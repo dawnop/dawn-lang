@@ -2,21 +2,11 @@
 # contract_app served through web/exchange over stdin and stdout, one request
 # per process, which is the shape the native services run in.
 #
-# stdout bytes are not a std primitive yet (the byte-stdout and append batch of
-# docs/web-core-split-design.md section 9 adds one), so the wire writes go
-# through `write_bytes` on /dev/stdout. That reopens the descriptor for every
-# write, which is right for the pipe the driver gives this process and wrong
-# for a regular file or a socket; the contract only ever runs it on a pipe, and
-# the primitive replaces this function.
-use std/io.{read_stdin, stdin_ready, with_fs_real, write_bytes}
-use web/exchange.{Transport, ExchangeConfig, serve_exchange}
+# The wire is stdout and stdin through web/exchange.stdio_transport, which
+# writes raw bytes and flushes them (std/io.write_stdout, flush_stdout).
+use std/io.{read_stdin, stdin_ready}
+use web/exchange.{ExchangeConfig, serve_exchange, stdio_transport}
 use contract_app/app.{routes, middleware, errors, MAX_BODY}
-
-fn write_wire(b: Bytes) -> Unit !io =
-  with_fs_real(() => {
-    let _ = write_bytes("/dev/stdout", b)
-    ()
-  })
 
 # Take what has already arrived and drop it, without waiting, so that exiting
 # with an unread body does not turn the close into a reset that eats the
@@ -33,7 +23,6 @@ fn drain() -> Unit !io = {
 }
 
 pub fn main() -> Unit !io = {
-  let t = Transport { read: (_pos, n) => read_stdin(n), write: write_wire }
-  serve_exchange(ExchangeConfig { max_body: MAX_BODY, errors: errors() }, routes(), middleware(), t)
+  serve_exchange(ExchangeConfig { max_body: MAX_BODY, errors: errors() }, routes(), middleware(), stdio_transport())
   drain()
 }

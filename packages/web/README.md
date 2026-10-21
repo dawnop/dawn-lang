@@ -167,15 +167,20 @@ middleware order, error shape and response framing. A contract
 compares the responses byte for byte.
 
 ```dawn
-use web/exchange.{Transport, serve_exchange, exchange_config}
+use web/exchange.{serve_exchange, exchange_config, stdio_transport}
 use web/middleware.{with_logging_to_stderr}
 
 pub fn main() -> Unit !io =
-  serve_exchange(exchange_config(), routes, [with_logging_to_stderr], my_transport)
+  serve_exchange(exchange_config(), routes, [with_logging_to_stderr], stdio_transport())
 ```
 
 A `Transport` is `read(pos, n)` (up to `n` bytes of the request from offset
 `pos`; a real stream ignores `pos`; empty at the end) and `write(bytes)`.
+`stdio_transport()` is the one for a process with the connection as stdin and
+stdout: it reads `std/io.read_stdin` and writes `write_stdout`, flushing after
+each write so a streamed body reaches the peer piece by piece. A `"stream-body"`
+upload is appended to its temp file 64 KiB at a time, so the process holds a few
+pieces and not the body (a 256 MiB PUT peaks at 16 MiB resident).
 stdout is the wire, so the application must not print to it: use
 `with_logging_to_stderr`. There is no keep-alive, no HTTP/2 and no `Date`
 header; the proxy in front supplies what it needs. The process drains unread

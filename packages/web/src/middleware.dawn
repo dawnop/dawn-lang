@@ -371,11 +371,46 @@ test "a limit of zero or less is refused where the middleware is built" {
   }
 }
 
-# The tests that fake `Clock` with a handler (what `timed` logs for a clock that
-# steps 7.5 ms, and for one that steps back) are not in this file for one
-# release: a handler spells every operation of its effect, `Clock` gained
-# `clock_sleep_ns`, and the previous release's compiler checks this file
-# against the std it shipped with. They come back with the next seed.
+test "the access log times a request on the clock it is given" {
+  let req = req_of("GET", map.empty())
+  # each reading 7.5 ms after the last: the handler took 7.5 ms, logged as 7
+  with handle Clock {
+    var reads: Int = 0
+    clock_wall_ns() => 0
+    clock_mono() => {
+      reads = reads + 1
+      io.instant_at_ns(reads * 7_500_000)
+    }
+    clock_sleep_ns(_ns) => ()
+  }
+  let (out, ms) = timed(ok_handler, req)
+  assert ms == 7
+  match out {
+    Ok(r) -> { assert response_status(r) == 200 }
+    Err(_) -> { assert false }
+  }
+  # the error branch is timed the same way
+  let (failed, ms2) = timed(failing_handler, req)
+  assert ms2 == 7
+  match failed {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.status == 404 }
+  }
+}
+
+test "a clock that steps back logs no time, not negative time" {
+  with handle Clock {
+    var reads: Int = 0
+    clock_wall_ns() => 0
+    clock_mono() => {
+      reads = reads + 1
+      io.instant_at_ns(-reads * 3_000_000)
+    }
+    clock_sleep_ns(_ns) => ()
+  }
+  let (_, ms) = timed(ok_handler, req_of("GET", map.empty()))
+  assert ms == 0
+}
 
 test "an encoded line break in the path stays one access-log line" {
   # what the server builds for `GET /a%0D%0AGET%20/admin`: `path` is decoded

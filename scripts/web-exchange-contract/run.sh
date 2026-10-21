@@ -27,6 +27,7 @@
 # proves each anchor in mutate.py exactly-once before any build.
 #
 #   scripts/web-exchange-contract/run.sh <path to dawnc>
+#   WEB_SPILL_MB=32 scripts/web-exchange-contract/run.sh <path to dawnc>   # smaller upload
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -46,6 +47,20 @@ echo "== build both sides of the contract application =="
 
 echo "== the contract: one set of raw requests, both servers =="
 python3 -I "$HERE/contract.py" --java "$JAVA" --jvm "$OUT/jvm.jar" --native "$OUT/native"
+
+# The memory of an upload. A "stream-body" route's body is appended to a temp
+# file in 64 KiB pieces, so the resident set of the process is a few pieces and
+# not the body (the adapter used to read it whole and write the file once). 256
+# MiB goes through counted and chunked; the peak has to stay under 32 MiB (the
+# runtime alone is about 20). The control sends the same body to a route that
+# holds it in memory, and its peak has to be over 200 MiB, which is what shows
+# the bound above can be exceeded.
+SPILL_MB=${WEB_SPILL_MB:-256}
+echo "== a ${SPILL_MB} MiB upload through a stream-body route stays small =="
+python3 -I "$HERE/spill_memory.py" "$OUT/native" --mb "$SPILL_MB" --route /spill-size --max-rss-mb 32
+python3 -I "$HERE/spill_memory.py" "$OUT/native" --mb "$SPILL_MB" --route /spill-size --chunked --max-rss-mb 32
+python3 -I "$HERE/spill_memory.py" "$OUT/native" --mb "$SPILL_MB" --route /hold-size --min-rss-mb 200
+echo "OK   control: the same body held in memory exceeds the bound"
 
 # A copy of the tree the native side builds from, with one rule of the adapter
 # broken by mutate.py (whose anchors the preflight proves exactly-once before any

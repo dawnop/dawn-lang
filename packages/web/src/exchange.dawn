@@ -42,9 +42,10 @@
 # header (the proxy in front adds one when the upstream sends none).
 use std/str
 use std/bytes
+use std/io
 use std/list
 use std/map
-use std/io.{eprintln, with_fs_real, with_env_real, getenv, temp_file, write_bytes, delete, Deleted, NotFound}
+use std/io.{eprintln, with_fs_real, with_env_real, getenv, temp_file, append_bytes, delete, Deleted, NotFound, read_stdin, write_stdout, flush_stdout}
 use types.{Request, Response, response_status, response_content_type, response_headers, response_body, ResponseBody, BodySource, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, error_response, default_errors, log_request, escape_field, DEFAULT_MAX_BODY}
 use wire.{raw_segs, decode_path_seg, has_dot_segment, parse_query, multimap}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes}
@@ -59,6 +60,9 @@ const MAX_CHUNK_LINE: Int = 1024
 const MAX_TRAILER: Int = 8192
 # How much one read asks for, on the request side and on a streaming response.
 const READ_CHUNK: Int = 8192
+# How much one piece of a spilled request body is: read, appended to the file,
+# dropped. The resident set of an upload is a few of these and not the body.
+const SPILL_CHUNK: Int = 65536
 
 # ---- the decisions both servers make ----
 
@@ -257,6 +261,22 @@ pub type Transport = {
   read: fn(Int, Int) -> Bytes !io,
   write: fn(Bytes) -> Unit !io,
 }
+
+## The transport of a process that is handed one accepted connection as stdin
+## and stdout (systemd `Accept=yes`, inetd): `read` takes the next `n` bytes of
+## stdin and ignores the position, `write` puts the bytes on stdout and flushes
+## them, so a streamed body reaches the peer piece by piece and the head does
+## not sit in a buffer while the handler works. Stdout is the wire, so nothing
+## else may print there: log to stderr (`with_logging_to_stderr`). The unread
+## rest of stdin after a refused body is the caller's to drain.
+pub fn stdio_transport() -> Transport =
+  Transport {
+    read: (_pos, n) => read_stdin(n),
+    write: b => {
+      write_stdout(b)
+      flush_stdout()
+    },
+  }
 
 ## What an exchange is configured with: the in-memory body ceiling a request
 ## gets (a positive byte count; routes that need more carry the "raw-body" or
@@ -629,28 +649,44 @@ fn read_chunked(t: Transport, pos0: Int, limit: Option[Int], fmt: ErrorFormat) -
   var buf = bytes.buf()
   var total = 0
   while true {
-    let line = read_crlf_line(t, pos, MAX_CHUNK_LINE)?
-    pos = pos + len(line) + 2
-    let size = chunk_size(line)?
+    let (size, after) = chunk_head(t, pos, limit, total, fmt)?
     if size == 0 {
-      skip_trailers(t, pos)?
       return Ok(bytes.freeze(buf))
     }
-    match limit {
-      Some(m) -> if total + size > m { return Err(http_error(413, fmt.body_too_large(m))) }
-      None -> ()
-    }
-    let data = read_exact(t, pos, size)?
-    pos = pos + size
-    let crlf = t.read(pos, 2)
-    if crlf != bytes.utf8("\r\n") {
-      return Err(bad_body())
-    }
-    pos = pos + 2
+    let data = read_exact(t, after, size)?
+    pos = chunk_tail(t, after + size)?
     total = total + size
     buf = bytes.put_bytes(buf, data)
   }
   Ok(bytes.freeze(buf))
+}
+
+# The chunk-size line at `pos`, and everything the decoder decides from it:
+# `(size, position after the line)`. Size 0 is the last chunk, and by then the
+# trailer section has been read and dropped. A chunk that would carry `total`
+# past `limit` is a 413 before any of it is read.
+fn chunk_head(t: Transport, pos: Int, limit: Option[Int], total: Int, fmt: ErrorFormat) -> Result[(Int, Int), HttpError] !io = {
+  let line = read_crlf_line(t, pos, MAX_CHUNK_LINE)?
+  let after = pos + len(line) + 2
+  let size = chunk_size(line)?
+  if size == 0 {
+    skip_trailers(t, after)?
+    return Ok((0, after))
+  }
+  match limit {
+    Some(m) -> if total + size > m { return Err(http_error(413, fmt.body_too_large(m))) }
+    None -> ()
+  }
+  Ok((size, after))
+}
+
+# The CRLF that ends a chunk's data at `pos`; the position after it.
+fn chunk_tail(t: Transport, pos: Int) -> Result[Int, HttpError] !io = {
+  let crlf = t.read(pos, 2)
+  if crlf != bytes.utf8("\r\n") {
+    return Err(bad_body())
+  }
+  Ok(pos + 2)
 }
 
 # The whole body under `limit`. A declared length over the ceiling is refused
@@ -668,29 +704,88 @@ fn read_body(t: Transport, pos: Int, kind: BodyKind, limit: Option[Int], fmt: Er
   }
 
 # A "stream-body" route gets its body as a file and an empty `body`. The JVM
-# server streams it to disk in chunks; there is no append in std/io yet, so this
-# reads it under the route's ceiling and writes the file once. The handler sees
-# the same Request either way; the difference is memory, which a process serving
-# one request pays once. A chunked append is the byte-stdout and append
-# primitives batch (docs/web-core-split-design.md section 9).
-fn spill_body(body: Bytes, fmt: ErrorFormat, log: fn(String) -> Unit !io) -> Result[String, HttpError] !io = {
+# server streams it to disk in chunks, and so does this: the temp file is made
+# first, every SPILL_CHUNK piece of the body is read and appended to it and
+# dropped, and the resident set of an upload is a few pieces whatever its size
+# (scripts/io-prims-contract measures a 256 MiB body). Whatever ends the body
+# early, a short or malformed body, a ceiling crossed, a disk that refuses, the
+# file is deleted and the request answered as the in-memory path would.
+#
+# A declared length over the ceiling is refused before the file exists, as
+# `read_body` does before it reads a byte.
+fn spill_stream(t: Transport, pos: Int, kind: BodyKind, limit: Option[Int], fmt: ErrorFormat, log: fn(String) -> Unit !io) -> Result[String, HttpError] !io = {
+  match kind {
+    Counted(n) ->
+      match limit {
+        Some(m) -> if n > m { return Err(http_error(413, fmt.body_too_large(m))) }
+        None -> ()
+      }
+    _ -> ()
+  }
   let dir = with_env_real(() => unwrap_or(getenv("TMPDIR"), "/tmp"))
-  with_fs_real(() => match temp_file(dir, "dawn-put-") {
+  let made = with_fs_real(() => temp_file(dir, "dawn-put-"))
+  match made {
     Err(m) -> {
       log("request body spill failed: ${m.message}")
       Err(http_error(500, fmt.internal_message))
     }
-    Ok(path) ->
-      match write_bytes(path, body) {
+    Ok(path) -> {
+      match copy_body(t, pos, kind, limit, path, fmt, log) {
         Ok(_) -> Ok(path)
-        Err(m) -> {
-          log("request body spill failed: ${m.message}")
+        Err(e) -> {
           delete_quietly(path, log)
-          Err(http_error(500, fmt.internal_message))
+          Err(e)
         }
       }
-  })
+    }
+  }
 }
+
+# One piece to the end of the spill file; a refusal is logged and a 500.
+fn append_piece(path: String, piece: Bytes, fmt: ErrorFormat, log: fn(String) -> Unit !io) -> Result[Unit, HttpError] !io =
+  with_fs_real(() => match append_bytes(path, piece) {
+    Ok(_) -> Ok(())
+    Err(m) -> {
+      log("request body spill failed: ${m.message}")
+      Err(http_error(500, fmt.internal_message))
+    }
+  })
+
+# `n` bytes of the request from `pos`, in SPILL_CHUNK pieces, each appended to
+# `path`; an early end is a 400 like `read_exact`'s.
+fn copy_exact(t: Transport, pos: Int, n: Int, path: String, fmt: ErrorFormat, log: fn(String) -> Unit !io) -> Result[Unit, HttpError] !io = {
+  var got = 0
+  while got < n {
+    let want = if n - got < SPILL_CHUNK { n - got } else { SPILL_CHUNK }
+    let piece = t.read(pos + got, want)
+    if len(piece) == 0 {
+      return Err(bad_body())
+    }
+    append_piece(path, piece, fmt, log)?
+    got = got + len(piece)
+  }
+  Ok(())
+}
+
+fn copy_body(t: Transport, pos0: Int, kind: BodyKind, limit: Option[Int], path: String, fmt: ErrorFormat, log: fn(String) -> Unit !io) -> Result[Unit, HttpError] !io =
+  match kind {
+    NoBody -> Ok(())
+    Counted(n) -> copy_exact(t, pos0, n, path, fmt, log)
+    ChunkedBody -> {
+      var pos = pos0
+      var total = 0
+      while true {
+        let (size, after) = chunk_head(t, pos, limit, total, fmt)?
+        if size == 0 {
+          return Ok(())
+        }
+        copy_exact(t, after, size, path, fmt, log)?
+        pos = chunk_tail(t, after + size)?
+        total = total + size
+      }
+      Ok(())
+    }
+  }
 
 fn delete_quietly(path: String, log: fn(String) -> Unit !io) -> Unit !io =
   with_fs_real(() => match delete(path) {
@@ -754,8 +849,7 @@ fn build_request(
       Some(m) -> m.body_limit
       None -> None
     }
-    let body = read_body(t, body_pos, kind, own, errors)?
-    let path = spill_body(body, errors, log)?
+    let path = spill_stream(t, body_pos, kind, own, errors, log)?
     Ok(Request { ..base, body_file: Some(path) })
   } else {
     let body = read_body(t, body_pos, kind, body_ceiling(meta, max_body), errors)?
@@ -1276,4 +1370,51 @@ test "the body ceiling is the route's, else the server's, and a raw-body route h
   assert body_ceiling(own, 5) == Some(7)
   assert body_ceiling(raw, 100) == None
   assert body_ceiling(raw_own, 100) == Some(7)
+}
+
+# ---- spilling a streamed body ----
+
+# What a stream-body route's file holds after `spill_stream`, or the status of
+# the refusal; the file is deleted once read.
+fn spill_outcome(s: String, kind: BodyKind, limit: Option[Int]) -> Result[String, Int] !io =
+  match spill_stream(fake(s), 0, kind, limit, default_errors(), _l => ()) {
+    Err(e) -> Err(e.status)
+    Ok(path) -> {
+      let text = with_fs_real(() => match io.read_file(path) {
+        Ok(t) -> t
+        Err(_) -> "unreadable"
+      })
+      delete_quietly(path, _l => ())
+      Ok(text)
+    }
+  }
+
+test "a counted body is appended to the spill file whole, across more than one piece" {
+  assert spill_outcome("hello world", Counted(11), None) == Ok("hello world")
+  assert spill_outcome("", Counted(0), None) == Ok("")
+  assert spill_outcome("", NoBody, None) == Ok("")
+  # 70000 bytes are two pieces (SPILL_CHUNK is 65536), and the join is exact
+  let big = str.repeat("0123456789", 7000)
+  assert spill_outcome(big, Counted(70000), None) == Ok(big)
+}
+
+test "a chunked body is decoded into the spill file, chunk by chunk" {
+  assert spill_outcome("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", ChunkedBody, None) == Ok("hello world")
+  assert spill_outcome("0\r\n\r\n", ChunkedBody, None) == Ok("")
+  assert spill_outcome("3\r\nabc\r\n0\r\nX-T: 1\r\n\r\n", ChunkedBody, None) == Ok("abc")
+  # one chunk bigger than a piece
+  let big = str.repeat("abcdefghij", 7000)
+  assert spill_outcome("11170\r\n" ++ big ++ "\r\n0\r\n\r\n", ChunkedBody, None) == Ok(big)
+}
+
+test "a spilled body that ends early, is malformed or crosses the ceiling is refused" {
+  # short of its declared length
+  assert spill_outcome("hello", Counted(11), None) == Err(400)
+  # declared over the ceiling: refused before the file is made
+  assert spill_outcome("hello world", Counted(11), Some(10)) == Err(413)
+  assert spill_outcome("hello world", Counted(11), Some(11)) == Ok("hello world")
+  # a chunk that would cross the ceiling, and a malformed frame
+  assert spill_outcome("6\r\n world\r\n0\r\n\r\n", ChunkedBody, Some(5)) == Err(413)
+  assert spill_outcome("5\r\nhelloXX0\r\n\r\n", ChunkedBody, None) == Err(400)
+  assert spill_outcome("5\r\nhel", ChunkedBody, None) == Err(400)
 }
