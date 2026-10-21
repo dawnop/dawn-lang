@@ -1,0 +1,170 @@
+# The io-primitives contract probe (docs/io-prims-design.md): one user program,
+# run on the JVM backend, on the native backend and on the native backend under
+# the sanitizers, whose output has to equal expected.txt line for line.
+#
+# It covers the batch's primitives through the public std/io surface: append,
+# range read, file size, disk space, sleep, and the order of stdout bytes
+# against stdout text and against a child process. Every refusal is printed as
+# a bare "err", because the two backends word a host failure differently and
+# the contract is that it is an `Err`, not what it says. A panic IS printed as
+# its message: once `catch_panic` hands it back it is a value, and the
+# backends may not disagree on it.
+#
+# Nothing here is a Java import, so the same file compiles for both backends.
+use std/io.{Fs, Proc, Clock, with_fs_real, with_proc_real, with_clock_real, proc_run, temp_dir, append_bytes, read_range, file_size, disk_space, write_bytes, read_bytes, delete, now, elapsed_ns, sleep_ns, write_stdout, flush_stdout}
+use std/bytes
+
+fn ok_or_err[T](r: Result[T, ForeignError]) -> String =
+  match r {
+    Ok(_) -> "ok"
+    Err(_) -> "err"
+  }
+
+fn text_of(r: Result[Bytes, ForeignError]) -> String =
+  match r {
+    Ok(b) -> "ok:" ++ bytes.decode_latin1(b)
+    Err(_) -> "err"
+  }
+
+fn size_text(r: Result[Int, ForeignError]) -> String =
+  match r {
+    Ok(n) -> "ok:${n}"
+    Err(_) -> "err"
+  }
+
+fn empty() -> Bytes = bytes.utf8("")
+
+## The panic message of a range read, or "no panic".
+fn range_panic(path: String, off: Int, n: Int) -> String !Fs =
+  match catch_panic(() => ok_or_err(read_range(path, off, n))) {
+    Ok(_) -> "no panic"
+    Err(e) -> e.message
+  }
+
+## 256 bytes, one of each value, to prove nothing in a path treats a byte as text.
+fn all_bytes() -> Bytes = {
+  var b = bytes.buf()
+  for i in range(0, 256) {
+    b = bytes.put(b, i)
+  }
+  bytes.freeze(b)
+}
+
+fn append_lines(d: String) -> Unit !(Fs | io) = {
+  let f = "${d}/deep/er/log.bin"
+  # a missing file and its missing parents are created by the first append
+  println("append creates    ${ok_or_err(append_bytes(f, bytes.utf8("one,")))}")
+  println("append appends    ${ok_or_err(append_bytes(f, bytes.utf8("two,")))}")
+  println("append empty      ${ok_or_err(append_bytes(f, empty()))}")
+  println("append third      ${ok_or_err(append_bytes(f, bytes.utf8("three")))}")
+  println("whole file        ${text_of(read_bytes(f))}")
+  # an existing file written by write_bytes is appended to, not replaced
+  let g = "${d}/g.bin"
+  let _ = write_bytes(g, all_bytes())
+  let _ = append_bytes(g, all_bytes())
+  match read_bytes(g) {
+    Ok(b) -> println("binary doubled    ${len(b)} ${bytes.at(b, 255)} ${bytes.at(b, 256)} ${bytes.at(b, 511)}")
+    Err(_) -> println("binary doubled    err")
+  }
+  # a directory is not a file to append to, and a file is not a directory to
+  # append under
+  println("append to dir     ${ok_or_err(append_bytes(d, bytes.utf8("x")))}")
+  println("append under file ${ok_or_err(append_bytes("${g}/inside", bytes.utf8("x")))}")
+}
+
+fn range_lines(d: String) -> Unit !(Fs | io) = {
+  let f = "${d}/r.txt"
+  let _ = write_bytes(f, bytes.utf8("0123456789"))
+  println("range middle      ${text_of(read_range(f, 2, 3))}")
+  println("range from start  ${text_of(read_range(f, 0, 4))}")
+  println("range to end      ${text_of(read_range(f, 7, 3))}")
+  println("range short       ${text_of(read_range(f, 7, 100))}")
+  println("range at end      ${text_of(read_range(f, 10, 5))}")
+  println("range past end    ${text_of(read_range(f, 25, 5))}")
+  println("range zero n      ${text_of(read_range(f, 3, 0))}")
+  println("range whole       ${text_of(read_range(f, 0, 10))}")
+  println("range max n       ${text_of(read_range(f, 4, 9223372036854775807))}")
+  println("range missing     ${text_of(read_range("${d}/nope", 0, 1))}")
+  println("range directory   ${text_of(read_range(d, 0, 1))}")
+  println("range negative off ${range_panic(f, -1, 1)}")
+  println("range negative n   ${range_panic(f, 0, -1)}")
+  # a binary file sliced across its middle comes back byte for byte
+  let g = "${d}/g.bin"
+  let _ = write_bytes(g, all_bytes())
+  match read_range(g, 250, 12) {
+    Ok(b) -> println("range binary      ${len(b)} ${bytes.at(b, 0)} ${bytes.at(b, 5)}")
+    Err(_) -> println("range binary      err")
+  }
+  # reading a range twice gives the same bytes: the read does not move anything
+  println("range repeat      ${read_range(f, 2, 3) == read_range(f, 2, 3)}")
+}
+
+fn size_lines(d: String) -> Unit !(Fs | io) = {
+  let f = "${d}/s.bin"
+  let _ = write_bytes(f, all_bytes())
+  println("size of file      ${size_text(file_size(f))}")
+  let e = "${d}/empty.bin"
+  let _ = write_bytes(e, empty())
+  println("size of empty     ${size_text(file_size(e))}")
+  let _ = append_bytes(f, bytes.utf8("abc"))
+  println("size after append ${size_text(file_size(f))}")
+  println("size of dir       ${size_text(file_size(d))}")
+  println("size of missing   ${size_text(file_size("${d}/nope"))}")
+}
+
+fn disk_lines(d: String) -> Unit !(Fs | io) = {
+  match disk_space(d) {
+    Ok(s) -> {
+      println("disk total > 0    ${s.total > 0}")
+      println("disk avail sane   ${s.available >= 0 && s.available <= s.total}")
+    }
+    Err(_) -> println("disk space        err")
+  }
+  println("disk of missing   ${ok_or_err(disk_space("${d}/nope"))}")
+}
+
+fn sleep_lines() -> Unit !(Clock | io) = {
+  let t0 = now()
+  sleep_ns(0)
+  sleep_ns(-5)
+  let quick = elapsed_ns(t0, now())
+  println("sleep zero fast   ${quick < 50_000_000}")
+  let t1 = now()
+  sleep_ns(30_000_000)
+  let slept = elapsed_ns(t1, now())
+  println("sleep 30ms        ${slept >= 30_000_000}")
+  println("sleep not long    ${slept < 2_000_000_000}")
+}
+
+## stdout bytes and text keep one order, and a child that shares stdout cannot
+## overtake what was written before it started.
+fn stdout_lines() -> Unit !(Proc | io) = {
+  print("1")
+  write_stdout(bytes.utf8("2"))
+  print("3")
+  write_stdout(bytes.utf8("4\n"))
+  write_stdout(bytes.utf8("A"))
+  let _ = proc_run(["echo", "B"], "", "")
+  write_stdout(bytes.utf8("C\n"))
+  flush_stdout()
+  flush_stdout()
+  println("end")
+}
+
+pub fn main() -> Unit !io = {
+  with_fs_real(() => with_proc_real(() => with_clock_real(() => {
+    match temp_dir("", "dawn-io-prims-") {
+      Err(_) -> println("no temp dir")
+      Ok(d) -> {
+        append_lines(d)
+        range_lines(d)
+        size_lines(d)
+        disk_lines(d)
+        sleep_lines()
+        stdout_lines()
+        let _ = delete(d)
+        ()
+      }
+    }
+  })))
+}
