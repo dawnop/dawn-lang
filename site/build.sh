@@ -2,9 +2,10 @@
 # Build the site into site/dist (run from anywhere).
 #
 # The generator (site/) and the search budget probe (site/search-budget/) run
-# as native binaries (`dawnc build`, cached by site_prog in site/dawnc.sh), not on the JVM; the JVM is still what
-# `dawn doc` (the two documentation inputs below) and the cuTile call map's
-# `dawn parse` use. Where dawnc comes from, and why, is site/dawnc.sh. The
+# as native binaries (`dawnc build`, cached by site_prog in site/dawnc.sh), not on the JVM. The two documentation inputs
+# below are written by `dawnc doc` too (native A2), except for a package with a
+# `use java`, which only the JVM driver can read (site/package-docs.sh says
+# why and when that ends). Where dawnc comes from, and why, is site/dawnc.sh. The
 # differential that holds the two backends to the same dist is
 # scripts/site-dist-diff.sh, with the native dist as the one that is shipped
 # and the JVM dist as the baseline it is held against.
@@ -13,7 +14,7 @@ cd "$(dirname "$0")/.."
 . site/dawnc.sh
 
 mkdir -p site/build
-./bin/dawn doc --stdlib > site/build/stdlib.json
+"$(site_dawnc)" doc --stdlib > site/build/stdlib.json
 # The same for every package, for packages.html (site/package-docs.sh).
 site/package-docs.sh site/build/packages
 
