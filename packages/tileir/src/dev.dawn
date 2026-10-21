@@ -1553,6 +1553,7 @@ pub fn min[D](a: Tile[D], b: Tile[D], propagate_nan: Bool = false) -> Tile[D] !D
 # it:
 #
 #   addf, mul   rounding Down or Up; ftz with NearestEven
+#   exp2        ftz
 #   div         rounding Down or Up
 #   sub         the defaults only
 #   maxf, minf  propagate_nan
@@ -1617,8 +1618,18 @@ pub fn abs[D](a: Tile[D]) -> Tile[D] !Dev = called("abs", () => unary("absf", a)
 ## result type 0 for CmpIOp`).
 pub fn exp[D](a: Tile[D]) -> Tile[D] !Dev = called("exp", () => unary("exp", a))
 
-## The element-wise `2^a`, without `flush_to_zero`. Tolerance tier.
-pub fn exp2[D](a: Tile[D]) -> Tile[D] !Dev = called("exp2", () => unary("exp2", a))
+## The element-wise `2^a`. Tolerance tier.
+##
+## `ftz` is the dialect's `flush_to_zero` unit attribute: a subnormal input
+## and a subnormal result are both replaced by the zero of their sign, so the
+## device can answer with the bare `ex2.approx.ftz` instruction and skip the
+## range fix-up it otherwise wraps around it (a subnormal result needs it).
+## f32 only, like the same attribute on `add` and `mul`: the assembler
+## refuses it on any other width (SharedVerifiers.h's `verifyFtz`). It is
+## the form a FlashAttention kernel wants: it folds `log2(e)` into its scale
+## and calls `exp2(.., ftz: true)` (docs/tile-backend-design.md 6.39).
+pub fn exp2[D](a: Tile[D], ftz: Bool = false) -> Tile[D] !Dev =
+  called("exp2", () => unary(if ftz { "exp2_ftz" } else { "exp2" }, a))
 
 ## The element-wise natural logarithm. Tolerance tier.
 pub fn log[D](a: Tile[D]) -> Tile[D] !Dev = called("log", () => unary("log", a))
@@ -4848,6 +4859,7 @@ fn k2_surface() -> Unit !Dev = {
   let x = param(F32, 0)
   let t = load(x, idx_const(0), [8])
   let _r = [
+    exp2(t, ftz: true), exp2(t, ftz: false),
     add(t, t, rounding: Down), add(t, t, rounding: Up),
     mul(t, t, rounding: Down), mul(t, t, rounding: Up),
     div(t, t, rounding: Down), div(t, t, rounding: Up),
@@ -4875,6 +4887,7 @@ test "the knife K2 parameters hand the handler the names the suffixed functions 
   let seen = logged(k2_surface)
   # every load answers 1 here
   let want = [
+    "unaryf exp2_ftz f32 [8] 1", "unaryf exp2 f32 [8] 1",
     "binaryf addf_neg_inf f32 [8] 1 1", "binaryf addf_pos_inf f32 [8] 1 1",
     "binaryf mulf_neg_inf f32 [8] 1 1", "binaryf mulf_pos_inf f32 [8] 1 1",
     "binaryf divf_neg_inf f32 [8] 1 1", "binaryf divf_pos_inf f32 [8] 1 1",

@@ -1,17 +1,22 @@
 # Layer 2 for the attribute kernels (knife T4), the fourteenth of these
-# programs: one `!Gpu` program runs each of the eleven kernels
+# programs: one `!Gpu` program runs each of the twelve kernels
 # scripts/tile-golden pins under `with_gpu_real` against the machine's GPU
 # and under `with_gpu_fake` against hand-written host references, and
 # prints what each device answered.
 #
 #   attr_diff <attr_round.cubin> <attr_nan.cubin> <attr_ftz.cubin>
-#             <attr_approx.cubin> <attr_overflow.cubin> <attr_memsem.cubin>
+#             <attr_approx.cubin> <attr_exp2.cubin> <attr_overflow.cubin>
+#             <attr_memsem.cubin>
 #             <attr_addf.cubin> <attr_ucmp.cubin> <attr_sat.cubin>
 #             <attr_ftof.cubin> <attr_xchg.cubin>
 #
 # Knife T17 added the last three: `ftoi`'s `saturating` modifier and the
 # `ftof` rounding modes bytecode 13.4 brought, and the atomic exchange, the
 # one read-modify-write mode no kernel had asked for.
+#
+# Knife P3 added `attr_exp2`, fourth in the list: `exp2` beside `exp2` with
+# `flush_to_zero`, tolerance tier, whose probe counts the lanes the flush
+# moved and the lanes whose subnormal answer it took to zero.
 #
 # The subject is the ATTRIBUTE DOMAINS rather than the opcode table: knife
 # T4 adds no opcode at all and writes, for the first time, the rest of
@@ -95,7 +100,7 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out}
-use tileref/ref.{attr_round_ref, attr_nan_ref, attr_ftz_ref, attr_approx_ref, attr_overflow_ref,
+use tileref/ref.{attr_round_ref, attr_nan_ref, attr_ftz_ref, attr_approx_ref, attr_exp2_ref, attr_overflow_ref,
   attr_memsem_ref, attr_addf_ref, attr_ucmp_ref, attr_sat_ref, attr_ftof_ref, attr_xchg_ref }
 use std/list
 use std/map
@@ -116,6 +121,7 @@ pub const ROUND_SEGS: Int = 6
 pub const NAN_SEGS: Int = 16
 pub const FTZ_SEGS: Int = 4
 pub const APPROX_SEGS: Int = 2
+pub const EXP2_SEGS: Int = 2
 pub const OVERFLOW_SEGS: Int = 3
 pub const MEMSEM_SEGS: Int = 3
 pub const UCMP_SEGS: Int = 2
@@ -362,6 +368,20 @@ fn differing_normal(v: List[Float], segs: Int, ja: Int, jb: Int) -> Int =
       && to_string(a) != to_string(v[at(segs, b, jb, lane)])
   }))
 
+## How many lanes answer a nonzero SUBNORMAL in segment `ja` and exactly
+## zero in segment `jb`: the lanes `flush_to_zero` took to zero. `differing`
+## counts every lane that moved; this one says what it moved to, which is
+## the attribute's whole meaning, so a device that moved the lanes some
+## other way (a different approximation of the same function) would not
+## satisfy it.
+fn subnormal_flushed(v: List[Float], segs: Int, ja: Int, jb: Int) -> Int =
+  len(list.filter(range(0, ATTR_BLOCKS * ATTR_TILE), k => {
+    let b = k / ATTR_TILE
+    let lane = k % ATTR_TILE
+    let a = v[at(segs, b, ja, lane)]
+    magnitude(a) > 0.0 && magnitude(a) < F32_MIN_NORMAL && v[at(segs, b, jb, lane)] == 0.0
+  }))
+
 ## The largest RELATIVE distance between two segments, which is what the
 ## approximate square root is measured by: it has no host definition, so
 ## the number recorded is how far the architecture's approximation is from
@@ -398,6 +418,8 @@ fn probe_fields(name: String, v: List[Float]) -> List[String] =
   } else if name == "attr_approx" {
     ["lanes=${differing(v, APPROX_SEGS, 0, 1)}",
       "distance=${segment_distance(v, APPROX_SEGS, 0, 1)}"]
+  } else if name == "attr_exp2" {
+    ["lanes=${differing(v, EXP2_SEGS, 0, 1)}", "flushed=${subnormal_flushed(v, EXP2_SEGS, 0, 1)}"]
   } else if name == "attr_ucmp" {
     ["signed=${v[at(UCMP_SEGS, 0, 0, 0)]}", "unsigned=${v[at(UCMP_SEGS, 0, 1, 0)]}"]
   } else if name == "attr_sat" {
@@ -530,6 +552,21 @@ fn approx_x() -> List[Float] =
   list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i =>
       narrow.round_f32(0.5 + to_float(i) * 0.37) * to_float(1 << (i % 6)))
 
+## attr_exp2's argument, eight lane shapes in rotation (every block holds
+## each of them sixteen times):
+##
+##   -130, -149, -140.5, -126.5  a SUBNORMAL answer: plain `exp2` keeps it,
+##                               `flush_to_zero` takes it to zero
+##   -126                        the smallest normal answer, exactly 2^-126:
+##                               the boundary, kept under both
+##   the smallest subnormal      a subnormal ARGUMENT, whose answer is 1
+##                               whether or not it is flushed to zero first
+##   3.25, -20.75                ordinary arguments, normal answers
+fn exp2_x() -> List[Float] = {
+  let table = [0.0 - 130.0, 0.0 - 149.0, 0.0 - 140.5, 0.0 - 126.5, 0.0 - 126.0, F32_MIN_SUBNORMAL, 3.25, 0.0 - 20.75]
+  list.map(range(0, ATTR_BLOCKS * ATTR_TILE), i => table[i % 8])
+}
+
 ## attr_overflow's operands: small enough that none of the three
 ## operations leaves the 32-bit range on any lane.
 fn overflow_x() -> List[Float] =
@@ -654,6 +691,13 @@ fn corpus_line(name: String) -> String =
     })
     "lanes=${len(idx)} subnormal_sum=${len(sub_sum)} subnormal_product=${len(sub_product)}"
       ++ " normal_sum_from_subnormal=${len(normal_sum)}"
+  } else if name == "attr_exp2" {
+    let x = exp2_x()
+    let idx = range(0, ATTR_BLOCKS * ATTR_TILE)
+    let sub_result = list.filter(idx, i => x[i] < 0.0 - 126.0)
+    let sub_arg = list.filter(idx, i => magnitude(x[i]) < F32_MIN_NORMAL && x[i] != 0.0)
+    let normal = list.filter(idx, i => x[i] >= 0.0 - 126.0 && magnitude(x[i]) >= F32_MIN_NORMAL)
+    "lanes=${len(idx)} subnormal_result=${len(sub_result)} subnormal_argument=${len(sub_arg)} normal_result=${len(normal)}"
   } else if name == "attr_overflow" {
     let x = overflow_x()
     let y = overflow_y()
@@ -685,7 +729,7 @@ fn corpus_line(name: String) -> String =
 
 ## The kernels this program runs, in the order their cubins are given.
 fn case_name(i: Int) -> String =
-  ["attr_round", "attr_nan", "attr_ftz", "attr_approx", "attr_overflow", "attr_memsem",
+  ["attr_round", "attr_nan", "attr_ftz", "attr_approx", "attr_exp2", "attr_overflow", "attr_memsem",
     "attr_addf", "attr_ucmp", "attr_sat", "attr_ftof", "attr_xchg"][i]
 
 ## The one tolerance-tier kernel here: the approximate square root has no
@@ -700,7 +744,7 @@ fn case_name(i: Int) -> String =
 ## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier`
 ## column of scripts/leetgpu-diff/problems.txt against it. No kernel here
 ## is a leetgpu problem, so what it contributes is only this name.
-pub fn tolerance_tier() -> List[String] = ["attr_approx"]
+pub fn tolerance_tier() -> List[String] = ["attr_approx", "attr_exp2"]
 
 fn tier_of(i: Int) -> String =
   if list.any(tolerance_tier(), n => n == case_name(i)) { "tolerance" } else { "exact" }
@@ -720,6 +764,8 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
       ("f64", sentinel_buffer(ATTR_BLOCKS * FTZ_SEGS * ATTR_TILE + TAIL))]
   } else if name == "attr_approx" {
     [("f64", approx_x()), ("f64", sentinel_buffer(ATTR_BLOCKS * APPROX_SEGS * ATTR_TILE + TAIL))]
+  } else if name == "attr_exp2" {
+    [("f64", exp2_x()), ("f64", sentinel_buffer(ATTR_BLOCKS * EXP2_SEGS * ATTR_TILE + TAIL))]
   } else if name == "attr_overflow" {
     [("i32", overflow_x()), ("i32", overflow_y()),
       ("i32", list.map(range(0, ATTR_BLOCKS * OVERFLOW_SEGS * ATTR_TILE + TAIL), _i => 0.0))]
@@ -749,6 +795,8 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
     map.from([("attr_ftz", (3, last_out((dts, ins) => attr_ftz_ref(ATTR_BLOCKS, dts, ins))))])
   } else if name == "attr_approx" {
     map.from([("attr_approx", (2, last_out((dts, ins) => attr_approx_ref(ATTR_BLOCKS, dts, ins))))])
+  } else if name == "attr_exp2" {
+    map.from([("attr_exp2", (2, last_out((dts, ins) => attr_exp2_ref(ATTR_BLOCKS, dts, ins))))])
   } else if name == "attr_overflow" {
     map.from([("attr_overflow", (3, last_out((dts, ins) => attr_overflow_ref(ATTR_BLOCKS, dts, ins))))])
   } else if name == "attr_memsem" {
@@ -799,7 +847,7 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.rea
 
 fn usage() -> Unit !Exit !io = {
   io.eprintln("usage: attr_diff <attr_round.cubin> <attr_nan.cubin> <attr_ftz.cubin>"
-      ++ " <attr_approx.cubin> <attr_overflow.cubin> <attr_memsem.cubin> <attr_addf.cubin>"
+      ++ " <attr_approx.cubin> <attr_exp2.cubin> <attr_overflow.cubin> <attr_memsem.cubin> <attr_addf.cubin>"
       ++ " <attr_ucmp.cubin> <attr_sat.cubin> <attr_ftof.cubin> <attr_xchg.cubin>")
   io.exit(2)
 }
@@ -808,7 +856,7 @@ fn usage() -> Unit !Exit !io = {
 # frame with nothing above it. `Fs` stays where it was, installed per read.
 pub fn main() -> Unit !io = io.with_exit_real(() => {
   let paths = args()
-  let count = 11
+  let count = 12
   if len(paths) != count { usage() } else { () }
   var cubins: Map[String, Bytes] = map.empty()
   for i in range(0, count) {

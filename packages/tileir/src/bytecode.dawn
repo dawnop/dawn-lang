@@ -815,7 +815,7 @@ fn float_op(op: String) -> Int = match op {
   "negf" -> OP_NEGF
   "absf" -> OP_ABSF
   "exp" -> OP_EXP
-  "exp2" -> OP_EXP2
+  "exp2" | "exp2_ftz" -> OP_EXP2
   "log" -> OP_LOG
   "log2" -> OP_LOG2
   "sqrt" | "sqrt_approx" -> OP_SQRT
@@ -853,6 +853,7 @@ fn float_rounding(op: String) -> Option[Int] = match op {
 # is one.
 fn float_flags(op: String) -> Int = match op {
   "addf_ftz" | "mulf_ftz" -> FLOAT_FLAG_FTZ
+  "exp2_ftz" -> FLOAT_FLAG_FTZ
   "maxf_nan" | "minf_nan" -> MINMAX_FLAG_PROPAGATE_NAN
   _ -> 0
 }
@@ -2745,6 +2746,11 @@ test "a unary float operation writes flags only where it has an optional field, 
   # enum, tanh without its rounding mode does the same
   assert not float_op_has_flags("exp")
   assert float_op_has_flags("exp2")
+  # `exp2_ftz` is the same opcode with the one optional field set: the
+  # flush_to_zero bit, which is bit 0 because it is the only optional field
+  assert float_op_has_flags("exp2_ftz")
+  assert (float_op("exp2_ftz"), float_flags("exp2_ftz"), float_flags("exp2")) == (0x18, FLOAT_FLAG_FTZ, 0)
+  assert unary_rounding("exp2_ftz") == None
   assert float_op_has_flags("rsqrt")
   assert float_op_has_flags("sqrt")
   assert not float_op_has_flags("tanh")

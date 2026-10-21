@@ -43,6 +43,21 @@ unchanged byte for byte against 0.18.1; `hint_view` is the 209th.
   said `num_worker_warps_per_cta` takes powers of two up to 32 was wrong: the
   dialect's range is 4 to 8.
 
+## 0.20.0 (2026-10-21)
+
+`dev.exp2` takes `ftz: Bool = false`, the dialect's `flush_to_zero` unit
+attribute (section 6.40, tileir P3): a subnormal input and a subnormal result
+become the zero of their sign, and the device answers with the bare
+`ex2.approx.ftz` instruction. f32 only; the assembler refuses it on other
+widths, as it does for `add` and `mul`. Calls that do not pass `ftz` record
+and assemble as before, byte for byte, but the function's type gained a
+parameter, so a caller that stored `exp2` as a first-class function value
+needs a wrapper. The recording handler accepts the new operation name
+`exp2_ftz` (the same opcode, flags word 1). `scripts/tile-golden` gains
+`attr_exp2`, and `flash_attn_bf16` now writes `exp2(.., ftz: true)` with
+`log2(e)` folded into its launch scale; its golden changes, nothing else
+does.
+
 ## 0.18.1 (2026-10-20)
 
 No API change; the recorded program changes (section 6.38, tileir P2). A load

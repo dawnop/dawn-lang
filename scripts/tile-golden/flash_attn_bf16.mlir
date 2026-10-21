@@ -32,9 +32,9 @@ cuda_tile.module @m {
       %41 = maxf %22, %40 : tile<32x1xf32>
       %42 = broadcast %41 : tile<32x1xf32> -> tile<32x32xf32>
       %43 = subf %35, %42 rounding<nearest_even> : tile<32x32xf32>
-      %44 = exp %43 : tile<32x32xf32>
+      %44 = exp2 %43 flush_to_zero : tile<32x32xf32>
       %45 = subf %22, %41 rounding<nearest_even> : tile<32x1xf32>
-      %46 = exp %45 : tile<32x1xf32>
+      %46 = exp2 %45 flush_to_zero : tile<32x1xf32>
       %47 = mulf %23, %46 rounding<nearest_even> : tile<32x1xf32>
       %48 = reduce %44 dim=1 identities=[0.0 : f32] : tile<32x32xf32> -> tile<32xf32> (%49: tile<f32>, %50: tile<f32>) {
         %51 = addf %49, %50 rounding<nearest_even> : tile<f32>

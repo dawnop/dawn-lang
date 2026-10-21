@@ -990,7 +990,7 @@ arch_floors=(sm_90 sm_90 sm_100 sm_100 sm_100 sm_89)
 # per pair of formats, `nearest_away` among them) and attr_xchg (the atomic
 # exchange, the last read-modify-write mode without a kernel). Their three
 # mutants are below with the T4 six.
-attrs=(attr_round attr_nan attr_ftz attr_approx attr_overflow attr_memsem attr_addf attr_ucmp
+attrs=(attr_round attr_nan attr_ftz attr_approx attr_exp2 attr_overflow attr_memsem attr_addf attr_ucmp
   attr_sat attr_ftof attr_xchg)
 
 # The loop kernels of knife T5, in the order loop_diff takes them. Three of
@@ -2145,7 +2145,7 @@ fi
 if [ "$attr_verdict" = pass ]; then
   attr_probe_line="$(sed -n 's/^probe attrs //p' "$work/attr.out" | tail -n 1)"
   for claim in attr_round:add attr_round:mul attr_round:div attr_nan:ordering attr_nan:maxf \
-    attr_nan:minf attr_ftz:add attr_ftz:mul attr_ftz:normal_sum attr_approx:lanes \
+    attr_nan:minf attr_ftz:add attr_ftz:mul attr_ftz:normal_sum attr_approx:lanes attr_exp2:lanes attr_exp2:flushed \
     attr_sat:nan_zero attr_sat:clamped attr_ftof:f32_zero attr_ftof:f32_down attr_ftof:f32_up \
     attr_ftof:tf32_zero attr_ftof:tf32_away attr_ftof:f16_zero attr_ftof:bf16_zero; do
     field="${claim#*:}"
@@ -4715,6 +4715,17 @@ attr_pkg_mutant ftz-bit-dropped bytecode.dawn \
   '  "addf_ftz" | "mulf_ftz" -> FLOAT_FLAG_FTZ' \
   '  "addf_ftz" | "mulf_ftz" -> 0' \
   attr_ftz probe:attr_ftz:add=0
+
+# 35a. exp2-ftz-bit-dropped (knife P3): the same bit on `exp2`, which has
+#     its own table row. attr_exp2 is tolerance tier and a subnormal answer
+#     is inside the tolerance of the zero it flushes to, so the verdict
+#     stays `close:tolerance`; what moves is the probe, whose two segments
+#     become the same number on every lane (and `flushed`, the lanes taken
+#     from a subnormal to zero, falls to zero with them).
+attr_pkg_mutant exp2-ftz-bit-dropped bytecode.dawn \
+  '  "exp2_ftz" -> FLOAT_FLAG_FTZ' \
+  '  "exp2_ftz" -> 0' \
+  probe:attr_exp2:lanes=0 probe:attr_exp2:flushed=0
 
 # 36. propagate-nan-bit-dropped: the same for `propagate_nan`. Without it
 #     `maxf` answers the non-NaN operand where the kernel asked for a NaN,

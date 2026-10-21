@@ -167,6 +167,30 @@ pub fn ref_exp(x: Float) -> Float =
     sum * pow2(k)
   }
 
+## `2` raised to the power `x`: exact at an integer `x` (a doubling or a
+## halving, which is what makes the corpus lanes of `attr_exp2` land on
+## exactly the powers of two they were chosen as), `ref_exp (x * ln2)`
+## elsewhere.
+pub fn ref_exp2(x: Float) -> Float =
+  if x != x {
+    x
+  } else if x > 1100.0 {
+    1.0 / 0.0
+  } else if x < 0.0 - 1100.0 {
+    0.0
+  } else if to_float(to_int(x)) == x {
+    pow2(to_int(x))
+  } else {
+    ref_exp(x * LN2)
+  }
+
+## `2^x` under `flush_to_zero`, for a binary32 `x`: a subnormal argument is
+## flushed to its zero, the answer is rounded to binary32, and a subnormal
+## answer is flushed to the zero of its sign (here always `+0.0`, a power
+## of two being positive). Both flushes are the dialect's: "flushes
+## subnormal inputs and results to sign-preserving zero".
+pub fn ref_exp2_ftz(x: Float) -> Float = f32_flush(narrow.round_f32(ref_exp2(f32_flush(narrow.round_f32(x)))))
+
 ## The natural logarithm of `x`. `x = m * 2^e` with `m` in `[1, 2)`, then
 ## the `atanh` series of `log(m)`, which converges fastest where the
 ## argument is near 1. Answers NaN for a negative argument and the negative
@@ -2023,8 +2047,16 @@ fn bt_dot(a: List[Float], b: List[Float], k: Int, i: Int, j: Int) -> Float =
 ## sees the narrowed `p`; the running sum `l` adds the unrounded ones, as
 ## the kernel does, so the two halves of `acc / l` are not rounded alike on
 ## either side.
+##
+## `base2` is the kernel that folds `log2(e)` into its scale and writes
+## `exp2(.., ftz: true)` (knife P3: `flash_attn_bf16`): `scale` is then the
+## launch's own, already multiplied by `log2(e)`, and the exponentials are
+## `ref_exp2_ftz`, flushed at binary32's smallest normal like the device's.
+## The same loop either way, so the two readings of one attention differ by
+## the one thing the kernel changed.
 pub fn flash_attn_ref(m: Int, n: Int, d: Int, bk: Int, scale: Float, dtypes: List[String],
-  ins: List[List[Float]], p_round: String = "") -> List[Float] = {
+  ins: List[List[Float]], p_round: String = "", base2: Bool = false) -> List[Float] = {
+  let ex = (x: Float) => if base2 { ref_exp2_ftz(x) } else { ref_exp(x) }
   let q = ins[0]
   let k = ins[1]
   let v = ins[2]
@@ -2039,8 +2071,8 @@ pub fn flash_attn_ref(m: Int, n: Int, d: Int, bk: Int, scale: Float, dtypes: Lis
       let s = list.map(keys, j => scale * bt_dot(q, k, d, i, j))
       let block_max = list.fold(s, -INFINITY, (a, x) => if x > a { x } else { a })
       let mx_new = if block_max > mx { block_max } else { mx }
-      let alpha = ref_exp(mx - mx_new)
-      let p = list.map(s, x => ref_exp(x - mx_new))
+      let alpha = ex(mx - mx_new)
+      let p = list.map(s, x => ex(x - mx_new))
       l = l * alpha + list.fold(p, 0.0, (a, x) => a + x)
       let pv = if p_round == "" { p } else { list.map(p, x => round_to(p_round, x)) }
       let before = acc
@@ -3491,6 +3523,35 @@ pub fn attr_approx_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]
   })
 }
 
+## `2^x` of one binary32 tile, plain and under `flush_to_zero`, in `blocks`
+## blocks of 128 lanes and two segments. `ins` is `[x, old out]`.
+##
+## The plain segment is the binary32 `2^x` with its subnormal range intact
+## and the flushed one is `ref_exp2_ftz`, so the two differ exactly on the
+## lanes whose answer (or argument) is subnormal, which is the whole of what
+## the attribute does. Tolerance tier: the device's `ex2` is an
+## approximation, and a subnormal answer is within the tolerance of the zero
+## it flushes to, so what says the attribute reached the device is the
+## count of lanes on which the two device segments differ (attr_diff's
+## probe), not the comparison against this.
+pub fn attr_exp2_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  let width = 2 * 128
+  list.map(range(0, len(old)), idx => {
+    let b = idx / width
+    if b >= blocks {
+      kept(old, idx)
+    } else {
+      let k = idx % width
+      let i = b * 128 + k % 128
+      let a = narrow.round_f32(x[i])
+      round_to(dt, if k / 128 == 0 { narrow.round_f32(ref_exp2(a)) } else { ref_exp2_ftz(a) })
+    }
+  })
+}
+
 ## The sum, the difference and the product of two i32 tiles under the
 ## three overflow assumptions, in `blocks` blocks of 128 lanes and three
 ## segments each. `ins` is `[x, y, old out]`.
@@ -4873,6 +4934,22 @@ test "the attribute references answer what a reader can check by hand" {
   assert ftz[2 * 128] == 1.401298464324817e-45 && ftz[3 * 128] == 0.0
   assert f32_flush(1.401298464324817e-45) == 0.0
   assert f32_flush(1.1754943508222875e-38) == 1.1754943508222875e-38
+  # `2^x` under flush_to_zero: 2^-130 is a subnormal binary32, so the plain
+  # segment keeps it and the flushed one answers zero; 2^-126 is the smallest
+  # normal and both keep it; the smallest subnormal as an ARGUMENT answers 1
+  # either way (flushing it to zero gives 2^0), and past the underflow point
+  # both answer zero
+  let xs = list.map(range(0, 128), i =>
+      if i % 4 == 0 { 0.0 - 130.0 } else if i % 4 == 1 { 0.0 - 126.0 } else if i % 4 == 2 { 1.401298464324817e-45 } else { 0.0 - 200.0 })
+  let e2 = attr_exp2_ref(1, f2, [xs, zeros(2 * 128 + 4)])
+  let two_m130 = 7.346839692639297e-40
+  let two_m126 = 1.1754943508222875e-38
+  assert e2[0] == two_m130 && e2[128] == 0.0
+  assert e2[1] == two_m126 && e2[129] == two_m126
+  assert e2[2] == 1.0 && e2[130] == 1.0
+  assert e2[3] == 0.0 && e2[131] == 0.0
+  assert ref_exp2(10.0) == 1024.0 && ref_exp2(0.0 - 1.0) == 0.5
+  assert ref_exp2_ftz(0.0 - 127.0) == 0.0 && ref_exp2_ftz(0.0 - 126.0) == two_m126
   # the approximate root's reference is the correctly rounded one: both
   # segments the same, which is why this kernel is tolerance tier
   let four = list.map(range(0, 128), _i => 4.0)
@@ -5280,6 +5357,14 @@ test "the online softmax answers what the three-launch chain does, including whe
   })
   assert moved > 0.0
   assert moved <= 0.9 / 128.0
+  # the base-2 reading, with log2(e) folded into the scale as the kernel's
+  # launch does, is the same attention: the argument rounds to binary32 and
+  # the answer is held to a few binary32 ulps, not to the f64 tolerance above
+  let log2e = 1.4426950408889634
+  let base2 = flash_attn_ref(m, n, d, bk, scale * log2e, ["f64", "f64", "f64", "f64"], [q, k, v, old], base2: true)
+  for i in range(0, m * d) {
+    assert close(base2[i], got[i], 1.0e-5)
+  }
 }
 
 test "the scalar references read the launch's scalars, not a buffer" {
