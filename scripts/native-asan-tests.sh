@@ -41,7 +41,7 @@ ROOT=$(pwd)
 # rechecked below: an entry whose package no longer has a `use java` is stale
 # and fails the run, so the table cannot outlive what it excuses.
 declare -A EXCLUDED=(
-  [packages/web]="use java: the HTTP server and client are java.net and com.sun.net.httpserver, and the native backend refuses use java (jsig_refused)"
+  [packages/web-jvm]="use java: the JDK HTTP server (com.sun.net.httpserver) is the whole package, and the native backend refuses use java (jsig_refused)"
 )
 
 # Units with a leak that is known and not yet fixed. The unit still runs with

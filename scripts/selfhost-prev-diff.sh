@@ -257,7 +257,7 @@ gate() { # label, differs (0 identical, 1 differs)
   emit_gate "$1" "$2" || fail=1
 }
 
-for t in site playground packages/web packages/json selfhost examples/projects/calc.dawn \
+for t in site playground packages/web packages/web-jvm packages/json selfhost examples/projects/calc.dawn \
     examples/interop/interop.dawn examples/effects/handlers.dawn \
     examples/text/chars.dawn examples/errors/barriers.dawn; do
   mkdir -p "$OUT/prev/$t" "$OUT/head/$t"

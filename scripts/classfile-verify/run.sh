@@ -268,7 +268,7 @@ loop_operand_java_fixture=scripts/classfile-verify/loop_operand_java.dawn
 # largest corpora this gate emits, and until they were written here the map
 # reported that no file under selfhost/src was watched by this gate.
 corpus=(selfhost site playground)
-corpus+=(packages/json packages/web packages/sha2 packages/inflate)
+corpus+=(packages/json packages/web packages/web-jvm packages/sha2 packages/inflate)
 corpus+=(examples/projects/calc.dawn examples/interop/interop.dawn)
 corpus+=(examples/effects/handlers.dawn examples/text/chars.dawn)
 corpus+=(examples/errors/barriers.dawn)

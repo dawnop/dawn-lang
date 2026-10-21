@@ -18,17 +18,15 @@
 #   ./bin/dawn doc     a package with a `use java`. The native driver cannot
 #                      compile Java, and `doc` checks the whole package, so it
 #                      would reject the package rather than document it.
-#                      Today that is packages/web alone. The test is the
-#                      package's text, not a list kept here: a package that
-#                      gains a `use java` moves to the JVM by itself, one that
-#                      loses its last one moves to dawnc by itself.
-#                      EXIT CONDITION: this exception goes away when B1
-#                      (ruling-full-native 2026-10-20, item 4) moves web's Java
-#                      into its own module. A native `doc` mode that skips Java
-#                      signatures was the alternative and was not built: it
-#                      would be a branch in the compiler for a transitional
-#                      state, dead code the day B1 lands. When B1 merges,
-#                      delete has_java and the JVM branch below.
+#                      Today that is packages/web-jvm alone (the JDK server, split
+#                      out of packages/web at web 7, which is pure Dawn and so
+#                      goes to dawnc). The test is the package's text, not a
+#                      list kept here: a package that gains a `use java` moves
+#                      to the JVM by itself, one that loses its last one moves
+#                      to dawnc by itself. This branch is not a transitional
+#                      state: a native `doc` mode that skips Java signatures
+#                      was not built (docs/web-core-split-design.md says why),
+#                      and a package with a `use java` keeps this driver.
 #
 # DAWN_DOC_BACKEND=jvm sends every package to the JVM driver: the baseline the
 # differential in scripts/site-dist-diff.sh holds the native documents to.
@@ -91,7 +89,7 @@ for pkg in packages/*/; do
     need_jvm=1
     jobs_list="$jobs_list"$'j\t'"$name"$'\n'
     if [ "${DAWN_DOC_BACKEND:-}" != jvm ]; then
-      echo "site/package-docs.sh: $name has a use java: documented by the JVM driver (until B1)" >&2
+      echo "site/package-docs.sh: $name has a use java: documented by the JVM driver" >&2
     fi
   fi
 done

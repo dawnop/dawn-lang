@@ -9,7 +9,6 @@ use std/bytes
 use std/map
 use json/value.{Json, JStr, JObj}
 use json/render.{render}
-use java "java.io.InputStream"
 
 # No handler field, so it derives Show and can travel inside a Request.
 ## The matched route's metadata, handed to middleware so they can dispatch on
@@ -91,13 +90,29 @@ pub type Request = {
 # combinations no longer typecheck. The kind also decides the wire framing —
 # Text/Binary get an exact Content-Length, a Stream an exact one when it states
 # its length and chunked framing when it does not (WEB-07, see
-# web/server.body_length). An opaque InputStream isn't printable, so neither
-# this nor Response derives Show (docs/streaming-response-design.md §三).
+# web_jvm/server.body_length). A BodySource holds functions, which are not
+# printable, so neither this nor Response derives Show
+# (docs/streaming-response-design.md §三).
 #
 # `length` is web5's: a stream with no length cannot tell a truncated upstream
 # from a complete one (a clean EOF looks the same either way), so an upstream
 # that says how long it is (an object store's Content-Length) can pass that on
 # and have it checked.
+## An upstream a response body is read from, as two functions and no host
+## type: `read(n)` returns at most `n` bytes and an empty `Bytes` at the end of
+## the stream, and `close()` releases the upstream. The server calls `close`
+## exactly once for every source it is handed, after the last read, when it
+## stops reading because the transfer failed, and also when the source is never
+## read at all (HEAD, 1xx/204/205/304), so a source that holds a connection
+## needs no other cleanup path. A failed `read` raises, as any IO does; the
+## server tells that apart from a clean end (web_jvm/server.pump_with).
+##
+## Nothing here names a backend: the JVM server builds one from an
+## `InputStream` (`web_jvm/server.input_source`), and any other server builds
+## one from whatever it reads. docs/web-core-split-design.md §3 weighs this
+## shape against two others.
+pub type BodySource = { read: fn(Int) -> Bytes !io, close: fn() -> Unit !io }
+
 ## What a Response carries: nothing, text, bytes, or a live upstream stream.
 ## The kind also decides the framing — Text and Binary get an exact
 ## Content-Length, a Stream an exact one when `length` is `Some` and chunked
@@ -106,11 +121,12 @@ pub type ResponseBody =
   | Empty
   | Text(value: String)
   | Binary(value: Bytes)
-  | Stream(value: InputStream, length: Option[Int])
+  | Stream(source: BodySource, length: Option[Int])
 
-# The representation of a Response, package-private: web/server reads it
-# through `response_rep` to write the wire, and nothing outside the package can
-# name it. Every value of it that exists came out of `build` and `with_header`,
+# The representation of a Response, package-private: a server outside the
+# package (web_jvm/server) reads a response through the public accessors
+# (`response_status` and the rest), and nothing outside this package can
+# name the record. Every value of it that exists came out of `build` and `with_header`,
 # which is what lets the checks live there and only there.
 pub(pkg) type ResponseRep = {
   status: Int,
@@ -160,10 +176,38 @@ pub fn response_body(r: Response) -> ResponseBody = {
   rep.body
 }
 
-## The representation, for web/server to write to the wire. Package-private:
+## The representation, for this package's own tests and checks. Package-private:
 ## there is no conversion back, so the checks at construction are the only
 ## way a Response comes to exist.
 pub(pkg) fn response_rep(r: Response) -> ResponseRep = r
+
+# Equality for responses, for the tests of this package and of the servers in
+# it. A body that is a stream holds functions, and a function has no equality,
+# so `==` on a ResponseBody or a Response is a type error since 7.0 and a test
+# compares through these instead; a stream is equal to nothing, itself included.
+pub(pkg) fn same_body(a: ResponseBody, b: ResponseBody) -> Bool =
+  match a {
+    Empty -> match b {
+      Empty -> true
+      _ -> false
+    }
+    Text(x) -> match b {
+      Text(y) -> x == y
+      _ -> false
+    }
+    Binary(x) -> match b {
+      Binary(y) -> x == y
+      _ -> false
+    }
+    Stream(_, _) -> false
+  }
+
+pub(pkg) fn same_response(a: Response, b: Response) -> Bool = {
+  let x = response_rep(a)
+  let y = response_rep(b)
+  x.status == y.status && x.content_type == y.content_type && x.headers == y.headers &&
+    same_body(x.body, y.body)
+}
 
 # `code` is a machine-readable tag for clients that dispatch on more than the
 # status (None when the message is the whole story); `headers` travel onto the
@@ -197,6 +241,15 @@ pub alias Guard = fn(Request) -> Result[Unit, HttpError] !io
 ## A handler transformer. `serve_app` composes a list of them with the first
 ## element outermost.
 pub alias Middleware = fn(Handler) -> Handler
+
+# The ceiling on a request body read into memory, in bytes. 8 MiB: comfortably
+# above any JSON or form this framework is meant to carry, far below what a few
+# concurrent requests could use to exhaust a heap. Routes that legitimately take
+# more opt out with the "raw-body" tag (nginx bounds those) or the "stream-body"
+# tag (those never touch the heap at all). It lives here, not beside a server,
+# because every server of this package starts from the same number.
+## The default ceiling on a request body read into memory, in bytes (8 MiB).
+pub const DEFAULT_MAX_BODY: Int = 8388608
 
 ## An HttpError with no `code` and no headers — the shape almost every call
 ## site wants.
@@ -310,15 +363,16 @@ pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
 # length its panic; one constructor with a defaulted `Option` says the same
 # thing (web 6.0, docs/std-defaults-design.md A3). `Some(n)` keeps the panic on a
 # negative `n`: the option says whether a length is known, not what one is.
-## A streaming body: a live InputStream pumped to the socket in constant
-## memory. The server closes the stream after pumping, including when the
-## client disconnects mid-download.
+## A streaming body: a live `BodySource` pumped to the socket in constant
+## memory. The server closes the source after pumping, including when the
+## client disconnects mid-download. A JVM program holding an `InputStream`
+## passes `web_jvm/server.input_source(stream)`.
 ##
 ## With `length` absent the body is chunked, and that is a limit, not just a
 ## framing choice: an upstream that ends early with a clean EOF is
 ## indistinguishable here from one that delivered everything, so a truncated
 ## object is served as a complete one. A failed *read* is caught and logged
-## (web/server.pump_stream); a short but orderly one cannot be, since telling
+## (web_jvm/server.pump_stream); a short but orderly one cannot be, since telling
 ## them apart needs a length to compare against.
 ##
 ## With `length: Some(n)` the body is framed with an exact Content-Length
@@ -328,12 +382,12 @@ pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
 ## the connection ends short of the promised length, which is how the client
 ## learns of it; one that runs long is cut off by the JDK's fixed-length stream
 ## and logged as a failed transfer. A negative length panics.
-pub fn streaming(status: Int, content_type: String, stream: InputStream, length: Option[Int] = None) -> Response = {
+pub fn streaming(status: Int, content_type: String, source: BodySource, length: Option[Int] = None) -> Response = {
   match length {
     Some(n) if n < 0 -> panic("illegal stream length ${n}: a byte count is not negative")
     _ -> ()
   }
-  build(status, content_type, Stream(stream, length))
+  build(status, content_type, Stream(source, length))
 }
 
 # ---- header hygiene ----
@@ -423,14 +477,14 @@ pub fn escape_field(s: String) -> String = {
   out
 }
 
-# The request half of every log line the package writes: the method and the
-# path *as the client sent it*, still percent-encoded, as nginx logs it. The
-# decoded path is the wrong thing to log: `%0D%0A` decodes to a line break,
-# and a log line that carries one is two log lines, the second written by the
-# client (CWE-117). The raw path cannot hold a control character (the JDK's
-# URI refuses one), and `escape_field` makes that a property of this function
-# rather than of the JDK.
-pub(pkg) fn log_request(method: String, raw_path: String) -> String =
+## The request half of every log line the package writes: the method and the
+## path *as the client sent it*, still percent-encoded, as nginx logs it. The
+## decoded path is the wrong thing to log: `%0D%0A` decodes to a line break,
+## and a log line that carries one is two log lines, the second written by the
+## client (CWE-117). The raw path cannot hold a control character (the JDK's
+## URI refuses one), and `escape_field` makes that a property of this function
+## rather than of the JDK.
+pub fn log_request(method: String, raw_path: String) -> String =
   escape_field(method) ++ " " ++ escape_field(raw_path)
 
 # A code point in hex for `escape_field`: two digits up to U+00FF, as it has
@@ -459,7 +513,7 @@ fn header_problem(r: ResponseRep, name: String, value: String) -> Option[String]
   }
 
 # The framing headers belong to the server: the body kind decides them (see
-# web/server.body_length), and a handler's own copy can only disagree with
+# web_jvm/server.body_length), and a handler's own copy can only disagree with
 # that decision. jdk.httpserver does not reconcile the two. A handler's
 # Transfer-Encoding goes out next to the JDK's Content-length, which RFC 9112
 # §6.1 forbids outright and a proxy in front may frame differently from the
@@ -998,9 +1052,9 @@ test "response header helpers" {
   assert response_headers(rd) == [("Location", "/here")]
   # a redirect carries no content, and says so: it used to be Text("") — the
   # same bytes on the wire, but the kind is what states the intent
-  assert response_body(rd) == Empty
+  assert same_body(response_body(rd), Empty)
   match try_redirect(303, "/there") {
-    Ok(r) -> { assert response_body(r) == Empty }
+    Ok(r) -> { assert same_body(response_body(r), Empty) }
     Err(_) -> { assert false }
   }
   let at = attachment("text/markdown", "post.md", "# hi")
@@ -1067,13 +1121,19 @@ test "try_with_header answers 400 where with_header would panic" {
     Err(e) -> { assert e.status == 400 }
   }
   # a legal one is the same Response with_header builds
-  assert try_with_header(json_ok(JStr("hi")), "X-A", "1") == Ok(with_header(json_ok(JStr("hi")), "X-A", "1"))
+  match try_with_header(json_ok(JStr("hi")), "X-A", "1") {
+    Ok(r) -> { assert same_response(r, with_header(json_ok(JStr("hi")), "X-A", "1")) }
+    Err(_) -> { assert false }
+  }
   # try_redirect is the same refusal on the constructor that carries a target
   match try_redirect(302, "/ok\r\nX-Evil: 1") {
     Ok(_) -> { assert false }
     Err(e) -> { assert e.status == 400 }
   }
-  assert try_redirect(302, "/here") == Ok(redirect(302, "/here"))
+  match try_redirect(302, "/here") {
+    Ok(r) -> { assert same_response(r, redirect(302, "/here")) }
+    Err(_) -> { assert false }
+  }
 }
 
 test "escape_field rewrites what cannot travel and nothing else" {
@@ -1226,11 +1286,11 @@ test "http_error fills the new fields empty; error_response carries error header
 test "the error body's key is the default one, and configurable" {
   let e = http_error(404, "nope")
   # default wording: the neutral {"error": ...}
-  assert response_body(error_response(e)) == Text("{\"error\":\"nope\"}")
+  assert same_body(response_body(error_response(e)), Text("{\"error\":\"nope\"}"))
   # an application whose clients read {"detail": ...} (FastAPI's shape, which
   # this used to be hardcoded to) states it
   let fastapi = ErrorFormat { ..default_errors(), detail_key: "detail" }
-  assert response_body(error_response(e, fmt: fastapi)) == Text("{\"detail\":\"nope\"}")
+  assert same_body(response_body(error_response(e, fmt: fastapi)), Text("{\"detail\":\"nope\"}"))
   # the configured rendering is otherwise the same response
   assert response_status(error_response(e, fmt: fastapi)) == 404
   assert response_content_type(error_response(e, fmt: fastapi)) == "application/json; charset=utf-8"
@@ -1367,13 +1427,13 @@ test "an HttpError out of range renders as the neutral 500, headers kept" {
   }
   let r = error_response(bad)
   assert response_status(r) == 500
-  assert response_body(r) == Text("{\"error\":\"internal server error\"}")
+  assert same_body(response_body(r), Text("{\"error\":\"internal server error\"}"))
   # the CORS stamp rides on the headers, and an error the page cannot read is
   # what LIB-10 was about
   assert response_headers(r) == [("Vary", "Origin")]
   let fastapi = ErrorFormat { ..default_errors(), detail_key: "detail", internal_message: "oops" }
-  assert response_body(error_response(HttpError { ..bad, status: 1000 }, fmt: fastapi)) ==
-    Text("{\"detail\":\"oops\"}")
+  assert same_body(response_body(error_response(HttpError { ..bad, status: 1000 }, fmt: fastapi)),
+    Text("{\"detail\":\"oops\"}"))
   # in range is untouched
   assert response_status(error_response(http_error(418, "teapot"))) == 418
 }
