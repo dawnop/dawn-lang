@@ -68,6 +68,7 @@ ADAPTERS = {
     "tile-golden": (".",),
     "tileinterp-diff": (".",),
     "wasm-dom-contract": (".",),
+    "web-exchange-contract": (".",),
 }
 EXCLUSIONS = {
     "tile-gpu-diff": "generic replacement helper; all anchor text is supplied by callers",

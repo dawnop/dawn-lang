@@ -402,7 +402,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 22353s (the most this file's `3x` claims may add up to)
+# push-total: 22443s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3766,8 +3766,14 @@ jobs:
     # 2026-10-20: scripts/native-web-core.sh joins this job (dawnc check and doc
     # of packages/web whole, with two controls): 1.4s measured locally, charged
     # at 5s. Planning value: 785 + 5 = 790s. The push total moves by 5s.
-    # budget: 3x 790s worst observed plus one deviation and the web check (run 38634588917)
-    timeout-minutes: 40
+    # 2026-10-21: scripts/web-exchange-contract/run.sh joins this job (both web
+    # servers on one set of raw requests, with four negative controls): 41s
+    # measured locally on a loaded 16-core machine (the JVM jar build, six
+    # native builds and 78 fixtures), charged at 90s for a runner that is
+    # about twice as slow. Planning value: 790 + 90 = 880s, restated from the
+    # first observations. The push total moves by 90s.
+    # budget: 3x 880s worst observed plus one deviation, the web check and the web exchange contract (run 38634588917)
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -3813,6 +3819,19 @@ jobs:
       # into web/src). 1.4s locally, charged at 5s below.
       - name: packages/web checks and documents natively as a whole
         run: ./scripts/native-web-core.sh dawnc-linux-x86_64
+
+      # packages/web has two servers: web_jvm/server (jdk.httpserver, which parses
+      # the wire before any Dawn runs) and web/exchange (one request per process,
+      # which the native backend builds). They are meant to answer every request
+      # the same, and two programs drift. This sends one set of raw requests to
+      # both, a JVM jar and the binary this job just built, and compares the
+      # responses byte for byte after the differences that are the JDK's own
+      # (listed in contract.py). Four negative controls break the adapter on a
+      # copy (no chunked decoding, HEAD writes its body, no dot-segment check, no
+      # guard) and require the contract to go red on the fixture for that rule.
+      # 41s locally, charged at 90s above.
+      - name: web_jvm/server and web/exchange answer the same bytes
+        run: ./scripts/web-exchange-contract/run.sh dawnc-linux-x86_64
 
       # `check`, `emitc`, `build`, `run` and a program's `test` load only the
       # std modules the program reaches (docs/check-std-prune-design.md). This
