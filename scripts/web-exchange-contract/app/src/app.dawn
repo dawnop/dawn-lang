@@ -6,6 +6,7 @@
 #   /echo, /small               body ceilings (the server's, and a route's own)
 #   /guarded                    a guard that refuses before the body is read
 #   /spill, /spill-small        a "stream-body" route and its own ceiling
+#   /spill-size, /hold-size     the memory measurement's pair (native only)
 #   /stream-*                   streaming bodies: unknown length (chunked), an
 #                               exact length, one that runs short, one that runs
 #                               over its stated length, one on a no-body status
@@ -18,7 +19,7 @@
 # so the source keeps its position in a temp file: crude, and the same on both
 # servers, which is the only thing this file needs.
 use std/bytes
-use std/io.{with_fs_real, with_env_real, getenv, temp_file, read_file, write_file, delete}
+use std/io.{with_fs_real, with_env_real, getenv, temp_file, read_file, write_file, delete, file_size}
 use web/types.{Request, Response, HttpError, Handler, Middleware, BodySource, http_error, text, binary, streaming, header, headers_all, query, query_all, param, param_segs, with_header, default_errors, ErrorFormat}
 use web/wire.{join_with}
 use web/router.{Route, route_get, route_post, route_put, tagged, body_limit, guarded}
@@ -70,6 +71,22 @@ fn spilled(req: Request) -> Result[Response, HttpError] !io =
         Err(m) -> Ok(text(500, "unreadable: ${m.message}"))
       })
   }
+
+# The two routes the memory measurement uses (spill_memory.py, which only the
+# native side serves): the same upload, one streamed to disk and one held. They
+# answer the size alone, so neither handler reads the body into memory itself.
+fn spilled_size(req: Request) -> Result[Response, HttpError] !io =
+  match req.body_file {
+    None -> Ok(text(500, "no spill file"))
+    Some(p) ->
+      with_fs_real(() => match file_size(p) {
+        Ok(n) -> Ok(text(200, "spilled ${n} bytes, body held ${len(req.body)}"))
+        Err(m) -> Ok(text(500, "unreadable: ${m.message}"))
+      })
+  }
+
+fn held_size(req: Request) -> Result[Response, HttpError] =
+  Ok(text(200, "held ${len(req.body)} bytes"))
 
 # ---- streaming sources ----
 
@@ -145,6 +162,8 @@ pub fn routes() -> List[Route] = [
   guarded(route_post("/guarded", granted), need_token),
   tagged(route_put("/spill", spilled), ["stream-body"]),
   body_limit(tagged(route_put("/spill-small", spilled), ["stream-body"]), 16),
+  tagged(route_put("/spill-size", spilled_size), ["stream-body"]),
+  tagged(route_put("/hold-size", held_size), ["raw-body"]),
   route_get("/stream-chunked", stream_chunked),
   route_get("/stream-sized", stream_sized),
   route_get("/stream-short", stream_short),

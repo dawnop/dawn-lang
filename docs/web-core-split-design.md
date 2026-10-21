@@ -299,15 +299,17 @@ JVM 一侧的行为变化（唯一一处）：读请求体时 JDK 流抛出的�
   chunked 60 字节 1.36 / 1.76 ms。这是适配层本身的量级，不含 systemd `Accept=yes` 起实例的成本（runner 实测约占 `/health` p95 的 90%）。
 - 墙钟：契约整套（建 JVM jar、建 native、78 夹具、四次负控各建一次 native）本机 41 s。
 
-### 九.8 B2 要补的缺口（本刀没有碰 std，也没有碰编译器）
+### 九.8 B2 要补的缺口（B1b 留下的清单与落地结果）
 
-1. **stdout 写字节**。std 目前只有 `print(String)`，二进制响应无法经 `print` 出去。契约的 native 主程序暂用
-   `write_bytes("/dev/stdout", …)`，每次写重开描述符，对驱动给的管道成立、对普通文件与 socket 不成立；`stdio_transport` 因此不进
-   `web` 的公开面，等 `io_write_stdout_bytes` 与 flush 落地后再加。
-2. **追加写与按区间读**。`stream-body` 的块式 spill 与流式回写要用。
+B2（[io-prims-design.md](io-prims-design.md)）补了前两条：
+
+1. **stdout 写字节**：`std/io.write_stdout` 与 `flush_stdout` 落地，`web/exchange.stdio_transport()` 进了 `web` 的公开面（7.2.0），
+   契约的 native 主程序改用它，78/78 不变。
+2. **追加写与按区间读**：`append_bytes` 落地，`stream-body` 的 native 一侧改成块式（64 KiB 一块，先建文件再追加，定长与 chunked 都是），
+   256 MiB 的上传峰值驻留 16.2 MiB（此前约等于体大小）；`read_range` 供 Range 请求与流式回写用，本包尚未有消费者。
 3. **排空**。退出时 stdin 里还有没读的体（早拒绝）会让内核发 RST，客户端可能丢掉已写出的响应。契约的 native 主程序在
    `serve_exchange` 返回后用 `stdin_ready(0)` 排空（runner 的 `drain` 同款）；这是调用方的事，没有放进适配层，因为「排空多少、等多久」
-   是传输自己的策略（runner 实测 20 ms 的等待会把 p50 从 1 ms 推到 21 ms）。
+   是传输自己的策略（runner 实测 20 ms 的等待会把 p50 从 1 ms 推到 21 ms）。仍然如此。
 
 ### 九.9 给 dawnop-site 的后续改动点（本刀不动那个仓库）
 

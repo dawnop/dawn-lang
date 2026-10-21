@@ -6,6 +6,25 @@ Newest first. From 2.0.0 the manifest name carries the major (`web2` ...
 `docs/std-defaults-design.md`, `docs/audit/web-api-v2-design.md` and
 `docs/web-core-split-design.md` (in Chinese).
 
+## 7.2.0 (2026-10-21)
+
+Added, nothing removed or changed for a caller of 7.1:
+
+- **`web/exchange.stdio_transport()`**, the `Transport` of a process handed one
+  accepted connection as stdin and stdout: `read` takes the next `n` bytes of
+  stdin (the position is ignored), `write` puts the bytes on stdout and flushes
+  them, so each piece of a streamed body reaches the peer when it is written.
+  Stdout is the wire, so the process logs to stderr
+  (`with_logging_to_stderr`). It rides std's `write_stdout` and `flush_stdout`
+  (docs/io-prims-design.md).
+- **A "stream-body" upload no longer passes through memory in `web/exchange`.**
+  The temp file is made first and the body is read, appended
+  (`std/io.append_bytes`) and dropped 64 KiB at a time, for a counted and a
+  chunked body alike. A 256 MiB PUT peaks at 16 MiB resident where it peaked
+  at the size of the body; the `Request` a handler sees, the statuses and the
+  ceilings are unchanged, and a body that ends early, is malformed or crosses
+  the ceiling still leaves no file behind. `web_jvm/server` already streamed.
+
 ## 7.1.0 (2026-10-21)
 
 Added, nothing removed or changed for a caller of 7.0:

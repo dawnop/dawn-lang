@@ -402,7 +402,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 22503s (the most this file's `3x` claims may add up to)
+# push-total: 22523s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3789,7 +3789,12 @@ jobs:
     # native builds and 78 fixtures), charged at 90s for a runner that is
     # about twice as slow. Planning value: 790 + 90 = 880s, restated from the
     # first observations. The push total moves by 90s.
-    # budget: 3x 880s worst observed plus one deviation, the web check and the web exchange contract (run 38634588917)
+    # 2026-10-21: the exchange contract gains the memory of a 256 MiB upload
+    # through a stream-body route (counted and chunked, with the body-holding
+    # route as the control): about 5s measured locally, charged at 20s.
+    # Planning value: 880 + 20 = 900s; 3 x 900s is the 45 minutes the timeout
+    # already is. The push total moves by 20s.
+    # budget: 3x 900s worst observed plus one deviation, the web check and the web exchange contract (run 38634588917)
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -3846,7 +3851,10 @@ jobs:
       # (listed in contract.py). Four negative controls break the adapter on a
       # copy (no chunked decoding, HEAD writes its body, no dot-segment check, no
       # guard) and require the contract to go red on the fixture for that rule.
-      # 41s locally, charged at 90s above.
+      # 41s locally, charged at 90s above. A 256 MiB upload through a stream-body
+      # route is also held to a peak resident set under 32 MiB, counted and
+      # chunked, against a route that holds the same body (over 200 MiB) as the
+      # control: 20s charged above.
       - name: web_jvm/server and web/exchange answer the same bytes
         run: ./scripts/web-exchange-contract/run.sh dawnc-linux-x86_64
 
