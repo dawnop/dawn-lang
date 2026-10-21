@@ -51,7 +51,6 @@ header, its terminator and its closing brace.
 
 from pathlib import Path
 import contextlib
-import hashlib
 import io
 import os
 import re
@@ -221,52 +220,33 @@ def split_args(s: str) -> list:
     return out
 
 
-HARNESS_BIN = ROOT / "site" / "build" / "gpu-map-harness"
-
-
-def harness_key(main_src: str) -> str:
-    """What the built harness depends on: the compiler (std is embedded in it),
-    the harness text, and every package source it may import. All of packages/
-    rather than the transitive closure of tileir and tileref: a wider key only
-    costs a rebuild, a narrower one could serve a stale binary."""
-    h = hashlib.sha256()
-    h.update(hashlib.sha256(Path(dawnc()).read_bytes()).digest())
-    h.update(main_src.encode("utf-8"))
-    for f in sorted((ROOT / "packages").rglob("*")):
-        if f.is_file() and (f.suffix == ".dawn" or f.name == "dawn.toml") \
-                and "build" not in f.relative_to(ROOT).parts:
-            h.update(str(f.relative_to(ROOT)).encode("utf-8") + b"\0")
-            h.update(f.read_bytes())
-    return h.hexdigest()
+HARNESS_DIR = ROOT / "site" / "gpu-map" / "harness"
 
 
 def run_harness(src: str) -> str:
-    # Built once and cached: `dawnc run` would emit C and run cc on every
-    # build (about 40 s here), and the harness only changes when kernels.dawn,
-    # a package or the compiler does.
-    main_src = harness_source(src)
-    key = harness_key(main_src)
-    keyfile = Path(str(HARNESS_BIN) + ".key")
-    stale = not HARNESS_BIN.exists() or not keyfile.exists() \
-        or keyfile.read_text(encoding="utf-8") != key
-    if stale:
-        HARNESS_BIN.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="gpu-map.") as work:
-            proj = Path(work)
-            (proj / "src").mkdir()
-            (proj / "src" / "main.dawn").write_text(main_src, encoding="utf-8")
-            (proj / "dawn.toml").write_text(
-                "schema = 1\nname = \"gpu_map\"\n\n[deps]\n"
-                f"tileir = \"{ROOT / 'packages' / 'tileir'}\"\n"
-                f"tileref = \"{ROOT / 'packages' / 'tileref'}\"\n",
-                encoding="utf-8")
-            keyfile.unlink(missing_ok=True)
-            r = subprocess.run([dawnc(), "build", str(proj), "-o", str(HARNESS_BIN)],
-                               capture_output=True, text=True, cwd=ROOT)
+    # The harness is a project of its own (site/gpu-map/harness: dawn.toml is
+    # committed, src/main.dawn is written here from kernels.dawn and ignored by
+    # git). It is listed in site/native-progs.txt, so site_prog builds it once
+    # with dawnc and the site's one CI cache keeps it; `dawnc run` would emit C
+    # and run cc on every build (about 40 s). Its key reads kernels.dawn
+    # through harness/inputs.txt, since main.dawn does not exist when CI
+    # computes the cache key.
+    (HARNESS_DIR / "src").mkdir(parents=True, exist_ok=True)
+    main = HARNESS_DIR / "src" / "main.dawn"
+    text = harness_source(src)
+    if not main.exists() or main.read_text(encoding="utf-8") != text:
+        main.write_text(text, encoding="utf-8")
+        # a walked-but-ignored file must not break `dawn fmt site --check`
+        r = subprocess.run([dawnc(), "fmt", str(main)], capture_output=True, text=True, cwd=ROOT)
         if r.returncode != 0:
-            fail("the harness did not build:\n" + (r.stderr or r.stdout)[-2000:])
-        keyfile.write_text(key, encoding="utf-8")
-    r = subprocess.run([str(HARNESS_BIN)], capture_output=True, text=True, cwd=ROOT)
+            fail("could not format the harness:\n" + (r.stderr or r.stdout)[-2000:])
+    r = subprocess.run(["bash", "-c", ". site/dawnc.sh && site_prog gpu_map_harness"],
+                       capture_output=True, text=True, cwd=ROOT,
+                       env={**os.environ, "DAWNC_BIN": dawnc()})
+    if r.returncode != 0 or not r.stdout.strip():
+        fail("the harness did not build:\n" + (r.stderr or r.stdout)[-2000:])
+    exe = ROOT / r.stdout.strip().splitlines()[-1]
+    r = subprocess.run([str(exe)], capture_output=True, text=True, cwd=ROOT)
     if r.returncode != 0:
         fail("the harness did not run:\n" + (r.stderr or r.stdout)[-2000:])
     return r.stdout
