@@ -286,7 +286,8 @@ body is a closure with a data-dependent exit.
   `step: By(nprog)`. The induction variable is always an `Idx`.
   (`extent_of(p, dim)` and `blocks_of(p, dim)` are a parameter's extent and
   its number of cells along a dimension.)
-- `d_loop { .. }` runs until its body answers a true rank-0 mask. On the
+- `d_loop { .. }` (its `at` default comes first, so the block is the last
+  argument) runs until its body answers a true rank-0 mask. On the
   iteration that answers true the loop stops with the carries as they
   entered it, so compute the mask before the `set`s.
 - `d_if(cond, () => .., () => ..)` runs one of two regions, neither of which
@@ -339,11 +340,20 @@ and same-rank rules), as is the `k` of `mma`, `mma_scaled` and `mmai` and the fo
 `mma`. A mismatch panics
 while the kernel records, naming the operation by its depth-first number in
 `TileProg.ops` (`MakeToken(0)` is #0) and, for the four float operators, as
-the kernel wrote it. When the operation is inside a region, the regions follow
-the reason, outermost first, for example:
-``tileir: kernel `vadd_half`: op #6 `+`: rhs is tile<128xf64>, declared tile<64xf64>``
-or ``... declared tile<4xf64> (inside the body of a `d_range`, inside the then branch of a `d_if`)``.
-There is no source line yet.
+the kernel wrote it. The message ends in the line of your own source that the
+call was written on (since 0.21.0: every public function of `tileir/dev` takes
+`at: Loc = caller()`, and the recording keeps the one of the call you wrote, not
+the ones the library makes for itself), for example:
+``tileir: kernel `vadd_half`: op #6 `+`: rhs is tile<128xf64>, declared tile<64xf64> (rhs comes from `load_cell` at src/main.dawn:14:22) at src/main.dawn:15:19``.
+After the reason come, in this order, where the wrong operand was made (the
+call you wrote, or `the `+` operator` for one an operator made), and, when the
+operation is inside a region, the regions, outermost first, each with the line
+of the call that opened it:
+``... declared tile<4xf64> (inside the body of a `d_range` at src/main.dawn:26:12, inside the then branch of a `d_if` at src/main.dawn:27:7) at src/main.dawn:26:12``.
+An operator (`+ - * /`, a `var`, a bare float literal) is a trait method, which
+takes no `caller()` default, so it has no line of its own: the message ends in
+the nearest line it does have (the enclosing region's, else the line that
+recorded the kernel) and the operand note says where the operands came from.
 [ERRORS.md](ERRORS.md) sorts these messages, the compiler's and the device's
 into four layers, with the fix for each.
 
@@ -420,9 +430,10 @@ A handler has to answer every operation of `Dev`, so a new operation is a
 version bump (see the changelog). What a handler owes the ones that issue
 nothing:
 
-- `t_call_enter(name)` / `t_call_exit()` and `t_body_enter()` /
+- `t_call_enter(name, at)` / `t_call_exit()` and `t_body_enter()` /
   `t_body_exit()`: answer `()` and record nothing. The call pair wraps the
-  body of each public function; the body pair wraps each closure a public
+  body of each public function (`at` is the `Loc` of the call, `None` for an
+  operator, which has none); the body pair wraps each closure a public
   function takes. `prog.trace_calls` uses them to attribute operations to
   the calls the kernel wrote; `render.line_map` refuses a program whose
   operations fall outside any pair.

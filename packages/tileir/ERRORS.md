@@ -6,7 +6,7 @@ Knowing which one spoke is most of the fix.
 | Layer | When it runs | What it looks like | The usual fix |
 |---|---|---|---|
 | **type check** | `dawn check`, `dawn run`, the editor; before anything executes | a compiler error with a source position | change the type: the format, the effect or the argument is wrong |
-| **record** | while `trace1` to `trace5` or `trace_kernel` runs your kernel body once | a panic `tileir: kernel `name`: op #N `op`: ...` | the kernel asks for something the shapes or roles cannot give; change the call it names |
+| **record** | while `trace1` to `trace5` or `trace_kernel` runs your kernel body once | a panic `tileir: kernel `name`: op #N `op`: ... at src/main.dawn:L:C`, the line of your own call | the kernel asks for something the shapes or roles cannot give; change the call it names |
 | **emit** | `render`, `encode`, `lower`, then `tileiras` | a panic `tileir: ...` with no kernel name, or `tileiras` refusing the bytes | usually a view or a region whose parts disagree; occasionally a defect in the assembler |
 | **device** | the host program, on the fake device or a real one | an `Err(ForeignError)` whose `kind` is `gpu.*` or `cuda.*` | the host call, the launch geometry or the machine; the kind says which |
 
@@ -48,15 +48,22 @@ number (`MakeToken` is `#0`, then in the order recorded) and its dialect name.
 Real messages:
 
 ```
-tileir: kernel `shapes_differ`: op #6 `+`: rhs is tile<64xf64>, declared tile<128xf64> at tileir/prog.dawn:339:3
-tileir: kernel `write_in`: op #10 `store_cell`: parameter 0 is an In, and nothing writes an In at tileir/prog.dawn:339:3
-tileir: kernel `not_pow2`: every tile dimension is a power of two, got 100 in [100] at tileir/prog.dawn:339:3
-tileir: kernel `pointer_store`: op #5 `store`: parameter 1 is an Out, which is written through its cells alone (store_cell, store_sub); a parameter written any other way is a Shared at tileir/prog.dawn:339:3
+tileir: kernel `shapes_differ`: op #4 `+`: rhs is tile<64xf64>, declared tile<128xf64> (rhs comes from `load` at src/main.dawn:58:11) at src/main.dawn:59:15
+tileir: kernel `write_in`: op #7 `store_cell`: parameter 0 is an In, and nothing writes an In at src/main.dawn:84:3
+tileir: kernel `not_pow2`: every tile dimension is a power of two, got 100 in [100] at src/main.dawn:69:12
+tileir: kernel `pointer_store`: op #3 `store`: parameter 1 is an Out, which is written through its cells alone (store_cell, store_sub); a parameter written any other way is a Shared at src/main.dawn:89:3
 ```
 
-The trailing position is the library's own line (the `panic` inside
-`refuse`), not a line of your kernel: a Dawn panic carries the position of its
-raise. The kernel name says which function, the operation name which call in
+The trailing position is a line of your own kernel: the call you wrote that the
+recorder was running when it refused (every public function of `tileir/dev`
+takes `at: Loc = caller()` since 0.21.0, so the recorder knows where each call
+was written). A refusal that needs an operand says where that operand was made
+(`rhs comes from `load` at ..`) and one inside a region says which `for` or
+`d_if` it is in, each with its line. An operator (`+ - * /`, a `var`, a float
+literal) has no line of its own, because a trait method takes no `caller()`
+default; its message ends in the nearest line it does have, the enclosing
+region's, else the line that called `trace_kernel` or `trace1` to `trace5`. The
+kernel name says which function, the operation name which call in
 it; `op #N` counts operations, so a run of `load`s and `add`s is a few numbers
 long and the one named is the one to look at. The recorder has no codes, only
 messages, and they are free text, so the rows below are keyed by a fragment of
