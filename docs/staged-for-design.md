@@ -101,8 +101,9 @@ prelude 内部移动，不改任何程序的 id）。两者 `injects: false`，�
 
 ### D4 体内的名字仍解析到原 `var` 的符号
 
-`LambdaCx` 加 `staged_loop: Bool` 与 `staged: Map[Int, StagedCell]`（原 `var` 的符号 id → 格子局部、值类型、`StagedVar` 见证、
-首次提及位置）。`resolve_local` 找到一个跨过 staged 帧的 `var` 时：从最外层被跨过的 staged 帧起，staged 帧捕获格子局部（首次时铸格子），
+`LambdaCx` 保存 `staged_kind: StagedKind` 与 `staged: Map[Int, StagedCell]`（原 `var` 的符号 id → 格子局部、值类型、`StagedVar` 见证、
+首次提及位置）。S1 条件协议将原 `staged_loop` 布尔标志扩为普通闭包、staged 循环与条件臂三种，
+以免条件臂被当作循环目标（见 [staged-if-design.md](staged-if-design.md)）。`resolve_local` 找到一个跨过 staged 帧的 `var` 时：从最外层被跨过的 staged 帧起，staged 帧捕获格子局部（首次时铸格子），
 其余闭包报错；返回值仍是原 id。`check_var`/`check_assign` 看到该 id 在某个 staged 帧的表里，就产出 `var_get`/`var_set`。
 
 否决的替代：**像 handler 格子那样让体内名字解析到另一个 Sym**：LSP 会看到两个符号，重命名断开。

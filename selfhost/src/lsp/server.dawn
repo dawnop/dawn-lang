@@ -7479,3 +7479,73 @@ test "fixed integer oracle agrees with closed LSP evaluation for every row" {
     }
   }))
 }
+
+test "staged if pairs both rewritten arms for navigation references rename and tokens" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let text = join([
+      "type V = { n: Int }",
+      "type Cell = { n: Int }",
+      "type Cond = { n: Int }",
+      "impl StagedCond[Cond] {",
+      "  fn staged_if(c: Cond, on_true: fn() -> Unit, on_false: fn() -> Unit) -> Unit = on_true()",
+      "}",
+      "impl StagedVar[V] { type Cell = Cell",
+      "  fn var_open(v: V) -> Cell = Cell { n: v.n }",
+      "  fn var_get(c: Cell) -> V = V { n: c.n }",
+      "  fn var_set(c: Cell, v: V) -> Unit = () }",
+      "fn f(c: Cond) -> V = {",
+      "  var acc = V { n: 1 }",
+      "  if c { acc = V { n: acc.n + 1 } }",
+      "  else if c { acc = V { n: acc.n + 2 } }",
+      "  else { acc = V { n: acc.n + 3 } }",
+      "  acc",
+      "}",
+      ""
+    ], "\n")
+    let (st, d) = untitled_state(std, "untitled:staged-if", text)
+    let analysis = analysis_of(st, d).expect("the staged if probe has an analysis")
+    let qc = doc_qcx(st, d, analysis).expect("the staged if probe has a QCx")
+    let decl = probe_offset(text, "acc = V", 0)
+    let at_use = probe_offset(text, "acc.n + 2", 0)
+    let uses = occurrences(qc, at_use, true)
+    assert len(uses) == 8
+    assert map(uses, o => o.write) == [true, true, false, true, false, true, false, false]
+    let original = def_probe_span(def_probe_at(st, d, text, "acc\n}", 0), "the plain var read")
+    let (dlo, dhi) = original
+    assert dlo == decl - 4 && dhi > decl + 3
+    for needle in ["acc.n + 1", "acc.n + 2", "acc.n + 3", "acc\n}"] {
+      let target = def_probe_at(st, d, text, needle, 0)
+      assert target.hover == "var acc: V"
+      assert def_probe_span(target, "the original var") == original
+    }
+    assert def_probe_at(st, d, text, "if c {", 3).hover == "let c: Cond"
+    let tokens = semantic_tokens(qc, 0, len(text))
+    for occurrence in uses {
+      var found = false
+      for token in tokens {
+        if token.lo == occurrence.lo {
+          assert token.hi == occurrence.hi
+          assert token.ty == 7
+          assert token.mods & 8 == 8
+          found = true
+        }
+      }
+      assert found
+    }
+    match handle_rename(st, rename_params(d, "acc.n + 2", 0, "total")) {
+      (Ok(r), _) -> {
+        let edits = match oget(get_or_null(r, "changes"), d.uri) {
+          Some(JArr(es)) -> es
+          _ -> panic("no staged if rename edits")
+        }
+        assert len(edits) == 8
+        for e in edits { assert ostr(e, "newText") == "total" }
+      }
+      (Err(why), _) -> panic("staged if rename refused: ${why}")
+    }
+  }))
+}

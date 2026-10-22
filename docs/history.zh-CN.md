@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/history.md @ c7b4c0b85216652b -->
+<!-- doc-check: translation-of docs/history.md @ 73bb1edc6982fa66 -->
 
 # 历史
 
@@ -217,3 +217,6 @@
 ## 早期决定
 
 [早期设计决定（M0–M7）](design.md)按当时写下的样子，保留了自举之前每个选择背后的理由。
+- **2026-10-22。** Unit 型 staged `if` 增加 `StagedCond` prelude 协议，两臂共享 StagedVar 格子，
+  并复用外层 staged 循环的格子；宿主 Bool 保持原分支。设备包接入与 token 分支分别后续交付。
+  （[条件协议](staged-if-design.md)、[spec §4.6](spec.md)）

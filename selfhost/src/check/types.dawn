@@ -2769,6 +2769,9 @@ pub const SHR_ID: Int = 22
 pub const USHR_ID: Int = 23
 pub const BIT_NOT_ID: Int = 24
 
+## Unit-valued conditional recording; appended so existing dictionary ids stay stable.
+pub const STAGED_COND_ID: Int = 25
+
 pub fn bitwise_trait_ids() -> List[Int] =
   [BIT_AND_ID, BIT_OR_ID, BIT_XOR_ID, SHL_ID, SHR_ID, USHR_ID, BIT_NOT_ID]
 
@@ -3124,7 +3127,8 @@ pub fn prelude_traits() -> Traits = {
     (SHL_ID, bitwise_trait(SHL_ID, "Shl", "shl", -44, 2)),
     (SHR_ID, bitwise_trait(SHR_ID, "Shr", "shr", -45, 2)),
     (USHR_ID, bitwise_trait(USHR_ID, "Ushr", "ushr", -46, 2)),
-    (BIT_NOT_ID, bitwise_trait(BIT_NOT_ID, "BitNot", "bit_not", -47, 1))])
+    (BIT_NOT_ID, bitwise_trait(BIT_NOT_ID, "BitNot", "bit_not", -47, 1)),
+    (STAGED_COND_ID, staged_cond_trait())])
 }
 
 ## `trait StagedIter[R] { type Item  effect StagedIter = !()
@@ -3151,6 +3155,24 @@ fn staged_iter_trait() -> TraitI = {
     assoc: ["Item"],
     eff_assoc: ["StagedIter"],
     eff_defaults: [("StagedIter", EPure)],
+    injects: false
+  }
+}
+
+## Both arms are ordinary closures under the condition's associated row.
+## No method name is injected, and no host Bool dictionary is provided.
+fn staged_cond_trait() -> TraitI = {
+  let cv = TyVar("C", -48)
+  let e = EffAssoc("C", -48, STAGED_COND_ID, "StagedCond")
+  let arm = TyFn([], TyUnit, e)
+  let sig = Sig {
+    ..prelude_method(STAGED_COND_ID, cv, "staged_if", [cv, arm, arm], ["c", "on_true", "on_false"], TyUnit),
+    eff: e
+  }
+  TraitI {
+    ..prelude_trait(STAGED_COND_ID, "StagedCond", cv, "staged_if", sig),
+    eff_assoc: ["StagedCond"],
+    eff_defaults: [("StagedCond", EPure)],
     injects: false
   }
 }
@@ -3259,7 +3281,7 @@ fn bitwise_trait(tid: Int, name: String, method: String, tvid: Int, arity: Int) 
 pub fn prelude_trait_ids() -> List[Int] =
   [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, DISPLAY_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID,
     REM_ID, NEG_ID, FROM_INT_ID, FROM_FLOAT_ID, STAGED_ITER_ID, STAGED_VAR_ID, LEN_ID,
-    BIT_AND_ID, BIT_OR_ID, BIT_XOR_ID, SHL_ID, SHR_ID, USHR_ID, BIT_NOT_ID]
+    BIT_AND_ID, BIT_OR_ID, BIT_XOR_ID, SHL_ID, SHR_ID, USHR_ID, BIT_NOT_ID, STAGED_COND_ID]
 
 ## The prelude trait names, derived from the table rather than transcribed.
 pub fn prelude_trait_names() -> List[String] = {
@@ -5065,10 +5087,10 @@ test "prelude shapes" {
     assert tr.eff_assoc == [tr.name]
     assert tr.eff_defaults == [(tr.name, EPure)]
   }
-  # the staged-loop traits: consumed by `for`, so not injected; one effect
+  # the staging traits: consumed by `for`/`if`, so not injected; one effect
   # member each named like the trait and pure by default, as the operators'
-  # are, and no prelude impl of either
-  for tid in [STAGED_ITER_ID, STAGED_VAR_ID] {
+  # are, and no prelude impl
+  for tid in [STAGED_ITER_ID, STAGED_VAR_ID, STAGED_COND_ID] {
     let tr = trait_of(traits, tid)
     assert not tr.injects
     assert tr.eff_assoc == [tr.name]
@@ -5083,7 +5105,7 @@ test "prelude shapes" {
   }
   assert vnames == ["var_open", "var_get", "var_set"]
   for pi in prelude_impls() {
-    assert pi.trait_id != STAGED_ITER_ID && pi.trait_id != STAGED_VAR_ID
+    assert pi.trait_id != STAGED_ITER_ID && pi.trait_id != STAGED_VAR_ID && pi.trait_id != STAGED_COND_ID
   }
   var tbl: Impls = map.empty()
   for i in prelude_impls() { tbl = insert_impl(tbl, i) }

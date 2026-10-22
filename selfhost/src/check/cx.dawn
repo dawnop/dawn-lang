@@ -422,6 +422,10 @@ pub(pkg) type StagedCell = {
   use_hi: Int
 }
 
+## Staging authorizes cell capture, independently of the actual loop stack.
+## A branch keeps the user's if span for diagnostics from its generated closure.
+pub(pkg) type StagedKind = OrdinaryClosure | StagedLoop | StagedBranch(lo: Int, hi: Int)
+
 pub(pkg) type LambdaCx =
   {
     boundary: Int,
@@ -460,10 +464,8 @@ pub(pkg) type LambdaCx =
     # `with x <- f()` is sugar too, and it is handed to a *user* function that
     # may store it, so sugar is not evidence of belonging to anything.
     handler_of: Option[Int],
-    # This closure is the body of a staged `for` (docs/staged-for-design.md):
-    # a jump out of it is refused in the staged loop's own words, and an outer
-    # `var` crossing it is carried through a cell rather than refused.
-    staged_loop: Bool,
+    # Only staged bodies can carry outer vars. A conditional arm is not a loop.
+    staged_kind: StagedKind,
     # The outer `var`s this staged body carries, by the `var`'s own symbol id.
     # Filled while the body is checked, the first time a mention of a `var`
     # crosses this frame (`checker.resolve_local`); a nested staged body that
