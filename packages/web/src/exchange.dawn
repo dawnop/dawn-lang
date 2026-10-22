@@ -948,7 +948,7 @@ fn copy_to_wire(t: Transport, src: BodySource, limit: Option[Int], framed: Bool)
   var total = 0
   var more = true
   while more {
-    let piece = src.read(READ_CHUNK)
+    let piece = src.read(total, READ_CHUNK)
     if len(piece) == 0 {
       more = false
     } else {
@@ -1290,7 +1290,7 @@ test "the head is read up to the blank line and not a byte past it" {
   }
 }
 
-fn src() -> BodySource = BodySource { read: _n => bytes.utf8(""), close: () => () }
+fn src() -> BodySource = BodySource { read: (_pos, _n) => bytes.utf8(""), close: () => () }
 
 test "framing: exact for text and bytes, chunked only for a stream of unknown length" {
   assert framing(200, Empty) == Sized(0)
@@ -1345,13 +1345,13 @@ test "a chunk on the wire is its size in hex, the bytes, CRLF" {
 }
 
 fn panicking_source() -> BodySource =
-  BodySource { read: _n => panic("source bug"), close: () => () }
+  BodySource { read: (_pos, _n) => panic("source bug"), close: () => () }
 
 test "a pump ends clean, short, or as a panic, and each says so" {
   assert pump_with(src(), None, _up => 3) == Pumped
   assert pump_with(src(), Some(3), _up => 3) == Pumped
   assert pump_with(src(), Some(10), _up => 3) == Truncated(3, 10)
-  match pump_with(panicking_source(), None, up => len(up.read(10))) {
+  match pump_with(panicking_source(), None, up => len(up.read(0, 10))) {
     PumpPanicked(m) -> { assert str.starts_with(m, "source bug") }
     _ -> { assert false }
   }

@@ -39,3 +39,17 @@ This package starts at 1.0.0 with the server API `web` 6 had in `web/server`; se
 ## 1.1.0
 
 A request body the JDK's stream cannot read (a chunk size that is not hex, a chunk cut short, a body that ends before its `Content-Length`) is answered `400` with `{"error":"malformed request body"}`. It was a `500`: the exception went up as a panic. A temp file for a spilled body is still removed. The same failures get the same answer from `web/exchange` (the single-exchange server of `packages/web`), and `scripts/web-exchange-contract` holds the two servers to the same bytes. The server now calls the shared decisions that `web` 7.1 made public (`serve_through`, `body_ceiling`, `framing`, `pump_with` and the rest) instead of keeping its own copies. Needs `web` 7.1.
+
+
+## 2.0.0
+
+This major pairs with `web8` 8.0.0 from the same release tag. The package
+identity is `web_jvm2`; retain the `web_jvm` dependency alias and imports.
+`BodySource.read` now takes `(pos, n)`, and the JVM pump supplies the actual
+number of bytes already sent. `input_source(stream)` ignores `pos` because
+an InputStream maintains its own sequential cursor: the server consumes it
+once, in order, without seeking or replaying reads. The adapter still waits
+for one byte and then takes only the bytes already available, up to `n`.
+Custom sources must migrate their callbacks; there is no old-signature alias.
+Pure Dawn Bytes and file adapters are in `web/source` and also work here.
+See [the web migration guide](../web/MIGRATION.md).

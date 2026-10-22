@@ -61,14 +61,15 @@ const PUMP_CHUNK: Int = 8192
 
 ## A BodySource over a Java InputStream: what a JVM program passes to
 ## `streaming` when its upstream is a stream (an `HttpClient` response body, a
-## file). A `read(n)` returns what the stream has ready, not `n` bytes: it
+## file). The stream already owns its sequential cursor, so `pos` is ignored.
+## A `read(pos, n)` returns what the stream has ready, not `n` bytes: it
 ## waits for one byte, then takes whatever else is already buffered up to `n`,
 ## which is `read(byte[])`'s behaviour. `readNBytes(n)` alone would wait to
 ## fill the whole chunk, and a download proxied from a slow upstream would
 ## stall until 8 KiB had arrived instead of passing each piece on, which is the
 ## first-byte-out-immediately property the streaming body exists for.
 pub fn input_source(s: InputStream) -> BodySource =
-  BodySource { read: n => read_ready(s, n), close: () => s.close() }
+  BodySource { read: (_pos, n) => read_ready(s, n), close: () => s.close() }
 
 fn read_ready(s: InputStream, n: Int) -> Bytes !io = {
   let first = s.readNBytes(1)!
@@ -92,7 +93,7 @@ fn copy_source(src: BodySource, out: OutputStream) -> Int !io = {
   var total = 0
   var more = true
   while more {
-    let chunk = src.read(PUMP_CHUNK)
+    let chunk = src.read(total, PUMP_CHUNK)
     if len(chunk) == 0 {
       more = false
     } else {
@@ -1137,17 +1138,17 @@ test "an InputStream source reads what is ready, in chunks no larger than asked,
   let big = bytes.utf8(join_with(map(range(0, 2000), i => "0123456789"), ""))
   let src = test_source_of(big)
   # 20000 bytes are ready, so a read of 8192 is 8192, not one byte
-  assert len(src.read(8192)) == 8192
-  assert len(src.read(8192)) == 8192
-  assert len(src.read(8192)) == 3616
-  assert len(src.read(8192)) == 0
+  assert len(src.read(0, 8192)) == 8192
+  assert len(src.read(8192, 8192)) == 8192
+  assert len(src.read(16384, 8192)) == 3616
+  assert len(src.read(20000, 8192)) == 0
   # fewer ready than asked for: what there is, not a wait for more
   let small = test_source_of(bytes.utf8("abc"))
-  assert small.read(8192) == bytes.utf8("abc")
-  assert len(small.read(8192)) == 0
+  assert small.read(0, 8192) == bytes.utf8("abc")
+  assert len(small.read(3, 8192)) == 0
   # a read of one is one, and a read of zero or less is not a loop
   let one = test_source_of(bytes.utf8("xyz"))
-  assert one.read(1) == bytes.utf8("x")
+  assert one.read(0, 1) == bytes.utf8("x")
   small.close()
   one.close()
   src.close()

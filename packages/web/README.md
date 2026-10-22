@@ -24,6 +24,7 @@ TLS is terminated in front of it (nginx or similar).
 | module | what it holds |
 |---|---|
 | `web/types` | `Request`, `Response` and its constructors, `HttpError`, `ErrorFormat`, `BodySource`, `DEFAULT_MAX_BODY` |
+| `web/source` | `bytes_source`, `file_source`: sequential sources using the pump's byte offset |
 | `web/router` | routes, `route_get` and friends, `tagged`, `body_limit`, `guarded`, and the dispatch a server runs (`dispatch_segs`, `validate_routes`, `Dispatch`) |
 | `web/middleware` | `with_logging`, `with_logging_to_stderr`, `with_cors`, `with_body_limit` |
 | `web/wire` | `parse_form`, `form_value`, `form_all`, and the path and query rules every server shares |
@@ -131,13 +132,35 @@ let d = attachment("text/plain", "\u{4e2d}\u{6587}.txt", body)
 ```
 
 `streaming(status, content_type, source)` takes a `BodySource`, two functions:
-`read(n)` returns at most `n` bytes and an empty `Bytes` at the end, and
-`close()` releases the upstream. The server closes every source it is given,
+`read(pos, n)` returns at most `n` bytes starting at byte offset `pos`, and
+an empty `Bytes` at the end. The pump starts at zero and advances by the
+actual returned length, including short reads. It consumes each source once
+in order; this is not a seek or replay API. `close()` releases the upstream. The server closes every source it is given,
 read or not. On the JVM, `web_jvm/server.input_source(stream)` makes one from
 an `InputStream`. The body is chunked. With `length: Some(n)` it sends
 `Content-Length: n` instead, and a stream that ends short is logged and the
 connection is closed before `n`, so the client can tell. A `ResponseBody` holds
 functions when it is a stream, so it has no `==`; compare with a `match`.
+
+Pure Dawn sources work on both backends:
+
+```dawn
+use web/source.{bytes_source, file_source}
+
+let memory = streaming(200, "application/octet-stream", bytes_source(payload))
+let disk = streaming(200, "application/octet-stream", file_source(path), length: Some(size))
+```
+
+`file_source` uses `read_range(path, pos, n)` on each read and holds no open
+handle or mutable cursor. Keep the file unchanged until the response ends.
+It does not own the path: its close does nothing. To delete a temporary file,
+wrap the source's close, or bracket the file around the whole exchange.
+A failed file read panics with the IO error; the pump catches it, reports it
+and closes the source instead of treating the failure as EOF.
+
+Version 8 changes the source callback and the package identity to `web8`.
+The JVM adapter is `web_jvm2` 2.0.0. Upgrade both from the same release tag;
+keep the dependency aliases `web` and `web_jvm`. See [migration](MIGRATION.md).
 
 An `HttpError` whose status is outside `200..599` is answered as the neutral
 `500`, keeping its headers.

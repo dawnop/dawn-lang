@@ -1,0 +1,45 @@
+# A sequential source must not hide a mutable cursor inside a closure: the
+# response pump already knows how far it has read. These adapters use that
+# position directly, so Bytes and files work on both backends without a host
+# stream, an open handle or a second copy of a file in memory.
+use std/bytes
+use std/io.{with_fs_real, read_range}
+use types.{BodySource}
+
+## A source over immutable bytes. The pump supplies the byte offset; close
+## has no resource to release. Negative positions or sizes are caller bugs.
+pub fn bytes_source(data: Bytes) -> BodySource =
+  BodySource {
+    read: (pos, n) => {
+      if pos < 0 || n < 0 { panic("bytes_source: pos and n must not be negative") }
+      let start = if pos < len(data) { pos } else { len(data) }
+      let count = if n < len(data) - start { n } else { len(data) - start }
+      bytes.slice(data, start, start + count)
+    },
+    close: () => (),
+  }
+
+## A source reading a file in ranges, opening and closing it on every read.
+## Keep the file unchanged until consumption ends. This source does not own
+## the path: close does nothing; wrap it to delete a temporary file if needed.
+## A failed read panics with the IO error rather than returning a false EOF;
+## the server's pump catches that panic and still closes the source.
+pub fn file_source(path: String) -> BodySource =
+  BodySource {
+    read: (pos, n) => with_fs_real(() => match read_range(path, pos, n) {
+      Ok(piece) -> piece
+      Err(e) -> panic("file_source: ${e.kind}: ${e.message}")
+    }),
+    close: () => (),
+  }
+
+test "bytes sources read ranges, short tails and EOF without a captured cursor" {
+  let s = bytes_source(bytes.utf8("abcdef"))
+  assert s.read(0, 2) == bytes.utf8("ab")
+  assert s.read(2, 3) == bytes.utf8("cde")
+  assert s.read(5, 100) == bytes.utf8("f")
+  assert len(s.read(6, 100)) == 0
+  assert len(s.read(100, 100)) == 0
+  assert len(s.read(0, 0)) == 0
+  s.close()
+}

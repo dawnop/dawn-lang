@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The wire contract of the web package's two servers, built and run, with its
-# negative controls.
+# negative controls, source position/ownership oracle and bounded file round trip.
 #
 # packages/web has two servers: web_jvm/server on jdk.httpserver, and
 # web/exchange, the single-exchange adapter the native backend builds. They
@@ -29,6 +29,7 @@
 #   scripts/web-exchange-contract/run.sh <path to dawnc>
 #   WEB_SPILL_MB=32 scripts/web-exchange-contract/run.sh <path to dawnc>   # smaller upload
 set -euo pipefail
+contract_started=$SECONDS
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 HERE=scripts/web-exchange-contract
@@ -37,7 +38,7 @@ DAWNC=${1:?usage: run.sh <dawnc>}
 case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac
 
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/web-exchange-contract.XXXXXX")
-trap 'rm -rf "$OUT"' EXIT
+trap 'rm -rf "${OUT:?}"' EXIT
 
 JAVA=$(DAWN_LAUNCHER_PRINT_JAVA=1 ./bin/dawn)
 
@@ -47,6 +48,10 @@ echo "== build both sides of the contract application =="
 
 echo "== the contract: one set of raw requests, both servers =="
 python3 -I "$HERE/contract.py" --java "$JAVA" --jvm "$OUT/jvm.jar" --native "$OUT/native"
+# These drivers share the fixture application but have independent oracles:
+# offsets and close events, then bounded memory and a bidirectional digest.
+python3 "$HERE/positions.py" --java "$JAVA" --jvm "$OUT/jvm.jar" --native "$OUT/native"
+python3 -I "$HERE/transfer_memory.py" --java "$JAVA" --jvm "$OUT/jvm.jar" --native "$OUT/native" --mb "${WEB_SPILL_MB:-256}"
 
 # The memory of an upload. A "stream-body" route's body is appended to a temp
 # file in 64 KiB pieces, so the resident set of the process is a few pieces and
@@ -90,4 +95,35 @@ control no-chunked-decoding "chunked-two-chunks,chunked-binary,chunked-over-ceil
 control head-writes-its-body "head-hello,head-stream-sized"
 control no-dot-segment-check "dot-segment-plain,dot-segment-encoded"
 control guard-not-consulted "guard-refuses,guard-refuses-without-reading"
-echo "web exchange contract: OK"
+# Position faults are built in each backend. In particular an InputStream
+# alone cannot reveal the JVM pump supplying the wrong offset.
+position_control() {
+  local side=$1 mutation=$2 fixture=$3
+  local t="$OUT/ctl-$side-$mutation"
+  mkdir -p "$t/packages" "$t/scripts/web-exchange-contract"
+  cp -R packages/web packages/web-jvm packages/json "$t/packages/"
+  cp -R "$HERE/app" "$HERE/native" "$HERE/jvm" "$t/scripts/web-exchange-contract/"
+  python3 -I "$HERE/mutate.py" "$side-$mutation" "$t"
+  local jar="$OUT/jvm.jar" binary="$OUT/native"
+  if [ "$side" = jvm ]; then
+    jar="$t/jvm.jar"
+    ./bin/dawn build "$t/scripts/web-exchange-contract/jvm" -o "$jar" > "$t/build.txt" 2>&1 || { cat "$t/build.txt"; exit 1; }
+  else
+    binary="$t/native"
+    "$DAWNC" build "$t/scripts/web-exchange-contract/native" -o "$binary" > "$t/build.txt" 2>&1 || { cat "$t/build.txt"; exit 1; }
+  fi
+  if python3 "$HERE/positions.py" --java "$JAVA" --jvm "$jar" --native "$binary" --only "$fixture" > "$t/run.txt" 2>&1; then
+    cat "$t/run.txt"
+    echo "FAIL: $side-$mutation survived"
+    exit 1
+  fi
+  grep -q "^FAIL $fixture: $side " "$t/run.txt" || { cat "$t/run.txt"; echo "FAIL: missing dedicated failure"; exit 1; }
+  echo "OK   control: $side-$mutation turns $fixture red"
+}
+for side in native jvm; do
+  position_control "$side" offset-stuck offset-advances
+  position_control "$side" offset-plus-one offset-starts-at-zero
+  position_control "$side" no-source-close close-success
+  position_control "$side" head-reads-source head-never-reads
+done
+echo "web exchange contract: OK (wall $((SECONDS - contract_started))s)"

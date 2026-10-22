@@ -1,5 +1,8 @@
 # `packages/web` 第七个 major：JDK server 拆成独立包（`web7 / 7.0.0` 与 `web_jvm / 1.0.0`），及单交换适配层（§九）
 
+本文记录 web 7 的拆分与单交换协议；web 8 的 BodySource 位置协议取代下面的旧 read 签名，
+见 [web 8 设计](web-read-pos-design.md)。
+
 > 状态：**current** —— 2026-10-20，native B1a。依据：「完全 native 化」裁决第 4 条与调研 §1(B)、
 > Q4（均在本仓外的 agent-handoff）。本篇写成于动码前，实现后回填了 §八的实测。
 > 下一刀（B1b，单交换适配层）在 §九，§七留的接口在那里兑现。
