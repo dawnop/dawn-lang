@@ -7450,3 +7450,32 @@ test "bitwise operators retain operand navigation rename and evaluated values" {
     assert not str.contains(eval_probe_at(st, d, text, "77 } | LoggedBits", 5), " = ")
   }))
 }
+
+test "fixed integer oracle agrees with closed LSP evaluation for every row" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let cases = match io.read_file("scripts/fixed-ints/lsp-cases.txt") {
+      Ok(s) -> s
+      Err(e) -> panic("bitwise oracle cases: ${e.message}")
+    }
+    for row in str.split(cases, "\n") {
+      if row != "" {
+        let parts = str.split(row, "\t")
+        let text = match io.read_file("scripts/spike-native/bitwise_fixed/src/" ++ parts[0]) {
+          Ok(s) -> s
+          Err(e) -> panic("bitwise oracle source: ${e.message}")
+        }
+        let st = def_probe_state(std)
+        let d = def_probe_doc_named(st, parts[0], text)
+        for call in list.drop(parts, 1) {
+          let needle = call ++ ","
+          let result = eval_probe_at(st, d, text, needle, len(call) - 1)
+          if result != "Bool = true" { panic("${call}: expected Bool = true, got ${result}") }
+        }
+      }
+    }
+  }))
+}

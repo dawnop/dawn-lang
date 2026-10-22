@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 961d0691c99bdae0 -->
+<!-- doc-check: translation-of docs/spec.md @ bbb72e937d4bdb1c -->
 
 # Dawn Language Specification
 
@@ -1508,7 +1508,7 @@ From lowest to highest:
   `(a & b) == c`. Int counts take their low six bits, including negative counts; `<<` wraps,
   `>>` copies the sign, and `>>>` fills with zero. Official finite-width integers use
   `k = n & (w - 1)`; laws of arbitrary user impls remain the author's responsibility.
-  The std integer and device library impls follow later seed and library migrations.
+  The std fixed-width integers implement all seven traits with Int for each shift Amount; device libraries migrate separately.
 
 **Numeric edge semantics** (all of them **guaranteed** — after selfhosting the two
 implementations are cross-checked against this, "happens to agree" is not allowed):
@@ -4723,10 +4723,14 @@ default rounding, nearest even; `%` is the exact truncating remainder) and `From
 - **Equality, hashing and order** are inherited from the target `Int` (§2.7), which is right
   for in-range values; only `U64` writes an `Ord` of its own, without which a value above
   2^63 would compare below zero. Rendering is decimal (`impl Show`, unsigned for `U64`).
-- **Bitwise** operations are named functions: `and`, `or`, `xor`, `complement` (`not` is a
-  keyword), `shl`, `shr`, `rotl`, `rotr`. A signed `shr` copies the sign bit in, an unsigned
-  one zeros; a shift or rotation count is taken modulo w (as `Int`'s shifts take the low six
-  bits). This step supplies compiler traits only; std operator impls follow after seed advancement. The named functions remain until that migration.
+- **Bitwise** operations use seven pure impls for `& | ^ ~ << >> >>>`, returning the subject
+  type, with `Int` for each shift Amount. The count is `k = n & (w - 1)`, including negative
+  counts. Left shifts keep the low w bits and wrap. Signed `>>` fills with the sign bit;
+  `>>>` removes host sign extension before filling with zeros. Both unsigned right shifts
+  fill with zeros. `~` flips the low w bits and restores the invariant. Zero counts preserve
+  the bit pattern: `i8.wrap(-1) >>> 0` is still -1, while `i8.wrap(-1) >>> 1` is 127.
+  The named `and/or/xor/complement/shl/shr` exports are removed without aliases. Rotations
+  retain `rotl/rotr`, with the same count mask for the width.
 
 Implementation strategy: wrap Java thinly wherever a thin wrapper will do (`String` simply
 is `java.lang.String`), while the persistent `List`/`Map`/`Set` are **pure Dawn source**

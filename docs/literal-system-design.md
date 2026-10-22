@@ -182,7 +182,8 @@ trait FromFloat[T] { effect FromFloat = !()  fn from_float(x: Float) -> T !T.Fro
 ### D13 std 定宽整数（刀 N2）的语义
 
 表示 `pub opaque type U8 = Int` 等，不变量「值在该类型的范围内」（`U64` 无不变量，按位解释）；算术环绕，与 `Int` 一致；`/`、`%` 除零 panic；
-无符号的 `<` 必须给自己的 `Ord` impl（否则 `U64` 按有符号比，静默错）；转换 `of`/`wrap`/`to_int`；按位先给具名函数，运算符形式等按位 trait 立项。刀前必测
+无符号的 `<` 必须给自己的 `Ord` impl（否则 `U64` 按有符号比，静默错）；转换 `of`/`wrap`/`to_int`；
+按位现由七个运算符 trait 提供，三个移位 Amount 都是 Int（[按位刀 2](bitwise-operator-traits-design.md)）。初版的六个具名入口已删除。刀前必测
 sha256 用 `U32` 对比 `Int + MASK` 的两后端吞吐。
 
 **刀 N2 落地（2026-10-06）**，在上面之外定下的几件事：
@@ -198,7 +199,8 @@ sha256 用 `U32` 对比 `Int + MASK` 的两后端吞吐。
   程序只导入用到的宽度。代价：七个模块形状相同，靠同一个对拍语料（`spike-native/fixed_ints`，Python 无界整数算出的期望）钉住。
 - **`Ord` 只有 `U64` 写**：其余六个的值就是范围内的 `Int`，继承目标的序是对的；自己写一份说的是同一件事，却把每个 `<`
   从原生比较变成一次调用。草稿「为一致仍各写一份」不采。
-- **`complement` 而不是 `not`**：`not` 是关键字。移位与旋转的计数取模宽度，同 `Int` 移位取低 6 位。
+- **初版曾用 `complement` 而不是 `not`**：`not` 是关键字；2026-10-22 按位刀 2 已改为 `~` 并删除旧入口。
+  移位与旋转的计数为 `n & (w - 1)`，包括负计数；`>>>` 在主体位宽内补零。
 - **`U64` 不收负字面量**，大值写 `u64.wrap(-1)` 或 `u64.MAX`：字面量先是 64 位有符号词法值（`int-min-literal-design.md`）。
 - 检查版只给 `checked_add`/`checked_sub`/`checked_mul`；`/` 的唯一越界（有符号 `MIN / -1`）照 `Int` 回绕。
 
@@ -253,7 +255,7 @@ sha256 用 `U32` 对比 `Int + MASK` 的两后端吞吐。
 | L2 | LSP：字面量悬停显示定型结果与折叠值（`lspeval` 读折叠表）；`EUnary(-, 字面量)` 与 `XComptime` 配对 | 完成 |
 | L3 | tileir：`FromFloat[Tile[D]]`、`FromInt[Idx]`（与运算符刀 3 同批） | 待种子 |
 | N1 | `std/narrow`：`FromFloat[BF16/F16/F32]`（不给 `FromInt`：bf16 只有 256 个连续整数）；`narrow-contract` 把每个有限的舍入输入写成该格式的字面量，编译期折叠的值对 oracle。顺带修了 `-0.0` 字面量经 trait 时丢符号（`0.0 - 0.0` 是 +0.0） | 完成 |
-| N2 | std 定宽整数（D13）：七个模块、`FromInt` 与六个算术 trait、`Show`、`U64` 的 `Ord`、`of`/`wrap`/`to_int`、具名按位、`checked_*` | 完成 |
+| N2 | std 定宽整数（D13）：七个模块、`FromInt` 与六个算术 trait、`Show`、`U64` 的 `Ord`、`of`/`wrap`/`to_int`、按位（后接入七个 trait）、`checked_*` | 完成 |
 | N3 | 按位 trait（独立设计） | — |
 | — | 模式里的字面量（D10） | 有消费者时 |
 

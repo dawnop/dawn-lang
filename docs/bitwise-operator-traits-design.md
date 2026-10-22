@@ -1,7 +1,7 @@
 # 按位与移位运算符 trait 设计
 
 > 状态：**current**。刀 0 已证明 Amount 可以复用现有关联类型；刀 1 交付编译器。
-> std 定宽整数和设备库 impl 尚未交付，须等待编译器发版、推进种子后分刀迁移。
+> 刀 2 在 v0.97.0 种子后接入 std 定宽整数；设备库 impl 仍分刀迁移。
 > 权威条文见 [spec.md](spec.md) §3.5、§4.3、§11；算术先例见
 > [arith-operator-traits-design.md](arith-operator-traits-design.md)，投影纪律见
 > [assoc-types-design.md](assoc-types-design.md)。
@@ -74,11 +74,32 @@ LSP 内联测试覆盖七个操作符跳转、Amount 参数的 hover、操作数
 负控分别强迫 Int 走 trait、把 Amount 当主体、让 opaque 继承 BitAnd、漏传 Shl 效果证据。
 具体运行结果随提交的验证记录；本设计不作未测量的性能断言，不增加 CI 步骤或预算。
 
+## 刀 2：定宽整数
+
+七个 std/int 模块由 scripts/fixed-ints/gen.py 统一生成七个纯 impl，三个 Amount 均为 Int。
+Int 的七个 prelude 原生槽继续复用刀 1，不另造 std 类型或绕开快路。
+先在 Int 中读取表示，再计算并重建主体不变量；有符号窄值的逻辑右移先取低 w 位。
+左移通过现有 C uint64_t 路径，最后截位；不新增 C 后端原语或改变 Int 发射。
+移位计数始终先按 w 掩码，旋转仍借 Int 的低六位掩码，避免零计数时出现移 64 位。
+
+删除每模块的 and/or/xor/complement/shl/shr 六个公开入口，共 42 个；调用改用运算符，
+保留 rotl/rotr、checked_*、转换和 DeviceBits，不留兼容包装。
+生成器同时维护旧 fixed_ints 语料和独立的按位 oracle：由 Python 任意精度整数计算预期，
+覆盖所有标准主体、边界位型、负计数及整周期计数，比较具体调用、泛型字典、comptime 与 LSP。
+C 验证使用 gcc/clang 的 O0/O2 和 UBSan；负控分别破坏窄逻辑右移、计数掩码、
+U64 右移及 C 截位，确保对应反例实际失败。
+
+定向实测：8 种主体各 7 个位型、11 个计数、7 个运算，共 4312 个逐值预期，
+具体调用、泛型字典及两条 comptime 路径一致；56 行 LSP 求值在正常预算内全部通过。
+selfhost 1154 项测试和三个定向 spike-native 语料（含 ASan）通过；
+bitwise_fixed 与 int_edges 的 gcc/clang-18 × O0/O2 共 8 组 UBSan 输出吻合独立预期。
+四项负控均实际判红，std 变异先重生 stdsrc 再构建各自的变异编译器；详见交付报告。
+
 ## 不做的（理由）
 
 1. 不做多 RHS、多参数 trait、关联类型相等约束、隐式转换与 impl 特化，单一 Amount 已表达本项消费者。
 2. 不做合并 Bits/FiniteBits、位宽成员或专用计数类型，掩码类型不应被迫实现移位。
 3. 不做宿主 Bool 按位、Float 位模式运算或复合赋值，没有本刀消费者。
-4. 不修改 std/int 的 impl 或具名函数，旧种子必须继续编译 bootstrap closure。
+4. 不在 selfhost 源码中消费窄整数新运算符；种子 v0.97.0 已提供 std 所需 trait。
 5. 不修改 GPU 库、解释器或参考实现，其设备计数掩码和 API 迁移另刀交付。
 6. 不扩展 C 的可移植性承诺，原有 Int 掩码及无符号左移发射继续服务此刀。
