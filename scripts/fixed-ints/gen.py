@@ -6,7 +6,7 @@
 
 std/int/i8, i16, i32, u8, u16, u32 and u64 are one design at seven widths
 (docs/literal-system-design.md D13, spec 11 "Fixed-width integers"): the
-same impls, the same conversions and the same bitwise functions, differing
+same impls, the same conversions and the same bitwise operators, differing
 only in the width, the signedness and U64's unsigned order and division.
 Seven hand-maintained copies of one shape drift one copy at a time, and the
 drift is invisible to review because each file is plausible on its own. So
@@ -17,7 +17,9 @@ expectation is computed here with Python's unbounded integers, from the
 definitions (reduce modulo 2^w, read the top bit as a sign for the I types,
 truncate `/` and `%`), so it is an opinion from outside Dawn: a wrong rule
 both backends shared would still disagree with it. spike-native runs it on
-both backends.
+both backends. It also writes the bitwise_fixed project, its expectations and
+LSP row index, covering all seven operators on Int and the seven std types.
+The project separates widths so its comptime constants fit JVM class files.
 
 `--check` regenerates in memory and compares, with no toolchain, so it
 costs well under a second; it runs in the tree-policy job. A module edited
@@ -120,10 +122,12 @@ def module(name, w, signed):
     a(f"# literal at `{T}` is `FromInt`'s, range-checked at compile time, so")
     a(f"# `let b: {T} = {hi + 1}` does not compile (outside this module: inside it the")
     a("# type is seen through and a literal is the Int it always was, literal design")
-    a("# D7). The bitwise operations are named functions until the operators have")
-    a("# traits of their own; `complement` and not `not`, which is a keyword. A")
-    a(f"# shift or rotation count is taken modulo {w}, as the JVM and the hardware do")
-    a("# for Int's own shifts.")
+    a("# D7). All seven bitwise traits are explicit pure impls, with Int shift")
+    a(f"# amounts masked by {w - 1}, including negative counts. Left shifts wrap;")
+    a("# `>>` follows signedness and `>>>` shifts the width's bits with zeros.")
+    a("# Logical right shift first removes any host sign extension, then rebuilds")
+    a("# the invariant, so shifting by zero preserves the original bit pattern.")
+    a("# Rotations remain named because neither shift alone expresses a rotation.")
     if T in DTYPES:
         a("#")
         a(f"# `{T}` is also a device format (std/dtype): the constant `{T}` below is its")
@@ -322,42 +326,42 @@ def module(name, w, signed):
         a(f"  if r < {lo} || r > {hi} {{ None }} else {{ Some(r) }}")
     a("}")
     a("")
-    # bitwise
-    for fn, op, doc in [("and", "&", "The bitwise and."), ("or", "|", "The bitwise or."), ("xor", "^", "The bitwise exclusive or.")]:
-        a(f"## {doc}")
-        a(f"pub fn {fn}(a: {T}, b: {T}) -> {T} = {{")
-        a("  let x: Int = a")
-        a("  let y: Int = b")
-        a(f"  x {op} y")
+    # Bitwise methods deliberately use Int locals: the opaque subject is
+    # visible here, and a recursive operator call would lose its invariant.
+    for tr, fn, op in [("BitAnd", "bit_and", "&"), ("BitOr", "bit_or", "|"), ("BitXor", "bit_xor", "^")]:
+        a(f"impl {tr}[{T}] {{")
+        a(f"  fn {fn}(a: {T}, b: {T}) -> {T} = {{")
+        a("    let x: Int = a")
+        a("    let y: Int = b")
+        a(f"    {wrapexpr(f'x {op} y')}")
+        a("  }")
         a("}")
         a("")
-    a("## Every bit flipped.")
-    a(f"pub fn complement(a: {T}) -> {T} = {{")
-    a("  let x: Int = a")
-    a(f"  {wrapexpr('~x')}")
+    a(f"impl BitNot[{T}] {{")
+    a(f"  fn bit_not(a: {T}) -> {T} = {{")
+    a("    let x: Int = a")
+    a(f"    {wrapexpr('~x')}")
+    a("  }")
     a("}")
     a("")
     k = f"n & {w - 1}"
-    a(f"## `a` shifted left by `n` modulo {w} places, zeros in at the bottom.")
-    a(f"pub fn shl(a: {T}, n: Int) -> {T} = {{")
-    a("  let x: Int = a")
-    a(f"  {wrapexpr(f'x << ({k})')}")
-    a("}")
-    a("")
-    if signed:
-        a(f"## `a` shifted right by `n` modulo {w} places, copies of the sign bit in at")
-        a("## the top (arithmetic, as Int's `>>`).")
-        a(f"pub fn shr(a: {T}, n: Int) -> {T} = {{")
-        a("  let x: Int = a")
-        a(f"  x >> ({k})")
+    for tr, fn, op in [("Shl", "shl", "<<"), ("Shr", "shr", ">>" if signed else ">>>"), ("Ushr", "ushr", ">>>")]:
+        a(f"impl {tr}[{T}] {{")
+        a(f"  type {tr}Amount = Int")
+        a(f"  fn {fn}(a: {T}, n: Int) -> {T} = {{")
+        a("    let x: Int = a")
+        # Narrow shifts use only the width's bits unless sign fill is wanted.
+        # emitc converts left/logical shifts to uint64_t before shifting, and
+        # wrap then truncates and reconstructs the opaque representation.
+        if not big and op != ">>":
+            a(f"    let u = x & {hexs(mask)}")
+            value = "u"
+        else:
+            value = "x"
+        a(f"    {wrapexpr(f'{value} {op} ({k})')}")
+        a("  }")
         a("}")
-    else:
-        a(f"## `a` shifted right by `n` modulo {w} places, zeros in at the top.")
-        a(f"pub fn shr(a: {T}, n: Int) -> {T} = {{")
-        a("  let x: Int = a")
-        a(f"  x >>> ({k})")
-        a("}")
-    a("")
+        a("")
     for fn, l, r, doc in [("rotl", "<<", ">>>", "left"), ("rotr", ">>>", "<<", "right")]:
         a(f"## `a`'s {w} bits rotated {doc} by `n` modulo {w} places.")
         a(f"pub fn {fn}(a: {T}, n: Int) -> {T} = {{")
@@ -413,7 +417,7 @@ def module(name, w, signed):
     a("  assert to_int(wrap(7) / wrap(2)) == 3")
     a("  assert to_int(wrap(7) % wrap(2)) == 1")
     a(f"  assert rotl(wrap(1), {w}) == wrap(1)")
-    a(f"  assert rotr(wrap(1), 1) == shl(wrap(1), {w - 1})")
+    a(f"  assert rotr(wrap(1), 1) == wrap(1) << {w - 1}")
     a("  assert checked_add(MAX, wrap(1)) == None")
     a("  assert checked_sub(MIN, wrap(1)) == None")
     if big:
@@ -432,10 +436,10 @@ def module(name, w, signed):
         if signed:
             a("  # the one quotient out of range wraps, as Int's MIN / -1 does")
             a("  assert MIN / wrap(-1) == MIN")
-            a("  assert to_int(shr(MIN, 1)) == " + str(lo // 2))
+            a("  assert to_int(MIN >> 1) == " + str(lo // 2))
         else:
             a(f"  assert to_int(-wrap(1)) == {hi}")
-            a(f"  assert to_int(complement(MIN)) == {hi}")
+            a(f"  assert to_int(~MIN) == {hi}")
     a("}")
     a("")
     return "\n".join(L)
@@ -495,7 +499,7 @@ def corpus():
     P("#")
     P("# Fixed-width integers in std (docs/literal-system-design.md D13): the seven")
     P("# types' wrapping arithmetic, through a generic function (so dictionaries)")
-    P("# and directly, their bitwise functions, the checked forms, order, rendering")
+    P("# and directly, their bitwise operators, the checked forms, order, rendering")
     P("# and the conversions, on both backends. The operands are literals at each")
     P("# type, folded through FromInt at compile time; a U64 above 2^63 - 1 has no")
     P("# literal and is `u64.wrap` of its bit pattern.")
@@ -546,8 +550,8 @@ def corpus():
                     wrap(((ua << k) | (ua >> (w - k))) & mask, w, s),
                     wrap(((ua >> k) | (ua << (w - k))) & mask, w, s),
                     wrap(ua << ((w + 1) & (w - 1)), w, s)]
-            M(f'  println("${{show({m}.and({A}, {B}))}} ${{show({m}.or({A}, {B}))}} ${{show({m}.xor({A}, {B}))}} ${{show({m}.complement({A}))}} '
-              f'${{show({m}.shl({A}, {k}))}} ${{show({m}.shr({A}, {k}))}} ${{show({m}.rotl({A}, {k}))}} ${{show({m}.rotr({A}, {k}))}} ${{show({m}.shl({A}, {w + 1}))}}")')
+            M(f'  println("${{show({A} & {B})}} ${{show({A} | {B})}} ${{show({A} ^ {B})}} ${{show(~{A})}} '
+              f'${{show({A} << {k})}} ${{show({A} >> {k})}} ${{show({m}.rotl({A}, {k}))}} ${{show({m}.rotr({A}, {k}))}} ${{show({A} << {w + 1})}}")')
             exp.append(" ".join(map(str, bits)))
             M(f'  println("${{opt({m}.checked_add({A}, {B}))}} ${{opt({m}.checked_sub({A}, {B}))}} ${{opt({m}.checked_mul({A}, {B}))}}")')
             exp.append(f"{checked(a + b, w, s)} {checked(a - b, w, s)} {checked(a * b, w, s)}")
@@ -569,6 +573,103 @@ def corpus():
     return "\n".join(prog + main) + "\n", "\n".join(exp) + "\n"
 
 
+# ------------------------------------------------------ bitwise oracle
+
+def bitwise_corpus():
+    """One independent row per bit pattern, shared by runtime and LSP tests.
+
+    Expected values use unbounded Python integers. Dawn's concrete, generic
+    and comptime paths each compute every element, rather than comparing two
+    backends which could share the same wrong library implementation.
+    """
+    prog = [
+        "# GENERATED by scripts/fixed-ints/gen.py -- edit the generator.",
+        "# Each row checks every result against an independent integer oracle.",
+        "# Concrete calls, dictionary calls and comptime all see the same inputs;",
+        "# the LSP test evaluates the same checks under the editor's budget.",
+    ]
+    p = prog.append
+    p("")
+    for fn, tr, op in [("conjunction", "BitAnd", "&"), ("disjunction", "BitOr", "|"), ("exclusive", "BitXor", "^")]:
+        p(f"fn {fn}[T: {tr}](a: T, b: T) -> T !T.{tr} = a {op} b")
+    p("fn inverted[T: BitNot](a: T) -> T !T.BitNot = ~a")
+    for fn, tr, op in [("left", "Shl", "<<"), ("right", "Shr", ">>"), ("logical", "Ushr", ">>>")]:
+        p(f"fn {fn}[T: {tr}](a: T, n: T.{tr}Amount) -> T !T.{tr} = a {op} n")
+    p("")
+    common = list(prog)
+    modules = {}
+    rows = []
+    for name, w, signed in [("Int", 64, True)] + TYPES:
+        prog = list(common)
+        p = prog.append
+        local_rows = []
+        m = name.lower()
+        if name != "Int":
+            prog.insert(4, f"use std/int/{m}")
+        ty = "Int" if name == "Int" else f"{m}.{name}"
+        mask = (1 << w) - 1
+        top = 1 << (w - 1)
+        patterns = list(dict.fromkeys([0, 1, mask, top, mask // 3, 2 * (mask // 3), top - 1]))
+        counts = [-w - 1, -w, -1, 0, 1, w - 1, w, w + 1, 2 * w, -(1 << 63), (1 << 63) - 1]
+
+        def raw(v):
+            return wrap(v, 64, True) if w == 64 else wrap(v, w, signed)
+
+        def expr(v):
+            return str(raw(v)) if name == "Int" else f"{m}.wrap({raw(v)})"
+
+        def read(e):
+            return e if name == "Int" else f"{m}.to_int({e})"
+
+        for mode in ["concrete", "generic"]:
+            p(f"fn {mode}_{m}(a: {ty}) -> List[Int] = {{")
+            p(f"  let b = {expr(mask * 11 // 17)}")  # repeated 0xA5
+            p("  var out: List[Int] = []")
+            p(f"  for n in [{', '.join(map(str, counts))}] {{")
+            if mode == "concrete":
+                ops = ["a & b", "a | b", "a ^ b", "~a", "a << n", "a >> n", "a >>> n"]
+            else:
+                ops = ["conjunction(a, b)", "disjunction(a, b)", "exclusive(a, b)", "inverted(a)", "left(a, n)", "right(a, n)", "logical(a, n)"]
+            p(f"    out = out ++ [{', '.join(map(read, ops))}]")
+            p("  }")
+            p("  out")
+            p("}")
+            p("")
+        for i, a in enumerate(patterns):
+            label = f"{m}_{i}"
+            expected = []
+            b = mask * 11 // 17
+            for n in counts:
+                k = n & (w - 1)
+                expected.extend(map(raw, [a & b, a | b, a ^ b, a ^ mask,
+                    (a << k) & mask, wrap(a, w, signed) >> k, a >> k]))
+            p(f"const EXPECT_{label.upper()}: List[Int] = [{', '.join(map(str, expected))}]")
+            p(f"const FOLDED_{label.upper()}: List[Int] = comptime {{ concrete_{m}({expr(a)}) }}")
+            p(f"const DICT_{label.upper()}: List[Int] = comptime {{ generic_{m}({expr(a)}) }}")
+            p(f"pub fn check_{label}() -> Bool =")
+            p(f"  concrete_{m}({expr(a)}) == EXPECT_{label.upper()} && generic_{m}({expr(a)}) == EXPECT_{label.upper()} &&")
+            p(f"  FOLDED_{label.upper()} == EXPECT_{label.upper()} && DICT_{label.upper()} == EXPECT_{label.upper()}")
+            p("")
+            rows.append((m, label))
+            local_rows.append(label)
+        p("fn lsp_probe() -> List[Bool] = [")
+        for label in local_rows:
+            p(f"  check_{label}(),")
+        p("]")
+        modules[f"{m}_cases.dawn"] = "\n".join(prog) + "\n"
+    main = ["# Split by width to keep the JVM class initializer below 64 KiB."]
+    for name, _, _ in [("Int", 64, True)] + TYPES:
+        main.append(f"use {name.lower()}_cases")
+    main.append("\npub fn main() -> Unit !io = {")
+    for m, label in rows:
+        main.append(f'  println("{label}: ${{{m}_cases.check_{label}()}}")')
+    main.append("}")
+    modules["main.dawn"] = "\n".join(main) + "\n"
+    return (modules,
+        "".join(f"{label}: true\n" for _, label in rows),
+        "".join(f"{name.lower()}_cases.dawn\t" + "\t".join(f"check_{label}()" for m, label in rows if m == name.lower()) + "\n" for name, _, _ in [("Int", 64, True)] + TYPES))
+
+
 # ---------------------------------------------------------------- driver
 
 
@@ -579,6 +680,12 @@ def outputs() -> dict:
     program, expect = corpus()
     out[SPIKE / "fixed_ints.dawn"] = program
     out[SPIKE / "fixed_ints.expect"] = expect
+    program, expect, lsp_cases = bitwise_corpus()
+    out[SPIKE / "bitwise_fixed" / "dawn.toml"] = '# Each width owns its constants so class initializers stay bounded.\nschema = 1\nname = "bitwise_fixed"\n'
+    for filename, source in program.items():
+        out[SPIKE / "bitwise_fixed" / "src" / filename] = source
+    out[SPIKE / "bitwise_fixed.expect"] = expect
+    out[ROOT / "scripts" / "fixed-ints" / "lsp-cases.txt"] = lsp_cases
     return out
 
 
@@ -597,6 +704,7 @@ def main(argv: list) -> int:
         print("usage: gen.py [--check]", file=sys.stderr)
         return 2
     for p, text in files.items():
+        p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
     print(f"wrote {len(files)} files")
     return 0

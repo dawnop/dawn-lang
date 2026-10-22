@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/history.md @ 41f91e2743c5080e -->
+<!-- doc-check: translation-of docs/history.md @ c7b4c0b85216652b -->
 
 # 历史
 
@@ -180,6 +180,11 @@
 - **2026-10-21，尚未发版。** 按位运算符新增 `BitAnd`、`BitOr`、`BitXor`、`Shl`、
   `Shr`、`Ushr`、`BitNot`，移位各有独立 Amount，七个 trait 各带关联效果。
   七个名字从此占用 trait 与 effect 声明位置。Int 保留原生快路，std 整数与 GPU 迁移留待后续。
+  （[设计](bitwise-operator-traits-design.md)）
+
+- **2026-10-22，尚未发版。** std 七种定宽整数实现全部七个按位 trait，计数为 Int，左移回绕，
+  `>>` 随符号性补位，`>>>` 在主体位宽内补零。删除 42 个具名 `and/or/xor/complement/shl/shr`
+  公开入口，保留旋转与检查算术。独立整数预期覆盖运行期、泛型、comptime 与 LSP 求值。
   （[设计](bitwise-operator-traits-design.md)）
 
 从 2026-07-17 的 v0.1.0 到 2026-10-01 的 v0.81.0，共 83 个 release tag。
