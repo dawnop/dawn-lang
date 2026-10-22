@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 8f2ffa2393e4c6ce -->
+<!-- doc-check: translation-of docs/spec.md @ fea2b558e22c5619 -->
 
 # Dawn Language Specification
 
@@ -1520,7 +1520,10 @@ From lowest to highest:
   `(a & b) == c`. Int counts take their low six bits, including negative counts; `<<` wraps,
   `>>` copies the sign, and `>>>` fills with zero. Official finite-width integers use
   `k = n & (w - 1)`; laws of arbitrary user impls remain the author's responsibility.
-  The std fixed-width integers implement all seven traits with Int for each shift Amount; device libraries migrate separately.
+  The std fixed-width integers implement all seven traits with Int for each shift Amount.
+  tileir's four signed integer Tile formats also implement all seven, with same-type Tile
+  Amounts and associated !Dev effects; Bool Tiles support only `& | ^ ~`. Device counts use
+  the same width mask. See §11 for the complete eligibility matrix.
 
 **Numeric edge semantics** (all of them **guaranteed** — after selfhosting the two
 implementations are cross-checked against this, "happens to agree" is not allowed):

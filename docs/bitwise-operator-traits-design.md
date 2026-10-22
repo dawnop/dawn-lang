@@ -2,10 +2,23 @@
 
 > 状态：**current**。刀 0 已证明 Amount 可以复用现有关联类型；刀 1 交付编译器。
 > 刀 2 在 v0.97.0 种子后接入 std 定宽整数；刀 3 接入 Tile 的按位与掩码运算；
-> 刀 4 接入 Tile 移位并统一计数掩码语义，三架构设备与定向验收结果见本节。
+> 刀 4 接入 Tile 移位并统一计数掩码语义；刀 5 固化跨层 oracle 与负控，完成终态核账。
 > 权威条文见 [spec.md](spec.md) §3.5、§4.3、§11；算术先例见
 > [arith-operator-traits-design.md](arith-operator-traits-design.md)，投影纪律见
 > [assoc-types-design.md](assoc-types-design.md)。
+
+## 落地提交
+
+| 刀 | main 提交 | 交付 |
+|---|---|---|
+| 0/1 | b604ee8b（#842） | Amount 硬闸通过；七 trait、Int 快路、效果与双后端 ABI |
+| 种子 | 5db96875 | v0.97.0 种子，先于 std impl |
+| 2 | 3e5649ce（#844） | 七个定宽整数、49 个 impl、删除 42 个旧入口 |
+| 3 | 806f07fe（#849） | Tile 资格、位运算、mask select 迁移 |
+| 4 | 39dcc4a6（#853） | Tile 移位掩码、解释器与参考、三架构逐位核验 |
+| 5 | 本提交 | 持久负控、同一组跨层预期、文档终态 |
+
+合入采用 rebase，故表中是 main 的提交，不是各 PR 开发分支的旧 SHA。
 
 ## 形状与边界
 
@@ -102,7 +115,7 @@ bitwise_fixed 与 int_edges 的 gcc/clang-18 × O0/O2 共 8 组 UBSan 输出吻�
 分别答 Dtype[D]；前者仅 Bool、I8、I16、I32、Int，后者仅四种有符号整数。
 沿 ScalarDtype 模式传资格字典，不写 Tile[I32] 等具体泛型头特化。
 四个条件 impl 均约束 D: TileBitsDtype，关联效果固定 !Dev，不从元素转发关联效果。
-TileShiftDtype 本刀只声明及提供资格见证，移位运算符和计数掩码留刀 4。
+刀 3 仅声明 TileShiftDtype 及资格见证；刀 4 已补齐三个移位 impl 与计数掩码。
 
 整数 &、|、^ 用 BinaryI，分别记录 andi、ori、xori；Bool 的 &、| 保持既有
 select 内核及常量顺序，迁移后既有 mlir 与 tilebc 必须逐字节相同。
@@ -111,7 +124,7 @@ select 内核及常量顺序，迁移后既有 mlir 与 tilebc 必须逐字节�
 形状只沿现有 rank-0 与同 rank 长度 1 的广播，不增加不同 rank 广播。
 
 删除 and_i、or_i、xor_i、and_mask、or_mask 五个公开入口并迁移全部消费者，
-包括 in_range 的内部组合；不保留转发。转换、pack/unpack、比较与现有具名移位保留。
+包括 in_range 的内部组合；不保留转发。转换、pack/unpack、比较保留；当时保留的具名移位已由刀 4 删除。
 tileir 从 0.22.0 升到 0.23.0，遵守 0.x minor 的兼容性边界。
 
 运算符无 at 默认参数，沿算术 called_bare 记录。错误包含英文操作名、操作数来源和
@@ -178,6 +191,30 @@ sm_86、sm_90、sm_100 的五个新移位案例均逐位一致，每架构核对
 三本台账整轮严格串行并共用 inputs=06ef9587f9ba；漏掩码与算术右移误用补零两项
 设备负控在三架构上都令五个案例明确数值失败。完整台账和最终全集门见交付报告。
 
+## 刀 5：收尾契约
+
+逐条核账以 main 的实际实现为准。将刀 0/1 与刀 2 的八个 scratch 负控移入
+`scripts/bitwise-contract` 的持久注册表，由 checker-corpus 执行，预检在任何构建前
+验证全部锚点恰好匹配一次。变异编译器必须构建成功；诊断变化、具名测试失败或错误数值
+才算负控判红。std 变异先重生 stdsrc，再构建对应编译器，不能借旧嵌入源得到假结果。
+
+沿用 fixed-ints 的独立 Python 整数 oracle，四种有符号宽度的同一组输入与逐项预期
+同时交给宿主具体/泛型、comptime、LSP、tileinterp 原始整数求值和 tileref。
+后两者在临时包副本中追加测试，不改产品包的公开接口或彼此独立的依赖关系。
+尤其 i64 直接比较 Int 位型，不以 Float 缓冲拒绝充作数值通过。原有完整记录程序对拍
+与三架构设备台账继续独立守住记录、广播、降低与字节码路径。
+
+定向实测：每种宽度 7 个位型 × 11 个计数 × 7 个运算，四种宽度共 2156 个预期；
+tileinterp 在开启和关闭 UB 检查时均逐项相等，tileref 同样通过 28 行测试。
+宿主原有语料完全不变，继续覆盖 8 种主体的 4312 个预期与 56 行 LSP 求值。
+bitwise_fixed、int_edges 的 gcc/clang-18 × O0/O2 共八组 UBSan 结果吻合，stderr 为空。
+八个持久负控均先构建成功，再由对应 checker 断言、诊断或数值判红。
+Amount 负控使用显式空 std 清单，只检查 prelude 语料，避免已迁移 std 的加载失败冒充诊断变化。
+
+常量计数折叠本刀不做：tile_shift 只持有 Tile 句柄，常量值由记录 handler 管理；
+增加常量查询或跨记录层的传播超出本刀的小优化边界。保留刀 4 已验证的显式 andi，
+不改变 golden 或设备输入，三本台账数值与输入摘要均保持原样。不作性能断言。
+
 ## 不做的（理由）
 
 1. 不做多 RHS、多参数 trait、关联类型相等约束、隐式转换与 impl 特化，单一 Amount 已表达本项消费者。
@@ -186,3 +223,7 @@ sm_86、sm_90、sm_100 的五个新移位案例均逐位一致，每架构核对
 4. 不在 selfhost 源码中消费窄整数新运算符；种子 v0.97.0 已提供 std 所需 trait。
 5. 不增加 Tile 与宿主 Int 的混合移位；显式 consti 和同型设备计数已覆盖本刀。
 6. 不扩展 C 的可移植性承诺，原有 Int 掩码及无符号左移发射继续服务此刀。
+7. 不开放 U8 tile、I4、FromInt[Tile] 或任意 rank 广播；它们需要独立格式与推断裁决。
+8. 不加入 Tile 比较运算符、popcount、checked/unsafe 移位或新原子/bitcast 语义；现有接口各有独立契约。
+9. 不改写 SHA-256 或 inflate，没有本项的性能或算法验证；不保留旧具名兼容函数，防止两套表面继续分叉。
+10. 不折叠记录期常量计数，原因见刀 5；保留已审计的显式掩码和三本原始台账。

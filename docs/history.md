@@ -206,17 +206,24 @@ links to; dates are commit dates in UTC+8, and `git log` holds the commits behin
   masked-`Int` form (on main, not yet released).
   ([literal-system-design.md](literal-system-design.md))
 
-- **2026-10-21, not yet released.** Bitwise operator traits add `BitAnd`, `BitOr`,
+- **2026-10-21, released in v0.97.0.** Bitwise operator traits add `BitAnd`, `BitOr`,
   `BitXor`, `Shl`, `Shr`, `Ushr`, and `BitNot`, with one associated count type per
   shift and an associated effect per trait. These names are now reserved for traits
   and effects. Int keeps its native path; std integer and GPU migrations follow later.
   ([Design](bitwise-operator-traits-design.md))
 
-- **2026-10-22, not yet released.** The seven std fixed-width integers implement all seven
+- **2026-10-22, released in v0.98.0.** The seven std fixed-width integers implement all seven
   bitwise traits with Int shift counts, wrapping left shifts, signed `>>`, and zero filling
   `>>>` within the subject width. The 42 named `and/or/xor/complement/shl/shr` exports are
   removed; rotations and checked arithmetic remain. Independent integer expectations cover
   runtime, generic, comptime, and LSP evaluation. ([Design](bitwise-operator-traits-design.md))
+
+- **2026-10-22, not yet released.** Tile bitwise and shift operators complete the migration.
+  Signed integer Tiles implement all seven traits with `!Dev`; Bool Tiles implement the four
+  bitwise traits. Tile shift Amounts are same-type Tiles and every lane masks its count by
+  `width - 1`. All ten replaced named functions are removed. The closeout preserves compiling
+  negative controls and compares the same independent integer expectations across host,
+  comptime, LSP, tileinterp and tileref evaluation. ([Design](bitwise-operator-traits-design.md))
 
 - **2026-10-22, not yet released.** Staged `if` gains StagedCond and typed StagedResult slots
   for value forms with matching arm types. Both arms share StagedVar cells with each other

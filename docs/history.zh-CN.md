@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/history.md @ d1b21f5ea4bedb36 -->
+<!-- doc-check: translation-of docs/history.md @ 63f70f5b2e5f55e3 -->
 
 # 历史
 
@@ -177,15 +177,20 @@
   同样回绕，字面量在编译期检查范围，按位运算是具名函数。编译器仍然只拥有 `Int` 与 `Float`；实测 `U32` 版 sha256
   与掩码 `Int` 写法相差不到 1%（已在 main，尚未发版）。（[literal-system-design.md](literal-system-design.md)）
 
-- **2026-10-21，尚未发版。** 按位运算符新增 `BitAnd`、`BitOr`、`BitXor`、`Shl`、
+- **2026-10-21，已随 v0.97.0 发版。** 按位运算符新增 `BitAnd`、`BitOr`、`BitXor`、`Shl`、
   `Shr`、`Ushr`、`BitNot`，移位各有独立 Amount，七个 trait 各带关联效果。
   七个名字从此占用 trait 与 effect 声明位置。Int 保留原生快路，std 整数与 GPU 迁移留待后续。
   （[设计](bitwise-operator-traits-design.md)）
 
-- **2026-10-22，尚未发版。** std 七种定宽整数实现全部七个按位 trait，计数为 Int，左移回绕，
+- **2026-10-22，已随 v0.98.0 发版。** std 七种定宽整数实现全部七个按位 trait，计数为 Int，左移回绕，
   `>>` 随符号性补位，`>>>` 在主体位宽内补零。删除 42 个具名 `and/or/xor/complement/shl/shr`
   公开入口，保留旋转与检查算术。独立整数预期覆盖运行期、泛型、comptime 与 LSP 求值。
   （[设计](bitwise-operator-traits-design.md)）
+
+- **2026-10-22，尚未发版。** Tile 按位与移位运算符完成迁移。有符号整数 Tile 以 !Dev 实现
+  全部七个 trait，Bool Tile 实现四个按位 trait。移位 Amount 是同型 Tile，每 lane 计数先与
+  width−1 相与。删除十个被替代的具名函数；收尾固化可编译负控，以同一份独立整数预期
+  核对宿主、comptime、LSP、tileinterp 和 tileref 求值。（[设计](bitwise-operator-traits-design.md)）
 
 - **2026-10-22，尚未发版。** staged `if` 增加 StagedCond 条件协议与 StagedResult 结果槽，
   支持同型两臂的值形式。两臂共享 StagedVar 格子并复用外层 staged 循环的格子；宿主 Bool
