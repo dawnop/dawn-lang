@@ -141,8 +141,8 @@ def check_measurements(data, ledger, displayed):
     return problems
 
 
-def check_matmul(source, ledger, data):
-    """Extend the same source-to-evidence gate to the existing f64 GEMM.
+def check_matmul(source, ledger, data, dtype="f64"):
+    """Extend the same source-to-evidence gate to the existing GEMM formats.
 
     The complete filtered grid stays here, including the runners up. Shapes
     measure a single architecture choice; they never become selection keys.
@@ -152,24 +152,29 @@ def check_matmul(source, ledger, data):
     if not table:
         return ['missing literal mm_cfg table']
     lines = table[1].strip().splitlines()
-    found = list(MM_ROW.finditer(table[1]))
-    if len(found) != 3 or lines[-1].strip() != '_ -> panic("matmul: only f64 is available")' or len(lines) != 4:
+    all_found = list(MM_ROW.finditer(table[1]))
+    found = [m for m in all_found if re.fullmatch(r'\(("sm_\d+"|_), "' + dtype + r'"\)', m[1].strip())]
+    ledger = dict(ledger, rows=[r for r in ledger['rows'] if r['dtype'] == dtype])
+    if len(found) != 3 or len(all_found) != 9 or lines[-1].strip() != '_ -> panic("matmul: available dtypes are f64, f16 and i8")' or len(lines) != 10:
         problems.append('unreadable matmul table or unsupported dtype fallback')
-    expected_keys = {('sm_90', 'f64'), ('sm_100', 'f64'), ('default', 'f64')}
+    expected_keys = {('sm_90', dtype), ('sm_100', dtype), ('default', dtype)}
     actual_keys, ids = [], []
     cases = data['cases']
     if {(c['arch'], c['shape']) for c in cases} != {(a, s) for a in ['sm_90', 'sm_100'] for s in ['square', 'skinny']} or len(cases) != 4:
         problems.append('missing or duplicate matmul shape')
-    grid = dict(tm=[16, 32, 64, 128, 256], tn=[16, 32, 64], tk=[16, 32], occupancy=[0, 2], cga=[0, 2])
+    grid = (dict(tm=[16, 32, 64, 128, 256], tn=[16, 32, 64], tk=[16, 32], occupancy=[0, 2], cga=[0, 2]) if dtype == 'f64' else
+            dict(tm=[32, 64, 128, 256], tn=[32, 64, 128], tk=[32, 64, 128], occupancy=[0, 2], cga=[0, 2]))
+    baseline_name = 'm64n64k32o0c0' if dtype == 'f64' else 'm32n32k32o0c0'
     if data['grid'] != grid or data['rounds'] != 5 or data['warmup'] != 10:
         problems.append('changed matmul measurement grid or method')
-    if (data['tileiras'], data['cutile_tileiras'], data['opt_level'], data['compiler_verified_in_each_process'], data['dtype']) != ('13.4.92', '13.4.92', 3, True, 'f64'):
+    if (data['tileiras'], data['cutile_tileiras'], data['opt_level'], data['compiler_verified_in_each_process'], data['dtype']) != ('13.4.92', '13.4.92', 3, True, dtype):
         problems.append('missing matmul timing toolchain')
     rejected = set()
     for c in cases:
         arch, shape = c['arch'], c['shape']
-        expected_shape = (2048, 2048, 2048) if shape == 'square' else (4096, 256, 2048)
-        if (c['m'], c['n'], c['k']) != expected_shape or c['dtype'] != 'f64' or c['card'] != ('H200' if arch == 'sm_90' else 'B200'):
+        expected_shape = (((2048, 2048, 2048) if shape == 'square' else (4096, 256, 2048)) if dtype == 'f64' else
+                          ((4096, 4096, 4096) if shape == 'square' else (8192, 256, 4096)))
+        if (c['m'], c['n'], c['k']) != expected_shape or c['dtype'] != dtype or c['card'] != ('H200' if arch == 'sm_90' else 'B200'):
             problems.append('changed matmul workload or card')
         allowed = set()
         for tm, tn, tk, occ, cga in itertools.product(*grid.values()):
@@ -189,6 +194,10 @@ def check_matmul(source, ledger, data):
                     not all(math.isfinite(x) and x > 0 for x in r['round_medians']) or
                     not math.isfinite(r['miss']) or not 0 <= r['miss'] <= 1):
                 problems.append('incomplete or incorrect matmul timing')
+            if dtype != 'f64' and r.get('dtype') != dtype:
+                problems.append('matmul timing belongs to another dtype')
+            if dtype != 'f64' and (r['miss'] != 0 or r['max_abs_err'] != 0):
+                problems.append('matmul exact corpus differs from its reference')
             if r['kind'] in ['dawn', 'cutile']:
                 cfg = r['config']
                 name = f"m{cfg['tm']}n{cfg['tn']}k{cfg['tk']}o{cfg['occupancy']}c{cfg['cga']}"
@@ -201,7 +210,7 @@ def check_matmul(source, ledger, data):
         problems.append('matmul recording filter inventory differs from the grid')
     for m in found:
         key, tm, tn, tk, occ, cga, evidence, med, base = m.groups()
-        key_match = re.fullmatch(r'\(("sm_\d+"|_), "(f64)"\)', key.strip())
+        key_match = re.fullmatch(r'\(("sm_\d+"|_), "(' + dtype + r')"\)', key.strip())
         if not key_match:
             problems.append('unknown matmul selection key')
             continue
@@ -214,7 +223,7 @@ def check_matmul(source, ledger, data):
             continue
         r = records[0]
         cfg = dict(tm=int(tm), tn=int(tn), tk=int(tk), occupancy=int(occ), cga=int(cga))
-        if (r['table_arch'], r['dtype'], r['config']) != (arch, 'f64', cfg) or cliff(arch, cfg['tm'], cfg['cga'] or 1):
+        if (r['table_arch'], r['dtype'], r['config']) != (arch, dtype, cfg) or cliff(arch, cfg['tm'], cfg['cga'] or 1):
             problems.append(f'{evidence}: matmul table configuration differs from measurement')
         for literal, field in [(med, 'median_ms'), (base, 'baseline_ms')]:
             if float(literal) != round(r[field], len(literal.split('.')[1])):
@@ -226,7 +235,7 @@ def check_matmul(source, ledger, data):
             problems.append(f'{evidence}: missing measured matmul architecture')
         for c in selected_cases:
             rs = {x['name']: x for x in c['results'] if x['kind'] == 'dawn'}
-            chosen, baseline = rs.get(r['case_name']), rs.get('m64n64k32o0c0')
+            chosen, baseline = rs.get(r['case_name']), rs.get(baseline_name)
             if not chosen or not baseline or chosen['config'] != cfg:
                 problems.append(f'{evidence}: missing measured matmul configuration')
                 continue
@@ -258,7 +267,7 @@ def check_matmul(source, ledger, data):
         choice = choices[0]
         selected = rs.get(choice['case_name'])
         matching = rs.get('cutile_' + choice['case_name'])
-        base = rs.get('m64n64k32o0c0')
+        base = rs.get(baseline_name)
         if (len(rs) != 12 or len(c['results']) != 12 or not selected or not matching or not base or
                 'torch_matmul' not in rs or len([r for r in rs.values() if r['kind'] == 'cutile']) != 8):
             problems.append('missing final matmul baseline, matched cuTile candidate or torch')
@@ -271,6 +280,10 @@ def check_matmul(source, ledger, data):
             if (len(r['round_medians']) != 5 or r['n_samples'] < 15 or not 0 < r['median_ms'] <= r['p90_ms'] or
                     not math.isfinite(r['miss']) or not 0 <= r['miss'] <= 1):
                 problems.append('incomplete or incorrect final matmul timing')
+            if dtype != 'f64' and r.get('dtype') != dtype:
+                problems.append('matmul timing belongs to another dtype')
+            if dtype != 'f64' and (r['miss'] != 0 or r['max_abs_err'] != 0):
+                problems.append('final matmul exact corpus differs from its reference')
         if min(b / t for b, t in zip(base['round_medians'], selected['round_medians'])) < 1.05:
             problems.append('final paired matmul improvement is below five percent')
     return problems
@@ -291,12 +304,33 @@ def matmul_self_test(source, ledger, data):
     print('PASS matmul config negative controls: missing evidence, changed tile, changed time, missing grid cell, wrong compiler')
 
 
+def matmul_format_self_test(source, ledger, data, dtype):
+    row = next(r for r in ledger['rows'] if r['dtype'] == dtype and r['table_arch'] == 'sm_90')
+    changed = copy.deepcopy(ledger)
+    changed['rows'] = [r for r in changed['rows'] if r['id'] != row['id']]
+    assert check_matmul(source, changed, data, dtype), 'missing format evidence stayed green'
+    cfg = row['config']
+    literal = f'mm_config({cfg["tm"]}, {cfg["tn"]}, {cfg["tk"]}, {cfg["occupancy"]}, {cfg["cga"]}, "{row["id"]}"'
+    bad = literal.replace(f'({cfg["tm"]},', f'({cfg["tm"] * 2},', 1)
+    assert literal in source
+    assert check_matmul(source.replace(literal, bad), ledger, data, dtype), 'changed format tile stayed green'
+    changed_data = copy.deepcopy(data)
+    changed_data['cases'][0]['results'].pop(0)
+    assert check_matmul(source, ledger, changed_data, dtype), 'missing format grid cell stayed green'
+    changed_data = copy.deepcopy(data)
+    changed_data['cases'][0]['results'][0]['max_abs_err'] = 0.001
+    assert check_matmul(source, ledger, changed_data, dtype), 'inexact corpus stayed green'
+    print(f'PASS {dtype} matmul negative controls: missing evidence, changed tile, missing grid cell, inexact corpus')
+
+
 def main():
     source, ledger = KERNELS.read_text(), json.loads(LEDGER.read_text())
     data = json.loads(LEDGER.with_name("measurements.json").read_text())
     display = (ROOT / "site/gpu-map/flash-perf.tsv").read_text()
     problems = (check(source, ledger) + check_measurements(data, ledger, display) +
-                check_matmul(source, ledger['matmul'], data['matmul']))
+                check_matmul(source, ledger['matmul'], data['matmul']) +
+                check_matmul(source, ledger['matmul'], data['matmul_f16'], 'f16') +
+                check_matmul(source, ledger['matmul'], data['matmul_i8'], 'i8'))
     for p in problems:
         print(f"FAIL flash config: {p}")
     if problems:
@@ -304,6 +338,8 @@ def main():
     if sys.argv[1:] == ["--self-test"]:
         self_test(source, ledger)
         matmul_self_test(source, ledger['matmul'], data['matmul'])
+        for dtype in ['f16', 'i8']:
+            matmul_format_self_test(source, ledger['matmul'], data['matmul_' + dtype], dtype)
         assert check_measurements(data, ledger, display + "changed"), "changed page timings stayed green"
         changed = copy.deepcopy(data)
         next(r for r in changed['alignment_adopted'] if r['name'] == 'kt_approx')['median_ms'] *= 1.2
@@ -315,7 +351,7 @@ def main():
     elif sys.argv[1:]:
         return 2
     print("PASS flash config: eight table cells match eight measured rows; one alternative retained")
-    print("PASS matmul config: three table cells match the complete two-architecture, two-shape grid")
+    print("PASS matmul config: nine table cells match complete grids for three dtypes, two architectures and two shapes")
     return 0
 
 
