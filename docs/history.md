@@ -218,6 +218,11 @@ links to; dates are commit dates in UTC+8, and `git log` holds the commits behin
   removed; rotations and checked arithmetic remain. Independent integer expectations cover
   runtime, generic, comptime, and LSP evaluation. ([Design](bitwise-operator-traits-design.md))
 
+- **2026-10-22, not yet released.** Staged `if` gains StagedCond and typed StagedResult slots
+  for value forms with matching arm types. Both arms share StagedVar cells with each other
+  and enclosing staged loops; host Bool retains its branch. Device integration and token
+  branching follow separately. ([Conditional protocol](staged-if-design.md), [spec §4.6](spec.en.md))
+
 From v0.1.0 on 2026-07-17 to v0.81.0 on 2026-10-01 there have been 83 release tags.
 
 ## Decisions that were reversed
@@ -250,7 +255,3 @@ table says what replaced it and when.
 
 [Early design decisions (M0–M7)](design.en.md) keeps the reasoning behind each choice made
 before self-hosting, as it was written at the time.
-- **2026-10-22.** Unit-valued staged `if` gains the `StagedCond` prelude protocol. Both arms
-  share StagedVar cells with each other and with enclosing staged loops; host Bool retains
-  its existing branch. Device package integration and token branching follow separately.
-  ([Conditional protocol](staged-if-design.md), [spec §4.6](spec.en.md))

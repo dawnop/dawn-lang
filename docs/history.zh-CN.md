@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/history.md @ 73bb1edc6982fa66 -->
+<!-- doc-check: translation-of docs/history.md @ d1b21f5ea4bedb36 -->
 
 # 历史
 
@@ -187,6 +187,10 @@
   公开入口，保留旋转与检查算术。独立整数预期覆盖运行期、泛型、comptime 与 LSP 求值。
   （[设计](bitwise-operator-traits-design.md)）
 
+- **2026-10-22，尚未发版。** staged `if` 增加 StagedCond 条件协议与 StagedResult 结果槽，
+  支持同型两臂的值形式。两臂共享 StagedVar 格子并复用外层 staged 循环的格子；宿主 Bool
+  保持原分支。设备包接入与 token 分支后续交付。（[条件协议](staged-if-design.md)、[spec §4.6](spec.md)）
+
 从 2026-07-17 的 v0.1.0 到 2026-10-01 的 v0.81.0，共 83 个 release tag。
 
 ## 被推翻的决定
@@ -217,6 +221,3 @@
 ## 早期决定
 
 [早期设计决定（M0–M7）](design.md)按当时写下的样子，保留了自举之前每个选择背后的理由。
-- **2026-10-22。** Unit 型 staged `if` 增加 `StagedCond` prelude 协议，两臂共享 StagedVar 格子，
-  并复用外层 staged 循环的格子；宿主 Bool 保持原分支。设备包接入与 token 分支分别后续交付。
-  （[条件协议](staged-if-design.md)、[spec §4.6](spec.md)）

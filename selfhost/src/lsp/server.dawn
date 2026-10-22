@@ -7490,6 +7490,11 @@ test "staged if pairs both rewritten arms for navigation references rename and t
       "type V = { n: Int }",
       "type Cell = { n: Int }",
       "type Cond = { n: Int }",
+      "type ResultSlot = { value: Option[V] }",
+      "impl StagedResult[V] { type Slot = ResultSlot",
+      "  fn result_open() -> ResultSlot = ResultSlot { value: None }",
+      "  fn result_set(s: ResultSlot, v: V) -> Unit = ()",
+      "  fn result_get(s: ResultSlot) -> V = s.value! }",
       "impl StagedCond[Cond] {",
       "  fn staged_if(c: Cond, on_true: fn() -> Unit, on_false: fn() -> Unit) -> Unit = on_true()",
       "}",
@@ -7503,6 +7508,11 @@ test "staged if pairs both rewritten arms for navigation references rename and t
       "  else if c { acc = V { n: acc.n + 2 } }",
       "  else { acc = V { n: acc.n + 3 } }",
       "  acc",
+      "}",
+      "fn value(c: Cond, initial: V) -> V = {",
+      "  var state = initial",
+      "  let chosen = if c { state } else { state }",
+      "  chosen",
       "}",
       ""
     ], "\n")
@@ -7523,8 +7533,23 @@ test "staged if pairs both rewritten arms for navigation references rename and t
       assert def_probe_span(target, "the original var") == original
     }
     assert def_probe_at(st, d, text, "if c {", 3).hover == "let c: Cond"
+    let value_uses = occurrences(qc, probe_offset(text, "state } else", 0), true)
+    assert len(value_uses) == 3
+    assert def_probe_at(st, d, text, "state } else", 0).hover == "var state: V"
+    assert def_probe_at(st, d, text, "state }\n", 0).hover == "var state: V"
+    assert def_probe_at(st, d, text, "chosen\n", 0).hover == "let chosen: V"
+    match handle_rename(st, rename_params(d, "state } else", 0, "current")) {
+      (Ok(r), _) -> {
+        let edits = match oget(get_or_null(r, "changes"), d.uri) {
+          Some(JArr(es)) -> es
+          _ -> panic("no result arm rename edits")
+        }
+        assert len(edits) == 3
+      }
+      (Err(why), _) -> panic("result arm rename refused: ${why}")
+    }
     let tokens = semantic_tokens(qc, 0, len(text))
-    for occurrence in uses {
+    for occurrence in uses ++ value_uses {
       var found = false
       for token in tokens {
         if token.lo == occurrence.lo {

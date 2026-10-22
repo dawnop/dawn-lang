@@ -71,7 +71,7 @@ use check/types.{
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID,
   NEG_ID, BIT_AND_ID, BIT_OR_ID, BIT_XOR_ID, SHL_ID, SHR_ID, USHR_ID, BIT_NOT_ID,
   is_bitwise_trait, bitwise_trait_name, is_shift_trait, shift_amount_name, is_arith_trait, arith_trait_name, opaque_inherits, CHAR_OPAQUE_ID, FROM_INT_ID, FROM_FLOAT_ID,
-  STAGED_ITER_ID, STAGED_VAR_ID, STAGED_COND_ID, LEN_ID,
+  STAGED_ITER_ID, STAGED_VAR_ID, STAGED_COND_ID, STAGED_RESULT_ID, LEN_ID,
   head_of, impl_at, has_impl_at,
   is_ord_scalar, ord_scalar_names, public_builtin_type_names, is_ground, expandable, type_args_of, sub_goals,
   AWorld, PkgDep
@@ -5430,7 +5430,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       if is_lit_atom(e) { check_num_lit(cx, e, expected) } else { check_unary_expr(cx, op, operand, lo, hi) }
     EBinary(op, left, right, olo, ohi, lo, hi) ->
       check_binary_expr(cx, op, left, right, olo, ohi, lo, hi, expected)
-    EIf(cond, thn, els, lo, hi) -> check_if(cx, cond, thn, els, expected, lo, hi)
+    EIf(cond, thn, els, lo, hi) -> check_if(cx, cond, thn, els, expected, lo, hi, false)
     EListLit(elems, lo, hi) -> check_list_lit(cx, elems, expected, lo, hi)
     ETupleLit(elems, lo, hi) -> check_tuple_lit(cx, elems, expected, lo, hi)
     EPropagate(operand, lo, hi) -> {
@@ -5523,12 +5523,13 @@ fn check_if(
   els: Option[Expr],
   expected: Option[Ty],
   lo: Int,
-  hi: Int
+  hi: Int,
+  value_form: Bool
 ) -> (Cx, Ty, TExpr) !io = {
   let (cx1, ct, cndx) = check_expr(cx, cond, no_expected())
   var cx2 = cx1
   if ct != TyBool && not is_errorish(ct) && has_trait_at(cx1, STAGED_COND_ID, ct) {
-    return check_staged_if(cx1, ct, cndx, thn, els, lo, hi)
+    return check_staged_if(cx1, ct, cndx, thn, els, expected, lo, hi, value_form)
   }
   if ct != TyBool && not is_errorish(ct) {
     let text = ty_show(cx2.adts, ct)
@@ -8601,7 +8602,11 @@ fn check_let(
   }
   let outer_initializing = cx1.frame.initializing
   cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, initializing: set.insert(outer_initializing, name) } }
-  let (cxb, it, ix) = check_expr(cx1, init, ann_t)
+  # A bound staged if is a value form even when its result is Unit.
+  let (cxb, it, ix) = match init {
+    EIf(c, t, e, a, z) -> check_if(cx1, c, t, e, ann_t, a, z, true)
+    _ -> check_expr(cx1, init, ann_t)
+  }
   cx1 = Cx { ..cxb, frame: Frame { ..cxb.frame, initializing: outer_initializing } }
   var t = match ann_t {
     Some(a) -> a
@@ -9387,8 +9392,8 @@ fn check_staged_for(cx: Cx, pat: Pattern, from: Expr, ft: Ty, fx: TExpr, body: E
 
 ## One conditional arm, with its own scope, effects and captures, but the
 ## canonical cells from the other arm. No synthetic loop target is added.
-fn check_staged_arm(cx: Cx, body: Expr, cells: Map[Int, StagedCell], lo: Int,
-  hi: Int) -> (Cx, TExpr, Eff, Map[Int, StagedCell]) !io = {
+fn check_staged_arm(cx: Cx, body: Expr, cells: Map[Int, StagedCell], expected: Option[Ty], lo: Int,
+  hi: Int) -> (Cx, Ty, TExpr, Eff, Map[Int, StagedCell]) !io = {
   let saved_used = cx.frame.used_effects
   let saved_wit = cx.frame.eff_witness
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
@@ -9399,25 +9404,59 @@ fn check_staged_arm(cx: Cx, body: Expr, cells: Map[Int, StagedCell], lo: Int,
   }
   let entered = Cx { ..cx, frame: Frame { ..cx.frame, used_effects: [], eff_witness: empty_w,
     lambda_stack: cx.frame.lambda_stack ++ [ctx] } }
-  let (checked, bt, bx) = check_expr(push_scope(entered), body, Some(TyUnit))
+  let (checked, bt, bx) = check_expr(push_scope(entered), body, expected)
   var cx1 = pop_scope(checked)
-  if bt != TyUnit && not is_errorish(bt) {
-    cx1 = cerr_h(cx1, "a staged if currently produces Unit, got " ++ ty_show(cx1.adts, bt), lo, hi,
-      "assign a carried var in each branch instead of returning a value")
-  }
   let popped = cx1.frame.lambda_stack[len(cx1.frame.lambda_stack) - 1]
   let row = eff_union(cx1.frame.used_effects)
   cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame,
     lambda_stack: list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1),
     used_effects: saved_used, eff_witness: saved_wit } }
-  (cx1, XLambda([], [], bx, popped.captures, owner_off(cx, e_lo(body)), owner_off(cx, e_hi(body)),
-    TyFn([], TyUnit, row)), row, popped.staged)
+  (cx1, bt, XLambda([], [], bx, popped.captures, owner_off(cx, e_lo(body)), owner_off(cx, e_hi(body)),
+    TyFn([], bt, row)), row, popped.staged)
 }
 
-## Unit-valued staged if: evaluate the condition, open the union of cells,
-## pass two closures sharing those identities, then write back in declaration order.
-fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], lo: Int,
-  hi: Int) -> (Cx, Ty, TExpr) !io = {
+## A branch may infer its result from its sibling. Only the result tail is
+## inspected; names and carried cells still resolve in the single checking pass.
+fn staged_arm_waits(cx: Cx, e: Expr) -> Bool =
+  match e {
+    EBlock(_, Some(t), ..) -> staged_arm_waits(cx, t)
+    _ -> is_lit_atom(e) || needs_expected(cx, e)
+  }
+
+## Put the branch result into the hidden slot on every normal exit. The slot
+## is captured only by these two closures, never entered in a user scope.
+fn staged_result_arm(cx: Cx, lam: TExpr, t: Ty, slot: Int, wit: WitRef, lo: Int,
+  hi: Int) -> (Cx, TExpr, Eff) = {
+  let (body, caps, llo, lhi, used) = match lam {
+    XLambda([], [], b, cs, a, z, TyFn([], _, e)) -> (b, cs, a, z, e)
+    _ -> panic("staged_result_arm: expected a generated branch closure")
+  }
+  let saved_used = cx.frame.used_effects
+  let saved_wit = cx.frame.eff_witness
+  let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
+  let ctx = LambdaCx {
+    boundary: len(cx.frame.scopes), expected_ret: Some(TyUnit), captures: caps,
+    sugar: false, arm: false, ctl: false, local_fn: None, handler_of: None,
+    staged_kind: StagedBranch(lo, hi), staged: map.empty()
+  }
+  let scoped = Cx { ..cx, frame: Frame { ..cx.frame, used_effects: [], eff_witness: empty_w,
+    lambda_stack: cx.frame.lambda_stack ++ [ctx] } }
+  let (resolved, _) = resolve_witness(scoped, STAGED_RESULT_ID, t, lo, hi, "a staged if result")
+  let sx = XLocal(slot, "\$result", owner_off(cx, lo), owner_off(cx, hi), sym_of(cx, slot).ty)
+  let (charged, store) = staged_call(resolved, STAGED_RESULT_ID, "result_set", t, [sx, body], wit,
+    TyUnit, lo, hi, NO_NAME)
+  let row = eff_union([used] ++ charged.frame.used_effects)
+  let popped = charged.frame.lambda_stack[len(charged.frame.lambda_stack) - 1]
+  let restored = Cx { ..charged, frame: Frame { ..charged.frame, used_effects: saved_used,
+    eff_witness: saved_wit,
+    lambda_stack: list.take(charged.frame.lambda_stack, len(charged.frame.lambda_stack) - 1) } }
+  (restored, XLambda([], [], store, popped.captures ++ [slot], llo, lhi, TyFn([], TyUnit, row)), row)
+}
+
+## Evaluate the condition once. Typed result slots are opened empty, written
+## inside both closures, and read only after the conditional library merges.
+fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], expected: Option[Ty], lo: Int,
+  hi: Int, value_form: Bool) -> (Cx, Ty, TExpr) !io = {
   let olo = owner_off(cx, lo)
   let ohi = owner_off(cx, hi)
   let (cxw, witness) = resolve_witness(cx, STAGED_COND_ID, ct, lo, hi, "a staged if")
@@ -9427,10 +9466,56 @@ fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], lo
   }
   let (cxr, sid) = hidden_local(cxw, "\$condition", ct, lo, hi)
   var stmts: List[TStmt] = [TSLet(Some(sid), "\$condition", cond, olo, ohi)]
-  let (cxt, tx, te, cells) = check_staged_arm(cxr, thn, map.empty(), lo, hi)
   let other = match els { Some(e) -> e, None -> EUnit(lo, hi) }
-  let (cxf, fx, fe, shared) = check_staged_arm(cxt, other, cells, lo, hi)
-  var cx1 = cxf
+  let reverse = expected == None && staged_arm_waits(cxr, thn) && not staged_arm_waits(cxr, other)
+  let first = if reverse { other } else { thn }
+  let second = if reverse { thn } else { other }
+  let (cxt, at, ax, ae, cells) = check_staged_arm(cxr, first, map.empty(), expected, lo, hi)
+  let next_expected = match expected {
+    Some(t) -> Some(t)
+    None -> if not is_errorish(at) { Some(at) } else { None }
+  }
+  let (cxf, bt, bx, be, shared) = check_staged_arm(cxt, second, cells, next_expected, lo, hi)
+  let (tt, et) = if reverse { (bt, at) } else { (at, bt) }
+  let (unified, result) = unify_branches(cxf, tt, et, lo, hi, "the staged if branches")
+  var cx1 = unified
+  var tx = if reverse { bx } else { ax }
+  var fx = if reverse { ax } else { bx }
+  var te = if reverse { be } else { ae }
+  var fe = if reverse { ae } else { be }
+  var result_slot: Option[(Int, WitRef)] = None
+  if els == None && (value_form || (tt != TyUnit && not is_errorish(tt))) {
+    cx1 = cerr_h(cx1, "a staged if value requires an else branch", lo, hi,
+      "both branches must initialize the result slot")
+  } else if result != TyUnit && not is_errorish(result) {
+    if not has_trait_at(cx1, STAGED_RESULT_ID, result) {
+      let text = ty_show(cx1.adts, result)
+      cx1 = cerr_h(cx1, "a staged if result of type " ++ text ++ " needs `StagedResult[" ++ text ++ "]`", lo, hi,
+        "provide the result type's slot protocol; host scalars do not become recorded results implicitly")
+    } else {
+      let (cxv, rw) = resolve_witness(cx1, STAGED_RESULT_ID, result, lo, hi, "a staged if result")
+      cx1 = cxv
+      match rw {
+        Some(w) -> {
+          let slot_ty = reduce_assoc(cx1, TyAssoc(result, STAGED_RESULT_ID, "Slot"))
+          let (cxs, slot) = hidden_local(cx1, "\$result", slot_ty, lo, hi)
+          let (cxo, open) = staged_call(cxs, STAGED_RESULT_ID, "result_open", result, [], w,
+            slot_ty, lo, hi, NO_NAME)
+          cx1 = cxo
+          stmts = stmts ++ [TSLet(Some(slot), "\$result", open, olo, ohi)]
+          let (cxa, x, e) = staged_result_arm(cx1, tx, result, slot, w, lo, hi)
+          let (cxb, y, f) = staged_result_arm(cxa, fx, result, slot, w, lo, hi)
+          cx1 = cxb
+          tx = x
+          fx = y
+          te = e
+          fe = f
+          result_slot = Some((slot, w))
+        }
+        None -> ()
+      }
+    }
+  }
   let row = reduce_eff(cx1, EffAssoc("C", -48, STAGED_COND_ID, "StagedCond"), map.from([(-48, ct)]))
   let used = eff_union([te, fe])
   if not eff_carries(row, used) {
@@ -9464,7 +9549,15 @@ fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], lo
     cx1 = cxg
     stmts = stmts ++ [TSAssign(sc.orig, name, back, olo, ohi)]
   }
-  (cx1, TyUnit, XBlock(stmts, None, olo, ohi, TyUnit))
+  match result_slot {
+    Some((slot, w)) -> {
+      let sx = XLocal(slot, "\$result", olo, ohi, sym_of(cx1, slot).ty)
+      let (cxg, value) = staged_call(cx1, STAGED_RESULT_ID, "result_get", result, [sx], w,
+        result, lo, hi, NO_NAME)
+      (cxg, result, XBlock(stmts, Some(value), olo, ohi, result))
+    }
+    None -> (cx1, result, XBlock(stmts, None, olo, ohi, result))
+  }
 }
 
 ## The source the staged-`for` tests check: a recording iterator and cell
@@ -9642,6 +9735,69 @@ test "staged if arms share canonical cells and open and write back in declaratio
     assert len(captures) == 3
     for id in opens { assert list.contains(captures, id) }
   }
+}
+
+## The result protocol has an empty representation, distinct from an initialized V.
+fn staged_value_src(body: String) -> String = staged_if_src(
+  "type Slot = { value: Option[V] }\nimpl StagedResult[V] {\n  type Slot = Slot\n" ++
+    "  fn result_open() -> Slot = Slot { value: None }\n" ++
+    "  fn result_set(s: Slot, v: V) -> Unit = ()\n  fn result_get(s: Slot) -> V = s.value!\n}\n" ++ body)
+
+test "a staged value stores both arm results and reads its hidden slot after the merge" {
+  let src = staged_value_src("fn f(c: Cond, a: V, b: V) -> V = if c { a } else { b }\n")
+  let (md, pd) = parser.parse_module(src)
+  assert len(pd) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, tm) = check_module(seed_prelude(test_cx()), md, env)
+  assert len(cx.diags) == 0
+  let (ss, tail) = match arith_body(tm, "f") {
+    XBlock(stmts, Some(value), ..) -> (stmts, value)
+    _ -> panic("a result block must read its slot in tail position")
+  }
+  assert len(ss) == 3
+  let slot = match ss[1] {
+    TSLet(Some(id), "\$result", XCallFn(_, "result_open", [], _, evs, Some(tid), ..), ..) -> {
+      assert tid == STAGED_RESULT_ID && len(evs) == 1
+      id
+    }
+    _ -> panic("a result slot is opened without an initial value")
+  }
+  match ss[2] {
+    TSExpr(XCallFn(_, "staged_if", [_, yes, no], ..), ..) -> {
+      for arm in [yes, no] {
+        match arm {
+          XLambda([], [], XCallFn(_, "result_set", [XLocal(id, ..), XBlock(_, Some(XLocal(_, name, ..)), ..)],
+            _, evs, Some(tid), ..), caps, _, _, TyFn([], TyUnit, _)) -> {
+            assert id == slot && tid == STAGED_RESULT_ID && len(evs) == 1
+            assert list.contains(caps, slot)
+            assert name == "a" || name == "b"
+          }
+          _ -> panic("each arm must definitely assign the result exactly at its normal exit")
+        }
+      }
+    }
+    _ -> panic("the conditional must run before the result is read")
+  }
+  match tail {
+    XCallFn(_, "result_get", [XLocal(id, ..)], _, evs, Some(tid), ..) -> {
+      assert id == slot && tid == STAGED_RESULT_ID && len(evs) == 1
+    }
+    _ -> panic("the result cannot escape before the merge")
+  }
+}
+
+test "a generic condition forwards its dictionary for a concrete pure result protocol" {
+  let src = staged_value_src("fn f[C: StagedCond](c: C, a: V, b: V) -> V !C.StagedCond = if c { a } else { b }\n")
+  let (md, pd) = parser.parse_module(src)
+  assert len(pd) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, _) = check_module(seed_prelude(test_cx()), md, env)
+  assert len(cx.diags) == 0
+}
+
+test "a bound Unit staged if also needs an else while a Unit statement may omit it" {
+  let src = staged_if_src("fn f(c: Cond) -> Unit = {\n  if c { () }\n  let x = if c { () }\n}\n")
+  assert msgs_of(src) == ["a staged if value requires an else branch"]
 }
 
 test "host Bool if retains XIf even with a user staged condition in scope" {

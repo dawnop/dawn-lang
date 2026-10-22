@@ -1,6 +1,6 @@
 # staged if：条件协议与共享格子
 
-> 状态：**current**。S0 设计已冻结（`15d5662d`）；S1 实现检查器协议与双后端记录语料。
+> 状态：**current**。S0 设计已冻结（`15d5662d`）；S1 实现检查器协议与双后端记录语料；补裁纳入有类型结果槽的值形式。
 > S2 包迁移与不变性门、S3 token 分支、S4 设备验收仍待后续刀，权威条文见 [spec.md](spec.md)。
 
 本文冻结 2026-10-22 裁决的 S0/S1 边界。`if` 和 `for` 一样由检查器调用普通库协议，
@@ -11,7 +11,7 @@ token 分支分别属于 S2/S3，设备验收属于 S4。本文不作性能断�
 
 宿主 `Bool` 始终走既有 `XIf`，求值与产物保持不变。其余非错误、非 bottom 条件若实现
 `StagedCond`，改写成一次 `staged_if` 调用；条件先于新开格子恰好求值一次，两臂成为无参闭包。
-无 `else` 补空 Unit 臂；`else if` 是 else 内的嵌套条件，后一个条件留在该臂内求值。
+Unit 语句无 `else` 补空臂，值形式必须有 `else`；`else if` 是 else 内的嵌套条件，后一个条件留在该臂内求值。
 两臂具有独立词法作用域，遮蔽按符号身份判断。
 
 语言不理解 Tile、设备或 Dev。未来 tileir 只接受 `dtype=i1, shape=[]` 的严格 rank-0 条件，
@@ -62,11 +62,46 @@ S2 不得为此放开具体泛型头特化。`impl StagedCond[Tile[Bool]]` 不�
 创建序；新 open 按声明序。for 内 if、if 内 for 和 if 内 if 都复用外层身份；包是否支持
 这些区域组合由库自己的记录器决定，S1 不宣称 tileir 已支持 if 内循环或访存。
 
-## 4. Unit 与跳转
+## 4. 值形式、结果槽与跳转
 
-staged if 结果固定 Unit，包括 `let x = if c { () } else { () }`。任一臂产生非 Unit 都明确
-报错，不能丢弃尾值。结果槽协议另案：现有 StagedVar 需要合法初值，不能提前执行一臂取得它；
-trait 方法也不支持独立结果类型参数。
+10-22 补裁撤销 Unit 限制。值形式必须有 else，两臂检查成同一 T，外层期望传给两臂；
+没有外层期望时先检查自足的臂，再给需要上下文的臂传入 T，最后仍按源码顺序生成闭包。
+Unit 语句继续原无结果路径；非 Unit 尾值不能静默丢弃。宿主 Bool 的值形式仍走原 XIf。
+
+| 结果槽形状 | 可表达性与代价 | 选择 |
+|---|---|---|
+| 新 prelude `StagedResult[T]`，关联 Slot，open/set/get | 三个普通单参数 trait 方法；Slot 只属于结果类型，open 无值实参，由检查器在已知 T 处直接解 witness；可把未赋值槽与已有初始化 carry 区分 | 采用 |
+| 给 StagedVar 增加无初值 open | 同样能用已有 Cell 表达，但所有既有 impl 都要处理未初始化状态，普通 var_get/var_set 与结果的确定赋值及合流读混在同一协议 | 不采用；不是兼容性理由，而是状态纪律不同 |
+
+```text
+trait StagedResult[T] {
+  type Slot
+  effect StagedResult = !()
+  fn result_open() -> T.Slot !T.StagedResult
+  fn result_set(s: T.Slot, v: T) -> Unit !T.StagedResult
+  fn result_get(s: T.Slot) -> T !T.StagedResult
+}
+```
+
+StagedResult 的 id 追加为 26，方法不注入、不可 derive，同名效果默认纯；不提供宿主标量的
+内置 impl，不继承 opaque 底层 impl。结果 T 的协议与条件 C 独立，因此同一种条件可在不同
+调用处产生不同 T。既不修改 StagedCond 的 Unit 闭包 ABI，也不添加泛型 trait 方法、HKT、
+元组 trait、unsafe 或新的 Core 节点。普通 trait 的空 Option 槽声明/impl 探针已通过现有编译器，
+新 prelude 的零参数 open 也已在 JVM/native 记录库与 ASan 对拍中通过；硬闸未触发。
+泛型结果的效果仍必须包含在条件协议行中；两个独立投影不自动相等，与 staged for 泛型携带的
+既有边界相同，不为绕过效果检查添加新机制。
+
+检查器先检查并统一两臂，再创建用户不可命名的空槽，给两个生成闭包的每个正常出口各包一层
+result_set。不能先执行任何一臂取得初值；无 else、臂尾 Unit 与 T 不同型都不能提供结果。
+slot 只进入这两个生成闭包的 captures，不进用户词法 scope；result_get 只能位于 staged_if
+返回之后。因此源码不能在合流前读出或传出这个槽，也不能通过绑定中的变量自引用绕过。
+跨臂 return/?/break/continue 仍拒绝，panic 等不返回路径不能到达结果读出。
+
+result_set 的效果必须包含在 C.StagedCond 内；result_open/get 在外层计 T.StagedResult 效果。
+记录库须分别保存两臂对同一空槽的写，确认两臂均初始化之后才能将该槽标为 ready；
+result_get 对尚未 merge 的槽拒绝。库若保存回调或漏跑一臂，就是违反协议，不能得到合法结果。
+S2 中 Tile 结果分别校验 dtype/shape 并作为 if 的 yield 结果，不广播、不提升格式，
+宿主 Int/Float 没有默认 StagedResult，不能冒充设备结果。
 
 `break`、`continue`、`return`、`?` 不得越过 staged 条件臂边界，报文点名 staged if。
 臂内新建的宿主循环仍可局部 break/continue，局部函数或普通 lambda 自己的 return 不受影响。
@@ -74,7 +109,7 @@ trait 方法也不支持独立结果类型参数。
 
 ## 5. 诊断、位置与语言服务
 
-staged 条件自身的 Unit、效果与跨臂边界诊断保留用户 if 位置，生成调用的名字位置指向 if；
+staged 条件自身的结果类型、效果与跨臂边界诊断保留用户 if 位置，生成调用的名字位置指向 if；
 生成 get/set 没有假造的用户调用名。外层 var 无 StagedVar 的诊断包含类型和协议名，只读也拒绝。
 不支持的条件仍给 Bool 条件类型错误。普通闭包捕获继续指出实际闭包边界。
 LSP 将改写块还原为条件和两个用户臂；cell 符号沿用原 var 声明位置，使 hover、goto、
@@ -111,17 +146,15 @@ lower、可见性、bytecode、解释器同步验型；沿用现有 if 结果与
 
 ## 8. 验证与交付边界
 
-S1 用不依赖 tileir 的普通记录库实现两个协议，固定双臂入口、读写、开放、合流及写回记录，
-JVM/native/ASan 对拍。checker 逐条钉住缺 impl、只读 var、非 Unit、跳转、捕获和效果诊断。
-负控须先证明红：Bool 强走 trait、两臂独建或交换 cell、重复条件、删只读检查、接受非 Unit、
-漏报或超出效果。另以宿主 Bool 的 TAST/Core/emit 基线比较守住原路径。
+S1 用不依赖 tileir 的普通记录库实现三个协议，固定双臂入口、读写、开放、合流及写回记录，
+JVM/native/ASan 对拍。checker 逐条钉住缺 impl、只读 var、缺 else、不同型结果、跳转、捕获和效果诊断。
+负控须先证明红：Bool 强走 trait、两臂独建或交换 cell、重复条件、删只读检查、漏报或超出效果；追加缺臂赋值、提前执行、合流前逃逸、不同型结果和宿主值冒充结果。另以宿主 Bool 的 TAST/Core/emit 基线比较守住原路径。
 所有改动逐文件问 gatemap，跑锚点预检、完整门禁、文档与格式检查。S2–S4 的包/设备验收
 不记为本刀已通过；种子发布推进之后才允许在 selfhost/std 或包消费者里使用新语法。
 
 ## 不做的（理由）
 
 - 逐 lane if、自动 any/all、设备 Bool 转宿主 Bool：不同执行语义，继续显式 select/mask。
-- 非 Unit 表达式结果：需要独立结果槽及初始化纪律，已有 cell 不能凭空给初值。
 - staged while 与隐式非局部退出：需要设备控制流协议，保留显式 d_loop/d_return_if。
 - 放开普通 var 闭包捕获：重复记录与逃逸会破坏现有规则。
 - 检查器线程化异构元组：格子与库 yield 已有明确分工，不增加变长泛型或 Core 节点。
