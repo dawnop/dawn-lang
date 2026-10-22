@@ -928,6 +928,9 @@ shaped=(shape_ops grid_stride token_join ptr_roundtrip ptr_recast insert_tile po
 # are: `tileiras` refuses the TYPE `f4E2M1FN` at sm_86 and sm_89.
 dtypes=(dtype_i16 dtype_i64 dtype_tf32 dtype_i4 pack_roundtrip)
 
+# The bitwise operators, one segment per operator at every supported width.
+bitwise_kernels=(bitwise_i8 bitwise_i16 bitwise_i32 bitwise_i64 bitwise_mask)
+
 # The tf32 mutant below names one of the five; the others are its
 # kernel-level control, and a tag mutant that moved them would be changing
 # something other than the tag it names.
@@ -1200,7 +1203,7 @@ echo "      arch: ${#arch_ran[@]} of ${#arch_kernels[@]} architecture-gated kern
 
 for k in vadd vadd_bf16 vadd_f32 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
-  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
+  "${shaped[@]}" "${dtypes[@]}" "${bitwise_kernels[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
   "${hints[@]}" "${views[@]}" "${inbounds_ks[@]}" "${dyns[@]}" "${scalars[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
   "${sequenced[@]}" ${arch_ran[@]+"${arch_ran[@]}"}; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
@@ -2733,6 +2736,20 @@ sym_probe="$(sed -n 's/^probe symbols //p' "$work/sym.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe; erf error: $erf_probe;"\
   " per-op miss: $trig_probe; sequence launches: $seq_launch_probe; loop rounds: $loop_probe"
 
+# Every operator and supported format, including typed full-width i64.
+build_native "$root/std" "$work/bitwise.bin" "$here/bitwise_diff.dawn"
+bitwise_cubins=()
+for k in "${bitwise_kernels[@]}"; do bitwise_cubins+=("$work/$k.cubin"); done
+rc=0
+device "$work/bitwise.bin" "${bitwise_cubins[@]}" > "$work/bitwise.out" 2> "$work/bitwise.err" || rc=$?
+cat "$work/bitwise.out"
+bitwise_verdict="$(sed -n 's/^tile-gpu-diff: //p' "$work/bitwise.out" | tail -n 1)"
+case "$bitwise_verdict" in
+  pass) ;;
+  blocked:*) ;;
+  *) cat "$work/bitwise.err" >&2; fail "bitwise_diff disagreed or printed no verdict (exit $rc)" ;;
+esac
+
 # The ledger records one verdict for the tree: every family passes (or was
 # skipped on purpose), or it is the first thing that stopped one of them. The
 # list is in run order and is the only place the fold reads; fold_verdict.sh
@@ -2745,7 +2762,7 @@ verdict_families=(
   dtype_verdict arch_verdict loop_verdict dbg_verdict dbg_fail_verdict
   dbg_print_verdict shape_verdict attr_verdict global_verdict sym_verdict
   alloca_verdict view_verdict dyn_verdict gsview_verdict hint_verdict seq_verdict
-  scalar_verdict
+  scalar_verdict bitwise_verdict
 )
 fold_verdict_selftest || fail "the verdict fold's negative control failed"
 fold_script_selftest "$here/run.sh" || fail "a family verdict is assigned in run.sh but not read by the fold"
@@ -5824,7 +5841,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/scan_diff.dawn \
   scripts/tile-gpu-diff/atom_diff.dawn scripts/tile-gpu-diff/erf_diff.dawn \
   scripts/tile-gpu-diff/trig_diff.dawn scripts/tile-gpu-diff/shape_diff.dawn \
-  scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
+  scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/bitwise_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
   scripts/tile-gpu-diff/attr_diff.dawn scripts/tile-gpu-diff/assert_diff.dawn \
   scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/sym_diff.dawn \
   scripts/tile-gpu-diff/hint_diff.dawn \
@@ -5845,6 +5862,7 @@ summary="$summary alloca=$alloca_shape symbols=$sym_probe views=$view_shape_line
 summary="$summary dyn=$dyn_shape_line $dyn_probe"
 summary="$summary gsview=$gsview_shape_line $gsview_probe"
 summary="$summary scalar=$scalar_shape_line $scalar_probe"
+summary="$summary bitwise:$(sed -n 's/^tiers //p' "$work/bitwise.out" | tail -n 1)"
 summary="$summary arch=$arch_probe"
 summary="$summary asm=$asm_probe"
 if [ -n "$note" ]; then line="$line # inputs=$inputs_digest $note; $summary"; else line="$line # inputs=$inputs_digest $summary"; fi

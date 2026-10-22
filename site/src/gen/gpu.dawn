@@ -621,7 +621,8 @@ pub fn read_ledgers() -> List[Ledger] !Fs = {
 ##     the test below holds that set empty.
 pub type Mutant = { name: String, gate: Int }
 
-## tile-golden's mutants, in its run order.
+## tile-golden's bare mutant names, in shell-array order. Spaces and tabs
+## separate names; line breaks do not define array elements.
 pub fn golden_mutants(run_sh: String) -> List[String] = {
   var out: List[String] = []
   var on = false
@@ -631,7 +632,7 @@ pub fn golden_mutants(run_sh: String) -> List[String] = {
     } else if on && l == ")" {
       on = false
     } else if on {
-      out = out ++ [str.trim(l)]
+      out = out ++ filter(str.split(str.replace(str.trim(l), "\t", " "), " "), name => name != "")
     }
   }
   out
@@ -1943,7 +1944,7 @@ test "every mutant is placed at the gate its harness proves" {
 ## is gate 1, anything else gate 0, and a listed mutant with no block, or a
 ## device name that is only part of a longer one, is not placed.
 test "the gate rule reads the block, and only the block" {
-  let run_sh = "mutants=(\n  a-text\n  b-writer\n  c-asm\n)\n"
+  let run_sh = "mutants=(\n  a-text\tb-writer\n\n   c-asm  \n)\n"
     ++ "if run_item a-text; then\n  mutant_run a-text vadd\nfi\n"
     ++ "if run_item b-writer; then\n  writer_mutant_checks b-writer vadd same-size x\nfi\n"
     ++ "if run_item c-asm; then\n  if [ -n \"\$tileiras\" ]; then\n    true\n  fi\nfi\n"

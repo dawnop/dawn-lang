@@ -1,7 +1,7 @@
 # 按位与移位运算符 trait 设计
 
 > 状态：**current**。刀 0 已证明 Amount 可以复用现有关联类型；刀 1 交付编译器。
-> 刀 2 在 v0.97.0 种子后接入 std 定宽整数；设备库 impl 仍分刀迁移。
+> 刀 2 在 v0.97.0 种子后接入 std 定宽整数；刀 3 接入 Tile 的按位与掩码运算，移位留刀 4。
 > 权威条文见 [spec.md](spec.md) §3.5、§4.3、§11；算术先例见
 > [arith-operator-traits-design.md](arith-operator-traits-design.md)，投影纪律见
 > [assoc-types-design.md](assoc-types-design.md)。
@@ -95,11 +95,48 @@ selfhost 1154 项测试和三个定向 spike-native 语料（含 ASan）通过�
 bitwise_fixed 与 int_edges 的 gcc/clang-18 × O0/O2 共 8 组 UBSan 输出吻合独立预期。
 四项负控均实际判红，std 变异先重生 stdsrc 再构建各自的变异编译器；详见交付报告。
 
+## 刀 3：Tile 位运算与掩码
+
+增加 TileBitsDtype 与 TileShiftDtype 两个格式资格 trait，纯方法 bits_dtype 与 shift_dtype
+分别答 Dtype[D]；前者仅 Bool、I8、I16、I32、Int，后者仅四种有符号整数。
+沿 ScalarDtype 模式传资格字典，不写 Tile[I32] 等具体泛型头特化。
+四个条件 impl 均约束 D: TileBitsDtype，关联效果固定 !Dev，不从元素转发关联效果。
+TileShiftDtype 本刀只声明及提供资格见证，移位运算符和计数掩码留刀 4。
+
+整数 &、|、^ 用 BinaryI，分别记录 andi、ori、xori；Bool 的 &、| 保持既有
+select 内核及常量顺序，迁移后既有 mlir 与 tilebc 必须逐字节相同。
+~ 为同型全一常量与输入 xori，Bool 用 i1 的 1；不对宿主 SSA 句柄取反。
+每次记录用资格见证的 dtype 检查实际操作数，trace 仍执行整数格式白名单和左右 dtype 检查。
+形状只沿现有 rank-0 与同 rank 长度 1 的广播，不增加不同 rank 广播。
+
+删除 and_i、or_i、xor_i、and_mask、or_mask 五个公开入口并迁移全部消费者，
+包括 in_range 的内部组合；不保留转发。转换、pack/unpack、比较与现有具名移位保留。
+tileir 从 0.22.0 升到 0.23.0，遵守 0.x minor 的兼容性边界。
+
+运算符无 at 默认参数，沿算术 called_bare 记录。错误包含英文操作名、操作数来源和
+记录边界的用户行，不能承诺运算符自身的精确行列；LSP 的符号 span 不受影响。
+负控覆盖 Float 缺资格、Bool/I32 混型、资格与记录 dtype 不符，以及把 mask &
+改为 andi 后 golden 必须红。验收比较既有全部 golden，并以 tileref、tileinterp 和
+三种架构设备台账核对数值；不作性能断言。
+
+定向实测：tileir 273 项、tileref 31 项测试通过。新增五个独立 golden kernel，
+每个运算单独输出一段；四种整数与 mask 各比较 512 lane，另以 typed Int 通道
+核对 i64 的完整位型，共 12288 个运算结果，不把大整数转成 Float。
+tileinterp-diff 的 178 个案例一致、21 个按既有规则拒绝，无数值不一致；
+覆盖清单新增这五个 kernel。sm_86、sm_90、sm_100 的六个新按位案例均逐位一致，
+包括 typed i64 的完整位型和未写尾部。225 个 golden 的 JVM/native 文本、字节、
+固定版本汇编与反汇编全部通过；全矩阵 324 个工作项与独立覆盖汇总通过。
+完整设备台账与最终全集门结果见交付报告。
+
+站点 GPU 页从 tile-golden 的 shell 数组读取变异名称。数组允许同一行放多个裸名称，
+站点读取器按空格与制表符拆分并跳过空行，保持数组顺序；仍逐个查找真实执行块，
+没有对应执行块继续报错。此修正只影响站点证据展示，不改设备测试程序或摘要规则。
+
 ## 不做的（理由）
 
 1. 不做多 RHS、多参数 trait、关联类型相等约束、隐式转换与 impl 特化，单一 Amount 已表达本项消费者。
 2. 不做合并 Bits/FiniteBits、位宽成员或专用计数类型，掩码类型不应被迫实现移位。
 3. 不做宿主 Bool 按位、Float 位模式运算或复合赋值，没有本刀消费者。
 4. 不在 selfhost 源码中消费窄整数新运算符；种子 v0.97.0 已提供 std 所需 trait。
-5. 不修改 GPU 库、解释器或参考实现，其设备计数掩码和 API 迁移另刀交付。
+5. 不在刀 3 修改移位语义；设备计数掩码与五个移位入口的迁移留刀 4。
 6. 不扩展 C 的可移植性承诺，原有 Int 掩码及无符号左移发射继续服务此刀。

@@ -1,5 +1,9 @@
 # tileref changelog
 
+## 0.1.1 (2026-10-22)
+
+Add finite-width bitwise reference segments and a full-width Int oracle for tile operators.
+
 ## 0.1.0 (2026-10-01)
 
 The host references moved here from `std/gpu`, which keeps only the device

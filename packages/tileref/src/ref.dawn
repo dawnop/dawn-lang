@@ -5380,3 +5380,41 @@ test "the scalar references read the launch's scalars, not a buffer" {
   let w = scalar_wide_ref(2, [x, x, out, out], [10.0, 5.0])
   assert w == [(2, [10.0, 20.0, 9.0, 9.0]), (3, [6.0, 7.0, 9.0, 9.0])]
 }
+
+## Four output segments in `&`, `|`, `^`, `~` order for equally long integer
+## buffers. Width 1 uses low-bit mask truth tables; 8, 16, 32 and 64 read
+## signed bit patterns. This independent host oracle calls no tile code,
+## and Int preserves the complete i64 bit pattern.
+pub fn bitwise_ref_int(width: Int, a: List[Int], b: List[Int]) -> List[Int] = {
+  let mask = if width == 64 { -1 } else { (1 << width) - 1 }
+  let wrap = (v: Int) => {
+    let u = v & mask
+    if width == 64 { u } else if u >= (1 << (width - 1)) { u - (1 << width) } else { u }
+  }
+  list.map(range(0, 4 * len(a)), k => {
+    let j = k / len(a)
+    let i = k % len(a)
+    if width == 1 {
+      let x = (a[i] & 1) != 0
+      let y = (b[i] & 1) != 0
+      if (if j == 0 { x && y } else if j == 1 { x || y } else if j == 2 { x != y } else { not x }) { 1 } else { 0 }
+    } else {
+      wrap(if j == 0 { a[i] & b[i] } else if j == 1 { a[i] | b[i] } else if j == 2 { a[i] ^ b[i] } else { ~a[i] })
+    }
+  })
+}
+
+## Four output segments for the finite-width bitwise kernel, preserving the
+## sentinel tail supplied by its caller. All Float-channel values are exact.
+pub fn bitwise_ref(width: Int, _dts: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = list.map(ins[0], to_int)
+  let b = list.map(ins[1], to_int)
+  let values = list.map(bitwise_ref_int(width, a, b), to_float)
+  values ++ list.drop(ins[2], len(values))
+}
+
+test "bitwise oracle pins narrow sign bits, mask truth tables and all 64 bits" {
+  assert bitwise_ref_int(8, [-128], [85]) == [0, -43, -43, 127]
+  assert bitwise_ref_int(1, [0, 0, 1, 1], [0, 1, 0, 1]) == [0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0]
+  assert bitwise_ref_int(64, [0x7FFFFFFFFFFFFFFF], [-1]) == [0x7FFFFFFFFFFFFFFF, -1, 0 - 9223372036854775807 - 1, 0 - 9223372036854775807 - 1]
+}

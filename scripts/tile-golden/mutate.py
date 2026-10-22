@@ -37,6 +37,16 @@ LOWER = "packages/tileir/src/lower.dawn"
 KERNELS = "scripts/tile-golden/kernels.dawn"
 
 MUTATIONS = {
+    "mask-and-as-andi": ((
+        DEV,
+        'dt == "i1" && (op == "andi" || op == "ori")',
+        'dt == "i1" && op == "ori"',
+    ),),
+    "bits-witness-mismatch": ((
+        DEV,
+        'let dt = dtype_name(d)\n  let x: Int = a\n  let y: Int = b',
+        'let dt = if dtype_name(d) == "i32" { "i16" } else { dtype_name(d) }\n  let x: Int = a\n  let y: Int = b',
+    ),),
     "drop-store-token": ((
         RENDER,
         ' token=${name(tok_in)}${hints_attr(hints)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token',

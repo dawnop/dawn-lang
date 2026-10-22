@@ -16,7 +16,8 @@ beside this directory. So both are checked here, and the rule for each is
 
 ## OPERATIONS.md
 
-  * Surface. The functions are the `pub fn` of dev.dawn and prog.dawn. Each
+  * Surface. The functions are the `pub fn` of dev.dawn and prog.dawn, plus
+    the four bitwise prelude trait methods implemented on Tile. Each
     has exactly one row, and each row names a function that is there. A new
     public function does not compile past this gate until it has said what it
     records (a function that records nothing says `-`).
@@ -133,7 +134,12 @@ def feature_names(text):
 def check_operations(table_text, dev_text, prog_text, features_text):
     problems = []
     dev, prog = pub_fns(dev_text), pub_fns(prog_text)
-    surface = set(dev) | set(prog)
+    # Operator methods are public through their prelude traits, rather than
+    # through top-level function exports. Each still owes one operation row.
+    operators = re.findall(
+        r"impl[^\n]*\b(?:BitAnd|BitOr|BitXor|BitNot)\[Tile\[\w+\]\]\s*\{\s*"
+        r"effect \w+ = !Dev\s*fn (bit_\w+)\(", dev_text)
+    surface = set(dev) | set(prog) | set(operators)
     both = sorted(set(dev) & set(prog))
     if both:
         problems.append(f"{', '.join(both)} is public in both dev.dawn and prog.dawn, so a row cannot say which")
@@ -305,6 +311,7 @@ def self_test():
     cases = [
         ("the real tables are clean (the positive control)", "ops", ops, None),
         ("a public function with no row", "ops", drop(ops, "add"), "`add` is a public function and OPERATIONS.md has no row"),
+        ("an operator method with no row", "ops", drop(ops, "bit_and"), "`bit_and` is a public function and OPERATIONS.md has no row"),
         ("a row for a function that is not there", "ops", ops + "| `no_such_fn` | `addf` | - |\n",
          "`no_such_fn` is not a public function"),
         ("a misspelled operation", "ops", ops.replace("| `add` | `addf` |", "| `add` | `addff` |", 1),
