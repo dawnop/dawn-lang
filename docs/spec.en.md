@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 67cc2a5fb6d0b2f0 -->
+<!-- doc-check: translation-of docs/spec.md @ 1903e5a71c72006b -->
 
 # Dawn Language Specification
 
@@ -1011,21 +1011,21 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   (callable directly, by UFCS, or in a pipeline).
 - **Injection is a per-trait property**: whether a trait's method names occupy the function
   namespace is decided by that trait. Today a `trait` declaration always injects, and the six
-  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` inject too; **the twenty whose method name the
+  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` inject too; **the twenty-one whose method name the
   language consumes on the user's behalf do not**, and their method names appear only in impl
   bodies, in documentation and in error messages: `Index` (consumed by `[]`, §4.8), `Display`
   (consumed by `to_string` and `${...}`, §4.3), the six arithmetic traits
   `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg` (consumed by the operators, §4.3), `FromInt`/`FromFloat`
   (consumed by numeric literals, §1.5) and `StagedIter`/`StagedVar` (consumed by the staged
-  `for`, §4.7), `StagedCond` (staged `if`, §4.6), and the seven bitwise and shift traits below.
-- **Twenty-six built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
+  `for`, §4.7), `StagedCond`/`StagedResult` (staged `if`, §4.6), and the seven bitwise and shift traits below.
+- **Twenty-seven built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
   `==`/`!=`), `Hash` (`hash`), `Show` (`show`, the **nested** rendering, and the bound
   `to_string` asks for), `Iter` (behind `for..in`, §4.7), `Len` (`len`, the number of elements a
   container holds), `Index` (behind `[]`, §4.8),
   `Display` (`display`, the **top-level** rendering, behind `to_string` and `${...}`, §4.3),
   the six arithmetic traits behind `+ - * / %` and unary `-` (see their entry below),
   `FromInt`/`FromFloat` behind numeric literals (the entry after that), and
-  `StagedIter`/`StagedVar` behind the staged `for`, `StagedCond` behind the staged `if`, and the seven bitwise and shift traits.
+  `StagedIter`/`StagedVar` behind the staged `for`, `StagedCond`/`StagedResult` behind the staged `if`, and the seven bitwise and shift traits.
   The impls for the scalars ship with the language;
   `derive Ord` / `derive Show` cast an ordinary impl, and on a generic type a conditional impl;
   `Display` cannot be derived (the reason is under `Display` below).
@@ -1122,6 +1122,12 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   defaults to pure; generic code projects `!C.StagedCond`. The language provides no impl,
   including for Bool; opaque types do not inherit the underlying impl. The name is reserved
   in trait and effect declaration positions.
+- **`StagedResult`** (staged `if` results, §4.6):
+  `trait StagedResult[T] { type Slot  effect StagedResult = !()  fn result_open() -> T.Slot !T.StagedResult  fn result_set(s: T.Slot, v: T) -> Unit !T.StagedResult  fn result_get(s: T.Slot) -> T !T.StagedResult }`.
+  The result type T chooses the slot independently of the condition. Open takes no initial value;
+  both arms assign the slot, and get is legal only after merging. Methods do not inject, it cannot
+  be derived, and its same-named associated effect defaults to pure. Host scalars have no built-in
+  impl; opaque types do not inherit it. The name is reserved for trait and effect declarations.
 - **`BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr`/`Ushr`/`BitNot`** (§4.3) implement
   `& | ^ << >> >>> ~`, always returning the subject type. The first three are homogeneous
   binary operations; `BitNot` is unary. Each shift has its own associated count type:
@@ -1817,15 +1823,22 @@ let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
 
 - **Staged `if`**: a non-Bool condition implementing `StagedCond` is rewritten into a call to
   its impl with two parameterless closures. The condition is evaluated once outside the arms,
-  before opening cells. The result is always `Unit`; non-Unit arm tails are rejected even in
-  statement position or when both have the same type. An omitted else is an empty Unit arm;
-  else-if remains nested inside the else arm. Arms have independent scopes and share the outer
+  before opening cells. A value form requires else and matching arm types, with the expected
+  type flowing into both arms; without an outer expectation, a self-sufficient arm supplies the
+  type for a context-dependent sibling. A non-Unit result T needs StagedResult: the checker opens
+  an uninitialized slot, writes it at each arm's normal exit and reads it only after staged_if
+  returns. Neither arm is evaluated eagerly; the slot has no user-visible binding and cannot
+  escape before the merge. Non-Unit values cannot be silently discarded as statements.
+  A Unit statement may omit else, which becomes an empty arm; else-if stays nested in else. Arms have independent scopes and share the outer
   vars' StagedVar cells (§4.7), opened and written back in declaration order; nested staged
   for/if reuses the enclosing cells. Read-only vars also need StagedVar; ordinary closures
   cannot capture the cells. The library protocol records both arms from the same entry state,
   carries the union of their writes, and yields the original value in an unwritten arm.
   The compiler does not construct a heterogeneous result tuple. Each arm's effects, including
-  generated get/set calls, must fit `C.StagedCond`; open/writeback effects are charged outside.
+  generated get/set/result_set calls, must fit `C.StagedCond`; cell open/writeback and result
+  open/get effects are charged outside. The library checks both assignments at the merge.
+  Device results must match dtype/shape without broadcasting, format promotion or host values
+  substituting for device results.
   break/continue/return/`?` cannot leave a staged conditional arm and name staged if in their
   diagnostics. Local jumps in a host loop inside an arm and a local function's own return
   remain legal. The language specifies no device type or rank; libraries validate conditions.

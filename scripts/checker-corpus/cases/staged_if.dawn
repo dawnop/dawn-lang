@@ -98,3 +98,28 @@ pub fn scope(c: Cond) -> Unit !Rec = {
   if c { let only_here = 1 } else { emit(to_string(only_here)) }
   emit(to_string(only_here))
 }
+
+# Results have their own protocol; initialized variable cells are not substitutes.
+pub type ResultSlot = { value: Option[Val] }
+impl StagedResult[Val] {
+  type Slot = ResultSlot
+  effect StagedResult = !Rec
+  fn result_open() -> ResultSlot !Rec = ResultSlot { value: None }
+  fn result_set(s: ResultSlot, v: Val) -> Unit !Rec = emit("result")
+  fn result_get(s: ResultSlot) -> Val !Rec = s.value!
+}
+pub type Other = { n: Int }
+pub fn different_results(c: Cond, v: Val, other: Other) -> Val !Rec = if c { v } else { other }
+pub fn host_in_arm(c: Cond, v: Val, host: Int) -> Val !Rec = if c { v } else { host }
+pub fn host_result(c: Cond, host: Int) -> Int !Rec = if c { host } else { host }
+pub fn one_result(c: Cond, v: Val) -> Val !Rec = if c { v } else { () }
+pub fn no_result_else(c: Cond, v: Val) -> Val !Rec = if c { v }
+pub fn escaped_result(c: Cond) -> Val !Rec = {
+  let answer = if c { answer } else { Val { n: 2 } }
+  answer
+}
+pub fn slot_effect(c: Pure, v: Val) -> Val !Rec = if c { v } else { v }
+pub fn generic_result[C: StagedCond, T: StagedResult](c: C, v: T) -> T !(C.StagedCond | T.StagedResult) =
+  if c { v } else { v }
+
+pub fn unit_without_else(c: Cond) -> Unit !Rec = { let value = if c { () } }

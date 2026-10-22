@@ -45,7 +45,7 @@ use check/tast.{
 }
 use check/types.{
   Ty, TyAdt, TyFn, TyOpaque, RESULT_ID, TyList, TyMap, TySet, TyString, TyBool, Sig, Sym, CtorI,
-  STAGED_VAR_ID, STAGED_ITER_ID, STAGED_COND_ID, is_lit_trait, impl_at, TyVar, EQ_ID, ORD_ID,
+  STAGED_VAR_ID, STAGED_ITER_ID, STAGED_COND_ID, STAGED_RESULT_ID, is_lit_trait, impl_at, TyVar, EQ_ID, ORD_ID,
   ty_show, sig_render, ctor_render, trait_of, adt_of, arg_slots, SlotAt,
   builtin_type_at, builtin_type_hard_reserved, builtin_type_render
 }
@@ -2756,17 +2756,25 @@ fn staged_for_parts(ts: Option[TStmt], pat: Pattern) -> Option[(TPat, TExpr, TEx
 ## Pair the user's condition and two arms with their generated typed pieces.
 ## The outer opens/writebacks must never appear as user references.
 fn staged_if_parts(te: Option[TExpr]) -> Option[(TExpr, TExpr, TExpr)] = {
-  let ss = match te { Some(XBlock(stmts, None, ..)) -> stmts, _ -> return None }
+  let ss = match te { Some(XBlock(stmts, _, ..)) -> stmts, _ -> return None }
   let cond = match get(ss, 0) { Some(TSLet(Some(_), _, x, ..)) -> x, _ -> return None }
   for st in ss {
     match st {
       TSExpr(XCallFn(_, _, [_, XLambda([], [], t, ..), XLambda([], [], f, ..)], _, _, Some(tid), ..), ..) ->
-        if tid == STAGED_COND_ID { return Some((cond, t, f)) }
+        if tid == STAGED_COND_ID { return Some((cond, staged_result_body(t), staged_result_body(f))) }
       _ -> ()
     }
   }
   None
 }
+
+## The result store is compiler plumbing; navigation belongs to its value.
+fn staged_result_body(x: TExpr) -> TExpr =
+  match x {
+    XCallFn(_, "result_set", [_, body], _, _, Some(tid), ..) ->
+      if tid == STAGED_RESULT_ID { body } else { x }
+    _ -> x
+  }
 
 ## The cell a staged `var_get` or `var_set` goes through, if `x` is one.
 fn staged_cell_use(x: TExpr) -> Option[(Int, List[TExpr])] =
