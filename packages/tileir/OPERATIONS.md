@@ -240,7 +240,9 @@ Each answers a `Tile[Bool]`. The `_u` forms are the unordered float predicates (
 
 ## Integer arithmetic
 
-The `_i` forms are `i32` tiles. The unsuffixed `addi`, `subi`, `muli`, `shli` and `shri` take any integer width.
+The `_i` forms are `i32` tiles. The unsuffixed `addi`, `subi` and `muli` take any integer width.
+
+The shift operators require `TileShiftDtype`: I8, I16, I32 or Int. Their Amount is the same tile type, with the existing rank-zero and singleton broadcasting. Each lane first masks its count with `width - 1`, including negative counts. Left shifts wrap, `>>` copies the sign bit, and `>>>` fills with zero. Every device shift is preceded by an explicit `andi`; operators carry `!Dev` and use the recording boundary location.
 
 | Function | Operation | Also |
 |---|---|---|
@@ -252,17 +254,15 @@ The `_i` forms are `i32` tiles. The unsuffixed `addi`, `subi`, `muli`, `shli` an
 | `max_i` | `maxi` | - |
 | `min_i` | `mini` | - |
 | `mulhi_i` | `mulhii` | - |
-| `shl_i` | `shli` | - |
-| `shr_i` | `shri` | - |
-| `shr_u` | `shri` | - |
 | `neg_i` | `negi` | - |
 | `abs_i` | `absi` | - |
+| `shl` | `shli` | `constant`, `andi` |
+| `shr` | `shri` | `constant`, `andi` |
+| `ushr` | `shri` | `constant`, `andi` |
 | `add_i64` | `addi` | - |
 | `addi` | `addi` | - |
 | `subi` | `subi` | - |
 | `muli` | `muli` | - |
-| `shli` | `shli` | - |
-| `shri` | `shri` | - |
 
 ## Conversions
 

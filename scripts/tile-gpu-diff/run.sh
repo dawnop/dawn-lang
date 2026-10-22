@@ -930,6 +930,7 @@ dtypes=(dtype_i16 dtype_i64 dtype_tf32 dtype_i4 pack_roundtrip)
 
 # The bitwise operators, one segment per operator at every supported width.
 bitwise_kernels=(bitwise_i8 bitwise_i16 bitwise_i32 bitwise_i64 bitwise_mask)
+shift_kernels=(shift_i8 shift_i16 shift_i32 shift_i64)
 
 # The tf32 mutant below names one of the five; the others are its
 # kernel-level control, and a tag mutant that moved them would be changing
@@ -1203,7 +1204,7 @@ echo "      arch: ${#arch_ran[@]} of ${#arch_kernels[@]} architecture-gated kern
 
 for k in vadd vadd_bf16 vadd_f32 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
-  "${shaped[@]}" "${dtypes[@]}" "${bitwise_kernels[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
+  "${shaped[@]}" "${dtypes[@]}" "${bitwise_kernels[@]}" "${shift_kernels[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
   "${hints[@]}" "${views[@]}" "${inbounds_ks[@]}" "${dyns[@]}" "${scalars[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
   "${sequenced[@]}" ${arch_ran[@]+"${arch_ran[@]}"}; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
@@ -2750,6 +2751,20 @@ case "$bitwise_verdict" in
   *) cat "$work/bitwise.err" >&2; fail "bitwise_diff disagreed or printed no verdict (exit $rc)" ;;
 esac
 
+# Every operator and supported format, including typed full-width i64.
+build_native "$root/std" "$work/shift.bin" "$here/shift_diff.dawn"
+shift_cubins=()
+for k in "${shift_kernels[@]}"; do shift_cubins+=("$work/$k.cubin"); done
+rc=0
+device "$work/shift.bin" "${shift_cubins[@]}" > "$work/shift.out" 2> "$work/shift.err" || rc=$?
+cat "$work/shift.out"
+shift_verdict="$(sed -n 's/^tile-gpu-diff: //p' "$work/shift.out" | tail -n 1)"
+case "$shift_verdict" in
+  pass) ;;
+  blocked:*) ;;
+  *) cat "$work/shift.err" >&2; fail "shift_diff disagreed or printed no verdict (exit $rc)" ;;
+esac
+
 # The ledger records one verdict for the tree: every family passes (or was
 # skipped on purpose), or it is the first thing that stopped one of them. The
 # list is in run order and is the only place the fold reads; fold_verdict.sh
@@ -2762,7 +2777,7 @@ verdict_families=(
   dtype_verdict arch_verdict loop_verdict dbg_verdict dbg_fail_verdict
   dbg_print_verdict shape_verdict attr_verdict global_verdict sym_verdict
   alloca_verdict view_verdict dyn_verdict gsview_verdict hint_verdict seq_verdict
-  scalar_verdict bitwise_verdict
+  scalar_verdict bitwise_verdict shift_verdict
 )
 fold_verdict_selftest || fail "the verdict fold's negative control failed"
 fold_script_selftest "$here/run.sh" || fail "a family verdict is assigned in run.sh but not read by the fold"
@@ -2956,6 +2971,25 @@ family_pkg_verdict() { # name, bin, clean-verdict, red-kernels-separated-by-spac
     echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $clean, before any launch reaches the device"
   fi
 }
+
+# Boundary counts must change both the bytecode and real numerical answers
+# when the surface mask is removed. Every width is tested independently.
+for shift_mutant in shift-count-unmasked shift-signed-as-logical; do
+  shift_pkg="$work/pkg-$shift_mutant"
+  cp -r "$root/packages/tileir" "$shift_pkg"
+  if [ "$shift_mutant" = shift-count-unmasked ]; then
+    python3 "$here/mutate.py" "$shift_pkg/src/dev.dawn" shift-count-unmasked \
+      '  let count = t_binaryi("andi", dt, shape_of(y), y, limit)' \
+      '  let count = y'
+  else
+    python3 "$here/mutate.py" "$shift_pkg/src/bytecode.dawn" shift-signed-as-logical \
+      '  "shri" -> [SIGNED]' \
+      '  "shri" -> [UNSIGNED]'
+  fi
+  mutant_kernels "$shift_mutant" "$shift_pkg" "${shift_kernels[@]}"
+  family_pkg_verdict "$shift_mutant" "$work/shift.bin" "$shift_verdict" \
+    "shift_i8 shift_i16 shift_i32 shift_i64 shift_i64_big" "${shift_kernels[@]}"
+done
 
 mutant_kernels mask-all-true "$mutant_pkg" "${strided[@]}"
 family_pkg_verdict mask-all-true "$work/strided.bin" "$strided_verdict" \
@@ -5841,7 +5875,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/scan_diff.dawn \
   scripts/tile-gpu-diff/atom_diff.dawn scripts/tile-gpu-diff/erf_diff.dawn \
   scripts/tile-gpu-diff/trig_diff.dawn scripts/tile-gpu-diff/shape_diff.dawn \
-  scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/bitwise_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
+  scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/bitwise_diff.dawn scripts/tile-gpu-diff/shift_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
   scripts/tile-gpu-diff/attr_diff.dawn scripts/tile-gpu-diff/assert_diff.dawn \
   scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/sym_diff.dawn \
   scripts/tile-gpu-diff/hint_diff.dawn \
@@ -5863,6 +5897,7 @@ summary="$summary dyn=$dyn_shape_line $dyn_probe"
 summary="$summary gsview=$gsview_shape_line $gsview_probe"
 summary="$summary scalar=$scalar_shape_line $scalar_probe"
 summary="$summary bitwise:$(sed -n 's/^tiers //p' "$work/bitwise.out" | tail -n 1)"
+summary="$summary shift:$(sed -n 's/^tiers //p' "$work/shift.out" | tail -n 1)"
 summary="$summary arch=$arch_probe"
 summary="$summary asm=$asm_probe"
 if [ -n "$note" ]; then line="$line # inputs=$inputs_digest $note; $summary"; else line="$line # inputs=$inputs_digest $summary"; fi

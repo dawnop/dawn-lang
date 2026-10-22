@@ -1,7 +1,8 @@
 # 按位与移位运算符 trait 设计
 
 > 状态：**current**。刀 0 已证明 Amount 可以复用现有关联类型；刀 1 交付编译器。
-> 刀 2 在 v0.97.0 种子后接入 std 定宽整数；刀 3 接入 Tile 的按位与掩码运算，移位留刀 4。
+> 刀 2 在 v0.97.0 种子后接入 std 定宽整数；刀 3 接入 Tile 的按位与掩码运算；
+> 刀 4 接入 Tile 移位并统一计数掩码语义，三架构设备与定向验收结果见本节。
 > 权威条文见 [spec.md](spec.md) §3.5、§4.3、§11；算术先例见
 > [arith-operator-traits-design.md](arith-operator-traits-design.md)，投影纪律见
 > [assoc-types-design.md](assoc-types-design.md)。
@@ -132,11 +133,56 @@ tileinterp-diff 的 178 个案例一致、21 个按既有规则拒绝，无数�
 站点读取器按空格与制表符拆分并跳过空行，保持数组顺序；仍逐个查找真实执行块，
 没有对应执行块继续报错。此修正只影响站点证据展示，不改设备测试程序或摘要规则。
 
+## 刀 4：Tile 移位与计数掩码
+
+三个条件 impl 约束 D: TileShiftDtype，分别绑定 ShlAmount、ShrAmount、UshrAmount
+为 Tile[D]，关联效果固定 !Dev。每 lane 的动态计数与主体同 dtype，Bool、U8、浮点
+没有资格；资格与实际记录 dtype 一致性、形状及广播沿刀 3 的检查。泛型转发与捕获闭包
+复用现有字典及关联效果证据，操作数按书写顺序各求值一次。
+
+记录先以 shift_dtype 见证选定宽度 w，再发同 dtype 的常量 w−1 与 andi，最后发
+shli、signed shri 或 unsigned shri。常量和动态计数都保留显式掩码，负数按二补码低位
+取 k = n & (w−1)。左移截去高位，不增加溢出假设；>> 补符号，>>> 补零，k=0 保留位型。
+运算符仍用 called_bare，英文拒绝落在用户记录边界，不承诺符号自身精确位置。
+
+删除 shl_i、shr_i、shr_u、shli、shri 五个公开入口并迁移全部调用，不留兼容层；
+tileir 0.23.0 升为 0.24.0。底层 BinaryI 协议与方言 opcode 保留。tileinterp 的三个
+整数移位统一先掩码，删除 shift_ub 分支；tileref 独立按有限位宽计算并重建有符号结果。
+解释器的原始记录入口也采用该语义，不能靠旧越界拒绝掩盖设备漏发掩码。
+
+四种整数各增加逐 lane 边界 kernel，覆盖 0、w−1、w、w+1、负计数及最小有符号主体，
+同时比较三个移位的独立输出段。i64 另经 typed Int 通道比较完整位型，避免 Float 精度损失。
+同一数据由 tileref、tileinterp 和三种架构真实设备比较；设备整轮录制严格串行。
+负控分别删除设备掩码、把 signed shri 改为 unsigned、恢复解释器越界拒绝，并验证
+Float/Bool 等不合格 dtype、混 dtype Amount 和缺 Dev 的精确拒绝。
+
+逐 kernel 审核所有移位 golden 的新增 andi、SSA 变化及签名属性，其他既有 golden 保持
+逐字节一致。flash_attn.map 若受源码行移动影响，以规范命令重录并审核字段。
+只使用 emit-labels.txt 中存在的精确标签；不发明 tile golden 标签，不用通配豁免。
+本刀不作性能断言，不修改 workflow 或门禁预算。
+
+定向实测：tileir 275 项、tileinterp 182 项、tileref 32 项测试通过，完整 dispatcher 的
+JVM 与 C Core lint 通过。tileinterp-diff 的 182 个案例一致、22 个按既有规则拒绝，
+无数值不一致；四个新增 shift kernel 均参与比较。额外的 typed i64 案例受解释器既有
+Float 存储精度边界拒绝，完整位型另由设备与 Int oracle 比较，不记作解释器数值通过。
+原始整数解释器测试独立覆盖四种宽度、极端计数、最小有符号主体及两档 UB 检查。
+
+229 个 golden 的 JVM/native 文本、字节、固定版本汇编与反汇编全部通过；全矩阵
+330 个工作项与独立覆盖汇总通过。既有 225 对中仅 rainbow、int_ops、dtype_i16、
+dtype_i4 四对因显式掩码变化；撤销已逐条核验的掩码与扩展节点并统一 SSA 后，四个
+原程序全文相同，其余 442 个既有文件逐字节不变。新增四对分别使用 7、15、31、63。
+flash_attn.map 以规范命令重录，38 个调用和 50 个操作不变，仅源码行号统一后移 9。
+
+sm_86、sm_90、sm_100 的五个新移位案例均逐位一致，每架构核对 7680 个结果与
+80 个未写尾部元素，含 typed i64 的 INT_MIN、INT_MAX、超过 2^53 的位型和极端计数。
+三本台账整轮严格串行并共用 inputs=06ef9587f9ba；漏掩码与算术右移误用补零两项
+设备负控在三架构上都令五个案例明确数值失败。完整台账和最终全集门见交付报告。
+
 ## 不做的（理由）
 
 1. 不做多 RHS、多参数 trait、关联类型相等约束、隐式转换与 impl 特化，单一 Amount 已表达本项消费者。
 2. 不做合并 Bits/FiniteBits、位宽成员或专用计数类型，掩码类型不应被迫实现移位。
 3. 不做宿主 Bool 按位、Float 位模式运算或复合赋值，没有本刀消费者。
 4. 不在 selfhost 源码中消费窄整数新运算符；种子 v0.97.0 已提供 std 所需 trait。
-5. 不在刀 3 修改移位语义；设备计数掩码与五个移位入口的迁移留刀 4。
+5. 不增加 Tile 与宿主 Int 的混合移位；显式 consti 和同型设备计数已覆盖本刀。
 6. 不扩展 C 的可移植性承诺，原有 Int 掩码及无符号左移发射继续服务此刀。

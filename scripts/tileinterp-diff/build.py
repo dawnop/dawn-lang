@@ -58,6 +58,7 @@ FAMILIES = [
     ("trig", "trig_diff.dawn", "trigs"),
     ("dtype", "dtype_diff.dawn", "dtypes"),
     ("bitwise", "bitwise_diff.dawn", "bitwise_kernels"),
+    ("shift", "shift_diff.dawn", "shift_kernels"),
     ("loop", "loop_diff.dawn", "loops"),
     ("assert", "assert_diff.dawn", "dbg"),
     ("shape", "shape_diff.dawn", "shaped"),

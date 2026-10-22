@@ -33,24 +33,32 @@ cuda_tile.module @m {
     %36 = constant <i32: 2> : tile<i32>
     %37 = addi %35, %36 : tile<i32>
     %38 = store_view_tko weak %33, %18[%37, %4] token=%31 : tile<1x128xi16>, partition_view<tile=(1x128), padding_value = zero, tensor_view<5x512xi16, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
-    %39 = constant <i16: 3> : tile<128xi16>
-    %40 = shli %7, %39 : tile<128xi16>
-    %41 = constant <i16: 2> : tile<128xi16>
-    %42 = shri %40, %41 signed : tile<128xi16>
-    %43 = reshape %42 : tile<128xi16> -> tile<1x128xi16>
-    %44 = constant <i32: 8> : tile<i32>
-    %45 = muli %20, %44 : tile<i32>
-    %46 = constant <i32: 3> : tile<i32>
-    %47 = addi %45, %46 : tile<i32>
-    %48 = store_view_tko weak %43, %18[%47, %4] token=%38 : tile<1x128xi16>, partition_view<tile=(1x128), padding_value = zero, tensor_view<5x512xi16, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
-    %49 = itof %7 signed rounding<nearest_even> : tile<128xi16> -> tile<128xf64>
-    %50 = ftoi %49 signed rounding<nearest_int_to_zero> : tile<128xf64> -> tile<128xi16>
+    %39 = constant <i16: 3> : tile<i16>
+    %40 = constant <i16: 15> : tile<i16>
+    %41 = andi %39, %40 : tile<i16>
+    %42 = reshape %41 : tile<i16> -> tile<1xi16>
+    %43 = broadcast %42 : tile<1xi16> -> tile<128xi16>
+    %44 = shli %7, %43 : tile<128xi16>
+    %45 = constant <i16: 2> : tile<i16>
+    %46 = constant <i16: 15> : tile<i16>
+    %47 = andi %45, %46 : tile<i16>
+    %48 = reshape %47 : tile<i16> -> tile<1xi16>
+    %49 = broadcast %48 : tile<1xi16> -> tile<128xi16>
+    %50 = shri %44, %49 signed : tile<128xi16>
     %51 = reshape %50 : tile<128xi16> -> tile<1x128xi16>
     %52 = constant <i32: 8> : tile<i32>
     %53 = muli %20, %52 : tile<i32>
-    %54 = constant <i32: 4> : tile<i32>
+    %54 = constant <i32: 3> : tile<i32>
     %55 = addi %53, %54 : tile<i32>
-    %56 = store_view_tko weak %51, %18[%55, %4] token=%48 : tile<1x128xi16>, partition_view<tile=(1x128), padding_value = zero, tensor_view<5x512xi16, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
+    %56 = store_view_tko weak %51, %18[%55, %4] token=%38 : tile<1x128xi16>, partition_view<tile=(1x128), padding_value = zero, tensor_view<5x512xi16, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
+    %57 = itof %7 signed rounding<nearest_even> : tile<128xi16> -> tile<128xf64>
+    %58 = ftoi %57 signed rounding<nearest_int_to_zero> : tile<128xf64> -> tile<128xi16>
+    %59 = reshape %58 : tile<128xi16> -> tile<1x128xi16>
+    %60 = constant <i32: 8> : tile<i32>
+    %61 = muli %20, %60 : tile<i32>
+    %62 = constant <i32: 4> : tile<i32>
+    %63 = addi %61, %62 : tile<i32>
+    %64 = store_view_tko weak %59, %18[%63, %4] token=%56 : tile<1x128xi16>, partition_view<tile=(1x128), padding_value = zero, tensor_view<5x512xi16, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
     return
   }
 }

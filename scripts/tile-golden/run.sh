@@ -560,7 +560,8 @@ kernels=(
   scalar_scale scalar_len scalar_loop scalar_wide
   dtype_e5m3 mmaf_scaled_e5m3
   vadd_producer vadd_debug foldif_debug
-  bitwise_i8 bitwise_i16 bitwise_i32 bitwise_i64 bitwise_mask)
+  bitwise_i8 bitwise_i16 bitwise_i32 bitwise_i64 bitwise_mask
+  shift_i8 shift_i16 shift_i32 shift_i64)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -693,6 +694,7 @@ mutants=(
   debug-line-off-by-one
   debug-count-short
   mask-and-as-andi bits-witness-mismatch bits-type-rejections
+  shift-count-unmasked shift-witness-mismatch
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -2387,7 +2389,7 @@ fi
 if run_item pack-result-shape-unhalved; then
   mutant_project pack-result-shape-unhalved prog.dawn
   refused_mutant_checks pack-result-shape-unhalved dtype_i4 \
-    'tileir: kernel `dtype_i4`: op #60 `select`: condition is tile<256xi1>, declared tile<32xi1>'
+    'tileir: kernel `dtype_i4`: op #66 `select`: condition is tile<256xi1>, declared tile<32xi1>'
 fi
 
 # 55. The writer gives a `tensor_view` the POINTER tag. Both are type-table
@@ -2565,7 +2567,7 @@ fi
 if run_item ftoi-flags-unwritten; then
   mutant_project ftoi-flags-unwritten bytecode.dawn
   writer_mutant_checks ftoi-flags-unwritten int_ops func-one-short \
-    "error at offset 146: invalid integer value for enum type: 6"
+    "error at offset 185: invalid integer value for enum type: 6"
 fi
 
 # 68. The view load and store stop writing `inbounds`, the DenseBoolArrayAttr
@@ -3072,7 +3074,32 @@ if run_item bits-type-rejections; then
     diff -u "$here/bitwise-rejected.expected" "$work/bits-rejected.errors" >&2 || true
     fail "bits-type-rejections: the expected checker refusals changed"
   }
-  echo "PASS  bitwise checker: ineligible formats, mixed masks, missing Dev and all five removed names refused"
+  echo "PASS  bitwise checker: ineligible formats, mixed masks, missing Dev and all ten removed names refused"
+fi
+
+# A missed mask is visible even when the interpreter would normalize the
+# raw instruction; require a successful trace and a changed golden.
+if run_item shift-count-unmasked; then
+  mutant_project shift-count-unmasked dev.dawn
+  mutant_run shift-count-unmasked shift_i32
+  for backend in jvm native; do
+    out="$work/m-shift-count-unmasked.shift_i32.$backend"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "shift-count-unmasked did not render"; }
+    ! cmp -s "$here/shift_i32.mlir" "$out" || fail "shift-count-unmasked stayed golden on $backend"
+    ! grep -Fq 'andi ' "$out" || fail "shift-count-unmasked still masks the count"
+  done
+  echo "PASS  mutant: shift-count-unmasked (the shift golden differs on both backends)"
+fi
+if run_item shift-witness-mismatch; then
+  mutant_project shift-witness-mismatch dev.dawn
+  mutant_run shift-witness-mismatch shift_i32
+  for backend in jvm native; do
+    out="$work/m-shift-witness-mismatch.shift_i32.$backend"
+    [ "$(cat "$out.rc")" != 0 ] || fail "shift-witness-mismatch stayed green on $backend"
+    grep -Fq 'declared tile<128xi16>' "$out.err" || { cat "$out.err" >&2; fail "shift-witness-mismatch failed for another reason"; }
+    grep -Fq 'src/main.dawn:' "$out.err" || fail "shift-witness-mismatch did not name a user line"
+  done
+  echo "PASS  mutant: shift-witness-mismatch (both backends refuse the wrong declared dtype at the user boundary)"
 fi
 
 _item_tick ""

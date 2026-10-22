@@ -38,6 +38,11 @@ MMA = "packages/tileinterp/src/mma.dawn"
 FORMATS = "packages/tileinterp/src/formats.dawn"
 
 MUTATIONS = {
+    "shift-ub-restored": ((
+        INTERP,
+        '  "shli" -> wrap(w, a << (b & (w - 1)))',
+        '  "shli" -> if b < 0 || b >= w { if cx.ub { refuse_ub("shift_ub restored") } else { 0 } } else { wrap(w, a << b) }',
+    ),),
     "mulf-adds": ((
         INTERP,
         '  "mulf" -> a * b\n',

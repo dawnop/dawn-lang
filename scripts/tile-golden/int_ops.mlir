@@ -20,43 +20,55 @@ cuda_tile.module @m {
     %21 = mini %7, %12 signed : tile<128xi32>
     %22 = negi %7 : tile<128xi32>
     %23 = absi %16 : tile<128xi32>
-    %24 = constant <i32: 3> : tile<128xi32>
-    %25 = shli %7, %24 : tile<128xi32>
-    %26 = constant <i32: 5> : tile<128xi32>
-    %27 = shri %7, %26 signed : tile<128xi32>
-    %28 = constant <i32: 5> : tile<128xi32>
-    %29 = shri %7, %28 unsigned : tile<128xi32>
-    %30 = itof %7 signed rounding<nearest_even> : tile<128xi32> -> tile<128xf64>
-    %31 = constant <f64: 0.5> : tile<128xf64>
-    %32 = mulf %30, %31 rounding<nearest_even> : tile<128xf64>
-    %33 = ftoi %32 signed rounding<nearest_int_to_zero> : tile<128xf64> -> tile<128xi32>
-    %34 = trunci %7 : tile<128xi32> -> tile<128xi1>
-    %35 = exti %34 unsigned : tile<128xi1> -> tile<128xi32>
-    %36 = bitcast %7 : tile<128xi32> -> tile<128xf32>
-    %37 = bitcast %36 : tile<128xf32> -> tile<128xi32>
-    %38 = addi %16, %17 : tile<128xi32>
-    %39 = xori %38, %18 : tile<128xi32>
-    %40 = addi %39, %19 : tile<128xi32>
-    %41 = xori %40, %20 : tile<128xi32>
-    %42 = addi %41, %21 : tile<128xi32>
-    %43 = xori %42, %22 : tile<128xi32>
-    %44 = addi %43, %23 : tile<128xi32>
-    %45 = xori %44, %25 : tile<128xi32>
-    %46 = addi %45, %27 : tile<128xi32>
-    %47 = xori %46, %29 : tile<128xi32>
-    %48 = andi %7, %12 : tile<128xi32>
-    %49 = addi %47, %48 : tile<128xi32>
-    %50 = ori %7, %12 : tile<128xi32>
-    %51 = xori %49, %50 : tile<128xi32>
-    %52 = xori %7, %12 : tile<128xi32>
-    %53 = addi %51, %52 : tile<128xi32>
-    %54 = xori %53, %33 : tile<128xi32>
-    %55 = addi %54, %35 : tile<128xi32>
-    %56 = xori %55, %37 : tile<128xi32>
-    %57 = assume div_by<16>, %arg2 : tile<ptr<i32>>
-    %58 = make_tensor_view %57, shape = [1000], strides = [1] : tensor_view<1000xi32, strides=[1]>
-    %59 = make_partition_view %58 : partition_view<tile=(128), padding_value = zero, tensor_view<1000xi32, strides=[1]>, dim_map=[0]>
-    %60 = store_view_tko weak %56, %59[%4] token=%0 : tile<128xi32>, partition_view<tile=(128), padding_value = zero, tensor_view<1000xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %24 = constant <i32: 3> : tile<i32>
+    %25 = constant <i32: 31> : tile<i32>
+    %26 = andi %24, %25 : tile<i32>
+    %27 = reshape %26 : tile<i32> -> tile<1xi32>
+    %28 = broadcast %27 : tile<1xi32> -> tile<128xi32>
+    %29 = shli %7, %28 : tile<128xi32>
+    %30 = constant <i32: 5> : tile<i32>
+    %31 = constant <i32: 31> : tile<i32>
+    %32 = andi %30, %31 : tile<i32>
+    %33 = reshape %32 : tile<i32> -> tile<1xi32>
+    %34 = broadcast %33 : tile<1xi32> -> tile<128xi32>
+    %35 = shri %7, %34 signed : tile<128xi32>
+    %36 = constant <i32: 5> : tile<i32>
+    %37 = constant <i32: 31> : tile<i32>
+    %38 = andi %36, %37 : tile<i32>
+    %39 = reshape %38 : tile<i32> -> tile<1xi32>
+    %40 = broadcast %39 : tile<1xi32> -> tile<128xi32>
+    %41 = shri %7, %40 unsigned : tile<128xi32>
+    %42 = itof %7 signed rounding<nearest_even> : tile<128xi32> -> tile<128xf64>
+    %43 = constant <f64: 0.5> : tile<128xf64>
+    %44 = mulf %42, %43 rounding<nearest_even> : tile<128xf64>
+    %45 = ftoi %44 signed rounding<nearest_int_to_zero> : tile<128xf64> -> tile<128xi32>
+    %46 = trunci %7 : tile<128xi32> -> tile<128xi1>
+    %47 = exti %46 unsigned : tile<128xi1> -> tile<128xi32>
+    %48 = bitcast %7 : tile<128xi32> -> tile<128xf32>
+    %49 = bitcast %48 : tile<128xf32> -> tile<128xi32>
+    %50 = addi %16, %17 : tile<128xi32>
+    %51 = xori %50, %18 : tile<128xi32>
+    %52 = addi %51, %19 : tile<128xi32>
+    %53 = xori %52, %20 : tile<128xi32>
+    %54 = addi %53, %21 : tile<128xi32>
+    %55 = xori %54, %22 : tile<128xi32>
+    %56 = addi %55, %23 : tile<128xi32>
+    %57 = xori %56, %29 : tile<128xi32>
+    %58 = addi %57, %35 : tile<128xi32>
+    %59 = xori %58, %41 : tile<128xi32>
+    %60 = andi %7, %12 : tile<128xi32>
+    %61 = addi %59, %60 : tile<128xi32>
+    %62 = ori %7, %12 : tile<128xi32>
+    %63 = xori %61, %62 : tile<128xi32>
+    %64 = xori %7, %12 : tile<128xi32>
+    %65 = addi %63, %64 : tile<128xi32>
+    %66 = xori %65, %45 : tile<128xi32>
+    %67 = addi %66, %47 : tile<128xi32>
+    %68 = xori %67, %49 : tile<128xi32>
+    %69 = assume div_by<16>, %arg2 : tile<ptr<i32>>
+    %70 = make_tensor_view %69, shape = [1000], strides = [1] : tensor_view<1000xi32, strides=[1]>
+    %71 = make_partition_view %70 : partition_view<tile=(128), padding_value = zero, tensor_view<1000xi32, strides=[1]>, dim_map=[0]>
+    %72 = store_view_tko weak %68, %71[%4] token=%0 : tile<128xi32>, partition_view<tile=(128), padding_value = zero, tensor_view<1000xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }

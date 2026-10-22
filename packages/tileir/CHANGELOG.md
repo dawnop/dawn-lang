@@ -7,6 +7,13 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.24.0 (2026-10-22)
+
+- Add conditional `<<`, `>>`, `>>>` implementations for `Tile[D]` with `D: TileShiftDtype`, same-type Tile Amounts and ground `!Dev` effects.
+- Mask every lane's count with `width - 1` before device shifts, including negative counts. Left shifts wrap, `>>` is arithmetic, and `>>>` is logical.
+- Remove `shl_i`, `shr_i`, `shr_u`, `shli` and `shri` without compatibility wrappers. Operators use the user recording boundary location.
+- Align tileinterp and tileref with masked counts and cover all four integer widths with boundary kernels.
+
 ## 0.23.0 (2026-10-22)
 
 - Add `TileBitsDtype` for Bool, I8, I16, I32 and Int and `TileShiftDtype` for the four signed integer formats, each with a pure dtype witness.

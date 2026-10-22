@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 1903e5a71c72006b -->
+<!-- doc-check: translation-of docs/spec.md @ 8f2ffa2393e4c6ce -->
 
 # Dawn Language Specification
 
@@ -5087,6 +5087,13 @@ The reasons, the roadmap and the measurements are in
   not a power of two; loops nested deeper than `MAX_LOOP_DEPTH` (16); one recording issuing
   more than `MAX_HANDLES` (65536) handles; a region left open, or closed with the wrong
   number of values.
+- `Tile[I8/I16/I32/Int]` supports `<< >> >>>` through conditional `TileShiftDtype` impls.
+  All three Amounts are the same `Tile[D]`, and effects are ground `!Dev`. Dtypes must
+  agree; shapes support only rank-0 and same-rank singleton broadcasting. Every lane
+  first takes `k = n & (w - 1)`, including negative counts, with an explicit device `andi`
+  before shifting. Left shifts wrap, `>>` fills with the sign bit, `>>>` fills with zero,
+  and zero counts preserve the bit pattern. Bool, U8 and floating tiles cannot shift.
+  The five named shift functions are removed; tileinterp and tileref use the same masked counts.
 - Outputs: `tileir/render`'s `render(prog)` gives text in the `cuda_tile` dialect, and
   `tileir/bytecode`'s `encode(prog)` gives `cuda-tile` bytecode whose version is pinned in
   `BYTECODE_MAJOR` / `BYTECODE_MINOR`. One `TileProg` is one module holding one

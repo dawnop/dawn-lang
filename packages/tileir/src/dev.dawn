@@ -64,7 +64,7 @@ pub trait TileBitsDtype[D] {
   fn bits_dtype() -> Dtype[D]
 }
 
-## The signed integer formats whose tiles will admit shifts. Separate from
+## The signed integer formats whose tiles admit shifts. Separate from
 ## TileBitsDtype so that a mask need not promise a shift operation.
 pub trait TileShiftDtype[D] {
   fn shift_dtype() -> Dtype[D]
@@ -518,8 +518,8 @@ pub opaque type Ptrs[D] = Int
 ##
 ## `shri` and `shru` are one dialect opcode under two signedness
 ## attributes: `shri` is arithmetic (the sign bit is copied down) and
-## `shru` is logical (zeros are shifted in), and the two differ on every
-## negative operand. `divi` / `remi` / `maxi` / `mini` are signed, as
+## `shru` is logical (zeros are shifted in). They differ for a negative
+## operand when the masked count is nonzero. `divi` / `remi` / `maxi` / `mini` are signed, as
 ## `t_cmpi` is; `mulhii` takes no signedness at all (the dialect defines it
 ## for unsigned operands, and `bytecode.dawn` says so where it is encoded).
 ## Overflow is `none` everywhere: the device wraps, and so must a host
@@ -1573,7 +1573,7 @@ pub fn min[D](a: Tile[D], b: Tile[D], propagate_nan: Bool = false, at: Loc = cal
 # `ordered`, `relaxed device`, and no unit attribute set anywhere. Knife T4
 # wrote the other values as suffixed names (`addf_down`, `addf_ftz`,
 # `maxf_nan`, `add_i_nsw`, ...) and gave a reason: the attribute is part of
-# what the operation IS, as it is for `shr_i` and `shr_u`, a caller picks
+# what the operation IS, as it is for `>>` and `>>>`, a caller picks
 # one at the point of use, and a name can be grepped for.
 #
 # Knife K2 made them parameters with the dialect's defaults, and the reason
@@ -1599,7 +1599,7 @@ pub fn min[D](a: Tile[D], b: Tile[D], propagate_nan: Bool = false, at: Loc = cal
 #
 # What stays a separate name: `sqrt_approx` (`approx` is a precision
 # contract, a tolerance tier, and not a rounding direction, so `Rounding`
-# has no `Approx`), `shr_i` / `shr_u` and the `*_u` comparisons (signedness
+# has no `Approx`), `>>` / `>>>` and the `*_u` comparisons (signedness
 # changes the answer, not how it is rounded), and `add_i64` (another result
 # type).
 #
@@ -2221,23 +2221,6 @@ pub fn min_i(a: Tile[I32], b: Tile[I32], at: Loc = caller()) -> Tile[I32] !Dev =
 ## product takes this beside `mul_i`.
 pub fn mulhi_i(a: Tile[I32], b: Tile[I32], at: Loc = caller()) -> Tile[I32] !Dev = called("mulhi_i", at, () => binary_int("mulhii", a, b))
 
-## The element-wise left shift `a << b`, wrapping: the bits shifted past the
-## top are dropped. A shift count outside `[0, 32)` is undefined on the
-## device.
-pub fn shl_i(a: Tile[I32], b: Tile[I32], at: Loc = caller()) -> Tile[I32] !Dev = called("shl_i", at, () => binary_int("shli", a, b))
-
-## The element-wise ARITHMETIC right shift `a >> b`: the sign bit is copied
-## into the vacated positions, so a negative operand stays negative. This
-## is `shri` with `signedness<signed>`.
-pub fn shr_i(a: Tile[I32], b: Tile[I32], at: Loc = caller()) -> Tile[I32] !Dev = called("shr_i", at, () => binary_int("shri", a, b))
-
-## The element-wise LOGICAL right shift `a >>> b`: zeros are shifted in, so
-## a negative operand becomes a large positive one. This is the SAME opcode
-## as `shr_i` with `signedness<unsigned>`, and the two differ on every
-## negative operand and nowhere else -- which is what
-## scripts/tile-gpu-diff's shri-always-logical mutant measures.
-pub fn shr_u(a: Tile[I32], b: Tile[I32], at: Loc = caller()) -> Tile[I32] !Dev = called("shr_u", at, () => binary_int("shru", a, b))
-
 ## The element-wise negation `-a`, wrapping (so `-(-2^31)` is `-2^31`).
 pub fn neg_i(a: Tile[I32], at: Loc = caller()) -> Tile[I32] !Dev = called("neg_i", at, () => unary_int("negi", a))
 
@@ -2297,7 +2280,7 @@ fn int_op(base: String, overflow: Overflow) -> String = {
 # ---- integer arithmetic at any width (knife T3) ----
 #
 # The family above is i32's and nothing else's: it predates every other
-# integer width and a hundred kernels spell it that way. The five below
+# integer width and a hundred kernels spell it that way. The three below
 # work at the width of their operands, because a tile of `i16` or `i64` has
 # no spelling in that family at all. There is ONE implementation -- `add_i`
 # and `addi` over i32 go through `binary_int_at` and emit the same
@@ -2325,14 +2308,6 @@ pub fn subi[D](a: Tile[D], b: Tile[D], at: Loc = caller()) -> Tile[D] !Dev = cal
 ## The element-wise product `a * b`, wrapping: the low bits of the exact
 ## product, as many as the format holds.
 pub fn muli[D](a: Tile[D], b: Tile[D], at: Loc = caller()) -> Tile[D] !Dev = called("muli", at, () => binary_int_at("muli", a, b))
-
-## The element-wise left shift `a << b`, wrapping. A shift count outside
-## `[0, width)` is undefined on the device.
-pub fn shli[D](a: Tile[D], b: Tile[D], at: Loc = caller()) -> Tile[D] !Dev = called("shli", at, () => binary_int_at("shli", a, b))
-
-## The element-wise ARITHMETIC right shift `a >> b`: the sign bit is copied
-## into the vacated positions.
-pub fn shri[D](a: Tile[D], b: Tile[D], at: Loc = caller()) -> Tile[D] !Dev = called("shri", at, () => binary_int_at("shri", a, b))
 
 ## The rank-0 tile of the integer format `d` holding `value`, truncated to
 ## the format's width. `i_const` is the i32 spelling.
@@ -2881,6 +2856,39 @@ impl[D: TileBitsDtype] BitNot[Tile[D]] {
     let h: Tile[D] = t_binaryi("xori", dt, shape_of(x), x, one)
     h
   })
+}
+
+# Mask even constant counts in the recorded program, so device shifts never
+# see a negative or out-of-width count. The dtype witness is also checked
+# against both actual operands by the recording handler.
+fn tile_shift[D: TileShiftDtype](op: String, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
+  let d: Dtype[D] = shift_dtype()
+  let dt = dtype_name(d)
+  let mask = match dt { "i8" -> 7, "i16" -> 15, "i32" -> 31, _ -> 63 }
+  let x: Int = a
+  let y: Int = b
+  let limit = t_consti(dt, [], mask)
+  let count = t_binaryi("andi", dt, shape_of(y), y, limit)
+  let h: Tile[D] = t_binaryi(op, dt, wider([x, y]), x, count)
+  h
+}
+
+impl[D: TileShiftDtype] Shl[Tile[D]] {
+  type ShlAmount = Tile[D]
+  effect Shl = !Dev
+  fn shl(a: Tile[D], n: Tile[D]) -> Tile[D] !Dev = called_bare("shl", () => tile_shift("shli", a, n))
+}
+
+impl[D: TileShiftDtype] Shr[Tile[D]] {
+  type ShrAmount = Tile[D]
+  effect Shr = !Dev
+  fn shr(a: Tile[D], n: Tile[D]) -> Tile[D] !Dev = called_bare("shr", () => tile_shift("shri", a, n))
+}
+
+impl[D: TileShiftDtype] Ushr[Tile[D]] {
+  type UshrAmount = Tile[D]
+  effect Ushr = !Dev
+  fn ushr(a: Tile[D], n: Tile[D]) -> Tile[D] !Dev = called_bare("ushr", () => tile_shift("shru", a, n))
 }
 
 impl[D] Add[Tile[D]] {

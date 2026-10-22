@@ -1335,11 +1335,10 @@ pub fn rainbow_ref(n: Int, rounds: Int, k1: Int, k2: Int, k3: Int, dtypes: List[
 ## into one lane: the reference for the `int_ops` coverage kernel, as
 ## `elemops` and `mathops` are for the float families. `ins` is `[a, b, old]`.
 ##
-## The divisor is `b | 1`, so it is odd and never zero; the corpus still owes
-## the kernel two things the device leaves undefined and this does not:
-## no lane of `a` may be -2^31 (its `divi` by a `b | 1` of -1 would overflow,
-## and so would `absi` and `negi` in a way this reference cannot follow), and
-## the shift counts are host constants inside `[0, 32)`.
+## The divisor is `b | 1`, so it is odd and never zero. The corpus avoids
+## -2^31 to stay away from signed division overflow with a divisor of -1.
+## Shift counts follow the masked rule in shift_ref_int; this kernel uses
+## the in-range constants 3 and 5.
 pub fn int_ops_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   let xa = ins[0]
   let xb = ins[1]
@@ -5417,4 +5416,40 @@ test "bitwise oracle pins narrow sign bits, mask truth tables and all 64 bits" {
   assert bitwise_ref_int(8, [-128], [85]) == [0, -43, -43, 127]
   assert bitwise_ref_int(1, [0, 0, 1, 1], [0, 1, 0, 1]) == [0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0]
   assert bitwise_ref_int(64, [0x7FFFFFFFFFFFFFFF], [-1]) == [0x7FFFFFFFFFFFFFFF, -1, 0 - 9223372036854775807 - 1, 0 - 9223372036854775807 - 1]
+}
+
+## Three independent output segments in left, arithmetic right, logical right
+## order. Counts use their two's complement low bits at the declared width;
+## inputs and results retain all 64 bits without a Float conversion.
+pub fn shift_ref_int(width: Int, a: List[Int], counts: List[Int]) -> List[Int] = {
+  let mask = if width == 64 { -1 } else { (1 << width) - 1 }
+  let wrap = (v: Int) => {
+    let u = v & mask
+    if width == 64 { u } else if u >= (1 << (width - 1)) { u - (1 << width) } else { u }
+  }
+  list.map(range(0, 3 * len(a)), i => {
+    let j = i / len(a)
+    let lane = i % len(a)
+    let x = wrap(a[lane])
+    let k = counts[lane] & (width - 1)
+    wrap(if j == 0 { x << k } else if j == 1 { x >> k } else { (x & mask) >>> k })
+  })
+}
+
+## Float-channel adapter for the three narrow shift kernels, retaining the
+## caller's sentinel tail. The i64 kernel uses shift_ref_int directly.
+pub fn shift_ref(width: Int, _dts: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let values = shift_ref_int(width, list.map(ins[0], to_int), list.map(ins[1], to_int))
+  list.map(values, to_float) ++ list.drop(ins[2], len(values))
+}
+
+test "shift oracle masks signed counts and preserves minimum operands at every width" {
+  for w in [8, 16, 32, 64] {
+    let minimum = 1 << (w - 1)
+    let lo = if w == 64 { minimum } else { 0 - minimum }
+    let n = [0, w - 1, w, w + 1, -1, 0 - w, 0 - w - 1]
+    assert shift_ref_int(w, [lo, lo, lo, lo, lo, lo, lo], n) ==
+      [lo, 0, lo, 0, 0, lo, 0, lo, -1, lo, lo >> 1, -1, lo, -1, lo, 1, lo, (lo >>> 1) & (if w == 64 { -1 } else { minimum - 1 }), 1, lo, 1]
+  }
+  assert shift_ref_int(8, [-1, 1, 1], [1, 8, 9]) == [-2, 1, 2, -1, 1, 0, 127, 1, 0]
 }

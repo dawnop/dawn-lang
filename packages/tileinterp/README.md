@@ -85,7 +85,7 @@ has several and could not check the rest.
 The checks are on by default (`ub_checks: true`), and a launch that reaches
 undefined behaviour fails with `interp.ub` rather than answering: an access
 outside its buffer, a broken `inbounds` promise, an `extract` or `insert` out
-of range, an integer division by zero, a shift outside the width, a broken
+of range, an integer division by zero, a broken
 overflow assumption, a non-saturating `ftoi` of NaN or of a value out of
 range, a false `assume`, and the use (a store, a branch, a bound, an index)
 of a lane a masked load or an out-of-bounds view read left unspecified.
@@ -106,3 +106,5 @@ Design and measurements: [`docs/tileinterp-design.md`](../../docs/tileinterp-des
 (in Chinese).
 
 Changes between versions: [CHANGELOG.md](CHANGELOG.md).
+
+Integer shifts normalize every count with `count & (width - 1)`, including negative counts. Left shifts wrap at the lane width, arithmetic right shifts copy the sign bit, and logical right shifts fill with zero. These rules also apply to raw interpreted integer shift instructions; surface tile operators additionally record an explicit device mask.
