@@ -46,6 +46,25 @@ MUTATIONS = {
     ),),
 }
 
+# The same faults must be visible in each backend, including the JVM pump
+# whose InputStream adapter would otherwise mask a bad position.
+for side, path, read in (
+    ("native", EXCHANGE, "src.read(total, READ_CHUNK)"),
+    ("jvm", "packages/web-jvm/src/server.dawn", "src.read(total, PUMP_CHUNK)"),
+):
+    MUTATIONS[f"{side}-offset-stuck"] = ((path, read, read.replace("total,", "0,")),)
+    MUTATIONS[f"{side}-offset-plus-one"] = ((path, read, read.replace("total,", "total + 1,")),)
+    # Ownership is shared by the servers, but each built arm is exercised.
+    MUTATIONS[f"{side}-no-source-close"] = ((
+        EXCHANGE, "let _ = catch_fault(() => s.close())",
+        "let _ = catch_fault(() => { let _ = s\n      () })",
+    ),)
+    MUTATIONS[f"{side}-head-reads-source"] = ((
+        EXCHANGE, "Stream(s, _) -> close_source(s)",
+        "Stream(s, _) -> { let _ = s.read(0, 1)\n      close_source(s) }",
+    ),)
+
+
 
 def main() -> None:
     if len(sys.argv) != 3:

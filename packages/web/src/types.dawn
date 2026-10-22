@@ -99,19 +99,23 @@ pub type Request = {
 # that says how long it is (an object store's Content-Length) can pass that on
 # and have it checked.
 ## An upstream a response body is read from, as two functions and no host
-## type: `read(n)` returns at most `n` bytes and an empty `Bytes` at the end of
-## the stream, and `close()` releases the upstream. The server calls `close`
+## type: `read(pos, n)` returns at most `n` bytes at byte offset `pos`, and an
+## empty `Bytes` at the end of the stream. The server starts at zero and
+## advances by the actual number of
+## returned bytes, including short reads. This is one sequential consumption,
+## not a seek or replay contract. `close()` releases the upstream. The server
+## calls `close`
 ## exactly once for every source it is handed, after the last read, when it
 ## stops reading because the transfer failed, and also when the source is never
 ## read at all (HEAD, 1xx/204/205/304), so a source that holds a connection
 ## needs no other cleanup path. A failed `read` raises, as any IO does; the
-## server tells that apart from a clean end (web_jvm/server.pump_with).
+## server tells that apart from a clean end (web/exchange.pump_with).
 ##
 ## Nothing here names a backend: the JVM server builds one from an
 ## `InputStream` (`web_jvm/server.input_source`), and any other server builds
 ## one from whatever it reads. docs/web-core-split-design.md §3 weighs this
 ## shape against two others.
-pub type BodySource = { read: fn(Int) -> Bytes !io, close: fn() -> Unit !io }
+pub type BodySource = { read: fn(Int, Int) -> Bytes !io, close: fn() -> Unit !io }
 
 ## What a Response carries: nothing, text, bytes, or a live upstream stream.
 ## The kind also decides the framing — Text and Binary get an exact

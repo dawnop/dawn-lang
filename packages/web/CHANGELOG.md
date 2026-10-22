@@ -1,7 +1,24 @@
 # web changelog
 
+## 8.0.0
+
+- **Breaking:** `BodySource.read(n)` becomes `read(pos, n)`. Each server pump
+  starts at byte offset zero and advances by the actual length returned,
+  including short reads. A source is consumed once, sequentially. Every
+  custom source literal and direct read call must accept/pass both arguments.
+- Add `web/source.bytes_source` and `file_source`, pure Dawn adapters on both
+  backends. Files use `read_range` without an open handle or mutable cursor.
+  A read failure terminates the transfer and still closes the source.
+- The package identity is `web8`; use `web_jvm2` 2.0.0 from the same tag for
+  the JVM server. Dependency aliases and import paths stay `web`/`web_jvm`.
+  `input_source` ignores the supplied offset because InputStream owns its
+  sequential cursor. Its ready-byte behavior is unchanged.
+- HEAD and no-body statuses still close without reading. Fixed and chunked
+  framing, short/long stream detection and close ownership are unchanged.
+- See [the migration guide](MIGRATION.md), including the dawnop-site S7 impact.
+
 Newest first. From 2.0.0 the manifest name carries the major (`web2` ...
-`web7`, the v2-in-name rule); consumers keep `use web/...` through a
+`web8`, the v2-in-name rule); consumers keep `use web/...` through a
 `web = ...` alias. Design background: `docs/web5-design.md`,
 `docs/std-defaults-design.md`, `docs/audit/web-api-v2-design.md` and
 `docs/web-core-split-design.md` (in Chinese).

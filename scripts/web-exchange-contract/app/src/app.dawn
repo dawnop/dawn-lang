@@ -15,13 +15,14 @@
 # and a middleware that stamps every answer, refusals included, so that the
 # order "a refusal goes through the chain" is visible in the bytes.
 #
-# A streaming source needs state and a closure cannot mutate what it captures,
-# so the source keeps its position in a temp file: crude, and the same on both
-# servers, which is the only thing this file needs.
+# Sources use the pump position, with deliberately short reads. The optional
+# trace records reads and close for the position contract; it is observation,
+# never a cursor or a source of response bytes.
 use std/bytes
-use std/io.{with_fs_real, with_env_real, getenv, temp_file, read_file, write_file, delete, file_size}
+use std/io.{with_fs_real, with_env_real, getenv, temp_file, read_file, delete, file_size, append_bytes, write_bytes, rename}
 use web/types.{Request, Response, HttpError, Handler, Middleware, BodySource, http_error, text, binary, streaming, header, headers_all, query, query_all, param, param_segs, with_header, default_errors, ErrorFormat}
 use web/wire.{join_with}
+use web/source.{bytes_source, file_source}
 use web/router.{Route, route_get, route_post, route_put, tagged, body_limit, guarded}
 
 ## The server-side body ceiling both servers run with, small enough that a
@@ -90,47 +91,81 @@ fn held_size(req: Request) -> Result[Response, HttpError] =
 
 # ---- streaming sources ----
 
-fn piece(i: Int) -> Bytes =
-  match i {
-    0 -> bytes.utf8("alpha-")
-    1 -> bytes.utf8("beta-")
-    2 -> bytes.freeze(bytes.put(bytes.put(bytes.put(bytes.buf(), 0), 255), 10))
-    3 -> bytes.utf8("omega")
-    _ -> bytes.utf8("")
-  }
+fn stream_bytes() -> Bytes =
+  bytes.freeze(bytes.put_bytes(bytes.put(bytes.put(bytes.put(bytes.put_bytes(bytes.buf(), bytes.utf8("alpha-beta-")), 0), 255), 10), bytes.utf8("omega")))
 
-# alpha- (6) + beta- (5) + three binary bytes + omega (5)
 const STREAM_LEN: Int = 19
 
 fn state_dir() -> String !io = with_env_real(() => unwrap_or(getenv("TMPDIR"), "/tmp"))
 
-fn next_piece(path: String) -> Bytes !io =
-  with_fs_real(() => {
-    let i = match read_file(path) {
-      Ok(s) -> unwrap_or(parse_int(s), 0)
-      Err(_) -> 0
-    }
-    let p = piece(i)
-    if len(p) > 0 {
-      let _ = write_file(path, to_string(i + 1))
-      ()
-    }
-    p
-  })
+fn trace(event: String) -> Unit !io = with_env_real(() => {
+  match getenv("WEB_SOURCE_TRACE") {
+    Some(path) -> with_fs_real(() => { let _ = append_bytes(path, bytes.utf8(event ++ "\n"))
+      () })
+    None -> ()
+  }
+})
 
-fn drop_state(path: String) -> Unit !io =
-  with_fs_real(() => {
-    let _ = delete(path)
-    ()
-  })
+# Cap each read below the requested size: the next offset must count the
+# actual bytes returned, even across the binary segment and the short tail.
+fn observed(base: BodySource) -> BodySource = BodySource {
+  read: (pos, n) => {
+    trace("read ${pos}")
+    base.read(pos, if n < 6 { n } else { 6 })
+  },
+  close: () => { base.close()
+    trace("close") },
+}
 
-fn make_source() -> BodySource !io = {
-  let dir = state_dir()
-  let path = with_fs_real(() => match temp_file(dir, "contract-stream-") {
+fn make_source() -> BodySource = observed(bytes_source(stream_bytes()))
+
+fn stream_file(_req: Request) -> Result[Response, HttpError] !io = with_fs_real(() => {
+  let path = match temp_file(state_dir(), "contract-source-") {
     Ok(p) -> p
-    Err(_) -> "/nonexistent/contract-stream"
+    Err(e) -> panic(e.message)
+  }
+  match write_bytes(path, stream_bytes()) {
+    Ok(_) -> ()
+    Err(e) -> panic(e.message)
+  }
+  let base = file_source(path)
+  let owned = BodySource {
+    read: base.read,
+    close: () => { base.close()
+      let _ = with_fs_real(() => delete(path))
+      () },
+  }
+  Ok(streaming(200, "application/octet-stream", observed(owned)))
+})
+
+fn stream_failure(_req: Request) -> Result[Response, HttpError] !io =
+  Ok(streaming(200, "application/octet-stream", observed(file_source("/nonexistent/web-read-pos-source")), length: Some(STREAM_LEN)))
+
+# Transfer ownership by renaming the spill: request cleanup runs when the
+# handler returns, before the response is pumped. The response source owns
+# the renamed path and deletes it on every close path.
+fn spill_back(req: Request) -> Result[Response, HttpError] !io = match req.body_file {
+  None -> Ok(text(500, "no spill file"))
+  Some(path) -> with_fs_real(() => match file_size(path) {
+    Ok(n) -> {
+      let owned_path = path ++ ".response"
+      match rename(path, owned_path) {
+        Ok(_) -> ()
+        Err(e) -> panic(e.message)
+      }
+      let base = file_source(owned_path)
+      let owned = BodySource {
+        read: base.read,
+        close: () => {
+          base.close()
+          let _ = with_fs_real(() => delete(owned_path))
+          ()
+        },
+      }
+      Ok(streaming(200, "application/octet-stream", owned, length: Some(n)))
+    }
+    Err(e) -> panic(e.message)
   })
-  BodySource { read: _n => next_piece(path), close: () => drop_state(path) }
 }
 
 fn stream_chunked(_req: Request) -> Result[Response, HttpError] !io =
@@ -169,6 +204,9 @@ pub fn routes() -> List[Route] = [
   route_get("/stream-short", stream_short),
   route_get("/stream-long", stream_long),
   route_get("/stream-204", stream_no_content),
+  route_get("/source-file", stream_file),
+  route_get("/source-failure", stream_failure),
+  tagged(route_put("/spill-back", spill_back), ["stream-body"]),
 ]
 
 # Stamps both branches, as with_cors does: an answer the chain never saw has no
