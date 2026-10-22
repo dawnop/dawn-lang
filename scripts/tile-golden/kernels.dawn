@@ -18,12 +18,12 @@ use std/int/i32.{I32}
 use std/narrow.{F32, BF16, F16, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU, F4E2M1FN, F8E5M3FNU, Rounding, f32}
 use std/float.{INFINITY}
 use tileref/ref.{global_table_a, global_table_b, global_syms_c}
-use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, store, row_major, permute, coord,
-  and_mask, or_mask, in_range, axis_mask, gather, scatter, axis_strides, ge_i, mma, full, transpose, to, add, sub, mul, div, max, min,
+use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, param, block_id, tile_at, load, store, row_major, permute, coord,
+  in_range, axis_mask, gather, scatter, axis_strides, ge_i, mma, full, transpose, to, add, sub, mul, div, max, min,
   abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_eq,
   d_loop, carry, get, set, lit, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes, d_reduce,
-  d_reduce2, d_if, i_const, add_i, sub_i, mul_i, Overflow, div_i, rem_i, max_i, min_i, mulhi_i, and_i,
-  or_i, xor_i, shl_i, shr_i, lt_i, shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask,
+  d_reduce2, d_if, i_const, add_i, sub_i, mul_i, Overflow, div_i, rem_i, max_i, min_i, mulhi_i,
+  shl_i, shr_i, lt_i, shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask,
   bits_to_float, bits_to_int, float_to_float, ext_u8, trunc_u8, mmai, d_return_if, pack_bytes, unpack_bytes, ext_i4,
   ext_u4, trunc_i4, arange, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_scan, d_scan2,
   erf, sin, cos, tan, sinh, cosh, atan2, remf, extract, cat, permute_tile, num_blocks, scalar, d_fork2, insert, powi,
@@ -696,7 +696,7 @@ fn transpose_tail(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let bj = block_id(1)
   let r0 = bi * idx_const(TT_TILE)
   let c0 = bj * idx_const(TT_TILE)
-  let m = and_mask(axis_mask(r0, shape, 0, TT_ROWS), axis_mask(c0, shape, 1, TT_COLS))
+  let m = (axis_mask(r0, shape, 0, TT_ROWS) & axis_mask(c0, shape, 1, TT_COLS))
   let pad = f_const(F64, 0.0)
   let base_in = bi * idx_const(TT_TILE * TT_COLS) + c0
   let t = load(x, base_in, shape, strides: Some(row_major([TT_ROWS, TT_COLS])), mask: Some(m), pad: Some(pad))
@@ -747,7 +747,7 @@ fn conv2d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let bj = block_id(1)
   let r0 = bi * idx_const(C2_TILE)
   let c0 = bj * idx_const(C2_TILE)
-  let m = and_mask(axis_mask(r0, shape, 0, c2_oh()), axis_mask(c0, shape, 1, c2_ow()))
+  let m = (axis_mask(r0, shape, 0, c2_oh()) & axis_mask(c0, shape, 1, c2_ow()))
   let zero = f_const(F64, 0.0)
   let corner = bi * idx_const(C2_TILE * C2_W) + c0
   var acc = zero
@@ -781,7 +781,7 @@ fn max_pool(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let bj = block_id(1)
   let r0 = bi * idx_const(MP_TILE)
   let c0 = bj * idx_const(MP_TILE)
-  let m = and_mask(axis_mask(r0, shape, 0, mp_oh()), axis_mask(c0, shape, 1, mp_ow()))
+  let m = (axis_mask(r0, shape, 0, mp_oh()) & axis_mask(c0, shape, 1, mp_ow()))
   let ninf = f_const(F64, -INFINITY)
   let corner = bi * idx_const(MP_TILE * MP_K * MP_W) + bj * idx_const(MP_TILE * MP_K)
   let window = [MP_K * MP_W, MP_K]
@@ -854,8 +854,8 @@ fn jacobi(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let bj = block_id(1)
   let rows = coord(bi * idx_const(JC_TILE), shape, 0, 1)
   let cols = coord(bj * idx_const(JC_TILE), shape, 1, 1)
-  let inside = and_mask(in_range(rows, 0, JC_H), in_range(cols, 0, JC_W))
-  let interior = and_mask(in_range(rows, 1, JC_H - 1), in_range(cols, 1, JC_W - 1))
+  let inside = (in_range(rows, 0, JC_H) & in_range(cols, 0, JC_W))
+  let interior = (in_range(rows, 1, JC_H - 1) & in_range(cols, 1, JC_W - 1))
   let zero = f_const(F64, 0.0)
   let lay = row_major([JC_H, JC_W])
   let base = bi * idx_const(JC_TILE * JC_W) + bj * idx_const(JC_TILE)
@@ -889,7 +889,7 @@ fn depthwise_conv1d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit
   let bl = block_id(1)
   let c0 = bc * idx_const(DW_TC)
   let l0 = bl * idx_const(DW_TL)
-  let m = and_mask(axis_mask(c0, shape, 0, DW_C), axis_mask(l0, shape, 1, dw_out()))
+  let m = (axis_mask(c0, shape, 0, DW_C) & axis_mask(l0, shape, 1, dw_out()))
   let zero = f_const(F64, 0.0)
   let corner = bc * idx_const(DW_TC * DW_L) + l0
   let wcorner = bc * idx_const(DW_TC * DW_K)
@@ -930,14 +930,14 @@ fn gaussian_blur(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !D
   let bj = block_id(1)
   let rows = coord(bi * idx_const(GB_TILE), shape, 0, 1)
   let cols = coord(bj * idx_const(GB_TILE), shape, 1, 1)
-  let inside = and_mask(in_range(rows, 0, GB_H), in_range(cols, 0, GB_W))
+  let inside = (in_range(rows, 0, GB_H) & in_range(cols, 0, GB_W))
   let zero = f_const(F64, 0.0)
   let lay = row_major([GB_H, GB_W])
   let corner = bi * idx_const(GB_TILE * GB_W) + bj * idx_const(GB_TILE)
   var acc = zero
   for p in range(0, GB_K) {
     for q in range(0, GB_K) {
-      let tap = and_mask(in_range(rows, gb_lo(p), gb_hi(GB_H, p)), in_range(cols, gb_lo(q), gb_hi(GB_W, q)))
+      let tap = (in_range(rows, gb_lo(p), gb_hi(GB_H, p)) & in_range(cols, gb_lo(q), gb_hi(GB_W, q)))
       let shift = (p - gb_half()) * GB_W + (q - gb_half())
       let xt = load(x, corner + idx_const(shift), shape, strides: Some(lay), mask: Some(tap), pad: Some(zero))
       let wt = load(w, idx_const(p * GB_K + q), shape, strides: Some([0, 0]))
@@ -1029,11 +1029,11 @@ fn subarray_sum(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
 # non-negative values would forgive it.
 fn rb_round(h: Tile[I32]) -> Tile[I32] !Dev = {
   let h1 = mul_i(h, i_const(RB_K1))
-  let h2 = xor_i(h1, shr_u(h1, i_const(15)))
+  let h2 = (h1 ^ shr_u(h1, i_const(15)))
   let h3 = add_i(h2, i_const(RB_K2))
-  let h4 = xor_i(h3, shr_i(h3, i_const(13)))
+  let h4 = (h3 ^ shr_i(h3, i_const(13)))
   let h5 = mul_i(h4, i_const(RB_K3))
-  xor_i(h5, shr_u(h5, i_const(16)))
+  (h5 ^ shr_u(h5, i_const(16)))
 }
 
 # RB_ROUNDS applications of that round to each seed: leetgpu 24 (Rainbow
@@ -1060,7 +1060,7 @@ fn int_ops(x: Param[I32], y: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let one = i_const(1)
   let a = load_cell(x)
   let b = load_cell(y)
-  let odd = or_i(b, one)
+  let odd = (b | one)
   let d = sub_i(a, b)
   let hi = mulhi_i(a, b)
   let q = div_i(a, odd)
@@ -1084,21 +1084,38 @@ fn int_ops(x: Param[I32], y: Param[I32], out: Param[I32]) -> Unit !Dev = {
   # bitcast there and back: the value itself, bit for bit
   let bc = bits_to_int(bits_to_float(a))
   let c0 = add_i(d, hi)
-  let c1 = xor_i(c0, q)
+  let c1 = (c0 ^ q)
   let c2 = add_i(c1, r)
-  let c3 = xor_i(c2, mx)
+  let c3 = (c2 ^ mx)
   let c4 = add_i(c3, mn)
-  let c5 = xor_i(c4, ng)
+  let c5 = (c4 ^ ng)
   let c6 = add_i(c5, av)
-  let c7 = xor_i(c6, sh)
+  let c7 = (c6 ^ sh)
   let c8 = add_i(c7, ar)
-  let c9 = xor_i(c8, lo)
-  let c10 = add_i(c9, and_i(a, b))
-  let c11 = xor_i(c10, or_i(a, b))
-  let c12 = add_i(c11, xor_i(a, b))
-  let c13 = xor_i(c12, hf)
+  let c9 = (c8 ^ lo)
+  let c10 = add_i(c9, (a & b))
+  let c11 = (c10 ^ (a | b))
+  let c12 = add_i(c11, (a ^ b))
+  let c13 = (c12 ^ hf)
   let c14 = add_i(c13, bit)
-  store_cell(out, xor_i(c14, bc))
+  store_cell(out, (c14 ^ bc))
+}
+
+# Each operator has its own output segment, through a captured generic
+# dictionary. No operation can cancel another, and each width is recorded
+# separately. The mask kernel stores i32 results because i1 has no buffer.
+fn bitwise_tiles[D: TileBitsDtype](a: Param[D], b: Param[D], out: Param[D]) -> Unit !Dev = {
+  let x = load_cell(a)
+  let y = load_cell(b)
+  let apply = (j: Int) => if j == 0 { x & y } else if j == 1 { x | y } else if j == 2 { x ^ y } else { ~x }
+  for j in 0..4 { store_sub(out, [j, 0], reshape(apply(j), [1, 128])) }
+}
+
+fn bitwise_mask(a: Param[I32], b: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let x = int_to_mask(load_cell(a))
+  let y = int_to_mask(load_cell(b))
+  let apply = (j: Int) => if j == 0 { x & y } else if j == 1 { x | y } else if j == 2 { x ^ y } else { ~x }
+  for j in 0..4 { store_sub(out, [j, 0], reshape(mask_to_int(apply(j)), [1, 128])) }
 }
 
 # ---- the wide kernels (knife 11) ----
@@ -1358,7 +1375,7 @@ fn token_embed(ids: Param[I32], table: Param[Float], out: Param[Float]) -> Unit 
   let s = [TOK_TILE, EMB_DIM]
   let id = load(ids, tile_at(block_id(0), TOK_TILE), s, strides: Some(axis_strides(2, 0, 1)))
   let ok = in_range(id, 0, EMB_ROWS)
-  let row = and_i(id, i_const(EMB_ROWS - 1))
+  let row = (id & i_const(EMB_ROWS - 1))
   let off = add_i(mul_i(row, i_const(EMB_DIM)), coord(idx_const(0), s, 1, 1))
   store_cell(out, gather(table, off, mask: Some(ok), pad: Some(f_const(F64, EMB_MISS))))
 }
@@ -1387,8 +1404,8 @@ fn sort_rank(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let zero = idx_const(0)
   let row = load(x, zero, s2, strides: Some([1, 0]))
   let col = load(x, zero, s2, strides: Some([0, 1]))
-  let tie = and_mask(eq(col, row), lt_i(coord(zero, s2, 1, 1), coord(zero, s2, 0, 1)))
-  let before = or_mask(lt(col, row), tie)
+  let tie = (eq(col, row) & lt_i(coord(zero, s2, 1, 1), coord(zero, s2, 0, 1)))
+  let before = (lt(col, row) | tie)
   let hit = select(before, f_const(F64, 1.0), f_const(F64, 0.0))
   let rank = reduce_sum(hit, dim: 1)
   scatter(out, float_to_int(rank, I32), load(x, zero, s1))
@@ -1433,7 +1450,7 @@ const SC_TILE: Int = 128
 # STRIDE; this one reads its permutation out of a buffer.
 fn scatter_perm(perm: Param[I32], x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let p = load_cell(perm)
-  let dst = and_i(p, i_const(SC_N - 1))
+  let dst = (p & i_const(SC_N - 1))
   scatter(out, dst, load_cell(x), mask: Some(in_range(p, 0, SC_N)))
 }
 
@@ -1625,7 +1642,7 @@ fn gae_lam() -> Float = 0.95
 fn gae(rewards: Param[Float], values: Param[Float], adv: Param[Float]) -> Unit !Dev = {
   let s = [GAE_S]
   let blk = tile_at(block_id(0), GAE_S)
-  let nxt = and_i(add_i(lanes(blk, s), i_const(1)), i_const(GAE_B * GAE_S - 1))
+  let nxt = (add_i(lanes(blk, s), i_const(1)) & i_const(GAE_B * GAE_S - 1))
   let ok = in_range(lanes(idx_const(0), s), 0, GAE_S - 1)
   let nv = gather(values, nxt, mask: Some(ok), pad: Some(f_const(F64, 0.0)))
   let delta = load_cell(rewards) + f_const(F64, gae_gamma()) * nv - load_cell(values)
@@ -1729,8 +1746,8 @@ const HIST_N: Int = 500
 fn histogram(input: Param[I32], hist: Param[I32]) -> Unit !Dev = {
   let x = load_cell(input)
   let live = tail_mask(tile_at(block_id(0), HIST_TILE), [HIST_TILE], HIST_N)
-  let ok = and_mask(live, in_range(x, 0, HIST_BINS))
-  atomic_add(hist, and_i(x, i_const(HIST_BINS - 1)), i_const(1), mask: Some(ok))
+  let ok = (live & in_range(x, 0, HIST_BINS))
+  atomic_add(hist, (x & i_const(HIST_BINS - 1)), i_const(1), mask: Some(ok))
 }
 
 # The compare-and-swap's shape: CAS_SLOTS slots, CAS_TILE lanes a block,
@@ -2612,7 +2629,7 @@ fn attn_sinks(q: Param[Float], k: Param[Float], s: Param[Float]) -> Unit !Dev = 
   let causal = ge_i(gi, gj)
   let sink = lt_i(gj, i_const(ATT_SINKS))
   let window = ge_i(gj, add_i(gi, i_const(1 - ATT_SINK_WINDOW)))
-  let allowed = and_mask(causal, or_mask(sink, window))
+  let allowed = (causal & (sink | window))
   store_cell(s, select(allowed, v, f_const(F64, -INFINITY)))
 }
 
@@ -2718,7 +2735,7 @@ fn subarray_sum2d(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let zero = idx_const(0)
   let flat = lanes(zero, sh)
   let cols = i_const(S2_COLS)
-  let inside = and_mask(in_range(div_i(flat, cols), S2_R0, S2_R1 + 1), in_range(rem_i(flat, cols), S2_C0, S2_C1 + 1))
+  let inside = (in_range(div_i(flat, cols), S2_R0, S2_R1 + 1) & in_range(rem_i(flat, cols), S2_C0, S2_C1 + 1))
   let t = load(x, zero, sh, mask: Some(inside), pad: Some(i_const(0)))
   store_cell(out, d_reduce(t, 0.0, (acc, e) => add_i(acc, e)))
 }
@@ -2746,7 +2763,7 @@ fn subarray_sum3d(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let plane = i_const(S3_ROWS * S3_COLS)
   let depth = in_range(div_i(flat, plane), S3_D0, S3_D1 + 1)
   let rows = in_range(rem_i(div_i(flat, cols), i_const(S3_ROWS)), S3_R0, S3_R1 + 1)
-  let inside = and_mask(and_mask(depth, rows), in_range(rem_i(flat, cols), S3_C0, S3_C1 + 1))
+  let inside = ((depth & rows) & in_range(rem_i(flat, cols), S3_C0, S3_C1 + 1))
   let t = load(x, zero, sh, mask: Some(inside), pad: Some(i_const(0)))
   store_cell(out, d_reduce(t, 0.0, (acc, e) => add_i(acc, e)))
 }
@@ -2816,7 +2833,7 @@ fn conv3d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let sh = [C3_TILE, C3_TILE]
   let bd = block_id(0)
   let zero = idx_const(0)
-  let m = and_mask(axis_mask(zero, sh, 0, c3_oh()), axis_mask(zero, sh, 1, c3_ow()))
+  let m = (axis_mask(zero, sh, 0, c3_oh()) & axis_mask(zero, sh, 1, c3_ow()))
   let pad = f_const(F64, 0.0)
   let corner = bd * idx_const(C3_H * C3_W)
   var acc = pad
@@ -3171,7 +3188,7 @@ const KV_INV_SQRT_D: Float = 0.17677669529663687
 ## integer operations rather than a new opcode. std/gpu's `I8` format is
 ## the host side of the same reading.
 fn i8_signed(t: Tile[I8]) -> Tile[I32] !Dev =
-  sub_i(xor_i(ext_u8(t), i_const(128)), i_const(128))
+  sub_i((ext_u8(t) ^ i_const(128)), i_const(128))
 
 ## The dequantised cache block of head `h`: `K[h, j, d] * scale[h, j]` as
 ## an f64 tile of KV_S rows by KV_D columns, the scale broadcast along the
@@ -4133,7 +4150,7 @@ fn attr_sat(x: Param[Float], out: Param[I32]) -> Unit !Dev = {
   let base = tile_at(b, ATTR_TILE)
   let obase = tile_at(b, ATTR_SAT_SEGS * ATTR_TILE)
   let a = load_cell(x)
-  let fits = and_mask(gt(a, f_const(F64, 0.0 - 2147483649.0)), lt(a, f_const(F64, 2147483648.0)))
+  let fits = (gt(a, f_const(F64, 0.0 - 2147483649.0)) & lt(a, f_const(F64, 2147483648.0)))
   store(out, obase, float_to_int(a, I32, saturating: true))
   store(out, obase + idx_const(ATTR_TILE), float_to_int(a, I32), mask: Some(fits))
 }
@@ -5486,6 +5503,31 @@ fn trace(name: String) -> TileProg = match name {
       Out(I32, tail_of(IOP_N, IOP_TILE)), int_ops)
     p
   }
+  "bitwise_i8" -> {
+    let (p, _e) = trace3("bitwise_i8", In(I8, cells([512], [128])), In(I8, cells([512], [128])),
+      Out(I8, seg_out(4, 4, 512, 128)), bitwise_tiles)
+    p
+  }
+  "bitwise_i16" -> {
+    let (p, _e) = trace3("bitwise_i16", In(I16, cells([512], [128])), In(I16, cells([512], [128])),
+      Out(I16, seg_out(4, 4, 512, 128)), bitwise_tiles)
+    p
+  }
+  "bitwise_i32" -> {
+    let (p, _e) = trace3("bitwise_i32", In(I32, cells([512], [128])), In(I32, cells([512], [128])),
+      Out(I32, seg_out(4, 4, 512, 128)), bitwise_tiles)
+    p
+  }
+  "bitwise_i64" -> {
+    let (p, _e) = trace3("bitwise_i64", In(I64, cells([512], [128])), In(I64, cells([512], [128])),
+      Out(I64, seg_out(4, 4, 512, 128)), bitwise_tiles)
+    p
+  }
+  "bitwise_mask" -> {
+    let (p, _e) = trace3("bitwise_mask", In(I32, cells([512], [128])), In(I32, cells([512], [128])),
+      Out(I32, seg_out(4, 4, 512, 128)), bitwise_mask)
+    p
+  }
   "sum_diff" -> {
     let (p, _e) = trace4("sum_diff",
       In(F64, tail_of(WIDE_N, WIDE_TILE)), In(F64, tail_of(WIDE_N, WIDE_TILE)),
@@ -6404,7 +6446,7 @@ pub fn main() -> Unit !io = match args() {
         ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
         ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"
         ++ "|count_eq|subarray_sum|rainbow|int_ops"
-        ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
+        ++ "|bitwise_i8|bitwise_i16|bitwise_i32|bitwise_i64|bitwise_mask|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
         ++ "|matmul_f16_sm90|matmul_f16_sm100|matmul_i8_sm90|matmul_i8_sm100"
         ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
         ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"

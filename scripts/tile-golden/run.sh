@@ -559,7 +559,8 @@ kernels=(
   matmul_f16_sm90 matmul_f16_sm100 matmul_i8_sm90 matmul_i8_sm100
   scalar_scale scalar_len scalar_loop scalar_wide
   dtype_e5m3 mmaf_scaled_e5m3
-  vadd_producer vadd_debug foldif_debug)
+  vadd_producer vadd_debug foldif_debug
+  bitwise_i8 bitwise_i16 bitwise_i32 bitwise_i64 bitwise_mask)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -691,6 +692,7 @@ mutants=(
   producer-under-13-2-header
   debug-line-off-by-one
   debug-count-short
+  mask-and-as-andi bits-witness-mismatch bits-type-rejections
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -3033,6 +3035,44 @@ if run_item debug-count-short; then
     echo "PASS  mutant: debug-count-short (.tilebc red on both backends)"
     echo "SKIP  mutant: debug-count-short not handed to tileiras (--without-tileiras)"
   fi
+fi
+
+# Bitwise migration controls: preserving select is a byte-level contract,
+# and the witness must be checked against the recorded operands.
+if run_item mask-and-as-andi; then
+  mutant_project mask-and-as-andi dev.dawn
+  mutant_run mask-and-as-andi transpose_tail
+  for backend in jvm native; do
+    out="$work/m-mask-and-as-andi.transpose_tail.$backend"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "mask-and-as-andi did not render"; }
+    ! cmp -s "$here/transpose_tail.mlir" "$out" || fail "mask-and-as-andi stayed golden on $backend"
+    grep -Fq 'andi ' "$out" || fail "mask-and-as-andi changed something other than conjunction"
+  done
+  echo "PASS  mutant: mask-and-as-andi (the existing mask golden differs on both backends)"
+fi
+if run_item bits-witness-mismatch; then
+  mutant_project bits-witness-mismatch dev.dawn
+  mutant_run bits-witness-mismatch bitwise_i32
+  for backend in jvm native; do
+    out="$work/m-bits-witness-mismatch.bitwise_i32.$backend"
+    [ "$(cat "$out.rc")" != 0 ] || fail "bits-witness-mismatch stayed green on $backend"
+    grep -Fq 'declared tile<128xi16>' "$out.err" || { cat "$out.err" >&2; fail "bits-witness-mismatch failed for another reason"; }
+    grep -Fq 'src/main.dawn:' "$out.err" || fail "bits-witness-mismatch did not name a user line"
+  done
+  echo "PASS  mutant: bits-witness-mismatch (the operator refuses the recorded i32 operand as i16 on both backends)"
+fi
+if run_item bits-type-rejections; then
+  project "$work/bits-rejected" "$root/packages/tileir"
+  cp "$here/bitwise-rejected.dawn" "$work/bits-rejected/src/main.dawn"
+  if "$root/bin/dawn" check "$work/bits-rejected" > "$work/bits-rejected.out" 2>&1; then
+    fail "bits-type-rejections: invalid programs were accepted"
+  fi
+  sed -n '/^error:/p' "$work/bits-rejected.out" > "$work/bits-rejected.errors"
+  cmp -s "$here/bitwise-rejected.expected" "$work/bits-rejected.errors" || {
+    diff -u "$here/bitwise-rejected.expected" "$work/bits-rejected.errors" >&2 || true
+    fail "bits-type-rejections: the expected checker refusals changed"
+  }
+  echo "PASS  bitwise checker: ineligible formats, mixed masks, missing Dev and all five removed names refused"
 fi
 
 _item_tick ""

@@ -7,6 +7,13 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.23.0 (2026-10-22)
+
+- Add `TileBitsDtype` for Bool, I8, I16, I32 and Int and `TileShiftDtype` for the four signed integer formats, each with a pure dtype witness.
+- Add conditional `& | ^ ~` tile implementations with `!Dev`. Integer operations record `andi`, `ori`, `xori`; mask `& |` preserve the existing select kernels. Complement records xor with all ones, or 1 for i1.
+- Remove `and_i`, `or_i`, `xor_i`, `and_mask` and `or_mask`. Replace calls with operators; no compatibility wrappers remain. Operators have no `at` parameter and use the recording boundary's user location, as arithmetic does.
+- Keep named shifts and their current count semantics for the next migration.
+
 ## 0.22.0
 
 - Add `prog.check_config(arch, bq, hints, at:)` to reject measured row-tile performance cliffs before recording.

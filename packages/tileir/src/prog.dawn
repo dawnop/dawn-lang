@@ -23,8 +23,13 @@ use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, with_gpu_fake, reference_
   arg_shared, entry_grid }
 use std/gpu
 use std/dtype.{F64, I64, Dtype, dtype_name}
+use std/int/i32 as std_i32
 use std/int/i32.{I32}
-use dev.{Dev, Param, Tile, Idx, neg, addi, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, memory_fence_alias, gdc_wait, gdc_launch_dependents, assume_div_by,
+use std/int/i8 as std_i8
+use std/int/i8.{I8}
+use std/int/i16 as std_i16
+use std/int/i16.{I16}
+use dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, bits_dtype, shift_dtype, consti, bool_const, neg, addi, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, memory_fence_alias, gdc_wait, gdc_launch_dependents, assume_div_by,
   assume_same_elements, assume_in_range, param, block_id, tile_at, load, store, gather, scatter, atomic_rmw, atomic_add,
   atomic_cas, add, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_range, By, d_loop, Carry, carry, get, set,
   d_reduce, d_if, max, gt, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, ptrs, int_to_ptr, ptr_to_int,
@@ -1202,6 +1207,10 @@ fn spelled(call: String) -> String = match call {
   "idx_div" -> "the `/` operator"
   "idx_rem" -> "the `%` operator"
   "neg" -> "the unary `-` operator"
+  "bit_and" -> "the `&` operator"
+  "bit_or" -> "the `|` operator"
+  "bit_xor" -> "the `^` operator"
+  "bit_not" -> "the `~` operator"
   "lit" -> "a float literal"
   "idx_const" -> "an integer literal"
   _ -> "a `var`"
@@ -7500,4 +7509,77 @@ test "P4: approximate division is f32 only and cannot promise directed rounding"
   let p = trace_kernel("approx", [], () => { let _x = div(f_const(F32, 1.0), f_const(F32, 3.0), approx: true, ftz: true) })
   assert count_ops(p.ops, op => match op { BinaryF(_d, "divf_approx_ftz", "f32", _s, _a, _b) -> true
     _ -> false }) == 1
+}
+
+# Qualifiers are compile-time evidence; shapes and actual formats remain
+# recording facts. Keep both halves visible in these operator contracts.
+fn bits_witness[D: TileBitsDtype](x: D) -> String = {
+  let _ = x
+  let d: Dtype[D] = bits_dtype()
+  dtype_name(d)
+}
+
+fn shift_witness[D: TileShiftDtype](x: D) -> String = {
+  let _ = x
+  let d: Dtype[D] = shift_dtype()
+  dtype_name(d)
+}
+
+test "bitwise: the two qualification sets return their own pure witnesses" {
+  assert bits_witness(false) == "i1"
+  assert bits_witness(std_i8.wrap(1)) == "i8"
+  assert bits_witness(std_i16.wrap(1)) == "i16"
+  assert bits_witness(std_i32.wrap(1)) == "i32"
+  assert bits_witness(1) == "i64"
+  assert shift_witness(std_i8.wrap(1)) == "i8"
+  assert shift_witness(std_i16.wrap(1)) == "i16"
+  assert shift_witness(std_i32.wrap(1)) == "i32"
+  assert shift_witness(1) == "i64"
+}
+
+fn bits_capture[D: TileBitsDtype](x: Tile[D], y: Tile[D]) -> Tile[D] !Dev = {
+  let f = () => (x & y) ^ ~(x | y)
+  f()
+}
+
+test "bitwise: integer records and all-ones constants follow the witness at every width" {
+  let p = trace_kernel("bits", [], () => {
+    let _a = bits_capture(consti(I8, -128), consti(I8, 85))
+    let _b = bits_capture(consti(I16, -32768), consti(I16, 85))
+    let _c = bits_capture(i_const(-2147483648), i_const(85))
+    let _d = bits_capture(consti(I64, -1), consti(I64, 85))
+    let _e = bits_capture(bool_const(true), bool_const(false))
+    ()
+  })
+  let ops = ops_where(p.ops, o => match o { BinaryI(_d, _op, _dt, _s, _a, _b) -> true, _ -> false })
+  let names = list.map(ops, o => match o { BinaryI(_d, op, dt, _s, _a, _b) -> dt ++ ":" ++ op, _ -> "" })
+  assert names == ["i8:andi", "i8:ori", "i8:xori", "i8:xori", "i16:andi", "i16:ori", "i16:xori", "i16:xori",
+    "i32:andi", "i32:ori", "i32:xori", "i32:xori", "i64:andi", "i64:ori", "i64:xori", "i64:xori", "i1:xori", "i1:xori"]
+  let ones = ops_where(p.ops, o => match o { ConstI(_d, _dt, _s, v) -> v == -1 || v == 1, _ -> false })
+  assert len(ones) == 8
+}
+
+test "bitwise: rank-zero and same-rank singleton dimensions widen, and other shapes refuse at the user boundary" {
+  let p = trace_kernel("broadcast", [], () => {
+    let a = broadcast(i_const(3), [8, 1])
+    let b = broadcast(i_const(5), [1, 4])
+    let _c = (a & b) | i_const(2)
+    let m = broadcast(bool_const(true), [8, 1]) & broadcast(bool_const(false), [1, 4])
+    let _d = m ^ bool_const(true)
+    ()
+  })
+  assert list.any(p.ops, o => match o { BinaryI(_d, "andi", "i32", [8, 4], _a, _b) -> true, _ -> false })
+  assert list.any(p.ops, o => match o { Select(_d, "i1", [8, 4], _c, _a, _b) -> true, _ -> false })
+  let file = loc.path(loc.here())
+  let msg = refusal(() => {
+    let _x = broadcast(i_const(3), [8]) & broadcast(i_const(5), [4])
+    ()
+  })
+  assert str.contains(msg, "tile<4xi32>") && str.contains(msg, "tile<8xi32>")
+  assert str.contains(msg, "at ${file}:")
+  let rank = refusal(() => {
+    let _x = broadcast(bool_const(true), [8]) | broadcast(bool_const(false), [1, 8])
+    ()
+  })
+  assert str.contains(rank, "tile<1x8xi1>")
 }

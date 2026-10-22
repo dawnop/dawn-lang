@@ -37,6 +37,26 @@ and every operation it saw under a function is on that function's row (the
 kernels calls, such as `scan_sum` or `fill`, was read from its recording
 handler.
 
+Tile bitwise operators require `D: TileBitsDtype` (Bool, I8, I16, I32,
+Int), with ground `!Dev`. Integer `&`, `|`, `^` record `andi`, `ori`,
+`xori`; mask `&` and `|` record the existing `select` kernels. `~` records
+`xori` with a same-format all-ones constant (1 for i1). The pure witness
+method `bits_dtype` returns `Dtype[D]`; `shift_dtype` on `TileShiftDtype`
+returns the four signed integer witnesses for the later shift migration.
+Both operands must match that witness. Broadcasting accepts rank 0 and
+same-rank dimensions of length 1. Operators have no `at` argument and use
+the enclosing recording boundary's location, as arithmetic operators do.
+
+The following rows name prelude trait methods on `Tile[D]`, rather than
+functions in the top-level namespace.
+
+| Function | Operation | Also |
+|---|---|---|
+| `bit_and` | `andi`, `select` | `constant` |
+| `bit_or` | `ori`, `select` | `constant` |
+| `bit_xor` | `xori` | - |
+| `bit_not` | `xori` | `constant` |
+
 ## Where the block is
 
 Index values (`Idx`) are rank-0 `i32` tiles, so index arithmetic is integer arithmetic.
@@ -232,9 +252,6 @@ The `_i` forms are `i32` tiles. The unsuffixed `addi`, `subi`, `muli`, `shli` an
 | `max_i` | `maxi` | - |
 | `min_i` | `mini` | - |
 | `mulhi_i` | `mulhii` | - |
-| `and_i` | `andi` | - |
-| `or_i` | `ori` | - |
-| `xor_i` | `xori` | - |
 | `shl_i` | `shli` | - |
 | `shr_i` | `shri` | - |
 | `shr_u` | `shri` | - |
@@ -276,8 +293,6 @@ A mask is a `Tile[Bool]`; combining two is a `select`, since the dialect has no 
 | Function | Operation | Also |
 |---|---|---|
 | `select` | `select` | - |
-| `and_mask` | `select` | `constant` |
-| `or_mask` | `select` | `constant` |
 | `in_range` | `cmpi`, `select` | `constant` |
 | `axis_mask` | `cmpi` | `constant`, `muli`, `addi`, `iota`, `reshape`, `broadcast` |
 | `tail_mask` | `cmpi` | `constant`, `muli`, `addi`, `iota`, `reshape`, `broadcast` |

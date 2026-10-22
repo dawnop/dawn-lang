@@ -36,6 +36,7 @@ use std/str
 use std/dtype.{Dtype, dtype_name, to_bits, F64, I64, I1}
 use std/int/i32.{I32}
 use std/int/i8.{I8}
+use std/int/i16.{I16}
 use std/gpu.{I4, ScalarDtype, scalar_dtype}
 use std/narrow.{F32, F16, BF16, TF32, F8E4M3FN, F8E5M2, Rounding, to_f64, tf32_of_bits, f8e4m3fn_of_bits, f8e5m2_of_bits}
 
@@ -55,6 +56,55 @@ use std/narrow.{F32, F16, BF16, TF32, F8E4M3FN, F8E5M2, Rounding, to_f64, tf32_o
 ## pointers) is a fact the recording sees, and the rank is one dimension of
 ## the shape like any other (docs/tile-backend-design.md 6.26).
 pub opaque type Tile[D] = Int
+
+## The integer and mask formats whose tiles admit `& | ^ ~`. The pure
+## witness fixes the format the recording checks against both operands;
+## `DeviceBits` alone also covers formats these instructions cannot use.
+pub trait TileBitsDtype[D] {
+  fn bits_dtype() -> Dtype[D]
+}
+
+## The signed integer formats whose tiles will admit shifts. Separate from
+## TileBitsDtype so that a mask need not promise a shift operation.
+pub trait TileShiftDtype[D] {
+  fn shift_dtype() -> Dtype[D]
+}
+
+impl TileBitsDtype[Bool] {
+  fn bits_dtype() -> Dtype[Bool] = I1
+}
+
+impl TileBitsDtype[I8] {
+  fn bits_dtype() -> Dtype[I8] = I8
+}
+
+impl TileBitsDtype[I16] {
+  fn bits_dtype() -> Dtype[I16] = I16
+}
+
+impl TileBitsDtype[I32] {
+  fn bits_dtype() -> Dtype[I32] = I32
+}
+
+impl TileBitsDtype[Int] {
+  fn bits_dtype() -> Dtype[Int] = I64
+}
+
+impl TileShiftDtype[I8] {
+  fn shift_dtype() -> Dtype[I8] = I8
+}
+
+impl TileShiftDtype[I16] {
+  fn shift_dtype() -> Dtype[I16] = I16
+}
+
+impl TileShiftDtype[I32] {
+  fn shift_dtype() -> Dtype[I32] = I32
+}
+
+impl TileShiftDtype[Int] {
+  fn shift_dtype() -> Dtype[Int] = I64
+}
 
 ## A scalar index tile inside a kernel: a block id, or later what is computed
 ## from one. Distinct from `Tile[D]` (it is `i32` and has no format marker)
@@ -1178,28 +1228,11 @@ pub fn coord(base: Idx, shape: List[Int], axis: Int, step: Int, at: Loc = caller
   lanes_strided(base, shape, axis_strides(len(shape), axis, step))
 })
 
-## The lanes both masks select: a `select`, `a` where it is 1 choosing `b`
-## and 0 elsewhere. Knife 10 brought `andi`, which computes the same tile
-## over `i1` operands; this is still a `select` because switching it would
-## re-record six kernels that were measured against a device under the
-## spelling they have, and buy no claim the `andi` clients below do not
-## already make. The shape is the masks' own.
-pub fn and_mask(a: Tile[Bool], b: Tile[Bool], at: Loc = caller()) -> Tile[Bool] !Dev = called("and_mask", at, () => {
-  select(a, b, bool_const(false))
-})
-
-## The lanes either mask selects: a `select`, `a` where it is 1 choosing
-## the all-true tile and `b` elsewhere. The `or` to `and_mask`'s `and`,
-## written the same way and for the same reason.
-pub fn or_mask(a: Tile[Bool], b: Tile[Bool], at: Loc = caller()) -> Tile[Bool] !Dev = called("or_mask", at, () => {
-  select(a, bool_const(true), b)
-})
-
 ## The lanes whose coordinate `c` satisfies `lo <= c < hi`, as a mask of
 ## `c`'s shape. Both bounds are host constants; `lo` is not always zero,
 ## because a stencil reads a coordinate one before the tile's own.
 pub fn in_range(c: Tile[I32], lo: Int, hi: Int, at: Loc = caller()) -> Tile[Bool] !Dev = called("in_range", at, () => {
-  and_mask(ge_i(c, i_const(lo)), lt_i(c, i_const(hi)))
+  ge_i(c, i_const(lo)) & lt_i(c, i_const(hi))
 })
 
 ## The lanes whose `axis` coordinate, counted from `base`, is below
@@ -2188,15 +2221,6 @@ pub fn min_i(a: Tile[I32], b: Tile[I32], at: Loc = caller()) -> Tile[I32] !Dev =
 ## product takes this beside `mul_i`.
 pub fn mulhi_i(a: Tile[I32], b: Tile[I32], at: Loc = caller()) -> Tile[I32] !Dev = called("mulhi_i", at, () => binary_int("mulhii", a, b))
 
-## The element-wise bitwise `a & b`.
-pub fn and_i(a: Tile[I32], b: Tile[I32], at: Loc = caller()) -> Tile[I32] !Dev = called("and_i", at, () => binary_int("andi", a, b))
-
-## The element-wise bitwise `a | b`.
-pub fn or_i(a: Tile[I32], b: Tile[I32], at: Loc = caller()) -> Tile[I32] !Dev = called("or_i", at, () => binary_int("ori", a, b))
-
-## The element-wise bitwise `a ^ b`.
-pub fn xor_i(a: Tile[I32], b: Tile[I32], at: Loc = caller()) -> Tile[I32] !Dev = called("xor_i", at, () => binary_int("xori", a, b))
-
 ## The element-wise left shift `a << b`, wrapping: the bits shifted past the
 ## top are dropped. A shift count outside `[0, 32)` is undefined on the
 ## device.
@@ -2810,6 +2834,53 @@ fn neg_int_at[D](a: Tile[D]) -> Tile[D] !Dev = {
   let (dt, s) = row_of(x)
   let h: Tile[D] = t_unaryi("negi", dt, s, x)
   h
+}
+
+# Qualification, rather than the opaque handle's representation, chooses
+# the declared dtype. The handler checks its whitelist and operand records.
+# Mask conjunction/disjunction keep the old select operands and order so
+# that replacing the public functions changes no golden bytes.
+fn tile_bits[D: TileBitsDtype](op: String, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
+  let d: Dtype[D] = bits_dtype()
+  let dt = dtype_name(d)
+  let x: Int = a
+  let y: Int = b
+  let h: Tile[D] = if dt == "i1" && (op == "andi" || op == "ori") {
+    let c = t_consti("i1", [], if op == "ori" { 1 } else { 0 })
+    let lhs = if op == "andi" { y } else { c }
+    let rhs = if op == "andi" { c } else { y }
+    t_select(dt, wider([lhs, rhs, x]), x, lhs, rhs)
+  } else {
+    t_binaryi(op, dt, wider([x, y]), x, y)
+  }
+  h
+}
+
+impl[D: TileBitsDtype] BitAnd[Tile[D]] {
+  effect BitAnd = !Dev
+  fn bit_and(a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = called_bare("bit_and", () => tile_bits("andi", a, b))
+}
+
+impl[D: TileBitsDtype] BitOr[Tile[D]] {
+  effect BitOr = !Dev
+  fn bit_or(a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = called_bare("bit_or", () => tile_bits("ori", a, b))
+}
+
+impl[D: TileBitsDtype] BitXor[Tile[D]] {
+  effect BitXor = !Dev
+  fn bit_xor(a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = called_bare("bit_xor", () => tile_bits("xori", a, b))
+}
+
+impl[D: TileBitsDtype] BitNot[Tile[D]] {
+  effect BitNot = !Dev
+  fn bit_not(a: Tile[D]) -> Tile[D] !Dev = called_bare("bit_not", () => {
+    let d: Dtype[D] = bits_dtype()
+    let dt = dtype_name(d)
+    let x: Int = a
+    let one = t_consti(dt, [], if dt == "i1" { 1 } else { -1 })
+    let h: Tile[D] = t_binaryi("xori", dt, shape_of(x), x, one)
+    h
+  })
 }
 
 impl[D] Add[Tile[D]] {
