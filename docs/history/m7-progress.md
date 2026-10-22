@@ -13,6 +13,12 @@
 
 ## 状态总览
 
+后续核账（2026-10-22）：本篇所提「位运算符零逃生口」是 M7 当时的缺口。
+当前 Int 原生快路及七个运算符 trait 已由 b604ee8b（#842）交付；3e5649ce（#844）
+补齐 std 定宽整数，806f07fe（#849）与 39dcc4a6（#853）补齐 Tile 按位与掩码移位。
+刀 5 固化同一整数 oracle 的运行期、comptime、LSP、解释器及独立参考核验与八项宿主负控。
+终态与范围边界见 [按位设计](../bitwise-operator-traits-design.md)；不将这次收尾记作 M7 自举的新前置。
+
 | 序 | 修复项 | 层 | 状态 | 提交 |
 |---|---|---|---|---|
 | 1 | 补齐 `find/take/drop/reverse` + 字符串 `index_of/last_index_of` | 库 | ✅ 完成 | dawn-lang `1784358`、backend `82664a8` |

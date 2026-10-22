@@ -109,3 +109,6 @@ fi
 
 ./scripts/checker-corpus/coverage.py
 echo "OK: checker corpus -- $n cases, $n_diags diagnostics in the recorded order"
+
+# Diagnostic bytes alone cannot prove the Int route or finite-width semantics.
+python3 scripts/bitwise-contract/check.py

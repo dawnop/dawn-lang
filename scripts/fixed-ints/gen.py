@@ -575,6 +575,24 @@ def corpus():
 
 # ------------------------------------------------------ bitwise oracle
 
+def bitwise_vectors(w, signed):
+    """Unbounded integer oracle shared by host, interpreter and reference probes."""
+    mask = (1 << w) - 1
+    top = 1 << (w - 1)
+    patterns = list(dict.fromkeys([0, 1, mask, top, mask // 3, 2 * (mask // 3), top - 1]))
+    counts = [-w - 1, -w, -1, 0, 1, w - 1, w, w + 1, 2 * w, -(1 << 63), (1 << 63) - 1]
+    rows = []
+    for a in patterns:
+        b = mask * 11 // 17
+        expected = []
+        for n in counts:
+            k = n & (w - 1)
+            expected.extend(wrap(v, w, signed or w == 64) for v in [a & b, a | b, a ^ b, a ^ mask,
+                (a << k) & mask, wrap(a, w, signed) >> k, a >> k])
+        rows.append((wrap(a, w, signed or w == 64), wrap(b, w, signed or w == 64), expected))
+    return counts, rows
+
+
 def bitwise_corpus():
     """One independent row per bit pattern, shared by runtime and LSP tests.
 
@@ -608,9 +626,7 @@ def bitwise_corpus():
             prog.insert(4, f"use std/int/{m}")
         ty = "Int" if name == "Int" else f"{m}.{name}"
         mask = (1 << w) - 1
-        top = 1 << (w - 1)
-        patterns = list(dict.fromkeys([0, 1, mask, top, mask // 3, 2 * (mask // 3), top - 1]))
-        counts = [-w - 1, -w, -1, 0, 1, w - 1, w, w + 1, 2 * w, -(1 << 63), (1 << 63) - 1]
+        counts, vectors = bitwise_vectors(w, signed)
 
         def raw(v):
             return wrap(v, 64, True) if w == 64 else wrap(v, w, signed)
@@ -635,14 +651,8 @@ def bitwise_corpus():
             p("  out")
             p("}")
             p("")
-        for i, a in enumerate(patterns):
+        for i, (a, _b, expected) in enumerate(vectors):
             label = f"{m}_{i}"
-            expected = []
-            b = mask * 11 // 17
-            for n in counts:
-                k = n & (w - 1)
-                expected.extend(map(raw, [a & b, a | b, a ^ b, a ^ mask,
-                    (a << k) & mask, wrap(a, w, signed) >> k, a >> k]))
             p(f"const EXPECT_{label.upper()}: List[Int] = [{', '.join(map(str, expected))}]")
             p(f"const FOLDED_{label.upper()}: List[Int] = comptime {{ concrete_{m}({expr(a)}) }}")
             p(f"const DICT_{label.upper()}: List[Int] = comptime {{ generic_{m}({expr(a)}) }}")
