@@ -37,6 +37,16 @@ LOWER = "packages/tileir/src/lower.dawn"
 KERNELS = "scripts/tile-golden/kernels.dawn"
 
 MUTATIONS = {
+    "shift-count-unmasked": ((
+        DEV,
+        '  let count = t_binaryi("andi", dt, shape_of(y), y, limit)',
+        '  let count = y',
+    ),),
+    "shift-witness-mismatch": ((
+        DEV,
+        '  let dt = dtype_name(d)\n  let mask = match dt',
+        '  let dt = if dtype_name(d) == "i32" { "i16" } else { dtype_name(d) }\n  let mask = match dt',
+    ),),
     "mask-and-as-andi": ((
         DEV,
         'dt == "i1" && (op == "andi" || op == "ori")',

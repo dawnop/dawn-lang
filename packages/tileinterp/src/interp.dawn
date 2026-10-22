@@ -807,15 +807,12 @@ fn int_bin(cx: Cx, op: String, w: Int, a: Int, b: Int) -> Int = match op {
   "andi" -> wrap(w, a & b)
   "ori" -> wrap(w, a | b)
   "xori" -> wrap(w, a ^ b)
-  "shli" -> if b < 0 || b >= w { shift_ub(cx, "shli", b, w) } else { wrap(w, a << b) }
-  "shri" -> if b < 0 || b >= w { shift_ub(cx, "shri", b, w) } else { wrap(w, a >> b) }
-  "shru" -> if b < 0 || b >= w { shift_ub(cx, "shru", b, w) } else { wrap(w, unsigned_of(w, a) >>> b) }
+  "shli" -> wrap(w, a << (b & (w - 1)))
+  "shri" -> wrap(w, a >> (b & (w - 1)))
+  "shru" -> wrap(w, unsigned_of(w, a) >>> (b & (w - 1)))
   "mulhii" -> wrap(w, mulhi_u(w, a, b))
   _ -> internal("integer operation ${op} passed the static walk")
 }
-
-fn shift_ub(cx: Cx, op: String, b: Int, w: Int) -> Int =
-  if cx.ub { refuse_ub("${op} by ${b}, outside 0 to ${w - 1}") } else { 0 }
 
 # A non-saturating `ftoi`'s lane: NaN, an infinity or a value outside the
 # target is undefined (refused); with the checks off, sm_86's measured
@@ -1747,4 +1744,29 @@ test "approximate division uses a correctly rounded reference and flushes both e
   assert float_bin_in("f32", "divf_approx_ftz", tiny, 1.0) == 0.0
   assert float_bin_in("f32", "divf_approx_ftz", 1.0e-30, 1.0e10) == 0.0
   assert float_bin_in("f32", "divf_approx_ftz", 1.0, 4.0) == 0.25
+}
+
+test "integer shifts mask all counts even when UB checks are enabled" {
+  with_mem(() => {
+    let base = Cx { bufs: [], lens: [], written: mem.new(0), params: [], dtypes: [], bid: [0, 0, 0], grid: [1, 1, 1], ub: true }
+    for checks in [true, false] {
+      let cx = Cx { ..base, ub: checks }
+      for w in [8, 16, 32, 64] {
+        let lo = if w == 64 { 1 << 63 } else { 0 - (1 << (w - 1)) }
+        for n in [0, w, 0 - w, lo] {
+          assert int_bin(cx, "shli", w, lo, n) == lo
+          assert int_bin(cx, "shri", w, lo, n) == lo
+          assert int_bin(cx, "shru", w, lo, n) == lo
+        }
+        for n in [w - 1, -1, 0 - w - 1] {
+          assert int_bin(cx, "shli", w, lo, n) == 0
+          assert int_bin(cx, "shri", w, lo, n) == -1
+          assert int_bin(cx, "shru", w, lo, n) == 1
+        }
+        assert int_bin(cx, "shli", w, 1, w + 1) == 2
+        assert int_bin(cx, "shri", w, lo, w + 1) == lo >> 1
+        assert int_bin(cx, "shru", w, -1, w + 1) == if w == 64 { 9223372036854775807 } else { (1 << (w - 1)) - 1 }
+      }
+    }
+  })
 }

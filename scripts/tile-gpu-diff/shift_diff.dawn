@@ -1,0 +1,331 @@
+# Shift layer 2 compares every boundary count against signed operand
+# patterns, with a distinct segment per operator. An extra i64 run uses typed
+# transfers so INT_MIN, INT_MAX and bits beyond Float precision are exact.
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out}
+use std/dtype.{I64}
+use tileref/ref.{shift_ref, shift_ref_int}
+use std/list
+use std/map
+
+pub const DT_N: Int = 512
+pub const DT_TILE: Int = 128
+pub const TAIL: Int = 16
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignError] !Gpu = {
+  var hs: List[Int] = []
+  for (dt, data) in bufs {
+    hs = hs ++ [gpu.gpu_alloc(dt, len(data))?]
+  }
+  Ok(hs)
+}
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
+  for i in 0..len(hs) {
+    let (dt, data) = bufs[i]
+    gpu.gpu_copy_from_host(hs[i], gpu.encode_floats(dt, data))?
+  }
+  Ok(())
+}
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a
+## `gx` by 1 by 1 grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. The LAST buffer is the output, and the
+## one this reads back.
+fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !Gpu =
+  match alloc_all(bufs) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, 1, 1, list.map(hs, h => gpu.Buffer(h))) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let (last_dt, _last) = bufs[len(bufs) - 1]
+              let r: Result[List[Float], ForeignError] = match gpu.gpu_copy_to_host(hs[len(hs) - 1]) {
+                Ok(raw) -> Ok(gpu.decode_floats(last_dt, raw))
+                Err(e) -> Err(e)
+              }
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+## The verdict for one kernel. Every kernel here is EXACT tier, so there is
+## no tolerance arm: the two renderings are equal or they are not.
+fn verdict(fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if rendered(real.result) == rendered(fake.result) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+## The first lane on which the two answers differ, and what each says, or
+## "-" if they agree. The segment names left, arithmetic right,
+## logical right, in that order. Each segment has DT_N lanes.
+fn first_difference(real: Trace, fake: Trace) -> String =
+  match (real.result, fake.result) {
+    (Some(a), Some(b)) ->
+      if len(a) != len(b) {
+        "lengths ${len(a)} and ${len(b)}"
+      } else {
+        match list.find(range(0, len(a)), i => to_string(a[i]) != to_string(b[i])) {
+          Some(i) -> "seg ${i / DT_N} lane ${i % DT_N}: device ${a[i]} host ${b[i]}"
+          None -> "-"
+        }
+      }
+    _ -> "-"
+  }
+
+# All four widths have exact Float-channel inputs; full-width i64 is typed below.
+fn case_name(i: Int) -> String = ["shift_i8", "shift_i16", "shift_i32", "shift_i64"][i]
+fn width(i: Int) -> Int = [8, 16, 32, 64][i]
+fn case_segments(_i: Int) -> Int = 3
+fn case_grid(_i: Int) -> Int = DT_N / DT_TILE
+# Every operand pattern meets every boundary count, including the minimum
+# signed operand. Narrow inputs stay exact on the Float transfer channel.
+fn corpus(i: Int, rhs: Bool) -> List[Float] = list.map(range(0, DT_N), lane => {
+  let w = width(i)
+  let lo = 0 - (1 << (w - 1))
+  let counts = [0, w - 1, w, w + 1, -1, 0 - w, 0 - w - 1, 1, 2 * w, lo]
+  let values = if w == 64 { [0, 1, 2, lo, 4, lo, 8, 16] } else { [0, 1, -1, lo, 0 - lo - 1, 85, -86, 3] }
+  to_float(if rhs { counts[lane % len(counts)] } else { values[(lane / len(counts)) % len(values)] })
+})
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let dt = ["i8", "i16", "i32", "i64"][i]
+  [(dt, corpus(i, false)), (dt, corpus(i, true)), (dt, list.map(range(0, 3 * DT_N + TAIL), _k => -7.0))]
+}
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
+  map.from([(case_name(i), (3, last_out((dts, ins) => shift_ref(width(i), dts, ins))))])
+fn shape_of(_name: String) -> String = "lanes=512 operations=3"
+
+const BIG_PINNED_A: Int = 9007199254740993
+const BIG_MAX: Int = 9223372036854775807
+
+# Full-width inputs include INT_MIN, INT_MAX and values beyond 2^53.
+fn big_a() -> List[Int] = list.map(range(0, DT_N), lane =>
+    [0, 1, -1, 0 - BIG_MAX - 1, BIG_MAX, BIG_PINNED_A, 0 - BIG_PINNED_A, -86][(lane / 12) % 8])
+fn big_b() -> List[Int] = list.map(range(0, DT_N), lane =>
+    [0, 63, 64, 65, -1, -64, -65, 1, 128, 0 - BIG_MAX - 1, BIG_MAX, -2][lane % 12])
+
+fn big_sentinels() -> List[Int] = list.map(range(0, TAIL), _i => 0 - 12345)
+
+## Full-width i64 values cross the typed buffer channel, so high bits never
+## pass through Float. The sentinel tail is checked separately.
+fn big_stages() -> Result[List[Int], ForeignError] !Gpu = {
+  let a = gpu.alloc(I64, DT_N)?
+  let b = gpu.alloc(I64, DT_N)?
+  let out = gpu.alloc(I64, 3 * DT_N + TAIL)?
+  gpu.copy_from_host(a, big_a())?
+  gpu.copy_from_host(b, big_b())?
+  gpu.copy_from_host(out, list.map(range(0, 3 * DT_N), _i => 0 - 12345) ++ big_sentinels())?
+  gpu.launch("shift_i64", DT_N / DT_TILE, [gpu.erase(gpu.buffer_arg(a)), gpu.erase(gpu.buffer_arg(b)), gpu.erase(gpu.buffer_arg(out))])?
+  gpu.sync()?
+  let got = gpu.copy_to_host(out)?
+  gpu.free(a)?
+  gpu.free(b)?
+  gpu.free(out)?
+  Ok(got)
+}
+
+## The first complete i64 bit pattern that differs from the independent
+## host oracle, without converting either value to Float.
+fn big_first_difference(got: List[Int], want: List[Int]) -> String =
+  match list.find(range(0, len(want)), i => got[i] != want[i]) {
+    Some(i) -> "seg ${i / DT_N} lane ${i % DT_N}: device ${got[i]} host ${want[i]}"
+    None -> "-"
+  }
+
+## A vector as a line: its length, its first lanes and its last ones.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn buffers_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+}
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("shift_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+fn usage() -> Unit !Exit !io = {
+  io.eprintln("usage: shift_diff <shift_i8.cubin> <shift_i16.cubin> <shift_i32.cubin> <shift_i64.cubin>")
+  io.exit(2)
+}
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let paths = args()
+  let count = 4
+  if len(paths) != 4 { usage() } else { () }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(paths[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let gx = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, bufs))
+    let real = with_gpu_real(cubins, () => stages(name, gx, bufs))
+    let v = verdict(fake, real)
+    io.println("kernel ${name} tier=exact bufs=${buffers_of(i)} grid=(${gx}, 1, 1)"
+        ++ " segments=${case_segments(i)}")
+    io.println("  index ${shape_of(name)}")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    io.println("  first ${first_difference(real, fake)}")
+    if real.note != "" { io.println("  note  ${real.note}") } else { () }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  # the i64 corpus past 2^53, typed: the real device against the Int twin
+  let big = with_gpu_real(cubins, big_stages)
+  let want = shift_ref_int(64, big_a(), big_b())
+  io.println("kernel shift_i64_big tier=exact bufs=i64[${DT_N}],i64[${DT_N}],i64[${3 * DT_N + TAIL}]"
+      ++ " grid=(${DT_N / DT_TILE}, 1, 1) segments=3")
+  io.println("  index lanes=512 beyond_2p53=yes")
+  io.println("  fake  oracle=typed_int")
+  var big_verdict = ""
+  match big {
+    Err(e) -> {
+      io.println("  real  stopped=${e.kind}")
+      io.println("  note  ${e.message}")
+      big_verdict = "blocked:${e.kind}@big"
+    }
+    Ok(got) -> {
+      let lanes = list.take(got, 3 * DT_N)
+      let tail_ok = list.drop(got, 3 * DT_N) == big_sentinels()
+      io.println("  real  lanes=${len(got)} tail_untouched=${tail_ok}")
+      io.println("  first ${big_first_difference(lanes, want)}")
+      big_verdict = if lanes == want && tail_ok { "identical:exact" } else { "differ:result" }
+    }
+  }
+  io.println("  verdict ${big_verdict}")
+  if big_verdict == "identical:exact" { exact_count = exact_count + 1 } else { () }
+  if big_verdict != "identical:exact" { all_agreed = false } else { () }
+  if big_verdict == "differ:result" { any_differ = true } else { () }
+  if blocked == "" && not any_differ && big_verdict != "identical:exact" { blocked = big_verdict } else { () }
+  io.println("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")

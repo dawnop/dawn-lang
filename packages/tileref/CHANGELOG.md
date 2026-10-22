@@ -1,5 +1,9 @@
 # tileref changelog
 
+## 0.1.2 (2026-10-22)
+
+- Add finite-width shift references with masked signed counts and a typed Int oracle for complete i64 bit patterns.
+
 ## 0.1.1 (2026-10-22)
 
 Add finite-width bitwise reference segments and a full-width Int oracle for tile operators.

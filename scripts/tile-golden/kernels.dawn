@@ -18,18 +18,18 @@ use std/int/i32.{I32}
 use std/narrow.{F32, BF16, F16, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU, F4E2M1FN, F8E5M3FNU, Rounding, f32}
 use std/float.{INFINITY}
 use tileref/ref.{global_table_a, global_table_b, global_syms_c}
-use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, param, block_id, tile_at, load, store, row_major, permute, coord,
+use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, param, block_id, tile_at, load, store, row_major, permute, coord,
   in_range, axis_mask, gather, scatter, axis_strides, ge_i, mma, full, transpose, to, add, sub, mul, div, max, min,
   abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_eq,
   d_loop, carry, get, set, lit, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes, d_reduce,
   d_reduce2, d_if, i_const, add_i, sub_i, mul_i, Overflow, div_i, rem_i, max_i, min_i, mulhi_i,
-  shl_i, shr_i, lt_i, shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask,
+  lt_i, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask,
   bits_to_float, bits_to_int, float_to_float, ext_u8, trunc_u8, mmai, d_return_if, pack_bytes, unpack_bytes, ext_i4,
   ext_u4, trunc_i4, arange, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_scan, d_scan2,
   erf, sin, cos, tan, sinh, cosh, atan2, remf, extract, cat, permute_tile, num_blocks, scalar, d_fork2, insert, powi,
   memory_fence_alias, gdc_wait, gdc_launch_dependents, ptrs,
   ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, store_ptrs, i64_const, add_i64, d_global, Visibility,
-  global_ptrs, alloca_ptrs, mma_scaled, addi, subi, muli, shli, shri, consti, sqrt_approx, eq_u, ne_u, lt_u, le_u,
+  global_ptrs, alloca_ptrs, mma_scaled, addi, subi, muli, consti, sqrt_approx, eq_u, ne_u, lt_u, le_u,
   gt_u, ge_u, atomic_rmw, ByArch, EntryHints, entry_hints, ptr_hints, view_hints, for_arch,
   tensor_view, partition_view, load_view, store_view, tensor_view_dyn, tensor_dim, index_space_dim,
   idx_of, Dyn, strided_view, gather_scatter_view, load_gather, atomic_red_view, At, Rows, NoPadding, PadZero,
@@ -1029,11 +1029,11 @@ fn subarray_sum(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
 # non-negative values would forgive it.
 fn rb_round(h: Tile[I32]) -> Tile[I32] !Dev = {
   let h1 = mul_i(h, i_const(RB_K1))
-  let h2 = (h1 ^ shr_u(h1, i_const(15)))
+  let h2 = (h1 ^ (h1 >>> i_const(15)))
   let h3 = add_i(h2, i_const(RB_K2))
-  let h4 = (h3 ^ shr_i(h3, i_const(13)))
+  let h4 = (h3 ^ (h3 >> i_const(13)))
   let h5 = mul_i(h4, i_const(RB_K3))
-  (h5 ^ shr_u(h5, i_const(16)))
+  (h5 ^ (h5 >>> i_const(16)))
 }
 
 # RB_ROUNDS applications of that round to each seed: leetgpu 24 (Rainbow
@@ -1069,9 +1069,9 @@ fn int_ops(x: Param[I32], y: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let mn = min_i(a, b)
   let ng = neg_i(a)
   let av = abs_i(d)
-  let sh = shl_i(a, i_const(3))
-  let ar = shr_i(a, i_const(5))
-  let lo = shr_u(a, i_const(5))
+  let sh = (a << i_const(3))
+  let ar = (a >> i_const(5))
+  let lo = (a >>> i_const(5))
   # itof, one EXACT halving in f64, then ftoi: `a / 2` truncated toward
   # zero. Halving is exact for every i32, so the only inexact step would be
   # the rounding, and there is none: `ftoi` takes `nearest_int_to_zero` and
@@ -1109,6 +1109,15 @@ fn bitwise_tiles[D: TileBitsDtype](a: Param[D], b: Param[D], out: Param[D]) -> U
   let y = load_cell(b)
   let apply = (j: Int) => if j == 0 { x & y } else if j == 1 { x | y } else if j == 2 { x ^ y } else { ~x }
   for j in 0..4 { store_sub(out, [j, 0], reshape(apply(j), [1, 128])) }
+}
+
+# Each dynamic count is loaded per lane; a captured qualification dictionary
+# records all three shift operators independently so no result can cancel.
+fn shift_tiles[D: TileShiftDtype](a: Param[D], b: Param[D], out: Param[D]) -> Unit !Dev = {
+  let x = load_cell(a)
+  let n = load_cell(b)
+  let apply = (j: Int) => if j == 0 { x << n } else if j == 1 { x >> n } else { x >>> n }
+  for j in 0..3 { store_sub(out, [j, 0], reshape(apply(j), [1, 128])) }
 }
 
 fn bitwise_mask(a: Param[I32], b: Param[I32], out: Param[I32]) -> Unit !Dev = {
@@ -1987,7 +1996,7 @@ fn dtype_i16(a: Param[I16], b: Param[I16], out: Param[I16]) -> Unit !Dev = {
   seg(0, addi(ta, tb))
   seg(1, subi(ta, tb))
   seg(2, muli(ta, tb))
-  seg(3, shri(shli(ta, consti(I16, 3)), consti(I16, 2)))
+  seg(3, ((ta << consti(I16, 3)) >> consti(I16, 2)))
   seg(4, float_to_int(int_to_float(ta, F64), I16))
 }
 
@@ -2116,8 +2125,8 @@ fn dtype_i4(a: Param[I32], b: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let odd = int_to_mask(arange(I4_LANES))
   let words = (v: Tile[I32]) => unpack_bytes(pack_bytes(trunc_i4(v)), I32)
   seg(0, words(add_i(sa, sb)))
-  seg(1, words(shr_i(sa, i_const(1))))
-  seg(2, words(shr_i(ua, i_const(1))))
+  seg(1, words((sa >> i_const(1))))
+  seg(2, words((ua >> i_const(1))))
   seg(3, words(mul_i(sa, sb)))
   seg(4, words(select(odd, sb, sa)))
 }
@@ -5523,6 +5532,26 @@ fn trace(name: String) -> TileProg = match name {
       Out(I64, seg_out(4, 4, 512, 128)), bitwise_tiles)
     p
   }
+  "shift_i8" -> {
+    let (p, _e) = trace3("shift_i8", In(I8, cells([512], [128])), In(I8, cells([512], [128])),
+      Out(I8, seg_out(3, 4, 512, 128)), shift_tiles)
+    p
+  }
+  "shift_i16" -> {
+    let (p, _e) = trace3("shift_i16", In(I16, cells([512], [128])), In(I16, cells([512], [128])),
+      Out(I16, seg_out(3, 4, 512, 128)), shift_tiles)
+    p
+  }
+  "shift_i32" -> {
+    let (p, _e) = trace3("shift_i32", In(I32, cells([512], [128])), In(I32, cells([512], [128])),
+      Out(I32, seg_out(3, 4, 512, 128)), shift_tiles)
+    p
+  }
+  "shift_i64" -> {
+    let (p, _e) = trace3("shift_i64", In(I64, cells([512], [128])), In(I64, cells([512], [128])),
+      Out(I64, seg_out(3, 4, 512, 128)), shift_tiles)
+    p
+  }
   "bitwise_mask" -> {
     let (p, _e) = trace3("bitwise_mask", In(I32, cells([512], [128])), In(I32, cells([512], [128])),
       Out(I32, seg_out(4, 4, 512, 128)), bitwise_mask)
@@ -6446,7 +6475,7 @@ pub fn main() -> Unit !io = match args() {
         ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
         ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"
         ++ "|count_eq|subarray_sum|rainbow|int_ops"
-        ++ "|bitwise_i8|bitwise_i16|bitwise_i32|bitwise_i64|bitwise_mask|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
+        ++ "|bitwise_i8|bitwise_i16|bitwise_i32|bitwise_i64|bitwise_mask|shift_i8|shift_i16|shift_i32|shift_i64|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
         ++ "|matmul_f16_sm90|matmul_f16_sm100|matmul_i8_sm90|matmul_i8_sm100"
         ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
         ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"

@@ -122,7 +122,7 @@ if [ "$mode" != selftest ]; then
 fi
 
 # ---- --selftest
-for m in mulf-adds bounds-unchecked unsupported-skipped mma-drops-term narrow-unrounded fma-two-roundings; do
+for m in mulf-adds bounds-unchecked unsupported-skipped mma-drops-term narrow-unrounded fma-two-roundings shift-ub-restored; do
   d="$work/$m"
   mkdir -p "$d"
   mutant_package "$d" "$m"
@@ -160,6 +160,12 @@ for m in mulf-adds bounds-unchecked unsupported-skipped mma-drops-term narrow-un
       run_families "$d" 30
       if judge "$d" > "$d/judge.out" 2>&1; then cat "$d/judge.out" >&2; fail "$m: the comparison stayed green"; fi
       echo "PASS  $m: the package test and the comparison went red (first finding: $(grep -m1 '^FAIL ' "$d/judge.out" | cut -c1-160))"
+      ;;
+    shift-ub-restored)
+      if ./bin/dawn test "$pkg" > "$d/test.out" 2>&1; then fail "$m: the package tests stayed green"; fi
+      grep -q '^FAIL  interp :: integer shifts mask all counts even when UB checks are enabled' "$d/test.out" ||
+        { cat "$d/test.out" >&2; fail "$m: the count-mask test did not fail"; }
+      echo "PASS  $m: raw out-of-width and negative counts made the integer shift test red"
       ;;
     fma-two-roundings)
       if ./bin/dawn test "$pkg" > "$d/test.out" 2>&1; then fail "$m: the package tests stayed green"; fi
