@@ -7,6 +7,8 @@
 # (bytes to the file) or `kernels --bytecode-version` (the header's version,
 # which run.sh holds against toolchain.txt).
 use std/list
+use std/str
+use std/loc
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{I4}
 use std/dtype.{F64, I64}
@@ -382,15 +384,86 @@ const MM_TM: Int = 64
 const MM_TN: Int = 64
 const MM_TK: Int = 32
 
-#
-# Since the batch's PR-3 the three matrices are cut into cells on their
-# markers (`mm_cells`): A's rows follow grid axis 0 and its K the loop,
-# B's columns follow axis 1 and its K the loop, C's cell is the block's.
-# So the body is the textbook loop, with no base, no stride and no shape.
-fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
+# A configuration changes tile types, so it is selected before recording.
+# Evidence rows are in flash-config/ledger.json, measured with tileiras
+# 13.4.92 -O3. Zero means the hint is absent, as in the flash table.
+type MmCfg = { tm: Int, tn: Int, tk: Int, occ: Int, cga: Int, evidence: String, median: Float, baseline: Float }
+
+type MmShape = { m: Int, n: Int, k: Int }
+
+fn mm_shape() -> MmShape = MmShape { m: MM_M, n: MM_N, k: MM_K }
+
+fn mm_config(tm: Int, tn: Int, tk: Int, occ: Int, cga: Int, evidence: String, median: Float, baseline: Float) -> MmCfg =
+  MmCfg { tm: tm, tn: tn, tk: tk, occ: occ, cga: cga, evidence: evidence, median: median, baseline: baseline }
+
+fn mm_cfg(arch: String, dtype: String) -> MmCfg = match (arch, dtype) {
+  ("sm_90", "f64") -> mm_config(16, 64, 16, 2, 0, "mmf6490", 6.287264, 14.983552)
+  ("sm_100", "f64") -> mm_config(16, 64, 16, 2, 0, "mmf64100", 5.545920, 10.758112)
+  (_, "f64") -> mm_config(64, 64, 32, 0, 0, "mmf64default", 14.983552, 14.983552)
+  _ -> panic("matmul: only f64 is available")
+}
+
+fn mm_opt(n: Int) -> Option[Int] = if n == 0 { None } else { Some(n) }
+
+fn mm_entry(c: MmCfg) -> EntryHints = entry_hints(occupancy: mm_opt(c.occ), num_cta_in_cga: mm_opt(c.cga))
+
+# A's rows follow grid axis 0 and B's columns follow axis 1. Their K
+# cells follow the loop; the accumulator is its carried value.
+fn mm_body(a: Param[Float], b: Param[Float], c: Param[Float], cfg: MmCfg, shape: MmShape) -> Unit !Dev = {
   var acc = zeros(c)
-  for k in d_range(0, MM_K / MM_TK) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
+  for k in d_range(0, shape.k / cfg.tk) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
   store_cell(c, acc)
+}
+
+# The default entry keeps the same three-parameter contract and bytecode.
+fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev =
+  mm_body(a, b, c, mm_cfg("default", "f64"), mm_shape())
+
+fn mm_kernel(c: MmCfg, shape: MmShape) -> fn(Param[Float], Param[Float], Param[Float]) -> Unit !Dev =
+  (a, b, o) => mm_body(a, b, o, c, shape)
+
+fn mm_record(arch: String, dtype: String, shape: MmShape, cfg: Option[MmCfg] = None, at: Loc = caller()) -> TileProg = {
+  if dtype != "f64" { panic("matmul: only f64 is available", at: at) } else { () }
+  let c = match cfg { Some(c) -> c
+    None -> mm_cfg(arch, dtype) }
+  let e = mm_entry(c)
+  check_config(arch, c.tm, e, at: at)
+  if c.tn <= 0 || c.tk <= 0 { panic("matmul: tile dimensions must be positive", at: at) } else { () }
+  if shape.m <= 0 || shape.n <= 0 || shape.k <= 0 || shape.m % c.tm != 0 || shape.n % c.tn != 0 || shape.k % c.tk != 0 {
+    panic("matmul: dimensions must be positive multiples of the configured tiles", at: at)
+  } else { () }
+  let hints: ByArch[EntryHints] = if c.occ == 0 && c.cga == 0 { [] } else { [for_arch(arch, e)] }
+  let (p, _e) = trace3("matmul",
+    In(F64, cells([shape.m, shape.k], [c.tm, c.tk], along: [0, FREE_AXIS])),
+    In(F64, cells([shape.k, shape.n], [c.tk, c.tn], along: [FREE_AXIS, 1])),
+    Out(F64, cells([shape.m, shape.n], [c.tm, c.tn])), mm_kernel(c, shape), hints: hints)
+  p
+}
+
+fn mm_named(name: String, arch: String) -> TileProg = TileProg { ..mm_record(arch, "f64", mm_shape()), name: name }
+
+# The golden harness runs this through both backends with the default
+# matmul item. Bypassing the factory's filter must make these checks red.
+fn mm_refusal[T](body: fn() -> T) -> String = match catch_panic(body) { Ok(_) -> "accepted"
+  Err(e) -> e.message }
+
+fn mm_expect(ok: Bool) -> Unit = if ok { () } else { panic("matmul configuration check failed") }
+
+fn mm_config_check() -> Unit = {
+  let file = loc.path(loc.here())
+  let line = loc.line(loc.here())
+  let a = mm_refusal(() => mm_record("sm_100", "f64", mm_shape(), cfg: Some(mm_config(64, 64, 32, 0, 2, "bad", 0.0, 0.0))))
+  mm_expect(str.contains(a, "cga=2 requires bq >= 128"))
+  mm_expect(str.contains(a, " at ${file}:${line + 1}:"))
+  let line2 = loc.line(loc.here())
+  let b = mm_refusal(() => mm_record("sm_90", "f64", mm_shape(), cfg: Some(mm_config(256, 64, 32, 0, 0, "bad", 0.0, 0.0))))
+  mm_expect(str.contains(b, "sm_90 bq=256 requires cga=2"))
+  mm_expect(str.contains(b, " at ${file}:${line2 + 1}:"))
+  let _a = mm_record("sm_100", "f64", mm_shape(), cfg: Some(mm_config(128, 64, 32, 0, 2, "edge", 0.0, 0.0)))
+  let _b = mm_record("sm_90", "f64", mm_shape(), cfg: Some(mm_config(256, 64, 32, 0, 2, "edge", 0.0, 0.0)))
+  let _c = mm_record("sm_90", "f64", mm_shape())
+  mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", "f32", mm_shape())), "only f64 is available"))
+  mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", "f64", MmShape { m: 256, n: 256, k: 255 })), "positive multiples"))
 }
 
 # The batched GEMM: BMM_B independent 64x64 products in 32x32 tiles, the
@@ -5274,6 +5347,8 @@ fn trace(name: String) -> TileProg = match name {
       Out(F64, cells([MM_M, MM_N], [MM_TM, MM_TN])), matmul)
     p
   }
+  "matmul_sm90" -> mm_named("matmul_sm90", "sm_90")
+  "matmul_sm100" -> mm_named("matmul_sm100", "sm_100")
   "batched_matmul" -> {
     let (p, _e) = trace3("batched_matmul", In(F64, Whole), In(F64, Whole),
       Out(F64, cells([BMM_B, BMM_M, BMM_N], [1, BMM_T, BMM_T], along: [2, 0, 1])), batched_matmul)
@@ -6245,6 +6320,10 @@ fn out_along_twice() -> TileProg = {
 
 pub fn main() -> Unit !io = match args() {
   ["--bytecode-version"] -> println(bytecode_version())
+  ["--mm-config-check"] -> {
+    mm_config_check()
+    println("PASS matmul recording filters and boundaries")
+  }
   ["out_along_twice"] -> print(render(out_along_twice()))
   [name] -> print(render(trace_twice(name)))
   [name, "--bytecode-bare", path] -> {

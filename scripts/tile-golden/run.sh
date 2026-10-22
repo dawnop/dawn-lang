@@ -555,6 +555,7 @@ kernels=(
   view_inbounds view_inbounds_off view_inbounds_dim
   flash_attn idx_softmax carry_extent flash_attn_bf16
   flash_bf16_sm90_d64 flash_bf16_sm90_d128 flash_bf16_sm100_d64 flash_bf16_sm100_d128
+  matmul_sm90 matmul_sm100
   scalar_scale scalar_len scalar_loop scalar_wide
   dtype_e5m3 mmaf_scaled_e5m3
   vadd_producer vadd_debug foldif_debug)
@@ -979,9 +980,9 @@ check_global_syms_symbols() { # cubin
 # between.
 kernel_arch() { # kernel
   case "$1" in
-    flash_bf16_sm100_d64|flash_bf16_sm100_d128|dtype_e4m3|dtype_e5m2|dtype_e8m0|dtype_e2m1|mmaf_scaled_e4m3) echo sm_100 ;;
+    matmul_sm100|flash_bf16_sm100_d64|flash_bf16_sm100_d128|dtype_e4m3|dtype_e5m2|dtype_e8m0|dtype_e2m1|mmaf_scaled_e4m3) echo sm_100 ;;
     dtype_e5m3|mmaf_scaled_e5m3) echo sm_107 ;;
-    flash_bf16_sm90_d64|flash_bf16_sm90_d128) echo sm_90 ;;
+    matmul_sm90|flash_bf16_sm90_d64|flash_bf16_sm90_d128) echo sm_90 ;;
     view_atomic_bf16) echo sm_89 ;;
     *) echo "$gpu_name" ;;
   esac
@@ -1038,6 +1039,14 @@ echo "PASS  version: the writer and toolchain.txt agree on bytecode $want_byteco
 
 for k in "${kernels[@]}"; do
   run_item "$k" || continue
+  if [ "$k" = matmul ]; then
+    run_jvm "$work/clean" "$work/mm-check.jvm" --mm-config-check ||
+      { cat "$work/mm-check.jvm.err" >&2; fail "matmul recording filters failed on the JVM"; }
+    run_native "$work/clean.bin" "$work/mm-check.native" --mm-config-check ||
+      { cat "$work/mm-check.native.err" >&2; fail "matmul recording filters failed natively"; }
+    cmp -s "$work/mm-check.jvm" "$work/mm-check.native" || fail "matmul recording checks disagree"
+    cat "$work/mm-check.jvm"
+  fi
   golden="$here/$k.mlir"
   bc_golden="$here/$k.tilebc"
   run_jvm "$work/clean" "$work/$k.jvm" "$k" ||
