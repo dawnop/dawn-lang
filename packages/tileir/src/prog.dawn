@@ -34,7 +34,7 @@ use dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, bits_dtype, shift
   atomic_cas, add, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_range, By, d_loop, Carry, carry, get, set,
   d_reduce, d_if, max, gt, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, ptrs, int_to_ptr, ptr_to_int,
   tensor_view, partition_view, load_view, store_view, NoPadding, PadNegInf, extract, insert, powi, d_return_if,
-  float_to_float, sub, add_i, d_fork2, select, lt, arange, mma, full, to, transpose, permute_tile, rounding_name, Overflow, Padding, PadZero, padding_name,
+  float_to_float, sub, add_i, alloca_ptrs, d_fork2, select, lt, arange, mma, full, to, transpose, permute_tile, rounding_name, Overflow, Padding, PadZero, padding_name,
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
   retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, ByArch, EntryHints, PtrHints, ViewHints, wire_entry, wire_ptr, wire_view, for_arch, entry_hints, ptr_hints, view_hints, lit, idx_div,
   idx_rem, idx_sub, extent_of, blocks_of, scalar, idx_as_tile }
@@ -961,26 +961,15 @@ type Frame =
   | WhileFrame(outer: List[TileOp], inits: List[Int], carried: List[Int])
   | ReduceFrame(outer: List[TileOp], dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int])
   | ScanFrame(outer: List[TileOp], dim: Int, reverse: Bool, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int])
-  | ThenFrame(outer: List[TileOp], cond: Int)
-  | ElseFrame(outer: List[TileOp], cond: Int, on_true: List[TileOp])
+  | ThenFrame(outer: List[TileOp], cond: Int, entry_tok: Int)
+  | ElseFrame(outer: List[TileOp], cond: Int, on_true: List[TileOp], entry_tok: Int, then_tok: Int)
 
-# S2 deliberately keeps the existing pure regions. Token branches are S3.
-fn pending_s3(frames: List[Frame]) -> String =
-  if list.any(frames, f => match f {
-    ThenFrame(_o, _c) -> true
-    ElseFrame(_o, _c, _t) -> true
-    _ -> false
-  }) { "; staged if token branches require S3, which is not delivered" } else { "" }
-
-# A reduction's, a scan's or an `if`'s region is pure: the dialect requires
-# it of the first two and none of the three carries the memory ordering
-# token, so a load, a store or a loop (which carries the token through
-# itself) inside one has no order to be in. This is what says so: every
-# frame but the loop's.
+# Only reduce and scan require pure bodies. An if carries its memory order
+# through a private result, and still respects every enclosing pure region.
 fn is_pure_region(f: Frame) -> Bool = match f {
-  LoopFrame(_outer, _iv, _lower, _upper, _step, _unsigned, _inits, _carried) -> false
-  WhileFrame(_outer, _inits, _carried) -> false
-  _ -> true
+  ReduceFrame(_outer, _dim, _shape, _identities, _operands, _args) -> true
+  ScanFrame(_outer, _dim, _reverse, _shape, _identities, _operands, _args) -> true
+  _ -> false
 }
 
 # Whether a `return` may sit inside the region `f` opened: an `if` (either
@@ -988,8 +977,8 @@ fn is_pure_region(f: Frame) -> Bool = match f {
 # (ReturnOp::verify, knife T17).
 fn return_passes(f: Frame) -> Bool = match f {
   WhileFrame(_outer, _inits, _carried) -> true
-  ThenFrame(_outer, _cond) -> true
-  ElseFrame(_outer, _cond, _on_true) -> true
+  ThenFrame(_outer, _cond, _entry) -> true
+  ElseFrame(_outer, _cond, _on_true, _entry, _then) -> true
   _ -> false
 }
 
@@ -1128,8 +1117,8 @@ fn op_number(frames: List[Frame], ops: List[TileOp]) -> Int = {
     WhileFrame(outer, _inits, _carried) -> op_count(outer)
     ReduceFrame(outer, _dim, _shape, _identities, _operands, _args) -> op_count(outer)
     ScanFrame(outer, _dim, _reverse, _shape, _identities, _operands, _args) -> op_count(outer)
-    ThenFrame(outer, _cond) -> op_count(outer)
-    ElseFrame(outer, _cond, on_true) -> op_count(outer) + op_count(on_true)
+    ThenFrame(outer, _cond, _entry) -> op_count(outer)
+    ElseFrame(outer, _cond, on_true, _entry, _then) -> op_count(outer) + op_count(on_true)
   })
   before + op_count(ops) + 1
 }
@@ -1170,8 +1159,8 @@ fn region_phrase(f: Frame) -> String = match f {
   WhileFrame(_outer, _inits, _carried) -> "the body of a `d_loop`"
   ReduceFrame(_outer, _dim, _shape, _identities, _operands, _args) -> "the combiner of a `d_reduce`"
   ScanFrame(_outer, _dim, _reverse, _shape, _identities, _operands, _args) -> "the combiner of a `d_scan`"
-  ThenFrame(_outer, _cond) -> "the then branch of a `d_if`"
-  ElseFrame(_outer, _cond, _on_true) -> "the else branch of a `d_if`"
+  ThenFrame(_outer, _cond, _entry) -> "the then branch of a `d_if`"
+  ElseFrame(_outer, _cond, _on_true, _entry, _then) -> "the else branch of a `d_if`"
 }
 
 # ` (inside X, inside Y)` for the open regions, outermost first; empty at the
@@ -1469,6 +1458,7 @@ fn writes_of(defs: Map[Int, TileOp], op: TileOp) -> List[Write] = match op {
   AtomicRedViewOf(_t, _dtype, view, _ix, _mode, _scope, _v, _ti) -> [named(view_param(defs, view))]
   For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> writes_in(defs, body)
   Loop(_inits, _carried, _results, body) -> writes_in(defs, body)
+  If(_results, _cond, on_true, on_false) -> writes_in(defs, on_true) ++ writes_in(defs, on_false)
   _ -> []
 }
 
@@ -1499,15 +1489,14 @@ fn recorded(frames: List[Frame], ops: List[TileOp]) -> List[TileOp] = {
     WhileFrame(outer, _inits, _carried) -> flat(outer)
     ReduceFrame(outer, _dim, _shape, _identities, _operands, _args) -> flat(outer)
     ScanFrame(outer, _dim, _reverse, _shape, _identities, _operands, _args) -> flat(outer)
-    ThenFrame(outer, _cond) -> flat(outer)
-    ElseFrame(outer, _cond, on_true) -> flat(outer) ++ flat(on_true)
+    ThenFrame(outer, _cond, _entry) -> flat(outer)
+    ElseFrame(outer, _cond, on_true, _entry, _then) -> flat(outer) ++ flat(on_true)
   }) ++ flat(ops)
 }
 
-# The token an operation of the chain answers, and the ones it was ordered
-# after. A loop answers its last result and was ordered after its last
-# init: the token rides through every loop as the last carried value.
-fn tok_step(op: TileOp) -> Option[(Int, List[Int])] = match op {
+# The token an operation answers and its dependencies. Regions are looked
+# up in explicit recording metadata: pure loops have no token result.
+fn tok_step(op: TileOp, region_tokens: Map[Int, Int]) -> Option[(Int, List[Int])] = match op {
   Load(_d, t, _p, _dt, _b, _s, _st, _m, _pd, ti, _h) -> Some((t, [ti]))
   Store(t, _p, _dt, _b, _s, _st, _v, _m, ti, _h) -> Some((t, [ti]))
   Gather(_d, t, _p, _dt, _i, _s, _m, _pd, ti) -> Some((t, [ti]))
@@ -1522,10 +1511,22 @@ fn tok_step(op: TileOp) -> Option[(Int, List[Int])] = match op {
   LoadView(_d, t, _dt, _v, _ix, ti, _ib, _h) -> Some((t, [ti]))
   StoreView(t, _dt, _v, _ix, _val, ti, _ib, _h) -> Some((t, [ti]))
   JoinToks(t, toks) -> Some((t, toks))
-  For(_iv, _lower, _upper, _step, _unsigned, inits, _carried, results, _body) -> Some((last(results), [last(inits)]))
-  Loop(inits, _carried, results, _body) -> Some((last(results), [last(inits)]))
+  For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, results, _body) -> region_step(results, region_tokens)
+  Loop(_inits, _carried, results, _body) -> region_step(results, region_tokens)
+  If(results, _cond, _on_true, _on_false) -> region_step(results, region_tokens)
   _ -> None
 }
+
+# Registered only when the recorder retains a region's token result. A
+# data-only loop or if has no entry here, including one with zero results.
+fn region_step(results: List[Int], region_tokens: Map[Int, Int]) -> Option[(Int, List[Int])] =
+  match list.find(results, h => map.has(region_tokens, h)) {
+    Some(h) -> match map.get(region_tokens, h) {
+      Some(entry) -> Some((h, [entry]))
+      None -> None
+    }
+    None -> None
+  }
 
 # The tokens `tok` is ordered after, itself included, walking the chain
 # back until it leaves what was recorded (the entry token, or a token a
@@ -1567,12 +1568,12 @@ fn overlap(a: Write, b: Write) -> Option[String] = match (a, b) {
 # and a write another issued after it must not reach one element. Within
 # one block the block id is the same atom on both sides and cancels, which
 # is why this is decidable at recording time and needs no grid.
-fn check_fork(name: Ctx, frames: List[Frame], ops: List[TileOp], toks: List[Int]) -> Unit = {
+fn check_fork(name: Ctx, frames: List[Frame], ops: List[TileOp], toks: List[Int], region_tokens: Map[Int, Int]) -> Unit = {
   let all = recorded(frames, ops)
   let no_defs: Map[Int, TileOp] = map.empty()
   let defs = list.fold(all, no_defs, (m, op) => list.fold(defined(op), m, (m2, h) => map.insert(m2, h, op)))
   let no_chain: Map[Int, (TileOp, List[Int])] = map.empty()
-  let chain = list.fold(all, no_chain, (m, op) => match tok_step(op) {
+  let chain = list.fold(all, no_chain, (m, op) => match tok_step(op, region_tokens) {
     Some((t, before)) -> map.insert(m, t, (op, before))
     None -> m
   })
@@ -1971,7 +1972,7 @@ fn unordered_read(roles: List[Access], aim: Option[Int]) -> Bool = match aim {
 # Whether any operation of a region body, at any depth, is ordered after
 # token handle `t`. A loop whose carried token nothing in the body used and
 # that comes out unchanged does not need to carry it.
-fn tok_used(body: List[TileOp], t: Int) -> Bool = list.any(flat(body), o => match tok_step(o) {
+fn tok_used(body: List[TileOp], t: Int, region_tokens: Map[Int, Int]) -> Bool = list.any(flat(body), o => match tok_step(o, region_tokens) {
   Some((_out, before)) -> list.contains(before, t)
   None -> false
 })
@@ -2156,8 +2157,8 @@ fn top_of(f: Frame) -> List[TileOp] = match f {
   WhileFrame(outer, _inits, _carried) -> outer
   ReduceFrame(outer, _dim, _shape, _identities, _operands, _args) -> outer
   ScanFrame(outer, _dim, _reverse, _shape, _identities, _operands, _args) -> outer
-  ThenFrame(outer, _cond) -> outer
-  ElseFrame(outer, _cond, _on_true) -> outer
+  ThenFrame(outer, _cond, _entry) -> outer
+  ElseFrame(outer, _cond, _on_true, _entry, _then) -> outer
 }
 
 # Whether the handle `h`, which an operation the recording made itself
@@ -2527,6 +2528,7 @@ type ResultState = { value: Option[Int], ready: Bool, writes: Int }
 type Snap = {
   next: Int,
   tok: Int,
+  region_tokens: Map[Int, Int],
   ops: List[TileOp],
   globals: List[Global],
   frames: List[Frame],
@@ -2663,6 +2665,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
     with handle Dev {
       var next: Int = 1
       var tok: Int = 0
+      var region_tokens: Map[Int, Int] = map.empty()
       var ops: List[TileOp] = []
       var globals: List[Global] = []
       var frames: List[Frame] = []
@@ -2740,7 +2743,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
       }
       t_load(param, dtype, base0, shape, strides, mask0, pad0, hints) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "a load inside a reduce, scan or if region has no memory order${pending_s3(frames)}") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "a load inside a reduce or scan region has no memory order") } else { () }
         check_param(name, params, param, dtype, "load")
         check_shape(name, shape)
         check_strides(name, shape, strides)
@@ -2769,7 +2772,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
       }
       t_store(param, dtype, base0, shape, strides, v0, mask0, hints) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "a store inside a reduce, scan or if region has no memory order${pending_s3(frames)}") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "a store inside a reduce or scan region has no memory order") } else { () }
         check_param(name, params, param, dtype, "store")
         if len(shape) == 0 {
           refuse_at(name, frames, ops, writer(marks, calls, "store"), "a store writes a tile with a dimension, and this value is rank 0: broadcast it to the shape it is stored as")
@@ -2795,7 +2798,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
       }
       t_gather(param, dtype, index0, shape, mask0, pad0) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "a gather inside a reduce, scan or if region has no memory order${pending_s3(frames)}") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "a gather inside a reduce or scan region has no memory order") } else { () }
         check_param(name, params, param, dtype, "gather")
         check_shape(name, shape)
         let (g0, index) = settle(name, frames, grown(next, ops, held, spreads, pending), index0)
@@ -2815,7 +2818,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
       }
       t_scatter(param, dtype, index0, shape, v0, mask0) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "a scatter inside a reduce, scan or if region has no memory order${pending_s3(frames)}") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "a scatter inside a reduce or scan region has no memory order") } else { () }
         check_param(name, params, param, dtype, "scatter")
         check_shape(name, shape)
         check_write(name, frames, ops, roles, Some(param), writer(marks, calls, "scatter"), false)
@@ -2834,7 +2837,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
       }
       t_atomic_rmw(param, dtype, mode, index0, shape, v0, mask0) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "an atomic inside a reduce, scan or if region has no memory order${pending_s3(frames)}") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "an atomic inside a reduce or scan region has no memory order") } else { () }
         check_param(name, params, param, dtype, "atomic")
         check_shape(name, shape)
         check_rmw_mode(name, mode)
@@ -2856,7 +2859,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
       }
       t_atomic_cas(param, dtype, index0, shape, cmp0, v0, mask0) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "an atomic inside a reduce, scan or if region has no memory order${pending_s3(frames)}") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "an atomic inside a reduce or scan region has no memory order") } else { () }
         check_param(name, params, param, dtype, "atomic")
         check_shape(name, shape)
         check_write(name, frames, ops, roles, Some(param), writer(marks, calls, "atomic_cas"), false)
@@ -3225,7 +3228,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
       }
       t_loop_begin(lower0, upper0, step0, unsigned, inits0) => {
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "a loop inside a reduce, scan or if region has no memory order${pending_s3(frames)}") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "a loop inside a reduce or scan region has no memory order") } else { () }
         let (g, hs) = settle_all(name, frames, grown(next, ops, held, spreads, pending), [lower0, upper0, step0] ++ inits0)
         next = g.next
         ops = g.ops
@@ -3276,7 +3279,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
             # a body that never moved the token (only reads of an In, which
             # hang off the entry token) has no use for the slot: the loop
             # does not carry it and the token after is the one before
-            let drop = tok == last(carried) && not tok_used(inner, tok)
+            let drop = tok == last(carried) && not tok_used(inner, tok, region_tokens)
             let kept_inits = if drop { but_last(inits) } else { inits }
             let kept_carried = if drop { but_last(carried) } else { carried }
             let base = next
@@ -3286,6 +3289,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
             held = copy_held(held, kept_inits, results)
             frames = list.take(frames, len(frames) - 1)
             ops = outer ++ [For(iv, lower, upper, step, unsigned, kept_inits, kept_carried, results, body)]
+            if not drop { region_tokens = map.insert(region_tokens, last(results), last(inits)) }
             tok = if drop { last(inits) } else { last(results) }
             if drop { results } else { but_last(results) }
           }
@@ -3299,7 +3303,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         held = g.held
         spreads = g.spreads
         let open = frames
-        if list.any(open, is_pure_region) { refuse(name, "a loop inside a reduce, scan or if region has no memory order${pending_s3(frames)}") } else { () }
+        if list.any(open, is_pure_region) { refuse(name, "a loop inside a reduce or scan region has no memory order") } else { () }
         if len(frames) >= MAX_LOOP_DEPTH {
           refuse(name, "loops nest deeper than ${MAX_LOOP_DEPTH}; a body that recurses through d_loop unrolls forever")
         } else {
@@ -3341,7 +3345,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
             # would stop being unique
             let inner = ops
             let outer = saved
-            let drop = tok == last(carried) && not tok_used(inner, tok)
+            let drop = tok == last(carried) && not tok_used(inner, tok, region_tokens)
             let kept_inits = if drop { but_last(inits) } else { inits }
             let kept_carried = if drop { but_last(carried) } else { carried }
             let base = next
@@ -3354,6 +3358,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
             held = copy_held(held, kept_inits, results)
             frames = list.take(frames, len(frames) - 1)
             ops = outer ++ [Loop(kept_inits, kept_carried, results, body)]
+            if not drop { region_tokens = map.insert(region_tokens, last(results), last(inits)) }
             let after_loop = if drop { last(inits) } else { last(results) }
             tok = after_loop
             if drop { results } else { but_last(results) }
@@ -3716,7 +3721,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         ()
       }
       t_trial_begin() => {
-        trials = trials ++ [Snap { next: next, tok: tok, ops: ops, globals: globals, frames: frames, marks: marks,
+        trials = trials ++ [Snap { next: next, tok: tok, region_tokens: region_tokens, ops: ops, globals: globals, frames: frames, marks: marks,
           calls: calls, spans: spans, held: held, aims: aims, cell_views: cell_views, spreads: spreads, cell_blocks: cell_blocks,
           pending: pending, cell_tvs: cell_tvs, cell_marks: cell_marks, sub_views: sub_views, dyn_exts: dyn_exts,
           carries: carries, carry_rows: carry_rows, carry_sets: carry_sets, results: results }]
@@ -3730,6 +3735,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         trials = list.take(trials, len(trials) - 1)
         next = sn.next
         tok = sn.tok
+        region_tokens = sn.region_tokens
         ops = sn.ops
         globals = sn.globals
         frames = sn.frames
@@ -3829,12 +3835,12 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
       t_tok_join(toks) => {
         let open = frames
         if list.any(open, is_pure_region) {
-          refuse(name, "a token join inside a reduce, scan or if region has no memory order${pending_s3(frames)}")
+          refuse(name, "a token join inside a reduce or scan region has no memory order")
         } else {
           ()
         }
         if len(toks) < 2 { refuse(name, "join_tokens wants two or more tokens, got ${len(toks)}") } else { () }
-        check_fork(name, frames, ops, toks)
+        check_fork(name, frames, ops, toks, region_tokens)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [JoinToks(d, toks)]
@@ -3904,7 +3910,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         spreads = g.spreads
         let open = frames
         if list.any(open, is_pure_region) {
-          refuse(name, "a load inside a reduce, scan or if region has no memory order${pending_s3(frames)}")
+          refuse(name, "a load inside a reduce or scan region has no memory order")
         } else {
           ()
         }
@@ -3950,7 +3956,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         spreads = g.spreads
         let open = frames
         if list.any(open, is_pure_region) {
-          refuse(name, "a print inside a reduce, scan or if region has no memory order${pending_s3(frames)}")
+          refuse(name, "a print inside a reduce or scan region has no memory order")
         } else {
           ()
         }
@@ -3974,7 +3980,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
           ()
         }
         if list.any(frames, is_pure_region) {
-          refuse(name, "`${op}` inside a reduce, scan or if region has no memory order${pending_s3(frames)}")
+          refuse(name, "`${op}` inside a reduce or scan region has no memory order")
         } else {
           ()
         }
@@ -3993,7 +3999,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         spreads = g.spreads
         let open = frames
         if list.any(open, is_pure_region) {
-          refuse(name, "a store inside a reduce, scan or if region has no memory order${pending_s3(frames)}")
+          refuse(name, "a store inside a reduce or scan region has no memory order")
         } else {
           ()
         }
@@ -4207,7 +4213,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         # too.
         let open = frames
         if list.any(open, is_pure_region) {
-          refuse(name, "an atomic reduction inside a reduce, scan or if region has no memory order${pending_s3(frames)}")
+          refuse(name, "an atomic reduction inside a reduce or scan region has no memory order")
         } else {
           ()
         }
@@ -4236,7 +4242,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         spreads = g.spreads
         let open = frames
         if list.any(open, is_pure_region) {
-          refuse(name, "a load inside a reduce, scan or if region has no memory order${pending_s3(frames)}")
+          refuse(name, "a load inside a reduce or scan region has no memory order")
         } else {
           ()
         }
@@ -4266,7 +4272,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
       t_store_view(dtype, view, indices0, value0, inbounds, hints) => {
         let open = frames
         if list.any(open, is_pure_region) {
-          refuse(name, "a store inside a reduce, scan or if region has no memory order${pending_s3(frames)}")
+          refuse(name, "a store inside a reduce or scan region has no memory order")
         } else {
           ()
         }
@@ -4563,7 +4569,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
           ()
         }
         check_rank0(name, frames, ops, held, writer(marks, calls, "if"), "condition", cond, "i1")
-        frames = frames ++ [ThenFrame(ops, cond)]
+        frames = frames ++ [ThenFrame(ops, cond, tok)]
         ops = []
       }
       t_if_else(yields0) => {
@@ -4574,9 +4580,10 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         held = g.held
         spreads = g.spreads
         match frames[len(frames) - 1] {
-          ThenFrame(outer, cond) -> {
-            frames = list.take(frames, len(frames) - 1) ++ [ElseFrame(outer, cond, ops ++ [Yield(yields)])]
+          ThenFrame(outer, cond, entry_tok) -> {
+            frames = list.take(frames, len(frames) - 1) ++ [ElseFrame(outer, cond, ops ++ [Yield(yields)], entry_tok, tok)]
             ops = []
+            tok = entry_tok
           }
           _ -> refuse(name, "if_else closes a region that is not an if's then branch")
         }
@@ -4589,7 +4596,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         held = g.held
         spreads = g.spreads
         match frames[len(frames) - 1] {
-          ElseFrame(outer, cond, on_true) -> {
+          ElseFrame(outer, cond, on_true, entry_tok, then_tok) -> {
             let want = match on_true[len(on_true) - 1] {
               Yield(values) -> len(values)
               _ -> 0
@@ -4600,12 +4607,23 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
               ()
             }
             check_same_rows(name, frames, ops, held, writer(marks, calls, "if"), "yield", then_yields(on_true), yields)
+            # Data yields precede the private token slot. Both arms start
+            # at entry_tok; only the selected arm's end exists at runtime.
+            let ordered = then_tok != entry_tok || tok != entry_tok
+            let data_count = len(yields)
             let base = next
-            next = mint(name, next, len(yields))
-            let results = list.map(range(0, len(yields)), k => base + k)
+            next = mint(name, next, data_count + if ordered { 1 } else { 0 })
+            let results = list.map(range(0, data_count), k => base + k)
             held = copy_held(held, then_yields(on_true), results)
+            let all_results = if ordered { results ++ [base + data_count] } else { results }
+            let true_body = if ordered {
+              list.take(on_true, len(on_true) - 1) ++ [Yield(then_yields(on_true) ++ [then_tok])]
+            } else { on_true }
+            let false_body = ops ++ [Yield(if ordered { yields ++ [tok] } else { yields })]
             frames = list.take(frames, len(frames) - 1)
-            ops = outer ++ [If(results, cond, on_true, ops ++ [Yield(yields)])]
+            ops = outer ++ [If(all_results, cond, true_body, false_body)]
+            if ordered { region_tokens = map.insert(region_tokens, base + data_count, entry_tok) }
+            tok = if ordered { base + data_count } else { entry_tok }
             results
           }
           _ -> refuse(name, "if_end closes an if whose then branch is still open")
@@ -5347,7 +5365,7 @@ test "a print whose format expressions do not count its operands, and an assume 
   }))
   match inside {
     Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e.message, "a print inside a reduce, scan or if region has no memory order") }
+    Err(e) -> { assert str.contains(e.message, "a print inside a reduce or scan region has no memory order") }
   }
 }
 
@@ -5382,7 +5400,7 @@ test "the fence and the two gdc signals sit in the token chain between two store
   # each takes the token the operation before it answered and answers the
   # next: the wait takes the entry's, the load the wait's, the first store the
   # load's, the fence the first store's, the second store the fence's, the launch the second's
-  let steps = list.filter(list.map(prog.ops, tok_step), o => o != None)
+  let steps = list.filter(list.map(prog.ops, op => tok_step(op, map.empty())), o => o != None)
   assert len(steps) == 6
   let outs = list.map(steps, o => match o {
     Some((out, _ins)) -> out
@@ -5396,7 +5414,7 @@ test "the fence and the two gdc signals sit in the token chain between two store
   assert list.all(range(1, 6), i => ins[i] == outs[i - 1])
 }
 
-test "a fence or a gdc signal inside a reduce or an if region is refused, and so is a name outside the three" {
+test "a fence or a gdc signal inside a reduce or scan region is refused, and so is a name outside the three" {
   let in_reduce = catch_panic(() => trace_kernel("bad_fence", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let _r = d_reduce(load(x, idx_const(0), [8]), 0.0, (acc, e) => {
@@ -5407,7 +5425,7 @@ test "a fence or a gdc signal inside a reduce or an if region is refused, and so
   }))
   match in_reduce {
     Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e.message, "`memory_fence_alias_tko` inside a reduce, scan or if region has no memory order") }
+    Err(e) -> { assert str.contains(e.message, "`memory_fence_alias_tko` inside a reduce or scan region has no memory order") }
   }
   let unknown = catch_panic(() => trace_kernel("bad_name", [ByPtr("f64")], () => t_token_only("gdc_wait")))
   match unknown {
@@ -5429,7 +5447,7 @@ test "a gather inside a reduction region is refused: a pure region carries no me
   }))
   match outcome {
     Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e.message, "a gather inside a reduce, scan or if region has no memory order") }
+    Err(e) -> { assert str.contains(e.message, "a gather inside a reduce or scan region has no memory order") }
   }
 }
 
@@ -5539,10 +5557,10 @@ fn loop_in_reduce() -> Unit !Dev = {
   ()
 }
 
-test "a memory operation or a loop inside a reduce or an if region is refused: neither region carries the token" {
-  assert str.contains(refusal(load_in_reduce), "a load inside a reduce, scan or if region has no memory order")
-  assert str.contains(refusal(store_in_if), "a store inside a reduce, scan or if region has no memory order")
-  assert str.contains(refusal(loop_in_reduce), "a loop inside a reduce, scan or if region has no memory order")
+test "a reduce remains pure while an if carries stores" {
+  assert str.contains(refusal(load_in_reduce), "a load inside a reduce or scan region has no memory order")
+  let _p = trace_kernel("raw", [ByPtr("f64")], store_in_if)
+  assert str.contains(refusal(loop_in_reduce), "a loop inside a reduce or scan region has no memory order")
 }
 
 fn reduce_never_closed() -> Unit !Dev = {
@@ -7758,4 +7776,102 @@ test "S2: staged value and outer var merge through distinct yields in one loop c
     }
     _ -> panic("missing staged loop")
   }
+}
+
+# S3 guards cover conditional memory dependencies, including the writes a
+# fork's sibling may race with even when they sit in an unselected arm.
+fn conditional_fork(gap: Int) -> TileProg = trace_kernel("conditional_fork", [ByPtr("f64")], () => {
+  let x = param(F64, 0)
+  let t = full([8], 1.0)
+  d_fork2(() => {
+    if idx_eq(block_id(0), idx_const(0)) { store(x, idx_const(0), t) }
+    else { store(x, idx_const(64), t) }
+  }, () => store(x, idx_const(gap), t))
+})
+
+test "S3: both conditional store arms start at the entry and yield a selected token" {
+  let p = trace_kernel("conditional", [ByPtr("f64")], () => {
+    let x = param(F64, 0)
+    let t = full([8], 1.0)
+    let base = idx_const(0)
+    if idx_eq(block_id(0), base) { store(x, base, t) } else { store(x, base, t + t) }
+    store(x, base, t)
+  })
+  let branches = list.filter(p.ops, o => match o { If(_r, _c, _t, _f) -> true
+    _ -> false })
+  assert len(branches) == 1
+  match branches[0] {
+    If(rs, _c, ts, fs) -> {
+      assert len(rs) == 1
+      let stores = list.filter(ts ++ fs, o => match o { Store(_t, _p, _d, _b, _s, _st, _v, _m, _ti, _h) -> true
+        _ -> false })
+      assert len(stores) == 2
+      assert list.all(stores, o => match o {
+        Store(_t, _p, _d, _b, _s, _st, _v, _m, ti, _h) -> ti == 0
+        _ -> false
+      })
+      assert list.all(list.filter(p.ops, o => match o { Store(_t, _p, _d, _b, _s, _st, _v, _m, _ti, _h) -> true
+        _ -> false }), o => match o {
+          Store(_t, _p, _d, _b, _s, _st, _v, _m, ti, _h) -> ti == rs[0]
+          _ -> false
+        })
+      assert then_yields(ts) != then_yields(fs)
+    }
+    _ -> { assert false }
+  }
+}
+
+test "S3: fork conflicts include either conditional arm while disjoint writes remain legal" {
+  for gap in [0, 64] {
+    match catch_panic(() => conditional_fork(gap)) {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert str.contains(e.message, "the chains it joins are unordered and may write the same element") }
+    }
+  }
+  let _safe = conditional_fork(128)
+}
+
+test "S3: branch views stay scoped and read-only loads do not add a token result" {
+  let (p, _e) = trace2("branch_views", In(F64, cells([256], [128])), Out(F64, cells([256], [128])), (a, o) => {
+    let x = if idx_eq(block_id(0), idx_const(0)) { load_cell(a) } else { load_cell(a) + 1.0 }
+    store_cell(o, x + load_cell(a))
+  })
+  assert len(ops_where(p.ops, is_cell_view)) == 4
+  assert list.all(ops_where(p.ops, o => match o { If(_r, _c, _t, _f) -> true
+    _ -> false }), o => match o {
+      If(rs, _c, _t, _f) -> len(rs) == 1
+      _ -> false
+    })
+}
+
+test "S3: a conditional nested under a reduction still cannot perform memory operations" {
+  assert str.contains(refusal(() => {
+    let x = param(F64, 0)
+    let _r = d_reduce(full([8], 1.0), 0.0, (acc, e) => {
+      if idx_eq(block_id(0), idx_const(0)) { store(x, idx_const(0), full([8], 2.0)) }
+      acc + e
+    })
+  }), "a store inside a reduce or scan region has no memory order")
+}
+
+test "S3: data-only and zero-result regions are never mistaken for token steps" {
+  let none: Map[Int, Int] = map.empty()
+  assert tok_step(For(1, 2, 3, 4, false, [], [], [], [Continue([])]), none) == None
+  assert tok_step(Loop([5], [6], [7], [Continue([6])]), none) == None
+  assert tok_step(If([8], 9, [Yield([10])], [Yield([11])]), none) == None
+  let known = map.insert(none, 8, 0)
+  assert tok_step(If([7, 8], 9, [Yield([10, 11])], [Yield([12, 0])]), known) == Some((8, [0]))
+}
+
+test "S3: an unknown conditional write target conflicts with a fork sibling" {
+  let why = refusal(() => {
+    let x = param(F64, 0)
+    let t = full([8], 1.0)
+    let unknown = alloca_ptrs(F64, 8, 8, [8])
+    d_fork2(() => {
+      if idx_eq(block_id(0), idx_const(0)) { store_ptrs(unknown, t) }
+    }, () => store(x, idx_const(128), t))
+  })
+  assert str.contains(why, "the chains it joins are unordered and may write the same element")
+  assert str.contains(why, "a write whose target is not a parameter")
 }

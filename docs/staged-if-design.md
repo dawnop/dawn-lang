@@ -1,11 +1,11 @@
 # staged if：条件协议与共享格子
 
 > 状态：**current**。S0 设计已冻结（`15d5662d`）；S1 实现检查器协议与双后端记录语料；补裁纳入有类型结果槽的值形式。
-> S2 已接入 tileir 纯分支与 Tile 值结果，旧消费者不变性门通过；S3 token 分支仍待后续刀，权威条文见 [spec.md](spec.md)。
+> S2 已接入纯分支与 Tile 值结果；S3 已接通条件访存、原子与臂内循环，经 if 结果合流 token，旧消费者保持逐字节不变，权威条文见 [spec.md](spec.md)。
 
-本文记录 2026-10-22 裁决的 S0/S1 协议与 S2 包实现。`if` 和 `for` 一样由检查器调用普通库协议，
+本文记录 2026-10-22 裁决的 S0/S1 协议与 S2/S3 包实现。`if` 和 `for` 一样由检查器调用普通库协议，
 不在 TAST、Core 或宿主后端引入设备节点。S1 只交付语言协议；tileir 接入、旧消费者迁移和
-token 分支分别属于 S2/S3，设备验收属于 S4。本文不作性能断言。
+token 分支分别属于 S2/S3；本刀验收包含三架构设备对拍，完整里程碑收尾属于 S4。本文不作性能断言。
 
 ## 1. 表面与条件边界
 
@@ -115,7 +115,7 @@ staged 条件自身的结果类型、效果与跨臂边界诊断保留用户 if 
 LSP 将改写块还原为条件和两个用户臂；cell 符号沿用原 var 声明位置，使 hover、goto、
 references、rename 和 semantic tokens 都覆盖两臂，内部绑定不泄漏给用户。
 
-## 6. S2 包接入计划与 S3 token 方案
+## 6. S2/S3 包接入与 token 合流
 
 S2 增加只给 Bool 的 `TileCondDtype` 资格，让条件 impl 与显式 `d_if` 共用私有
 `if_rec`。两者仍有各自的真实组合用途，不增加弃用包装。资格方法返回 `Dtype[D]`，
@@ -138,7 +138,7 @@ S2 增加只给 Bool 的 `TileCondDtype` 资格，让条件 impl 与显式 `d_if
 覆盖不同选择，额外输出尾部保持哨兵。S2 不开放 token 区域；访存、token 或臂内循环的拒绝
 显式提示 S3 尚未交付。
 
-以下是 S3 方案，S2 不实现：
+S3 已按以下规则落地：
 
 if begin 保存入口 token；true 与 false 都从同一入口起链。切到 else 时恢复 token 和
 carry 入口状态、过滤不可见缓存，但正式记录不回退句柄计数，两个区域的句柄必须唯一。
@@ -153,6 +153,26 @@ JoinToks 不能充当 phi：互斥区域中的两个末 token 不会同时存在
 审计 writes_of、tok_step 与 fork 冲突，未知别名保守拒绝；同地址的互斥两臂写本身合法。
 访存、循环、join、atomic、print、fence 等所有入口及祖先 reduce/scan 纯区域禁令逐个核对。
 lower、可见性、bytecode、解释器同步验型；沿用现有 if 结果与 token 类型，不新添 opcode。
+
+S3 在 recorder 的区域帧保存入口 token 与 then 末 token；正式切臂只恢复入口 token，
+不回滚句柄分配。已有缓存的 visible 检查拒绝复用兄弟区域的常量、广播、cell/sub view。
+用户 carry 与结果槽仍由 if_rec 恢复，完整 trial 继续恢复全部状态。
+
+区域 token 结果另有 recorder 私有映射「结果句柄 → 入口 token」，并纳入 Snap；for、loop
+只有保留 token 槽时登记，if 只有任一臂推进时登记。fork 分析据此识别区域 token，
+不得把无 token 区域的末数据结果当成 token。If 的写集合取两臂并集；并行 fork 的链之间
+若可能写同一参数的重叠区间、未知地址或未知目标则拒绝。互斥 if 两臂写同一地址合法。
+
+lower_if 除数量外还比较两个完整 yield 类型列表，覆盖 token/tile 及 dtype/shape。
+新 golden 固定条件 load/store、if 内 for/atomic、不对称访存和嵌套 if，纯分支旧文件不重录。
+负控分别破坏合流、以 JoinToks 代替结果、漏掉条件写冲突和泄漏另一臂写；必须成功构建后
+由结构、golden 或数值断言证红。设备用独立 tileref 与 tileinterp 对拍，三架构整轮串行。
+
+已新增 staged_load、staged_store、staged_for、staged_atomic、staged_asym、staged_effect_nested。
+每个新 cubin 都用上传数据分别命中 true/false，覆盖条件读写、原子旧值、零/一/多轮循环和嵌套条件。
+六例在 sm_100、sm_90、本机 sm_86 都与 tileref 逐位一致；解释器明确拒绝原子，其余新例一致，
+不将拒绝记作数值通过。完整 tile golden 352 项全通过，470 个旧产物未改。
+
 
 ## 7. S2 不变性判据
 

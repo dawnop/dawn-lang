@@ -36,7 +36,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, param, blo
   PadNegZero, PadNan, PadPosInf, PadNegInf, Padding, broadcast, reshape, idx_as_tile, le_i, atomic_cas, atomic_add, load_cell, load_at,
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
   blocks_of }
-use tileir/prog.{TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
+use tileir/prog.{TileOp, TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
   Whole, FREE_AXIS, Scalar, check_config }
 use tileir/render.{render, text_debug}
 use tileir/bytecode.{encode, bytecode_version}
@@ -5320,6 +5320,77 @@ fn staged_one(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
   store_cell(o, x)
 }
 
+# S3 predicates come from uploaded data, so the same cubin runs both ways.
+# Shared output reads must observe only the selected branch's writes.
+fn staged_choice(a: Param[Float]) -> Tile[Bool] !Dev =
+  lt(reduce_sum(load(a, idx_const(0), [1])), f_const(F64, 0.0))
+
+fn staged_load(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
+  let x = if staged_choice(a) { load_cell(a) + 2.0 } else { load_cell(a) - 3.0 }
+  store(o, tile_at(block_id(0), 128), x)
+}
+
+fn staged_store(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
+  let t = load_cell(a)
+  let base = tile_at(block_id(0), 128)
+  if staged_choice(a) { store(o, base, t + 5.0) } else { store(o, base, t - 7.0) }
+  store(o, base, load(o, base, [128]) * 2.0)
+}
+
+fn staged_for(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
+  let t = load_cell(a)
+  let base = tile_at(block_id(0), 128)
+  var x = t
+  for j in d_range(0, 2) {
+    if staged_choice(a) {
+      # Zero, one and several iterations share the outer x and token.
+      for k in d_range(0, block_id(0)) {
+        x = x + t
+        store(o, base, x)
+      }
+    } else {
+      for k in d_range(0, 2) {
+        x = x - t
+        store(o, base, x)
+      }
+    }
+  }
+  store(o, base, x)
+}
+
+fn staged_atomic(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
+  let t = load_cell(a)
+  let base = tile_at(block_id(0), 128)
+  let old = if staged_choice(a) {
+    atomic_rmw(o, "addf", lanes(base, [128]), t)
+  } else {
+    atomic_rmw(o, "addf", lanes(base, [128]), t * 2.0)
+  }
+  store(o, base, old + load(o, base, [128]))
+}
+
+fn staged_asym(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), 128)
+  if staged_choice(a) { store(o, base, load_cell(a) + 11.0) }
+  store(o, base, load(o, base, [128]) + 1.0)
+}
+
+fn staged_effect_nested(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), 128)
+  let t = load_cell(a)
+  if staged_choice(a) {
+    if idx_lt(block_id(0), idx_const(2)) { store(o, base, t + 13.0) }
+    else { store(o, base, t - 17.0) }
+  } else {
+    store(o, base, t * 3.0)
+    # An else load observes its own write and never a then-region handle.
+    let x = if idx_eq(block_id(0), idx_const(0)) { load(o, base, [128]) }
+    else { load(o, base, [128]) + 19.0 }
+    store(o, base, x)
+  }
+  store(o, base, load(o, base, [128]) + 1.0)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" -> {
     let (p, _e) = trace3("vadd", In(F64, run_of(128)), In(F64, run_of(128)), Out(F64, run_of(128)), vadd)
@@ -5433,6 +5504,30 @@ fn trace(name: String) -> TileProg = match name {
     let (p, _e) = trace3("mathops",
       In(F64, tail_of(TAIL_N, TAIL_TILE)), In(F64, tail_of(TAIL_N, TAIL_TILE)),
       Out(F64, tail_of(TAIL_N, TAIL_TILE)), mathops)
+    p
+  }
+  "staged_load" -> {
+    let (p, _e) = trace2("staged_load", In(F64, cells([512], [128])), Shared(F64), staged_load)
+    p
+  }
+  "staged_store" -> {
+    let (p, _e) = trace2("staged_store", In(F64, cells([512], [128])), Shared(F64), staged_store)
+    p
+  }
+  "staged_for" -> {
+    let (p, _e) = trace2("staged_for", In(F64, cells([512], [128])), Shared(F64), staged_for)
+    p
+  }
+  "staged_atomic" -> {
+    let (p, _e) = trace2("staged_atomic", In(F64, cells([512], [128])), Shared(F64), staged_atomic)
+    p
+  }
+  "staged_asym" -> {
+    let (p, _e) = trace2("staged_asym", In(F64, cells([512], [128])), Shared(F64), staged_asym)
+    p
+  }
+  "staged_effect_nested" -> {
+    let (p, _e) = trace2("staged_effect_nested", In(F64, cells([512], [128])), Shared(F64), staged_effect_nested)
     p
   }
   "staged_unit" -> {
@@ -6533,16 +6628,62 @@ fn staged_if_checks() -> Unit = {
   if not str.contains(escaped, "cannot escape before both staged if arms merge") {
     panic("S2 result escape guard is missing: ${escaped}")
   }
-  let token = s2_message(() => trace_kernel("s2_token", [ByPtr("f64")], () => {
-    if idx_eq(idx_const(0), idx_const(0)) { let _t = load(param(F64, 0), idx_const(0), [1]) }
-  }))
-  if not str.contains(token, "S3, which is not delivered") { panic("S2 token refusal must name S3: ${token}") }
+
+}
+
+# Structural guards complement numerical checks: scheduling mistakes may
+# leave sequential interpreter results unchanged while losing dependencies.
+fn s3_fork_case(gap: Int) -> TileProg = trace_kernel("s3_fork", [ByPtr("f64")], () => {
+  let x = param(F64, 0)
+  let t = full([8], 1.0)
+  d_fork2(() => {
+    if idx_eq(block_id(0), idx_const(0)) { store(x, idx_const(0), t) }
+    else { store(x, idx_const(64), t) }
+  }, () => store(x, idx_const(gap), t))
+})
+
+fn staged_token_checks() -> Unit = {
+  let rendered = s2_message(() => {
+    let q = trace("staged_store")
+    let _text = render(q)
+    q
+  })
+  if rendered != "accepted" { panic("S3 if token must be a region result: ${rendered}") }
+  let p = trace("staged_store")
+  var expected = 0 - 1
+  var consumed = false
+  for op in p.ops {
+    match op {
+      If(rs, _c, _ts, _fs) -> {
+        if len(rs) != 1 { panic("S3 token result is missing") }
+        expected = rs[0]
+      }
+      Load(_d, _t, 1, _dt, _b, _s, _st, _m, _p, ti, _h) -> {
+        if expected < 0 || ti != expected { panic("S3 token merge is missing") }
+        consumed = true
+      }
+      _ -> ()
+    }
+  }
+  if not consumed { panic("S3 shared read witness is missing") }
+  for gap in [0, 64] {
+    let why = s2_message(() => s3_fork_case(gap))
+    if not str.contains(why, "the chains it joins are unordered and may write the same element") {
+      panic("S3 fork conflict guard is missing: ${why}")
+    }
+  }
+  let _safe = s3_fork_case(128)
+
 }
 
 pub fn main() -> Unit !io = match args() {
+  ["--staged-token-checks"] -> {
+    staged_token_checks()
+    println("PASS staged if token merge and conservative fork conflicts")
+  }
   ["--staged-if-checks"] -> {
     staged_if_checks()
-    println("PASS staged if rank, dtype, shape, assignment, escape and S3 boundaries")
+    println("PASS staged if rank, dtype, shape, assignment and escape boundaries")
   }
   ["--bytecode-version"] -> println(bytecode_version())
   ["--mm-config-check"] -> {
@@ -6583,7 +6724,7 @@ pub fn main() -> Unit !io = match args() {
         ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
         ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"
         ++ "|count_eq|subarray_sum|rainbow|int_ops"
-        ++ "|staged_unit|staged_value|staged_nested|staged_one|bitwise_i8|bitwise_i16|bitwise_i32|bitwise_i64|bitwise_mask|shift_i8|shift_i16|shift_i32|shift_i64|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
+        ++ "|staged_load|staged_store|staged_for|staged_atomic|staged_asym|staged_effect_nested|staged_unit|staged_value|staged_nested|staged_one|bitwise_i8|bitwise_i16|bitwise_i32|bitwise_i64|bitwise_mask|shift_i8|shift_i16|shift_i32|shift_i64|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
         ++ "|matmul_f16_sm90|matmul_f16_sm100|matmul_i8_sm90|matmul_i8_sm100"
         ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
         ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"

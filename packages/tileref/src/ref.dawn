@@ -5454,7 +5454,7 @@ test "shift oracle masks signed counts and preserves minimum operands at every w
   assert shift_ref_int(8, [-1, 1, 1], [1, 8, 9]) == [-2, 1, 2, -1, 1, 0, 127, 1, 0]
 }
 
-## Exact reference for S2's four pure staged-if kernels. Each lane uses its
+## Exact references for pure and effectful staged-if kernels. Each lane uses its
 ## grid block's choice, and output elements beyond the input keep their sentinel.
 ## Nested-loop results are closed formulas independent of the recorder's cells.
 pub fn staged_if_ref(name: String, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
@@ -5468,6 +5468,14 @@ pub fn staged_if_ref(name: String, _dtypes: List[String], ins: List[List[Float]]
       "staged_value" -> if b == 0 { t + 2.0 } else if b == 1 { t * 3.0 } else { t - 5.0 }
       "staged_nested" -> if b == 0 { t * 2.0 } else { t * 4.0 }
       "staged_one" -> if b == 0 { t + 7.0 } else { t }
+      "staged_load" -> if x[0] < 0.0 { t + 2.0 } else { t - 3.0 }
+      "staged_store" -> (if x[0] < 0.0 { t + 5.0 } else { t - 7.0 }) * 2.0
+      "staged_for" -> if x[0] < 0.0 { t * to_float(1 + 2 * b) } else { t - t * 4.0 }
+      "staged_atomic" -> old[i] * 2.0 + (if x[0] < 0.0 { t } else { t * 2.0 })
+      "staged_asym" -> (if x[0] < 0.0 { t + 11.0 } else { old[i] }) + 1.0
+      "staged_effect_nested" -> (if x[0] < 0.0 {
+        if b < 2 { t + 13.0 } else { t - 17.0 }
+      } else { t * 3.0 + (if b == 0 { 0.0 } else { 19.0 }) }) + 1.0
       _ -> panic("unknown staged if reference: ${name}")
     }
   })
