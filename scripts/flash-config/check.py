@@ -2,13 +2,15 @@
 """Keep the kernel's offline choices tied to the measurements that selected them.
 
 The table is Dawn source beside the kernel. This reader accepts only its
-literal fa_config rows, holds both functions' complete row sets to the ledger,
+literal fa_config and mm_config rows, holds their complete row sets to the ledger,
 and compares configurations and rounded selection timings. It never chooses
 or tunes a kernel. Self tests delete evidence, change a tile, change a time,
 and exercise both rejected cliff configurations and their allowed boundaries.
 """
 import copy
+import itertools
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -17,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 KERNELS = ROOT / "scripts/tile-golden/kernels.dawn"
 LEDGER = Path(__file__).with_name("ledger.json")
 ROW = re.compile(r'^\s*(.*?) -> fa_config\((\d+), (\d+), (\d+), (\d+), "([a-z0-9]+)", ([0-9.]+), ([0-9.]+)\)$', re.M)
+MM_ROW = re.compile(r'^\s*(.*?) -> mm_config\((\d+), (\d+), (\d+), (\d+), (\d+), "([a-z0-9]+)", ([0-9.]+), ([0-9.]+)\)$', re.M)
 
 
 def cliff(arch, bq, cga):
@@ -138,17 +141,169 @@ def check_measurements(data, ledger, displayed):
     return problems
 
 
+def check_matmul(source, ledger, data):
+    """Extend the same source-to-evidence gate to the existing f64 GEMM.
+
+    The complete filtered grid stays here, including the runners up. Shapes
+    measure a single architecture choice; they never become selection keys.
+    """
+    problems = []
+    table = re.search(r'^fn mm_cfg\([^\n]+ = match [^\n]+ \{\n(.*?)^\}', source, re.M | re.S)
+    if not table:
+        return ['missing literal mm_cfg table']
+    lines = table[1].strip().splitlines()
+    found = list(MM_ROW.finditer(table[1]))
+    if len(found) != 3 or lines[-1].strip() != '_ -> panic("matmul: only f64 is available")' or len(lines) != 4:
+        problems.append('unreadable matmul table or unsupported dtype fallback')
+    expected_keys = {('sm_90', 'f64'), ('sm_100', 'f64'), ('default', 'f64')}
+    actual_keys, ids = [], []
+    cases = data['cases']
+    if {(c['arch'], c['shape']) for c in cases} != {(a, s) for a in ['sm_90', 'sm_100'] for s in ['square', 'skinny']} or len(cases) != 4:
+        problems.append('missing or duplicate matmul shape')
+    grid = dict(tm=[16, 32, 64, 128, 256], tn=[16, 32, 64], tk=[16, 32], occupancy=[0, 2], cga=[0, 2])
+    if data['grid'] != grid or data['rounds'] != 5 or data['warmup'] != 10:
+        problems.append('changed matmul measurement grid or method')
+    if (data['tileiras'], data['cutile_tileiras'], data['opt_level'], data['compiler_verified_in_each_process'], data['dtype']) != ('13.4.92', '13.4.92', 3, True, 'f64'):
+        problems.append('missing matmul timing toolchain')
+    rejected = set()
+    for c in cases:
+        arch, shape = c['arch'], c['shape']
+        expected_shape = (2048, 2048, 2048) if shape == 'square' else (4096, 256, 2048)
+        if (c['m'], c['n'], c['k']) != expected_shape or c['dtype'] != 'f64' or c['card'] != ('H200' if arch == 'sm_90' else 'B200'):
+            problems.append('changed matmul workload or card')
+        allowed = set()
+        for tm, tn, tk, occ, cga in itertools.product(*grid.values()):
+            name = f'm{tm}n{tn}k{tk}o{occ}c{cga}'
+            if cliff(arch, tm, cga or 1):
+                rejected.add((arch, shape, name))
+            else:
+                allowed.add(name)
+        dawn = [r for r in c['results'] if r['kind'] == 'dawn']
+        if {r['name'] for r in dawn} != allowed or len(dawn) != len(allowed):
+            problems.append('missing or duplicate filtered matmul grid cell')
+        for r in c['results']:
+            if (r['arch'], r['shape'], r['m'], r['n'], r['k']) != (arch, shape, *expected_shape):
+                problems.append('matmul timing belongs to another case')
+            if (len(r['round_medians']) != 5 or r['n_samples'] < 15 or
+                    not 0 < r['median_ms'] <= r['p90_ms'] or
+                    not all(math.isfinite(x) and x > 0 for x in r['round_medians']) or
+                    not math.isfinite(r['miss']) or not 0 <= r['miss'] <= 1):
+                problems.append('incomplete or incorrect matmul timing')
+            if r['kind'] in ['dawn', 'cutile']:
+                cfg = r['config']
+                name = f"m{cfg['tm']}n{cfg['tn']}k{cfg['tk']}o{cfg['occupancy']}c{cfg['cga']}"
+                if r['name'] != ('cutile_' if r['kind'] == 'cutile' else '') + name or cliff(arch, cfg['tm'], cfg['cga'] or 1):
+                    problems.append('matmul timing configuration differs from its name or violates a filter')
+        if len([r for r in c['results'] if r['kind'] == 'torch' and r['name'] == 'torch_matmul']) != 1 or len([r for r in c['results'] if r['kind'] == 'cutile']) != 6:
+            problems.append('missing same-round matmul comparator')
+    actual_rejected = [(r['arch'], r['shape'], r['name']) for r in data['filtered']]
+    if set(actual_rejected) != rejected or len(actual_rejected) != len(rejected):
+        problems.append('matmul recording filter inventory differs from the grid')
+    for m in found:
+        key, tm, tn, tk, occ, cga, evidence, med, base = m.groups()
+        key_match = re.fullmatch(r'\(("sm_\d+"|_), "(f64)"\)', key.strip())
+        if not key_match:
+            problems.append('unknown matmul selection key')
+            continue
+        arch = key_match[1].strip('"') if key_match[1] != '_' else 'default'
+        actual_keys.append((arch, key_match[2]))
+        ids.append(evidence)
+        records = [r for r in ledger['rows'] if r['id'] == evidence]
+        if len(records) != 1:
+            problems.append(f'{evidence}: expected exactly one matmul measurement')
+            continue
+        r = records[0]
+        cfg = dict(tm=int(tm), tn=int(tn), tk=int(tk), occupancy=int(occ), cga=int(cga))
+        if (r['table_arch'], r['dtype'], r['config']) != (arch, 'f64', cfg) or cliff(arch, cfg['tm'], cfg['cga'] or 1):
+            problems.append(f'{evidence}: matmul table configuration differs from measurement')
+        for literal, field in [(med, 'median_ms'), (base, 'baseline_ms')]:
+            if float(literal) != round(r[field], len(literal.split('.')[1])):
+                problems.append(f'{evidence}: matmul {field} differs from measurement')
+        if (r['tileiras'], r['opt_level']) != ('13.4.92', 3):
+            problems.append(f'{evidence}: missing matmul toolchain')
+        selected_cases = [c for c in cases if c['arch'] == r['measured_arch']]
+        if not selected_cases or (arch != 'default' and r['measured_arch'] != arch):
+            problems.append(f'{evidence}: missing measured matmul architecture')
+        for c in selected_cases:
+            rs = {x['name']: x for x in c['results'] if x['kind'] == 'dawn'}
+            chosen, baseline = rs.get(r['case_name']), rs.get('m64n64k32o0c0')
+            if not chosen or not baseline or chosen['config'] != cfg:
+                problems.append(f'{evidence}: missing measured matmul configuration')
+                continue
+            if c['shape'] == 'square':
+                for field in ['median_ms', 'p90_ms', 'round_medians']:
+                    if r[field] != chosen[field] or r[{'median_ms': 'baseline_ms', 'p90_ms': 'baseline_p90_ms', 'round_medians': 'baseline_round_medians'}[field]] != baseline[field]:
+                        problems.append(f'{evidence}: matmul selection timing differs from grid')
+            if arch != 'default' and min(b / t for b, t in zip(baseline['round_medians'], chosen['round_medians'])) < 1.05:
+                problems.append(f'{evidence}: matmul improvement is below five percent')
+        if arch != 'default' and len(selected_cases) == 2:
+            maps = [{x['name']: x for x in c['results'] if x['kind'] == 'dawn'} for c in selected_cases]
+            common = set(maps[0]) & set(maps[1])
+            best = [min(x['median_ms'] for x in rs.values()) for rs in maps]
+            score = lambda name: (max(rs[name]['median_ms'] / b for rs, b in zip(maps, best)),
+                                  math.prod(rs[name]['median_ms'] / b for rs, b in zip(maps, best)))
+            if not common or r['case_name'] != min(common, key=score):
+                problems.append(f'{evidence}: matmul choice differs from the cross-shape winner')
+    if set(actual_keys) != expected_keys or len(set(ids)) != 3 or sorted(ids) != sorted(r['id'] for r in ledger['rows'] if r['selected']):
+        problems.append('the three matmul table cells and selected evidence are not one to one')
+    final = data['final_cases']
+    if len(final) != 4 or {(c['arch'], c['shape']) for c in final} != {(c['arch'], c['shape']) for c in cases}:
+        problems.append('missing final paired matmul case')
+    for c in final:
+        rs = {r['name']: r for r in c['results']}
+        choices = [r for r in ledger['rows'] if r['table_arch'] == c['arch']]
+        if len(choices) != 1:
+            problems.append('missing final matmul selection evidence')
+            continue
+        choice = choices[0]
+        selected = rs.get(choice['case_name'])
+        matching = rs.get('cutile_' + choice['case_name'])
+        base = rs.get('m64n64k32o0c0')
+        if (len(rs) != 12 or len(c['results']) != 12 or not selected or not matching or not base or
+                'torch_matmul' not in rs or len([r for r in rs.values() if r['kind'] == 'cutile']) != 8):
+            problems.append('missing final matmul baseline, matched cuTile candidate or torch')
+            continue
+        if selected['config'] != choice['config'] or matching['config'] != choice['config']:
+            problems.append('final matmul configuration differs from selection')
+        for r in rs.values():
+            if (r['shape'], r['arch'], r['m'], r['n'], r['k']) != (c['shape'], c['arch'], c['m'], c['n'], c['k']):
+                problems.append('final matmul timing belongs to another workload')
+            if (len(r['round_medians']) != 5 or r['n_samples'] < 15 or not 0 < r['median_ms'] <= r['p90_ms'] or
+                    not math.isfinite(r['miss']) or not 0 <= r['miss'] <= 1):
+                problems.append('incomplete or incorrect final matmul timing')
+        if min(b / t for b, t in zip(base['round_medians'], selected['round_medians'])) < 1.05:
+            problems.append('final paired matmul improvement is below five percent')
+    return problems
+
+
+def matmul_self_test(source, ledger, data):
+    changed = copy.deepcopy(ledger)
+    changed['rows'].pop(0)
+    assert check_matmul(source, changed, data), 'missing matmul evidence stayed green'
+    assert check_matmul(source.replace('mm_config(16, 64, 16, 2, 0, "mmf6490"', 'mm_config(32, 64, 16, 2, 0, "mmf6490"'), ledger, data), 'changed matmul tile stayed green'
+    assert check_matmul(source.replace('"mmf6490", 6.287264', '"mmf6490", 6.297264'), ledger, data), 'changed matmul timing stayed green'
+    changed_data = copy.deepcopy(data)
+    changed_data['cases'][0]['results'].pop(0)
+    assert check_matmul(source, ledger, changed_data), 'missing matmul grid cell stayed green'
+    changed_data = copy.deepcopy(data)
+    changed_data['cutile_tileiras'] = '13.3.36'
+    assert check_matmul(source, ledger, changed_data), 'wrong matmul comparator compiler stayed green'
+    print('PASS matmul config negative controls: missing evidence, changed tile, changed time, missing grid cell, wrong compiler')
+
+
 def main():
     source, ledger = KERNELS.read_text(), json.loads(LEDGER.read_text())
     data = json.loads(LEDGER.with_name("measurements.json").read_text())
     display = (ROOT / "site/gpu-map/flash-perf.tsv").read_text()
-    problems = check(source, ledger) + check_measurements(data, ledger, display)
+    problems = (check(source, ledger) + check_measurements(data, ledger, display) +
+                check_matmul(source, ledger['matmul'], data['matmul']))
     for p in problems:
         print(f"FAIL flash config: {p}")
     if problems:
         return 1
     if sys.argv[1:] == ["--self-test"]:
         self_test(source, ledger)
+        matmul_self_test(source, ledger['matmul'], data['matmul'])
         assert check_measurements(data, ledger, display + "changed"), "changed page timings stayed green"
         changed = copy.deepcopy(data)
         next(r for r in changed['alignment_adopted'] if r['name'] == 'kt_approx')['median_ms'] *= 1.2
@@ -160,6 +315,7 @@ def main():
     elif sys.argv[1:]:
         return 2
     print("PASS flash config: eight table cells match eight measured rows; one alternative retained")
+    print("PASS matmul config: three table cells match the complete two-architecture, two-shape grid")
     return 0
 
 
