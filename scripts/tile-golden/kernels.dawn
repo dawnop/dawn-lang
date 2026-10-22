@@ -400,7 +400,13 @@ fn mm_cfg(arch: String, dtype: String) -> MmCfg = match (arch, dtype) {
   ("sm_90", "f64") -> mm_config(16, 64, 16, 2, 0, "mmf6490", 6.287264, 14.983552)
   ("sm_100", "f64") -> mm_config(16, 64, 16, 2, 0, "mmf64100", 5.545920, 10.758112)
   (_, "f64") -> mm_config(64, 64, 32, 0, 0, "mmf64default", 14.983552, 14.983552)
-  _ -> panic("matmul: only f64 is available")
+  ("sm_90", "f16") -> mm_config(128, 128, 64, 0, 0, "mmf1690", 0.188992, 2.293120)
+  ("sm_100", "f16") -> mm_config(256, 128, 128, 0, 2, "mmf16100", 0.103072, 2.121632)
+  (_, "f16") -> mm_config(32, 32, 32, 0, 0, "mmf16default", 2.293120, 2.293120)
+  ("sm_90", "i8") -> mm_config(128, 128, 128, 2, 0, "mmi890", 0.191072, 2.938816)
+  ("sm_100", "i8") -> mm_config(256, 128, 128, 2, 2, "mmi8100", 0.066464, 2.467808)
+  (_, "i8") -> mm_config(32, 32, 32, 0, 0, "mmi8default", 2.938816, 2.938816)
+  _ -> panic("matmul: available dtypes are f64, f16 and i8")
 }
 
 fn mm_opt(n: Int) -> Option[Int] = if n == 0 { None } else { Some(n) }
@@ -423,7 +429,7 @@ fn mm_kernel(c: MmCfg, shape: MmShape) -> fn(Param[Float], Param[Float], Param[F
   (a, b, o) => mm_body(a, b, o, c, shape)
 
 fn mm_record(arch: String, dtype: String, shape: MmShape, cfg: Option[MmCfg] = None, at: Loc = caller()) -> TileProg = {
-  if dtype != "f64" { panic("matmul: only f64 is available", at: at) } else { () }
+  if dtype != "f64" && dtype != "f16" && dtype != "i8" { panic("matmul: available dtypes are f64, f16 and i8", at: at) } else { () }
   let c = match cfg { Some(c) -> c
     None -> mm_cfg(arch, dtype) }
   let e = mm_entry(c)
@@ -433,14 +439,28 @@ fn mm_record(arch: String, dtype: String, shape: MmShape, cfg: Option[MmCfg] = N
     panic("matmul: dimensions must be positive multiples of the configured tiles", at: at)
   } else { () }
   let hints: ByArch[EntryHints] = if c.occ == 0 && c.cga == 0 { [] } else { [for_arch(arch, e)] }
-  let (p, _e) = trace3("matmul",
-    In(F64, cells([shape.m, shape.k], [c.tm, c.tk], along: [0, FREE_AXIS])),
-    In(F64, cells([shape.k, shape.n], [c.tk, c.tn], along: [FREE_AXIS, 1])),
-    Out(F64, cells([shape.m, shape.n], [c.tm, c.tn])), mm_kernel(c, shape), hints: hints)
-  p
+  if dtype == "f64" {
+    let (p, _e) = trace3("matmul",
+      In(F64, cells([shape.m, shape.k], [c.tm, c.tk], along: [0, FREE_AXIS])),
+      In(F64, cells([shape.k, shape.n], [c.tk, c.tn], along: [FREE_AXIS, 1])),
+      Out(F64, cells([shape.m, shape.n], [c.tm, c.tn])), mm_kernel(c, shape), hints: hints)
+    p
+  } else if dtype == "f16" {
+    let (p, _e) = trace3("matmul_f16",
+      In(F16, cells([shape.m, shape.k], [c.tm, c.tk], along: [0, FREE_AXIS])),
+      In(F16, cells([shape.k, shape.n], [c.tk, c.tn], along: [FREE_AXIS, 1])),
+      Out(F16, cells([shape.m, shape.n], [c.tm, c.tn])), mm_f16_kernel(c, shape), hints: hints)
+    p
+  } else {
+    let (p, _e) = trace3("matmul_i8",
+      In(I8, cells([shape.m, shape.k], [c.tm, c.tk], along: [0, FREE_AXIS])),
+      In(I8, cells([shape.k, shape.n], [c.tk, c.tn], along: [FREE_AXIS, 1])),
+      Out(I32, cells([shape.m, shape.n], [c.tm, c.tn])), mm_i8_kernel(c, shape), hints: hints)
+    p
+  }
 }
 
-fn mm_named(name: String, arch: String) -> TileProg = TileProg { ..mm_record(arch, "f64", mm_shape()), name: name }
+fn mm_named(name: String, arch: String, dtype: String = "f64") -> TileProg = TileProg { ..mm_record(arch, dtype, mm_shape()), name: name }
 
 # The golden harness runs this through both backends with the default
 # matmul item. Bypassing the factory's filter must make these checks red.
@@ -462,8 +482,16 @@ fn mm_config_check() -> Unit = {
   let _a = mm_record("sm_100", "f64", mm_shape(), cfg: Some(mm_config(128, 64, 32, 0, 2, "edge", 0.0, 0.0)))
   let _b = mm_record("sm_90", "f64", mm_shape(), cfg: Some(mm_config(256, 64, 32, 0, 2, "edge", 0.0, 0.0)))
   let _c = mm_record("sm_90", "f64", mm_shape())
-  mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", "f32", mm_shape())), "only f64 is available"))
+  mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", "f32", mm_shape())), "available dtypes are f64, f16 and i8"))
   mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", "f64", MmShape { m: 256, n: 256, k: 255 })), "positive multiples"))
+  for dtype in ["f16", "i8"] {
+    mm_expect(str.contains(mm_refusal(() => mm_record("sm_100", dtype, mm_shape(), cfg: Some(mm_config(64, 64, 32, 0, 2, "bad", 0.0, 0.0)))), "cga=2 requires bq >= 128"))
+    mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", dtype, mm_shape(), cfg: Some(mm_config(256, 64, 32, 0, 0, "bad", 0.0, 0.0)))), "sm_90 bq=256 requires cga=2"))
+    let _d = mm_record("sm_100", dtype, mm_shape(), cfg: Some(mm_config(128, 64, 32, 0, 2, "edge", 0.0, 0.0)))
+    let _e = mm_record("sm_90", dtype, mm_shape(), cfg: Some(mm_config(256, 64, 32, 0, 2, "edge", 0.0, 0.0)))
+    let _f = mm_record("sm_90", dtype, mm_shape())
+    mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", dtype, MmShape { m: 256, n: 256, k: 255 })), "positive multiples"))
+  }
 }
 
 # The batched GEMM: BMM_B independent 64x64 products in 32x32 tiles, the
@@ -1201,11 +1229,18 @@ const MMF_T: Int = 32
 # measured for 128-wide f16 tiles on sm_86 is not wanted (docs
 # tile-backend-design.md 6.26): `tileiras` budgets this one 6 KB of shared
 # memory either way.
-fn matmul_f16(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
+fn mm_f16_body(a: Param[F16], b: Param[F16], c: Param[F16], cfg: MmCfg, shape: MmShape) -> Unit !Dev = {
   var acc = zeros(c)
-  for k in d_range(0, MMF_K / MMF_T) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
+  for step in d_range(0, shape.k / cfg.tk) { acc = mma(load_at(a, [step]), load_at(b, [step]), acc) }
   store_cell(c, acc)
 }
+
+# Preserve the small default entry while architecture recordings close over a configuration.
+fn matmul_f16(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev =
+  mm_f16_body(a, b, c, mm_cfg("default", "f16"), MmShape { m: MMF_M, n: MMF_N, k: MMF_K })
+
+fn mm_f16_kernel(c: MmCfg, shape: MmShape) -> fn(Param[F16], Param[F16], Param[F16]) -> Unit !Dev =
+  (a, b, o) => mm_f16_body(a, b, o, c, shape)
 
 # The batched f16 GEMM: leetgpu 57. `batched_matmul` at f16, the batch on
 # the grid's third axis.
@@ -1247,11 +1282,18 @@ const MMI_N: Int = 64
 const MMI_K: Int = 64
 const MMI_T: Int = 32
 
-fn matmul_i8(a: Param[I8], b: Param[I8], c: Param[I32]) -> Unit !Dev = {
+fn mm_i8_body(a: Param[I8], b: Param[I8], c: Param[I32], cfg: MmCfg, shape: MmShape) -> Unit !Dev = {
   var acc = zeros(c)
-  for k in d_range(0, MMI_K / MMI_T) { acc = mmai(load_at(a, [k]), load_at(b, [k]), acc) }
+  for k in d_range(0, shape.k / cfg.tk) { acc = mmai(load_at(a, [k]), load_at(b, [k]), acc) }
   store_cell(c, acc)
 }
+
+# Preserve the small default entry while architecture recordings close over a configuration.
+fn matmul_i8(a: Param[I8], b: Param[I8], c: Param[I32]) -> Unit !Dev =
+  mm_i8_body(a, b, c, mm_cfg("default", "i8"), MmShape { m: MMI_M, n: MMI_N, k: MMI_K })
+
+fn mm_i8_kernel(c: MmCfg, shape: MmShape) -> fn(Param[I8], Param[I8], Param[I32]) -> Unit !Dev =
+  (a, b, o) => mm_i8_body(a, b, o, c, shape)
 
 # ---- the gather and scatter kernels (knife 12) ----
 #
@@ -5349,6 +5391,10 @@ fn trace(name: String) -> TileProg = match name {
   }
   "matmul_sm90" -> mm_named("matmul_sm90", "sm_90")
   "matmul_sm100" -> mm_named("matmul_sm100", "sm_100")
+  "matmul_f16_sm90" -> mm_named("matmul_f16_sm90", "sm_90", "f16")
+  "matmul_f16_sm100" -> mm_named("matmul_f16_sm100", "sm_100", "f16")
+  "matmul_i8_sm90" -> mm_named("matmul_i8_sm90", "sm_90", "i8")
+  "matmul_i8_sm100" -> mm_named("matmul_i8_sm100", "sm_100", "i8")
   "batched_matmul" -> {
     let (p, _e) = trace3("batched_matmul", In(F64, Whole), In(F64, Whole),
       Out(F64, cells([BMM_B, BMM_M, BMM_N], [1, BMM_T, BMM_T], along: [2, 0, 1])), batched_matmul)
@@ -6359,6 +6405,7 @@ pub fn main() -> Unit !io = match args() {
         ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"
         ++ "|count_eq|subarray_sum|rainbow|int_ops"
         ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
+        ++ "|matmul_f16_sm90|matmul_f16_sm100|matmul_i8_sm90|matmul_i8_sm100"
         ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
         ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"
         ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
