@@ -299,13 +299,17 @@ A mask is a `Tile[Bool]`; combining two is a `select`, since the dialect has no 
 
 ## Loops, branches and folds
 
-A region function records a region operation and runs the closure it was given once for its body. `carry`, `get` and `set` are the loop-carried values of a region and are no instruction of their own.
+A region function records a region operation; carry and result discovery trials run its closures before the final recording. `carry`, `get` and `set` are the loop-carried values of a region and are no instruction of their own.
 
 | Function | Operation | Also |
 |---|---|---|
 | `d_range` | `for`, `continue` | `constant` |
 | `d_loop` | `loop`, `if`, `break`, `continue` | `yield` |
 | `d_if` | `if`, `yield` | - |
+| `staged_if` | `if` | `yield` |
+| `result_open` | - | - |
+| `result_set` | - | - |
+| `result_get` | - | - |
 | `d_return_if` | `if`, `return` | `yield` |
 | `carry` | - | - |
 | `get` | - | - |

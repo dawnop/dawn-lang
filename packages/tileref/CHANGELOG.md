@@ -1,5 +1,9 @@
 # tileref changelog
 
+## 0.1.3 (2026-10-22)
+
+- Add exact independent references for pure staged-if Unit, value, nested loop and single-write branches, including untouched output tails.
+
 ## 0.1.2 (2026-10-22)
 
 - Add finite-width shift references with masked signed counts and a typed Int oracle for complete i64 bit patterns.

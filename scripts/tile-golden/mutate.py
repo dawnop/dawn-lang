@@ -37,6 +37,32 @@ LOWER = "packages/tileir/src/lower.dawn"
 KERNELS = "scripts/tile-golden/kernels.dawn"
 
 MUTATIONS = {
+    "staged-rank-accepted": ((
+        PROG,
+        '        check_rank0(name, frames, ops, held, writer(marks, calls, "if"), "condition", cond, "i1")',
+        '        ()',
+    ),),
+    "staged-dtype-accepted": ((
+        PROG,
+        '            check_same_rows(name, frames, ops, held, writer(marks, calls, "if"), "yield", then_yields(on_true), yields)',
+        '            ()',
+    ),),
+    "staged-one-arm-accepted": ((
+        DEV,
+        '  t_result_reset(rs)',
+        '  ()',
+    ),),
+    "staged-eager-arm": ((
+        DEV,
+        '  let before = carry_gets(cs)\n  t_if_begin(c)',
+        '  let before = carry_gets(cs)\n  user_body(on_true)\n  t_if_begin(c)',
+    ),),
+    "staged-invariance": ((
+        KERNELS,
+        '  if idx_eq(b, idx_const(0)) { () } else { answer = hi.get() - lo.get() }',
+        '  if idx_eq(b, idx_const(1)) { () } else { answer = hi.get() - lo.get() }',
+    ),),
+
     "shift-count-unmasked": ((
         DEV,
         '  let count = t_binaryi("andi", dt, shape_of(y), y, limit)',

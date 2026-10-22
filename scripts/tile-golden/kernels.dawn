@@ -22,7 +22,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, param, blo
   in_range, axis_mask, gather, scatter, axis_strides, ge_i, mma, full, transpose, to, add, sub, mul, div, max, min,
   abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_eq,
   d_loop, carry, get, set, lit, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes, d_reduce,
-  d_reduce2, d_if, i_const, add_i, sub_i, mul_i, Overflow, div_i, rem_i, max_i, min_i, mulhi_i,
+  d_reduce2, i_const, add_i, sub_i, mul_i, Overflow, div_i, rem_i, max_i, min_i, mulhi_i,
   lt_i, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask,
   bits_to_float, bits_to_int, float_to_float, ext_u8, trunc_u8, mmai, d_return_if, pack_bytes, unpack_bytes, ext_i4,
   ext_u4, trunc_i4, arange, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_scan, d_scan2,
@@ -343,9 +343,9 @@ fn foldif(x: Param[Float], out: Param[Float], chunks: Int) -> Unit !Dev = {
     hi.set(max(hi.get(), t))
     lo.set(min(lo.get(), t))
   }
-  let answer = carry(total.get())
-  d_if(idx_eq(b, idx_const(0)), () => (), () => answer.set(hi.get() - lo.get()))
-  store_cell(out, answer.get())
+  var answer = total.get()
+  if idx_eq(b, idx_const(0)) { () } else { answer = hi.get() - lo.get() }
+  store_cell(out, answer)
 }
 
 # And nor does this one: it is the oracle for the N-ary reduction, the shape
@@ -2481,15 +2481,15 @@ const CE_T: Int = 64
 # DYN_DIM dimension, so the grid's blocks times the tile).
 fn carry_extent(x: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let zero = idx_const(0)
-  let best = carry(reduce_max(load_at(x, [zero, zero]), dim: 0))
-  let total = carry(zeros(o))
+  var best = reduce_max(load_at(x, [zero, zero]), dim: 0)
+  var total = zeros(o)
   for j in d_range(idx_const(1), blocks_of(x, 0), step: By(1)) {
     let m = reduce_max(load_at(x, [j, zero]), dim: 0)
-    d_if(idx_lt(j, idx_const(2)), () => best.set(max(best.get(), m)), () => ())
-    total.set(total.get() + m)
+    if idx_lt(j, idx_const(2)) { best = max(best, m) }
+    total = total + m
   }
   let n = int_to_float(idx_as_tile(extent_of(o, 0)), F64)
-  store_cell(o, total.get() / n + best.get())
+  store_cell(o, total / n + best)
 }
 
 # leetgpu 37 (Matrix Power): one square product, launched P-1 times with the
@@ -5283,6 +5283,43 @@ const PRODUCER: String = "dawn-tileir"
 # locations are lines and columns in it; run.sh reads this constant too.
 const DEBUG_DIR: String = "tile-golden"
 
+# S2 pure branches: four blocks choose unequal results and cover a no-write
+# arm, nested result slots and a shared outer var inside a staged loop.
+fn staged_unit(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
+  let t = load_cell(a)
+  var x = t
+  if idx_eq(block_id(0), idx_const(0)) { x = t + t } else { x = t * t }
+  store_cell(o, x)
+}
+
+fn staged_value(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
+  let t = load_cell(a)
+  let b = block_id(0)
+  let x = if idx_eq(b, idx_const(0)) { t + 2.0 } else {
+    if idx_eq(b, idx_const(1)) { t * 3.0 } else { t - 5.0 }
+  }
+  store_cell(o, x)
+}
+
+fn staged_nested(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
+  let t = load_cell(a)
+  let b = block_id(0)
+  var x = t
+  for j in d_range(0, 3) {
+    if idx_lt(j, idx_const(2)) {
+      if idx_eq(b, idx_const(0)) { x = x + t } else { x = x + t * 2.0 }
+    } else { x = x - t }
+  }
+  store_cell(o, x)
+}
+
+fn staged_one(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
+  let t = load_cell(a)
+  var x = t
+  if idx_eq(block_id(0), idx_const(0)) { x = t + 7.0 }
+  store_cell(o, x)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" -> {
     let (p, _e) = trace3("vadd", In(F64, run_of(128)), In(F64, run_of(128)), Out(F64, run_of(128)), vadd)
@@ -5396,6 +5433,22 @@ fn trace(name: String) -> TileProg = match name {
     let (p, _e) = trace3("mathops",
       In(F64, tail_of(TAIL_N, TAIL_TILE)), In(F64, tail_of(TAIL_N, TAIL_TILE)),
       Out(F64, tail_of(TAIL_N, TAIL_TILE)), mathops)
+    p
+  }
+  "staged_unit" -> {
+    let (p, _e) = trace2("staged_unit", In(F64, cells([512], [128])), Out(F64, cells([512], [128])), staged_unit)
+    p
+  }
+  "staged_value" -> {
+    let (p, _e) = trace2("staged_value", In(F64, cells([512], [128])), Out(F64, cells([512], [128])), staged_value)
+    p
+  }
+  "staged_nested" -> {
+    let (p, _e) = trace2("staged_nested", In(F64, cells([512], [128])), Out(F64, cells([512], [128])), staged_nested)
+    p
+  }
+  "staged_one" -> {
+    let (p, _e) = trace2("staged_one", In(F64, cells([512], [128])), Out(F64, cells([512], [128])), staged_one)
     p
   }
   "foldif" -> {
@@ -6435,7 +6488,62 @@ fn out_along_twice() -> TileProg = {
   p
 }
 
+# These deliberately malformed recordings never reach a renderer. Their
+# exact refusals distinguish validation from an assembler or launch failure.
+fn s2_message(f: fn() -> TileProg) -> String = match catch_panic(f) {
+  Ok(_p) -> "accepted"
+  Err(e) -> e.message
+}
+
+fn s2_result_case(mode: Int) -> TileProg = trace_kernel("s2_result", [], () => {
+  let slot = t_result_new()
+  if mode == 4 { let _escaped = t_result_get(slot) }
+  if idx_eq(idx_const(0), idx_const(0)) {
+    t_result_set(slot, t_constf("f64", [], 1.0))
+  } else {
+    if mode != 1 {
+      t_result_set(slot, t_constf(if mode == 2 { "f32" } else { "f64" }, if mode == 3 { [1] } else { [] }, 2.0))
+    }
+  }
+  let _answer = t_result_get(slot)
+  ()
+})
+
+fn staged_if_checks() -> Unit = {
+  let rank = s2_message(() => trace_kernel("s2_rank", [], () => {
+    if lt(full([1], 1.0), full([1], 0.0)) { () }
+  }))
+  if not str.contains(rank, "condition is tile<1xi1>, and it must be the rank-0 tile<i1>") {
+    panic("S2 rank-0 guard is missing: ${rank}")
+  }
+  if s2_message(() => s2_result_case(0)) != "accepted" { panic("S2 valid result was refused") }
+  let missing = s2_message(() => s2_result_case(1))
+  if not str.contains(missing, "both staged if arms must assign the result slot") {
+    panic("S2 definite assignment guard is missing: ${missing}")
+  }
+  let dtype = s2_message(() => s2_result_case(2))
+  if not str.contains(dtype, "yield 0 is tile<f64> and comes back tile<f32>") {
+    panic("S2 dtype guard is missing: ${dtype}")
+  }
+  let shape = s2_message(() => s2_result_case(3))
+  if not str.contains(shape, "yield 0 is tile<f64> and comes back tile<1xf64>") {
+    panic("S2 shape guard is missing: ${shape}")
+  }
+  let escaped = s2_message(() => s2_result_case(4))
+  if not str.contains(escaped, "cannot escape before both staged if arms merge") {
+    panic("S2 result escape guard is missing: ${escaped}")
+  }
+  let token = s2_message(() => trace_kernel("s2_token", [ByPtr("f64")], () => {
+    if idx_eq(idx_const(0), idx_const(0)) { let _t = load(param(F64, 0), idx_const(0), [1]) }
+  }))
+  if not str.contains(token, "S3, which is not delivered") { panic("S2 token refusal must name S3: ${token}") }
+}
+
 pub fn main() -> Unit !io = match args() {
+  ["--staged-if-checks"] -> {
+    staged_if_checks()
+    println("PASS staged if rank, dtype, shape, assignment, escape and S3 boundaries")
+  }
   ["--bytecode-version"] -> println(bytecode_version())
   ["--mm-config-check"] -> {
     mm_config_check()
@@ -6475,7 +6583,7 @@ pub fn main() -> Unit !io = match args() {
         ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
         ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"
         ++ "|count_eq|subarray_sum|rainbow|int_ops"
-        ++ "|bitwise_i8|bitwise_i16|bitwise_i32|bitwise_i64|bitwise_mask|shift_i8|shift_i16|shift_i32|shift_i64|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
+        ++ "|staged_unit|staged_value|staged_nested|staged_one|bitwise_i8|bitwise_i16|bitwise_i32|bitwise_i64|bitwise_mask|shift_i8|shift_i16|shift_i32|shift_i64|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
         ++ "|matmul_f16_sm90|matmul_f16_sm100|matmul_i8_sm90|matmul_i8_sm100"
         ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
         ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"

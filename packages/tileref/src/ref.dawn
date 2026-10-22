@@ -5453,3 +5453,22 @@ test "shift oracle masks signed counts and preserves minimum operands at every w
   }
   assert shift_ref_int(8, [-1, 1, 1], [1, 8, 9]) == [-2, 1, 2, -1, 1, 0, 127, 1, 0]
 }
+
+## Exact reference for S2's four pure staged-if kernels. Each lane uses its
+## grid block's choice, and output elements beyond the input keep their sentinel.
+## Nested-loop results are closed formulas independent of the recorder's cells.
+pub fn staged_if_ref(name: String, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  list.map(range(0, len(old)), i => if i >= len(x) { old[i] } else {
+    let b = i / 128
+    let t = x[i]
+    match name {
+      "staged_unit" -> if b == 0 { t + t } else { t * t }
+      "staged_value" -> if b == 0 { t + 2.0 } else if b == 1 { t * 3.0 } else { t - 5.0 }
+      "staged_nested" -> if b == 0 { t * 2.0 } else { t * 4.0 }
+      "staged_one" -> if b == 0 { t + 7.0 } else { t }
+      _ -> panic("unknown staged if reference: ${name}")
+    }
+  })
+}

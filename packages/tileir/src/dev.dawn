@@ -57,6 +57,16 @@ use std/narrow.{F32, F16, BF16, TF32, F8E4M3FN, F8E5M2, Rounding, to_f64, tf32_o
 ## the shape like any other (docs/tile-backend-design.md 6.26).
 pub opaque type Tile[D] = Int
 
+## The format whose tiles may control a staged `if`. Rank remains a recording
+## fact: even a single-element vector is not a rank-0 condition.
+pub trait TileCondDtype[D] {
+  fn cond_dtype() -> Dtype[D]
+}
+
+impl TileCondDtype[Bool] {
+  fn cond_dtype() -> Dtype[Bool] = I1
+}
+
 ## The integer and mask formats whose tiles admit `& | ^ ~`. The pure
 ## witness fixes the format the recording checks against both operands;
 ## `DeviceBits` alone also covers formats these instructions cannot use.
@@ -931,6 +941,16 @@ pub effect Dev {
   fn t_carry_set(c: Int, h: Int) -> Unit
   fn t_trial_begin() -> Unit
   fn t_trial_end() -> List[Int]
+  # Separate empty result slots: trials discover writes without manufacturing
+  # an initial tile. Yields require assignment; reset starts the sibling arm;
+  # merge alone makes get legal after the if returns its typed results.
+  fn t_result_new() -> Int
+  fn t_result_set(slot: Int, value: Int) -> Unit
+  fn t_result_get(slot: Int) -> Int
+  fn t_result_writes() -> List[Int]
+  fn t_result_yields(slots: List[Int]) -> List[Int]
+  fn t_result_reset(slots: List[Int]) -> Unit
+  fn t_result_merge(slots: List[Int], values: List[Int]) -> Unit
   fn t_tok_get() -> Int
   fn t_tok_set(tok: Int) -> Unit
   fn t_tok_join(toks: List[Int]) -> Int
@@ -2768,6 +2788,41 @@ impl[D] StagedVar[Tile[D]] {
   fn var_set(c: Carry[D], v: Tile[D]) -> Unit !Dev = called_bare("set", () => set_rec(c, v))
 }
 
+impl[D: TileCondDtype] StagedCond[Tile[D]] {
+  effect StagedCond = !Dev
+  fn staged_if(c: Tile[D], on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !Dev) -> Unit !Dev =
+    called_bare("if", () => {
+      let format: Dtype[D] = cond_dtype()
+      let dt = dtype_name(format)
+      if dt != "i1" { panic("tileir: a staged if requires the Bool format") } else { () }
+      let h: Int = c
+      if_rec(h, on_true, on_false)
+    })
+}
+
+## An uninitialized staged-if result, distinct from an initialized Carry.
+## Only the generated arms write it; reading before both arms merge fails.
+pub opaque type ResultSlot[D] = Int
+
+impl[D] StagedResult[Tile[D]] {
+  type Slot = ResultSlot[D]
+  effect StagedResult = !Dev
+  fn result_open() -> ResultSlot[D] !Dev = called_bare("result_open", () => {
+    let s: ResultSlot[D] = t_result_new()
+    s
+  })
+  fn result_set(s: ResultSlot[D], v: Tile[D]) -> Unit !Dev = called_bare("result_set", () => {
+    let slot: Int = s
+    let h: Int = v
+    t_result_set(slot, h)
+  })
+  fn result_get(s: ResultSlot[D]) -> Tile[D] !Dev = called_bare("result_get", () => {
+    let slot: Int = s
+    let v: Tile[D] = t_result_get(slot)
+    v
+  })
+}
+
 # ---- operators (knife L3) ----
 #
 # `+ - * /` and unary `-` on tiles, and on `Idx`. A tile's format is a fact
@@ -3200,16 +3255,29 @@ pub fn d_scan2[D](a: Tile[D], b: Tile[D], a_identity: Float, b_identity: Float,
 ## `if` with one region is refused, measured). Neither may load or store.
 pub fn d_if(cond: Tile[Bool], on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !Dev, at: Loc = caller()) -> Unit !Dev = called("d_if", at, () => {
   let c: Int = cond
+  if_rec(c, on_true, on_false)
+})
+
+# Both spellings use the same trials, carry order and region boundaries.
+fn result_trial(region: fn() -> Unit !Dev) -> (List[Int], List[Int]) !Dev = {
+  t_trial_begin()
+  region()
+  let results = t_result_writes()
+  let cs = t_trial_end()
+  (cs, results)
+}
+
+fn if_rec(c: Int, on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !Dev) -> Unit !Dev = {
   let none: List[Int] = []
   # one trial per branch: each starts from what the carries held outside
-  let on_t = trial(() => {
+  let (on_t, rt) = result_trial(() => {
     t_if_begin(c)
     user_body(on_true)
     t_if_else(none)
     let _r = t_if_end(none)
     ()
   })
-  let on_f = trial(() => {
+  let (on_f, rf) = result_trial(() => {
     t_if_begin(c)
     t_if_else(none)
     user_body(on_false)
@@ -3218,15 +3286,20 @@ pub fn d_if(cond: Tile[Bool], on_true: fn() -> Unit !Dev, on_false: fn() -> Unit
   })
   let cs = list.filter(range(0, 1 + list.fold(on_t ++ on_f, 0 - 1, (m, k) => if k > m { k } else { m })),
     k => list.contains(on_t, k) || list.contains(on_f, k))
+  let rs = list.filter(range(0, 1 + list.fold(rt ++ rf, 0 - 1, (m, k) => if k > m { k } else { m })),
+    k => list.contains(rt, k) || list.contains(rf, k))
   let before = carry_gets(cs)
   t_if_begin(c)
   user_body(on_true)
-  let yields = carry_gets(cs)
+  let yields = carry_gets(cs) ++ t_result_yields(rs)
   carry_sets(cs, before)
+  t_result_reset(rs)
   t_if_else(yields)
   user_body(on_false)
-  carry_sets(cs, t_if_end(carry_gets(cs)))
-})
+  let outs = t_if_end(carry_gets(cs) ++ t_result_yields(rs))
+  carry_sets(cs, list.take(outs, len(cs)))
+  t_result_merge(rs, list.drop(outs, len(cs)))
+}
 
 # ---- shapes, the grid's extent, token joins and pointers (knife T2) ----
 
@@ -4354,6 +4427,13 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       carries = list.map(range(0, len(was)), k => if k == c { h } else { was[k] })
       sets = list.map(range(0, len(n)), k => if k == c { n[k] + 1 } else { n[k] })
     }
+    t_result_new() => panic("this surface probe does not open result slots")
+    t_result_set(_s, _h) => panic("this surface probe does not assign result slots")
+    t_result_get(_s) => panic("this surface probe does not read result slots")
+    t_result_writes() => []
+    t_result_yields(_ss) => []
+    t_result_reset(_ss) => ()
+    t_result_merge(_ss, _hs) => ()
     t_trial_begin() => {
       snaps = snaps ++ [(next, carries, sets)]
     }
@@ -4786,6 +4866,13 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       carries = list.map(range(0, len(was)), k => if k == c { h } else { was[k] })
       sets = list.map(range(0, len(n)), k => if k == c { n[k] + 1 } else { n[k] })
     }
+    t_result_new() => panic("this surface probe does not open result slots")
+    t_result_set(_s, _h) => panic("this surface probe does not assign result slots")
+    t_result_get(_s) => panic("this surface probe does not read result slots")
+    t_result_writes() => []
+    t_result_yields(_ss) => []
+    t_result_reset(_ss) => ()
+    t_result_merge(_ss, _hs) => ()
     t_trial_begin() => {
       snaps = snaps ++ [((log, rows), carries, sets)]
     }
@@ -5523,6 +5610,13 @@ test "d_range hands the body the carried handle and passes its answer back as th
         carries = list.map(range(0, len(was)), k => if k == c { h } else { was[k] })
         sets = list.map(range(0, len(n)), k => if k == c { n[k] + 1 } else { n[k] })
       }
+      t_result_new() => panic("this surface probe does not open result slots")
+      t_result_set(_s, _h) => panic("this surface probe does not assign result slots")
+      t_result_get(_s) => panic("this surface probe does not read result slots")
+      t_result_writes() => []
+      t_result_yields(_ss) => []
+      t_result_reset(_ss) => ()
+      t_result_merge(_ss, _hs) => ()
       t_trial_begin() => {
         snaps = snaps ++ [(log, carries, sets)]
       }

@@ -1,9 +1,9 @@
 # staged if：条件协议与共享格子
 
 > 状态：**current**。S0 设计已冻结（`15d5662d`）；S1 实现检查器协议与双后端记录语料；补裁纳入有类型结果槽的值形式。
-> S2 包迁移与不变性门、S3 token 分支、S4 设备验收仍待后续刀，权威条文见 [spec.md](spec.md)。
+> S2 已接入 tileir 纯分支与 Tile 值结果，旧消费者不变性门通过；S3 token 分支仍待后续刀，权威条文见 [spec.md](spec.md)。
 
-本文冻结 2026-10-22 裁决的 S0/S1 边界。`if` 和 `for` 一样由检查器调用普通库协议，
+本文记录 2026-10-22 裁决的 S0/S1 协议与 S2 包实现。`if` 和 `for` 一样由检查器调用普通库协议，
 不在 TAST、Core 或宿主后端引入设备节点。S1 只交付语言协议；tileir 接入、旧消费者迁移和
 token 分支分别属于 S2/S3，设备验收属于 S4。本文不作性能断言。
 
@@ -14,7 +14,7 @@ token 分支分别属于 S2/S3，设备验收属于 S4。本文不作性能断�
 Unit 语句无 `else` 补空臂，值形式必须有 `else`；`else if` 是 else 内的嵌套条件，后一个条件留在该臂内求值。
 两臂具有独立词法作用域，遮蔽按符号身份判断。
 
-语言不理解 Tile、设备或 Dev。未来 tileir 只接受 `dtype=i1, shape=[]` 的严格 rank-0 条件，
+语言不理解 Tile、设备或 Dev。tileir 的 S2 实现只接受 `dtype=i1, shape=[]` 的严格 rank-0 条件，
 不是单元素形状 `[1]`。类型不携带 rank，因此记录期仍须检查。逐 lane 条件继续用 `select`
 或访存 `mask:`；不隐式归约、不自动 any/all、不自动 if-conversion。
 
@@ -115,7 +115,30 @@ staged 条件自身的结果类型、效果与跨臂边界诊断保留用户 if 
 LSP 将改写块还原为条件和两个用户臂；cell 符号沿用原 var 声明位置，使 hover、goto、
 references、rename 和 semantic tokens 都覆盖两臂，内部绑定不泄漏给用户。
 
-## 6. S3 token 方案（本刀不实现）
+## 6. S2 包接入计划与 S3 token 方案
+
+S2 增加只给 Bool 的 `TileCondDtype` 资格，让条件 impl 与显式 `d_if` 共用私有
+`if_rec`。两者仍有各自的真实组合用途，不增加弃用包装。资格方法返回 `Dtype[D]`，
+实现先核实 i1，记录器仍用 `check_rank0` 核实实际条件行。trait 没有 caller 默认值，
+沿用 `called_bare` 与 `user_body` 的来源纪律，错误至少指向用户 trace 边界行。
+
+迁移 foldif、foldif_debug 与 carry_extent 后，先通过第 7 节不变性门，再接值形式。
+未修改、重录任何既有 MLIR/tilebc/debug golden。Carry 的次序与纯 if 的 token 状态不变。
+
+`StagedResult[Tile[D]]` 的关联 Slot 是独立 `ResultSlot[D]`，不是 Carry 的未初始化哨兵。
+记录器保存 `Option[Int]`、ready 和写次数；完整 trial 快照包含这份状态。每臂 trial 只收集
+入口已存在、尚未完成而在本臂写过的槽，嵌套 if 不会提前合并父槽。两臂写集合按创建序取并集。
+正式 then 结束后收集结果，切 else 前清空这些槽；未赋值即拒绝，不能复用 then 值冒充 else。
+用户 carry 的 yields 在前，结果槽在后；`t_if_end` 对两臂实际 dtype/shape 逐项验相等，
+不广播、不提升。回填 Carry 后才把结果槽标为 ready，result_get 在这之前拒绝。
+七个新增 Dev 操作构成破坏性 handler 协议，外部 handler 必须实现，不保留兼容层。
+
+新增 staged_unit、staged_value（含嵌套结果）、staged_nested、staged_one，分别覆盖双臂 Unit、
+值、循环共享格子、单臂写；独立参考使用闭式结果，不复制 recorder 的状态算法。每例四个 block
+覆盖不同选择，额外输出尾部保持哨兵。S2 不开放 token 区域；访存、token 或臂内循环的拒绝
+显式提示 S3 尚未交付。
+
+以下是 S3 方案，S2 不实现：
 
 if begin 保存入口 token；true 与 false 都从同一入口起链。切到 else 时恢复 token 和
 carry 入口状态、过滤不可见缓存，但正式记录不回退句柄计数，两个区域的句柄必须唯一。

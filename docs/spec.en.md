@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ fea2b558e22c5619 -->
+<!-- doc-check: translation-of docs/spec.md @ 26f2f1f0d10a4e2c -->
 
 # Dawn Language Specification
 
@@ -1841,7 +1841,9 @@ let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
   generated get/set/result_set calls, must fit `C.StagedCond`; cell open/writeback and result
   open/get effects are charged outside. The library checks both assignments at the merge.
   Device results must match dtype/shape without broadcasting, format promotion or host values
-  substituting for device results.
+  substituting for device results. tileir implements this for strict rank-0 Tile[Bool] conditions
+  and Tile results. S2 arms admit pure computation and staged variable writes; memory, token
+  operations and loops inside an arm are rejected until S3.
   break/continue/return/`?` cannot leave a staged conditional arm and name staged if in their
   diagnostics. Local jumps in a host loop inside an arm and a local function's own return
   remain legal. The language specifies no device type or rank; libraries validate conditions.
