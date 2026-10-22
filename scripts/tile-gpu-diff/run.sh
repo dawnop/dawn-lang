@@ -931,7 +931,7 @@ dtypes=(dtype_i16 dtype_i64 dtype_tf32 dtype_i4 pack_roundtrip)
 # The bitwise operators, one segment per operator at every supported width.
 bitwise_kernels=(bitwise_i8 bitwise_i16 bitwise_i32 bitwise_i64 bitwise_mask)
 shift_kernels=(shift_i8 shift_i16 shift_i32 shift_i64)
-staged_kernels=(staged_unit staged_value staged_nested staged_one)
+staged_kernels=(staged_unit staged_value staged_nested staged_one staged_load staged_store staged_for staged_atomic staged_asym staged_effect_nested)
 
 # The tf32 mutant below names one of the five; the others are its
 # kernel-level control, and a tag mutant that moved them would be changing

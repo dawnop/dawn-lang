@@ -1,5 +1,9 @@
 # tileref changelog
 
+## 0.1.4 (2026-10-23)
+
+- Add independent exact references for conditional memory, nested loops, atomics and asymmetric branch writes with both uploaded predicate signs.
+
 ## 0.1.3 (2026-10-22)
 
 - Add exact independent references for pure staged-if Unit, value, nested loop and single-write branches, including untouched output tails.

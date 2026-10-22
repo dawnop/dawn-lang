@@ -562,7 +562,7 @@ kernels=(
   vadd_producer vadd_debug foldif_debug
   bitwise_i8 bitwise_i16 bitwise_i32 bitwise_i64 bitwise_mask
   shift_i8 shift_i16 shift_i32 shift_i64
-  staged_unit staged_value staged_nested staged_one)
+  staged_unit staged_value staged_nested staged_one staged_load staged_store staged_for staged_atomic staged_asym staged_effect_nested)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -698,6 +698,7 @@ mutants=(
   shift-count-unmasked shift-witness-mismatch
   staged-type-rejections staged-if-checks staged-rank-accepted staged-dtype-accepted staged-one-arm-accepted
   staged-eager-arm staged-invariance
+  staged-token-checks staged-token-unmerged staged-token-join staged-fork-accepted staged-write-leaks
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -3151,7 +3152,7 @@ if run_item staged-one-arm-accepted; then
 fi
 staged_golden_mutant() { # name, kernel
   local m="$1" k="$2" out backend
-  if [ "$m" = staged-invariance ]; then
+  if [ "$m" = staged-invariance ] || [ "$m" = staged-write-leaks ]; then
     kernel_mutant_project "$m"
     build_native "$work/m-$m" "$work/m-$m.bin" -O0
   else
@@ -3173,6 +3174,50 @@ if run_item staged-eager-arm; then
 fi
 if run_item staged-invariance; then
   staged_golden_mutant staged-invariance foldif
+fi
+
+if run_item staged-token-checks; then
+  run_jvm "$work/clean" "$work/token-checks.jvm" --staged-token-checks ||
+    { cat "$work/token-checks.jvm.err" >&2; fail "staged token checks failed on JVM"; }
+  run_native "$work/clean.bin" "$work/token-checks.native" --staged-token-checks ||
+    { cat "$work/token-checks.native.err" >&2; fail "staged token checks failed natively"; }
+  cmp -s "$work/token-checks.jvm" "$work/token-checks.native" || fail "staged token checks disagree"
+  cat "$work/token-checks.jvm"
+fi
+staged_token_mutant() { # name, assertion
+  local m="$1" expected="$2" backend out
+  mutant_project "$m" prog.dawn
+  mutant_run "$m" --staged-token-checks
+  for backend in jvm native; do
+    out="$work/m-$m.--staged-token-checks.$backend"
+    [ "$(cat "$out.rc")" != 0 ] || fail "$m survived on $backend"
+    grep -Fq "$expected" "$out.err" || { cat "$out.err" >&2; fail "$m failed for another reason"; }
+  done
+  if [ "$m" = staged-token-unmerged ]; then
+    mutant_run "$m" staged_store
+    mutant_run_bytecode "$m" staged_store
+    for backend in jvm native; do
+      out="$work/m-$m.staged_store.$backend"
+      [ "$(cat "$out.rc")" = 0 ] || fail "$m failed to record its golden witness"
+      [ "$(cat "$out.tilebc.rc")" = 0 ] || fail "$m failed to encode its golden witness"
+      ! cmp -s "$here/staged_store.mlir" "$out" || fail "$m text stayed invariant"
+      ! cmp -s "$here/staged_store.tilebc" "$out.tilebc" || fail "$m bytes stayed invariant"
+    done
+  fi
+  echo "PASS  mutant: $m (built successfully, owning token assertion red on both backends)"
+}
+# Literal entries keep the site coverage parser aligned with executable controls.
+if run_item staged-token-unmerged; then
+  staged_token_mutant staged-token-unmerged "S3 token merge is missing"
+fi
+if run_item staged-token-join; then
+  staged_token_mutant staged-token-join "S3 if token must be a region result"
+fi
+if run_item staged-fork-accepted; then
+  staged_token_mutant staged-fork-accepted "S3 fork conflict guard is missing"
+fi
+if run_item staged-write-leaks; then
+  staged_golden_mutant staged-write-leaks staged_asym
 fi
 
 _item_tick ""

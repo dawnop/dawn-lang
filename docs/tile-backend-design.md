@@ -710,9 +710,10 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   整列上；把它按 `[BN_ROWS]` 形状、`[0]` stride 读，梯子发出的偏移量整块相同，
   `load_ptr_tko` 就把同一个地址读 128 遍。`group_norm` 的每通道 `gamma` 同理，用
   `[1, 0]`。这省掉了一族「把一维张成二维」的公开操作。
-- **归约区域与 `if` 区域里禁止访存**：方言要求归约体是纯的，而两种区域都不携带内存序 token,
-  所以里面的 load / store / `d_for` 一律在记录时按名拒绝（`a load inside a reduce or if
-  region has no memory order`）。这是本包自己立的规矩，不是方言的。
+- **归约区域禁止访存，`if` 已由 S3 接通 token**：本节原实现的两种区域均不携带 token，
+  因而当时拒绝 load/store/循环。现今 reduce/scan 仍要求纯体；if 两臂从同一入口起链，
+  在 if 末经私有结果选择末 token，见 [staged if 设计](staged-if-design.md)。
+  原来的 if 禁令是本包记录器的限制，不是方言的限制。
 - **各操作的属性形状是量出来的，不是猜的**：`exp` 在 13.2 **一个属性都不写**（它的
   `rounding_mode` 是 13.3 才加的；在 13.2 上写了会让读取器把下一个字节当别的东西，实测报
   `failed to get result type 0 for CmpIOp`），刀 T8 把钉子挪到 13.3 之后它**必须**写这一格，
@@ -5639,7 +5640,8 @@ T18 名下，而这一刀把它定为不做（本仓从不写这个可选参数�
 （`runtime/c/dawn_rt.c`），从不设这个属性，所以**在任何目标上设备都不会让这两条起效**。
 
 **二、公开面。** `memory_fence_alias()`、`gdc_wait()`、`gdc_launch_dependents()`，都是 `Unit !Dev`，照 `d_print` 取当前 token、
-放回下一个，位于 token 链上。在 reduce / scan / `if` 区域里按名拒绝（这些区域不带 token）。记录是一条 `TokenOnly(tok_out, op, tok_in)`，
+放回下一个，位于 token 链上。在 reduce / scan 区域里按名拒绝；原实现也拒绝 `if`，
+S3 接通条件 token 后已允许，但嵌在纯 reduce/scan 祖先内仍拒绝。记录是一条 `TokenOnly(tok_out, op, tok_in)`，
 降低成 `TokenOnlyTile`；`op` 必须是方言的三个名字之一，别的名字记录时就拒。文本是 `%t = memory_fence_alias_tko %tok` 与
 `%t = gdc_wait_tko token = %tok -> token`，`tileirdisasm` 13.4.92 对 golden 的字节印出的就是这两种拼法。
 

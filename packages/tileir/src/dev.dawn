@@ -807,10 +807,10 @@ pub opaque type Ptrs[D] = Int
 ## a strided view's grid and answers nothing, so it is a `Unit` operation
 ## that still moves the token chain on.
 ##
-## A load or a store inside a reduction or an `if` is REFUSED: the dialect
-## requires a reduction's body to be pure, and neither region carries the
-## memory ordering token, so a memory operation inside one would have no
-## order at all. `t_print` is refused there for the same reason, and
+## A load or store inside a reduction or scan is refused: the dialect
+## requires pure bodies. An if restores its entry token before the else
+## arm and merges the selected end through a private result when needed.
+## `t_print` is refused in pure regions for the same reason, and
 ## `t_assert` and `t_assume` are not: neither is ordered against memory.
 ##
 ## `t_cell_view(param, dtype, free)` and `t_cell_fill(param, value)` read
@@ -3252,7 +3252,10 @@ pub fn d_scan2[D](a: Tile[D], b: Tile[D], a_identity: Float, b_identity: Float,
 ## shape. A wider `cond` is refused when the kernel records.
 ##
 ## Both regions are always written, as the dialect's reader requires (an
-## `if` with one region is refused, measured). Neither may load or store.
+## `if` with one region is refused, measured). Both may load, store, perform
+## atomics and contain loops. The selected memory token is an if result;
+## a branch that does not advance the chain yields the entry token. Pure
+## branches retain their original result list without an extra token.
 pub fn d_if(cond: Tile[Bool], on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !Dev, at: Loc = caller()) -> Unit !Dev = called("d_if", at, () => {
   let c: Int = cond
   if_rec(c, on_true, on_false)

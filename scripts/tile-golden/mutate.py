@@ -37,6 +37,26 @@ LOWER = "packages/tileir/src/lower.dawn"
 KERNELS = "scripts/tile-golden/kernels.dawn"
 
 MUTATIONS = {
+    "staged-token-unmerged": ((
+        PROG,
+        '            tok = if ordered { base + data_count } else { entry_tok }',
+        '            tok = entry_tok',
+    ),),
+    "staged-token-join": ((
+        PROG,
+        '            ops = outer ++ [If(all_results, cond, true_body, false_body)]',
+        '            ops = outer ++ [If(results, cond, on_true, ops ++ [Yield(yields)])]\n            if ordered { ops = ops ++ [JoinToks(base + data_count, [then_tok, tok])] }',
+    ),),
+    "staged-fork-accepted": ((
+        PROG,
+        '  If(_results, _cond, on_true, on_false) -> writes_in(defs, on_true) ++ writes_in(defs, on_false)',
+        '  If(_results, _cond, _on_true, _on_false) -> []',
+    ),),
+    "staged-write-leaks": ((
+        KERNELS,
+        '  if staged_choice(a) { store(o, base, load_cell(a) + 11.0) }',
+        '  store(o, base, load_cell(a) + 11.0)\n  if staged_choice(a) { store(o, base, load_cell(a) + 11.0) }',
+    ),),
     "staged-rank-accepted": ((
         PROG,
         '        check_rank0(name, frames, ops, held, writer(marks, calls, "if"), "condition", cond, "i1")',

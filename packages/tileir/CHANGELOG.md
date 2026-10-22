@@ -7,6 +7,13 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.25.1 (2026-10-23)
+
+- Support conditional loads, stores, atomics and staged loops in Unit and Tile value branches.
+- Merge memory order through an if token result, preserving pure branch bytes and the read-only In fast path.
+- Track region token results explicitly through trials and conservatively include both arms in fork conflict checks.
+- Validate complete if yield types during lowering and cover uploaded true and false predicates with six new kernels.
+
 ## 0.25.0 (2026-10-22)
 
 - Add Bool-only TileCondDtype qualification and StagedCond for pure rank-0 device conditions, sharing the recorder with d_if.

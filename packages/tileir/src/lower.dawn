@@ -1559,6 +1559,9 @@ fn lower_if(l0: L, results: List[Int], cond: Int, on_true: List[TileOp], on_fals
   } else {
     ()
   }
+  if etys != tys {
+    panic("tileir: an if's branches yield different types: ${show(tys)} and ${show(etys)}")
+  }
   let l3 = close_scope(l2, else_inner)
   emit_region(l3, IfElse(res, tys, c, cond_ty, then_inner.body, else_inner.body), [then_inner.owners, else_inner.owners])
 }
@@ -2143,4 +2146,16 @@ test "P4: a tensor view claims buffer alignment before an arbitrary element offs
   assert k.body[2] == AssumeTile(4, Arg(0), DivBy(16, none, none), pt)
   assert k.body[3] == Offset(5, Val(4), Val(1), pt, Tile([], Num("i32")))
   assert k.body[4] == MakeTensorView(6, Val(5), pt, TensorView(Num("f64"), [16], [1]), [], [], Tile([], Num("i32")))
+}
+
+test "S3: hand-built if yields must have identical complete types" {
+  for other in [ConstF(9, "f32", [8], 2.0), ConstF(9, "f64", [4], 2.0), MakeToken(9)] {
+    let p = TileProg { ..branch_prog(), ops: list.take(branch_prog().ops, 7) ++ [
+      If([10], 7, [ConstF(8, "f64", [8], 1.0), Yield([8])], [other, Yield([9])])
+    ] }
+    match catch_panic(() => lower(p)) {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert str.contains(e.message, "an if's branches yield different types") }
+    }
+  }
 }

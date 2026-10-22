@@ -1,5 +1,5 @@
-# Pure staged-if layer 2 covers both choices in four blocks, nested slots,
-# loop sharing and the unwritten arm. Exact inputs also expose an eager arm.
+# Staged-if layer 2 runs every effectful cubin with negative and positive
+# predicate inputs. Shared output sentinels expose writes from an unselected arm.
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
@@ -156,15 +156,15 @@ fn first_difference(real: Trace, fake: Trace) -> String =
     _ -> "-"
   }
 
-fn case_name(i: Int) -> String = ["staged_unit", "staged_value", "staged_nested", "staged_one"][i]
+fn case_name(i: Int) -> String = ["staged_unit", "staged_value", "staged_nested", "staged_one", "staged_load", "staged_store", "staged_for", "staged_atomic", "staged_asym", "staged_effect_nested"][if i < 10 { i } else { i - 6 }]
 fn case_segments(_i: Int) -> Int = 1
 fn case_grid(_i: Int) -> Int = DT_N / DT_TILE
-fn case_bufs(_i: Int) -> List[(String, List[Float])] =
-  [("f64", list.map(range(0, DT_N), k => to_float(k % 17 - 8))),
+fn case_bufs(i: Int) -> List[(String, List[Float])] =
+  [("f64", list.map(range(0, DT_N), k => if k == 0 && i >= 10 { 8.0 } else { to_float(k % 17 - 8) })),
     ("f64", list.map(range(0, DT_N + TAIL), _k => -12345.0))]
 fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
   map.from([(case_name(i), (2, last_out((dts, ins) => staged_if_ref(case_name(i), dts, ins))))])
-fn shape_of(_name: String) -> String = "blocks=4 lanes=512 both_arms=yes tail=16"
+fn shape_of(_name: String) -> String = "blocks=4 lanes=512 predicate=uploaded-sign tail=16"
 
 ## A vector as a line: its length, its first lanes and its last ones.
 fn digest(v: List[Float]) -> String =
@@ -198,13 +198,13 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.rea
 }
 
 fn usage() -> Unit !Exit !io = {
-  io.eprintln("usage: staged_if_diff <staged_unit.cubin> <staged_value.cubin> <staged_nested.cubin> <staged_one.cubin>")
+  io.eprintln("usage: staged_if_diff <staged_unit.cubin> <staged_value.cubin> <staged_nested.cubin> <staged_one.cubin> <staged_load.cubin> <staged_store.cubin> <staged_for.cubin> <staged_atomic.cubin> <staged_asym.cubin> <staged_effect_nested.cubin>")
   io.exit(2)
 }
 
 pub fn main() -> Unit !io = io.with_exit_real(() => {
   let paths = args()
-  let count = 4
+  let count = 10
   if len(paths) != count { usage() } else { () }
   var cubins: Map[String, Bytes] = map.empty()
   for i in range(0, count) {
@@ -214,7 +214,7 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
   var blocked = ""
   var any_differ = false
   var exact_count = 0
-  for i in range(0, count) {
+  for i in range(0, 16) {
     let name = case_name(i)
     let bufs = case_bufs(i)
     let gx = case_grid(i)
@@ -224,7 +224,7 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     let v = verdict(fake, real)
     io.println("kernel ${name} tier=exact bufs=${buffers_of(i)} grid=(${gx}, 1, 1)"
         ++ " segments=${case_segments(i)}")
-    io.println("  index ${shape_of(name)}")
+    io.println("  index ${shape_of(name)} scenario=${i} predicate=${if i >= 10 { "false" } else if i >= 4 { "true" } else { "by-block" }}")
     io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
     io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
         ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")

@@ -299,6 +299,8 @@ A mask is a `Tile[Bool]`; combining two is a `select`, since the dialect has no 
 
 ## Loops, branches and folds
 
+A rank-0 device `if` supports memory operations, atomics and nested staged loops in both Unit and Tile value forms. Both arms start from the same entry token. If either advances it, a private token result selects the executed arm's end; pure branches add no token slot. The recorder restores carries and result slots between arms and keeps cached views scoped to their region. Conditional write sets include both arms, so unordered fork chains with overlapping or unknown writes are refused. Mutually exclusive arms may write the same address. Reductions and scans remain pure, including an `if` nested inside them.
+
 A region function records a region operation; carry and result discovery trials run its closures before the final recording. `carry`, `get` and `set` are the loop-carried values of a region and are no instruction of their own.
 
 | Function | Operation | Also |
