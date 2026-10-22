@@ -1,0 +1,150 @@
+# A recording library independent of device types: each arm runs from the
+# same saved state, and an explicit union of writes chooses merged values.
+# Slot numbers expose duplicate opens, exchanged cells and writeback order;
+# unequal arms and an effectful condition expose eager or repeated evaluation.
+use std/map
+use std/set
+
+type Value = { name: String, n: Int }
+type Cell = { id: Int }
+type Cond = { name: String, choose: Bool }
+type Once = { n: Int }
+type Image = { values: Map[Int, Value], written: Set[Int] }
+
+effect Record {
+  fn note(s: String) -> Unit
+  fn open(v: Value) -> Cell
+  fn read(c: Cell) -> Value
+  fn write(c: Cell, v: Value) -> Unit
+  fn save() -> Image
+  fn restore(s: Image) -> Unit
+  fn merge(c: Cond, entry: Image, t: Image, f: Image) -> Unit
+}
+
+impl StagedCond[Cond] {
+  effect StagedCond = !Record
+  fn staged_if(c: Cond, on_true: fn() -> Unit !Record, on_false: fn() -> Unit !Record) -> Unit !Record = {
+    let entry = save()
+    restore(entry)
+    note("then ${c.name}")
+    on_true()
+    let t = save()
+    restore(entry)
+    note("else ${c.name}")
+    on_false()
+    let f = save()
+    merge(c, entry, t, f)
+  }
+}
+
+impl StagedVar[Value] {
+  type Cell = Cell
+  effect StagedVar = !Record
+  fn var_open(v: Value) -> Cell !Record = open(v)
+  fn var_get(c: Cell) -> Value !Record = read(c)
+  fn var_set(c: Cell, v: Value) -> Unit !Record = write(c, v)
+}
+
+impl StagedIter[Once] {
+  type Item = Int
+  effect StagedIter = !Record
+  fn staged_for(r: Once, body: fn(Int) -> Unit !Record) -> Unit !Record = {
+    note("loop ${r.n}")
+    body(r.n)
+    note("end loop")
+  }
+}
+
+fn condition(name: String, choose: Bool) -> Cond !Record = {
+  note("condition ${name}")
+  Cond { name: name, choose: choose }
+}
+
+# A generic call forwards the conditional dictionary and associated row.
+fn generic[C: StagedCond](c: C, yes: fn() -> Unit !C.StagedCond,
+  no: fn() -> Unit !C.StagedCond) -> Unit !C.StagedCond = {
+  if c { yes() } else { no() }
+}
+
+fn program() -> Unit !Record = {
+  var a = Value { name: "a", n: 10 }
+  var b = Value { name: "b", n: 20 }
+  var ro = Value { name: "ro", n: 3 }
+  if condition("both", true) {
+    b = Value { name: "b", n: a.n + ro.n }
+    a = Value { name: "a", n: a.n + 1 }
+    let b = Value { name: "shadow", n: 99 }
+    note("local ${b.n}")
+  } else {
+    a = Value { name: "a", n: b.n + ro.n }
+    b = Value { name: "b", n: b.n + 2 }
+  }
+  note("after ${a.n} ${b.n} ${ro.n}")
+  # Only the false arm writes; then reads the original b and yields a unchanged.
+  if condition("one", false) { let snapshot = b } else { a = b }
+  note("one ${a.n} ${b.n}")
+  # No else still has a physical empty closure. Setting the original value
+  # is a write, and read-only b does not become a result slot.
+  if condition("empty", false) { a = a }
+  let unit = if condition("unit", true) { () } else { () }
+  note("unit ${unit}")
+  if condition("outer", false) {
+    a = Value { name: "a", n: 100 }
+  } else if condition("inner", true) {
+    a = Value { name: "a", n: a.n + 1 }
+  } else {
+    a = Value { name: "a", n: 200 }
+  }
+  note("chain ${a.n}")
+  for i in (Once { n: 2 }) {
+    if condition("in-loop", true) { a = Value { name: "a", n: a.n + i } }
+  }
+  if condition("with-loop", true) {
+    for i in (Once { n: 3 }) { a = Value { name: "a", n: a.n + i } }
+  }
+  note("nested ${a.n}")
+  generic(condition("generic", false), () => note("generic true"), () => note("generic false"))
+  if true { note("host true") } else { note("host false") }
+}
+
+pub fn main() -> Unit !io = {
+  with handle Record {
+    var state: Image = Image { values: map.empty(), written: set.empty() }
+    note(s) => println(s)
+    open(v) => {
+      let i = len(state.values)
+      state = Image { ..state, values: map.insert(state.values, i, v) }
+      println("open ${i} ${v.name}=${v.n}")
+      Cell { id: i }
+    }
+    read(c) => {
+      let v = state.values[c.id]
+      println("get ${c.id} ${v.name}=${v.n}")
+      v
+    }
+    write(c, v) => {
+      println("set ${c.id} ${v.name}=${v.n}")
+      state = Image { values: map.insert(state.values, c.id, v), written: set.insert(state.written, c.id) }
+    }
+    save() => state
+    restore(s) => { state = Image { ..s, written: set.empty() } }
+    merge(c, entry, t, f) => {
+      var values = entry.values
+      var written = entry.written
+      let ids = sort(set.to_list(set.from(set.to_list(t.written) ++ set.to_list(f.written))))
+      for i in ids {
+        if map.has(entry.values, i) {
+          let tv = t.values[i]
+          let fv = f.values[i]
+          let chosen = if c.choose { tv } else { fv }
+          println("yield ${i} ${tv.n}/${fv.n} -> ${chosen.n}")
+          values = map.insert(values, i, chosen)
+          written = set.insert(written, i)
+        }
+      }
+      state = Image { values: values, written: written }
+      println("end ${c.name}")
+    }
+  }
+  program()
+}

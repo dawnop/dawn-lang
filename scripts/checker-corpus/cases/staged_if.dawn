@@ -1,0 +1,100 @@
+# Staged conditional diagnostics are pinned individually, including read-only
+# host vars, lexical closure boundaries and effects that the arms cannot record.
+pub effect Rec { fn emit(s: String) -> Unit }
+pub type Cond = { choose: Bool }
+pub type Pure = { n: Int }
+pub type Val = { n: Int }
+pub type Slot = { n: Int }
+
+impl StagedCond[Cond] {
+  effect StagedCond = !Rec
+  fn staged_if(c: Cond, on_true: fn() -> Unit !Rec, on_false: fn() -> Unit !Rec) -> Unit !Rec = {
+    on_true()
+    on_false()
+  }
+}
+impl StagedCond[Pure] {
+  fn staged_if(c: Pure, on_true: fn() -> Unit, on_false: fn() -> Unit) -> Unit = on_true()
+}
+impl StagedVar[Val] {
+  type Cell = Slot
+  effect StagedVar = !Rec
+  fn var_open(v: Val) -> Slot !Rec = Slot { n: v.n }
+  fn var_get(c: Slot) -> Val !Rec = Val { n: c.n }
+  fn var_set(c: Slot, v: Val) -> Unit !Rec = emit("set")
+}
+
+pub fn host_written(c: Cond) -> Int !Rec = {
+  var n = 0
+  if c { n = n + 1 } else { n = n + 2 }
+  n
+}
+pub fn host_read(c: Cond) -> Unit !Rec = {
+  var n = 0
+  if c { emit(to_string(n)) }
+}
+pub fn values(c: Cond) -> Val !Rec = if c { Val { n: 1 } } else { Val { n: 2 } }
+pub fn let_value(c: Cond) -> Unit !Rec = {
+  let x = if c { 1 } else { 2 }
+}
+pub fn missing_else(c: Cond) -> Unit !Rec = { if c { 1 } }
+pub fn jumps(c: Cond) -> Option[Int] !Rec = {
+  if c {
+    break
+    continue
+    return Some(2)
+    let y = Some(1)?
+  }
+  None
+}
+pub fn outer_loop(c: Cond) -> Unit !Rec = {
+  for i in 0..2 { if c { break } else { continue } }
+}
+pub fn captured(c: Cond) -> Unit !Rec = {
+  var v = Val { n: 1 }
+  if c {
+    let f = () => v
+    let g = (x: Val) => { v = x }
+  }
+}
+pub fn with_capture(c: Cond) -> Unit !Rec = {
+  var v = Val { n: 1 }
+  if c { with ignored <- wrap()
+    let snapshot = v }
+}
+fn wrap(f: fn(Unit) -> Unit !Rec) -> Unit !Rec = f(())
+pub fn handler_capture(c: Cond) -> Unit !Rec = {
+  var v = Val { n: 1 }
+  if c { with handle Rec { emit(s) => { let snapshot = v } }
+    emit("x") }
+}
+pub fn pure_arms(c: Pure) -> Unit !io = { if c { println("no") } }
+pub fn excess_effect(c: Cond) -> Unit !(Rec | io) = { if c { println("no") } }
+pub fn missing_effect(c: Cond) -> Unit = { if c { emit("missing") } }
+pub fn missing_cell_effect(c: Pure) -> Unit !Rec = {
+  var v = Val { n: 1 }
+  if c { v = v }
+}
+pub fn ordinary_lambda(c: Cond) -> Unit !Rec = {
+  var v = Val { n: 1 }
+  let f = () => { if c { v = v } }
+}
+pub fn local_jumps(c: Cond) -> Unit !Rec = {
+  if c {
+    var n = 0
+    while n < 3 {
+      n = n + 1
+      if n == 1 { continue }
+      break
+    }
+    let f: fn() -> Int = () => { return 1 }
+    fn local() -> Int = { return 2 }
+    emit(to_string(f() + local()))
+  }
+}
+pub fn invalid_condition() -> Unit = { if 1.0 { () } }
+pub fn unknown_condition() -> Unit = { if missing { () } }
+pub fn scope(c: Cond) -> Unit !Rec = {
+  if c { let only_here = 1 } else { emit(to_string(only_here)) }
+  emit(to_string(only_here))
+}

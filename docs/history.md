@@ -250,3 +250,7 @@ table says what replaced it and when.
 
 [Early design decisions (M0–M7)](design.en.md) keeps the reasoning behind each choice made
 before self-hosting, as it was written at the time.
+- **2026-10-22.** Unit-valued staged `if` gains the `StagedCond` prelude protocol. Both arms
+  share StagedVar cells with each other and with enclosing staged loops; host Bool retains
+  its existing branch. Device package integration and token branching follow separately.
+  ([Conditional protocol](staged-if-design.md), [spec §4.6](spec.en.md))

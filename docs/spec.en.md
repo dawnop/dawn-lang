@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ bbb72e937d4bdb1c -->
+<!-- doc-check: translation-of docs/spec.md @ 67cc2a5fb6d0b2f0 -->
 
 # Dawn Language Specification
 
@@ -1011,21 +1011,21 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   (callable directly, by UFCS, or in a pipeline).
 - **Injection is a per-trait property**: whether a trait's method names occupy the function
   namespace is decided by that trait. Today a `trait` declaration always injects, and the six
-  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` inject too; **the nineteen whose method name the
+  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` inject too; **the twenty whose method name the
   language consumes on the user's behalf do not**, and their method names appear only in impl
   bodies, in documentation and in error messages: `Index` (consumed by `[]`, §4.8), `Display`
   (consumed by `to_string` and `${...}`, §4.3), the six arithmetic traits
   `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg` (consumed by the operators, §4.3), `FromInt`/`FromFloat`
   (consumed by numeric literals, §1.5) and `StagedIter`/`StagedVar` (consumed by the staged
-  `for`, §4.7), and the seven bitwise and shift traits below.
-- **Twenty-five built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
+  `for`, §4.7), `StagedCond` (staged `if`, §4.6), and the seven bitwise and shift traits below.
+- **Twenty-six built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
   `==`/`!=`), `Hash` (`hash`), `Show` (`show`, the **nested** rendering, and the bound
   `to_string` asks for), `Iter` (behind `for..in`, §4.7), `Len` (`len`, the number of elements a
   container holds), `Index` (behind `[]`, §4.8),
   `Display` (`display`, the **top-level** rendering, behind `to_string` and `${...}`, §4.3),
   the six arithmetic traits behind `+ - * / %` and unary `-` (see their entry below),
   `FromInt`/`FromFloat` behind numeric literals (the entry after that), and
-  `StagedIter`/`StagedVar` behind the staged `for`, and the seven bitwise and shift traits.
+  `StagedIter`/`StagedVar` behind the staged `for`, `StagedCond` behind the staged `if`, and the seven bitwise and shift traits.
   The impls for the scalars ship with the language;
   `derive Ord` / `derive Show` cast an ordinary impl, and on a generic type a conditional impl;
   `Display` cannot be derived (the reason is under `Display` below).
@@ -1116,6 +1116,12 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   implements both writes `!T.StagedIter` and `!T.StagedVar` without ambiguity. The language
   provides no impl of either for any type. Both names are taken in trait and effect
   position from now on as well.
+- **`StagedCond`** (behind staged `if`, §4.6):
+  `trait StagedCond[C] { effect StagedCond = !()  fn staged_if(c: C, on_true: fn() -> Unit !C.StagedCond, on_false: fn() -> Unit !C.StagedCond) -> Unit !C.StagedCond }`.
+  Its method name does not inject, it cannot be derived, and its same-named associated effect
+  defaults to pure; generic code projects `!C.StagedCond`. The language provides no impl,
+  including for Bool; opaque types do not inherit the underlying impl. The name is reserved
+  in trait and effect declaration positions.
 - **`BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr`/`Ushr`/`BitNot`** (§4.3) implement
   `& | ^ << >> >>> ~`, always returning the subject type. The first three are homogeneous
   binary operations; `BitNot` is unary. Each shift has its own associated count type:
@@ -1788,7 +1794,7 @@ xs |> map(x => x * x)             # parentheses optional for a single parameter
 - A closure captures bindings by value (capturing a `var` is a compile error — to share
   mutable state, pass it explicitly).
 - There are exactly two exceptions, and both are **cells**: a handler's cells (§6.5) and the
-  staged `for`'s cells (§4.7). Each crosses only the closures it is licensed for, as a cell, and
+  staged `for`/`if` cells (§4.6, §4.7). Each crosses only the closures it is licensed for, as a cell, and
   reads and writes go through the cell; every other closure is unchanged.
 - **Division of labour between the arrows (design verdict, 2026-07-31, deliberately not
   unified)**: `->` is the **clause arrow** and appears only in "declaration-shaped"
@@ -1804,10 +1810,25 @@ xs |> map(x => x * x)             # parentheses optional for a single parameter
 let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
 ```
 
-- The condition must be `Bool`, and a branch body must be a block.
+- A host condition is `Bool`; a non-Bool condition may implement `StagedCond` (below); a branch body must be a block.
 - Used as a value, `else` must be present and the branches must have the same type;
   used as a statement (the value is discarded) `else` may be omitted, and then the branches
   must be `Unit`.
+
+- **Staged `if`**: a non-Bool condition implementing `StagedCond` is rewritten into a call to
+  its impl with two parameterless closures. The condition is evaluated once outside the arms,
+  before opening cells. The result is always `Unit`; non-Unit arm tails are rejected even in
+  statement position or when both have the same type. An omitted else is an empty Unit arm;
+  else-if remains nested inside the else arm. Arms have independent scopes and share the outer
+  vars' StagedVar cells (§4.7), opened and written back in declaration order; nested staged
+  for/if reuses the enclosing cells. Read-only vars also need StagedVar; ordinary closures
+  cannot capture the cells. The library protocol records both arms from the same entry state,
+  carries the union of their writes, and yields the original value in an unwritten arm.
+  The compiler does not construct a heterogeneous result tuple. Each arm's effects, including
+  generated get/set calls, must fit `C.StagedCond`; open/writeback effects are charged outside.
+  break/continue/return/`?` cannot leave a staged conditional arm and name staged if in their
+  diagnostics. Local jumps in a host loop inside an arm and a local function's own return
+  remain legal. The language specifies no device type or rank; libraries validate conditions.
 
 ### 4.7 Loops
 

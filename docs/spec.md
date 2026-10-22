@@ -804,18 +804,18 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 - trait 恰有一个类型参数；方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
 - **注入是逐 trait 的属性**：一个 trait 的方法名是否占据函数命名空间由该 trait 决定。
   今天 `trait` 声明恒注入，`Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` 六个预置 trait 也注入；
-  **方法名由语言代用户消费掉的十九个不注入**，它们的方法名只在 impl 体、文档与错误消息里
+  **方法名由语言代用户消费掉的二十个不注入**，它们的方法名只在 impl 体、文档与错误消息里
   出现：`Index`（`[]` 消费它，§4.8）、`Display`（`to_string` 与 `${...}` 消费它，§4.3）、
   六个算术 trait `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg`（运算符消费它们，§4.3）、
   `FromInt`/`FromFloat`（数字字面量消费它们，§1.5）与
-  `StagedIter`/`StagedVar`（staged `for` 消费它们，§4.7），以及七个按位与移位 trait（下文）。
-- **预置 trait 二十五个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
+  `StagedIter`/`StagedVar`（staged `for` 消费它们，§4.7）与 `StagedCond`（staged `if`，§4.6），以及七个按位与移位 trait（下文）。
+- **预置 trait 二十六个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
   背后是 `==`/`!=`）、`Hash`（`hash`）、`Show`（`show`，**嵌套**渲染，也是 `to_string`
   要的 bound）、`Iter`（背后是 `for..in`，§4.7）、`Len`（`len`，容器的元素个数）、`Index`（背后是 `[]`，§4.8）、
   `Display`（`display`，**顶层**渲染，背后是 `to_string` 与 `${...}`，§4.3），
   背后是 `+ - * / %` 与一元 `-` 的六个算术 trait（见下面那条）、背后是数字字面量的
   `FromInt`/`FromFloat`（再下一条），以及背后是 staged `for` 的 `StagedIter`/`StagedVar`
-  （再下一条），以及七个按位与移位 trait。
+  （再下一条）、背后是 staged `if` 的 `StagedCond`，以及七个按位与移位 trait。
   标量的 impl 随语言提供；
   `derive Ord` / `derive Show` 铸的是普通 impl，泛型类型上铸的是条件 impl；
   `Display` 不可 derive（理由见下面 `Display` 那条）。
@@ -884,6 +884,10 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   两者的方法名由语言消费，**不**进入函数命名空间；不可 derive；各带一个与 trait 同名的关联效果，
   默认纯（与算术、字面量 trait 同），所以同时实现两者的类型在泛型代码里写 `!T.StagedIter`、
   `!T.StagedVar` 不会混淆；语言不为任何类型提供 impl。两个名字同样从此在 trait 与效果位置被占用。
+- **`StagedCond`**（背后是 staged `if`，§4.6）：
+  `trait StagedCond[C] { effect StagedCond = !()  fn staged_if(c: C, on_true: fn() -> Unit !C.StagedCond, on_false: fn() -> Unit !C.StagedCond) -> Unit !C.StagedCond }`。
+  方法名不注入，不可 derive，同名关联效果默认纯；泛型以 `!C.StagedCond` 投影。
+  语言不提供任何 impl，尤其不给 Bool 提供；opaque 不继承底层 impl。名字占用 trait 与 effect 声明位置。
 - **`BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr`/`Ushr`/`BitNot`**（§4.3）：
   分别承载 `& | ^ << >> >>> ~`，结果固定为主体类型。前三者两参同型，`BitNot` 一元；
   移位各有独立关联类型 `ShlAmount`、`ShrAmount`、`UshrAmount`：
@@ -1404,7 +1408,7 @@ xs |> map(x => x * x)             # 单参数可省括号
 - **lambda 不能直接当 `if`/`while` 的条件**：`if x => { ... }` 会把本该是循环体的
   花括号吃成 lambda 的 body。这是一条专门的诊断，不是「expected `{`」。
 - 闭包按值捕获绑定（捕获 `var` 是编译错误——想共享可变状态请显式传递）。
-- 例外只有两处，且都是**格子**：handler 的格子（§6.5）与 staged `for` 的格子（§4.7）。
+- 例外只有两处，且都是**格子**：handler 的格子（§6.5）与 staged `for`/`if` 的格子（§4.6、§4.7）。
   它们以格子身份穿过各自被授权的闭包，读写经过格子；其余闭包照旧。
 - **箭头分工（设计裁决，2026-07-31，刻意不统一）**：`->` 是**子句箭头**，只出现在
   「声明形状」的位置——函数类型（§2.2）与 match 臂（§5.1）；`=>` 是**表达式箭头**，
@@ -1418,9 +1422,19 @@ xs |> map(x => x * x)             # 单参数可省括号
 let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
 ```
 
-- 条件必须是 `Bool`，分支体必须是块。
+- 宿主条件为 `Bool`，走原有宿主分支；非 Bool 条件可实现 `StagedCond`（下文）。分支体必须是块。
 - 作为值使用时 `else` 必须存在且分支同类型；
   作为语句（值被丢弃）时可省 `else`，此时分支必须是 `Unit`。
+
+- **staged `if`**：非 Bool 条件实现 `StagedCond` 时，检查器将两臂改写为交给该 impl 的无参闭包。
+  条件在外层恰好求值一次，先于新开格子；结果固定 `Unit`，两臂的非 Unit 尾值明确报错，
+  即使作为语句或两臂同型也不丢弃。无 else 补空 Unit 臂，else if 留在 else 臂内嵌套。
+  两臂独立作用域，共享外层 `var` 的 StagedVar 格子（§4.7），按声明序打开并写回，
+  与 staged for/if 嵌套时复用外层格子。只读 var 也须实现 StagedVar；普通闭包仍不能捕获格子。
+  库协议从同一入口记录两臂，携带两臂写集合并集，未写臂携带原值；编译器不构造异构结果元组。
+  每臂效果（含生成 get/set）须包含在 `C.StagedCond` 内，open/writeback 在外层照常计效果。
+  break/continue/return/`?` 不得离开 staged 条件臂，诊断点名 staged if；臂内宿主循环的局部跳转
+  与局部函数自身 return 仍合法。语言不规定设备类型或 rank，库须自行验证条件。
 
 ### 4.7 循环
 
@@ -1455,7 +1469,7 @@ while queue.non_empty() { ... }
   循环，而是交给该 impl 的 `staged_for`：`body` 成为一个闭包，由 impl 决定怎么跑（tileir
   用它记录设备循环）。`e` 仍在外层恰好求值一次，先于一切格子。体中提到的每个外层 `var`
   （读或写，按作用域，不含体内自己声明的）在进循环前按**声明序**各开一个格子
-  （`StagedVar.var_open`），体内对它的读写经过格子，循环后写回；嵌套的 staged 循环复用外层
+  （`StagedVar.var_open`），体内对它的读写经过格子，循环后写回；嵌套的 staged 循环与条件复用外层
   已开的格子。这样的 `var` 的类型必须实现 `StagedVar`，否则是编译错误（宿主值在被记录的体里
   没有意义）；体内的普通 lambda 不能捕获格子名；`break`/`continue`/`return`/`?` 不能离开
   staged 体；体只能执行 `StagedIter[R]` 声明的效果。区间 `a..b` 永远是宿主循环；同时实现

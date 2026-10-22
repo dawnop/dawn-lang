@@ -45,7 +45,7 @@ use check/tast.{
 }
 use check/types.{
   Ty, TyAdt, TyFn, TyOpaque, RESULT_ID, TyList, TyMap, TySet, TyString, TyBool, Sig, Sym, CtorI,
-  STAGED_VAR_ID, STAGED_ITER_ID, is_lit_trait, impl_at, TyVar, EQ_ID, ORD_ID,
+  STAGED_VAR_ID, STAGED_ITER_ID, STAGED_COND_ID, is_lit_trait, impl_at, TyVar, EQ_ID, ORD_ID,
   ty_show, sig_render, ctor_render, trait_of, adt_of, arg_slots, SlotAt,
   builtin_type_at, builtin_type_hard_reserved, builtin_type_render
 }
@@ -2753,6 +2753,21 @@ fn staged_for_parts(ts: Option[TStmt], pat: Pattern) -> Option[(TPat, TExpr, TEx
   None
 }
 
+## Pair the user's condition and two arms with their generated typed pieces.
+## The outer opens/writebacks must never appear as user references.
+fn staged_if_parts(te: Option[TExpr]) -> Option[(TExpr, TExpr, TExpr)] = {
+  let ss = match te { Some(XBlock(stmts, None, ..)) -> stmts, _ -> return None }
+  let cond = match get(ss, 0) { Some(TSLet(Some(_), _, x, ..)) -> x, _ -> return None }
+  for st in ss {
+    match st {
+      TSExpr(XCallFn(_, _, [_, XLambda([], [], t, ..), XLambda([], [], f, ..)], _, _, Some(tid), ..), ..) ->
+        if tid == STAGED_COND_ID { return Some((cond, t, f)) }
+      _ -> ()
+    }
+  }
+  None
+}
+
 ## The cell a staged `var_get` or `var_set` goes through, if `x` is one.
 fn staged_cell_use(x: TExpr) -> Option[(Int, List[TExpr])] =
   match x {
@@ -3506,10 +3521,17 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           }
         }
         _ -> {
-          q = walk_e(qc, q, cond, None)
-          q = walk_e(qc, q, thn, None)
+          let (tc, tt, tf) = match staged_if_parts(te) {
+            Some((c, t, f)) -> (Some(c), Some(t), Some(f))
+            None -> {
+              let n: Option[TExpr] = None
+              (n, n, n)
+            }
+          }
+          q = walk_e(qc, q, cond, tc)
+          q = walk_e(qc, q, thn, tt)
           match els {
-            Some(e) -> { q = walk_e(qc, q, e, None) }
+            Some(e) -> { q = walk_e(qc, q, e, tf) }
             None -> ()
           }
         }
@@ -4484,11 +4506,12 @@ fn collect_e(
     EIf(cond, thn, els, _, _) -> {
       let (tc, tt, tels) = match te {
         Some(XIf(c, t, e, _, _, _)) -> (Some(c), Some(t), e)
-        _ -> {
-          let n1: Option[TExpr] = None
-          let n2: Option[TExpr] = None
-          let n3: Option[TExpr] = None
-          (n1, n2, n3)
+        _ -> match staged_if_parts(te) {
+          Some((c, t, f)) -> (Some(c), Some(t), Some(f))
+          None -> {
+            let n: Option[TExpr] = None
+            (n, n, n)
+          }
         }
       }
       acc = collect_e(qc, acc, cond, tc, before)
