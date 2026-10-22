@@ -561,7 +561,8 @@ kernels=(
   dtype_e5m3 mmaf_scaled_e5m3
   vadd_producer vadd_debug foldif_debug
   bitwise_i8 bitwise_i16 bitwise_i32 bitwise_i64 bitwise_mask
-  shift_i8 shift_i16 shift_i32 shift_i64)
+  shift_i8 shift_i16 shift_i32 shift_i64
+  staged_unit staged_value staged_nested staged_one)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -695,6 +696,8 @@ mutants=(
   debug-count-short
   mask-and-as-andi bits-witness-mismatch bits-type-rejections
   shift-count-unmasked shift-witness-mismatch
+  staged-type-rejections staged-if-checks staged-rank-accepted staged-dtype-accepted staged-one-arm-accepted
+  staged-eager-arm staged-invariance
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -3100,6 +3103,76 @@ if run_item shift-witness-mismatch; then
     grep -Fq 'src/main.dawn:' "$out.err" || fail "shift-witness-mismatch did not name a user line"
   done
   echo "PASS  mutant: shift-witness-mismatch (both backends refuse the wrong declared dtype at the user boundary)"
+fi
+
+if run_item staged-type-rejections; then
+  project "$work/staged-rejected" "$root/packages/tileir"
+  cp "$here/staged-if-rejected.dawn" "$work/staged-rejected/src/main.dawn"
+  if "$root/bin/dawn" check "$work/staged-rejected" > "$work/staged-rejected.out" 2>&1; then
+    fail "staged-type-rejections: invalid device conditions or results were accepted"
+  fi
+  sed -n '/^error:/p' "$work/staged-rejected.out" > "$work/staged-rejected.errors"
+  cmp -s "$here/staged-if-rejected.expected" "$work/staged-rejected.errors" || {
+    diff -u "$here/staged-if-rejected.expected" "$work/staged-rejected.errors" >&2 || true
+    fail "staged-type-rejections: exact checker refusals changed"
+  }
+  echo "PASS  staged if checker: ineligible conditions, unequal results, host values and missing arms refused"
+fi
+
+# The clean recording must reject malformed shapes and incomplete result slots
+# before any renderer or assembler runs. Mutants remove exactly one guard.
+if run_item staged-if-checks; then
+  run_jvm "$work/clean" "$work/staged-checks.jvm" --staged-if-checks ||
+    { cat "$work/staged-checks.jvm.err" >&2; fail "staged if recording checks failed on JVM"; }
+  run_native "$work/clean.bin" "$work/staged-checks.native" --staged-if-checks ||
+    { cat "$work/staged-checks.native.err" >&2; fail "staged if recording checks failed natively"; }
+  cmp -s "$work/staged-checks.jvm" "$work/staged-checks.native" || fail "staged if checks disagree"
+  cat "$work/staged-checks.jvm"
+fi
+staged_guard_mutant() { # name, module, assertion
+  local m="$1" module="$2" expected="$3" out backend
+  mutant_project "$m" "$module"
+  mutant_run "$m" --staged-if-checks
+  for backend in jvm native; do
+    out="$work/m-$m.--staged-if-checks.$backend"
+    [ "$(cat "$out.rc")" != 0 ] || fail "$m survived on $backend"
+    grep -Fq "$expected" "$out.err" || { cat "$out.err" >&2; fail "$m failed for another reason"; }
+  done
+  echo "PASS  mutant: $m (built successfully, owning recording assertion red on both backends)"
+}
+if run_item staged-rank-accepted; then
+  staged_guard_mutant staged-rank-accepted prog.dawn "S2 rank-0 guard is missing"
+fi
+if run_item staged-dtype-accepted; then
+  staged_guard_mutant staged-dtype-accepted prog.dawn "S2 dtype guard is missing"
+fi
+if run_item staged-one-arm-accepted; then
+  staged_guard_mutant staged-one-arm-accepted dev.dawn "S2 definite assignment guard is missing"
+fi
+staged_golden_mutant() { # name, kernel
+  local m="$1" k="$2" out backend
+  if [ "$m" = staged-invariance ]; then
+    kernel_mutant_project "$m"
+    build_native "$work/m-$m" "$work/m-$m.bin" -O0
+  else
+    mutant_project "$m" dev.dawn
+  fi
+  mutant_run "$m" "$k"
+  mutant_run_bytecode "$m" "$k"
+  for backend in jvm native; do
+    out="$work/m-$m.$k.$backend"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "$m failed to record"; }
+    ! cmp -s "$here/$k.mlir" "$out" || fail "$m text stayed invariant on $backend"
+    [ "$(cat "$out.tilebc.rc")" = 0 ] || fail "$m failed to encode"
+    ! cmp -s "$here/$k.tilebc" "$out.tilebc" || fail "$m bytes stayed invariant on $backend"
+  done
+  echo "PASS  mutant: $m ($k text and byte invariance red on both backends)"
+}
+if run_item staged-eager-arm; then
+  staged_golden_mutant staged-eager-arm staged_value
+fi
+if run_item staged-invariance; then
+  staged_golden_mutant staged-invariance foldif
 fi
 
 _item_tick ""

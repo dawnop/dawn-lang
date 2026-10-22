@@ -7,6 +7,13 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.25.0 (2026-10-22)
+
+- Add Bool-only TileCondDtype qualification and StagedCond for pure rank-0 device conditions, sharing the recorder with d_if.
+- Add StagedResult for Tile values with separate uninitialized slots. Both arms must assign matching dtype and shape; each result becomes an if yield without broadcasting or promotion.
+- Preserve carry creation order, shared staged for cells and the entry value in an unwritten arm. Migrate foldif and carry_extent with byte-identical MLIR and tilebc, including foldif_debug metadata.
+- Add seven Dev result-slot operations. External handlers must implement them; no compatibility handler is supplied. Token branches remain rejected with an explicit S3 diagnostic.
+
 ## 0.24.0 (2026-10-22)
 
 - Add conditional `<<`, `>>`, `>>>` implementations for `Tile[D]` with `D: TileShiftDtype`, same-type Tile Amounts and ground `!Dev` effects.

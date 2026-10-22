@@ -1443,7 +1443,8 @@ let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
   库协议从同一入口记录两臂，携带两臂写集合并集，未写臂携带原值；编译器不构造异构结果元组。
   每臂效果（含生成 get/set/result_set）须包含在 `C.StagedCond` 内，格子 open/writeback 与结果槽
   open/get 在外层照常计效果。库合流时确认两臂赋值；设备结果必须同 dtype/shape，不能广播、提升格式
-  或以宿主值代替设备结果。
+  或以宿主值代替设备结果。tileir 已为严格 rank-0 的 Tile[Bool] 条件和 Tile 结果实现此协议；
+  S2 两臂只接受纯计算及 staged var 写入，臂内访存、token 操作和循环等待 S3，记录期明确拒绝。
   break/continue/return/`?` 不得离开 staged 条件臂，诊断点名 staged if；臂内宿主循环的局部跳转
   与局部函数自身 return 仍合法。语言不规定设备类型或 rank，库须自行验证条件。
 

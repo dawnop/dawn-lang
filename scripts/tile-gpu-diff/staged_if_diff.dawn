@@ -1,0 +1,252 @@
+# Pure staged-if layer 2 covers both choices in four blocks, nested slots,
+# loop sharing and the unwritten arm. Exact inputs also expose an eager arm.
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out}
+use tileref/ref.{staged_if_ref}
+use std/list
+use std/map
+
+pub const DT_N: Int = 512
+pub const DT_TILE: Int = 128
+pub const TAIL: Int = 16
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignError] !Gpu = {
+  var hs: List[Int] = []
+  for (dt, data) in bufs {
+    hs = hs ++ [gpu.gpu_alloc(dt, len(data))?]
+  }
+  Ok(hs)
+}
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
+  for i in 0..len(hs) {
+    let (dt, data) = bufs[i]
+    gpu.gpu_copy_from_host(hs[i], gpu.encode_floats(dt, data))?
+  }
+  Ok(())
+}
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a
+## `gx` by 1 by 1 grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. The LAST buffer is the output, and the
+## one this reads back.
+fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !Gpu =
+  match alloc_all(bufs) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, 1, 1, list.map(hs, h => gpu.Buffer(h))) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let (last_dt, _last) = bufs[len(bufs) - 1]
+              let r: Result[List[Float], ForeignError] = match gpu.gpu_copy_to_host(hs[len(hs) - 1]) {
+                Ok(raw) -> Ok(gpu.decode_floats(last_dt, raw))
+                Err(e) -> Err(e)
+              }
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+## The verdict for one kernel. Every kernel here is EXACT tier, so there is
+## no tolerance arm: the two renderings are equal or they are not.
+fn verdict(fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if rendered(real.result) == rendered(fake.result) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+## The first lane on which the two answers differ, and what each says, or
+## "-" if they agree. The final lanes are untouched output sentinels.
+fn first_difference(real: Trace, fake: Trace) -> String =
+  match (real.result, fake.result) {
+    (Some(a), Some(b)) ->
+      if len(a) != len(b) {
+        "lengths ${len(a)} and ${len(b)}"
+      } else {
+        match list.find(range(0, len(a)), i => to_string(a[i]) != to_string(b[i])) {
+          Some(i) -> "seg ${i / DT_N} lane ${i % DT_N}: device ${a[i]} host ${b[i]}"
+          None -> "-"
+        }
+      }
+    _ -> "-"
+  }
+
+fn case_name(i: Int) -> String = ["staged_unit", "staged_value", "staged_nested", "staged_one"][i]
+fn case_segments(_i: Int) -> Int = 1
+fn case_grid(_i: Int) -> Int = DT_N / DT_TILE
+fn case_bufs(_i: Int) -> List[(String, List[Float])] =
+  [("f64", list.map(range(0, DT_N), k => to_float(k % 17 - 8))),
+    ("f64", list.map(range(0, DT_N + TAIL), _k => -12345.0))]
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
+  map.from([(case_name(i), (2, last_out((dts, ins) => staged_if_ref(case_name(i), dts, ins))))])
+fn shape_of(_name: String) -> String = "blocks=4 lanes=512 both_arms=yes tail=16"
+
+## A vector as a line: its length, its first lanes and its last ones.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn buffers_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+}
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("staged_if_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+fn usage() -> Unit !Exit !io = {
+  io.eprintln("usage: staged_if_diff <staged_unit.cubin> <staged_value.cubin> <staged_nested.cubin> <staged_one.cubin>")
+  io.exit(2)
+}
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let paths = args()
+  let count = 4
+  if len(paths) != count { usage() } else { () }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(paths[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let gx = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, bufs))
+    let real = with_gpu_real(cubins, () => stages(name, gx, bufs))
+    let v = verdict(fake, real)
+    io.println("kernel ${name} tier=exact bufs=${buffers_of(i)} grid=(${gx}, 1, 1)"
+        ++ " segments=${case_segments(i)}")
+    io.println("  index ${shape_of(name)}")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    io.println("  first ${first_difference(real, fake)}")
+    if real.note != "" { io.println("  note  ${real.note}") } else { () }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  io.println("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
