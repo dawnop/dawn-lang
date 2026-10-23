@@ -1,0 +1,94 @@
+# A2 output ABI and precision witnesses. General flash MMA remains tolerance
+# tier in seq_diff. Here Q=K=0 makes every probability exactly one, so the
+# independent answer is a dyadic mean of small BF16 values, exactly F32 and
+# deliberately not BF16. No reference records or interprets the device kernel.
+use std/io
+use std/gpu
+use std/gpu.{Gpu, DeviceBuffer, Entry5}
+use std/narrow
+use std/narrow.{F32, BF16}
+use std/list
+use std/map
+use std/bytes
+
+fn require(ok: Bool, why: String) -> Unit = if not ok { panic("A2 ${why}") }
+
+fn trip() -> Result[Unit, ForeignError] !Gpu = {
+  let bits = [0x00000000, 0x80000000, 0x00000001, 0x007fffff, 0x00800000, 0x7f7fffff, 0x3f800001, 0xbf800001]
+  let xs = list.map(bits, b => narrow.f32(narrow.f32_of_bits(b)))
+  let b: DeviceBuffer[F32] = gpu.alloc(F32, len(xs))?
+  gpu.copy_from_host(b, xs)?
+  let raw = gpu.gpu_copy_to_host(gpu.handle_of(b))?
+  let got = gpu.copy_to_host(b)?
+  require(len(b) == len(bits) && len(raw) == 4 * len(bits), "roundtrip 4*n bytes")
+  require(raw == bytes.pack_ints(bits, 4), "roundtrip bits including signed zero and boundaries")
+  require(list.map(got, x => narrow.f32_bits(narrow.to_f64(x))) == bits, "typed roundtrip values")
+  gpu.free(b)?
+  Ok(())
+}
+
+fn value(row: Int, col: Int, d: Int) -> Float =
+  to_float((row % 512 % 7 + 1) * (col % 5 + 1)) / 16.0 * (if row < 512 { 1.0 } else { -1.0 })
+
+fn sample(d: Int, bq: Int, bk: Int) -> Result[Unit, ForeignError] !Gpu = {
+  let n = 1024 * d
+  let q = gpu.alloc(BF16, n)?
+  let k = gpu.alloc(BF16, n)?
+  let v = gpu.alloc(BF16, n)?
+  let o: DeviceBuffer[F32] = gpu.alloc(F32, n)?
+  let zs = list.map(range(0, n), _i => narrow.bf16(0.0))
+  gpu.copy_from_host(q, zs)?
+  gpu.copy_from_host(k, zs)?
+  gpu.copy_from_host(v, list.map(range(0, n), i => narrow.bf16(value(i / d, i % d, d))))?
+  gpu.copy_from_host(o, list.map(range(0, n), _i => narrow.f32(-12345.0)))?
+  let e: Entry5[BF16, BF16, BF16, F32, F32] = gpu.entry5("flash_attn_bf16",
+    gpu.arg_in([1024, d], [bq, d], [0, 1]),
+    gpu.arg_in([1024, d], [bk, d], [-1, 1]),
+    gpu.arg_in([1024, d], [bk, d], [-1, 1]),
+    gpu.arg_out([1024, d], [bq, d]), gpu.arg_scalar())
+  gpu.launch_entry5(e, gpu.buffer_arg(q), gpu.buffer_arg(k), gpu.buffer_arg(v), gpu.buffer_arg(o),
+    gpu.scalar_arg(narrow.f32(1.4426950408889634)))?
+  gpu.sync()?
+  let raw = gpu.gpu_copy_to_host(gpu.handle_of(o))?
+  let got = gpu.copy_to_host(o)?
+  require(len(o) == n && len(got) == n, "output element count")
+  require(len(raw) == 4 * n, "output 4*n bytes")
+  let means = list.map(range(0, 2 * d), c =>
+      list.fold(range(0, 512), 0.0, (s, r) => s + value((c / d) * 512 + r, c % d, d)) / 512.0)
+  require(list.any(means, x => narrow.round_bf16(x) != x), "precision witness is nontrivial")
+  for i in range(0, n) {
+    let want = means[(i / (512 * d)) * d + i % d]
+    require(narrow.to_f64(got[i]) == want, "finite dyadic mean d=${d} lane=${i}, output lost precision or was not written")
+  }
+  gpu.free(q)?
+  gpu.free(k)?
+  gpu.free(v)?
+  gpu.free(o)?
+  Ok(())
+}
+
+pub fn main() -> Unit !io = {
+  let ps = args()
+  if len(ps) != 4 { panic("usage: flash_output_diff <arch> <d32.cubin> <d64.cubin> <d128.cubin>") }
+  let fake = gpu.with_gpu_fake(map.empty(), trip)
+  require(fake == Ok(()), "fake roundtrip")
+  for i in range(0, 3) {
+    let d = [32, 64, 128][i]
+    let bq = if ps[0] == "sm_100" && d != 32 { 256 } else { 64 }
+    let bk = if ps[0] == "sm_90" && d == 64 || ps[0] == "sm_100" && d == 128 { 128 } else { 64 }
+    let cubin = match io.with_fs_real(() => io.read_bytes(ps[i + 1])) {
+      Ok(b) -> b
+      Err(e) -> panic("A2 read cubin: ${e}")
+    }
+    let run: fn() -> Result[Unit, ForeignError] !Gpu = () => {
+      trip()?
+      sample(d, bq, bk)
+    }
+    let r = gpu.with_gpu_real(map.from([("flash_attn_bf16", cubin)]), run)
+    match r {
+      Ok(_) -> println("PASS A2 d=${d} heads=2 blocks=${1024 / bq} elements=${1024 * d} bytes=${4 * 1024 * d} finite-dyadic=exact roundtrip=exact")
+      Err(e) -> panic("A2 device refused: ${e}")
+    }
+  }
+  println("tile-gpu-diff: pass")
+}

@@ -43,6 +43,13 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
 
 ## 2. 逐行对照
 
+下表保留当时的审计快照。当前 A2 已将 bf16 输入/f32 累加的输出从 f64 迁为 f32，
+五个录制入口与宿主四字节缓冲同步；表中泛型探针的 `(acc / l).to(F64)` 已被此输出契约替代，
+不能复制成当前 bf16 实现。P3 已采用 exp2-ftz，P4-c 已实现普通 flash 的配置/尺寸工厂与多形状消费者。
+泛型主体合并按裁决排在 A2 后，随后才做 GQA；运行期键数与 GQA 尺寸/布局仍待 K3。
+历史测量保留其原来的 f64 输出身份，A2 同轮测量另记。参见 [后端设计](tile-backend-design.md#646-a2bf16-flash-的-f32-输出契约2026-10-23)。
+
+
 | 位置 | 现在 | 理想或 Triton | 差距 | 类别 | 处理 |
 |---|---|---|---|---|---|
 | 签名 | `scale` 是第五个入口参数 | Triton 的 `sm_scale` 是运行期实参；cutile-rs 的 `qk_scale: f32` 同 | 本来是缺口（scale 烧进 cubin） | 1 | **本 PR 已修**（f64 与 bf16 两个 kernel，各一个提交） |

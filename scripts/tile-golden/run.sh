@@ -699,6 +699,7 @@ mutants=(
   staged-type-rejections staged-if-checks staged-rank-accepted staged-dtype-accepted staged-one-arm-accepted
   staged-eager-arm staged-invariance
   staged-token-checks staged-token-unmerged staged-token-join staged-fork-accepted staged-write-leaks
+  flash-output-f64 flash-output-one-f64 flash-output-bf16
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -3218,6 +3219,35 @@ if run_item staged-fork-accepted; then
 fi
 if run_item staged-write-leaks; then
   staged_golden_mutant staged-write-leaks staged_asym
+fi
+
+# A2 controls are type-consistent kernel edits. Native construction must
+# succeed; the named output oracle, rather than a type/assembler error, reds.
+flash_output_mutant() { # mutation, entry
+  local m="$1" k="$2" backend out
+  kernel_mutant_project "$m"
+  build_native "$work/m-$m" "$work/m-$m.bin" -O0
+  mutant_run "$m" "$k"
+  for backend in jvm native; do
+    out="$work/m-$m.$k.$backend"
+    if [ "$m" = flash-output-bf16 ]; then
+      [ "$(cat "$out.rc")" = 0 ] || fail "$m did not record"
+      ! cmp -s "$here/$k.mlir" "$out" || fail "$m golden stayed green"
+    else
+      [ "$(cat "$out.rc")" != 0 ] || fail "$m output contract stayed green"
+      grep -q "A2 $k: output entry must be f32" "$out.err" || fail "$m missed its named oracle"
+    fi
+  done
+  echo "PASS  mutant: $m (type-consistent build, named A2 output oracle red on both backends)"
+}
+if run_item flash-output-f64; then
+  flash_output_mutant flash-output-f64 flash_attn_bf16
+fi
+if run_item flash-output-one-f64; then
+  flash_output_mutant flash-output-one-f64 flash_bf16_sm90_d128
+fi
+if run_item flash-output-bf16; then
+  flash_output_mutant flash-output-bf16 flash_attn_bf16
 fi
 
 _item_tick ""
