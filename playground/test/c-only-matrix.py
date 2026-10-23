@@ -6,6 +6,8 @@ and limits. Preserve all payload fields, map local ids through source identity,
 and report interleaved measurements rather than asserting a speed multiplier.
 """
 import hashlib
+import base64
+import gzip
 import io
 import json
 import os
@@ -83,13 +85,24 @@ with tempfile.TemporaryDirectory(prefix='play-c-matrix.') as work:
             native = (output.read_bytes(), cmap.read_bytes())
             run([ROOT / 'bin/dawn', '__emitc', target, '-o', output, '--map', cmap], env=env)
             assert native == (output.read_bytes(), cmap.read_bytes()), (source.stem, 'compiler C/map bytes differ')
+            classes, jmap = raw / 'classes', raw / 'jvm.dawnmap'
+            run([ROOT / 'bin/dawn', '__emit', target, '-o', classes, '--map', jmap], env=env)
+            listing = run([os.environ.get('PLAY_JAVAP', 'javap'), '-J-Dstdout.encoding=UTF-8', '-c', '-p', '-s', classes / ('main.class' if project else 'prog.class')], env=env)
             print('C artifacts ' + json.dumps({'sample': source.stem, 'form': 'project' if project else 'file',
+                'jvm_map_sha256': hashlib.sha256(jmap.read_bytes()).hexdigest(), 'javap_sha256': hashlib.sha256(listing).hexdigest(),
                 'c_sha256': hashlib.sha256(native[0]).hexdigest(), 'map_sha256': hashlib.sha256(native[1]).hexdigest()}), flush=True)
         ac, abc, _ = request(old, code, 'c')
         aj, abj, _ = request(old, code, 'jvm')
         bc, bbc, _ = request(runner, code, 'c')
         bj, bbj, _ = request(runner, code, 'jvm')
         assert norm(abj) == norm(bbj), (source.stem, 'JVM paired contract changed')
+        # Keep all four wire bodies losslessly in the step log, independently
+        # of the human-readable identity diff. No timing field is discarded.
+        evidence = {'sample': source.stem, 'source': code, 'baseline_c': abc.decode(),
+                    'baseline_jvm': abj.decode(), 'c': bbc.decode(), 'jvm': bbj.decode()}
+        packed = gzip.compress(json.dumps(evidence, ensure_ascii=False, separators=(',', ':')).encode(), mtime=0)
+        print('C evidence ' + base64.b64encode(packed).decode(), flush=True)
+
         if not ac['ok']:
             assert source.stem == 'tile_broken' and norm(abc) == norm(bbc), (source.stem, ac, bc)
             print('C matrix ' + json.dumps({'sample': source.stem, 'diagnostic_equal': True}))

@@ -710,7 +710,9 @@ PYTILE
   done
   ok_case "native parse: Tile IR uses one dawnc parse, no JVM parse, and matches JVM response bytes" "$st"
 
-  # Tool selection and parse failures keep their existing categories. Only
+  # Tool selection and parse failures keep their existing categories. The
+  # timeout budget also covers the real JVM probe build, so leave it enough
+  # room under concurrent gates; the timeout stub exceeds the whole budget. Only
   # an empty failure or the native refusal retries parse with the JVM.
   cat >"$NATIVE_DIR/parse-fault" <<'FAULT'
 #!/bin/sh
@@ -720,7 +722,7 @@ if [ "$1" = --version ]; then
 fi
 printf '%s\n' "$1" >>"$PLAY_TEST_PARSE_LOG"
 case "$PLAY_TEST_PARSE_FAULT" in
-  timeout) exec sleep 6 ;;
+  timeout) exec sleep 20 ;;
   empty) exit 1 ;;
   refusal) echo 'error: `use java` is not available in this compiler'; exit 1 ;;
   diagnostic) echo 'error: parse failed'; exit 1 ;;
@@ -737,7 +739,7 @@ FAULT
     j0=$(grep -c '^parse$' "$JVMLOG" || true)
     printf 'POST /compile HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "${#data}" "$data" |
       PLAY_TEST_DAWNC_REAL="$DAWNC_REAL" PLAY_TEST_PARSE_LOG="$NATIVE_DIR/fault-calls" \
-      PLAY_TEST_PARSE_FAULT="$fault" DAWNC_BIN="$tool" PLAY_COMPILE_TIMEOUT=3 \
+      PLAY_TEST_PARSE_FAULT="$fault" DAWNC_BIN="$tool" PLAY_COMPILE_TIMEOUT=10 \
       "$NATIVE_BIN" serve >"$CASES/$fault.http" 2>"$CASES/$fault.log"
     n1=$(grep -c '^parse$' "$NATIVE_DIR/fault-calls" || true)
     j1=$(grep -c '^parse$' "$JVMLOG" || true)

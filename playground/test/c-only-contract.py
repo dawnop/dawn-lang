@@ -34,10 +34,15 @@ with tempfile.TemporaryDirectory(prefix='play-c-contract.') as work:
     spy = w / 'spy'
     spy.write_text('#!/bin/sh\nprintf "%s\\n" "$0 $*" >>' + shlex.quote(str(calls)) + '\nexit 99\n')
     spy.chmod(0o755)
+    bins = w / 'jdk/bin'
+    bins.mkdir(parents=True)
+    for name in ('dawn', 'java', 'javap'):
+        (bins / name).symlink_to(spy)
     answers = w / 'answers'
     answers.mkdir()
     env = dict(os.environ, DAWN_BIN=str(spy), PLAY_JAVA=str(spy), PLAY_JAVAP=str(spy),
-               DAWNC_BIN=dawnc, PLAY_ANSWERS=str(answers), PLAY_COMPILE_TIMEOUT='30')
+               DAWNC_BIN=dawnc, PLAY_ANSWERS=str(answers), PLAY_COMPILE_TIMEOUT='30',
+               PATH=str(bins) + os.pathsep + os.environ['PATH'], JAVA_HOME=str(bins.parent))
 
     def request(code=hello, target='c', changes=None, raw=None):
         body = raw if raw is not None else json.dumps({'code': code, 'target': target}).encode()
@@ -105,7 +110,7 @@ with tempfile.TemporaryDirectory(prefix='play-c-contract.') as work:
     # JVM path. Restore only the real compiler, then fail javap itself.
     real_dawn = os.environ.get('DAWN_BIN', str(Path(__file__).resolve().parents[2] / 'bin/dawn'))
     assert request(target='jvm', changes={'PLAY_JAVAP': '/nonexistent/javap'})[0] == 503
-    status, d, _ = request(code=hello + ' ', target='jvm', changes={'DAWN_BIN': real_dawn})
+    status, d, _ = request(code=hello + ' ', target='jvm', changes={'DAWN_BIN': real_dawn, 'PATH': os.environ['PATH'], 'JAVA_HOME': os.environ.get('JAVA_HOME', '')})
     assert status == 500 and 'listing tool failed' in d['output'], d
     assert calls.exists(), 'the JVM probe did not reach the failing listing tool'
     calls.unlink()
