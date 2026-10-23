@@ -43,6 +43,11 @@ with tempfile.TemporaryDirectory(prefix='play-c-matrix.') as work:
     w = Path(work)
     baseline = w / 'baseline'
     baseline.mkdir()
+    # GitHub's default checkout is shallow; external bundles already contain
+    # this ancestor. Fetch exactly the pinned commit only when it is absent.
+    present = subprocess.run(['git', '-C', ROOT, 'cat-file', '-e', BASE + '^{commit}'], capture_output=True)
+    if present.returncode != 0:
+        run(['git', '-C', ROOT, 'fetch', '--no-tags', '--depth=1', 'origin', BASE])
     data = run(['git', '-C', ROOT, 'archive', BASE, 'playground', 'packages'])
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
         archive.extractall(baseline, filter='data')
