@@ -3063,13 +3063,35 @@ fn ctor_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   Ok((st1, ECtor(name.text, name.lo, name.hi)))
 }
 
-## Whether the `{` at `st` opens something that can only be a record literal's
-## fields: `name:` or a `..base` spread. Neither can begin a statement, so in a
-## header this is never a body. The shorthand `{ x }` is left alone:
-## `if a == B { x }` is a constructor value followed by a body.
+## Value fields use `=`. This colon branch is a bridge, removed in the next release.
+pub fn is_value_separator(k: TokKind) -> Bool = k == EQ || k == COLON
+
+## Recognize explicit record fields or a spread in a header for recovery.
+## The shorthand `{ x }` stays a body after a bare constructor value.
 fn braces_hold_fields(p: P, st: St) -> Bool = {
   let inner = skip_nl(p, adv1(p, st))
-  at_kind(p, inner, DOTDOT) || (at_kind(p, inner, IDENT) && kind_ahead(p, inner, 1) == COLON)
+  if at_kind(p, inner, DOTDOT) { return true }
+  if not at_kind(p, inner, IDENT) || not is_value_separator(kind_ahead(p, inner, 1)) { return false }
+  if kind_ahead(p, inner, 1) != EQ { return true }
+  # `if x == None { result = 1 }` has an assignment body. An equals field
+  # alone cannot distinguish that body from a record. A top-level comma or
+  # a following header/body token can: `if x == P { a = 1 } { ... }`.
+  var cursor = adv1(p, st)
+  var depth = 1
+  while not at_kind(p, cursor, EOF) {
+    let k = kind_of(p, cursor)
+    if depth == 1 && k == COMMA { return true }
+    if k == LBRACE || k == LPAREN || k == LBRACKET { depth = depth + 1 }
+    if k == RBRACE || k == RPAREN || k == RBRACKET {
+      depth = depth - 1
+      if depth == 0 {
+        let next = kind_of(p, skip_nl(p, adv1(p, cursor)))
+        return next == LBRACE || next == DOT || next == LPAREN || next == LBRACKET
+      }
+    }
+    cursor = adv1(p, cursor)
+  }
+  false
 }
 
 ## A record literal in an `if`/`while`/`for` header or a `match` scrutinee
@@ -3127,7 +3149,7 @@ fn call_args(p: P, st: St) -> Result[(St, List[Arg], Token), (St, Diag)] = {
   var st1 = skip_nl(p, adv1(p, st))
   var args: List[Arg] = []
   while not at_kind(p, st1, RPAREN) {
-    if at_kind(p, st1, IDENT) && kind_ahead(p, st1, 1) == COLON {
+    if at_kind(p, st1, IDENT) && is_value_separator(kind_ahead(p, st1, 1)) {
       let (st2, arg_name) = adv(p, st1)
       let st3 = skip_nl(p, adv1(p, st2))
       let (st4, value) = expression(p, st3, false)?
@@ -3172,7 +3194,7 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
       return Err((st1, perr(p, st1, "`..base` must come first in a record literal")))
     }
     let (st2, f) = want(p, st1, IDENT, "a field name")?
-    if at_kind(p, st2, COLON) {
+    if is_value_separator(kind_of(p, st2)) {
       let st3 = skip_nl(p, adv1(p, st2))
       let (st4, value) = expression(p, st3, false)?
       args = args ++ [Arg { name: Some(f.text), e: value, trailing: false, lo: f.lo, hi: e_hi(value) }]
@@ -3210,7 +3232,7 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
 ## name followed by `,` or `}`.
 fn starts_field(p: P, st: St) -> Bool = {
   let next = kind_ahead(p, st, 1)
-  at_kind(p, st, IDENT) && (next == COLON || next == COMMA || next == RBRACE)
+  at_kind(p, st, IDENT) && (is_value_separator(next) || next == COMMA || next == RBRACE)
 }
 
 ## Parse the segments of a STRING token: text stays text, each interpolation is
@@ -4245,7 +4267,7 @@ fn ctor_pat(p: P, st: St) -> PR[Pattern] = {
       st2 = st3
       break
     }
-    if at_kind(p, st2, IDENT) && kind_ahead(p, st2, 1) == COLON {
+    if at_kind(p, st2, IDENT) && is_value_separator(kind_ahead(p, st2, 1)) {
       let (st4, arg_name) = adv(p, st2)
       let st5 = skip_nl(p, adv1(p, st4))
       let (st6, pt) = pattern_p(p, st5)?
@@ -4280,7 +4302,7 @@ fn record_pat(p: P, st: St, name: Token) -> PR[Pattern] = {
       break
     }
     let (st3, f) = want(p, st1, IDENT, "a field name")?
-    if at_kind(p, st3, COLON) {
+    if is_value_separator(kind_of(p, st3)) {
       let st4 = skip_nl(p, adv1(p, st3))
       let (st5, sub) = pattern_p(p, st4)?
       args = args ++ [PatArg { name: Some(f.text), nlo: f.lo, nhi: f.hi, pat: sub }]

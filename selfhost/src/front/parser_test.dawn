@@ -22,6 +22,41 @@ fn rendered(src: String) -> String = {
   render_module(m, ds)
 }
 
+test "value separators have identical trees and retain type colons" {
+  for body in [
+    "f(a: g(b: 2), c: 3)",
+    "x.f(a: 2)",
+    "mod.f(a: 2)",
+    "K(x: 2)",
+    "P { ..p, x: f(a: 2), y }",
+    "match p { K(x: P { y: n, .. }) -> n }",
+    "column(gap: 12) { 1 }",
+    "{ with x <- f(a: 1)\n x }",
+    "if p == P { x: 1 } { 1 } else { 2 }",
+    "P { x: 1 y: 2 }"
+  ] {
+    let old = "fn probe(p: P) -> Int = " ++ body
+    let fresh = "fn probe(p: P) -> Int = " ++ str.replace(body, ":", "=")
+    assert rendered(old) == rendered(fresh)
+  }
+  let (_, ds) = parse_module("type P = { x: Int }\nfn f[T: Show](a: Int) -> Int = g(a = a)")
+  assert ds == []
+  for source in ["type P = { x = Int }", "fn f(a = Int) = a"] {
+    let (_, errors) = parse_module(source)
+    assert len(errors) > 0
+  }
+}
+
+test "equals in a call is a label even when the local has that name" {
+  let out = rendered("fn probe() = { var a = 0\n f(a = 2) }")
+  assert str.contains(out, "Arg name=a")
+  assert not str.contains(out, "Assign")
+  let (_, ds) = parse_module("fn probe() = (a = 2)")
+  assert len(ds) > 0
+  let (_, body_ds) = parse_module("fn probe() = { var a = 0\n if x == None { a = 2 } }")
+  assert body_ds == []
+}
+
 test "qualified effects parse in rows, arguments, ground bindings and handlers" {
   let (m, ds) = parse_module("fn f(g: fn() -> Int !dep.Ask) -> Int !(dep.Ask | T.E | e) = g()")
   assert ds == []
