@@ -1212,7 +1212,7 @@ def substitute_helper(info, args):
         while after < len(code) and code[after].isspace():
             after += 1
         if (before >= 0 and code[before] == ".") or (
-            after < len(code) and code[after] == ":"
+            after < len(code) and code[after] == "="
         ):
             continue
         out.append(body[last : match.start()])
@@ -1314,7 +1314,7 @@ def literal_record_field(expr, field):
     for part in split_top_level(expr, ",", brace + 1, close, code=code):
         if not part.strip():
             continue
-        entry = re.match(r"\s*([a-z_][A-Za-z0-9_]*)\s*:", code_mask(part))
+        entry = re.match(r"\s*([a-z_][A-Za-z0-9_]*)\s*=", code_mask(part))
         if entry is None or entry.group(1) in fields:
             return None
         fields[entry.group(1)] = part[entry.end() :].strip()

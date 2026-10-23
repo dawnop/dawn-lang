@@ -22,28 +22,35 @@ fn rendered(src: String) -> String = {
   render_module(m, ds)
 }
 
-test "value separators have identical trees and retain type colons" {
+test "value fields use equals and retain type colons" {
   for body in [
-    "f(a = g(b = 2), c = 3)",
-    "x.f(a = 2)",
-    "mod.f(a = 2)",
-    "K(x = 2)",
-    "P { ..p, x = f(a = 2), y }",
-    "match p { K(x = P { y = n, .. }) -> n }",
-    "column(gap = 12) { 1 }",
-    "{ with x <- f(a = 1)\n x }",
-    "if p == P { x = 1 } { 1 } else { 2 }",
-    "P { x = 1 y = 2 }"
+    "f(a = g(b = 2), c = 3)", "x.f(a = 2)", "mod.f(a = 2)", "K(x = 2)",
+    "P { ..p, x = f(a = 2), y }", "match p { K(x = P { y = n, .. }) -> n }",
+    "column(gap = 12) { 1 }", "{ with x <- f(a = 1)\n x }"
   ] {
-    let old = "fn probe(p: P) -> Int = " ++ body
-    let fresh = "fn probe(p: P) -> Int = " ++ str.replace(body, ":", "=")
-    assert rendered(old) == rendered(fresh)
+    let (_, ds) = parse_module("fn probe(p: P) -> Int = " ++ body)
+    assert ds == []
   }
-  let (_, ds) = parse_module("type P = { x: Int }\nfn f[T: Show](a: Int) -> Int = g(a = a)")
+  let (_, ds) = parse_module("type P = { x: Int }\ntype K = K(x: Int)\nfn f[T: Show](a: Int) -> Int = g(a = a)")
   assert ds == []
   for source in ["type P = { x = Int }", "fn f(a = Int) = a"] {
     let (_, errors) = parse_module(source)
     assert len(errors) > 0
+  }
+}
+
+test "removed value colons are rejected with an equals diagnostic" {
+  for (body, message) in [
+    ("f(a: 1)", "named arguments"),
+    ("x.f(a: 1)", "named arguments"),
+    ("P { x: 1 }", "record fields"),
+    ("P { ..p, x: 1 }", "record fields"),
+    ("match p { K(x: n) -> n }", "named pattern fields"),
+    ("match p { P { x: n, .. } -> n }", "named pattern fields")
+  ] {
+    let (_, ds) = parse_module("fn probe(p: P) = " ++ body)
+    assert len(ds) > 0
+    assert str.contains(ds[0].msg, message ++ " use `=` instead of `:`")
   }
 }
 
@@ -352,7 +359,7 @@ test "every call is one application node" {
 }
 
 test "an argument may be named at every call position" {
-  # `IDENT: expr` is grammatical wherever arguments are (SYN-03). Whether the
+  # `IDENT = expr` is grammatical wherever arguments are (SYN-03). Whether the
   # callee accepts names is a type question, so none of these is a parse error.
   for src in [
     "fn f() = Rect(2.0, h = 3.0)",
@@ -912,7 +919,7 @@ test "match arm recovery respects every nested delimiter" {
   let src = "fn f() = match x {\n" ++
     "  A -> [\n" ++
     "    Point {\n" ++
-    "      x: bad(\n" ++
+    "      x = bad(\n" ++
     "        =\n" ++
     "      )\n" ++
     "    },\n" ++

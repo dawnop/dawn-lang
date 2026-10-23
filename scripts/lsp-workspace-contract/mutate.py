@@ -336,13 +336,13 @@ def mutate(name, server, main, analyze, plan_source):
     elif name == "external-owner-clears":
         old = """            st = LspState {
               ..st,
-              workspaces: map.remove(st.workspaces, identity.lookup_key)
+              workspaces = map.remove(st.workspaces, identity.lookup_key)
             }
             publish_uris(st, affected)
             match before {"""
         new = """            st = LspState {
               ..st,
-              workspaces: map.remove(st.workspaces, identity.lookup_key)
+              workspaces = map.remove(st.workspaces, identity.lookup_key)
             }
             for affected_uri in sort(set.to_list(affected)) {
               notify("textDocument/publishDiagnostics", jobj([

@@ -41,7 +41,7 @@ WARM_ANALYZE = "incremental.analyze_placing(ws0.cache, loaded,"
 COLD_ANALYZE = "incremental.analyze_placing(incremental.evict(ws0.cache), loaded,"
 LOADED = "      let loaded = reusing.loaded"
 PREFIX_ANALYZE = "      let (update, sent) = placed"
-SAME_INPUT = "-> Bool = LoadedModule { ..a, line_starts: b.line_starts } == b\n"
+SAME_INPUT = "-> Bool = LoadedModule { ..a, line_starts = b.line_starts } == b\n"
 SAME_SURFACE = "-> Bool =\n  a == b &&\n"
 CUTOFF = "              Some(before) -> if same_surface(own, before) {"
 PROJECTED = "return ProjectedEffect(i, parts[1])"
@@ -175,7 +175,7 @@ MUTATIONS = {
     # The line starts ride on the parse: a file parsed again has to get
     # its own, not the ones the previous parse of the path held.
     "lsp-module-memo/stale-line-starts": ((ANALYZE, "else { (fresh_parse(text), false) }",
-                                           "else { (Parsed { ..fresh_parse(text), line_starts: p.line_starts }, false) }"),),
+                                           "else { (Parsed { ..fresh_parse(text), line_starts = p.line_starts }, false) }"),),
     # A body is checked with offsets relative to its own declaration, and
     # `tast_positions.symbols` is what adds the declaration's start back
     # on the way out. Its owner here is the LSP reader of those positions;
@@ -185,9 +185,9 @@ MUTATIONS = {
     # with the replay engine.
     "lsp-module-memo/resolver-drops-the-declaration": ((
         CHECKER,
-        "syms: tast_positions.symbols(entered.resolver, after.syms, "
+        "syms = tast_positions.symbols(entered.resolver, after.syms, "
         "mint_cursor(entered.cx), mint_cursor(after))",
-        "syms: tast_positions.symbols(tast_positions.unowned(after.src_path, after.line_starts, after.source), "
+        "syms = tast_positions.symbols(tast_positions.unowned(after.src_path, after.line_starts, after.source), "
         "after.syms, mint_cursor(entered.cx), mint_cursor(after))"),),
 
     # body-executor.py: the scheduler consumes every role's executor result.
@@ -224,8 +224,8 @@ MUTATIONS = {
     # program-wide impl table, and the intern table for collisions.
     "module-memo/ignore-reads": ((ENGINE, "  if not reads_hold(e, carry.exports, seen, fresh, named_base) { return None }\n", ""),),
     "module-memo/reexport-blind": ((ENGINE, SAME_SURFACE,
-        "-> Bool =\n  ModExports { ..a, adt_infos: b.adt_infos, trait_infos: b.trait_infos, "
-        "effect_infos: b.effect_infos } == b &&\n"),),
+        "-> Bool =\n  ModExports { ..a, adt_infos = b.adt_infos, trait_infos = b.trait_infos, "
+        "effect_infos = b.effect_infos } == b &&\n"),),
     # A selective `use` of a surface that changed holds by the names it lists
     # (docs/lsp-module-memo-design.md §十二): the names' entries, the effect
     # operations they bring, their package-private standing, the grafted id
@@ -329,7 +329,7 @@ MUTATIONS = {
     "identity/intern-collision-ignored": ((CX, "Some(other) -> if other != decl {", "Some(other) -> if false {"),),
     "identity/intern-not-recorded": ((CX, INTERN, "(cx, id)"),),
     "identity/mint-takes-a-slot": ((CX, INTERN,
-        "(Cx { ..cx, decl_slots: map.insert(cx.decl_slots, cx.owner_decl, slot_of(cx) + 1),\n"
+        "(Cx { ..cx, decl_slots = map.insert(cx.decl_slots, cx.owner_decl, slot_of(cx) + 1),\n"
         "    identities = map.insert(cx.identities, id, decl) }, id)"),),
     # A declaration that does not open one numbers its bindings in
     # whatever declaration the previous pass left open; one that
@@ -364,7 +364,7 @@ MUTATIONS = {
     "identity/mint-imported-effect": ((PASSES,
         "cx1 = Cx { ..cx1, effects = map.insert(cx1.effects, local, eid) }",
         "let (own_cx, own) = mint(cx1, EffectDecl, name, lo, hi)\n"
-        "      cx1 = Cx { ..own_cx, effects: map.insert(own_cx.effects, local, own),\n"
+        "      cx1 = Cx { ..own_cx, effects = map.insert(own_cx.effects, local, own),\n"
         "        effect_infos = map.insert(own_cx.effect_infos, own, effect_of(own_cx, eid)) }"),),
 }
 

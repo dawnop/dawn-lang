@@ -3050,7 +3050,7 @@ fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
 }
 
 ## The head of a constructor spelling: bare `None` / `Point`, or the record
-## literal `Point { x: 1.0 }` / `Point { ..p, x: 3.0 }`. `Circle(1.0)` is *not*
+## literal `Point { x = 1.0 }` / `Point { ..p, x = 3.0 }`. `Circle(1.0)` is *not*
 ## parsed here -- the parenthesised form is the general application postfix
 ## over this bare head (SYN-02), and `check_apply` turns it back into a
 ## construction because that is what the head resolves to.
@@ -3063,16 +3063,18 @@ fn ctor_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   Ok((st1, ECtor(name.text, name.lo, name.hi)))
 }
 
-## Value fields use `=`. This colon branch is a bridge, removed in the next release.
-pub fn is_value_separator(k: TokKind) -> Bool = k == EQ || k == COLON
+## Value and pattern fields use `=`; annotations and bounds keep `:`.
+pub fn is_value_separator(k: TokKind) -> Bool = k == EQ
 
 ## Recognize explicit record fields or a spread in a header for recovery.
 ## The shorthand `{ x }` stays a body after a bare constructor value.
 fn braces_hold_fields(p: P, st: St) -> Bool = {
   let inner = skip_nl(p, adv1(p, st))
   if at_kind(p, inner, DOTDOT) { return true }
-  if not at_kind(p, inner, IDENT) || not is_value_separator(kind_ahead(p, inner, 1)) { return false }
-  if kind_ahead(p, inner, 1) != EQ { return true }
+  if not at_kind(p, inner, IDENT) { return false }
+  # Recognize the removed spelling only to report its field diagnostic.
+  if kind_ahead(p, inner, 1) == COLON { return true }
+  if not is_value_separator(kind_ahead(p, inner, 1)) { return false }
   # `if x == None { result = 1 }` has an assignment body. An equals field
   # alone cannot distinguish that body from a record. A top-level comma or
   # a following header/body token can: `if x == P { a = 1 } { ... }`.
@@ -3142,7 +3144,7 @@ fn missing_comma(p: P, st: St, close: String, items: String) -> St =
     "a comma is missing between two " ++ items)] }
 
 ## `( arg, ... )` — the EBNF `call_args`, shared by the application postfix and
-## by the dot call. `st` is at the `(`. An argument may be written `name: expr`
+## by the dot call. `st` is at the `(`. An argument may be written `name = expr`
 ## anywhere (SYN-03); only constructors accept that, and saying so is the
 ## checker's job (docs/audit/application-syntax-design.md §3.2).
 fn call_args(p: P, st: St) -> Result[(St, List[Arg], Token), (St, Diag)] = {
@@ -3155,6 +3157,8 @@ fn call_args(p: P, st: St) -> Result[(St, List[Arg], Token), (St, Diag)] = {
       let (st4, value) = expression(p, st3, false)?
       args = args ++ [Arg { name = Some(arg_name.text), e = value, trailing = false, lo = arg_name.lo, hi = e_hi(value) }]
       st1 = st4
+    } else if at_kind(p, st1, IDENT) && kind_ahead(p, st1, 1) == COLON {
+      return Err((st1, perr(p, adv1(p, st1), "named arguments use `=` instead of `:`")))
     } else {
       let (st2, value) = expression(p, st1, false)?
       args = args ++ [pos_arg(value)]
@@ -3199,6 +3203,8 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
       let (st4, value) = expression(p, st3, false)?
       args = args ++ [Arg { name = Some(f.text), e = value, trailing = false, lo = f.lo, hi = e_hi(value) }]
       st1 = st4
+    } else if at_kind(p, st2, COLON) {
+      return Err((st2, perr(p, st2, "record fields use `=` instead of `:`")))
     } else if at_kind(p, st2, LPAREN) {
       # `Column { text("a") }`: an uppercase name takes its braces as a record
       # literal (spec §2.3), so this call sits in a field position and the
@@ -3208,7 +3214,7 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
           "not a tail block",
         "a tail block only attaches to a call; component functions use lowercase names")))
     } else {
-      # shorthand { x } means { x: x }
+      # shorthand { x } means { x = x }
       let value = EVar(f.text, f.lo, f.hi)
       args = args ++ [Arg { name = Some(f.text), e = value, trailing = false, lo = f.lo, hi = f.hi }]
       st1 = st2
@@ -3228,7 +3234,7 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
   Ok((st5, ERecord(name.text, args, spread, name.lo, name.hi, name.lo, close.hi)))
 }
 
-## A record-literal field starts here: a name followed by `:`, or a shorthand
+## A record-literal field starts here: a name followed by `=`, or a shorthand
 ## name followed by `,` or `}`.
 fn starts_field(p: P, st: St) -> Bool = {
   let next = kind_ahead(p, st, 1)
@@ -4274,6 +4280,8 @@ fn ctor_pat(p: P, st: St) -> PR[Pattern] = {
       args = args ++ [PatArg { name = Some(arg_name.text), nlo = arg_name.lo, nhi = arg_name.hi,
         pat = pt }]
       st2 = st6
+    } else if at_kind(p, st2, IDENT) && kind_ahead(p, st2, 1) == COLON {
+      return Err((st2, perr(p, adv1(p, st2), "named pattern fields use `=` instead of `:`")))
     } else {
       let (st7, pt) = pattern_p(p, st2)?
       args = args ++ [PatArg { name = None, nlo = pat_lo(pt), nhi = pat_hi(pt), pat = pt }]
@@ -4286,7 +4294,7 @@ fn ctor_pat(p: P, st: St) -> PR[Pattern] = {
   Ok((st8, PCtor(name.text, args, rest, name.lo, name.hi, name.lo, close.hi)))
 }
 
-## Point { x, y: 0, .. } — field shorthand `x` binds the field to `x`
+## Point { x, y = 0, .. } — field shorthand `x` binds the field to `x`
 fn record_pat(p: P, st: St, name: Token) -> PR[Pattern] = {
   var st1 = skip_nl(p, adv1(p, st))
   var args: List[PatArg] = []
@@ -4307,6 +4315,8 @@ fn record_pat(p: P, st: St, name: Token) -> PR[Pattern] = {
       let (st5, sub) = pattern_p(p, st4)?
       args = args ++ [PatArg { name = Some(f.text), nlo = f.lo, nhi = f.hi, pat = sub }]
       st1 = st5
+    } else if at_kind(p, st3, COLON) {
+      return Err((st3, perr(p, st3, "named pattern fields use `=` instead of `:`")))
     } else {
       # shorthand { x } binds field x to x
       args = args ++ [PatArg { name = Some(f.text), nlo = f.lo, nhi = f.hi,

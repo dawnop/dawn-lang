@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ ed90f3281c1a5b9f -->
+<!-- doc-check: translation-of docs/spec.md @ da837a3d701fb8be -->
 
 # Dawn Language Specification
 
@@ -535,9 +535,8 @@ type Shape =
 
 ### 2.4 Records
 
-Value fields and named fields in patterns use `=`; type fields retain `:`. This bridge
-release temporarily also accepts the old value separator `:`. The next release removes it;
-fmt preserves the input separator and does not perform migration.
+Value fields and named fields in patterns use `=`; type fields retain `:`.
+The old value separator `:` is a syntax error.
 
 ```dawn
 type Point = { x: Float, y: Float }

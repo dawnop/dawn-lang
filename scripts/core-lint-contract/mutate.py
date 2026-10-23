@@ -105,26 +105,26 @@ MUTATIONS = {
         LOWER,
         """  }, XCallBuiltin(name, args, no_wits, evid, 0, 0, NO_NAME, ret))
   let f = CFun {
-    name: lam,
-    owner: st5.owner,
-    captures: [],
-    params: ps,
-    dicts: [],
-    evs: evps,
-    ret: ret,
-    body: body,""",
+    name = lam,
+    owner = st5.owner,
+    captures = [],
+    params = ps,
+    dicts = [],
+    evs = evps,
+    ret = ret,
+    body = body,""",
         """  }, XCallBuiltin(name, args, no_wits, evid, 0, 0, NO_NAME, ret))
   var raw: List[CExpr] = []
   for p in ps { raw = raw ++ [CLocal(p.sym, p.ty)] }
   let f = CFun {
-    name: lam,
-    owner: st5.owner,
-    captures: [],
-    params: ps,
-    dicts: [],
-    evs: evps,
-    ret: ret,
-    body: if len(raw) < 0 { body } else { CIntrinsic(name, raw, ret, CNoSite) },""",
+    name = lam,
+    owner = st5.owner,
+    captures = [],
+    params = ps,
+    dicts = [],
+    evs = evps,
+    ret = ret,
+    body = if len(raw) < 0 { body } else { CIntrinsic(name, raw, ret, CNoSite) },""",
     ),),
     # #13: a zero-goal conditional impl's dictionary built as an application
     # of a def that records no arguments.
