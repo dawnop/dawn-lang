@@ -25,9 +25,17 @@ MUTATIONS = {
     'jvm-writes-c': ((R,
         'Mapped(_c, jvm, gaps) -> shown(host, view, target, key, started, jvm, gaps)',
         'Mapped(_c, jvm, gaps) -> { host.keep_put(compile_key("c", view.toolchain, "code"), kept_line(200, "S", _c)); shown(host, view, target, key, started, jvm, gaps) }'),),
-    'numeric-pick': (('site/play-ui/src/compile-view.ts',
-        'this.picked = matchIdentity(this.selection, a.code, a.build, m.view.calls)',
-        'this.picked = m.view.calls[1] ? 1 : null'),),
+    'numeric-pick': (
+        ('site/play-ui/src/compile-view.ts',
+         'private clearActive() {\n    this.clearMarks()\n    this.picked = null',
+         'private clearActive() {\n    this.clearMarks()'),
+        ('site/play-ui/src/compile-view.ts',
+         'private reapply() {\n    this.picked = null',
+         'private reapply() {'),
+        ('site/play-ui/src/compile-view.ts',
+         'this.picked = matchIdentity(this.selection, a.code, a.build, m.view.calls)',
+         'this.picked = this.picked !== null && m.view.calls[this.picked] ? this.picked : null'),
+    ),
 }
 
 

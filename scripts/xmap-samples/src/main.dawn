@@ -21,7 +21,7 @@
 use std/str
 use std/io
 use std/io.{Fs, with_fs_real}
-use xmap/xmap.{Files, Raw, parse_spec, raw_files, explore, explore_strict, explore_c, strict, to_xmap, pane_text}
+use xmap/xmap.{Files, Raw, Built, parse_spec, raw_files, explore, explore_strict, explore_c, strict, to_xmap, pane_text}
 
 fn read(path: String) -> String !Fs =
   match io.read_file(path) {
@@ -64,12 +64,13 @@ pub fn main() -> Unit !io = {
         Err(e) -> panic("${dir}/spec.txt: ${e}")
       }
       let raw = read_raw(dir, files)
-      match if len(a) > 3 && a[3] == "--c-only" {
+      let result: Result[Built, String] = if len(a) > 3 && a[3] == "--c-only" {
         match explore_c(spec, raw.source, raw.ctext, raw.cmap) {
           Ok(b) -> if strict_mode { strict(b) } else { Ok(b) }
           Err(e) -> Err(e)
         }
-      } else if strict_mode { explore_strict(spec, raw) } else { explore(spec, raw) } {
+      } else if strict_mode { explore_strict(spec, raw) } else { explore(spec, raw) }
+      match result {
         Err(e) -> panic("${name}: ${e}")
         Ok(b) -> {
           for p in b.panes {
