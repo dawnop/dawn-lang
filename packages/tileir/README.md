@@ -141,7 +141,7 @@ what it looks like and how to fix it. Both are checked against the source.
   launch grid: dimension `j` of an `Out` follows grid axis `along[j]`, each
   axis at most once (the identity unless `along` says otherwise), and an
   axis no dimension follows has one block. A batched product keeps its
-  batch on axis 2 with `cells([B, M, N], [1, T, T], along: [2, 0, 1])`.
+  batch on axis 2 with `cells([B, M, N], [1, T, T], along = [2, 0, 1])`.
 - `Shared(d)` is the escape hatch: atomics, scatters, a block that writes two
   regions, a write through pointers. `grep Shared(` finds every one.
 - `Scalar(d)` is a value the launch passes by value (`i32`, `i64`, `f32` or
@@ -177,8 +177,8 @@ fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
 }
 
 let (prog, entry) = trace3("matmul",
-  In(F64, cells([256, 256], [64, 32], along: [0, FREE_AXIS])),
-  In(F64, cells([256, 256], [32, 64], along: [FREE_AXIS, 1])),
+  In(F64, cells([256, 256], [64, 32], along = [0, FREE_AXIS])),
+  In(F64, cells([256, 256], [32, 64], along = [FREE_AXIS, 1])),
   Out(F64, cells([256, 256], [64, 64])), matmul)
 ```
 
@@ -238,7 +238,7 @@ let (prog, entry) = trace3("matmul",
   atomics, `tensor_view` and the views cut from it. A memory operation takes
   an element offset: `tile_at(idx, n)` is `idx * n`.
 - An operation's attributes are named parameters with the dialect's default:
-  `add(a, b, rounding: Down)`, `d_global("t", F64, xs, visibility: Private)`.
+  `add(a, b, rounding = Down)`, `d_global("t", F64, xs, visibility: Private)`.
   Float arithmetic is `add`, `sub`, `mul`, `div`, `max`, `min`, `neg`, `abs`,
   and `+ - * /` and unary `-` on tiles (and on `Idx`) are the same calls: over
   an integer tile they record the integer operations. Importing `max` and
@@ -266,10 +266,10 @@ var l: Tile[F32] = full([BQ, 1], 0.0)
 var acc: Tile[F32] = full([BQ, D], 0.0)
 for j in d_range(0, N / BK) {
   let s: Tile[F32] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
-  let m_new = max(m, reduce_max(s, keepdims: true))
+  let m_new = max(m, reduce_max(s, keepdims = true))
   let p = exp(s - m_new)
   let alpha = exp(m - m_new)
-  l = l * alpha + reduce_sum(p, keepdims: true)
+  l = l * alpha + reduce_sum(p, keepdims = true)
   acc = mma(p.to(BF16), load_at(v, [j]), acc * alpha)
   m = m_new
 }
@@ -279,7 +279,7 @@ store_cell(o, (acc / l).to(F64))   # o: Param[Float], scale: Param[F32]
 `carry`, `get` and `set` remain for the loops a `for` cannot write: `d_loop`'s
 body is a closure with a data-dependent exit.
 
-- `for j in d_range(lower, upper, step: By(n), unsigned_cmp: false) { .. }` is
+- `for j in d_range(lower, upper, step = By(n), unsigned_cmp = false) { .. }` is
   a loop. The bounds are host numbers (`Int`, fixed when the kernel is
   recorded) or `Idx` values the device computes; the step is `One` by default,
   or `By(n)` of the same kind as the bounds, so a grid-stride loop writes

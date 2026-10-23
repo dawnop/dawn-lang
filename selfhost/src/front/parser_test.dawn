@@ -24,16 +24,16 @@ fn rendered(src: String) -> String = {
 
 test "value separators have identical trees and retain type colons" {
   for body in [
-    "f(a: g(b: 2), c: 3)",
-    "x.f(a: 2)",
-    "mod.f(a: 2)",
-    "K(x: 2)",
-    "P { ..p, x: f(a: 2), y }",
-    "match p { K(x: P { y: n, .. }) -> n }",
-    "column(gap: 12) { 1 }",
-    "{ with x <- f(a: 1)\n x }",
-    "if p == P { x: 1 } { 1 } else { 2 }",
-    "P { x: 1 y: 2 }"
+    "f(a = g(b = 2), c = 3)",
+    "x.f(a = 2)",
+    "mod.f(a = 2)",
+    "K(x = 2)",
+    "P { ..p, x = f(a = 2), y }",
+    "match p { K(x = P { y = n, .. }) -> n }",
+    "column(gap = 12) { 1 }",
+    "{ with x <- f(a = 1)\n x }",
+    "if p == P { x = 1 } { 1 } else { 2 }",
+    "P { x = 1 y = 2 }"
   ] {
     let old = "fn probe(p: P) -> Int = " ++ body
     let fresh = "fn probe(p: P) -> Int = " ++ str.replace(body, ":", "=")
@@ -278,7 +278,7 @@ test "pipe keeps a receiver a receiver" {
 test "pipe carries the argument metadata it inserted in front of" {
   # a named argument and a tail block are properties of the *arguments*, and
   # rebuilding the list is where they get dropped
-  match piped_body("fn f() = x |> g(a, k: b)") {
+  match piped_body("fn f() = x |> g(a, k = b)") {
     EApply(callee, args, c, d) -> {
       assert len(args) == 3
       assert args[0].name == None
@@ -343,7 +343,7 @@ test "every call is one application node" {
   assert str.contains(out2, "Ctor Some ")
   # a record literal is not an application -- braces, not parens -- and it is
   # a node of its own rather than a flag on the constructor head
-  let out3 = rendered("fn f() = Point { x: 1 }")
+  let out3 = rendered("fn f() = Point { x = 1 }")
   assert not str.contains(out3, "Apply")
   assert str.contains(out3, "Record Point spread=false")
   let out4 = rendered("fn f(p: P) -> Int = match p {\n  P { x } -> x\n  Q(y) -> y\n}")
@@ -355,17 +355,17 @@ test "an argument may be named at every call position" {
   # `IDENT: expr` is grammatical wherever arguments are (SYN-03). Whether the
   # callee accepts names is a type question, so none of these is a parse error.
   for src in [
-    "fn f() = Rect(2.0, h: 3.0)",
-    "fn f() = g(h: 1)",
-    "fn f() = x.m(h: 1)",
-    "fn f() = make()(h: 1)",
-    "fn f() = m.C(h: 1)"
+    "fn f() = Rect(2.0, h = 3.0)",
+    "fn f() = g(h = 1)",
+    "fn f() = x.m(h = 1)",
+    "fn f() = make()(h = 1)",
+    "fn f() = m.C(h = 1)"
   ] {
     let (_, ds2) = parse_module(src)
     assert len(ds2) == 0
   }
-  assert str.contains(rendered("fn f() = g(h: 1)"), "Arg name=h")
-  assert str.contains(rendered("fn f() = x.m(h: 1)"), "Arg name=h")
+  assert str.contains(rendered("fn f() = g(h = 1)"), "Arg name=h")
+  assert str.contains(rendered("fn f() = x.m(h = 1)"), "Arg name=h")
 }
 
 test "a `(` on the next line is not a call" {

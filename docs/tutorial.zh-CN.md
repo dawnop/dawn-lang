@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 3801e7069072c336 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 267e7573568a556e -->
 
 # Dawn 教程
 
@@ -174,8 +174,8 @@ fn greet(name: String, greeting: String = "Hello", punct: String = "!") -> Strin
 
 pub fn main() -> Unit !io = {
   println(greet("Dawn"))
-  println(greet("Dawn", punct: "?"))
-  println(greet(punct: ".", name: "reader", greeting: "Welcome"))
+  println(greet("Dawn", punct = "?"))
+  println(greet(punct = ".", name = "reader", greeting = "Welcome"))
 }
 ```
 ```output
@@ -186,8 +186,8 @@ Welcome, reader.
 
 默认值在每次省掉它的调用里重新求值，而且必须是纯的：要是它能做 io，一次调用做不做 io
 就取决于调用方传没传这个实参。实参按书写顺序求值，不管它们落在哪一格。名字属于签名，
-所以函数值没有名字：`let g = greet` 之后，`g(name: "x")` 是错误，`g` 要求三个实参一个
-不少。构造器也一样收名字，字段名就是它的形参名（`Rect(w: 3.0, h: 4.0)`）。
+所以函数值没有名字：`let g = greet` 之后，`g(name = "x")` 是错误，`g` 要求三个实参一个
+不少。构造器也一样收名字，字段名就是它的形参名（`Rect(w = 3.0, h = 4.0)`）。
 
 另见：[spec.md](spec.md) §2.1、§3.1、§4.3、§4.4
 
@@ -253,10 +253,10 @@ record 是带命名字段的乘积类型，用花括号构造与更新：
 type Point = { x: Float, y: Float } derive Show
 
 fn shift(p: Point, dx: Float) -> Point =
-  Point { ..p, x: p.x + dx }
+  Point { ..p, x = p.x + dx }
 
 pub fn main() -> Unit !io = {
-  let a = Point { x: 1.0, y: 2.0 }
+  let a = Point { x = 1.0, y = 2.0 }
   println(to_string(shift(a, 10.0)))
 }
 ```
@@ -461,7 +461,7 @@ hi
 「从 0 开始 fold，用这个」。块必须和调用在同一行开头；下一行的 `{` 是另一条块语句。
 在 `if`、`while`、`for` 的头部以及 `match` 后面，花括号是语句体而不是实参，那里要给
 调用加括号：`if (f(x) { ... }) { ... }`。配上具名实参与默认值，一个选项很多、又带一段
-主体的函数在调用点就读作 `column(gap: 12) { ... }`。
+主体的函数在调用点就读作 `column(gap = 12) { ... }`。
 
 另见：[spec.md](spec.md) §4.3、§4.5、§6
 
@@ -769,7 +769,7 @@ fn total_area[T: Area](xs: List[T]) -> Float =
   fold(xs, 0.0, (acc, x) => acc + area(x))
 
 pub fn main() -> Unit !io = {
-  let rooms = [Rect { w: 3.0, h: 4.0 }, Rect { w: 2.0, h: 2.0 }]
+  let rooms = [Rect { w = 3.0, h = 4.0 }, Rect { w = 2.0, h = 2.0 }]
   println(to_string(total_area(rooms)))
   # trait 方法就是普通函数名，UFCS 点号调用也行
   println(to_string(rooms[0].bigger_than(10.0)))
@@ -796,7 +796,7 @@ type Card = { rank: Int, name: String } derive Show, Ord
 fn max2[T: Ord](a: T, b: T) -> T = if a < b { b } else { a }
 
 pub fn main() -> Unit !io = {
-  let hand = [Card { rank: 3, name: "queen" }, Card { rank: 1, name: "pawn" }]
+  let hand = [Card { rank = 3, name = "queen" }, Card { rank = 1, name = "pawn" }]
   # derive Ord 按字段声明顺序逐个比较（和类型先比构造器顺序）
   println(to_string(hand[1] < hand[0]))
   println(max2("pear", "apple"))
@@ -851,7 +851,7 @@ type ShownRepr = { render: fn() -> String }
 pub opaque type Shown = ShownRepr
 
 pub fn shown[T: Show](x: T) -> Shown = {
-  let r: ShownRepr = ShownRepr { render: () => show(x) }
+  let r: ShownRepr = ShownRepr { render = () => show(x) }
   r
 }
 
@@ -918,7 +918,7 @@ fn fetch_or[C: Store](c: C, k: C.Key, fallback: C.Item) -> C.Item =
   }
 
 pub fn main() -> Unit !io = {
-  let s = Shelf { names: ["tea", "rice"] }
+  let s = Shelf { names = ["tea", "rice"] }
   println(fetch_or(s, 1, "nothing"))
   println(fetch_or(s, 5, "nothing"))
 }
@@ -961,9 +961,9 @@ impl Iter[Countdown] {
 }
 
 pub fn main() -> Unit !io = {
-  let g = Grid { w: 3, cells: [1, 2, 3, 4, 5, 6] }
+  let g = Grid { w = 3, cells = [1, 2, 3, 4, 5, 6] }
   println("${g[(2, 1)]}")
-  let launch = Countdown { from: 3 }
+  let launch = Countdown { from = 3 }
   for n in launch {
     print("${n} ")
   }
@@ -1697,7 +1697,7 @@ refused: gpu.short_tensor: gpu.launch_entry: kernel `vadd`: argument 0 (In) hold
 `trace3` 答回记录和一个入口，`launch_entry3` 接这个入口和三个缓冲，缓冲的格式由入口的类型
 定死。在问任何 handler 之前，它先拿缓冲区对照格子：999 个元素的缓冲区够不到 1000 个元素的
 extent 的末尾。它还拒绝和格子不一致的网格，以及和别的参数共用缓冲区的 `Out`。extent 写成
-`DYN_DIM` 时，格子数交给启动来定，比如 `launch_entry3(entry, buffer_arg(a), buffer_arg(b), buffer_arg(out), grid: [8])`，这时缓冲区
+`DYN_DIM` 时，格子数交给启动来定，比如 `launch_entry3(entry, buffer_arg(a), buffer_arg(b), buffer_arg(out), grid = [8])`，这时缓冲区
 要盖住每一格的全部：八格、每格 128，就是 1024 个元素。
 
 `1998.0` 是参考实现的答案，不是 kernel 的。假设备从不运行 kernel 体：它拿启动的名字查表，调用
@@ -1806,7 +1806,7 @@ fn run(entry: Entry2[Float, Float]) -> Result[List[Float], ForeignError] !Gpu = 
 }
 
 pub fn main() -> Unit !io = {
-  let (prog, entry) = trace2("softmax", In(F64, cells([3], [4], pad: PadNegInf)),
+  let (prog, entry) = trace2("softmax", In(F64, cells([3], [4], pad = PadNegInf)),
     Out(F64, cells([3], [4])), softmax)
   # 填充值是记录的一部分
   for line in str.split(render(prog), "\n") {
@@ -1852,8 +1852,8 @@ fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
 }
 
 pub fn main() -> Unit !io = {
-  let a = In(F64, cells([256, 256], [64, 32], along: [0, FREE_AXIS]))
-  let b = In(F64, cells([256, 256], [32, 64], along: [FREE_AXIS, 1]))
+  let a = In(F64, cells([256, 256], [64, 32], along = [0, FREE_AXIS]))
+  let b = In(F64, cells([256, 256], [32, 64], along = [FREE_AXIS, 1]))
   let c = Out(F64, cells([256, 256], [64, 64]))     # 网格：4×4 个块
   let (prog, _entry) = trace3("matmul", a, b, c, matmul)
   # 沿 K 走八趟，记录里却只有一个循环、一个 mmaf
@@ -1901,15 +1901,15 @@ use tileir/prog.{trace2, cells, In, Out}
 
 fn row_softmax(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = load_cell(x)                                   # [32, 64]
-  let p = exp(sub(s, reduce_max(s, keepdims: true)))     # [32, 1]，加宽到 [32, 64]
-  store_cell(out, div(p, reduce_sum(p, keepdims: true)))
+  let p = exp(sub(s, reduce_max(s, keepdims = true)))     # [32, 1]，加宽到 [32, 64]
+  store_cell(out, div(p, reduce_sum(p, keepdims = true)))
 }
 
 # 同一个 kernel，去掉了第一个 `keepdims`。
 fn row_softmax_dropped(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = load_cell(x)
   let p = exp(sub(s, reduce_max(s)))                     # [32]
-  store_cell(out, div(p, reduce_sum(p, keepdims: true)))
+  store_cell(out, div(p, reduce_sum(p, keepdims = true)))
 }
 
 fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
@@ -1935,7 +1935,7 @@ recorded
 tileir: kernel `row_softmax`: op #9 `-`: rhs is tile<32xf64>, declared tile<32x64xf64> (rhs comes from `reduce_max` at src/main.dawn:15:22)
 ```
 
-`reduce_max(s, keepdims: true)` 归约最后一维（默认 `dim: -1`），并把这一维留成长度 1：得到
+`reduce_max(s, keepdims = true)` 归约最后一维（默认 `dim: -1`），并把这一维留成长度 1：得到
 `[32, 1]` 的 tile，每行一个最大值。它在 `sub` 里遇到 `[32, 64]` 的 tile，长度为 1 的那一维加宽到 64。
 规则就这一条：逐元素操作的操作数与操作同阶时，沿长度为 1 的维加宽；0 阶 tile 加宽到任何形状。
 第二个 kernel 去掉了 `keepdims`，最大值成了 `[32]`，阶不同，在减法处被拒；拒绝里写的是 `-`，
@@ -1969,7 +1969,7 @@ use tileir/prog.{Arg, trace2, cells, In, Out, Shared}
 fn transpose(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   let at = idx_add(idx_mul(block_id(1), idx_const(32 * 128)), idx_mul(block_id(0), idx_const(32)))
-  store(out, at, t, strides: Some([1, 128]))     # out 的步长，对调：布局本身完成转置
+  store(out, at, t, strides = Some([1, 128]))     # out 的步长，对调：布局本身完成转置
 }
 
 fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
@@ -1999,7 +1999,7 @@ recorded
 之前就拒。`Shared(d)` 是逃生口：kernel 自己寻址的参数，走指针路。这里 `store` 在一个元素偏移处
 写 tile，用的是对调过的 `out` 步长，于是 tile 落下时就转置好了，tile 内部一个元素也没挪。原子
 操作、scatter、一个块写两块区域，都因为同样的理由是 `Shared`，`grep Shared(` 能把它们全找出来。
-没有 `Out` 时网格归调用方：`launch_entry2(entry, buffer_arg(x), buffer_arg(out), grid: [4, 2])`。
+没有 `Out` 时网格归调用方：`launch_entry2(entry, buffer_arg(x), buffer_arg(out), grid = [4, 2])`。
 
 另有两条出路，各一句话。一个 kernel 要用两种形状读同一个 `In`，就用 `retile(p, extent, tile)`
 给它第二个视图。`trace1` 到 `trace5` 记录最多五个参数的 kernel，参数更多时用 `trace_kernel`，

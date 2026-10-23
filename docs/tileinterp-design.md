@@ -93,7 +93,7 @@ block 间写入不相交时，任何执行顺序答案相同；相交就是竞�
 4. **整数除零**、**溢出假设（`nsw`/`nuw`/`nw`）被违反**、**非饱和 `ftoi` 的 NaN
    与越界**、`loop`/`for` 超过步数上限（防死循环，2^24 步）。
 
-`interp_ref(prog, grid, ub_checks: false)` 关掉 1 到 3 中的「拒绝」，未定义 lane 填 NaN（浮点）或
+`interp_ref(prog, grid, ub_checks = false)` 关掉 1 到 3 中的「拒绝」，未定义 lane 填 NaN（浮点）或
 0（整数）继续算。默认开。
 
 ### 2.5 浮点
@@ -119,7 +119,7 @@ block 间写入不相交时，任何执行顺序答案相同；相交就是竞�
 报文带指令名与原因（例如 `mmaf (matrix product, I2)`、`addf on bf16 (narrow formats are I2)`）。
 解释过程中不再有第二个 `unsupported_op` 来源，所以「静态说支持」与「运行时没拒绝」是同一个判断。
 `WideRefFn` 没有错误通道，`interp_ref` 以 `panic("interp.unsupported_op: ...")` 失败；
-`with_gpu_interp` 把它变成 launch 的 `Err(kind: "interp.unsupported_op")`。
+`with_gpu_interp` 把它变成 launch 的 `Err(kind = "interp.unsupported_op")`。
 
 ## 3. 对拍与判词
 

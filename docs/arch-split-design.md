@@ -193,17 +193,17 @@ HAMT_CLASS, ARRAY_CLASS}`——单向，无环。**region → tail 的引用数�
 
 ```dawn
 # 今天（enter_isolated，:5335-5343 + :5346-5357，共 22 行）
-let frame = EffFrame { isolated: cx.isolated, used: cx.used_effects, … }   # 8 行
-(Cx { ..cx, used_effects: [], eff_witness: empty_w, … }, frame)            # 9 行
+let frame = EffFrame { isolated = cx.isolated, used = cx.used_effects, … }   # 8 行
+(Cx { ..cx, used_effects = [], eff_witness = empty_w, … }, frame)            # 9 行
 
 # 之后
 let saved = cx.frame
-(Cx { ..cx, frame: Frame { ..cx.frame, used_effects: [], … } }, saved)     # 仍是 9 行，多一层嵌套
+(Cx { ..cx, frame = Frame { ..cx.frame, used_effects = [], … } }, saved)     # 仍是 9 行，多一层嵌套
 ```
 
 ```dawn
 # leave_isolated 的恢复端，:5368-5377（9 行）→ 1 行
-Cx { ..cx1, frame: saved }
+Cx { ..cx1, frame = saved }
 ```
 
 **净收益诚实记账**：删掉 `EffFrame`（10 行的手工同义词）+ 恢复端 9 行变 1 行 +
@@ -570,7 +570,7 @@ glob `emit *` 命中 prev-diff 打印的**全部六个** emit 标签。实跑 pr
 这是一个具体的、已经踩到的陷阱，不是抽象担忧。今天 `EffFrame`(:5322) 有 8 个字段，
 `leave_isolated`(:5368-5377) 恢复的就是这 8 个。如果 `Frame` 按「概念」多装几个——
 比如把 `current_tparams`/`current_tparam_bounds`/`current_eff_vars` 也放进去——那么
-`Cx { ..cx1, frame: saved }` 会**连带恢复今天不恢复的字段**。comptime 体里只要有一个
+`Cx { ..cx1, frame = saved }` 会**连带恢复今天不恢复的字段**。comptime 体里只要有一个
 local fn（`enter_fn:9724-9731` 会写 `current_tparams`/`current_tparam_bounds`），
 行为就变了。
 
@@ -773,7 +773,7 @@ sed -n '/^pub fn enter_isolated/,/^}/p' selfhost/src/check/checker.dawn \
    是一个整体，切成六份不会让任何一个函数少收一个字段。
 2. **`DiagSink` 的漏斗已经存在**。`diags` 全仓 **253 读 / 3 写**，那 3 个写点就是
    `cerr`/`cerr_h`/`cerr_o`。把它变成子记录只换来 47→44 的**算术**；若真要让它变成参数，
-   245 个 `cerr` 调用点全部要改成 `Cx { ..cx, diag: cerr(cx.diag, …) }`。
+   245 个 `cerr` 调用点全部要改成 `Cx { ..cx, diag = cerr(cx.diag, …) }`。
 3. **表本身已经烂了**：`reported_key_types` 在 4ae6b61 上零命中；字段数写的是 46
    （实为 47）。而 `src_path` 被它划进 `DiagSink`，实测 `src_path` 与 `local_traits`
    的共现相关度（0.60）高于它与 `diags` 的——因为孤儿规则报错要说清 impl 在哪个文件。

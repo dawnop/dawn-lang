@@ -248,7 +248,7 @@ wasi-sdk 钉在 34。到 30 为止，现有的 `--target wasm` 链接命令行�
 
 ### 9.1 问题：一次带值的交互要记四遍
 
-带值的监听器从前的写法是「留一个洞」：视图里写 `on_value("input", SetDraft(text: ""))`，
+带值的监听器从前的写法是「留一个洞」：视图里写 `on_value("input", SetDraft(text = ""))`，
 那个空串是个占位符，宿主把真正的字符串带回来之后由 `fill` 倒进洞里。于是一次带值交互
 要在四个地方登记：`Msg` 的构造子、`update` 的臂、留洞的监听器、`Fill` 的臂。第四个是
 纯粹的簿记：它说的事情（`SetDraft` 的洞收 payload）在第三个地方已经说过一遍了，只是
@@ -296,7 +296,7 @@ wasi-sdk 钉在 34。到 30 为止，现有的 `--target wasm` 链接命令行�
 `node.deliver(listener, payload) -> M` 是那个入口，等于 `settle` 减去载荷种类的校验：
 
 ```dawn
-assert deliver(on_value("input", SetDraft), "buy milk") == SetDraft(text: "buy milk")
+assert deliver(on_value("input", SetDraft), "buy milk") == SetDraft(text = "buy milk")
 ```
 
 得到的是这种断言比从前的强。从前「消息对不对」是靠整棵树相等顺带断到的，一次断言里

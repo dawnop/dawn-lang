@@ -12,7 +12,7 @@
 ## 1. 语句级同步按括号深度（#190 #192 的假顶层错）
 
 **根因**：`sync_stmt` 从**失败点**往前扫到第一个 `NEWLINE`/`}`/EOF。失败点在语句内的花括号里时
-（`let p = P { x: 1 y: 2 }`），第一个 `}` 是字面量自己的，`block_body` 把它当成块尾，
+（`let p = P { x = 1 y = 2 }`），第一个 `}` 是字面量自己的，`block_body` 把它当成块尾，
 函数体的 `}` 于是留给下一行，后面的语句落到顶层，报「only declarations … at module top level」。
 
 **做法**：照 `sync_arm`，从**语句起点**按 `() [] {}` 深度扫：
@@ -54,7 +54,7 @@ hint 里写全四种即可，信息量相同。
 `stmt_and_sep` 在 `want_sep` 失败时看当前 token：
 
 - `=` 且语句是表达式语句：`only a variable can be assigned`，hint 按左侧分三型（下标、字段、其它），
-  给改法（`m = map.insert(m, k, v)`、`r = R { ..r, f: v }`）；
+  给改法（`m = map.insert(m, k, v)`、`r = R { ..r, f = v }`）；
 - `..`：``` `..` is not an expression operator ```，hint ``a range `a..b` only appears in a `for` header: `for i in a..b { ... }` ``（spec §4.7、§4.11）。
 
 ## 5. 未闭合的括号报在开括号（#195 第 1 步）

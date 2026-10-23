@@ -88,7 +88,7 @@ use util as u
 
 pub fn calls() -> String = {
   let a = pad_to("x", 4)
-  let b = u.pad_to("y", 3, fill: "-")
+  let b = u.pad_to("y", 3, fill = "-")
   let c = "z" |> pad_to(2)
   a ++ b ++ c
 }
@@ -153,19 +153,19 @@ type Val = { name: String }
 type Slot = { tag: String }
 type Span = { n: Int }
 
-fn span(n: Int) -> Span = Span { n: n }
+fn span(n: Int) -> Span = Span { n = n }
 
 impl StagedIter[Span] {
   type Item = Val
   effect StagedIter = !io
-  fn staged_for(r: Span, body: fn(Val) -> Unit !io) -> Unit !io = body(Val { name: "i" })
+  fn staged_for(r: Span, body: fn(Val) -> Unit !io) -> Unit !io = body(Val { name = "i" })
 }
 
 impl StagedVar[Val] {
   type Cell = Slot
   effect StagedVar = !io
-  fn var_open(v: Val) -> Slot !io = Slot { tag: v.name }
-  fn var_get(c: Slot) -> Val !io = Val { name: c.tag }
+  fn var_open(v: Val) -> Slot !io = Slot { tag = v.name }
+  fn var_get(c: Slot) -> Val !io = Val { name = c.tag }
   fn var_set(c: Slot, v: Val) -> Unit !io = ()
 }
 
@@ -176,7 +176,7 @@ pub fn loops(xs: List[Int]) -> Unit !io = {
   for d in 2..N { println("${d}") }
   for e in 4..5 { println("${e}") }
   for f in -3..3 { println("${f}") }
-  var acc = Val { name: "a" }
+  var acc = Val { name = "a" }
   for v in span(4) {
     for g in 2..6 { println("${g}") }
     acc = v
@@ -201,7 +201,7 @@ use std/narrow.{F32}
 type V = { n: Int }
 
 impl Add[V] {
-  fn add(a: V, b: V) -> V = V { n: a.n + b.n }
+  fn add(a: V, b: V) -> V = V { n = a.n + b.n }
 }
 
 fn sum(p: V, q: V) -> V = p + q
@@ -340,14 +340,14 @@ fn each(xs: List[Int], step: Int = 1, f: fn(Int) -> Unit) -> Unit = {
 
 pub fn run(s: String) -> Int = {
   let a = pad_to(s, 4)
-  let b = pad_to(width: 2, s: "x", why: "w")
+  let b = pad_to(width = 2, s = "x", why = "w")
   each([1]) { n =>
     let _ = n
   }
   let c = s.pad_to(3)
   let d = "x" |> pad_to(2)
   let e = df.span()
-  let f = df.span(hi: 3)
+  let f = df.span(hi = 3)
   let g = cursor.find(s, "a")
   len(a ++ b ++ c ++ d) + e + f + (if g == None { 0 } else { 1 })
 }
@@ -376,10 +376,10 @@ fn listed(n: Int, xs: List[Int] = [1, 2, 3]) -> Int = n
 
 pub fn run(s: String) -> Int = {
   let a = sep(s)
-  let b = sep(s, wide: 2)
+  let b = sep(s, wide = 2)
   let c = span()
-  let d = span(lo: 5)
-  let e = span(lo: len(s))
+  let d = span(lo = 5)
+  let e = span(lo = len(s))
   let f = slow(1)
   let g = listed(1)
   let h = dv.gap(s |> len)
@@ -406,7 +406,7 @@ fn compute(n: Int) -> Int = {
   fn double(k: Int) -> Int = k * 2
   let s = Circle(1.5)
   let a = area(s)
-  let p = Point { x: n, y: helper(n) }
+  let p = Point { x = n, y = helper(n) }
   let t = str.trim("  hi  ")
   let xs = [1, 2, 3]
   let total = fold(xs, 0, (acc, x) => acc + x)
@@ -529,7 +529,7 @@ for needle, occ, delta in [
     ("acc + x", 1, 1),      # lambda param use
     ("Circle(r) -> p.x", 1, 8),  # match binder
     ("Greet[T]", 1, 1),     # trait decl name
-    ("hi(x: Point)", 1, 0), # impl method name
+    ("hi(x = Point)", 1, 0), # impl method name
     ("double(n)", 1, 1),    # local fn call
     ("Point { x:", 1, 1),   # record ctor
     ("y => y + 1", 1, 0),   # lambda param inside a module-qualified call

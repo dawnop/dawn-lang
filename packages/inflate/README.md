@@ -7,7 +7,7 @@ use inflate/gzip
 use inflate/zip
 
 let data = gzip.gunzip(src)?                       # at most 64 MiB out
-let big = gzip.gunzip(src, cap: Some(268435456))?  # a larger ceiling
+let big = gzip.gunzip(src, cap = Some(268435456))?  # a larger ceiling
 let files = zip.entries(archive)?                  # name, is_dir, data
 ```
 
@@ -32,7 +32,7 @@ trailing garbage is an error rather than ignored.
 ## Raw DEFLATE
 
 `deflate.inflate(src)` decodes a stream that starts at byte zero.
-`deflate.inflate_from(src, from: k)` starts at offset `k` and also answers the
+`deflate.inflate_from(src, from = k)` starts at offset `k` and also answers the
 absolute offset just past the stream, which is what a container needs to find
 its trailer. Its `cap` counts only the output of that call.
 

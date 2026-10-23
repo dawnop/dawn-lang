@@ -125,7 +125,7 @@ Run it in the Playground
 
 ## api-occupancy
 
-On `sm_86`, a 128 by 128 f16 matrix product wants `entry_hints(occupancy: Some(2))`, which fits two blocks on each SM instead of one.
+On `sm_86`, a 128 by 128 f16 matrix product wants `entry_hints(occupancy = Some(2))`, which fits two blocks on each SM instead of one.
 
 ## api-surface
 

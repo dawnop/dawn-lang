@@ -219,7 +219,7 @@ type Task = { name: String, priority: Int } derive Show, Ord   # derive = 字段
 fn newest(vs: List[Version]) -> Option[Version] = max_by(vs, v => v)   # 约束转发
 
 pub fn main() -> Unit !io = {
-  let vs = [Version{major:1,minor:2,patch:0}, Version{major:1,minor:10,patch:3}]
+  let vs = [Version{major =1,minor =2,patch =0}, Version{major =1,minor =10,patch =3}]
   println(to_string(sort(vs)))                 # 泛型 sort 走 Ord[Version]
   assert vs[1] > vs[0]                         # 运算符桥接
   println(to_string(sort([3, 1, 2])))          # 内建标量 impl，直接 INVOKESTATIC

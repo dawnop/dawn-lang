@@ -177,7 +177,7 @@ prelude 最先，引入次之，本模块声明最后——这个顺序本身就
 | 6 | checker.dawn:3242 | 本模块顶层 `fn` | 同上 |
 
 还有一处 `cx.fns` 写入不是命名空间入口：checker.dawn:9652-9653 在推断完成后把
-`Sig{inferring: true}` 换成 sealed 版本，且 `if map.get(cx3.fns, d.name) == Some(s)`
+`Sig{inferring = true}` 换成 sealed 版本，且 `if map.get(cx3.fns, d.name) == Some(s)`
 守着——覆写同名同值，不建立新绑定。一道门不收它。
 
 三处 `alias_shadows`/`import_clashes` 走的是 checker.dawn:317-334 的四个小函数。

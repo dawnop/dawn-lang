@@ -190,7 +190,7 @@ def replace_once(old: str, new: str) -> None:
 VERSION_CHECK = """  match declared {
     Some(v) ->
       if v != VERSION {
-        return Err(StdLoadError { origin: origin, declared: declared, why: StdVersionSkew })
+        return Err(StdLoadError { origin = origin, declared = declared, why = StdVersionSkew })
       }
     None -> ()
   }

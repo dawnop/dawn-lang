@@ -59,7 +59,7 @@ panic，而不是用户运行期的 NoSuchMethodError）。判据落在类型上
 `TyAdt` 不往构造子的字段里递归，是有意的：`List[T]` 字段只是一个描述符，真要造出一个
 List 得靠某个活函数体里的字面量或原语，而那里自带 `TyList`；读回来也是在读处交出
 `TyList`。记录唯一藏得住 List 的地方是**折叠常量**：`CConstRef` / `CComptime` 指的是一个
-Core 里根本没有的 `CValue`，`const P: Point = Point { xs: [1] }` 在引用处只有一个 `TyAdt`，
+Core 里根本没有的 `CValue`，`const P: Point = Point { xs = [1] }` 在引用处只有一个 `TyAdt`，
 而发射器会像展开字面量一样把那个字段拼成 `std/pvec.from_array`。所以标量类型的折叠常量
 放行，其余一律按「可能藏了一个 List」算（`reach.folded_may_hold_list`）。判错的代价是
 C 侧的链接错误、JVM 侧的 `NoSuchMethodError`，所以每一条证不出「没有 List」的臂都答 true。

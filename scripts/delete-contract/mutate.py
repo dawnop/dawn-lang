@@ -106,15 +106,15 @@ MUTATIONS = {
         """pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !Fs =
   if path == "" {
     Err(ForeignError {
-      kind: "io.invalid_delete_path",
-      message: "io.delete: path must not be empty",
-      cause: None
+      kind = "io.invalid_delete_path",
+      message = "io.delete: path must not be empty",
+      cause = None
     })
   } else if str.ends_with(path, "/") {
     Err(ForeignError {
-      kind: "io.invalid_delete_path",
-      message: "io.delete: path must not end with '/'",
-      cause: None
+      kind = "io.invalid_delete_path",
+      message = "io.delete: path must not end with '/'",
+      cause = None
     })
   } else {
     match fs_delete(path) {

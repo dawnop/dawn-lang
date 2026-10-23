@@ -1185,8 +1185,8 @@ test "a trailing colon continues the line, as the lexer reads it" {
   assert fmt_of(want) == want
   # inside a bracket, a value on the line after its field name is the name's
   # continuation too, one level in from the field
-  let field = "fn g() -> P =\n  P(\n    reason:\n      \"r\",\n    code: 1\n  )\n"
-  assert fmt_of("fn g() -> P =\n  P(\n    reason:\n    \"r\",\n    code: 1\n  )\n") == field
+  let field = "fn g() -> P =\n  P(\n    reason =\n      \"r\",\n    code = 1\n  )\n"
+  assert fmt_of("fn g() -> P =\n  P(\n    reason =\n    \"r\",\n    code = 1\n  )\n") == field
 }
 
 test "a trailing binary operator indents the line it continues" {
@@ -1302,7 +1302,7 @@ test "the range operator closes up and the spread and rest prefixes do not" {
   assert fmt_of(p) == p
   assert fmt_of(fmt_of(p)) == p
   # the record spread: the space belongs to the `{`, which is not a value end
-  let s = "fn h(p: Point) -> Point = Point { ..p, y: 0 }\n"
+  let s = "fn h(p: Point) -> Point = Point { ..p, y = 0 }\n"
   assert fmt_of(s) == s
   # the three rest patterns: the space belongs to the comma
   let l = "fn k(xs: List[Int]) -> Int =\n  match xs {\n    [x, ..rest] -> x + len(rest)\n" ++
@@ -1623,9 +1623,9 @@ test "a header wrapped twice steps in from the keyword's line" {
 ## is popped. It used to refresh the body anchor with the brace still on the
 ## stack, and a record brace inside a later call matched the stale depth.
 test "a closing brace line leaves no stale anchor behind" {
-  let r = "fn f() -> Unit = [\n  S {\n  },\n  g(\n    S {\n      a: 1,\n    },\n  ),\n]\n"
+  let r = "fn f() -> Unit = [\n  S {\n  },\n  g(\n    S {\n      a = 1,\n    },\n  ),\n]\n"
   assert fmt_of(r) == r
-  assert fmt_of("fn f() -> Unit = [\nS {\n},\ng(\nS {\na: 1,\n},\n),\n]\n") == r
+  assert fmt_of("fn f() -> Unit = [\nS {\n},\ng(\nS {\na = 1,\n},\n),\n]\n") == r
   # `} else {` and `) {` still anchor where they did
   let e = "fn f(c: Bool) -> Int = {\n  if c {\n    1\n  } else {\n    2\n  }\n}\n"
   assert fmt_of(e) == e
@@ -1823,13 +1823,13 @@ test "a block follows the line its own construct starts on" {
 ## `b: {` starts where the field is written. A `({` that opens its line inside
 ## a header's condition follows the header.
 test "a guard's arm, a record field and a grouped block anchor to their own construct" {
-  let a = "fn f(x: Option[Int]) -> Int = {\n  match x {\n    Some(\n      n) if (\n        n >\n          3) -> {\n      let a = 1\n      a\n    }\n    _ -> 0\n  }\n}\n\nfn g() -> Int = {\n  if (false) {\n    var v:\n      R =\n      R { a:\n          s(\n            \"x\"), b: {\n              let w = 1\n              w\n            } }\n  }\n  trace = trace ++ [(if (\n    ({\n    if (true) { return 1 }\n    true\n  })) { 1 } else { 2 })]\n  1\n}\n"
+  let a = "fn f(x: Option[Int]) -> Int = {\n  match x {\n    Some(\n      n) if (\n        n >\n          3) -> {\n      let a = 1\n      a\n    }\n    _ -> 0\n  }\n}\n\nfn g() -> Int = {\n  if (false) {\n    var v:\n      R =\n      R { a =\n          s(\n            \"x\"), b = {\n              let w = 1\n              w\n            } }\n  }\n  trace = trace ++ [(if (\n    ({\n    if (true) { return 1 }\n    true\n  })) { 1 } else { 2 })]\n  1\n}\n"
   assert fmt_of(a) == a
 }
 
 test "formatting preserves both value separators and anchors equals field blocks" {
-  assert fmt_of("fn f() = g(a:1, b=2)\n") == "fn f() = g(a: 1, b = 2)\n"
-  assert fmt_of("fn f() = P { x:1, y=2 }\n") == "fn f() = P { x: 1, y = 2 }\n"
+  assert fmt_of("fn f() = g(a =1, b=2)\n") == "fn f() = g(a = 1, b = 2)\n"
+  assert fmt_of("fn f() = P { x =1, y=2 }\n") == "fn f() = P { x = 1, y = 2 }\n"
   let a = "fn f() = {\n  let p = P { a =\n      g(\n        1), b = {\n          let v = 2\n          v\n        } }\n  p\n}\n"
   assert fmt_of(a) == a
   assert fmt_of(fmt_of(a)) == a

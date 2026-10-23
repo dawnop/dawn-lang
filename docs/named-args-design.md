@@ -22,7 +22,7 @@ ButtonA("Continue", () => {}, true, Named("white"), Rgb(0,90,200), 16, Center, 2
 之前的最优变通是 config record + 函数式更新：
 
 ```dawn
-ButtonB("Continue", () => {}, ButtonStyle { ..button_default(), width: 240 })
+ButtonB("Continue", () => {}, ButtonStyle { ..button_default(), width = 240 })
 ```
 
 它已经**是默认参数的手工版**——`{ ..base, field: v }` 就是「缺省值 + 覆盖」。代价是每个
@@ -58,9 +58,9 @@ error: expected `)`, found `=`
 `spec.md` §4.3）。`scripts/grammar-corpus/accept/expr_forms.dawn:32-38` 已经把这件事钉住了：
 
 ```dawn
-let on_a_function = add(a: 1)(2)
-let on_a_dot_call = xs.at(i: 0)
-let on_an_applied_result = add(1)(b: 2)
+let on_a_function = add(a = 1)(2)
+let on_a_dot_call = xs.at(i = 0)
+let on_an_applied_result = add(1)(b = 2)
 ```
 
 语料只跑 `dawn __parse`（`scripts/grammar-corpus/README.md`），所以这些行只证明**能解析**。
@@ -155,7 +155,7 @@ std 也是每次从内嵌源码重新 check（`driver/stdlib.dawn:169-220`）；
 
 ```dawn
 type R = { a: Int, b: Int }
-let r = R { b: tap("written-1st (fills b)", 1), a: tap("written-2nd (fills a)", 2) }
+let r = R { b = tap("written-1st (fills b)", 1), a = tap("written-2nd (fills a)", 2) }
 ```
 
 改动前实际输出：
@@ -187,21 +187,21 @@ Kotlin 全部相反（那些都是写序）。构造器字段带副作用的少�
 
 | callee | 接受具名实参 | 名字来自 |
 |---|---|---|
-| 顶层函数 `f(a: 1)` | ✅ | 该函数的 `Sig.param_names` |
-| 模块限定 `m.f(a: 1)` | ✅ | 同上（`check_module_call`，`checker.dawn:6329`） |
-| UFCS / 点调用 `x.f(a: 1)` | ✅ | 同上（`check_method_call` 尾部，`checker.dawn:6549`） |
-| 管道 `x \|> f(a: 1)` | ✅ | 同上（parser 已把 `x` 前置成 `pos_arg`，`parser.dawn:1264`） |
-| trait 方法 `x.area(scale: 3)` | ✅ | **trait 声明的**形参名（见 §3.5） |
-| effect operation `get(key: "a")` | ✅ | effect 声明的形参名 |
-| 构造器 `R(b: 1)` | ✅（原有） | 字段名 |
-| 函数值 `g(a: 1)`、`f(1)(b: 2)` | ❌ | —— |
-| Java 成员 `o.m(a: 1)` | ❌ | Java 元数据里没有形参名（见 §3.6） |
+| 顶层函数 `f(a = 1)` | ✅ | 该函数的 `Sig.param_names` |
+| 模块限定 `m.f(a = 1)` | ✅ | 同上（`check_module_call`，`checker.dawn:6329`） |
+| UFCS / 点调用 `x.f(a = 1)` | ✅ | 同上（`check_method_call` 尾部，`checker.dawn:6549`） |
+| 管道 `x \|> f(a = 1)` | ✅ | 同上（parser 已把 `x` 前置成 `pos_arg`，`parser.dawn:1264`） |
+| trait 方法 `x.area(scale = 3)` | ✅ | **trait 声明的**形参名（见 §3.5） |
+| effect operation `get(key = "a")` | ✅ | effect 声明的形参名 |
+| 构造器 `R(b = 1)` | ✅（原有） | 字段名 |
+| 函数值 `g(a = 1)`、`f(1)(b = 2)` | ❌ | —— |
+| Java 成员 `o.m(a = 1)` | ❌ | Java 元数据里没有形参名（见 §3.6） |
 
 分派规则**一字不改**地复用 §2.3 的那份：位置前缀从左到右占槽，具名按名占槽，
 具名之间任意重排，**位置实参不得跟在具名实参之后**（`SlotAfterNamed` 保留，理由见 §5）。
 重名 → `SlotTaken`，未知名 → `SlotNoField` 走 `suggest.hint` 出拼写建议。
 
-**接收者不可具名。** `x.f(self: y)` 里 `self` 已被接收者按位置填掉，`arg_slots` 直接答
+**接收者不可具名。** `x.f(self = y)` 里 `self` 已被接收者按位置填掉，`arg_slots` 直接答
 `SlotTaken` → 「参数 `self` 被传了两次」。免费得到，不必写新规则。
 
 ### 3.2 落地点
@@ -230,9 +230,9 @@ checker 兑现：**只在写序≠声明序时**，在调用节点外套一层�
 
 | 场景 | 之前 | 改成 |
 |---|---|---|
-| 函数值 `g(a: 1)` | ``\`g\` is a function, not a constructor; …`` | ``\`g\` is a function value, and a function type carries no parameter names`` + hint「按位置传」 |
-| `f(1)(b: 2)` | `this callee is a function value, …` | 同上（无名可引） |
-| Java `o.m(a: 1)` | ``\`X.Y\` is a Java member, …`` | ``Java methods carry no parameter names`` + hint「按位置传」 |
+| 函数值 `g(a = 1)` | ``\`g\` is a function, not a constructor; …`` | ``\`g\` is a function value, and a function type carries no parameter names`` + hint「按位置传」 |
+| `f(1)(b = 2)` | `this callee is a function value, …` | 同上（无名可引） |
+| Java `o.m(a = 1)` | ``\`X.Y\` is a Java member, …`` | ``Java methods carry no parameter names`` + hint「按位置传」 |
 | 未知名 | ——（新增） | 复用构造器那条的形状：``\`f\` has no parameter \`xx\``` + `suggest.hint` |
 
 「一次调用只报一次」这条现有纪律（`checker.dawn:4249-4258` 的注释）保留。
@@ -257,7 +257,7 @@ impl 比对只看类型列表与返回类型（`passes.dawn:1656`）加效果 su
 五个实现（`std/list.dawn:41`、`str.dawn:338`、`bytes.dawn:357`、`map.dawn:134`、`set.dawn:90`）
 全部把接收者叫 `xs`/`s`/`b`/`m`，把**游标**叫 `c`。
 
-于是照 §3.1 的规则，`xs.iter_done(c: 3)` 里的 `c` 指的是**接收者**，而接收者已被点调用填掉，
+于是照 §3.1 的规则，`xs.iter_done(c = 3)` 里的 `c` 指的是**接收者**，而接收者已被点调用填掉，
 报的是「参数 `c` 被传了两次」。这是 §6.4 那笔审计（刀 4，另立）存在的理由。
 
 裁决：**名字取自 trait 声明，impl 的形参名纯属局部，不加新检查。**
@@ -269,12 +269,12 @@ impl 比对只看类型列表与返回类型（`passes.dawn:1656`）加效果 su
 - **不加「impl 应与 trait 同名」的检查**：那会当场把 std 的三处 `iter_done` 判红，
   而它们改名是有理由的。Dawn 没有 warning 通道，所以是「error 或什么都不做」二选一——
   选什么都不做。
-- **代价必须写下来**：`bytes.iter_done(c: 3)` 里的 `c` 指的是 trait 的第 1 个形参
+- **代价必须写下来**：`bytes.iter_done(c = 3)` 里的 `c` 指的是 trait 的第 1 个形参
   （即接收者），不是 impl 的第 2 个。这会误导。缓解只能靠 §6.4 的一次性 API 审计。
 
 **2026-10-01 回填（#210 刀 a）**：`Iter` 的声明改成接收者 `it`、游标 `c`
 （`types.dawn` 的 prelude `Iter`），与五个 std impl 对游标的叫法一致，
-`xs.iter_done(c: k)` 从此照字面意思成立；上面两句代价描述是改名前的状态。
+`xs.iter_done(c = k)` 从此照字面意思成立；上面两句代价描述是改名前的状态。
 形式上是破坏性变更（曾写 `k:` 的调用者要改成 `c:`），实扫仓内与 backend-dawn 为 0 处。
 仍不引入位置专用标记（裁决 2）；std 其余形参名的审计与冻结门是刀 b，另立一批、单独发版。
 
@@ -298,8 +298,8 @@ param = IDENT ":" type_expr [ "=" expr ] ;
 fn column(kids: List[Widget], align: Align = Start, gap: Int = 0) -> Widget = …
 
 column(kids)
-column(kids, gap: 12)
-column(kids, align: Center, gap: 12)
+column(kids, gap = 12)
+column(kids, align = Center, gap = 12)
 ```
 
 之前 `fn f(a: Int, b: Int = 2)` 报 `expected \`)\`, found \`=\``（实测），语法空间是空的。
@@ -458,7 +458,7 @@ trait 方法与 effect op **收具名实参（§3）但不收默认值**——�
 > **#206 期 2 后记**：本节的 `fn` 尾闭包片段是期 1 过渡期的实测证据，保留以说明
 > 裁决从何而来，不是现行语法。现行尾实参只写尾块；`fn` 只用于具名函数声明和函数类型。
 
-#206 需要 `f(a, align: Center) { ... }` 成立。这在之前是硬错，**而且不用等裸 `{}`，
+#206 需要 `f(a, align = Center) { ... }` 成立。这在之前是硬错，**而且不用等裸 `{}`，
 期 1 过渡期的 `fn` 尾闭包就已经踩上了**（实测 `p3.dawn`）：
 
 ```dawn
@@ -474,7 +474,7 @@ error: positional arguments cannot follow named arguments
 让 desugar 追加**具名**的那一个：
 
 ```dawn
-f(a, align: Center) { body }
+f(a, align = Center) { body }
   ⇝  f(a, align: Center, body: <closure>)      # body = 最后一个形参的名字
 ```
 
@@ -486,7 +486,7 @@ f(a, align: Center) { body }
 - **callee 是函数值**（路 A，无名可引）→ 按位置追加。这与 §3 一致：路 A 上根本不可能有具名
   实参，所以「位置跟在具名后」不会发生，不产生冲突。
 - **最后一个形参已被具名占掉** → `SlotTaken` → 「参数 `body` 被传了两次」。免费拿到。
-- **构造器同理**：期 1 的 `Box(n: 1) fn() => 7` 与现行 `Box(n: 1) { 7 }` 都 desugar
+- **构造器同理**：期 1 的 `Box(n: 1) fn() => 7` 与现行 `Box(n = 1) { 7 }` 都 desugar
   成 `Box(n: 1, f: <closure>)`；前者仅作为历史证据保留。
 
 **依赖关系**：(ii) 要求「具名实参能落在函数上」先成立，也就是 **#207 是 #206 这一半的前置**。
@@ -750,10 +750,10 @@ dogfood（首选 backend-dawn）尽快补上。
   那会让 `fn(Int) -> Int` 与 `fn(x: Int) -> Int` 变成一个还是两个类型，范围完全不同。
   代价是函数值上不能具名（§3.4），而这个代价换来的是路 A/路 B 那条**已经存在**的分岔
   正好就是特性边界，一条新规则都不用加。
-- **不做偏应用/柯里化。** `spec.md` §4.3 已裁。`f(a: 1)(b: 2)` 里第二次应用不具名，
+- **不做偏应用/柯里化。** `spec.md` §4.3 已裁。`f(a = 1)(b = 2)` 里第二次应用不具名，
   不是妥协是推论。
 - **不放宽「位置实参不得跟在具名实参之后」。** §5 的方案 (ii) 让尾块**按名**绑定，
-  于是根本不需要豁免。放宽的收益只有「少一条规则」，代价是 `f(b: 2, 1)` 这种调用点合法化。
+  于是根本不需要豁免。放宽的收益只有「少一条规则」，代价是 `f(b = 2, 1)` 这种调用点合法化。
 - **不给构造器字段加默认值。** record 的 `{ ..default(), x: v }`（实测可用）已经在做这件事，
   而且更灵活——它能一次覆盖任意子集，而默认值只能一个一个给。ADT 构造器有默认值还会与
   模式匹配的元数打架（模式里那些槽是不能省的）。两件事不合并。

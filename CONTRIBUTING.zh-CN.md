@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of CONTRIBUTING.md @ c29baf95208b3c38 -->
+<!-- doc-check: translation-of CONTRIBUTING.md @ fb624c2f49663fa7 -->
 
 # 怎么在这个仓库里做事
 
@@ -110,6 +110,9 @@ run 步骤，那么每个少了步骤的家族都要写一行 `Gate-Retire(<家�
 [docs/gate-drift-guards-design.md](docs/gate-drift-guards-design.md)。
 
 **绝不加 Claude 署名**（`Co-Authored-By` / `Claude-Session` 一概不要）。本项目以开源为标准。
+
+具名实参、值字段和模式字段使用 `=`，例如 `f(size = 2)` 和 `Point { x = 1 }`。
+形参与字段的类型仍使用 `:`，例如 `x: Int`。
 
 ## 六、契约：别单方面改
 

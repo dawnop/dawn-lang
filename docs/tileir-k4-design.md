@@ -173,7 +173,7 @@ pub fn scalar[D](p: Param[D]) -> Tile[D] !Dev      # rank-0 tile
 - `scalar(p)` 的结果是 rank-0 `Tile[D]`。算术走现有的 rank-0 加宽规则（`dev.dawn` 里「a rank-0 accumulator is widened」「the rank-0 rule widens it」），
   所以 `s * scalar(scale)`、`mma(..) * scalar(scale)` 不需要新规则。L3 之后写成 `mma(tq, kt, 0.0) * scalar(scale)`，与 cutile-rs 的 `qk * qk_scale` 同形。
 - 要当索引用时：`idx_of(scalar(n))`，`idx_of` 已经存在（`dev.dawn:3126`）。**不另造 `scalar_idx`**：一个概念一个名字，`Tile[I32]` 到 `Idx` 的那一步已经有名字。
-  `scalar` 对 `Param[I32]` 的结果因此直接接进 `d_range(0, idx_of(scalar(n)), step: By(num_blocks(0)))`。
+  `scalar` 对 `Param[I32]` 的结果因此直接接进 `d_range(0, idx_of(scalar(n)), step = By(num_blocks(0)))`。
 
 ### 3.2 允许的格式
 
@@ -194,7 +194,7 @@ pub fn scalar[D](p: Param[D]) -> Tile[D] !Dev      # rank-0 tile
 ```dawn
 fn persistent(x: Param[F32], n: Param[I32], out: Param[F32]) -> Unit !Dev = {
   let rows = idx_of(scalar(n))
-  for r in d_range(block_id(0), rows, step: By(num_blocks(0))) {
+  for r in d_range(block_id(0), rows, step = By(num_blocks(0))) {
     ...
   }
 }

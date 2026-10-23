@@ -5514,7 +5514,7 @@ fn operator_probe_text() -> String =
     "type V = { n: Int }",
     "",
     "impl Add[V] {",
-    "  fn add(a: V, b: V) -> V = V { n: a.n + b.n }",
+    "  fn add(a: V, b: V) -> V = V { n = a.n + b.n }",
     "}",
     "",
     "fn sum(p: V, q: V) -> V = p + q",
@@ -5576,7 +5576,7 @@ fn operator_target_probe_text() -> String =
     "type V = { n: Int }",
     "",
     "impl Neg[V] {",
-    "  fn neg(a: V) -> V = V { n: 0 - a.n }",
+    "  fn neg(a: V) -> V = V { n = 0 - a.n }",
     "}",
     "",
     "impl Eq[V] {",
@@ -5850,10 +5850,10 @@ test "an operator over a type of its own keeps its operands' references and hove
     let text = join([
       "type V = { x: Int }",
       "impl Add[V] {",
-      "  fn add(a: V, b: V) -> V = V { x: a.x + b.x }",
+      "  fn add(a: V, b: V) -> V = V { x = a.x + b.x }",
       "}",
       "impl Neg[V] {",
-      "  fn neg(a: V) -> V = V { x: -a.x }",
+      "  fn neg(a: V) -> V = V { x = -a.x }",
       "}",
       "fn f(v: V, w: V) -> V = v + -w",
       ""
@@ -5887,17 +5887,17 @@ test "a var a staged loop carries answers as the var at every spelling inside th
       "type R = { n: Int }",
       "impl StagedIter[R] {",
       "  type Item = V",
-      "  fn staged_for(r: R, body: fn(V) -> Unit) -> Unit = body(V { n: 0 })",
+      "  fn staged_for(r: R, body: fn(V) -> Unit) -> Unit = body(V { n = 0 })",
       "}",
       "impl StagedVar[V] {",
       "  type Cell = C",
-      "  fn var_open(v: V) -> C = C { n: v.n }",
-      "  fn var_get(c: C) -> V = V { n: c.n }",
+      "  fn var_open(v: V) -> C = C { n = v.n }",
+      "  fn var_get(c: C) -> V = V { n = c.n }",
       "  fn var_set(c: C, v: V) -> Unit = ()",
       "}",
       "fn g(a: V, b: V) -> V = a",
       "fn f(r: R) -> V = {",
-      "  var acc = V { n: 1 }",
+      "  var acc = V { n = 1 }",
       "  for j in r {",
       "    acc = g(acc, j)",
       "  }",
@@ -6436,7 +6436,7 @@ test "dot completion offers fields then the functions a dot call reaches" {
     # a parenthesised receiver
     assert list.contains(dot_labels(st, "n: Int", "(n + 1)."), "grow")
     # a let before the cursor gives the receiver its type
-    assert list.contains(dot_labels(st, "n: Int", "let q = Pt { x: n, y: n }\n  q."), "norm")
+    assert list.contains(dot_labels(st, "n: Int", "let q = Pt { x = n, y = n }\n  q."), "norm")
     # type arguments flow into fields and into the generic that unwraps
     let g = dot_labels(st, "b: Box[Int]", "b.")
     assert list.take(g, 2) == ["item", "tag"]
@@ -7056,8 +7056,8 @@ fn defaults_probe_text() -> String =
     "fn run(s: String) -> Int = {",
     "  let a = pad(s, 4)",
     "  let b = zero()",
-    "  let c = pad(width: 4, s: \"x\")",
-    "  let d = mid(s, last: 2)",
+    "  let c = pad(width = 4, s = \"x\")",
+    "  let d = mid(s, last = 2)",
     "  each([1]) { n =>",
     "    let _ = n",
     "  }",
@@ -7068,7 +7068,7 @@ fn defaults_probe_text() -> String =
     "  let i = 5 |> zero",
     "  let j = wordy(1)",
     "  let k = pad(s, 4, \"-\")",
-    "  let l = zero(1, m: 2)",
+    "  let l = zero(1, m = 2)",
     "  let m = site(1) + Some(2).expect(\"two\")",
     "  let n = both(1)",
     "  len(a ++ c ++ e ++ f ++ h) + b + d + i + j + len(k) + l + m + n + (if g == None { 0 } else { 1 })",
@@ -7095,8 +7095,8 @@ test "inlay hints: a left-out default shows its written text, after the last arg
     assert list.contains(got, "let a = pad(s, 4«, fill = \" \"»)")
     assert list.contains(got, "let b = zero(«n = 0, m = 1»)")
     # named out of order, and a default left out between written ones
-    assert list.contains(got, "let c = pad(width: 4, s: \"x\"«, fill = \" \"»)")
-    assert list.contains(got, "let d = mid(s, last: 2«, gap = 1»)")
+    assert list.contains(got, "let c = pad(width = 4, s = \"x\"«, fill = \" \"»)")
+    assert list.contains(got, "let d = mid(s, last = 2«, gap = 1»)")
     # a trailing block fills the last parameter; the hint stays in the parentheses
     assert list.contains(got, "each([1]«, step = 1») { n =>")
     # UFCS: the receiver fills the first parameter
@@ -7206,13 +7206,13 @@ fn values_probe_text() -> String =
     "",
     "fn run(s: String) -> Int = {",
     "  let a = sep(s)",
-    "  let b = sep(s, wide: 2)",
+    "  let b = sep(s, wide = 2)",
     "  let c = span()",
-    "  let d = span(lo: 5)",
-    "  let e = span(lo: len(s))",
+    "  let d = span(lo = 5)",
+    "  let e = span(lo = len(s))",
     "  let f = slow(1)",
     "  let g = listed(1)",
-    "  let h = s.sep(gap: 1)",
+    "  let h = s.sep(gap = 1)",
     "  len(a ++ b ++ h) + c + d + e + f + g",
     "}",
     ""
@@ -7227,19 +7227,19 @@ test "inlay hints: a left-out default shows its value where it folds, else its t
     # out; the written argument is an outer local none of them reads
     assert list.contains(got, "let a = sep(s«, gap = 4, wide = 9, tag = \"<4>\"»)")
     # a named argument given, the defaults around it still folded
-    assert list.contains(got, "let b = sep(s, wide: 2«, gap = 4, tag = \"<4>\"»)")
+    assert list.contains(got, "let b = sep(s, wide = 2«, gap = 4, tag = \"<4>\"»)")
     # a default that reads an earlier parameter folds with the call's value
     # of it, the left-out one's or the written one's
     assert list.contains(got, "let c = span(«lo = 1, hi = 10»)")
-    assert list.contains(got, "let d = span(lo: 5«, hi = 14»)")
+    assert list.contains(got, "let d = span(lo = 5«, hi = 14»)")
     # ... and is refused when that value is an outer local's: the text
-    assert list.contains(got, "let e = span(lo: len(s)«, hi = lo + 9»)")
+    assert list.contains(got, "let e = span(lo = len(s)«, hi = lo + 9»)")
     # past the depth budget the fold is refused: the text
     assert list.contains(got, "let f = slow(1«, k = spin(5000)»)")
     # a value that repeats its text, and one too long to show: the text
     assert list.contains(got, "let g = listed(1«, xs = [1, 2, 3], ys = str.repeat(\"ab\", 20)»)")
     # UFCS: the receiver fills `s`, which no default reads
-    assert list.contains(got, "let h = s.sep(gap: 1«, wide = 9, tag = \"<4>\"»)")
+    assert list.contains(got, "let h = s.sep(gap = 1«, wide = 9, tag = \"<4>\"»)")
     assert len(got) == 8
   }))
 }
@@ -7277,11 +7277,11 @@ test "inlay hints: a module-qualified call that leaves out its first parameter h
     let text = join([
       "use std/dfltprobe as df",
       "",
-      "fn r() -> Int = df.span() + df.span(hi: 3)",
+      "fn r() -> Int = df.span() + df.span(hi = 3)",
       ""
     ], "\n")
     let d = def_probe_doc_named(st, "dfltuser.dawn", text)
-    assert defaults_probe(st, d) == ["fn r() -> Int = df.span(«lo = 0, hi = 9») + df.span(hi: 3«, lo = 0»)"]
+    assert defaults_probe(st, d) == ["fn r() -> Int = df.span(«lo = 0, hi = 9») + df.span(hi = 3«, lo = 0»)"]
   }))
 }
 
@@ -7293,8 +7293,8 @@ test "inlay hints: a call in error gets no default hint" {
       "fn run() -> String = {",
       "  let a = pad(\"x\")",
       "  let b = pad(\"x\", 1, \"-\", 9)",
-      "  let c = pad(\"x\", 1, nope: 2)",
-      "  let e = pad(\"x\", 1, width: 2)",
+      "  let c = pad(\"x\", 1, nope = 2)",
+      "  let e = pad(\"x\", 1, width = 2)",
       "  a ++ b ++ c ++ e",
       "}",
       ""
@@ -7423,21 +7423,21 @@ test "bitwise operators retain operand navigation rename and evaluated values" {
       "type LoggedBits = { value: Int }",
       "impl BitOr[LoggedBits] { effect BitOr = !BitLog",
       "  fn bit_or(a: LoggedBits, b: LoggedBits) -> LoggedBits !BitLog = a }",
-      "fn logged() -> LoggedBits !BitLog = LoggedBits { value: 77 } | LoggedBits { value: 1 }",
+      "fn logged() -> LoggedBits !BitLog = LoggedBits { value = 77 } | LoggedBits { value = 1 }",
       "impl BitAnd[Bits] { fn bit_and(a: Bits, b: Bits) -> Bits = a }",
       "impl BitOr[Bits] { fn bit_or(a: Bits, b: Bits) -> Bits = a }",
       "impl BitXor[Bits] { fn bit_xor(a: Bits, b: Bits) -> Bits = a }",
       "impl BitNot[Bits] { fn bit_not(a: Bits) -> Bits = a }",
       "impl Shl[Bits] { type ShlAmount = Int",
-      "  fn shl(a: Bits, n: Int) -> Bits = Bits { value: a.value << n } }",
+      "  fn shl(a: Bits, n: Int) -> Bits = Bits { value = a.value << n } }",
       "impl Shr[Bits] { type ShrAmount = Int",
       "  fn shr(a: Bits, n: Int) -> Bits = a }",
       "impl Ushr[Bits] { type UshrAmount = Int",
       "  fn ushr(a: Bits, n: Int) -> Bits = a }",
       "fn all(a: Bits, b: Bits, n: Int) -> Bits = (a & b | a ^ ~b) << n >> n >>> n",
       "fn move[T: Shl](a: T, n: T.ShlAmount) -> T !T.Shl = a << n",
-      "const FOLDED: Bits = comptime { Bits { value: 3 } << 2 }",
-      "fn folded() -> Int = (Bits { value: 3 } << 2).value",
+      "const FOLDED: Bits = comptime { Bits { value = 3 } << 2 }",
+      "fn folded() -> Int = (Bits { value = 3 } << 2).value",
       ""
     ], "\n")
     let (st, d) = untitled_state(std, "untitled:bitwise", text)
@@ -7513,19 +7513,19 @@ test "staged if pairs both rewritten arms for navigation references rename and t
       "type Cond = { n: Int }",
       "type ResultSlot = { value: Option[V] }",
       "impl StagedResult[V] { type Slot = ResultSlot",
-      "  fn result_open() -> ResultSlot = ResultSlot { value: None }",
+      "  fn result_open() -> ResultSlot = ResultSlot { value = None }",
       "  fn result_set(s: ResultSlot, v: V) -> Unit = ()",
       "  fn result_get(s: ResultSlot) -> V = s.value! }",
       "impl StagedCond[Cond] {",
       "  fn staged_if(c: Cond, on_true: fn() -> Unit, on_false: fn() -> Unit) -> Unit = on_true()",
       "}",
       "impl StagedVar[V] { type Cell = Cell",
-      "  fn var_open(v: V) -> Cell = Cell { n: v.n }",
-      "  fn var_get(c: Cell) -> V = V { n: c.n }",
+      "  fn var_open(v: V) -> Cell = Cell { n = v.n }",
+      "  fn var_get(c: Cell) -> V = V { n = c.n }",
       "  fn var_set(c: Cell, v: V) -> Unit = () }",
       "fn f(c: Cond) -> V = {",
-      "  var acc = V { n: 1 }",
-      "  if c { acc = V { n: acc.n + 1 } }",
+      "  var acc = V { n = 1 }",
+      "  if c { acc = V { n = acc.n + 1 } }",
       "  else if c { acc = V { n: acc.n + 2 } }",
       "  else { acc = V { n: acc.n + 3 } }",
       "  acc",

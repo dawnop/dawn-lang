@@ -140,7 +140,7 @@
 
 ```
 fn c7_h0(p0: String, p1: C7R) -> Bool = {
-var v1: C7R = C7R { ..p1, b: (if (false) { return (if (false) { true } else { false }) } else { p0 }) }
+var v1: C7R = C7R { ..p1, b = (if (false) { return (if (false) { true } else { false }) } else { p0 }) }
 true
 }
 fn c7_case() -> String = ""

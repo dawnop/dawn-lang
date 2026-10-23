@@ -77,7 +77,7 @@ std 各模块的同一份结果在 `StdCtx.mods`。这份成本已经付过，�
 - `String`：双引号，转义同上，`${` 写成 `\${`，`"` 写成 `\"`。
 - `Float`、`Bool`、`Unit`：`to_string` 与 `()`。
 - `List`、元组：递归，元素按元素类型读。
-- ADT：记录显示 `P { x: 1, c: 'z' }`，和类构造器写法相同；和类构造器显示 `Circle(1.5)`，无字段的
+- ADT：记录显示 `P { x = 1, c = 'z' }`，和类构造器写法相同；和类构造器显示 `Circle(1.5)`，无字段的
   显示 `Dot`。字段类型由 ADT 的类型参数代换到 `TyAdt` 的实参上（`subst`），所以
   `Option[Char]` 里的字段是 `'z'` 而不是 `122`。`Option` 走同一条路。
 - 其他 opaque 类型按目标类型读：运行时 opaque 类型**就是**它的目标（`types.peel_opaque` 的注释）。
@@ -374,7 +374,7 @@ std 走 `StdCtx.srcs` 而不是调研建议的 `std_file_of` 读文件：`srcs` 
 | `let` 推断类型 | `let xs«: List[Int]» = range(0, n)` | 开 | `TSLet` 的符号（`Sym.ty`） | `label: ": List[Int]"`，`kind: 1`（Type），无 padding |
 | lambda 形参类型 | `xs.map(x«: Int» => x + 1)` | 开 | `XLambda` 的形参符号（hover 的 `offer_lambda_params` 用的同一组） | 同上 |
 | 调用处的效果行 | `read_file(p)« !Fs»` | 开 | 被调者 `Sig.eff`；局部函数值取它类型里的行 | `label: "!Fs"`，`kind: 1`，`paddingLeft: true` |
-| 参数名 | `column(«kids: »k, «gap: »12)` | **关** | 被调者 `Sig.param_names` | `label: "kids:"`，`kind: 2`（Parameter），`paddingRight: true` |
+| 参数名 | `column(«kids = »k, «gap = »12)` | **关** | 被调者 `Sig.param_names` | `label: "kids:"`，`kind: 2`（Parameter），`paddingRight: true` |
 
 `«…»` 是编辑器画出来的部分，不在文本里。类型标签自带冒号、不要 padding，画出来正好是读者会写的
 `let xs: List[Int]`；效果标签要左 padding，画出来是 `read_file(p) !Fs`。
@@ -655,9 +655,9 @@ Dawn 没有 `@param` 一类记号，引入它就是调研 §3.3 否掉的约定�
 调用处省掉了带默认值的形参时，在实参括号里补一条提示，写出省掉了哪些形参、各自的默认值**源码文本**：
 
 ```dawn
-let a = pad(s, 4«, fill: " "»)
-let b = span(«lo: 0, hi: 9»)
-let g = cursor.find(s, "a"«, from: start(s)»)
+let a = pad(s, 4«, fill = " "»)
+let b = span(«lo = 0, hi = 9»)
+let g = cursor.find(s, "a"«, from = start(s)»)
 ```
 
 调研报告（C4）原先把这一项放在 B 组，前提是「要显示**求得的值**才比 signatureHelp 多给信息，所以要等
@@ -668,16 +668,16 @@ C5 的求值入口」。本刀推翻这个前提：signatureHelp 只在光标停
 ### B1.1 形状与位置
 
 - **一条调用一条提示**，`kind: 2`（Parameter），不要 padding。标签是 `name: text` 按**声明序**用 `, ` 连起来；
-  括号里已经写了实参时以 `, ` 开头，画出来就是一段合法的具名实参：`pad(s, 4, fill: " ")`。clangd
+  括号里已经写了实参时以 `, ` 开头，画出来就是一段合法的具名实参：`pad(s, 4, fill = " ")`。clangd
   `DefaultArguments` 也是一条提示装下所有被省的实参。
 - **位置**：括号里最后一个写出的实参末尾；括号里没有实参时紧跟 `(` 之后；调用没有括号（`5 |> zero`）时
-  在名字末尾，标签自带括号：`5 |> zero«(m: 1)»`。放在实参列表末尾而不是「被省的那个位置」：中间省掉的
+  在名字末尾，标签自带括号：`5 |> zero«(m = 1)»`。放在实参列表末尾而不是「被省的那个位置」：中间省掉的
   形参只能靠具名实参跳过，具名实参可以写在任何位置，所以末尾的那段文字照抄进源码仍然合法、语义不变
-  （`mid(s, last: 2«, gap: 1»)`）；插在中间反而要把后面的位置实参改成具名的。
+  （`mid(s, last = 2«, gap = 1»)`）；插在中间反而要把后面的位置实参改成具名的。
 - **哪些形参算被省**：用 checker 自己的规则 `types.arg_slots`（位置实参从左往右占、具名实参占它的名字、
   尾随块占最后一个形参），前面补上接收者占的槽。所以具名乱序、`x |> f(a)` 管道插入的实参（在括号外，
-  不影响落点，参与计数）、尾随块（`each([1]«, step: 1») { n => … }`，提示在 `)` 前、块之前）、UFCS
-  （`s.pad(4«, fill: " "»)`，接收者占第 0 个形参）、模块限定（`str.pad_start`、`df.span()`）都与调用的
+  不影响落点，参与计数）、尾随块（`each([1]«, step = 1») { n => … }`，提示在 `)` 前、块之前）、UFCS
+  （`s.pad(4«, fill = " "»)`，接收者占第 0 个形参）、模块限定（`str.pad_start`、`df.span()`）都与调用的
   实际含义一致。
 - **出错的调用不给**：有实参落不到形参上（名字不存在、给了两次、位置实参过多），或有一个没默认值的形参
   没给，诊断已经在报，提示不再猜。checker 对后者与参数个数错误直接产出 `XError`，那些调用本来就没有签名可读；
@@ -723,7 +723,7 @@ K6 起默认值可以引用声明在它前面的形参：`fn find(s: String, sub
   std 模块限定、K6 的 `start(s)`、管道带括号与不带括号、超界、全写出的不给）；`kind: 2` 无 padding、
   `defaultArguments: false` 关掉；模块限定调用省掉第一个形参（探针 std 的 `df.span()`）；出错的调用不给。
 - 负控（每条单独改、跑 `./bin/dawn test selfhost`、还原）：
-  - `arg_slots` 的非 `SlotAt` 不退出 → 「出错的调用」一条红（`pad("x", 1, nope: 2)` 出了 `, fill: " "`）；
+  - `arg_slots` 的非 `SlotAt` 不退出 → 「出错的调用」一条红（`pad("x", 1, nope = 2)` 出了 `, fill: " "`）；
   - UFCS 不补接收者槽 → 各形状一条红（`s.pad(4)`）；
   - 默认值改成关 → 两条红；
   - 去掉 `…` 截断 → `lspinlay` 与 `server` 各一条红；
@@ -933,10 +933,10 @@ fuel 10⁵、深度 1,500。同一份代码在 VS Code（JVM）与 Playground（
 B1 的提示写的是默认值的源码文本；C4 在能求出值时改写成值：
 
 ```dawn
-let a = sep(s«, gap: 4, wide: 9, tag: "<4>"»)        # 文本是 GAP、twice(GAP) + 1、"<${GAP}>"
-let d = span(lo: 5«, hi: 14»)                         # hi 的默认值是 lo + 9，读这次调用的 lo
-let e = span(lo: str.len(s)«, hi: lo + 9»)            # 读到的 lo 是外层局部：退回文本
-let h = dv.gap(s |> str.len«, w: 6»)                  # 别的模块的默认值 2 * BASE，读那个模块的常量
+let a = sep(s«, gap = 4, wide = 9, tag = "<4>"»)        # 文本是 GAP、twice(GAP) + 1、"<${GAP}>"
+let d = span(lo = 5«, hi = 14»)                         # hi 的默认值是 lo + 9，读这次调用的 lo
+let e = span(lo = str.len(s)«, hi = lo + 9»)            # 读到的 lo 是外层局部：退回文本
+let h = dv.gap(s |> str.len«, w = 6»)                  # 别的模块的默认值 2 * BASE，读那个模块的常量
 ```
 
 立项依据是 2026-10-03 的 C5 裁决第 4 条刀序（C4 在 C5-2 之后，复用 `eval_closed`）。B1.7 第一条的重开条件
@@ -970,7 +970,7 @@ thunk 接受前面**所有**形参的值，不管默认值读没读。直接求�
   这个名字。不用 typed 的默认值树判，是因为被调者的 `TFun` 只在它自己的模块里，跨模块要另找。
 - 占位的值从不被读，所以它的类型不必对：lowering 对泛型形参会给它装箱（`adapt_in`），具体类型的形参原样传，
   解释器按值运行，不检查类型。这与 lowering 自己给证据槽填 unit 占位（`ev_placeholder`）是同一个做法。
-- 读到的形参保留真实的实参表达式，闭合判据照常检查：`span(lo: 5)` 求得 `hi: 14`，`span(lo: str.len(s))` 读到
+- 读到的形参保留真实的实参表达式，闭合判据照常检查：`span(lo = 5)` 求得 `hi: 14`，`span(lo = str.len(s))` 读到
   外层局部 `s`，拒绝，显示文本 `lo + 9`。
 
 ### C4.3 显示什么
@@ -1066,7 +1066,7 @@ thunk 接受前面**所有**形参的值，不管默认值读没读。直接求�
   文本）。理由同第 12 腿：两端在同一个提交上不一致就是缺陷，没有 Emit-Change 可遮；钉死的一列防两端都不求值而空对空一致。
 - 变异负控（一次性，在本 worktree 里改一处、跑 `./bin/dawn test selfhost`、还原；各恰好一条红，都是上面第一条用例）：
   - 不用占位（`reads_name` 一律算读）→ `sep(s)` 显示 `gap: GAP, …`：写出的 `s` 是外层局部，整条被拒。
-  - `memo_key` 不看实参（带真实实参的 thunk 调用也按被调者记）→ `span(lo: 5)` 显示 `hi: 10`，用的是 `span()` 那次的值。
+  - `memo_key` 不看实参（带真实实参的 thunk 调用也按被调者记）→ `span(lo = 5)` 显示 `hi: 10`，用的是 `span()` 那次的值。
   - 预算用宿主的 `st.host.ct` 而不是 `ct_hover` → `slow(1)` 显示 `k: 5000`。
   - 渲染用 hover 的 `value_text` → `hi: 10  (0xA)`。
   - 闭合判据这里同 C5.10：去掉它，读外层局部的默认值在解释器里找不到符号同样失败，测试抓不到；判据挡的是逃逸给出的错值，

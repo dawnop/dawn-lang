@@ -48,8 +48,8 @@ PROJECTED = "return ProjectedEffect(i, parts[1])"
 DENSIFY = ("  dense_expr(dense_params(dense_params(dense_params(dense_params(d, f.captures),\n"
            "    f.params), f.dicts), f.evs), f.body)")
 MOVED = "      Some(next) -> { moved_syms = map.insert(moved_syms, next, s) }"
-PARSE_HEADERS = "    cx = Cx { ..headers.cx, diags: [] }\n"
-INTERN = "(Cx { ..cx, identities: map.insert(cx.identities, id, decl) }, id)"
+PARSE_HEADERS = "    cx = Cx { ..headers.cx, diags = [] }\n"
+INTERN = "(Cx { ..cx, identities = map.insert(cx.identities, id, decl) }, id)"
 MINT = 'interned(cx, minted(cx.owner_class.unwrap_or(""), kind, name), lo, hi)'
 
 # body-executor.py: each role's executor call, and a body that bypasses the
@@ -90,7 +90,7 @@ def reset_state(role):
 
 MUTATIONS = {
     # The step starts from an empty intern table instead of the one before it.
-    "cold/intern-table": ((ANALYZE, "    identities: before.identities,", "    identities: map.empty(),"),),
+    "cold/intern-table": ((ANALYZE, "    identities = before.identities,", "    identities = map.empty(),"),),
     # Impls are carried from the std baseline, not from the module before.
     "cold/impl-carry": ((ANALYZE, "  var base_impls = before.impls\n", "  var base_impls = std.impls\n"),),
     # A module's diagnostics are prepended instead of appended.
@@ -108,11 +108,11 @@ MUTATIONS = {
     # reports the header diagnostics too.
     "cold/parse-failure-unpublished": ((ANALYZE, PARSE_HEADERS, "    let _ = headers\n"),),
     "cold/parse-failure-drops-impls": ((ANALYZE, PARSE_HEADERS,
-        "    cx = Cx { ..headers.cx, diags: [], impl_table: cx.impl_table }\n"),),
+        "    cx = Cx { ..headers.cx, diags = [], impl_table = cx.impl_table }\n"),),
     "cold/parse-failure-skips-imports": ((ANALYZE, "check_module_headers(cx, mf.m, before.exports)",
                                           "check_module_headers(cx, mf.m, map.empty())"),),
     "cold/parse-failure-reports-headers": ((ANALYZE, PARSE_HEADERS, PARSE_HEADERS +
-        "    for d in headers.cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }\n"),),
+        "    for d in headers.cx.diags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }\n"),),
     # A module that fails to parse without losing a declaration is checked
     # past the declarations the parser repaired (docs/lsp-module-memo-design.md
     # §十四): it checks the damaged bodies too, it takes every declaration
@@ -129,8 +129,8 @@ MUTATIONS = {
     "cold/recovered-keeps-damaged-diags": ((ANALYZE, "    if not inside { kept = kept ++ [d] }\n",
                                             "    kept = kept ++ [d]\n"),),
     "cold/recovered-flag-off": ((ANALYZE,
-        "ModuleHeaders { ..headers, recovered: true, damaged: damaged }",
-        "ModuleHeaders { ..headers, recovered: false, damaged: damaged }"),),
+        "ModuleHeaders { ..headers, recovered = true, damaged = damaged }",
+        "ModuleHeaders { ..headers, recovered = false, damaged = damaged }"),),
 
     # lsp-observe.py, a tool run by hand: not mutants but the probes of a
     # private LSP. It applies inputs always, prefix-stats only when the
@@ -154,22 +154,22 @@ MUTATIONS = {
     # is applied as written.
     "lsp-configured/policy": ((SERVER, "run_lsp_configured(std_flag, host, legacy_analysis_config())",
                                "run_lsp_configured(std_flag, host, "
-                               "LspAnalysisConfig { mode: Legacy, max_modules: 128 })"),),
+                               "LspAnalysisConfig { mode = Legacy, max_modules = 128 })"),),
     "lsp-configured/observe": ((SERVER, "      let prog = update.program\n      (Workspace {",
                                 '      benchmark_analysis_stats("project", Some(update.stats))\n'
                                 "      let prog = update.program\n      (Workspace {"),),
 
     # lsp-module-memo.py: the owner of the analysis is what the server
     # commits and discards, and a load reuses only unchanged parses.
-    "lsp-module-memo/drop-session": ((SERVER, "        cache: update.session,", "        cache: ws0.cache,"),),
+    "lsp-module-memo/drop-session": ((SERVER, "        cache = update.session,", "        cache = ws0.cache,"),),
     "lsp-module-memo/bypass-cache": ((SERVER, WARM_ANALYZE, COLD_ANALYZE),),
-    "lsp-module-memo/keep-conflict-cache": ((SERVER, "        cache: incremental.evict(ws0.cache),",
-                                             "        cache: ws0.cache,"),),
+    "lsp-module-memo/keep-conflict-cache": ((SERVER, "        cache = incremental.evict(ws0.cache),",
+                                             "        cache = ws0.cache,"),),
     # A load that is handed nothing to reuse still answers correctly, so
     # only the counts can see it; a load that reuses a parse whose text
     # changed answers with the old syntax.
-    "lsp-module-memo/drop-parses": ((SERVER, "        parses: retained_parses(st, reusing.parses),",
-                                     "        parses: ws0.parses,"),),
+    "lsp-module-memo/drop-parses": ((SERVER, "        parses = retained_parses(st, reusing.parses),",
+                                     "        parses = ws0.parses,"),),
     "lsp-module-memo/stale-parse": ((ANALYZE, "    Some(p) -> if p.text == text { (p, true) }",
                                      "    Some(p) -> if true { (p, true) }"),),
     # The line starts ride on the parse: a file parsed again has to get
@@ -241,11 +241,11 @@ MUTATIONS = {
     "module-memo/names-with-diags": ((ENGINE,
         "  if len(e.step.diags) > 0 { return false }\n  match (r.names,", "  match (r.names,"),),
     "module-memo/stale-selective-exports": ((ENGINE,
-        "cx: current_selective(ids_cx, e, carry, fresh)", "cx: ids_cx"),),
+        "cx = current_selective(ids_cx, e, carry, fresh)", "cx = ids_cx"),),
     "module-memo/ignore-impls": ((ENGINE,
         "  if not (impls_is == Some(e.pred) || same_rows(carry.impls, e.impls_in)) { return None }\n", ""),),
-    "module-memo/drop-identities": ((ENGINE, "  Some(Kept { identities: ids, minted: Some(rows) })",
-                                     "  Some(Kept { identities: carry.identities, minted: Some(rows) })"),),
+    "module-memo/drop-identities": ((ENGINE, "  Some(Kept { identities = ids, minted = Some(rows) })",
+                                     "  Some(Kept { identities = carry.identities, minted = Some(rows) })"),),
     "module-memo/skip-collision": ((ENGINE, "      Some(other) -> if other != v { return None }",
                                     "      Some(other) -> ()"),),
     "module-memo/keep-diagnosed": ((ENGINE, "  if len(e.step.diags) > 0 { return None }\n", ""),),
@@ -256,17 +256,17 @@ MUTATIONS = {
     "module-memo/unordered-surface": ((ENGINE, SAME_SURFACE, "-> Bool =\n  a == b ||\n"),),
     # The position view around a reused step.
     "module-memo/stale-spans": ((ENGINE,
-        "decl_spans: map.insert(carry.decl_spans, step.checked.mod_path, own_spans)",
-        "decl_spans: map.insert(step.after.decl_spans, step.checked.mod_path, own_spans)"),),
+        "decl_spans = map.insert(carry.decl_spans, step.checked.mod_path, own_spans)",
+        "decl_spans = map.insert(step.after.decl_spans, step.checked.mod_path, own_spans)"),),
     # The export surface the carry comparison reads.
-    "module-memo/alias-positions": ((CHECKER, "  AliasE { ..al, target: no_target, nlo: 0, nhi: 0 }\n",
-        "  if true { al } else { AliasE { ..al, target: no_target, nlo: 0, nhi: 0 } }\n"),),
+    "module-memo/alias-positions": ((CHECKER, "  AliasE { ..al, target = no_target, nlo = 0, nhi = 0 }\n",
+        "  if true { al } else { AliasE { ..al, target = no_target, nlo = 0, nhi = 0 } }\n"),),
     "module-memo/impl-positions": ((CHECKER,
-        "  if im.lo == 0 && im.hi == 0 { im } else { ImplI { ..im, lo: 0, hi: 0 } }\n",
-        "  if true { im } else { ImplI { ..im, lo: 0, hi: 0 } }\n"),),
+        "  if im.lo == 0 && im.hi == 0 { im } else { ImplI { ..im, lo = 0, hi = 0 } }\n",
+        "  if true { im } else { ImplI { ..im, lo = 0, hi = 0 } }\n"),),
     # What the owner remembers.
     "module-memo/ignore-eviction": ((ENGINE,
-        "  let none: Map[String, Entry] = map.empty()\n  State { ..session, memo: none }\n}",
+        "  let none: Map[String, Entry] = map.empty()\n  State { ..session, memo = none }\n}",
         "  session\n}"),),
     "module-memo/ignore-module-budget": ((ENGINE, "    if retained < session.max_modules {", "    if true {"),),
     "module-memo/allow-negative-budget": ((ENGINE,
@@ -330,13 +330,13 @@ MUTATIONS = {
     "identity/intern-not-recorded": ((CX, INTERN, "(cx, id)"),),
     "identity/mint-takes-a-slot": ((CX, INTERN,
         "(Cx { ..cx, decl_slots: map.insert(cx.decl_slots, cx.owner_decl, slot_of(cx) + 1),\n"
-        "    identities: map.insert(cx.identities, id, decl) }, id)"),),
+        "    identities = map.insert(cx.identities, id, decl) }, id)"),),
     # A declaration that does not open one numbers its bindings in
     # whatever declaration the previous pass left open; one that
     # reissues slot zero puts its body's locals on its signature's
     # binders; and a pool shared by the program puts two modules'
     # unowned bindings on one key.
-    "identity/enter-keeps-the-previous-declaration": ((CX, "Cx { ..interned_cx, owner_decl: id }", "interned_cx"),),
+    "identity/enter-keeps-the-previous-declaration": ((CX, "Cx { ..interned_cx, owner_decl = id }", "interned_cx"),),
     "identity/slots-restart-at-zero": ((CX, "pub(pkg) fn fresh(cx: Cx) -> (Cx, Int) = {\n  let slot = slot_of(cx)",
                                         "pub(pkg) fn fresh(cx: Cx) -> (Cx, Int) = {\n  let slot = 0"),),
     "identity/module-pool-is-one-for-the-program": ((CX,
@@ -347,25 +347,25 @@ MUTATIONS = {
     "identity/mint-ignores-the-kind": ((CX, MINT,
         'interned(cx, minted(cx.owner_class.unwrap_or(""), identity.TypeDecl, name), lo, hi)'),),
     # identity.py: the intern table on the carry between modules.
-    "identity/drop-identity-carry": ((ANALYZE, "identities: cx.identities,", "identities: before.identities,"),),
-    "identity/drop-std-identity-carry": ((STDLIB, "identities: interned,\n    mods: mods,",
-                                          "identities: map.empty(),\n    mods: mods,"),),
+    "identity/drop-identity-carry": ((ANALYZE, "identities = cx.identities,", "identities = before.identities,"),),
+    "identity/drop-std-identity-carry": ((STDLIB, "identities = interned,\n    mods = mods,",
+                                          "identities = map.empty(),\n    mods = mods,"),),
     "identity/drop-std-identity-step": ((STDLIB, "interned = cx1.identities", "interned = interned"),),
     # `identity.absolute` keeps a diagnostic's own offsets when the
     # revision has no view of its owner, so a program assembled
     # without the views renders declaration-relative offsets as
     # absolute and says nothing about it.
     "identity/drop-render-view": ((ANALYZE,
-        "Program { modules: out, diags: diags, decl_spans: carry.decl_spans, ct_world: carry.ct_world }",
-        "Program { modules: out, diags: diags, decl_spans: map.empty(), ct_world: carry.ct_world }"),),
+        "Program { modules = out, diags = diags, decl_spans = carry.decl_spans, ct_world = carry.ct_world }",
+        "Program { modules = out, diags = diags, decl_spans = map.empty(), ct_world = carry.ct_world }"),),
     # A module that imports an effect writes the provider's id into its
     # own table; this has it derive one from the name in the importing
     # scope instead.
     "identity/mint-imported-effect": ((PASSES,
-        "cx1 = Cx { ..cx1, effects: map.insert(cx1.effects, local, eid) }",
+        "cx1 = Cx { ..cx1, effects = map.insert(cx1.effects, local, eid) }",
         "let (own_cx, own) = mint(cx1, EffectDecl, name, lo, hi)\n"
         "      cx1 = Cx { ..own_cx, effects: map.insert(own_cx.effects, local, own),\n"
-        "        effect_infos: map.insert(own_cx.effect_infos, own, effect_of(own_cx, eid)) }"),),
+        "        effect_infos = map.insert(own_cx.effect_infos, own, effect_of(own_cx, eid)) }"),),
 }
 
 

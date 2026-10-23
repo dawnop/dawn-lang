@@ -42,8 +42,8 @@ def instrument(jreflect):
   let count = len(jars)
   io.eprintln("LSP_WORKSPACE_LEASE create " ++ to_string(count))
   JsigLease {
-    jsig: lease.jsig,
-    close: () => {
+    jsig = lease.jsig,
+    close = () => {
       lease.close()
       io.eprintln("LSP_WORKSPACE_LEASE close " ++ to_string(count))
       # `close` is a `fn() -> Unit !io` field, and `io.getenv` is `!Env`
@@ -85,8 +85,8 @@ def mutate(name, server, main, analyze, plan_source):
     elif name == "didclose-no-rebuild":
         server_text = replace_once(
             server_text,
-            "              Ready(ws) -> Ready(rebuild_workspace(st, Workspace { ..ws, path_by_uri: paths }))",
-            "              Ready(ws) -> Ready(Workspace { ..ws, path_by_uri: paths })",
+            "              Ready(ws) -> Ready(rebuild_workspace(st, Workspace { ..ws, path_by_uri = paths }))",
+            "              Ready(ws) -> Ready(Workspace { ..ws, path_by_uri = paths })",
             name,
         )
     elif name == "only-current-diagnostics":
@@ -108,7 +108,7 @@ def mutate(name, server, main, analyze, plan_source):
       }
       let next = LspState {
         ..st,
-        workspaces: map.insert(st.workspaces, identity.lookup_key, slot)
+        workspaces = map.insert(st.workspaces, identity.lookup_key, slot)
       }
       publish_uris(next, set.from([old.uri]))
       next"""
@@ -241,8 +241,8 @@ def mutate(name, server, main, analyze, plan_source):
     elif name == "project-only-identity":
         server_text = replace_once(
             server_text,
-            "lookup_key: workspace_key_part(project) ++ workspace_key_part(source_root)",
-            "lookup_key: workspace_key_part(project)",
+            "lookup_key = workspace_key_part(project) ++ workspace_key_part(source_root)",
+            "lookup_key = workspace_key_part(project)",
             name,
         )
     elif name == "global-definition":
@@ -357,7 +357,7 @@ def mutate(name, server, main, analyze, plan_source):
             main_text,
             "fn lsp_standalone_lease() -> JsigLease !io = jsig_for([])",
             """fn lsp_standalone_lease() -> JsigLease !io =
-  JsigLease { jsig: jsig_real(), close: () => () }""",
+  JsigLease { jsig = jsig_real(), close = () => () }""",
             name,
         )
     else:

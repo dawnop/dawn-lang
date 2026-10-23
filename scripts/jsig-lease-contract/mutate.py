@@ -44,7 +44,7 @@ MUTATIONS = {
         JSIG_FOR,
         """pub fn jsig_for(jars: List[String]) -> JsigLease !io = {
   let loader = loader_for(jars)
-  JsigLease { jsig: jsig_real(), close: () => loader.closeable.close() }
+  JsigLease { jsig = jsig_real(), close = () => loader.closeable.close() }
 }""",
     ),),
     "parent-is-system": ((
@@ -62,8 +62,8 @@ MUTATIONS = {
     ),),
     "drop-close": ((
         REFLECT,
-        "JsigLease { jsig: jsig_with(loader.base, asm_bridge), close: () => loader.closeable.close() }",
-        "JsigLease { jsig: jsig_with(loader.base, asm_bridge), close: () => () }",
+        "JsigLease { jsig = jsig_with(loader.base, asm_bridge), close = () => loader.closeable.close() }",
+        "JsigLease { jsig = jsig_with(loader.base, asm_bridge), close = () => () }",
     ),),
     "bypass-bracket": ((
         PROBE,

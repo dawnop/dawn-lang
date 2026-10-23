@@ -28,13 +28,13 @@ references 与 rename 的数据源都是 `lsp/lspq.dawn` 的并行遍历：语�
 | 书写类型 `e: Expr0`、`s: Shape` | 无 | 无 | 有 |
 | 改名导入的 UFCS `7.twice()` | 只有类型 | 同左 | 有 |
 | 限定访问里的模块别名段 `helper.`、`str.` | 外层类型 | 同左 | 有，跳到模块文件开头，hover 与 `use` 行相同 |
-| 记录字面量字段名 `Point0 { x: first }` | 外层类型 | 同左 | 有，跳到字段声明 |
+| 记录字面量字段名 `Point0 { x = first }` | 外层类型 | 同左 | 有，跳到字段声明 |
 | 具名实参名 `dy: 5` | 外层类型 | 同左 | 有，跳到形参声明 |
 | `var acc` 声明处 | 只有类型 | 同左 | 有（`let` 声明处一并补上） |
 
 除第一行外，表里调研列出的空洞在今天的 main 上都还在。夹具另外覆盖了表外、同一类的位置：
 函数类型参数里的效果行（`f: fn(Int) -> Int !Env`）、局部 `fn` 的效果行、类型参数（使用处与声明处）、trait bound、
-`alias`、限定类型 `helper.Shape`、记录模式的字段名 `Point { x: first, y, label }`、构造器的具名实参 `Num(v: 3)`、
+`alias`、限定类型 `helper.Shape`、记录模式的字段名 `Point { x = first, y, label }`、构造器的具名实参 `Num(v = 3)`、
 限定构造器模式与限定类型、效果行里的别名段。
 
 ## 三、怎么补

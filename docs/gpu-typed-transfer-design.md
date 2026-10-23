@@ -30,7 +30,7 @@ U0 的 §6.2 把 U3 写成「加一个 `Pod[T]` 类的 trait，编码走 `Bytes`
 | 项 | 事实 |
 |---|---|
 | 效果操作 | `gpu_upload(handle: Int, data: List[Float])`、`gpu_download(handle: Int) -> Result[List[Float], ForeignError]`（`std/gpu.dawn` 608 行起） |
-| 类型化函数 | `upload[D](t: Tensor[D], data: List[Float])`、`download[D](t: Tensor[D]) -> Result[List[Float], _]`；`D` 是幻影类型，函数里不读它 |
+| 类型化函数 | `upload[D](t = Tensor[D], data: List[Float])`、`download[D](t = Tensor[D]) -> Result[List[Float], _]`；`D` 是幻影类型，函数里不读它 |
 | `Tensor[D]` | `opaque` 的 `(handle, len)`，**不带格式名**；格式名只在 handler 的缓冲表里 |
 | 真设备 | f64：`gpu_upload_host(p, Array[Float])` 在 C 里拷成 `double[]` 再 `cuMemcpyHtoD`；其余 11 格式：`pack_to` 后 `gpu_upload_bytes_host(p, Bytes)` |
 | 假设备 | 缓冲表存 `(格式名, List[Float])`，`upload` 时按名 `round_to`，launch 时把 `List[Float]` 直接交给 `WideRefFn` |

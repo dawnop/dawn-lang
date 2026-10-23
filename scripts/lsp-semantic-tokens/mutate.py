@@ -32,8 +32,8 @@ MUTATIONS = {
     # a query context built on an unchecked entry's own tables, which hold
     # none of the types its `use` lines name (#788)
     'no-import-graft': (SERVER,
-        '    entry: with_import_tables(e, seen),\n',
-        '    entry: e,\n'),
+        '    entry = with_import_tables(e, seen),\n',
+        '    entry = e,\n'),
     # columns counted in UTF-8 bytes from the line start instead of UTF-16 units
     'columns-in-bytes': (SERVER,
         '                let (line, col) = lsp_position(d.view, d.ls, t.lo)\n'

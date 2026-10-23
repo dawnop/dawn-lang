@@ -77,7 +77,7 @@ pub type Point = { x: Int, y: Int }
 ## Scales a number. Pairs with [`geo.scale`].
 pub fn scale(n: Int, by: Int = 2) -> Int = n * by
 
-pub fn shift(p: Point, dx: Int) -> Point = Point { x: p.x + dx, y: p.y }
+pub fn shift(p: Point, dx: Int) -> Point = Point { x = p.x + dx, y = p.y }
 
 pub fn origin(x: Int) -> Point = {
   let y = x + 1
@@ -86,7 +86,7 @@ pub fn origin(x: Int) -> Point = {
 
 pub fn first(p: Point) -> Int =
   match p {
-    Point { x, y: _ } -> x
+    Point { x, y = _ } -> x
   }
 
 pub trait Area[T] {
@@ -118,7 +118,7 @@ fn helper(n: Int) -> Int = {
 
 pub fn main() -> Unit !io = {
   with handle Ask { ask() => 4 }
-  let a = scale(1, by: 3)
+  let a = scale(1, by = 3)
   let b = geo.scale(2)
   let c = 3 |> scale
   let d = 2.scale()
@@ -227,8 +227,8 @@ fn touch(p: lib. Point) -> Int = p.x
 
 pub fn main() -> Unit !io = {
   with handle Ask { ask() => 4 }
-  let pr = Pair { a: 1 }
-  let box = Box { value: 2 }
+  let pr = Pair { a = 1 }
+  let box = Box { value = 2 }
   let pt = lib.at(1)
   let total = lib.scale(1) + scale(1) + CAP + target() + café(1) + head_or([1], 0) + read(2) + ident(3) + touch(pt) + pr.a + box.value
   println("${total}")

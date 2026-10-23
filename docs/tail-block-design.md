@@ -66,8 +66,8 @@ fn ctor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
 实测（`n_ns_header.dawn` / `o_ns_paren.dawn`）：
 
 ```dawn
-if p == P { x: 1 } { io.println("eq") }     # 报错：花括号被读成 if 的体
-if p == (P { x: 1 }) { io.println("eq") }   # 通过：加括号即恢复
+if p == P { x = 1 } { io.println("eq") }     # 报错：花括号被读成 if 的体
+if p == (P { x = 1 }) { io.println("eq") }   # 通过：加括号即恢复
 ```
 
 **记录字面量与 `if` 头的歧义，与尾块与 `if` 头的歧义，是同一个歧义。** 前者在
@@ -100,7 +100,7 @@ if p == (P { x: 1 }) { io.println("eq") }   # 通过：加括号即恢复
 今天能写的东西。
 
 反面对照（今天合法，改后必须仍合法）：语句位独立裸块 `{ io.println(...) }` 单占一行
-（`d_stmtblock`，跑通）；`P { x: 1 }` 记录字面量（`e_typeident_sameline`，跑通）；
+（`d_stmtblock`，跑通）；`P { x = 1 }` 记录字面量（`e_typeident_sameline`，跑通）；
 `adder(3)(4)` 柯里化（`f_curried`，输出 7）。
 
 **结论**：三处裁决可以推翻，理由从「不可区分」降为「当年还没有区分机制」。
@@ -190,7 +190,7 @@ Rust 对结构体字面量在 `if` 头走的正是这条；Swift SE-0056 是同�
 
 `Column { text("a") }` 里的 `{` 在 `ctor_expr`（`:1699-1703`）就被 `record_lit` 吃掉了，
 根本到不了后缀循环。代价为零，一个记号都不用前瞻——Dawn 的组件函数是 snake_case，
-`column { }` 与 `Column { x: 1 }` 天然分家。
+`column { }` 与 `Column { x = 1 }` 天然分家。
 
 **要补的是诊断质量，不是判定。** 今天的报法（`i_recordlit_stmts` 实测）：
 
@@ -330,7 +330,7 @@ list.fold(xs, 0) { (acc, x) => acc + x }
 
 今天 `probe_tail.dawn` 报 `positional arguments cannot follow named arguments`
 （发出点 `checker.dawn:5454`，判定在 `types.dawn:482 ctor_slots`）。
-`Column(align: Center) { ... }` 必须合法，否则「具名 + 尾块」这个组合永远写不出来。
+`Column(align = Center) { ... }` 必须合法，否则「具名 + 尾块」这个组合永远写不出来。
 
 ### 5.1 规则
 
@@ -387,8 +387,8 @@ pub fn main() -> Unit !io = {
     }
   }
   column(
-    align: Center,
-    gap: 12,
+    align = Center,
+    gap = 12,
   ) {
     text("hi")
   }
@@ -419,7 +419,7 @@ fmt 不改。这与语言其它地方一致（`if` 的体、记录字面量都�
 三者互不影响。**裸箭头 lambda 进不了尾位是因为它以 `(` 开头**（`:1579-1588`），
 花括号没有这个性质——这正是 E2。
 
-**7.2 与记录字面量 `P { x: 1 }`。** 见 R3：`TYPEIDENT` 后的 `{` 在 `primary` 阶段
+**7.2 与记录字面量 `P { x = 1 }`。** 见 R3：`TYPEIDENT` 后的 `{` 在 `primary` 阶段
 （`ctor_expr`，`:1701`）就被消费，后缀循环看不到它。大小写把两者分在词法层。
 
 **7.3 与 `if`/`while`/`for`/`match` 头部。** 见 R2：`nb == true` 时尾块臂不触发，

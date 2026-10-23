@@ -39,7 +39,7 @@ source-location-design 3.1(c) 否决（Core 无 span、TCO 下栈不可信），
    官方文档把结果定性为「a hint」。Dawn 的失败消息是 spec 写死的契约（§8.2），不能是 hint。
 2. **丢失规则已经有了。** 函数当值用丢默认值（spec §3.1）。`let g = expect` 的类型是 `fn(Option[T], String, Loc) -> T`，
    调 `g` 必须给一个 `Loc`，类型系统会拦；不存在「静默变成定义处位置」这种第三种行为。
-3. **转传是写出来的数据流。** `panic(msg, at: at)` 是普通实参。Rust 那条「沿 `track_caller` 链自动上溯到最外层」的规则
+3. **转传是写出来的数据流。** `panic(msg, at = at)` 是普通实参。Rust 那条「沿 `track_caller` 链自动上溯到最外层」的规则
    在 Dawn 里由作者逐跳写 `at: at` 表达；忘了写，报的是库里那一跳的位置，读源码就看得出来，不需要知道某个属性的传染规则。
 4. **不加新的语言维度。** 隐式参数是一个新的解析机制（Scala、Haskell 都为它设计了一整套规则）。默认参数 Dawn 已有，
    `caller()` 只是「一种取值在调用点决定的默认值」，与 Swift 的魔法字面量同构，规则也同样只有一条：必须是整个默认值。
@@ -81,7 +81,7 @@ Loc
 pub fn expect_some[T](o: Option[T], what: String, at: Loc = caller()) -> T =
   match o {
     Some(v) -> v
-    None -> panic("expected ${what}", at: at)
+    None -> panic("expected ${what}", at = at)
   }
 ```
 
@@ -105,16 +105,16 @@ spec §3.1「在声明处的作用域求值」由此多一款**具名例外**：
 - 路径是**调用点所在模块**的展示路径（L1）：项目里 `src/…`，单文件 `p.dawn`，`[deps]` 包的模块里是 `<包名>/<路径>`，std 里是「无位置」。
   跨模块调用不影响：`app/src/main.dawn` 调 `[deps]` 包 `check` 的 `check.positive(n)`，`at` 是 `src/main.dawn:9:3`；
   包内部自己省掉 `at` 调 `panic`，报 `check/rules.dawn:12:5`。
-- 写了实参（`f(x, at: l)` 或位置实参）就用写的，与普通默认值一样。
+- 写了实参（`f(x, at = l)` 或位置实参）就用写的，与普通默认值一样。
 
 ### 3.4 嵌套转发
 
 ```dawn
 fn assert_eq[T: Eq + Show](a: T, b: T, at: Loc = caller()) -> Unit =
-  if a != b { panic("${show(a)} != ${show(b)}", at: at) }
+  if a != b { panic("${show(a)} != ${show(b)}", at = at) }
 
 fn assert_sorted(xs: List[Int], at: Loc = caller()) -> Unit =
-  assert_eq(xs, sort(xs), at: at)        # 转发：报 assert_sorted 的调用者
+  assert_eq(xs, sort(xs), at = at)        # 转发：报 assert_sorted 的调用者
 
 fn assert_small(n: Int) -> Unit =
   assert_eq(n < 10, true)                # 不转发：报这一行，assert_small 自己没有 at
@@ -143,7 +143,7 @@ fn expect[T](o: Option[T], msg: String, at: Loc = caller()) -> T
 - **源码兼容**：现有调用都省掉 `at`，含义与 L2 相同，消息逐字相同。
 - 裁决只点了 `panic`/`todo`；`expect` 是 L2 的同一族（都在 `sited_arity` 里），也是调研草案的示例本身，一并加，否则 `expect` 会成为
   三个失败内建里唯一不能转发的。`assert` 与后缀 `!` 是语法不是调用，没有形参可加，维持 L2；`dbg` 的行头不是失败，维持 L3。
-- 转发时（`at` 不是本调用点的常量）消息是 `<msg> at <at>`；`at` 是「无位置」则不加后缀。`todo(at: l)` 是 `not yet implemented at <l>`。
+- 转发时（`at` 不是本调用点的常量）消息是 `<msg> at <at>`；`at` 是「无位置」则不加后缀。`todo(at = l)` 是 `not yet implemented at <l>`。
 - builtin 表此前一律无默认（K19 把 `parse_int` 迁 std 就是因为这个）。那条限制的原因是默认值要在**声明模块**合成 `f$default$k`，
   builtin 没有声明模块。`caller()` 默认**不合成函数**（值在调用点决定），所以 builtin 带它不撞那条限制；builtin 的普通默认值仍然不收。
 
@@ -199,7 +199,7 @@ std/loc 是它的拥有者，所以在 std/loc 里 `Loc` 与 `String` 互相可�
 ## 五、comptime、LSP、Playground
 
 - **comptime**：占位在降低之前已是常量，解释器看到的就是字符串。`const HERE = loc.here()` 的值是这条 const 声明里那个调用的位置；
-  comptime 里 `panic(msg, at: at)` 失败时消息与运行期逐字相同（L2 5.3 的论证）。钉一条 `interp_test`。
+  comptime 里 `panic(msg, at = at)` 失败时消息与运行期逐字相同（L2 5.3 的论证）。钉一条 `interp_test`。
 - **悬停 / 签名帮助 / 补全**：签名照常渲染 `at: Loc = caller()`；悬停 `caller` 显示 `fn caller() -> Loc` 与文档。
 - **内联提示（C4，省掉的默认实参）**：`caller()` 默认**不显示**。它的值就是读者正看着的这个调用的位置，显示出来是噪音；
   不屏蔽的话，仓里每个 `panic(..)`、`.expect(..)` 后面都会多一个 `at: caller()`。`lspinlay` 的 `default_args_hint` 跳过 `caller_params`
@@ -276,7 +276,7 @@ std/loc 是它的拥有者，所以在 std/loc 里 `Loc` 与 `String` 互相可�
   要么内建签名提到一个当前作用域里不存在的名字。全局名的代价（用户不能声明 `type Loc`）在本仓与 dawnop-site 为 0 处。
 - **std 用自己的路径（`std/list.dawn:120:5`）代替「无位置」**：L1 已裁 std 无展示路径；std 的行号对用户没有用，且每次 std 改动都会动产物。
 - **让 builtin 带普通默认值**：普通默认值要在声明模块合成函数，builtin 没有声明模块；K19 的既定方向是迁 std。本刀只开 `caller()` 这一种不合成函数的默认值。
-- **`at` 之外的名字约定**（`loc`、`site`、`caller`）：裁决已用 `at`，读起来是 `panic(msg, at: at)`，与消息里的 ` at ` 同词。不做强制，只是约定。
+- **`at` 之外的名字约定**（`loc`、`site`、`caller`）：裁决已用 `at`，读起来是 `panic(msg, at = at)`，与消息里的 ` at ` 同词。不做强制，只是约定。
 - **多个层级的位置（调用栈）**：一个 `Loc` 是一个点。要两层就声明两个形参；把栈做进 `Loc` 就是运行期栈迹，第一刀已否。
 - **`ForeignError` 带 `Loc` 字段**：位置是消息的一部分（L2 已裁），决定看 `kind`。
 

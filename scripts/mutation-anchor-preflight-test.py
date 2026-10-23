@@ -160,8 +160,8 @@ class PreflightTests(unittest.TestCase):
                                           "moved_syms = map.insert(moved_syms, next, s) }\n      None -> ()",
                                           "moved_syms = map.insert(moved_syms, next, s) }\n      None -> {}")
         self.assert_registry_drift_is_red("incremental-semantics-contract", "identity/enter-keeps-the-previous-declaration",
-                                          "selfhost/src/check/cx.dawn", "Cx { ..interned_cx, owner_decl: id }",
-                                          "Cx { ..interned_cx, owner_decl: id  }")
+                                          "selfhost/src/check/cx.dawn", "Cx { ..interned_cx, owner_decl = id }",
+                                          "Cx { ..interned_cx, owner_decl = id  }")
         self.assert_registry_drift_is_red("incremental-semantics-contract", "identity/drop-std-identity-step",
                                           "selfhost/src/driver/stdlib.dawn", "interned = cx1.identities",
                                           "interned =  cx1.identities")
@@ -272,7 +272,7 @@ class PreflightTests(unittest.TestCase):
         # The sed it replaced mutated every copy and passed on any change; a
         # second copy of an anchor is now a red preflight, not a wider mutant.
         target = "packages/tea-core/src/diff.dawn"
-        literal = "op: Replace(w: new)"
+        literal = "op = Replace(w = new)"
         original = (p.ROOT / target).read_text()
         self.assertEqual(original.count(literal), 1)
         with self.assertRaisesRegex(p.PreflightError,
@@ -605,15 +605,15 @@ class PreflightTests(unittest.TestCase):
         source = "compiler-plan/src/source.dawn"
         self.assert_registry_drift_is_red("bootstrap-input-manifest-contract",
                                           "drop-package-manifest", source,
-                                          '    SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" },\n',
-                                          '    SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" } ,\n')
+                                          '    SourceInput { kind = InputFile, path = parent ++ "/dawn.toml" },\n',
+                                          '    SourceInput { kind = InputFile, path = parent ++ "/dawn.toml" } ,\n')
         self.assert_registry_drift_is_red("bootstrap-input-manifest-contract",
                                           "persist-internal-absolute", source,
                                           '        ("R", str.drop(input.path, len(prefix)))\n',
                                           '        ("R", str.drop(input.path, len(prefix) ))\n')
         self.assert_stale_mutator_is_red("bootstrap-input-manifest-contract",
                                          "drop-package-manifest",
-                                         'SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" },')
+                                         'SourceInput { kind = InputFile, path = parent ++ "/dawn.toml" },')
 
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -32,10 +32,10 @@ WRITE = "  match write_file(tmp, content) {"
 CORRUPT = (IO, WRITE, '  match write_file(tmp, content ++ "corrupt") {')
 PERMISSION = "  if exists(path) { copy_permissions(path, tmp) } else { Ok(()) }"
 STAGING_FAILED = '''      Err(e) -> Err(ForeignError {
-        kind: "io.atomic_write_staging_failed",
-        message: "io.atomic_write_file: cannot create a staging file in "
+        kind = "io.atomic_write_staging_failed",
+        message = "io.atomic_write_file: cannot create a staging file in "
           ++ parent_dir(path),
-        cause: Some(e.kind ++ ": " ++ e.message)
+        cause = Some(e.kind ++ ": " ++ e.message)
       })'''
 FMTWRITE = "selfhost/src/driver/fmtwrite.dawn"
 ATOMIC_CALL = ("io.atomic_write_file(", "io.write_file(")
@@ -89,9 +89,9 @@ MUTATIONS = {
         IO,
         STAGING_FAILED,
         '''      Err(e) -> Err(ForeignError {
-        kind: "io.atomic_write_staging_failed",
-        message: e.message,
-        cause: None
+        kind = "io.atomic_write_staging_failed",
+        message = e.message,
+        cause = None
       })''',
     ),),
     # Call sites: one compiler writer put back to a plain overwrite.

@@ -79,7 +79,7 @@ GPU 的机器上用假设备跑完并给出相同答案**。后半句是让宿�
    （`sqrt`、`abs` 没有运算符，删其余的是无谓的破坏）。运算符只给默认舍入（ties to even），
    语义结论不变（§3.2）；`narrow-contract` 让运算符与具名成员跑同一批 oracle 用例。
 2. **「opaque-twin 门禁成立」对 `BF16` 成立，对 `Tensor[D]` 幻影不成立。** 把
-   `pub opaque type Tensor[D] = ...` 换成 `alias` 后 `D` 失去载体，`copy_from_host[D](t: Tensor[D])`
+   `pub opaque type Tensor[D] = ...` 换成 `alias` 后 `D` 失去载体，`copy_from_host[D](t = Tensor[D])`
    一类签名处处「cannot infer type parameter(s) D」。这是 spec.md:397 五件事里的
    「统一判定」在起作用，合法；但 `run.sh` 只有 `twin-rejected`（双方都拒）与
    `twin-normalise` 两种标记，没有「alias 侧拒、opaque 侧过」。刀 1 给门禁加了第三种（§3.4）。
@@ -430,7 +430,7 @@ pub fn reference_kernels() -> Map[String, (Int, WideRefFn)]
 
 - **纯**（签名无 `!io`），所以它进得了 `dawn test --stdlib` 与 comptime。
 - 句柄从 1 起编号，缓冲是 `Map[Int, (格式名, List[Float])]`；`gpu_alloc` 接受 `element_bytes`
-  认识的格式（`f64`、`i32`、`i8`、`u8`、`bf16`、`f16`），其它 dtype 答 `Err(kind: "gpu.unsupported_dtype")`，
+  认识的格式（`f64`、`i32`、`i8`、`u8`、`bf16`、`f16`），其它 dtype 答 `Err(kind = "gpu.unsupported_dtype")`，
   与真设备拒绝它没有的格式同形；不存在的句柄答 `gpu.no_such_buffer`；**缓冲持有的是该格式的内存会
   持有的值**：`gpu_copy_from_host` 存入前按缓冲格式 `round_to`（f64 就是原样），launch 写回的值也按**那个**
   缓冲的格式舍入；长度不查（长度检查在效果之上）；`gpu_launch` 按名查 `kernels`，把每个实参缓冲的
@@ -517,7 +517,7 @@ pub fn reference_kernels() -> Map[String, (Int, WideRefFn)]
 - 假设备是 `Map[String, (Int, WideRefFn)]`，名字映到（缓冲个数，宿主参考实现），从不碰 kernel 体
   （`std/gpu.dawn:939`、§4.3）。
 
-名字不在表里两种 handler 都答 `Err(kind: "gpu.no_kernel")`。计划稿这里写的是「一张
+名字不在表里两种 handler 都答 `Err(kind = "gpu.no_kernel")`。计划稿这里写的是「一张
 `Map[String, TileProg]`」：`std/gpu` 不依赖 `packages/tileir`（§5.3），两个 handler 都没有收过
 `TileProg`。当前形状见 spec.md §12.6。
 
@@ -779,11 +779,11 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 - **刀 T20 加了什么**（13.4 的最后一个类型标签，实测见 §6.34）：`f8E5M3FNU`，只有 sm_107 收，可作 `ftof` 的任一端与 `mma_scaled` 的
   缩放（`f4E2M1FN` 操作数、块 16 或 32）。**只到层 1**：没有卡、没有宿主值（`std/narrow` 里只有类型与见证）、没有缓冲。
 - **标准库默认参数刀 K2 起的写法**（上面 T4 / T15 / T17 两段是当时的公开面，原样保留）：属性变体的后缀名全部删除，
-  改为带方言默认值、放在位置参数与 body 之后的具名形参：`addf(F32, s, a, b, rounding: Down)`（`sub` / `mul` / `div`
+  改为带方言默认值、放在位置参数与 body 之后的具名形参：`addf(F32, s, a, b, rounding = Down)`（`sub` / `mul` / `div`
   同形，另有 `ftz: Bool = false`）、`maxf(.., propagate_nan: true)`、`add_i(.., overflow: NoSignedWrap)`、
   `float_to_int(.., saturating: true)`、`float_to_float(.., rounding: NearestAway)`、`d_for(.., body, unsigned_cmp: true)`
-  （`d_for2`…`d_for4` 同形，从此也写得出无符号比较）、`d_global(sym, d, xs, align: 256, visibility: Private, constant: true)`、
-  `alloca_ptrs(.., shared: true)`、`trace_kernel(name, ps, body, hints: hs)`。舍入方向是 `std/narrow` 的 `Rounding`。
+  （`d_for2`…`d_for4` 同形，从此也写得出无符号比较）、`d_global(sym, d, xs, align = 256, visibility: Private, constant = true)`、
+  `alloca_ptrs(.., shared: true)`、`trace_kernel(name, ps, body, hints = hs)`。舍入方向是 `std/narrow` 的 `Rounding`。
   记录出来的 IR 不变（tile-golden 逐字节不动）；写入器还没学会的组合（如「向下舍入且 ftz」）在记录时拒绝。
   理由与对 T4 注释的推翻见 [std-defaults-design.md](std-defaults-design.md) 7.2 节。
 
@@ -4364,7 +4364,7 @@ tile=(1024) padding_value = neg_inf` 读，`reduce maxf`、`exp`、`reduce addf`
   tile），结果全 0、`fail`；输出 view 的 extent 改成 1100，第 1000 到 1023 个元素（tile 内、原 extent 外的 24 个 lane）
   被写成 0，只剩 76/100 个哨兵、`fail`。所以上面的「通过」确实是 padding 与写屏蔽在起作用，而不是语料碰巧。
 
-所以 `cells([RED_N], [RED_TILE], pad: PadNegInf)` 这类「tile 盖过 extent」的几何，D-4 降成 view 族之后可以直接用，
+所以 `cells([RED_N], [RED_TILE], pad = PadNegInf)` 这类「tile 盖过 extent」的几何，D-4 降成 view 族之后可以直接用，
 softmax 不再需要 `tail_mask`、两个 pad 常量与 `select`。
 
 **一、标记与 `Cells`。** 在 `packages/tileir/src/prog.dawn`：
@@ -4458,7 +4458,7 @@ tileir 的 `check_cells` 只做 Tile IR 才有的要求。
 同一份报告 §4.1 的 matmul 范例本身就是反例：`A` 切成 `[M/TM, K/TK]`、网格是 `[M/TM, N/TN]`，K ≠ N 时第 1 轴块数
 不等，可那是正确的 kernel（`A` 的第 1 维由循环的 `k` 挑，不跟网格）。所以「一致」只能对**跟随某一轴**的维说，
 而「跟不跟」只有写 kernel 的人知道，于是有了 `along`：默认恒等（逐元素一类，占多数）；matmul 写
-`cells([M, K], [TM, TK], along: [0, FREE_AXIS])` 与 `cells([K, N], [TK, TN], along: [FREE_AXIS, 1])`。这与 Pallas 的
+`cells([M, K], [TM, TK], along = [0, FREE_AXIS])` 与 `cells([K, N], [TK, TN], along = [FREE_AXIS, 1])`。这与 Pallas 的
 `BlockSpec.index_map` 是同一件事，只收它最常见的那种（投影），D-4 的 `load_cell` 正好按 `along` 取块号、`load_at`
 只为自由维收下标。照录：
 
@@ -4586,12 +4586,12 @@ gpu.grid_mismatch: gpu.launch_entry: kernel `fixed`: argument 0 (In) has 4 cell(
 
 | 名字 | 做什么 |
 |---|---|
-| `load_cell(p)` | 读本块在 `p` 的格子里那一格：经 `p` 的格子视图（`cells` 的 extent、tile、pad），下标是各维跟随的网格轴的块号。越过 extent 的 lane 读 `pad`，所以 `cells([1000], [1024], pad: PadNegInf)` 读整行不要 mask |
+| `load_cell(p)` | 读本块在 `p` 的格子里那一格：经 `p` 的格子视图（`cells` 的 extent、tile、pad），下标是各维跟随的网格轴的块号。越过 extent 的 lane 读 `pad`，所以 `cells([1000], [1024], pad = PadNegInf)` 读整行不要 mask |
 | `load_at(p, free)` | 同上，`along` 里是 `FREE_AXIS` 的维由 `free` 依次给出格子号（matmul 的 `k`）；个数不符在记录期拒 |
 | `store_cell(o, t)` | 写本块那一格；越过 extent 的 lane 不写。**不收 `d`**（D-4 扩大） |
 | `zeros(p)` / `fill(p, v)` | 形状是 `p` 的一格、格式是 `p` 的格式的常量 tile；整数格式的 `v` 必须是整数 |
-| `reduce_sum` / `reduce_max` / `reduce_min(t, dim: -1, keepdims: false)` | 不收 `d` 与 shape（从句柄表读），identity 内置（和 0，max 取 -inf 或整数最小值，min 取 +inf 或整数最大值），`keepdims` 把被归约的维留成长度 1：`[BQ, BK]` 的行最大值是 `[BQ, 1]` |
-| `scan_sum(t, dim: -1, reverse: false)` | 前缀和，形状不变 |
+| `reduce_sum` / `reduce_max` / `reduce_min(t, dim = -1, keepdims = false)` | 不收 `d` 与 shape（从句柄表读），identity 内置（和 0，max 取 -inf 或整数最小值，min 取 +inf 或整数最大值），`keepdims` 把被归约的维留成长度 1：`[BQ, BK]` 的行最大值是 `[BQ, 1]` |
+| `scan_sum(t, dim = -1, reverse = false)` | 前缀和，形状不变 |
 | `broadcast(t, shape)` | 把长度为 1 的维展开到 `shape`，其余维必须相等，秩不变；rank 0 的 `t` 走 `spread` |
 
 效果操作加四个：`t_cell_view(param, dtype, free) -> (Int, List[Int])`（格子视图与本块的下标）、
@@ -4640,9 +4640,9 @@ stride 遇到动态 extent 时同样由这几个句柄乘出来。
 因此可以写成教科书形状：
 
 ```dawn
-let m = broadcast(reduce_max(s, keepdims: true), [BQ, BK])
+let m = broadcast(reduce_max(s, keepdims = true), [BQ, BK])
 let p = exp(F64, [BQ, BK], sub(F64, [BQ, BK], s, m))
-let l = broadcast(reduce_sum(p, keepdims: true), [BQ, BK])
+let l = broadcast(reduce_sum(p, keepdims = true), [BQ, BK])
 ```
 
 **五、拒绝消息（照录，位置后缀省略）。**
@@ -5367,7 +5367,7 @@ attention 系；loop_until 仍拿 `-O0`，仍是 `identical:exact`。
    在可见范围内一次），flash_attn 没有同一句柄广播到同一形状两次的地方。K2 的 flash_attn 迁移是实测：去掉 4 个显式 `broadcast`
    后，除第 1 条的常量前移外字节不变。
 
-另一条签名上的事实：尾块填**最后一个**声明的形参（spec §4.3），而带默认值的形参可以排在 `body` 之前（`column(gap: 12) { .. }`
+另一条签名上的事实：尾块填**最后一个**声明的形参（spec §4.3），而带默认值的形参可以排在 `body` 之前（`column(gap = 12) { .. }`
 同理），所以 `d_range(lower, upper, step: Int = 1, body)` 与 `d_for(lower, upper, step, unsigned_cmp: Bool = false, body)`
 都能写 `d_range(0, n) { j => .. }`。
 
@@ -5771,7 +5771,7 @@ kernel、89 个变异体），tile.yml 的八个步骤名同步，`run:` 文本�
 段排在字符串段之后、结束字节之前；字符串在写完函数体、全局和 hints 之后才入表，所以有没有 Producer 不会移动别的字符串的下标。
 `vadd_producer.tilebc` 的尾部是 `…dawn-tileir` `07 01 01` `00`。
 
-**二、公开面。** 记录 handler 从不设它；要的人写 `TileProg { ..p, producer: Some(s) }`。文本渲染器不印它，因为 MLIR 文本没有地方放；
+**二、公开面。** 记录 handler 从不设它；要的人写 `TileProg { ..p, producer = Some(s) }`。文本渲染器不印它，因为 MLIR 文本没有地方放；
 能看见它的只有字节和 `tileirdisasm`，设备看不见：`tileirdisasm` 的首行是 `// Producer: <串>`，而 cubin 与不带这一段的同一个程序编出来的
 **逐字节相同**（run.sh 当场再编一份不带段的字节来比，不是拿报告里的话当证据）。
 
@@ -5827,7 +5827,7 @@ tile 输入摘要因此变了：**sm_86 / sm_90 / sm_100 三份台账等 int 立
 （`lower.instr_count`），不等就 panic 并写出两个数：一张与指令对不上的位置表比没有更糟。
 
 **三、公开面。** `DebugInfo = { dir, file, line, col, locs }`，`line` 与 `col` 是 kernel 自己的位置（DISubprogram 的行、函数的 DILoc）。记录 handler 从不设它，文本渲染器不印它；
-要的人写 `TileProg { ..p, debug: Some(d) }`。
+要的人写 `TileProg { ..p, debug = Some(d) }`。
 
 **四、两个 kernel 与三句判词。** `vadd_debug`（就是 `vadd` 换名字再带上 `text_debug`）与 `foldif_debug`（`foldif` 换名字；它有 `for`、`if` / `else`、`continue` 与 `yield`，
 区域嵌套与 `} else {` 那一行就在里面）。`run.sh` 对这两项在通常的文本、字节、汇编之外多做：
@@ -6048,7 +6048,7 @@ pub fn entry_hints(..) / ptr_hints(..) / view_hints(..)   # 全部是带 None �
 pub fn for_arch[H](arch: String, hints: H) -> (String, H)
 ```
 
-`hints:` 的接收者：`trace_kernel`、`trace_calls`、`trace1` 到 `trace5` 收 `ByArch[EntryHints]`；`load`、`store` 收 `ByArch[PtrHints]`；`load_cell`、`load_at`、`store_cell`、`store_sub`、`load_view`、`store_view`、`load_gather`、`store_gather` 收 `ByArch[ViewHints]`。写法：`load_cell(a, hints: [for_arch("sm_86", view_hints(latency: Some(3)))])`。`for_arch` 沿用旧名，改成对记录泛型。
+`hints:` 的接收者：`trace_kernel`、`trace_calls`、`trace1` 到 `trace5` 收 `ByArch[EntryHints]`；`load`、`store` 收 `ByArch[PtrHints]`；`load_cell`、`load_at`、`store_cell`、`store_sub`、`load_view`、`store_view`、`load_gather`、`store_gather` 收 `ByArch[ViewHints]`。写法：`load_cell(a, hints = [for_arch("sm_86", view_hints(latency = Some(3)))])`。`for_arch` 沿用旧名，改成对记录泛型。
 
 录制之后，记录经 `wire_entry` / `wire_ptr` / `wire_view` 变回线上形状 `Hints = List[(String, List[(String, Int)])]`（`allow_tma` 是 0 或 1），后面的 `lower`、`render`、`bytecode` 只认这一种。键在每个架构下按键名排序（`allow_tma` 在 `latency` 前，`num_cta_in_cga` 在 `num_worker_warps_per_cta` 前、`occupancy` 在后），这正是方言打印字典的次序，也让现有 `hint_entry` 的字节不变。所有键都是 `None` 的架构不写出（空字典是「有属性、零条目」，与没有这个属性不是一回事）。
 
@@ -6107,8 +6107,8 @@ scale）只省 4% 到 6%，因为不带 `flush_to_zero` 的 `exp2` 会在 `MUFU.
 
 | 方案 | 写法 | 取舍 |
 |---|---|---|
-| A. 具名参数 | `exp2(x, ftz: true)` | 与刀 K2 已定的 `add(a, b, ftz: true)`、`mul`、`sub`、`div` 同一形状；cuTile Python 是关键字参数 `flush_to_zero=`；一次 grep `ftz: true` 找到所有用处 |
-| B. 选项记录 | `exp2(x, Exp2Opts { ftz: true })` | 为一个字段新增一个类型与一条构造；全仓没有先例；以后 `rsqrt` 等再加属性时要么共用一个记录（字段不全适用）要么每个操作一个记录 |
+| A. 具名参数 | `exp2(x, ftz = true)` | 与刀 K2 已定的 `add(a, b, ftz = true)`、`mul`、`sub`、`div` 同一形状；cuTile Python 是关键字参数 `flush_to_zero=`；一次 grep `ftz: true` 找到所有用处 |
+| B. 选项记录 | `exp2(x, Exp2Opts { ftz = true })` | 为一个字段新增一个类型与一条构造；全仓没有先例；以后 `rsqrt` 等再加属性时要么共用一个记录（字段不全适用）要么每个操作一个记录 |
 
 选 A。K2 的四条理由（`docs/std-defaults-design.md` 7.2，`dev.dawn` 里「the attributes of float arithmetic」一节）原样适用：具名参数比后缀名好 grep，
 操作支持的取值不一致由汇编器拒绝（不是由名字表达），组合没有名字，方言把它们建模成带默认值的属性、cuTile 建模成带默认值的关键字参数。
@@ -6160,9 +6160,9 @@ ms，中位 / p90，每格 200 个样本；误差是与 f64 参考的最大绝�
 
 **测试与负控。**
 
-- `dev`：`k2_surface` 多两项（`exp2(t, ftz: true)` 与 `ftz: false`），记录名分别是 `exp2_ftz` 与 `exp2`；`render`、`bytecode`（flags 位、opcode `0x18`）各一条断言。
+- `dev`：`k2_surface` 多两项（`exp2(t, ftz = true)` 与 `ftz: false`），记录名分别是 `exp2_ftz` 与 `exp2`；`render`、`bytecode`（flags 位、opcode `0x18`）各一条断言。
 - tileinterp 自测一条（`exp2_pair`：次正规结果冲零、最小正规数保留、下溢为零、次正规输入答 1）；tileref 在 `attr_exp2_ref`、`ref_exp2_ftz`、
-  `flash_attn_ref(base2: true)` 上各有断言。
+  `flash_attn_ref(base2 = true)` 上各有断言。
 - 负控（先证明会红）：tileinterp 去掉结果那一冲，`selftest` 的 `exp2 with flush_to_zero ...` 红；tileref 去掉结果那一冲，`attribute references` 那条红
   （`e2[128] == 0.0`）。`tileinterp-diff` 对拍 pass、零不一致，覆盖 176 个 kernel（比改前多 `attr_exp2`）。注意 `attr_exp2` 与 `flash_attn_bf16` 都在容差档，
   去掉冲零后两边的差在容差以内，`tileinterp-diff` 自己分不出，所以这条负控由上面两处的精确断言承担。
@@ -6219,7 +6219,7 @@ ms，中位 / p90，每格 200 个样本；误差是与 f64 参考的最大绝�
 ```
 
 - 实现：`refuse(name, what)` 的 `name` 从 `String` 改为 `Ctx { kernel, at, regions, calls, spans }`（148 处 `refuse(name, ..)` 与 111 处 `refuse_at(name, frames, ops, ..)` 的调用形状**一个字符没动**，只改了 56 个 helper 的形参类型）。handler 里
-  `name` 是一个 `var`，`t_call_enter`/`t_call_exit`/`t_body_enter`/`t_body_exit`/`t_trial_end` 后用 `ctx_now` 重算，所以每个臂里的 `refuse(name, ..)` 自动带当时的位置。`refuse` 用 `panic(msg, at: name.at)` 显式传位置，库内位置不再出现。
+  `name` 是一个 `var`，`t_call_enter`/`t_call_exit`/`t_body_enter`/`t_body_exit`/`t_trial_end` 后用 `ctx_now` 重算，所以每个臂里的 `refuse(name, ..)` 自动带当时的位置。`refuse` 用 `panic(msg, at = name.at)` 显式传位置，库内位置不再出现。
 - 原因在前、说明在后，仍然是为了 tile-golden 变异体：它们按「`kernel … op #k … 原因`」的子串匹配，说明放前面会全断。新增的两段都放在原因之后，所以前缀比对继续通过。
 - **操作数溯源。** `spans[k]` 记每个已结束的 kernel 级调用铸出的句柄区间 `[from, to)`（`t_call_enter` 记起点，`t_call_exit` 补终点，随 `Snap` 一起被 trial 恢复）。拒绝一个操作数（`check_operand`、`check_k`、`check_format`、`tile_row`）时，
   找「最内层、区间含这个句柄、且已结束」的调用，报它的名字与位置：`rhs comes from `mma` at src/main.dawn:27:24`；来源是运算符则报 `rhs comes from the `+` operator`（没有位置）。
@@ -6308,7 +6308,7 @@ sm_100 d64 的 256×64 occupancy=2 cga=2、d128 的 256×128 cga=2。
 这些是 tileiras 13.4.92 的实测悬崖（20–80 倍及寄存器溢出），不是数值错误。
 英文报文通过 `at: Loc = caller()` 指到用户的配置调用行，且有允许边界的正例。
 
-bf16 最终除法改 `div(acc, l, approx: true, ftz: true)`，只允许 f32，与定向舍入互斥；
+bf16 最终除法改 `div(acc, l, approx = true, ftz = true)`，只允许 f32，与定向舍入互斥；
 approx 是方言舍入模式，不加入标准库 `Rounding`（它只表示精确舍入方向）。
 解释器以正确舍入的除法作为容差参考，ftz 冲输入与输出；真卡最大绝对误差与相对误差必须通过现有对拍界限。
 f64 继续精确除法。f64 缩块的根因是 tileiras 不将 f64 MMA 降成 DMMA：研究的 SASS 中 DMMA 为 0，

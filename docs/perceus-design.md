@@ -606,7 +606,7 @@ leak 模式时就地写并原样交回，否则照旧复制、末尾把消费掉
    jump 时拒绝。
 
 第四件之外还有一件不在编译器里：`std/hamt` 的 `assoc` 原来写作
-`Hamt { ..m, root: node_put(m.root, …) }`——字段读取内联在一个大表达式里，`m` 活到
+`Hamt { ..m, root = node_put(m.root, …) }`——字段读取内联在一个大表达式里，`m` 活到
 表达式末，把整条 spine 钉在 rc 2。分析是**语句粒度**的，切不进一个表达式中间；
 把字段先落成绑定（`let root = m.root` …），sweep 就有缝可下。这是「源码形状影响
 复用」的第一个实例，记在这儿当先例：**热路径上的记录更新要写成字段绑定式**。
@@ -852,7 +852,7 @@ check `checker.dawn`，`DAWN_RC_STATS=1` + 逐调用点插桩 + rc 直方图 + a
   `std/hamt.node_put`（45.4%，占全部拷贝的 99.57%）、`std/hamt.coll_put`（0%，150 次）。
 - **34,952 次失败里 rc > 2 的真多版本共享为零**：失败时头部 rc 恒等于 2，缓冲区恒唯一。
   整个 17% 都是分析或源形状把所有权白白交了出去，不是程序在真共享。
-- 失败两族：**约 49% 是 record-spread 钉根**（`Cx { ..cx, syms: map.insert(cx.syms, …) }`
+- 失败两族：**约 49% 是 record-spread 钉根**（`Cx { ..cx, syms = map.insert(cx.syms, …) }`
   这一形状，四个零唯一调用点占 79.6%，47 字段的 `Cx` 每次更新还多付 45 个 dup；§6.1 末
   「投影提升成 let」的缓办修法即此，公开 issue #30）；**39% 是下降钉父**（`node_put` 用
   `array_get`+dup 而不是 `pvec` 的 `array_steal`，改生成 C 验证方向 +3,984 就地，issue #31）。

@@ -65,9 +65,9 @@ fn agrees_with_cold(prog: Program, input: LoadResult, std: StdCtx) -> Bool !Fs !
 test "module memo reuses a step whose input and what it read are unchanged" {
   io.with_fs_real(() => io.with_env_real(() => {
     let std = std_ctx()
-    let a = source("a", "pub type Box = { n: Int }\npub fn make() -> Box = Box { n: 1 }\n")
+    let a = source("a", "pub type Box = { n: Int }\npub fn make() -> Box = Box { n = 1 }\n")
     let b = source("b", "pub type Other = { n: Int }\n")
-    let c = source("c", "use a.{Box}\npub fn value() -> Box = Box { n: 1 }\n")
+    let c = source("c", "use a.{Box}\npub fn value() -> Box = Box { n = 1 }\n")
     let d = source("d", "pub fn extra() -> Int = 4\n")
     let loaded = LoadResult { modules = [a, b, c], diags = [] }
     let fresh = incremental.new(std, ct_default(), jsig_refused(), 10)
@@ -79,8 +79,8 @@ test "module memo reuses a step whose input and what it read are unchanged" {
     assert warm.stats.reused_modules == 3
     assert warm.stats.checked_modules == 0
     assert warm.stats.comptime_modules == 0
-    let edited_c = source("c", "use a.{Box}\npub fn value() -> Box = Box { n: 2 }\n")
-    let body = source("a", "pub type Box = { n: Int }\npub fn make() -> Box = Box { n: 2 }\n")
+    let edited_c = source("c", "use a.{Box}\npub fn value() -> Box = Box { n = 2 }\n")
+    let body = source("a", "pub type Box = { n: Int }\npub fn make() -> Box = Box { n = 2 }\n")
     let signature = source("a", "pub type Box = { n: Int }\npub fn make() -> Int = 2\n")
     let moved = source("a", "# moved\n\n" ++ a.text)
     let edits = [
@@ -267,13 +267,13 @@ test "module memo checks an importer again when a surface changes only in what i
     let std = std_ctx()
     # d names nothing of b, yet reads b's type through a's surface, which
     # carries the tables a grafted from b
-    let b = source("b", "pub type Shape = { n: Int }\npub fn shape() -> Shape = Shape { n: 1 }\n")
+    let b = source("b", "pub type Shape = { n: Int }\npub fn shape() -> Shape = Shape { n = 1 }\n")
     let a = source("a", "use b.{Shape, shape}\npub fn make() -> Shape = shape()\n")
     let d = source("d", "use a\npub fn size() -> Int = a.make().n\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
       LoadResult { modules = [b, a, d], diags = [] })
     assert len(warm.program.diags) == 0
-    let renamed = source("b", "pub type Shape = { m: Int }\npub fn shape() -> Shape = Shape { m: 1 }\n")
+    let renamed = source("b", "pub type Shape = { m: Int }\npub fn shape() -> Shape = Shape { m = 1 }\n")
     let input = LoadResult { modules = [renamed, a, d], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert result.stats.reused_modules == 0
@@ -343,7 +343,7 @@ test "module memo checks an importer again when an effect it lists changes an op
     # signature lives under its own name in the surface; its type is also a
     # field of the effect's evidence record, but a parameter's name is not
     let lib = source("lib", "pub effect Ask { fn ask(k: Int) -> Int }\npub fn spare() -> Int = 0\n")
-    let user = source("user", "use lib.{Ask}\npub fn get() -> Int !Ask = ask(k: 2) + 1\n")
+    let user = source("user", "use lib.{Ask}\npub fn get() -> Int !Ask = ask(k = 2) + 1\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
       LoadResult { modules = [lib, user], diags = [] })
     assert len(warm.program.diags) == 0
@@ -389,13 +389,13 @@ test "module memo checks a selective importer again when the types its names men
     let std = std_ctx()
     # d lists only `make`, whose signature is the same before and after; the
     # type it returns is in the tables a grafted from b
-    let b = source("b", "pub type Shape = { n: Int }\npub fn shape() -> Shape = Shape { n: 1 }\n")
+    let b = source("b", "pub type Shape = { n: Int }\npub fn shape() -> Shape = Shape { n = 1 }\n")
     let a = source("a", "use b.{Shape, shape}\npub fn make() -> Shape = shape()\n")
     let d = source("d", "use a.{make}\npub fn size() -> Int = make().n\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
       LoadResult { modules = [b, a, d], diags = [] })
     assert len(warm.program.diags) == 0
-    let renamed = source("b", "pub type Shape = { m: Int }\npub fn shape() -> Shape = Shape { m: 1 }\n")
+    let renamed = source("b", "pub type Shape = { m: Int }\npub fn shape() -> Shape = Shape { m = 1 }\n")
     let input = LoadResult { modules = [renamed, a, d], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert result.stats.reused_modules == 0
@@ -410,7 +410,7 @@ test "module memo checks an importer again when what it uses without naming chan
     let std = std_ctx()
     # `app` lists `mk` alone and still reads `Box`'s impls through `show`
     # and its constructors through a field access; neither goes by a name
-    let text = "pub type Box = { n: Int } derive Show\npub fn mk(n: Int) -> Box = Box { n: n }\n"
+    let text = "pub type Box = { n: Int } derive Show\npub fn mk(n: Int) -> Box = Box { n = n }\n"
     let lib = source("lib", text ++ "pub fn spare() -> Int = 0\n")
     let app = source("app", "use lib.{mk}\npub fn shown() -> String = show(mk(1))\npub fn n() -> Int = mk(2).n\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
@@ -418,9 +418,9 @@ test "module memo checks an importer again when what it uses without naming chan
     assert len(warm.program.diags) == 0
     let edits = [
       # the derived impl goes
-      (source("lib", "pub type Box = { n: Int }\npub fn mk(n: Int) -> Box = Box { n: n }\npub fn spare() -> Int = 0\n"), 2),
+      (source("lib", "pub type Box = { n: Int }\npub fn mk(n: Int) -> Box = Box { n = n }\npub fn spare() -> Int = 0\n"), 2),
       # the type's field is renamed
-      (source("lib", "pub type Box = { m: Int } derive Show\npub fn mk(n: Int) -> Box = Box { m: n }\npub fn spare() -> Int = 0\n"), 2),
+      (source("lib", "pub type Box = { m: Int } derive Show\npub fn mk(n: Int) -> Box = Box { m = n }\npub fn spare() -> Int = 0\n"), 2),
       # a name it does not list, and nothing it uses implicitly
       (source("lib", text ++ "pub fn spare(k: Int = 0) -> Int = k\n"), 1)
     ]
@@ -461,7 +461,7 @@ test "module memo checks a module again when the impl table changes, whatever it
     # and r's surface, which carries p's type but not p's impls, does not
     # change when the impl goes
     let p = source("p", "pub type Tag = { n: Int }\nimpl Show[Tag] { fn show(t: Tag) -> String = \"tag\" }\n")
-    let r = source("r", "use p.{Tag}\npub fn tag() -> Tag = Tag { n: 1 }\n")
+    let r = source("r", "use p.{Tag}\npub fn tag() -> Tag = Tag { n = 1 }\n")
     let q = source("q", "use r\npub fn shown() -> String = show(r.tag())\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
       LoadResult { modules = [p, r, q], diags = [] })
@@ -554,8 +554,8 @@ test "module memo keeps an importer's step across an edit above an impl or a der
       "pub type Box = { n: Int } derive Show\n" ++
       "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\n"
     let lib = source("lib", text)
-    let app = source("app", "use lib.{Box, sizey}\npub fn size() -> Int = sizey(Box { n: 1 })\n" ++
-        "pub fn same() -> Bool = Box { n: 1 } == Box { n: 2 }\n")
+    let app = source("app", "use lib.{Box, sizey}\npub fn size() -> Int = sizey(Box { n = 1 })\n" ++
+        "pub fn same() -> Bool = Box { n = 1 } == Box { n = 2 }\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
       LoadResult { modules = [lib, app], diags = [] })
     assert len(warm.program.diags) == 0
@@ -730,10 +730,10 @@ test "module memo keeps the importers of a module that fails to parse on the hea
     # not import lib but comes after it, so it reads the impl table lib adds to
     let base = source("base", "pub type Tag = { n: Int }\n")
     let head = "use base.{Tag}\npub type Box = { n: Int }\npub trait Sizey[T] { fn sizey(x: T) -> Int }\n" ++
-      "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\npub fn wrap(t: Tag) -> Box = Box { n: t.n }\n" ++
+      "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\npub fn wrap(t: Tag) -> Box = Box { n = t.n }\n" ++
       "pub fn value() -> Int = 1\n"
     let lib = source("lib", head ++ "fn helper() -> Int = {\n  let x = 1\n  x\n}\n")
-    let user = source("user", "use base.{Tag}\nuse lib.{Box, wrap}\npub fn make() -> Box = wrap(Tag { n: 1 })\n")
+    let user = source("user", "use base.{Tag}\nuse lib.{Box, wrap}\npub fn make() -> Box = wrap(Tag { n = 1 })\n")
     let whole = source("whole", "use lib\npub fn total() -> Int = lib.value()\n")
     let far = source("far", "pub type Far = { n: Int }\npub fn far() -> Int = 3\n")
     let loaded = LoadResult { modules = [base, lib, user, whole, far], diags = [] }
@@ -802,7 +802,7 @@ test "module memo checks the importer of a declaration a parse failure dropped a
     # recovered tree calls unknown: an artifact of recovery, not reported.
     # user lists the type, so it is checked again and reports it missing,
     # as the cold path does.
-    let tail = "pub fn pair() -> Pair = Pair { a: 1, b: 2 }\npub fn value() -> Int = 1\n"
+    let tail = "pub fn pair() -> Pair = Pair { a = 1, b = 2 }\npub fn value() -> Int = 1\n"
     let lib = source("lib", "pub type Pair = { a: Int, b: Int }\n" ++ tail)
     let user = source("user", "use lib.{Pair, pair}\npub fn first() -> Pair = pair()\npub fn a() -> Int = first().a\n")
     let other = source("other", "use lib.{value}\npub fn twice() -> Int = value() * 2\n")

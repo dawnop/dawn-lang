@@ -72,7 +72,7 @@ note: expected `}` before the end of the file
 ## 4. LSP：`relatedInformation`
 
 - client 在 `initialize` 的 `capabilities.textDocument.publishDiagnostics.relatedInformation` 为 `true` 时，
-  每条 note 出一个 `DiagnosticRelatedInformation { location: { uri, range }, message }`，`uri` 就是诊断自己的 URI
+  每条 note 出一个 `DiagnosticRelatedInformation { location = { uri, range }, message }`，`uri` 就是诊断自己的 URI
   （同文件，见 §2），`range` 用与主 range 同一个 `jrange`（UTF-16 列）。VS Code 的 `vscode-languageclient`
   声明此能力，问题面板里 note 可点。
 - client 没声明时**不发**该字段（LSP 3.17 把它定义为 client 能力，未声明即不保证能解析），而是把 note 折进

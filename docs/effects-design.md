@@ -838,7 +838,7 @@ FAIL: run argv boundary contract
 **表 handler 与第一个客户（原刀 2 的地基，与这一刀同批，因为它就是开这条缝的理由）**：
 `compiler-plan/src/consolemem.dawn` 的
 `with_console_table[T, !e](body: fn() -> T !Console !e) -> (T, List[ConsoleWrite]) !e`
-把每一次写记成 `ConsoleWrite { stream: Stdout | Stderr, text, ends_line }`，**换行与文本分开记**，
+把每一次写记成 `ConsoleWrite { stream = Stdout | Stderr, text, ends_line }`，**换行与文本分开记**，
 因为「去了哪个流、有没有结束这一行」正是一条臂要做对的事，也正是一份拼好的记录会藏起来的事；
 要字节的调用者问 `out_text` / `err_text`。`exitmem.dawn` 的
 `with_exit_capture[!e](body: fn() -> Unit !Exit !e) -> Option[Int] !e` 用 `ctl` 臂不恢复，

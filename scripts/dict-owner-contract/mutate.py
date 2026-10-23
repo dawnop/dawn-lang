@@ -38,7 +38,7 @@ MUTATIONS = {
         "let key = dict_key(tid, subject)",
     ),),
     # The constructor records no arguments at all.
-    "constructor-arity": ((LOWER, "nargs: nargs,", "nargs: 0,"),),
+    "constructor-arity": ((LOWER, "nargs = nargs,", "nargs = 0,"),),
     "bridge-shape": (drop_shape_suffix("bridge"),),
     "prim-shape": (drop_shape_suffix("prim"),),
 }
