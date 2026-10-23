@@ -25,8 +25,8 @@ safety condition of the research report's §3.3 that a fixture can hold
                         the import list, a qualified call, a pipe and UFCS
   7 std and [deps]      a std function, a builtin and a [deps] package's
                         function are refused at prepareRename
-  8 record puns         the field side spells `{ x }` out as `{ col: x }`, the
-                        local side as `{ x: v }`, in a construction and a pattern
+  8 record puns         the field side spells `{ x }` out as `{ col = x }`, the
+                        local side as `{ x = v }`, in a construction and a pattern
   9 named arguments     a parameter's `by: 3` at a call follows it
   10 trait methods      the trait's method, the impl's and the call
   11 operations         the declaration, the call and the handler arm
@@ -316,12 +316,12 @@ CASES = [
     # 8, 13
     ("record pun, field side: spelled out where it puns", "geo.dawn", "x: Int, y", 0, "col", [
         "geo.dawn 1:54 x -> col", "geo.dawn 4:20 x -> col", "geo.dawn 9:52 x -> col",
-        "geo.dawn 9:57 x -> col", "geo.dawn 13:11 x -> col: x", "geo.dawn 18:13 x -> col: x",
+        "geo.dawn 9:57 x -> col", "geo.dawn 13:11 x -> col = x", "geo.dawn 18:13 x -> col = x",
         "geo.dawn 26:32 x -> col"]),
     ("record pun, local side: a let a construction puns", "geo.dawn", "let y", 4, "yy", [
-        "geo.dawn 12:7 y -> yy", "geo.dawn 13:14 y -> y: yy"]),
+        "geo.dawn 12:7 y -> yy", "geo.dawn 13:14 y -> y = yy"]),
     ("record pun, local side: a binder a pattern puns", "geo.dawn", "{ x, y: _ }", 2, "v", [
-        "geo.dawn 18:13 x -> x: v", "geo.dawn 18:26 x -> v"]),
+        "geo.dawn 18:13 x -> x = v", "geo.dawn 18:26 x -> v"]),
     # 10
     ("trait method: the trait's, the impl's and the call", "main.dawn", "area(q)", 0, "size", [
         "geo.dawn 22:6 area -> size", "geo.dawn 26:6 area -> size",

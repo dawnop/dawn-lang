@@ -535,6 +535,19 @@ fn is_chain_link(toks: List[Token], nls: List[Int], marks: Marks, j: Int) -> Boo
     (p.kind == BANG && set.has(marks.postfix, p.lo))
 }
 
+## `name = {` after a list opener or comma is a value slot. A declaration's
+## `let x: Type = {` must keep its statement anchor when the type wraps.
+fn equals_field_brace(toks: List[Token], at: Int) -> Bool = {
+  var before: List[TokKind] = []
+  var i = at - 1
+  while i >= 0 && len(before) < 3 {
+    if toks[i].kind != COMMENT { before = before ++ [toks[i].kind] }
+    i = i - 1
+  }
+  len(before) == 3 && before[0] == EQ && before[1] == IDENT &&
+    (before[2] == COMMA || before[2] == LPAREN || before[2] == LBRACE)
+}
+
 ## The chain links to break on the physical line whose first token is `toks[i]`
 ## and which prints at `indent` levels, added to `folds`.
 ##
@@ -770,7 +783,7 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
     # and a record field's `b: {` where the field is written
     let kw_brace = t.kind == LBRACE && have_prev_code &&
       (prev_code.kind == RETURN || prev_code.kind == COMPTIME || prev_code.kind == BREAK ||
-          prev_code.kind == COLON)
+          prev_code.kind == COLON || equals_field_brace(toks, i))
     let guard_brace = t.kind == LBRACE && have_prev_code && prev_code.kind == ARROW
     # `({` with the `(` opening its own line inside a header's condition: the
     # block is part of that header, so it follows the header's line
@@ -1812,6 +1825,14 @@ test "a block follows the line its own construct starts on" {
 test "a guard's arm, a record field and a grouped block anchor to their own construct" {
   let a = "fn f(x: Option[Int]) -> Int = {\n  match x {\n    Some(\n      n) if (\n        n >\n          3) -> {\n      let a = 1\n      a\n    }\n    _ -> 0\n  }\n}\n\nfn g() -> Int = {\n  if (false) {\n    var v:\n      R =\n      R { a:\n          s(\n            \"x\"), b: {\n              let w = 1\n              w\n            } }\n  }\n  trace = trace ++ [(if (\n    ({\n    if (true) { return 1 }\n    true\n  })) { 1 } else { 2 })]\n  1\n}\n"
   assert fmt_of(a) == a
+}
+
+test "formatting preserves both value separators and anchors equals field blocks" {
+  assert fmt_of("fn f() = g(a:1, b=2)\n") == "fn f() = g(a: 1, b = 2)\n"
+  assert fmt_of("fn f() = P { x:1, y=2 }\n") == "fn f() = P { x: 1, y = 2 }\n"
+  let a = "fn f() = {\n  let p = P { a =\n      g(\n        1), b = {\n          let v = 2\n          v\n        } }\n  p\n}\n"
+  assert fmt_of(a) == a
+  assert fmt_of(fmt_of(a)) == a
 }
 
 # ---- chain folding ----

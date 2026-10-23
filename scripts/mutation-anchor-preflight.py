@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 ADAPTERS = {
+    "named-arg-migrate": (".",),
     "bitwise-contract": (".",),
     "atomic-write-contract": (".",),
     "bootstrap-input-manifest-contract": ("compiler-plan/src/source.dawn",),

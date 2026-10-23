@@ -6689,6 +6689,27 @@ test "signature help carries the function's doc, whole, and nothing without one"
   })))
 }
 
+test "both value separators retain named signature help and argument completion" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let st0 = def_probe_state(std_for_probe())
+    for separator in [":", "="] {
+      let text = "fn pick(a: Int, b: Int) -> Int = a + b\n" ++
+        "fn probe() -> Int = {\n  let answer = 1\n  pick(b" ++ separator ++
+        " 2, a" ++ separator ++ " answer)\n}\n"
+      let d = def_probe_doc_named(st0, "separators.dawn", text)
+      let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+      let (reply, _) = handle_signature_help(st, d7_params(d, "b" ++ separator ++ " 2", 3))
+      assert get_or_null(reply, "activeParameter") == JInt(1)
+      let item = d7_item_in(handle_completion(st, d7_params(d, "a" ++ separator ++ " answer", 3)), "answer")
+      assert ostr(item, "label") == "answer"
+      match get_or_null(reply, "signatures") {
+        JArr(sigs) -> { assert ostr(sigs[0], "label") == "fn pick(a: Int, b: Int) -> Int" }
+        _ -> { assert false }
+      }
+    }
+  })))
+}
+
 test "hover on a use line: the module's doc on its path, a name's on the name" {
   io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
     let st = def_probe_state(d7_probe_std())
@@ -6981,12 +7002,12 @@ test "inlay hints: parameter names are off unless asked for, and hide what the c
       ]))]))]))
     }
     # `width` is passed to `width`, so only `s` and `fill` are named
-    assert inlay_probe(st, d, 21, 0, 21, 99) == ["let cut = pad(«s: »p, width, «fill: »b)"]
+    assert inlay_probe(st, d, 21, 0, 21, 99) == ["let cut = pad(«s = »p, width, «fill = »b)"]
     # one argument: no names; the effect hint is still on
     assert inlay_probe(st, d, 13, 0, 13, 99) == ["let text = io.read_file(p)« !Fs»"]
     # `letTypes: false` turned the let hints off and left the lambda's; the
     # lambda is an argument like any other
-    assert inlay_probe(st, d, 16, 0, 16, 99) == ["let xs = map(«xs: »[1, 2], «f: »x«: Int» => x + n)"]
+    assert inlay_probe(st, d, 16, 0, 16, 99) == ["let xs = map(«xs = »[1, 2], «f = »x«: Int» => x + n)"]
   }))
 }
 
@@ -7071,30 +7092,30 @@ test "inlay hints: a left-out default shows its written text, after the last arg
     let d = def_probe_doc_named(st, "defaults.dawn", defaults_probe_text())
     let got = defaults_probe(st, d)
     # by position, and with nothing written: the hint opens the parentheses
-    assert list.contains(got, "let a = pad(s, 4«, fill: \" \"»)")
-    assert list.contains(got, "let b = zero(«n: 0, m: 1»)")
+    assert list.contains(got, "let a = pad(s, 4«, fill = \" \"»)")
+    assert list.contains(got, "let b = zero(«n = 0, m = 1»)")
     # named out of order, and a default left out between written ones
-    assert list.contains(got, "let c = pad(width: 4, s: \"x\"«, fill: \" \"»)")
-    assert list.contains(got, "let d = mid(s, last: 2«, gap: 1»)")
+    assert list.contains(got, "let c = pad(width: 4, s: \"x\"«, fill = \" \"»)")
+    assert list.contains(got, "let d = mid(s, last: 2«, gap = 1»)")
     # a trailing block fills the last parameter; the hint stays in the parentheses
-    assert list.contains(got, "each([1]«, step: 1») { n =>")
+    assert list.contains(got, "each([1]«, step = 1») { n =>")
     # UFCS: the receiver fills the first parameter
-    assert list.contains(got, "let e = s.pad(4«, fill: \" \"»)")
+    assert list.contains(got, "let e = s.pad(4«, fill = \" \"»)")
     # std, module-qualified; a default that reads an earlier parameter is the
     # callee's text, `s` being `find`'s own
-    assert list.contains(got, "let f = str.pad_start(s, 4«, pad: \" \"»)")
-    assert list.contains(got, "let g = cursor.find(s, \"a\"«, from: start(s)»)")
+    assert list.contains(got, "let f = str.pad_start(s, 4«, pad = \" \"»)")
+    assert list.contains(got, "let g = cursor.find(s, \"a\"«, from = start(s)»)")
     # a pipe's argument is outside the parentheses; with none, the hint brings its own
-    assert list.contains(got, "let h = \"x\" |> pad(2«, fill: \" \"»)")
-    assert list.contains(got, "let i = 5 |> zero«(m: 1)»")
+    assert list.contains(got, "let h = \"x\" |> pad(2«, fill = \" \"»)")
+    assert list.contains(got, "let i = 5 |> zero«(m = 1)»")
     # past the bound the text is elided, the argument still shown
-    assert list.contains(got, "let j = wordy(1«, why: …»)")
+    assert list.contains(got, "let j = wordy(1«, why = …»)")
     # nothing left out, nothing shown
     assert not list.any(got, l => str.contains(l, "let k ") || str.contains(l, "let l "))
     # a `caller()` default is the site of the call being read, so it is never
     # shown, for a user's function or a builtin's `at`
     assert not list.any(got, l => str.contains(l, "let m "))
-    assert list.contains(got, "let n = both(1«, k: 2»)")
+    assert list.contains(got, "let n = both(1«, k = 2»)")
     assert len(got) == 12
   }))
 }
@@ -7115,7 +7136,7 @@ test "inlay hints: a left-out default is a parameter hint with no padding, and c
     match handle_inlay_hint(st1, params) {
       JArr(hs) -> {
         assert len(hs) == 1
-        assert get_or_null(hs[0], "label") == JStr("n: 0, m: 1")
+        assert get_or_null(hs[0], "label") == JStr("n = 0, m = 1")
         assert get_or_null(hs[0], "kind") == JInt(2)
         assert get_or_null(hs[0], "paddingLeft") == JNull
         assert get_or_null(hs[0], "paddingRight") == JNull
@@ -7204,21 +7225,21 @@ test "inlay hints: a left-out default shows its value where it folds, else its t
     let got = defaults_probe(st, d)
     # a constant, an expression over a call and an interpolation, all left
     # out; the written argument is an outer local none of them reads
-    assert list.contains(got, "let a = sep(s«, gap: 4, wide: 9, tag: \"<4>\"»)")
+    assert list.contains(got, "let a = sep(s«, gap = 4, wide = 9, tag = \"<4>\"»)")
     # a named argument given, the defaults around it still folded
-    assert list.contains(got, "let b = sep(s, wide: 2«, gap: 4, tag: \"<4>\"»)")
+    assert list.contains(got, "let b = sep(s, wide: 2«, gap = 4, tag = \"<4>\"»)")
     # a default that reads an earlier parameter folds with the call's value
     # of it, the left-out one's or the written one's
-    assert list.contains(got, "let c = span(«lo: 1, hi: 10»)")
-    assert list.contains(got, "let d = span(lo: 5«, hi: 14»)")
+    assert list.contains(got, "let c = span(«lo = 1, hi = 10»)")
+    assert list.contains(got, "let d = span(lo: 5«, hi = 14»)")
     # ... and is refused when that value is an outer local's: the text
-    assert list.contains(got, "let e = span(lo: len(s)«, hi: lo + 9»)")
+    assert list.contains(got, "let e = span(lo: len(s)«, hi = lo + 9»)")
     # past the depth budget the fold is refused: the text
-    assert list.contains(got, "let f = slow(1«, k: spin(5000)»)")
+    assert list.contains(got, "let f = slow(1«, k = spin(5000)»)")
     # a value that repeats its text, and one too long to show: the text
-    assert list.contains(got, "let g = listed(1«, xs: [1, 2, 3], ys: str.repeat(\"ab\", 20)»)")
+    assert list.contains(got, "let g = listed(1«, xs = [1, 2, 3], ys = str.repeat(\"ab\", 20)»)")
     # UFCS: the receiver fills `s`, which no default reads
-    assert list.contains(got, "let h = s.sep(gap: 1«, wide: 9, tag: \"<4>\"»)")
+    assert list.contains(got, "let h = s.sep(gap: 1«, wide = 9, tag = \"<4>\"»)")
     assert len(got) == 8
   }))
 }
@@ -7234,8 +7255,8 @@ test "inlay hints: left-out default values can be turned off, leaving the text" 
       ]))]))]))
     }
     let got = defaults_probe(off, d)
-    assert list.contains(got, "let a = sep(s«, gap: GAP, wide: twice(GAP) + 1, tag: \"<\${GAP}>\"»)")
-    assert list.contains(got, "let c = span(«lo: 1, hi: lo + 9»)")
+    assert list.contains(got, "let a = sep(s«, gap = GAP, wide = twice(GAP) + 1, tag = \"<\${GAP}>\"»)")
+    assert list.contains(got, "let c = span(«lo = 1, hi = lo + 9»)")
     assert len(got) == 8
   }))
 }
@@ -7260,7 +7281,7 @@ test "inlay hints: a module-qualified call that leaves out its first parameter h
       ""
     ], "\n")
     let d = def_probe_doc_named(st, "dfltuser.dawn", text)
-    assert defaults_probe(st, d) == ["fn r() -> Int = df.span(«lo: 0, hi: 9») + df.span(hi: 3«, lo: 0»)"]
+    assert defaults_probe(st, d) == ["fn r() -> Int = df.span(«lo = 0, hi = 9») + df.span(hi: 3«, lo = 0»)"]
   }))
 }
 
@@ -7446,7 +7467,7 @@ test "bitwise operators retain operand navigation rename and evaluated values" {
       }
       (Err(why), _) -> panic("bitwise operand rename refused: ${why}")
     }
-    assert str.contains(eval_probe_at(st, d, text, "3 } << 2).value", 4), "value: 12")
+    assert str.contains(eval_probe_at(st, d, text, "3 } << 2).value", 4), "value = 12")
     assert not str.contains(eval_probe_at(st, d, text, "77 } | LoggedBits", 5), " = ")
   }))
 }

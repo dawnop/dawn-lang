@@ -1387,7 +1387,7 @@ bad = 0
 if jvm != native:
     print("FAIL: default argument hints: jvm %r, native %r" % (jvm, native))
     bad = 1
-want = [', gap: 4, wide: 9, tag: "<4>"', ", hi: 14", ", k: 1400", ", k: down(1600)"]
+want = [', gap = 4, wide = 9, tag = "<4>"', ", hi = 14", ", k = 1400", ", k = down(1600)"]
 if jvm != want:
     print("FAIL: default argument hints on jvm: %r, expected %r" % (jvm, want))
     bad = 1

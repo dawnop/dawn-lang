@@ -18,7 +18,7 @@
 #
 # Why a record pun is spelled out rather than refused: `Point { x }` is one
 # span naming the field and the local. Renaming either half keeps the other
-# half's spelling, `Point { x: x2 }` or `Point { x2: x }`, which is what
+# half's spelling, `Point { x = x2 }` or `Point { x2 = x }`, which is what
 # rust-analyzer and Gleam write too. Folding a pair back into a pun when the
 # two names meet again is left to the writer, as formatting is.
 
@@ -90,10 +90,10 @@ pub(pkg) fn name_edit(path: String, lo: Int, hi: Int, pun: PunSide, old: String,
   let o = cps_len(old)
   match pun {
     NotPun -> Edit { path: path, lo: lo, hi: hi, text: new, name: (0, n), rest: None }
-    # the field is renamed; the local keeps its name: `Point { x2: x }`
-    PunField -> Edit { path: path, lo: lo, hi: hi, text: "${new}: ${old}", name: (0, n), rest: Some((n + 2, n + 2 + o)) }
-    # the local is renamed; the field keeps its name: `Point { x: x2 }`
-    PunLocal -> Edit { path: path, lo: lo, hi: hi, text: "${old}: ${new}", name: (o + 2, o + 2 + n), rest: Some((0, o)) }
+    # the field is renamed; the local keeps its name: `Point { x2 = x }`
+    PunField -> Edit { path: path, lo: lo, hi: hi, text: "${new} = ${old}", name: (0, n), rest: Some((n + 3, n + 3 + o)) }
+    # the local is renamed; the field keeps its name: `Point { x = x2 }`
+    PunLocal -> Edit { path: path, lo: lo, hi: hi, text: "${old} = ${new}", name: (o + 3, o + 3 + n), rest: Some((0, o)) }
   }
 }
 
@@ -306,13 +306,22 @@ test "a new name keeps the old one's case class and is never a keyword" {
 test "a pun spelled out keeps the half that is not renamed" {
   let text = "fn f() = Point {x}"
   let e = name_edit("a", 16, 17, PunField, "x", "col")
-  assert apply_edits(text, [e]) == "fn f() = Point {col: x}"
+  assert apply_edits(text, [e]) == "fn f() = Point {col = x}"
   let l = name_edit("a", 16, 17, PunLocal, "x", "v")
-  assert apply_edits(text, [l]) == "fn f() = Point {x: v}"
+  assert apply_edits(text, [l]) == "fn f() = Point {x = v}"
   # the local's site was the pun; it is now the half the local kept
   let ixs = edit_index(map.insert(map.empty(), "a", [e]))
-  assert forward_key(ixs, Key { path: "a", def: (16, 17) }, false) == Key { path: "a", def: (21, 22) }
+  assert forward_key(ixs, Key { path: "a", def: (16, 17) }, false) == Key { path: "a", def: (22, 23) }
   assert forward_key(ixs, Key { path: "a", def: (16, 17) }, true) == Key { path: "a", def: (16, 19) }
+}
+
+test "a spelled out pun measures both halves in code points" {
+  let e = name_edit("a", 3, 5, PunField, "x𐐨", "xx𐐨")
+  assert e.name == (0, 3)
+  assert e.rest == Some((6, 8))
+  assert apply_edits("P {x𐐨}", [e]) == "P {xx𐐨 = x𐐨}"
+  let ix = edit_index(map.insert(map.empty(), "a", [e]))
+  assert forward_key(ix, Key { path: "a", def: (3, 5) }, false) == Key { path: "a", def: (9, 11) }
 }
 
 test "positions move with the edits before them" {

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 67e9252d44eca7e1 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 3801e7069072c336 -->
 
 # Dawn 教程
 
@@ -261,7 +261,7 @@ pub fn main() -> Unit !io = {
 }
 ```
 ```output
-Point { x: 11.0, y: 2.0 }
+Point { x = 11.0, y = 2.0 }
 ```
 
 
@@ -810,7 +810,7 @@ true
 pear
 [1, 2, 3]
 ["pawn", "queen"]
-Some(Card { rank: 3, name: "queen" })
+Some(Card { rank = 3, name = "queen" })
 ```
 
 配套的列表函数都是稳定排序、平局取第一个：`sort`/`max`/`min` 要求元素有 `Ord`，

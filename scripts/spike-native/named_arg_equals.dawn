@@ -1,0 +1,28 @@
+# Both backends must preserve written-order arguments, dependent defaults and
+# base-before-fields updates when the value separator is an equals sign.
+use std/io
+
+type P = { x: Int, y: Int }
+type Pair = Pair(x: Int, y: Int)
+
+fn tap(label: String, value: Int) -> Int !io = {
+  io.println(label)
+  value
+}
+
+fn base() -> P !io = {
+  io.println("base")
+  P { x = 0, y = 0 }
+}
+
+fn combine(a: Int, b: Int = a + 1, c: Int = b + 1) -> Int = a * 100 + b * 10 + c
+
+pub fn main() -> Unit !io = {
+  io.println(to_string(combine(c = tap("c", 3), a = tap("a", 1))))
+  let p = P { ..base(), y = tap("y", 7), x = tap("x", 6) }
+  let P { x, y = n } = p
+  io.println(to_string(x * 10 + n))
+  let pair = Pair(y = 2, x = 1)
+  io.println(to_string(match pair { Pair(y = b, x = a) -> a * 10 + b }))
+  io.println(to_string(7.combine(c = tap("c2", 3), b = tap("b2", 2))))
+}
