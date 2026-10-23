@@ -8,7 +8,7 @@
 // A link with no `view` opens as it always did, so there is nothing to
 // migrate. What is picked is not in the URL, for the reason the static page
 // gives: it is a reading position, not a thing to share.
-import { readView, type XView } from './explorer-core'
+import { readView, type XView, type XCall } from './explorer-core'
 
 export type Target = 'c' | 'jvm' | 'tile'
 
@@ -70,15 +70,15 @@ export interface TileText {
 }
 
 export type Outcome =
-  | { kind: 'ok'; view: XView; cached: boolean; ms: number }
-  | { kind: 'tile'; tile: TileText; cached: boolean; ms: number }
+  | { kind: 'ok'; view: XView; build: string; cached: boolean; ms: number }
+  | { kind: 'tile'; tile: TileText; build: string; cached: boolean; ms: number }
   | { kind: 'diagnostics'; text: string }
   // the Tile IR program compiled and then failed or ran out of time
   | { kind: 'program'; title: string; text: string }
   | { kind: 'busy' }
   | { kind: 'too-long' }
   | { kind: 'too-large' }
-  | { kind: 'unavailable'; tile: boolean }
+  | { kind: 'unavailable'; target: Target; detail: string }
   | { kind: 'unreadable' }
   | { kind: 'failed'; status: number; detail: string }
 
@@ -114,7 +114,7 @@ export function classify(status: number, body: unknown, target: Target): Outcome
   if (status === 429) return { kind: 'busy' }
   if (status === 413) return { kind: 'too-long' }
   if (status === 422) return { kind: 'too-large' }
-  if (status === 503) return { kind: 'unavailable', tile: target === 'tile' }
+  if (status === 503) return { kind: 'unavailable', target, detail: detailOf(body) }
   const o = typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : null
   if (status === 200 && o && o.ok === false && o.phase === 'compile') {
     return { kind: 'diagnostics', text: detailOf(o) }
@@ -126,19 +126,19 @@ export function classify(status: number, body: unknown, target: Target): Outcome
     // the kernel's calls are paired with the source: a listing like the others
     const view = readView(o)
     if (!view || o.target !== 'tile' || view.pane.kind !== 'tile') return { kind: 'unreadable' }
-    return { kind: 'ok', view, cached: o.cached === true, ms: typeof o.ms === 'number' ? o.ms : 0 }
+    return { kind: 'ok', view, build: typeof o.build === 'string' ? o.build : '', cached: o.cached === true, ms: typeof o.ms === 'number' ? o.ms : 0 }
   }
   if (status === 200 && o && o.ok === true && o.phase === 'compile-view' && target === 'tile') {
     const tile = o.target === 'tile' ? readTile(o) : null
     if (!tile) return { kind: 'unreadable' }
-    return { kind: 'tile', tile, cached: o.cached === true, ms: typeof o.ms === 'number' ? o.ms : 0 }
+    return { kind: 'tile', tile, build: typeof o.build === 'string' ? o.build : '', cached: o.cached === true, ms: typeof o.ms === 'number' ? o.ms : 0 }
   }
   if (status === 200 && o && o.ok === true && o.phase === 'compile-view') {
     const pane = o.pane as Record<string, unknown> | undefined
     const view = readView(o)
     // an answer for the other tab is not this tab's listing
     if (!view || o.target !== target || pane?.kind !== target) return { kind: 'unreadable' }
-    return { kind: 'ok', view, cached: o.cached === true, ms: typeof o.ms === 'number' ? o.ms : 0 }
+    return { kind: 'ok', view, build: typeof o.build === 'string' ? o.build : '', cached: o.cached === true, ms: typeof o.ms === 'number' ? o.ms : 0 }
   }
   return { kind: 'failed', status, detail: detailOf(o) }
 }
@@ -154,9 +154,11 @@ export function messageOf(o: Outcome): string {
     case 'too-large':
       return 'The generated code is too large to show.'
     case 'unavailable':
-      return o.tile
+      return o.target === 'tile'
         ? 'The Tile IR view is not available on this server.'
-        : 'The compile view is not available on this server (javap is missing).'
+        : o.target === 'c'
+          ? `The C view is not available on this server (native dawnc or toolchain metadata is unavailable).${o.detail ? ` ${o.detail}` : ''}`
+          : 'The JVM view is not available on this server (javap is missing).'
     case 'unreadable':
       return 'The service sent an answer this page cannot read.'
     case 'failed':
@@ -184,7 +186,7 @@ export function notesOf(view: XView, label: string): string[] {
   const notes: string[] = []
   if (view.gaps.count > 0) {
     const n = view.gaps.count
-    notes.push(`${n} call${n > 1 ? 's' : ''} could not be matched to the ${label} listing and ${n > 1 ? 'are' : 'is'} not highlighted.`)
+    notes.push(`${n} mapping issue${n > 1 ? 's' : ''} in the ${label} view. Some calls or generated lines may have incomplete highlighting.`)
   }
   if (view.pane.truncated) {
     notes.push(`The ${label} listing is cut: showing ${view.pane.shown} of ${view.pane.total} lines.`)
@@ -194,6 +196,28 @@ export function notesOf(view: XView, label: string): string[] {
   }
   return notes
 }
+
+// Numeric ids belong to one table. Only a unique source identity in the
+// same snapshot and build can carry a selection across independent tables.
+export interface CallIdentity {
+  snapshot: string
+  build: string
+  call: Pick<XCall, 'name' | 'from' | 'to' | 'nfrom' | 'nto'>
+}
+
+export function identityOf(snapshot: string, build: string, call: XCall): CallIdentity {
+  const { name, from, to, nfrom, nto } = call
+  return { snapshot, build, call: { name, from, to, nfrom, nto } }
+}
+
+export function matchIdentity(identity: CallIdentity, snapshot: string, build: string, calls: XCall[]): number | null {
+  if (identity.snapshot !== snapshot || identity.build !== build) return null
+  const key = (c: CallIdentity['call']) => JSON.stringify([c.name, c.from, c.to, c.nfrom, c.nto])
+  const found = calls.filter(c => key(c) === key(identity.call))
+  return found.length === 1 ? found[0].id : null
+}
+
+export const SELECTION_MISSING = 'This view does not contain or show the selected call. Return to the previous view to restore it.'
 
 // Automatic compiling is on until the service says it is busy (429 from
 // /compile or from /run: they share two permits), and comes back on the next

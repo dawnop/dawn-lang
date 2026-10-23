@@ -21,7 +21,7 @@
 use std/str
 use std/io
 use std/io.{Fs, with_fs_real}
-use xmap/xmap.{Files, Raw, parse_spec, raw_files, explore, explore_strict, to_xmap, pane_text}
+use xmap/xmap.{Files, Raw, parse_spec, raw_files, explore, explore_strict, explore_c, strict, to_xmap, pane_text}
 
 fn read(path: String) -> String !Fs =
   match io.read_file(path) {
@@ -39,13 +39,13 @@ fn read_raw(dir: String, files: Files) -> Raw !Fs = {
   let at = (name: String) => read("${dir}/${name}")
   let rf = raw_files()
   Raw {
-    source= read(files.source),
-    ctext= at(rf[0]),
-    cmap= at(rf[1]),
-    jmap= at(rf[2]),
-    javap= at(rf[3]),
-    tile_map= if files.tile_map == "" { "" } else { read(files.tile_map) },
-    golden= if files.golden == "" { "" } else { read(files.golden) },
+    source = read(files.source),
+    ctext = at(rf[0]),
+    cmap = at(rf[1]),
+    jmap = at(rf[2]),
+    javap = at(rf[3]),
+    tile_map = if files.tile_map == "" { "" } else { read(files.tile_map) },
+    golden = if files.golden == "" { "" } else { read(files.golden) },
   }
 }
 
@@ -54,7 +54,7 @@ pub fn main() -> Unit !io = {
   if len(a) < 2 {
     panic("usage: xmap-samples <raw dir> <out dir> [--strict]")
   }
-  let strict = len(a) > 2 && a[2] == "--strict"
+  let strict_mode = len(a) > 2 && a[2] == "--strict"
   with_fs_real(() => {
     let names = filter(map(str.split(read("${a[0]}/programs.txt"), "\n"), str.trim), n => n != "")
     for name in names {
@@ -64,7 +64,12 @@ pub fn main() -> Unit !io = {
         Err(e) -> panic("${dir}/spec.txt: ${e}")
       }
       let raw = read_raw(dir, files)
-      match if strict { explore_strict(spec, raw) } else { explore(spec, raw) } {
+      match if len(a) > 3 && a[3] == "--c-only" {
+        match explore_c(spec, raw.source, raw.ctext, raw.cmap) {
+          Ok(b) -> if strict_mode { strict(b) } else { Ok(b) }
+          Err(e) -> Err(e)
+        }
+      } else if strict_mode { explore_strict(spec, raw) } else { explore(spec, raw) } {
         Err(e) -> panic("${name}: ${e}")
         Ok(b) -> {
           for p in b.panes {

@@ -531,6 +531,42 @@ pub type ViewRaw =
   | RawBroken(message: String)
   | RawTooLarge(what: String)
 
+## The native C job carries no JVM material, including on a failure path.
+pub type CViewRaw =
+  | COk(ctext: String, cmap: String, ms: Int)
+  | CFail(outcome: Outcome)
+  | CTimedOut(secs: Int)
+  | CBroken(message: String)
+  | CTooLarge(what: String)
+
+# Strict native emission: unlike emitc_unit, neither a Java refusal nor an
+# empty diagnostic can start the JVM compiler. The latter is infrastructure
+# failure, not a cacheable verdict about the submitted program.
+fn c_staged(dir: String, box: String, prog: String, module: String) -> CViewRaw !io = {
+  let started = tick()
+  let argv = [native_bin(), "emitc", prog, "-o", "${box}/out.c", "--map", "${box}/c.dawnmap"]
+  match await_unit(dir, box, "emitc", argv, budget_left(started)) {
+    None -> CTimedOut(compile_timeout_secs())
+    Some(code) ->
+      if code != 0 {
+        let diags = diagnostics(dir, box, "emitc")
+        if diags == "" { CBroken("native C compiler failed without diagnostics") } else { CFail(CompileError(diags)) }
+      } else {
+        let (cmap, map_cut) = read_lines_capped("${box}/c.dawnmap", [], VIEW_RAW_LIMIT, dir)
+        if map_cut {
+          CTooLarge("the C map")
+        } else {
+          let (ctext, text_cut) = read_lines_capped("${box}/out.c", kept_c_lines(cmap, module), VIEW_RAW_LIMIT, dir)
+          if text_cut { CTooLarge("the C text") } else { COk(ctext, cmap, ms_since(started)) }
+        }
+      }
+  }
+}
+
+## C raw material from dawnc alone, under the same staging and unit limits.
+pub fn c_view_raw(code: String) -> CViewRaw !io =
+  with_fs_real(() => with_staged(code, msg => CFail(CompileError(msg)), (dir, box, input) => c_staged(dir, box, input, if wants_tileir(code) { "main" } else { "prog" })))
+
 ## Whether `javap` can be started: the toolchain id the view's cache key
 ## carries (its `-version` line), or "" when it cannot. Asked once at startup
 ## like [`compiler_id`]: the unit that runs it later finds the same binary by
@@ -978,6 +1014,33 @@ pub fn compiler_id() -> CompilerId !io = {
   }
 }
 
+## The deployment's canonical identity without probing any compiler. C uses
+## this exclusively, so absent or malformed metadata cannot launch a JVM.
+pub fn deployed_id() -> CompilerId !io =
+  deployment_id(unwrap_or(with_env_real(() => io.getenv("PLAY_TOOLCHAIN_ID")), ""))
+
+fn deployment_id(text: String) -> CompilerId = {
+  let words = str.split(text, " ")
+  match words {
+    [version, build] -> {
+      let vs = str.split(version, ".")
+      let valid_version = len(vs) == 3 && list.all(vs, v => len(v) > 0 && list.all(str.chars(v), ch => str.contains("0123456789", ch)))
+      let hex = str.drop(build, 3)
+      if valid_version && str.starts_with(build, "b1:") && len(hex) == 12 && list.all(str.chars(hex), ch => str.contains("0123456789abcdef", ch)) {
+        CompilerId { version = version, build = build }
+      } else { CompilerId { version = "", build = "" } }
+    }
+    _ -> CompilerId { version = "", build = "" }
+  }
+}
+
+test "deployment metadata is complete and canonical or unavailable" {
+  assert deployment_id("0.100.0 b1:123456abcdef") == CompilerId { version = "0.100.0", build = "b1:123456abcdef" }
+  for bad in ["", "0.100.0", "0.100.0 b1:", "0.100.0 b1:123456abcdeg", "0.100.0 b1:123456ABCDEF", "0.100.0 b1:123456abcdef extra", "x b1:123456abcdef"] {
+    assert deployment_id(bad) == CompilerId { version = "", build = "" }
+  }
+}
+
 fn probe_compiler_id() -> CompilerId !io = {
   let root = temp_root()
   let base = "${root}/dawn-play-version-${uuid()}"
@@ -1003,14 +1066,14 @@ fn probe_compiler_id() -> CompilerId !io = {
 pub fn native_ready(id: CompilerId) -> Bool !io = {
   let line = first_line_of(native_bin(), "--version")
   if line == "" {
-    io.eprintln("dawn-play: no native dawnc at ${native_bin()}; /check and the C view use the JVM compiler")
+    io.eprintln("dawn-play: no native dawnc at ${native_bin()}; native compiler unavailable")
     false
   } else {
     let v = native_version_of(line)
     if v != "" && v == id.version {
       true
     } else {
-      io.eprintln("dawn-play: dawnc reports version '${v}' but dawn reports '${id.version}'; ignoring dawnc, /check and the C view use the JVM compiler")
+      io.eprintln("dawn-play: dawnc reports version '${v}' but dawn reports '${id.version}'; native compiler unavailable")
       false
     }
   }

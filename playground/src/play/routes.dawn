@@ -18,8 +18,8 @@ use std/io.{Instant}
 use play/contract.{Compiled, parse_request, parse_compile_request, wants_tileir, render_outcome, render_check, render_error, render_health}
 use play/exec.{CompilerId, tile_ready, native_ready, tool_present, tick, ms_since, TileRaw, TileMapped, TilePlain}
 use play/config.{javap_bin}
-use play/view.{build_view, respond, cache_key, Viewed, Mapped, Done, tile_view, tile_mapped, Tiled, TileShown, TileFailed}
-use play/host.{Host, JobResult, JRun, JCheck, JView, JTile, JOutcome, JViewRaw, JTileRaw, JBroken}
+use play/view.{build_view, build_c_view, respond, cache_key, compile_key, Viewed, CShown, Mapped, Done, tile_view, tile_mapped, Tiled, TileShown, TileFailed}
+use play/host.{Host, JobResult, JRun, JCheck, JCView, JView, JTile, JOutcome, JCViewRaw, JViewRaw, JTileRaw, JBroken}
 
 pub type Reply = { status: Int, body: String }
 
@@ -137,22 +137,21 @@ test "a kept /run answer gains cached as its last member and nothing else" {
   assert mark_cached(live) == "{\"ok\":true,\"phase\":\"run\",\"exit\":0,\"output\":\"hi\\n\",\"truncated\":false,\"ms\":7,\"cached\":true}"
 }
 
-# The refusal when the machine cannot make the view at all: the JVM listing is
-# `javap`'s, which only a JDK has, and the call table needs that listing for
-# either target. A clear 503 rather than a request that fails inside a
-# sandbox unit; deploys refuse to ship without it (deploy/redeploy.sh), so
-# seeing this means a machine that was set up by hand.
-pub fn unavailable(view: View) -> Option[Reply] =
-  if view.javap {
-    None
-  } else {
-    Some(raw(503, JSON_CT, render_error("the compile view is unavailable: this server has no javap (it needs a JDK, not only a JRE)")))
-  }
+# Refuse unavailable capabilities before looking up an answer: an old answer
+# cannot pretend the machine still has the target's toolchain.
+pub fn unavailable(view: View, target: String) -> Option[Reply] =
+  if target == "c" && view.build == "" {
+    Some(raw(503, JSON_CT, render_error("the C view is unavailable: native toolchain metadata unavailable")))
+  } else if target == "c" && not view.native {
+    Some(raw(503, JSON_CT, render_error("the C view is unavailable: matching native dawnc unavailable")))
+  } else if target == "jvm" && not view.javap {
+    Some(raw(503, JSON_CT, render_error("the JVM view is unavailable: this server has no javap (it needs a JDK, not only a JRE)")))
+  } else { None }
 
 # POST /compile: the program's C text or JVM listing, paired with the source
 # (packages/xmap). Same body limit, same JSON refusals and same gate as /check;
 # the work is play/exec.view_raw's and the answer is play/view.dawn's.
-pub fn compile_rpc(body: Bytes, host: Host, view: View) -> Reply !io =
+pub fn compile_rpc(body: Bytes, host: Host, id: CompilerId) -> Reply !io =
   if len(body) > MAX_BODY {
     raw(413, JSON_CT, render_error("source exceeds ${MAX_BODY} bytes"))
   } else {
@@ -160,15 +159,17 @@ pub fn compile_rpc(body: Bytes, host: Host, view: View) -> Reply !io =
       Err(e) -> raw(400, JSON_CT, render_error("request body is not valid UTF-8 (offset ${e.offset})"))
       Ok(source) -> match parse_compile_request(source) {
         Err(msg) -> raw(400, JSON_CT, render_error(msg))
-        Ok((code, target)) ->
+        Ok((code, target)) -> {
+          let view = view_here(id, target)
           if target == "tile" {
             tile_ir(host, view, code)
           } else {
-            match unavailable(view) {
+            match unavailable(view, target) {
               Some(refusal) -> refusal
               None -> compile_view(host, view, code, target)
             }
           }
+        }
       }
     }
   }
@@ -212,60 +213,56 @@ fn tiled(code: String, raw: TileRaw) -> Tiled =
 
 fn compile_view(host: Host, view: View, code: String, target: String) -> Reply !io = {
   let started = tick()
-  let base = cache_key(view.toolchain, code)
-  match host.keep_get("${base}/${target}") {
+  let key = compile_key(target, view.toolchain, code)
+  match host.keep_get(key) {
     Some(line) -> serve_kept(view.build, target, started, line)
-    None ->
-      match host.call(COMPILE_WAIT_SECS, JView(code, view.native)) {
-        None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
-        Some(JViewRaw(parts)) -> mapped(host, view, code, target, base, started, build_view(code, parts))
-        Some(other) -> failed(other)
+    None -> {
+      let built = match host.call(COMPILE_WAIT_SECS, if target == "c" { JCView(code) } else { JView(code, view.native) }) {
+        None -> return raw(429, JSON_CT, render_error("server busy, try again shortly"))
+        Some(JCViewRaw(parts)) -> if target == "c" { build_c_view(code, parts) } else { return failed(JBroken("wrong target result")) }
+        Some(JViewRaw(parts)) -> if target == "jvm" { build_view(code, parts) } else { return failed(JBroken("wrong target result")) }
+        Some(other) -> return failed(other)
       }
+      mapped(host, view, target, key, started, built)
+    }
   }
 }
 
-# The view's answer once the raw material is paired (packages/xmap) and cut:
-# here, outside the permit, which the job has already given back.
-fn mapped(host: Host, view: View, code: String, target: String, base: String, started: Instant, built: Viewed) -> Reply !io =
+# Rendering happens outside the permit. Only the requested target's schema
+# receives an answer, even when the paired oracle built both panes.
+fn mapped(host: Host, view: View, target: String, key: String, started: Instant, built: Viewed) -> Reply !io =
   match built {
-    Mapped(c, jvm, gaps) -> {
-      if gaps > 0 {
-        io.eprintln("compile view: ${gaps} gap(s) in program ${str.take(base, 12)}")
-      }
-      host.keep_put("${base}/c", kept_line(200, "S", c))
-      host.keep_put("${base}/jvm", kept_line(200, "S", jvm))
-      raw(200, JSON_CT, respond(target, view.build, false, ms_since(started), if target == "c" { c } else { jvm }))
-    }
+    CShown(rest, gaps) -> shown(host, view, target, key, started, rest, gaps)
+    Mapped(_c, jvm, gaps) -> shown(host, view, target, key, started, jvm, gaps)
     Done(status, body, keep) -> {
-      if keep {
-        host.keep_put("${base}/c", kept_line(status, "F", body))
-        host.keep_put("${base}/jvm", kept_line(status, "F", body))
-      }
+      if keep { host.keep_put(key, kept_line(status, "F", body)) }
       raw(status, JSON_CT, body)
     }
   }
 
-## The view of the machine this process runs on, the one /compile answers
-## with: the same text the runner's request and the deploy's warm-up key on.
-pub fn view_here(id: CompilerId) -> View !io = {
-  let javap = if tool_present(javap_bin()) { "present" } else { "" }
-  view_of(id, native_ready(id), javap)
+fn shown(host: Host, view: View, target: String, key: String, started: Instant, rest: String, gaps: Int) -> Reply !io = {
+  if gaps > 0 { io.eprintln("compile view: ${gaps} gap(s) in program ${str.take(key, 12)}") }
+  host.keep_put(key, kept_line(200, "S", rest))
+  raw(200, JSON_CT, respond(target, view.build, false, ms_since(started), rest))
 }
 
-## What /compile needs to know of the machine, asked of the toolchain, once
-## a request, since the process is the request.
-pub fn view_of(id: CompilerId, native: Bool, javap: String) -> View !io =
+## Target-specific capability context. C neither looks for javap nor probes
+## the JVM toolchain; its id must come from validated deployment metadata.
+pub fn view_here(id: CompilerId, target: String) -> View !io = {
+  let canonical = "${id.version} ${id.build}"
+  let javap = target != "c" && tool_present(javap_bin())
   View {
-    toolchain = "${id.version} ${id.build} ${javap}",
+    toolchain = if target == "c" { canonical } else { "${canonical} ${if javap { "present" } else { "" }}" },
     build = id.build,
-    javap = javap != "",
-    tile = tile_ready(),
-    native = native,
+    javap = javap,
+    tile = target == "tile" && tile_ready(),
+    native = (target != "c" || id.build != "") && native_ready(id),
   }
+}
 
 test "without javap the view is refused with a 503 that says why" {
   let view = View { toolchain = "", build = "", javap = false, tile = false, native = false }
-  match unavailable(view) {
+  match unavailable(view, "jvm") {
     Some(r) -> {
       assert r.status == 503
       assert str.contains(r.body, "javap")
@@ -273,5 +270,5 @@ test "without javap the view is refused with a 503 that says why" {
     None -> { assert false }
   }
   let with_javap = View { toolchain = "", build = "", javap = true, tile = false, native = false }
-  assert match unavailable(with_javap) { Some(_) -> false, None -> true }
+  assert match unavailable(with_javap, "jvm") { Some(_) -> false, None -> true }
 }

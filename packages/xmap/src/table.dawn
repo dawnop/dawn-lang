@@ -271,6 +271,32 @@ pub fn table_from_maps(src: Src, module: String, first: Int, last: Int, c: CMap,
   (tree(rows), gaps)
 }
 
+## The calls recorded by C alone. A zero-gap table says nothing about the
+## other backend; the paired oracle above deliberately keeps its own rules.
+pub fn table_from_c(src: Src, module: String, first: Int, last: Int, c: CMap) -> (List[Call], List[String]) = {
+  var rows: List[Call] = []
+  var gaps: List[String] = []
+  for k in sort_by(c_keys(src, module, first, last, c), by_key) {
+    let (lo, hi, nlo) = k
+    let named = match ident_at(src, nlo) {
+      Some(name) -> Some((name, nlo + len(name)))
+      None -> {
+        let what = what_of(c_what(c, module, k))
+        if what == "" { None } else { unspelled_name(src, lo, hi, nlo, what) }
+      }
+    }
+    match named {
+      Some((name, nhi)) -> {
+        rows = rows ++ [Call { id = 0, parent = -1, name = name, lo = lo, hi = hi, nlo = nlo, nhi = nhi, lines = [] }]
+      }
+      None -> {
+        gaps = gaps ++ ["the call at ${pos(at(src, lo))} has its name at ${pos(at(src, nlo))}, which is no identifier"]
+      }
+    }
+  }
+  (tree(rows), gaps)
+}
+
 # ---- checking it ----
 
 ## Whether the source text at a call's name span is how that call is spelled:

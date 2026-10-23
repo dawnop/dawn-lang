@@ -7,7 +7,7 @@
 # renderers, not by a second implementation of them.
 #
 # What it asks for, per sample: /run, and /compile for target c (which keeps
-# the JVM listing too, one job makes both), and for a program that imports
+# its own independent answer), JVM explicitly, and for a program that imports
 # tileir also target tile, which is the page's entry from the GPU page. It
 # runs before the new runner is swapped in (deploy/redeploy.sh) and as the
 # user the runner runs as, so the jobs go through the real sandbox.
@@ -28,11 +28,11 @@ use json/value.{JStr, JObj}
 use json/render.{render}
 use play/answers.{write_answer, has_answer}
 use play/contract.{wants_tileir}
-use play/exec.{CompilerId, compiler_id, run_cmd}
+use play/exec.{CompilerId, deployed_id, run_cmd}
 use play/gate.{recording_host}
 use play/host.{Host}
 use play/routes.{Reply, rpc, compile_rpc, view_here}
-use play/view.{cache_key}
+use play/view.{cache_key, compile_key}
 
 const BUSY_TRIES: Int = 40
 
@@ -59,16 +59,20 @@ fn fail(msg: String) -> Unit !io = {
 
 # One sample's answers; the names of the answers that did not get kept.
 fn warm_sample(host: Host, id: CompilerId, out: String, name: String, code: String) -> List[String] !io = {
-  let view = view_here(id)
+  let view = view_here(id, "jvm")
   let run_key = "${cache_key("${id.version} ${id.build}", code)}/run"
   let base = cache_key(view.toolchain, code)
   let r = until_answered(() => rpc(request(code, ""), host, false, false, "${id.version} ${id.build}"))
   io.eprintln("warm: ${name} run ${r.status}")
-  let c = until_answered(() => compile_rpc(request(code, "c"), host, view))
+  let c = until_answered(() => compile_rpc(request(code, "c"), host, id))
   io.eprintln("warm: ${name} compile c ${c.status}")
-  var wanted = [("run", run_key), ("c", "${base}/c"), ("jvm", "${base}/jvm")]
+  let j = until_answered(() => compile_rpc(request(code, "jvm"), host, id))
+  io.eprintln("warm: ${name} compile jvm ${j.status}")
+  let c_key = compile_key("c", "${id.version} ${id.build}", code)
+  let j_key = compile_key("jvm", view.toolchain, code)
+  var wanted = [("run", run_key), ("c", c_key), ("jvm", j_key)]
   if wants_tileir(code) {
-    let t = until_answered(() => compile_rpc(request(code, "tile"), host, view))
+    let t = until_answered(() => compile_rpc(request(code, "tile"), host, id))
     io.eprintln("warm: ${name} compile tile ${t.status}")
     wanted = wanted ++ [("tile", "${base}/tile")]
   }
@@ -100,7 +104,8 @@ pub fn warm_main(samples: String, out: String) -> Unit !io = {
   if len(names) == 0 {
     fail("no samples in ${samples}")
   }
-  let id = compiler_id()
+  let id = deployed_id()
+  if id.build == "" { fail("native toolchain metadata unavailable") }
   let host = recording_host((key, line) => write_answer(out, key, line))
   var missing: List[String] = []
   for n in names {

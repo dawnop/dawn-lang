@@ -16,14 +16,15 @@ use std/str
 use std/io
 use std/io.{with_fs_real, with_exit_real}
 use play/contract.{Outcome, Compiled, CompileError, Timeout}
-use play/exec.{execute, check, view_raw, tile_job, TileMapped, TilePlain, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
-use play/host.{Job, JRun, JCheck, JView, JTile, JobResult, JOutcome, JViewRaw, JTileRaw, JBroken}
+use play/exec.{execute, check, c_view_raw, view_raw, tile_job, TileMapped, TilePlain, COk, CFail, CTimedOut, CBroken, CTooLarge, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
+use play/host.{Job, JRun, JCheck, JCView, JView, JTile, JobResult, JOutcome, JCViewRaw, JViewRaw, JTileRaw, JBroken}
 
 ## Run a job in this process. What a host does once it has a permit.
 pub fn exec_job(job: Job) -> JobResult !io =
   match job {
     JRun(code) -> JOutcome(execute(code))
     JCheck(code, native) -> JOutcome(check(code, native))
+    JCView(code) -> JCViewRaw(c_view_raw(code))
     JView(code, native) -> JViewRaw(view_raw(code, native))
     JTile(code, native) -> JTileRaw(tile_job(code, native))
   }
@@ -66,6 +67,7 @@ pub fn encode_job(job: Job) -> Bytes =
   pack(match job {
     JRun(code) -> ["run", code]
     JCheck(code, native) -> ["check", code, flag(native)]
+    JCView(code) -> ["c-view", code]
     JView(code, native) -> ["view", code, flag(native)]
     JTile(code, native) -> ["tile", code, flag(native)]
   })
@@ -74,6 +76,7 @@ pub fn decode_job(b: Bytes) -> Option[Job] =
   match unpack(b) {
     Some(["run", code]) -> Some(JRun(code))
     Some(["check", code, native]) -> Some(JCheck(code, native == "1"))
+    Some(["c-view", code]) -> Some(JCView(code))
     Some(["view", code, native]) -> Some(JView(code, native == "1"))
     Some(["tile", code, native]) -> Some(JTile(code, native == "1"))
     _ -> None
@@ -93,6 +96,13 @@ pub fn encode_result(r: JobResult) -> Bytes =
     JTileRaw(raw) -> match raw {
       TileMapped(map, golden, ms) -> ["tile", "mapped", map, golden, "${ms}"]
       TilePlain(o, why) -> ["tile", "plain", why] ++ outcome_fields(o)
+    }
+    JCViewRaw(raw) -> match raw {
+      COk(ctext, cmap, ms) -> ["c-raw", "ok", ctext, cmap, "${ms}"]
+      CFail(o) -> ["c-raw", "fail"] ++ outcome_fields(o)
+      CTimedOut(secs) -> ["c-raw", "timeout", "${secs}"]
+      CBroken(m) -> ["c-raw", "broken", m]
+      CTooLarge(what) -> ["c-raw", "big", what]
     }
     JViewRaw(raw) -> match raw {
       RawOk(p) -> ["raw", "ok", p.ctext, p.cmap, p.jmap, p.javap, "${p.ms}"]
@@ -118,6 +128,20 @@ fn outcome_of(f: List[String]) -> Option[Outcome] =
 pub fn decode_result(b: Bytes) -> Option[JobResult] =
   match unpack(b) {
     Some(["broken", m]) -> Some(JBroken(m))
+    Some(["c-raw", "ok", ctext, cmap, ms]) -> match parse_int(ms) {
+      Some(n) -> Some(JCViewRaw(COk(ctext, cmap, n)))
+      None -> None
+    }
+    Some(["c-raw", "timeout", secs]) -> match parse_int(secs) {
+      Some(n) -> Some(JCViewRaw(CTimedOut(n)))
+      None -> None
+    }
+    Some(["c-raw", "broken", m]) -> Some(JCViewRaw(CBroken(m)))
+    Some(["c-raw", "big", what]) -> Some(JCViewRaw(CTooLarge(what)))
+    Some(["c-raw", "fail", a, b2]) -> match outcome_of([a, b2]) {
+      Some(o) -> Some(JCViewRaw(CFail(o)))
+      None -> None
+    }
     Some(["raw", "ok", ctext, cmap, jmap, javap, ms]) ->
       match parse_int(ms) {
         Some(n) -> Some(JViewRaw(RawOk(ViewParts { ctext = ctext, cmap = cmap, jmap = jmap, javap = javap, ms = n })))
@@ -187,7 +211,7 @@ pub fn job_main(dir: String) -> Unit !io = {
 }
 
 test "a job survives the round trip" {
-  for j in [JRun("fn main() = ()"), JCheck("é\nz", true), JView("a", false), JTile("", false), JTile("é\nz", true)] {
+  for j in [JRun("fn main() = ()"), JCheck("é\nz", true), JCView("é\nz"), JView("a", false), JTile("", false), JTile("é\nz", true)] {
     assert decode_job(encode_job(j)) == Some(j)
   }
   assert decode_job(bytes.utf8("3\nab")) == None
@@ -202,6 +226,11 @@ test "every result survives the round trip, long fields and awkward text include
     JOutcome(CompileError("")),
     JOutcome(Timeout("partial")),
     JBroken("it died"),
+    JCViewRaw(COk(big, "map", 2)),
+    JCViewRaw(CFail(CompileError("native refusal"))),
+    JCViewRaw(CTimedOut(30)),
+    JCViewRaw(CBroken("empty diagnostics")),
+    JCViewRaw(CTooLarge("the C text")),
     JViewRaw(RawOk(parts)),
     JViewRaw(RawFail(CompileError("prog.dawn:1: nope"))),
     JViewRaw(RawFail(Compiled("x", 0, false, 1))),
