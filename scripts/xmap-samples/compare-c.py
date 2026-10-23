@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 def read(path):
-    calls, outs, gaps = {}, {}, []
+    calls, outs = {}, {}
     for line in path.read_text().splitlines():
         w = line.split()
         if w[0] == 'call':
