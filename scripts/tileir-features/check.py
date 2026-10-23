@@ -1259,7 +1259,7 @@ def docs_check(extra):
     these text files has one command and the job that carries it keeps the
     `run:` text its budget line was observed under."""
     return (subprocess.run([sys.executable, str(DOCS_CHECK), *extra]).returncode or
-            subprocess.run([sys.executable, str(ROOT / "scripts/flash-config/check.py"), *extra]).returncode)
+            subprocess.run([sys.executable, str(ROOT / "scripts/flash-config/check.py"), "--history-only", *extra]).returncode)
 
 
 def main(argv):

@@ -212,7 +212,7 @@ def harness_source(src: str) -> str:
         fail(f"the {NAME} arm is not one traceN call answered as `p`: {body}")
     args = split_args(m.group(2))
     count = int(m.group(1))
-    if len(args) != count + 2 or args[0] != f'"{NAME}"' or args[-1] != 'fa_kernel(F64, fa64_math(), fa64_cfg("default", ATT_D), ATT_N, ATT_D, 1)':
+    if len(args) != count + 2 or args[0] != f'"{NAME}"' or args[-1] != 'fa_kernel(F64, fa64_math(), fa64_plan().tiles, ATT_N, ATT_D, 1)':
         fail(f"the {NAME} arm does not trace {NAME} itself with {count} markers: {body}")
     markers = args[1:-1]
     formats = [re.match(r'(?:In|Out|Shared|Scalar)\(([A-Z0-9]+)', k).group(1) for k in markers]

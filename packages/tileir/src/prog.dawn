@@ -1618,22 +1618,6 @@ fn first_overlap(wi: List[Write], wj: List[Write]) -> Option[String] = {
   })
 }
 
-## Validate a row tile and its entry hints before recording a configured
-## kernel. These two shapes hit measured tileiras performance cliffs.
-## The architecture is the offline compilation target, not a device query.
-pub fn check_config(arch: String, bq: Int, hints: EntryHints, at: Loc = caller()) -> Unit = {
-  let _wire = wire_entry([for_arch(arch, hints)])
-  let cga = match hints.num_cta_in_cga { Some(n) -> n
-    None -> 1 }
-  if bq <= 0 { panic("tileir: configuration bq must be positive, got ${bq}", at = at) } else { () }
-  if cga == 2 && bq < 128 {
-    panic("tileir: configuration for `${arch}`: cga=2 requires bq >= 128, got ${bq}", at = at)
-  } else { () }
-  if arch == "sm_90" && bq == 256 && cga != 2 {
-    panic("tileir: configuration sm_90 bq=256 requires cga=2", at = at)
-  } else { () }
-}
-
 ## Run `body` once under a handler that records what it issues, and answer
 ## the record. `params` says how each entry parameter is passed, in order
 ## (`ByPtr(dtype)` for a buffer, `ByValue(dtype)` for a scalar); the body's
@@ -7579,19 +7563,6 @@ test "K4.2: a Scalar has no cells, is never loaded, and only the four scalar for
   assert str.contains(loaded, "parameter 0 is a f32 passed by value, and a load reads memory through a pointer")
   let small = marked(() => trace2("c", Scalar(F16), Out(F16, g), (_s, o) => store_cell(o, zeros(o))))
   assert str.starts_with(small, "tileir: kernel `c`: parameter 0 is passed by value as f16; a scalar parameter is i32, i64, f32 or f64")
-}
-
-test "P4: configuration cliffs are refused at the caller before recording" {
-  let file = loc.path(loc.here())
-  let line = loc.line(loc.here())
-  let r = marked(() => check_config("sm_100", 64, entry_hints(num_cta_in_cga = Some(2))))
-  assert str.contains(r, "cga=2 requires bq >= 128")
-  assert str.contains(r, " at ${file}:${line + 1}:")
-  let s = marked(() => check_config("sm_90", 256, entry_hints()))
-  assert str.contains(s, "sm_90 bq=256 requires cga=2")
-  check_config("sm_100", 128, entry_hints(num_cta_in_cga = Some(2)))
-  check_config("sm_90", 256, entry_hints(num_cta_in_cga = Some(2)))
-  check_config("sm_90", 64, entry_hints(occupancy = Some(2)))
 }
 
 test "P4: approximate division is f32 only and cannot promise directed rounding" {

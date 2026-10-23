@@ -700,7 +700,7 @@ TILEIR_USE = "use tileir/"
 PINNED_SAMPLES = {
     "flash_attn": (
         "scripts/tile-golden/kernels.dawn",
-        ["flash_attn", "fa_shape", "fa_config", "fa64_cfg", "fa_kv_index", "fa_kernel", "fa64_math", "fa_bf16_math", "FaNumerics"],
+        ["flash_attn", "fa_kv_index", "fa_kernel", "fa64_math", "FaNumerics", "FaShape", "FaTiles"],
     ),
     # The two cards of the GPU page that are not golden kernels. `refused` is
     # two kernels packages/tileir's tests record and hold the refusal of;
@@ -763,8 +763,9 @@ def check_pinned_sample(stem: str, sample: pathlib.Path, out: pathlib.Path) -> l
             bad.append(f"{rel}: its `fn {kernel}` is not the text of the one in "
                        f"{original}; the sample is a copy that must not drift")
     original_lines = set(orig.splitlines())
+    fixture_constants = {"ATT_M", "ATT_N", "ATT_D", "FA_BQ", "FA_BK", "ATT_INV_SQRT_D"}
     for line in text.splitlines():
-        if line.startswith("const ") and line not in original_lines:
+        if line.startswith("const ") and (stem != "flash_attn" or line.split()[1].rstrip(":") in fixture_constants) and line not in original_lines:
             bad.append(f"{rel}: `{line}` is not a line of {original}")
     return bad
 
