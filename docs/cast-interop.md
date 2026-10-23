@@ -150,7 +150,7 @@ Dawn 已有**同构先例**：`map_empty`、`set_empty`、`java_try`、`catch_pa
   「消灭 as_XXX 家族」的主旨；`cast` 覆盖其余所有引用类型（`InputStream`/`String`/任意 `TJava`）。
 - **迁移面就 2 处真实调用点**，都在本轮 `.dawn-version` bump 内顺带改：
   - dawn-lang 自测 `BytesTest.kt:154`（`let b: Bytes = as_bytes(...)` → `cast(...)`，测试名/断言随之改）；
-  - dawnop-site `http.dawn:37`（`BytesResp { bytes = as_bytes(resp.body()!) }` → `cast(...)`）。
+  - dawnop-site `http.dawn:37`（`BytesResp { bytes: as_bytes(resp.body()!) }` → `cast(...)`）。
 - **字段位依赖（顺带验证 streaming 要的同一条路）**：`http.dawn:37` 是**记录字段位**，`cast` 的 T 需从
   字段类型 `bytes: Bytes` 作期望类型传入——与 streaming 的 `StreamResp { stream: cast(...) }` 同路。
   若 checker 现不传字段期望类型：补上（streaming 也受益）或退成 `let b: Bytes = cast(...)` 再塞（总能写）。

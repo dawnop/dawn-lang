@@ -959,9 +959,13 @@ def helper_param_is_bound(code, param):
     name = re.compile(r"\b%s\b" % re.escape(param))
     if re.search(r"\bfn\s+%s\s*\(" % re.escape(param), code):
         return True
-    for binder in re.finditer(r"\b(?:let|var)\b(.*?)(?<![=!<>])=(?!=|>)", code, re.S):
-        if name.search(binder.group(1)):
-            return True
+    for binder in re.finditer(r"\b(?:let|var)\b", code):
+        # Field equals inside a destructuring pattern do not end its binder.
+        for pos in top_level_offsets(code, binder.end()):
+            if code[pos] == "=" and code[pos - 1] not in "=!<>" and code[pos + 1:pos + 2] not in ("=", ">"):
+                if name.search(code[binder.end():pos]):
+                    return True
+                break
     for binder in re.finditer(r"\bfor\b(.*?)\bin\b", code, re.S):
         if name.search(binder.group(1)):
             return True
@@ -1187,7 +1191,7 @@ def substitute_helper(info, args):
     params = info["params"]
     if len(args) != len(params):
         return None
-    if any(re.match(r"\s*[a-z_][A-Za-z0-9_]*\s*:", arg) for arg in args):
+    if any(re.match(r"\s*[a-z_][A-Za-z0-9_]*\s*=(?!=|>)", arg) for arg in args):
         return None
     body = info["body"]
     full_code = code_mask(body)
@@ -1463,7 +1467,7 @@ def projected_record_patterns(expr, path, fns, env=None, depth=0, seen=()):
             return projected_record_patterns(args[0], path[1:], fns, env, depth + 1, seen)
         if callee in fns and callee not in env and callee not in seen and len(seen) < MAX_HELPER_DEPTH:
             info = fns[callee]
-            if len(args) != len(info["params"]) or any(re.match(r"\s*[a-z_][A-Za-z0-9_]*\s*:", arg) for arg in args):
+            if len(args) != len(info["params"]) or any(re.match(r"\s*[a-z_][A-Za-z0-9_]*\s*=(?!=|>)", arg) for arg in args):
                 return []
             if not path:
                 # The selected slot is now wording, not a record. Preserve
@@ -1759,8 +1763,8 @@ def self_test():
     record_cases = [
         ('let diagnostic = ' + record + '\n cerr(cx, diagnostic.message, 0, 1)', True),
         ('let diagnostic = (' + record + ')\n cerr(cx, diagnostic.message, 0, 1)', True),
-        ('let diagnostic = Diagnostic { message: if flag { "missing exported value" } '
-         'else { "private exported value" }, hint: "unrelated suggestion" }\n'
+        ('let diagnostic = Diagnostic { message = if flag { "missing exported value" } '
+         'else { "private exported value" }, hint = "unrelated suggestion" }\n'
          ' cerr(cx, diagnostic.message, 0, 1)', True),
         ('let diagnostic = ' + record + '\n cerr(cx, diagnostic.unknown, 0, 1)', False),
         ('let diagnostic = ' + record + '\n cerr(cx, opaque(diagnostic.message), 0, 1)', False),
@@ -2200,7 +2204,7 @@ fn query(context, name) = {
             print("FAIL: a postfix suffix stole its enclosing body", file=sys.stderr)
             return 1
     reset_delimiters = (
-        'if helper(Point { x: "record-key" }, values { "tail-key" }, '
+        'if helper(Point { x = "record-key" }, values { "tail-key" }, '
         '[{ "list-key" }]) { "delimiter yes message" } '
         'else { "delimiter no message" }'
     )
@@ -2512,7 +2516,7 @@ fn query(context, name) = {
     following_patterns = [
         '(B, C)',
         'Some(B)',
-        'Point { x: B, y: C }',
+        'Point { x = B, y: C }',
         '"control-a"\n  | "control-b"',
         '(\n  B,\n  C\n)',
     ]

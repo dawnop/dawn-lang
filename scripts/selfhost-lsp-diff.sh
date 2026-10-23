@@ -529,9 +529,9 @@ for needle, occ, delta in [
     ("acc + x", 1, 1),      # lambda param use
     ("Circle(r) -> p.x", 1, 8),  # match binder
     ("Greet[T]", 1, 1),     # trait decl name
-    ("hi(x = Point)", 1, 0), # impl method name
+    ("hi(x: Point)", 1, 0), # impl method name
     ("double(n)", 1, 1),    # local fn call
-    ("Point { x:", 1, 1),   # record ctor
+    ("Point { x =", 1, 1),   # record ctor
     ("y => y + 1", 1, 0),   # lambda param inside a module-qualified call
     ("u.Op", 1, 2),         # qualified constructor name
     ("(lhs, rhs) =>", 1, 1), # lambda param inside a qualified construction
@@ -621,7 +621,7 @@ req("textDocument/hover", at(calls_uri, calls_text, 'pad_to("x"', 1, 1))
 for needle, occ, delta in [
     ('pad_to("x", 4)', 1, 7),   # first argument
     ('pad_to("x", 4)', 1, 12),  # second, by position
-    ('fill: "-"', 1, 6),        # named, after a module alias
+    ('fill = "-"', 1, 6),        # named, after a module alias
     ("pad_to(2)", 1, 7),        # the right side of |>
     ("calls()", 1, 6),          # a declaration's own list: no help
 ]:

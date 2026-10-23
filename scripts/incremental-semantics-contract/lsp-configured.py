@@ -147,7 +147,7 @@ def configure(text, mode, modules, observe):
     entry, point, observed, _ = anchors()
     text = edit(text, entry,
                 "run_lsp_configured(std_flag, host, LspAnalysisConfig { "
-                f"mode: {mode}, max_modules: {modules}" + " })")
+                f"mode = {mode}, max_modules = {modules}" + " })")
     if not observe:
         return text
     # Only a project workspace owns a session; a standalone buffer is
@@ -175,7 +175,7 @@ def selftest():
     assert configure(entry, "Legacy", 128, False) == default
     for mode in ("Legacy", "Cold"):
         plain = configure(fixture, mode, 1, False)
-        assert f"mode: {mode}, max_modules: 1 }}" in plain
+        assert f"mode = {mode}, max_modules = 1 }}" in plain
         assert "benchmark_analysis_stats" not in plain
         observed = configure(fixture, mode, 1, True)
         assert observed.count("benchmark_analysis_stats(") == 2

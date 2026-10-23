@@ -23,14 +23,14 @@ def main():
         # what puts the identifiers its body binds inside it. A scheduler that
         # does not numbers every body in the module's free pool instead, so
         # every symbol id in the module moves.
-        ('allocation', 'Entered { cx: enter_decl_owner(entered, path, sp.lo, sp.hi),',
-         'Entered { cx: entered,'),
+        ('allocation', 'Entered { cx = enter_decl_owner(entered, path, sp.lo, sp.hi),',
+         'Entered { cx = entered,'),
         ('constant-visibility', 'executor.constant(state, owner.cx, d, declared, visible)',
          'executor.constant(state, owner.cx, d, declared, set.empty())'),
-        ('method-tag', 'impl_of: imp_key }', 'impl_of: None }'),
-        ('default-tag', 'default_of: Some(t) }', 'default_of: None }'),
-        ('diagnostic-order', '(state, ModuleBodies { cx: cx1, functions: fns_out, constants: tconsts,',
-         '(state, ModuleBodies { cx: Cx { ..cx1, diags: list.reverse(cx1.diags) }, functions: fns_out, constants: tconsts,'),
+        ('method-tag', 'impl_of = imp_key }', 'impl_of = None }'),
+        ('default-tag', 'default_of = Some(t) }', 'default_of = None }'),
+        ('diagnostic-order', '(state, ModuleBodies { cx = cx1, functions = fns_out, constants = tconsts,',
+         '(state, ModuleBodies { cx = Cx { ..cx1, diags = list.reverse(cx1.diags) }, functions = fns_out, constants = tconsts,'),
     ]
     with tempfile.TemporaryDirectory(prefix='dawn-body-scheduler-') as temp:
         root = Path(temp)

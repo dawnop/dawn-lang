@@ -2320,12 +2320,12 @@ const FA_BK: Int = 16
 # are the P4-b selection measurements, before approximate division.
 type FaShape = { n: Int, d: Int, bh: Int }
 
-fn fa_shape() -> FaShape = FaShape { n= ATT_N, d= ATT_D, bh= 1 }
+fn fa_shape() -> FaShape = FaShape { n = ATT_N, d = ATT_D, bh = 1 }
 
 type FaCfg = { bq: Int, bk: Int, occ: Int, cga: Int, evidence: String, median: Float, baseline: Float }
 
 fn fa_config(bq: Int, bk: Int, occ: Int, cga: Int, evidence: String, median: Float, baseline: Float) -> FaCfg =
-  FaCfg { bq= bq, bk= bk, occ= occ, cga= cga, evidence= evidence, median= median, baseline= baseline }
+  FaCfg { bq = bq, bk = bk, occ = occ, cga = cga, evidence = evidence, median = median, baseline = baseline }
 
 fn fa_cfg(arch: String, d: Int) -> FaCfg = match (arch, d) {
   ("sm_90", 64) -> fa_config(64, 128, 2, 0, "bf90d64", 0.1520, 0.2534)
@@ -2360,10 +2360,10 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
   var acc = zeros(o)
   for j in d_range(0, shape.n / cfg.bk) {
     let s: Tile[Float] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
-    let m_new = max(m, reduce_max(s, keepdims= true))
+    let m_new = max(m, reduce_max(s, keepdims = true))
     let p = exp(s - m_new)
     let alpha = exp(m - m_new)
-    l = l * alpha + reduce_sum(p, keepdims= true)
+    l = l * alpha + reduce_sum(p, keepdims = true)
     acc = mma(p, load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
     m = m_new
   }
@@ -2416,7 +2416,7 @@ fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Floa
 
 # Config -> kernel. Every captured value is fixed before recording.
 fn fa_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[Float], Param[Float], Param[Float], Param[Float], Param[Float]) -> Unit !Dev =
-  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, c, FaShape { n= n, d= d, bh= bh })
+  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, c, FaShape { n = n, d = d, bh = bh })
 
 fn fa_bf16_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[BF16], Param[BF16], Param[BF16], Param[Float], Param[F32]) -> Unit !Dev =
   (q, k, v, o, scale) => flash_attn_bf16(q, k, v, o, scale, c, FaShape { n= n, d= d, bh= bh })

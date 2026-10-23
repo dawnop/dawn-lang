@@ -59,7 +59,7 @@ class PreflightTests(unittest.TestCase):
         # only when contracts-1 ran it.
         lower = "selfhost/src/ir/lower.dawn"
         self.assert_registry_drift_is_red("dict-owner-contract", "constructor-arity", lower,
-                                          "nargs: nargs,", "nargs: nargs ,")
+                                          "nargs = nargs,", "nargs = nargs ,")
         # The two-line anchor the bridge and prim mutants share a shape with.
         self.assert_registry_drift_is_red("dict-owner-contract", "bridge-shape", lower,
                                           'let name = "bridge$" ++ to_string(tid)',
@@ -71,8 +71,8 @@ class PreflightTests(unittest.TestCase):
         # and refused a stale one only when incremental-memo-3 ran it.
         analyze = "selfhost/src/driver/analyze.dawn"
         self.assert_registry_drift_is_red("incremental-semantics-contract", "cold/intern-table", analyze,
-                                          "    identities: before.identities,",
-                                          "    identities: before.identities ,")
+                                          "    identities = before.identities,",
+                                          "    identities = before.identities ,")
         self.assert_registry_drift_is_red("incremental-semantics-contract", "cold/std-baseline", analyze,
                                           "      Some(before) -> { base_impls = before }",
                                           "      Some(prior) -> { base_impls = prior }")
@@ -108,15 +108,15 @@ class PreflightTests(unittest.TestCase):
         # refused a stale one only when incremental-memo-2 ran it.
         self.assert_registry_drift_is_red("incremental-semantics-contract", "lsp-module-memo/drop-session",
                                           "selfhost/src/lsp/server.dawn",
-                                          "        cache: update.session,", "        cache: update.session ,")
+                                          "        cache = update.session,", "        cache = update.session ,")
         self.assert_registry_drift_is_red("incremental-semantics-contract", "lsp-module-memo/stale-parse",
                                           "selfhost/src/driver/analyze.dawn",
                                           "if p.text == text { (p, true) }", "if text == p.text { (p, true) }")
         self.assert_registry_drift_is_red("incremental-semantics-contract",
                                           "lsp-module-memo/resolver-drops-the-declaration",
                                           "selfhost/src/check/checker.dawn",
-                                          "syms: tast_positions.symbols(entered.resolver, after.syms, ",
-                                          "syms: tast_positions.symbols(entered.resolver,  after.syms, ")
+                                          "syms = tast_positions.symbols(entered.resolver, after.syms, ",
+                                          "syms = tast_positions.symbols(entered.resolver,  after.syms, ")
         self.assert_stale_registry_is_red("incremental-semantics-contract", "lsp-module-memo/drop-parses", 0)
 
     def test_body_executor_anchor_drift_is_caught(self):
@@ -167,8 +167,8 @@ class PreflightTests(unittest.TestCase):
                                           "interned =  cx1.identities")
         self.assert_registry_drift_is_red("incremental-semantics-contract", "identity/mint-imported-effect",
                                           "selfhost/src/check/passes.dawn",
-                                          "effects: map.insert(cx1.effects, local, eid) }",
-                                          "effects: map.insert(cx1.effects, local, eid)  }")
+                                          "effects = map.insert(cx1.effects, local, eid) }",
+                                          "effects = map.insert(cx1.effects, local, eid)  }")
         self.assert_stale_registry_is_red("incremental-semantics-contract", "identity/binder-spelling", 0)
 
     def test_tile_golden_anchor_drift_is_caught(self):

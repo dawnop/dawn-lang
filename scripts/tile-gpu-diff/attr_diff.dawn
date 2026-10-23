@@ -167,7 +167,7 @@ fn message[T](r: Result[T, ForeignError]) -> String = match r {
 }
 
 fn blank() -> Trace =
-  Trace { alloc= "-", upload= "-", launch= "-", sync= "-", download= "-", result= None, note= "" }
+  Trace { alloc = "-", upload = "-", launch = "-", sync = "-", download = "-", result = None, note = "" }
 
 # Allocate and fill one buffer per (format, contents) pair, in order.
 fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignError] !Gpu = {
@@ -200,20 +200,20 @@ fn release(hs: List[Int]) -> Unit !Gpu = {
 ## same way.
 fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !Gpu =
   match alloc_all(bufs) {
-    Err(e) -> Trace { ..blank(), alloc= e.kind, note= e.message }
+    Err(e) -> Trace { ..blank(), alloc = e.kind, note = e.message }
     Ok(hs) -> {
-      let t0 = Trace { ..blank(), alloc= "ok" }
+      let t0 = Trace { ..blank(), alloc = "ok" }
       match upload_all(hs, bufs) {
         Err(e) -> {
           release(hs)
-          Trace { ..t0, upload= e.kind, note= e.message }
+          Trace { ..t0, upload = e.kind, note = e.message }
         }
         Ok(_) -> {
-          let t1 = Trace { ..t0, upload= "ok" }
+          let t1 = Trace { ..t0, upload = "ok" }
           match gpu.gpu_launch(kernel, gx, 1, 1, list.map(hs, h => gpu.Buffer(h))) {
             Err(e) -> {
               release(hs)
-              Trace { ..t1, launch= e.kind, note= e.message }
+              Trace { ..t1, launch = e.kind, note = e.message }
             }
             Ok(_) -> {
               let s = gpu.gpu_sync()
@@ -229,11 +229,11 @@ fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !
               }
               Trace {
                 ..t1,
-                launch= "ok",
-                sync= kind(s),
-                download= kind(r),
-                result= value,
-                note= message(s) ++ message(r)
+                launch = "ok",
+                sync = kind(s),
+                download = kind(r),
+                result = value,
+                note = message(s) ++ message(r)
               }
             }
           }
@@ -715,7 +715,7 @@ fn corpus_line(name: String) -> String =
   } else if name == "attr_ftof" {
     let x = ftof_x()
     let idx = range(0, ATTR_BLOCKS * ATTR_TILE)
-    let ties = list.filter(idx, i => narrow.round_tf32(x[i]) != narrow.round_tf32(x[i], mode= narrow.NearestAway))
+    let ties = list.filter(idx, i => narrow.round_tf32(x[i]) != narrow.round_tf32(x[i], mode = narrow.NearestAway))
     let off = list.filter(idx, i => narrow.round_f32(x[i]) != x[i])
     let past_f16 = list.filter(idx, i => magnitude(narrow.round_f16(x[i])) == 1.0 / 0.0)
     "lanes=${len(idx)} tf32_even_ties=${len(ties)} off_f32_grid=${len(off)} past_f16=${len(past_f16)}"

@@ -80,7 +80,7 @@ fn message[T](r: Result[T, ForeignError]) -> String = match r {
 }
 
 fn blank() -> Trace =
-  Trace { alloc= "-", upload= "-", launch= "-", sync= "-", download= "-", result= None, note= "" }
+  Trace { alloc = "-", upload = "-", launch = "-", sync = "-", download = "-", result = None, note = "" }
 
 # Allocate and fill one buffer per (format, contents) pair, in order.
 fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignError] !Gpu = {
@@ -123,20 +123,20 @@ fn args_of(spec: List[Spec], hs: List[Int]) -> List[LaunchArg] =
 fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])], spec: List[Spec],
   back: List[Int]) -> Trace !Gpu =
   match alloc_all(bufs) {
-    Err(e) -> Trace { ..blank(), alloc= e.kind, note= e.message }
+    Err(e) -> Trace { ..blank(), alloc = e.kind, note = e.message }
     Ok(hs) -> {
-      let t0 = Trace { ..blank(), alloc= "ok" }
+      let t0 = Trace { ..blank(), alloc = "ok" }
       match upload_all(hs, bufs) {
         Err(e) -> {
           release(hs)
-          Trace { ..t0, upload= e.kind, note= e.message }
+          Trace { ..t0, upload = e.kind, note = e.message }
         }
         Ok(_) -> {
-          let t1 = Trace { ..t0, upload= "ok" }
+          let t1 = Trace { ..t0, upload = "ok" }
           match gpu.gpu_launch(kernel, gx, 1, 1, args_of(spec, hs)) {
             Err(e) -> {
               release(hs)
-              Trace { ..t1, launch= e.kind, note= e.message }
+              Trace { ..t1, launch = e.kind, note = e.message }
             }
             Ok(_) -> {
               let s = gpu.gpu_sync()
@@ -156,11 +156,11 @@ fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])], spec: List
               release(hs)
               Trace {
                 ..t1,
-                launch= "ok",
-                sync= kind(s),
-                download= bad,
-                result= if bad == "ok" { Some(all) } else { None },
-                note= message(s)
+                launch = "ok",
+                sync = kind(s),
+                download = bad,
+                result = if bad == "ok" { Some(all) } else { None },
+                note = message(s)
               }
             }
           }
@@ -283,47 +283,47 @@ type Case = {
 
 fn scale_case(tag: String, word: LaunchArg, s: Float) -> Case =
   Case {
-    kernel= "scalar_scale",
-    tag= tag,
-    grid= 2,
-    bufs= [("f64", corpus_x(256)), ("f64", sentinel_buffer(264))],
-    spec= [B(0), W(word), B(1)],
-    back= [1],
-    refs= map.from([("scalar_scale", (2, last_out_with((_d, ins, _ss) => scalar_scale_ref(256, ins, [s]))))])
+    kernel = "scalar_scale",
+    tag = tag,
+    grid = 2,
+    bufs = [("f64", corpus_x(256)), ("f64", sentinel_buffer(264))],
+    spec = [B(0), W(word), B(1)],
+    back = [1],
+    refs = map.from([("scalar_scale", (2, last_out_with((_d, ins, _ss) => scalar_scale_ref(256, ins, [s]))))])
   }
 
 fn len_case(tag: String, word: LaunchArg, n: Int) -> Case =
   Case {
-    kernel= "scalar_len",
-    tag= tag,
-    grid= 2,
-    bufs= [("f64", corpus_x(256)), ("f64", sentinel_buffer(264))],
-    spec= [B(0), W(word), B(1)],
-    back= [1],
-    refs= map.from([("scalar_len", (2, last_out_with((_d, ins, _ss) => scalar_len_ref(ins, [to_float(n)]))))])
+    kernel = "scalar_len",
+    tag = tag,
+    grid = 2,
+    bufs = [("f64", corpus_x(256)), ("f64", sentinel_buffer(264))],
+    spec = [B(0), W(word), B(1)],
+    back = [1],
+    refs = map.from([("scalar_len", (2, last_out_with((_d, ins, _ss) => scalar_len_ref(ins, [to_float(n)]))))])
   }
 
 fn loop_case(tag: String, word: LaunchArg, n: Int) -> Case =
   Case {
-    kernel= "scalar_loop",
-    tag= tag,
-    grid= 1,
-    bufs= [("f64", corpus_x(4 * SK_TILE)), ("f64", sentinel_buffer(SK_TILE + 8))],
-    spec= [B(0), W(word), B(1)],
-    back= [1],
-    refs= map.from([("scalar_loop", (2, last_out_with((_d, ins, _ss) => scalar_loop_ref(SK_TILE, ins, [to_float(n)]))))])
+    kernel = "scalar_loop",
+    tag = tag,
+    grid = 1,
+    bufs = [("f64", corpus_x(4 * SK_TILE)), ("f64", sentinel_buffer(SK_TILE + 8))],
+    spec = [B(0), W(word), B(1)],
+    back = [1],
+    refs = map.from([("scalar_loop", (2, last_out_with((_d, ins, _ss) => scalar_loop_ref(SK_TILE, ins, [to_float(n)]))))])
   }
 
 fn wide_case(tag: String, a: Float, k: Int) -> Case =
   Case {
-    kernel= "scalar_wide",
-    tag= tag,
-    grid= 2,
-    bufs= [("f64", corpus_x(128)), ("i64", corpus_ints(128)), ("f64", sentinel_buffer(136)),
+    kernel = "scalar_wide",
+    tag = tag,
+    grid = 2,
+    bufs = [("f64", corpus_x(128)), ("i64", corpus_ints(128)), ("f64", sentinel_buffer(136)),
       ("i64", sentinel_buffer(136))],
-    spec= [B(0), B(1), W(gpu.erase(gpu.scalar_arg(a))), W(gpu.erase(gpu.scalar_arg(k))), B(2), B(3)],
-    back= [2, 3],
-    refs= map.from([("scalar_wide", (4, (_d, ins, _ss) => scalar_wide_ref(128, ins, [a, to_float(k)])))])
+    spec = [B(0), B(1), W(gpu.erase(gpu.scalar_arg(a))), W(gpu.erase(gpu.scalar_arg(k))), B(2), B(3)],
+    back = [2, 3],
+    refs = map.from([("scalar_wide", (4, (_d, ins, _ss) => scalar_wide_ref(128, ins, [a, to_float(k)])))])
   }
 
 ## A trip count here is never 1 or 2: the `scalar-passed-as-handle` mutant

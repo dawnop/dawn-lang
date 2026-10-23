@@ -3311,8 +3311,8 @@ mutant_ts_src="$work/kernels-transpose.dawn"
 cp "$golden/kernels.dawn" "$mutant_ts_src"
 before=$(digest "$mutant_ts_src")
 python3 "$here/mutate.py" "$mutant_ts_src" stride-row-major-swapped \
-  '  store(out, base_out, t, strides: Some(permute(row_major([TT_COLS, TT_ROWS]), [1, 0])), mask: Some(m))' \
-  '  store(out, base_out, t, strides: Some(permute(row_major([TT_ROWS, TT_COLS]), [1, 0])), mask: Some(m))'
+  '  store(out, base_out, t, strides= Some(permute(row_major([TT_COLS, TT_ROWS]), [1, 0])), mask= Some(m))' \
+  '  store(out, base_out, t, strides= Some(permute(row_major([TT_ROWS, TT_COLS]), [1, 0])), mask= Some(m))'
 after=$(digest "$mutant_ts_src")
 echo "      stride-row-major-swapped: scripts/tile-golden/kernels.dawn md5 $before -> $after"
 mkdir -p "$work/proj-transpose/src"
@@ -3899,8 +3899,8 @@ gath_kernel_check() { # name, kernel
 #     layer 1 accepts it (one index tile is as legal as another), and the
 #     device says 255 of 264 lanes hold the wrong value.
 gath_kernel_mutant scatter-unpermuted scatter_perm \
-  '  scatter(out, dst, load_cell(x), mask: Some(in_range(p, 0, SC_N)))' \
-  '  scatter(out, lanes(tile_at(block_id(0), SC_TILE), [SC_TILE]), load_cell(x), mask: Some(in_range(p, 0, SC_N)))'
+  '  scatter(out, dst, load_cell(x), mask= Some(in_range(p, 0, SC_N)))' \
+  '  scatter(out, lanes(tile_at(block_id(0), SC_TILE), [SC_TILE]), load_cell(x), mask= Some(in_range(p, 0, SC_N)))'
 gath_kernel_check scatter-unpermuted scatter_perm
 
 # 18. rank-scatter-in-lane-order: `sort_rank` still computes every rank and
@@ -4043,8 +4043,8 @@ fi
 #     different expression, which is why the red set is one kernel and not
 #     two.
 scan_kernel_mutant exclusive-scan-as-inclusive compact \
-  '  scatter(out, sub_i(incl, ones), t, mask: Some(keep))' \
-  '  scatter(out, incl, t, mask: Some(keep))'
+  '  scatter(out, sub_i(incl, ones), t, mask= Some(keep))' \
+  '  scatter(out, incl, t, mask= Some(keep))'
 scan_kernel_check exclusive-scan-as-inclusive compact
 
 # 21. atomic-as-plain-store: the PACKAGE's `atomic_add_masked` issues a
@@ -4062,10 +4062,10 @@ rm -rf "$mutant_pkg_atom"
 cp -r "$root/packages/tileir" "$mutant_pkg_atom"
 before=$(digest "$mutant_pkg_atom/src/dev.dawn")
 python3 "$here/mutate.py" "$mutant_pkg_atom/src/dev.dawn" atomic-as-plain-store \
-  '  let _old = atomic_rmw(p, "add", index, v, mask: mask)
+  '  let _old = atomic_rmw(p, "add", index, v, mask = mask)
   ()' \
-  '  let old = gather(p, index, mask: mask, pad: Some(i_const(0)))
-  scatter(p, index, add_i(old, v), mask: mask)'
+  '  let old = gather(p, index, mask = mask, pad = Some(i_const(0)))
+  scatter(p, index, add_i(old, v), mask = mask)'
 after=$(digest "$mutant_pkg_atom/src/dev.dawn")
 echo "      atomic-as-plain-store: packages/tileir/src/dev.dawn md5 $before -> $after"
 
@@ -4179,8 +4179,8 @@ atom_kernel_check() { # name, kernel
 #     operands is which: `AllTypesMatch<["cmp", "val", "result"]>` is
 #     satisfied either way, which is why tileiras accepts it.
 atom_kernel_mutant cas-compare-ignored cas_swap \
-  '[CAS_TILE]), c, load_cell(val), mask: Some(active))' \
-  '[CAS_TILE]), load_cell(val), load_cell(val), mask: Some(active))'
+  '[CAS_TILE]), c, load_cell(val), mask= Some(active))' \
+  '[CAS_TILE]), load_cell(val), load_cell(val), mask= Some(active))'
 atom_kernel_check cas-compare-ignored cas_swap
 
 # The two mutants of the error function family (knife 15). Both live in the

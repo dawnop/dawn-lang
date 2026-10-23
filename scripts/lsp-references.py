@@ -116,25 +116,25 @@ fn moved2(q: Point) -> Point = q.shift(dy = 2, dx = q.y)
 # is `needle` + delta in the program.
 REFERENCES = [
     ("local: a var, its assignments and reads", "var acc", 4, True, [
-        "53:6 acc", "54:2 acc", "54:8 acc", "55:2 acc", "55:8 acc", "55:62 acc",
+        "53:6 acc", "54:2 acc", "54:8 acc", "55:2 acc", "55:8 acc", "55:63 acc",
         "56:2 acc", "56:14 acc", "56:34 acc", "56:48 acc"]),
     ("local: a let read by a record pun", "let y = x", 4, True, ["32:6 y", "33:13 y"]),
     ("parameter: declaration, use, named argument", "dy: Int = 0", 0, True,
-     ["29:28 dy", "29:82 dy", "55:39 dy", "65:39 dy"]),
+     ["29:28 dy", "29:84 dy", "55:39 dy", "65:39 dy"]),
     ("parameter: passed to a call that leaves a default out", "moved(q", 6, True,
      ["63:9 q", "63:36 q"]),
     ("parameter: a method call with its named arguments out of order", "moved2(q", 7, True,
-     ["65:10 q", "65:31 q", "65:50 q"]),
-    ("named argument: a method call's, out of order", "dx: q.y", 0, True,
-     ["29:19 dx", "29:69 dx", "65:46 dx"]),
-    ("named argument: the parameter it names", "dy: 3", 0, True,
-     ["29:28 dy", "29:82 dy", "55:39 dy", "65:39 dy"]),
+     ["65:10 q", "65:31 q", "65:52 q"]),
+    ("named argument: a method call's, out of order", "dx = q.y", 0, True,
+     ["29:19 dx", "29:70 dx", "65:47 dx"]),
+    ("named argument: the parameter it names", "dy = 3", 0, True,
+     ["29:28 dy", "29:84 dy", "55:39 dy", "65:39 dy"]),
     ("pun, field side: puns in a construction and a pattern", "x: Int, y", 0, True,
-     ["11:15 x", "18:31 x", "29:60 x", "29:65 x", "33:10 x", "38:12 x"]),
+     ["11:15 x", "18:31 x", "29:60 x", "29:66 x", "33:10 x", "38:12 x"]),
     ("pun, local side: the parameter a construction pun reads", "origin(x: Int", 7, True,
      ["31:10 x", "32:10 x", "33:10 x"]),
-    ("pun, local side: the binder a pattern pun declares", "Point { x, y: _ }", 8, True,
-     ["38:12 x", "38:25 x"]),
+    ("pun, local side: the binder a pattern pun declares", "Point { x, y = _ }", 8, True,
+     ["38:12 x", "38:26 x"]),
     ("trait method: declaration, impl method, call", "fn area(s: T", 3, True,
      ["14:5 area", "18:5 area", "55:14 area"]),
     ("operation: declaration, calls, handler arm", "lookup(k)", 0, True,
@@ -160,10 +160,10 @@ REFERENCES = [
 # (label, needle, delta, expected occurrences with their kind)
 HIGHLIGHTS = [
     ("highlight: declaration and assignments write, reads read", "acc = acc + total", 0, [
-        "53:6 acc/3", "54:2 acc/3", "54:8 acc/2", "55:2 acc/3", "55:8 acc/2", "55:62 acc/2",
+        "53:6 acc/3", "54:2 acc/3", "54:8 acc/2", "55:2 acc/3", "55:8 acc/2", "55:63 acc/2",
         "56:2 acc/2", "56:14 acc/2", "56:34 acc/2", "56:48 acc/2"]),
     ("highlight: a field, its puns read", "x: Int, y", 0, [
-        "11:15 x/3", "18:31 x/2", "29:60 x/2", "29:65 x/2", "33:10 x/2", "38:12 x/2"]),
+        "11:15 x/3", "18:31 x/2", "29:60 x/2", "29:66 x/2", "33:10 x/2", "38:12 x/2"]),
 ]
 
 # Definition and hover at a call of a parameter that shares its name with a

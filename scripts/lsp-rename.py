@@ -27,7 +27,7 @@ safety condition of the research report's §3.3 that a fixture can hold
                         function are refused at prepareRename
   8 record puns         the field side spells `{ x }` out as `{ col = x }`, the
                         local side as `{ x = v }`, in a construction and a pattern
-  9 named arguments     a parameter's `by: 3` at a call follows it
+  9 named arguments     a parameter's `by = 3` at a call follows it
   10 trait methods      the trait's method, the impl's and the call
   11 operations         the declaration, the call and the handler arm
   12 pipes and UFCS     in 6
@@ -311,17 +311,17 @@ CASES = [
     ("importers: a public function from a call", "main.dawn", "scale(1, by", 2, "grow", SCALE_TO_GROW),
     ("importers: the same from its declaration", "geo.dawn", "fn scale", 3, "grow", SCALE_TO_GROW),
     # 9
-    ("named argument: the parameter follows to its call", "main.dawn", "by: 3", 0, "factor", [
+    ("named argument: the parameter follows to its call", "main.dawn", "by = 3", 0, "factor", [
         "geo.dawn 7:22 by -> factor", "geo.dawn 7:48 by -> factor", "main.dawn 15:20 by -> factor"]),
     # 8, 13
     ("record pun, field side: spelled out where it puns", "geo.dawn", "x: Int, y", 0, "col", [
         "geo.dawn 1:54 x -> col", "geo.dawn 4:20 x -> col", "geo.dawn 9:52 x -> col",
-        "geo.dawn 9:57 x -> col", "geo.dawn 13:11 x -> col = x", "geo.dawn 18:13 x -> col = x",
+        "geo.dawn 9:58 x -> col", "geo.dawn 13:11 x -> col = x", "geo.dawn 18:13 x -> col = x",
         "geo.dawn 26:32 x -> col"]),
     ("record pun, local side: a let a construction puns", "geo.dawn", "let y", 4, "yy", [
         "geo.dawn 12:7 y -> yy", "geo.dawn 13:14 y -> y = yy"]),
-    ("record pun, local side: a binder a pattern puns", "geo.dawn", "{ x, y: _ }", 2, "v", [
-        "geo.dawn 18:13 x -> x = v", "geo.dawn 18:26 x -> v"]),
+    ("record pun, local side: a binder a pattern puns", "geo.dawn", "{ x, y = _ }", 2, "v", [
+        "geo.dawn 18:13 x -> x = v", "geo.dawn 18:27 x -> v"]),
     # 10
     ("trait method: the trait's, the impl's and the call", "main.dawn", "area(q)", 0, "size", [
         "geo.dawn 22:6 area -> size", "geo.dawn 26:6 area -> size",

@@ -207,7 +207,7 @@ def harness_source(src: str) -> str:
     formats = [re.match(r'(?:In|Out|Shared|Scalar)\(([A-Z0-9]+)', k).group(1) for k in markers]
     params = ", ".join(f"param({d}, {k})" for k, d in enumerate(formats))
     erased = ", ".join(f"erase({k})" for k in markers)
-    traced = f'trace_calls("{NAME}", [], () => {NAME}({params}), markers: [{erased}])'
+    traced = f'trace_calls("{NAME}", [], () => {NAME}({params}), markers = [{erased}])'
     return src + MAIN.replace("%TRACE%", traced).replace("%NAME%", NAME)
 
 

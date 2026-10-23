@@ -230,7 +230,7 @@ fn run_kernel(bufs: List[(String, List[Float])]) -> (String, Option[List[Float]]
   }
 
 fn blank_probe() -> Probe =
-  Probe { kinds= [], elements= [], reads= [], writes= [], after= None, stopped= "", note= "" }
+  Probe { kinds = [], elements = [], reads = [], writes = [], after = None, stopped = "", note = "" }
 
 ## One lookup: the kind it answered, the element count it answered, and what
 ## the global held if it answered a handle. The handle is FREED, which for a
@@ -254,8 +254,8 @@ fn look_up_all(names: List[String], i: Int, p: Probe) -> Probe !Gpu =
     p
   } else {
     let (k, n, v) = look_up(names[i])
-    look_up_all(names, i + 1, Probe { ..p, kinds= p.kinds ++ [k], elements= p.elements ++ [n],
-      reads= p.reads ++ [v] })
+    look_up_all(names, i + 1, Probe { ..p, kinds = p.kinds ++ [k], elements = p.elements ++ [n],
+      reads = p.reads ++ [v] })
   }
 
 ## One write, through a second lookup of the same symbol: the handler
@@ -279,7 +279,7 @@ fn write_all(names: List[String], values: List[List[Float]], i: Int, p: Probe) -
     p
   } else {
     let k = write_one(names[i], values[i])
-    write_all(names, values, i + 1, Probe { ..p, writes= p.writes ++ [k] })
+    write_all(names, values, i + 1, Probe { ..p, writes = p.writes ++ [k] })
   }
 
 ## The whole symbol phase, in one installation: look every symbol up and
@@ -291,10 +291,10 @@ fn symbols(n: Int) -> Probe !Gpu = {
   let p0 = look_up_all(sym_names(), 0, blank_probe())
   let p1 = write_all(sym_names(), written_tables(n), 0, p0)
   if list.any(p1.writes, w => w != "ok") {
-    Probe { ..p1, note= "a write to a module global was refused" }
+    Probe { ..p1, note = "a write to a module global was refused" }
   } else {
     let (stop, out, note) = run_kernel(case_bufs(n))
-    Probe { ..p1, after= out, stopped= stop, note= note }
+    Probe { ..p1, after = out, stopped = stop, note = note }
   }
 }
 
@@ -430,7 +430,7 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
   #    own tables
   let bufs = case_bufs(n)
   let plain_fake = with_gpu_fake(kernels_with(global_syms_tables(n)), () => run_kernel(bufs),
-    globals= fake_globals())
+    globals = fake_globals())
   let plain_real = with_gpu_real(cubins, () => run_kernel(bufs))
   let v = verdict(plain_fake, plain_real)
   let (_fs, fout, _fnote) = plain_fake
@@ -446,7 +446,7 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
   # 2. the symbols: what the host can look up, read, write, and read back
   #    through a launch
   let sym_fake = with_gpu_fake(kernels_with(written_tables(n)), () => symbols(n),
-    globals= fake_globals())
+    globals = fake_globals())
   let sym_real = with_gpu_real(cubins, () => symbols(n))
   let sv = sym_verdict(sym_fake, sym_real)
   io.println("symbols ${KERNEL} declared=${DECLARED} probed=${len(sym_names())}")
