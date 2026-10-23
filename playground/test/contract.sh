@@ -625,6 +625,72 @@ a,b=drop(os.environ["A"]),drop(os.environ["B"])
 assert a["ok"] is True and a==b, (a,b)' || st=1
   ok_case "native emitc: the C view (text and map) equals the JVM compiler's" "$st"
 
+  # Projects use the same native commands as files. Count the subcommand,
+  # not --version (every request probes that even if it then uses the JVM).
+  # Compare wire bytes, including diagnostics, with only timing normalized.
+  st=0
+  for name in tile tile_broken; do
+    n0=$(grep -c '^check$' "$NATLOG" || true)
+    data=$(run_data "$CASES/$name.dawn" '{}')
+    post "$SOCK" check "$data" >"$CASES/$name.native-check"
+    post "$SOCK2" check "$data" >"$CASES/$name.jvm-check"
+    n1=$(grep -c '^check$' "$NATLOG" || true)
+    [ "$n1" -eq "$((n0 + 1))" ] || st=1
+    python3 - "$CASES/$name.native-check" "$CASES/$name.jvm-check" "$name" <<'PY' || st=1
+import json, re, sys
+a, b = [open(p, "rb").read() for p in sys.argv[1:3]]
+d = json.loads(a)
+assert d["ok"] is (sys.argv[3] == "tile"), d
+assert d["phase"] == ("check" if d["ok"] else "compile"), d
+if not d["ok"]:
+    assert "undefined function: nope" in d["output"], d
+assert re.sub(rb'"ms":[0-9]+', b'"ms":0', a) == re.sub(rb'"ms":[0-9]+', b'"ms":0', b), (a, b)
+PY
+  done
+  ok_case "native check: tileir projects use dawnc and match the JVM response bytes, including errors" "$st"
+
+  st=0
+  for name in tile tile_broken; do
+    n0=$(grep -c '^emitc$' "$NATLOG" || true)
+    data=$(compile_body "$CASES/$name.dawn" c)
+    post "$SOCK" compile "$data" >"$CASES/$name.native-c"
+    post "$SOCK2" compile "$data" >"$CASES/$name.jvm-c"
+    n1=$(grep -c '^emitc$' "$NATLOG" || true)
+    [ "$n1" -eq "$((n0 + 1))" ] || st=1
+    python3 - "$CASES/$name.native-c" "$CASES/$name.jvm-c" "$name" <<'PY' || st=1
+import json, re, sys
+a, b = [open(p, "rb").read() for p in sys.argv[1:3]]
+d = json.loads(a)
+assert d["ok"] is (sys.argv[3] == "tile"), d
+if d["ok"]:
+    assert d["target"] == "c" and d["pane"]["kind"] == "c" and d["gaps"]["count"] == 0, d
+else:
+    assert d["phase"] == "compile" and "undefined function: nope" in d["output"], d
+assert re.sub(rb'"ms":[0-9]+', b'"ms":0', a) == re.sub(rb'"ms":[0-9]+', b'"ms":0', b), (a, b)
+PY
+  done
+  ok_case "native emitc: tileir C views use dawnc and match the JVM response bytes, including errors" "$st"
+
+  # The answer key names the toolchain and staging form, not which compiler
+  # executable supplied the identical C text. A native-warmed project answer
+  # must therefore also serve the JVM-only runner, with the same bytes.
+  mkdir -p "$NATIVE_DIR/samples"
+  cp "$CASES/tile.dawn" "$NATIVE_DIR/samples/tile.dawn"
+  st=0
+  "$NATIVE_BIN" warm "$NATIVE_DIR/samples" "$NATIVE_DIR/answers" >"$NATIVE_DIR/warm.log" 2>&1 || st=1
+  data=$(compile_body "$CASES/tile.dawn" c)
+  printf 'POST /compile HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "${#data}" "$data" |
+    PLAY_ANSWERS="$NATIVE_DIR/answers" DAWNC_BIN=/nonexistent/dawnc "$NATIVE_BIN" serve 2>/dev/null >"$CASES/tile.hit-http"
+  python3 - "$CASES/tile.hit-http" "$CASES/tile.native-c" <<'PY' || st=1
+import json, re, sys
+hit = open(sys.argv[1], "rb").read().split(b"\r\n\r\n", 1)[1]
+live = open(sys.argv[2], "rb").read()
+assert json.loads(hit)["cached"] is True and json.loads(live)["cached"] is False
+norm = lambda t: re.sub(rb'"ms":[0-9]+', b'"ms":0', t).replace(b'"cached":true', b'"cached":false')
+assert norm(hit) == norm(live), (hit, live)
+PY
+  ok_case "store: a tileir C view warmed with dawnc is reusable by the JVM-only runner" "$st"
+
   kill -TERM "-$SRV2" 2>/dev/null || true
   rm -f "$LOG2"
 fi

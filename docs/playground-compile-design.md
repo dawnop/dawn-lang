@@ -502,6 +502,7 @@ K6 补的是 C / JVM 窗格早有的那一半：点源码里的一次调用，Ti
 - **配对：** 项目的模块叫 `main`、文件是 `src/main.dawn`，`view.dawn` 的 `spec` 按形态给 xmap 对应的 `Spec`；JVM 列表的类改成 `main.class`。
 - **native `dawnc`：** 项目形态不走 `dawnc check` / `dawnc emitc`（`/check` 与 C 视图直接用 JVM 编译器），因为 `dawnc` 对 `[deps]` 项目的支持未被验证，
   而 tileir 程序要用的恰是 `tileir` 的整份实现；每个请求少一次可能的回落，换来一个确定的路径。
+  这是 K7 当时的限制；2026-10-23 的 R5 已完成工程对拍并取消排除条件，见 `playground-native-runner-design.md` 4.5。
 
 **评估：无条件全走项目（不采用）。** 墙钟上它几乎免费：本机 `dawn run` 三次，普通 hello 单文件 1.53 / 1.51 / 1.46 s，放进带 tileir 依赖的项目 1.47 / 1.57 / 1.54 s，输出相同（事先的实测是 1.55 / 1.52 对 1.56 / 1.50 s），因为依赖按 `use` 加载，不用就不读。
 不采用的理由在别处：

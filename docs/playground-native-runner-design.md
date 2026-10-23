@@ -242,6 +242,39 @@ R1（沙箱 JVM 换 `-XX:+UseSerialGC -XX:TieredStopAtLevel=1`）让每个请求
 
 R1 的一个代价：comptime 要跑十秒以上的用户程序在 C1 下更慢，更早撞 30 s 的编译预算；概率低，写在 `playground/sandbox/SANDBOX.md`。
 
+### 4.5 tileir 工程的检查与 C 视图使用 dawnc（R5，2026-10-23）
+
+**原限制与原因核查。** `8f248b2b`（PR #779）把含 `use tileir/` 的程序在所有路由上暂存为工程，
+同时用 `native && not wants_tileir(code)` 禁用了工程的 `dawnc check` 与 `dawnc emitc`。
+当时的提交说明只写了不使用 native；`playground-compile-design.md` K7 补充的理由是
+「`dawnc` 对 `[deps]` 项目的支持未被验证」，PR 也要求重新验证，没有记录一个已知的能力缺口。
+这是一条未验证时的保守限制，不是工程必须用 JVM 的约定。
+
+放开前，本机用校验过 SHA-256 的 v0.100.0 release `dawnc` 与本树 JVM 编译器对拍全部 14 个侧栏样例，
+另加 `tile_vadd`、`tile_hostif`、`tile_broken` 三个契约样例。含 tileir 的程序使用 runner 同样的
+`src/main.dawn` 与三条固定路径依赖，因而覆盖多文件包的加载。17 个程序的 `check` 退出状态与诊断逐字节一致，
+`emitc` 与 `__emitc` 的 C 文本和映射也逐字节一致。错误程序还与 `/check` 原用的 `dawn build` 诊断对拍；
+成功时 `check` 的 `ok` 与 `build` 的写 jar 确认不同，但 runner 本来就丢弃这两种成功文本。
+
+**新路径。** 保留暂存形态与输入路径，只取消两处工程排除条件：版本匹配的 `dawnc` 为文件和工程执行
+`check`，并为 C/JVM 视图共用构建中的 C 部分执行 `emitc --map`。JVM 部分仍由 `dawn __emit` 与 `javap` 生成。
+原有 `use java` 拒绝和空诊断的 JVM 回落、超时预算、沙箱与闸门继续由同一份执行逻辑处理。
+契约必须数到真正的 `check` / `emitc` 调用，不能把每请求的 `--version` 探测算成使用了 native。
+成功与失败的 tileir 程序都与关闭 `dawnc` 的参照 runner 比较响应字节，只归一成功响应的 `ms`。
+
+**R2 答案键。** `cache_key` 包含工具链 id、`file` / `project` 形态与源码，调用者另加端点/目标，
+不包含实际选择的 `dawnc` / JVM 命令或二进制路径。R5 没有改变这些键成分或输出字节，因此不增加人为失效版本。
+部署仍用候选 runner 重新 `warm` 并替换整个目录；契约核对由 native 预热的 tileir C 视图也能被 JVM 参照 runner
+读取且等于实时输出。已有源码多一个字节与工具链 id 改变两条负控继续要求未命中。
+
+**不做的（理由）。**
+
+- 不改 `/run` 为 `dawnc build`：这会引入请求期 cc，与暂缓的 B 路裁决相冲突，R5 只消除未验证的排除条件。
+- 不改 Tile IR 视图：它需要编译并运行插桩工程，沿用 JVM 的执行路径与既有逐调用配对。
+- 不改编译器、诊断或 C 输出：本刀的前提是逐字节一致，因而不需要编译器发版。
+- 不为编译器命令路径增加答案键：路径本身不决定答案，工具链 id 与输出一致性才决定能否复用。
+- 不在本刀部署或合并：由协调者在合入后从同一提交构建 runner、预热答案并部署站点。
+
 ## 五、沙箱单元的相互作用
 
 - 每请求的编译单元与程序单元（`dawn-play-run-<id>`）**不变**；`sudo -n run-sandboxed.sh` 的白名单、限额、`RuntimeMaxSec=15` 都不动。
