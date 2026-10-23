@@ -1,86 +1,175 @@
 #!/usr/bin/env python3
 """Keep the kernel's offline choices tied to the measurements that selected them.
 
-The table is Dawn source beside the kernel. This reader accepts only its
-literal fa_config and mm_config rows, holds their complete row sets to the ledger,
-and compares configurations and rounded selection timings. It never chooses
-or tunes a kernel. Self tests delete evidence, change a tile, change a time,
-and exercise both rejected cliff configurations and their allowed boundaries.
+Execute the selectors beside the kernel and inspect the actual recorded IR.
+Plans carry tiles and optional hints; historical timings stay in this audit
+directory. P4-b history is pinned separately from P4-c and A2. Matmul keeps
+its original measured grid and winner checks. No selector is reimplemented
+here, and absent hints are never treated as explicit ones.
 """
+import argparse
 import copy
 import itertools
+import hashlib
+import subprocess
+import tempfile
 import json
 import math
 from pathlib import Path
-import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 KERNELS = ROOT / "scripts/tile-golden/kernels.dawn"
 LEDGER = Path(__file__).with_name("ledger.json")
-ROW = re.compile(r'^\s*(.*?) -> fa_config\((\d+), (\d+), (\d+), (\d+), "([a-z0-9]+)", ([0-9.]+), ([0-9.]+)\)$', re.M)
-MM_ROW = re.compile(r'^\s*(.*?) -> mm_config\((\d+), (\d+), (\d+), (\d+), (\d+), "([a-z0-9]+)", ([0-9.]+), ([0-9.]+)\)$', re.M)
+# P4-b selection history is distinct from the later P4-c measurements.
+# This pin proves that the archived record did not change, not that the
+# measurements are true. It includes tools, shapes, configs and all rounds.
+P4B_SELECTION_SHA256 = "d1258bec5f8d70baaacaccd6b43fb35b33ac35ae64133eb6dafe9f4533a98834"
+ARCHES = ("sm_90", "sm_100", "default", "sm_86", "sm_120")
+
+
+def manifest(source):
+    """Execute Dawn selectors and actual recorders, never evaluate Dawn in Python."""
+    with tempfile.TemporaryDirectory(prefix="flash-config-") as work:
+        project = Path(work)
+        (project / "src").mkdir()
+        (project / "src/main.dawn").write_text(source)
+        (project / "dawn.toml").write_text(
+            'schema = 1\nname = "config_audit"\n[deps]\n'
+            f'tileir = "{ROOT / "packages/tileir"}"\n'
+            f'tileref = "{ROOT / "packages/tileref"}"\n')
+        run = subprocess.run([str(ROOT / "bin/dawn"), "run", str(project), "--", "--config-manifest"],
+                             capture_output=True, text=True, check=True)
+        return parse_manifest(run.stdout)
+
+
+def parse_manifest(output):
+    if output and not output.endswith("END\n"):
+        raise ValueError("unterminated config manifest")
+    records = []
+    for block in output.split("END\n"):
+        if not block:
+            continue
+        header, ir = block.split("\n", 1)
+        fields = header.split("\t")
+        if fields[0] != "BEGIN" or fields[1] not in ("flash", "matmul"):
+            raise ValueError("invalid config manifest header")
+        family, arch, dtype = fields[1:4]
+        if family == "flash":
+            d, bh, bq, bk = map(int, fields[4:8])
+            cfg = dict(bq=bq, bk=bk)
+            key = (family, arch, dtype, d, bh)
+        else:
+            tm, tn, tk = map(int, fields[4:7])
+            cfg = dict(tm=tm, tn=tn, tk=tk)
+            key = (family, arch, dtype)
+        records.append(dict(key=key, config=cfg, hints=fields[-1], ir=ir))
+    return records
+
+
+def expected_hints(arch, cfg):
+    if not cfg['occupancy'] and not cfg['cga']:
+        return ""
+    return f"{arch}:{cfg['occupancy'] or 'none'}:{cfg['cga'] or 'none'}:none"
+
+
+def wiring(record):
+    """Check what the recorder emitted, independently of manifest plan fields."""
+    key, cfg, ir = record['key'], record['config'], record['ir']
+    problems = []
+    hint_fields = []
+    for item in filter(None, record['hints'].split(',')):
+        arch, occ, cga, warps = item.split(':')
+        attrs = [f"{name} = {value}" for name, value in
+                 [('num_cta_in_cga', cga), ('num_worker_warps_per_cta', warps), ('occupancy', occ)] if value != 'none']
+        hint_fields.append(f"{arch} = {{{', '.join(attrs)}}}")
+    want = ' optimization_hints=<' + ', '.join(hint_fields) + '>' if hint_fields else ''
+    entry = ir.splitlines()[1]
+    actual = entry[entry.index(' optimization_hints='):entry.rindex(' {')] if ' optimization_hints=' in entry else ''
+    if actual != want:
+        problems.append(f"{key}: recorded hints differ from plan")
+    if key[0] == 'flash':
+        _, _, dtype, d, bh = key
+        q, k = cfg['bq'], cfg['bk']
+        acc = 'f32' if dtype == 'bf16' else 'f64'
+        shapes = [(q, d), (k, d)]
+        mma = f': tile<{q}x{d}x{dtype}>, tile<{d}x{k}x{dtype}>, tile<{q}x{k}x{acc}>'
+        if f'shape = [{bh * 512}, {d}], strides = [{d}, 1]' not in ir:
+            problems.append(f"{key}: recorded storage differs from domain")
+    else:
+        dtype = key[2]
+        q, n, k = cfg['tm'], cfg['tn'], cfg['tk']
+        acc = 'i32' if dtype == 'i8' else dtype
+        shapes = [(q, k), (k, n), (q, n)]
+        mma = f': tile<{q}x{k}x{dtype}>, tile<{k}x{n}x{dtype}>, tile<{q}x{n}x{acc}>'
+    if any(f'tile=({a}x{b})' not in ir for a, b in shapes) or mma not in ir:
+        problems.append(f"{key}: recorded view/MMA tiles differ from plan")
+    return problems
 
 
 def cliff(arch, bq, cga):
     return (cga == 2 and bq < 128) or (arch == "sm_90" and bq == 256 and cga != 2)
 
 
-def check(source, ledger):
+def check(records, ledger):
     problems = []
-    if ledger.get("flash_output_dtype") != "f64":
-        problems.append("historical selection evidence must retain its f64 output format")
-    rows = []
-    for name, dtype in [("fa_cfg", "bf16"), ("fa64_cfg", "f64")]:
-        match = re.search(r'^fn ' + name + r'\([^\n]+ = match [^\n]+ \{\n(.*?)^\}', source, re.M | re.S)
-        if not match:
-            problems.append(f"missing literal {name} table")
+    historical = {k: v for k, v in ledger.items() if k != 'matmul'}
+    digest = hashlib.sha256(json.dumps(historical, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    if digest != P4B_SELECTION_SHA256:
+        problems.append('P4B_SELECTION_SHA256: archived tools, configurations or timings changed')
+    if records is None:
+        return problems
+    expected = {('flash', a, dt, d, bh) for a in ARCHES for dt in ['f64', 'bf16']
+                for d in [32, 64, 128, 256] for bh in [1, 2]}
+    flash = [r for r in records if r['key'][0] == 'flash']
+    if {r['key'] for r in flash} != expected or len(flash) != len(expected):
+        problems.append('flash selector manifest has missing or duplicate domain cases')
+    selected = [r for r in ledger['rows'] if r['selected']]
+    used = set()
+    for actual in flash:
+        _, arch, dtype, d, _bh = actual['key']
+        # Audit keys describe evidence coverage, not executable selection code.
+        rows = [r for r in selected if r['dtype'] == dtype and r['table_arch'] == arch
+                and r['table_d'] == (d if dtype == 'bf16' else 0)]
+        if not rows:
+            rows = [r for r in selected if r['dtype'] == dtype and r['table_arch'] == 'default']
+        if len(rows) != 1:
+            problems.append(f"{actual['key']}: expected one historical evidence association")
             continue
-        text = match[1]
-        found = list(ROW.finditer(text))
-        if len(found) != len([line for line in text.splitlines() if line.strip()]):
-            problems.append(f"unreadable row in {name}")
-        for m in found:
-            key, bq, bk, occ, cga, evidence, med, base = m.groups()
-            arch = "default" if key == "_" else re.search(r'"(sm_\d+)"', key)[1]
-            d = int(re.search(r', (\d+)\)', key)[1]) if dtype == "bf16" and key != "_" else 0
-            cfg = dict(bq=int(bq), bk=int(bk), occupancy=int(occ), cga=int(cga))
-            if cliff(arch, cfg['bq'], cfg['cga'] or 1):
-                problems.append(f"{evidence}: rejected cliff configuration")
-            rows.append(evidence)
-            records = [r for r in ledger["rows"] if r["id"] == evidence]
-            if len(records) != 1:
-                problems.append(f"{evidence}: expected exactly one measurement, got {len(records)}")
-                continue
-            r = records[0]
-            if (r["table_arch"], r["table_d"], r["dtype"], r["config"]) != (arch, d, dtype, cfg):
-                problems.append(f"{evidence}: table configuration differs from measurement")
-            for literal, field in [(med, "median_ms"), (base, "baseline_ms")]:
-                digits = len(literal.split('.')[1])
-                if float(literal) != round(r[field], digits):
-                    problems.append(f"{evidence}: {field} differs from measurement")
-            if r["tileiras"] != "13.4.92" or r["opt_level"] != 3 or r["p90_ms"] < r["median_ms"]:
-                problems.append(f"{evidence}: incomplete measurement metadata")
-            if not r["round_medians"] or not r["baseline_round_medians"]:
-                problems.append(f"{evidence}: missing paired rounds")
-    selected = [r["id"] for r in ledger["rows"] if r["selected"]]
-    if len(rows) != 8 or len(set(rows)) != 8 or sorted(rows) != sorted(selected):
-        problems.append("the eight table cells and selected ledger rows are not one to one")
-    alternate = [r for r in ledger["rows"] if not r["selected"]]
-    if len(alternate) != 1 or alternate[0]["id"] != "bf100d64single":
-        problems.append("missing sm_100 d64 single-head alternative")
+        row = rows[0]
+        used.add(row['id'])
+        cfg = row['config']
+        if actual['config'] != {k: cfg[k] for k in ['bq', 'bk']} or actual['hints'] != expected_hints(arch, cfg):
+            problems.append(f"{actual['key']}: actual plan differs from evidence {row['id']}")
+        problems += wiring(actual)
+    if used != {r['id'] for r in selected} or len(used) != 8:
+        problems.append('eight logical flash audit keys must all be covered')
     return problems
 
 
-def self_test(source, ledger):
+def self_test(records, ledger):
+    for field in ['median_ms', 'tileiras', 'measured_arch']:
+        changed = copy.deepcopy(ledger)
+        changed['rows'][0][field] = 0 if field == 'median_ms' else 'changed'
+        assert any('P4B_SELECTION_SHA256' in p for p in check(records, changed)), field
     changed = copy.deepcopy(ledger)
-    changed["rows"].pop(0)
-    assert check(source, changed), "a missing ledger row stayed green"
-    assert check(source.replace('fa_config(64, 128, 2, 0, "bf90d64"', 'fa_config(64, 64, 2, 0, "bf90d64"'), ledger), "a changed table tile stayed green"
-    assert check(source.replace('"bf90d64", 0.1520', '"bf90d64", 0.1530'), ledger), "a changed timing stayed green"
-    assert cliff("sm_100", 64, 2) and cliff("sm_90", 256, 1)
-    assert not cliff("sm_100", 128, 2) and not cliff("sm_90", 256, 2)
-    print("PASS flash config negative controls: missing row, changed tile, changed time, cliff boundaries")
+    changed['rows'].pop(0)
+    assert check(records, changed), 'missing evidence stayed green'
+    if records is None:
+        print("PASS flash history controls: missing evidence, median, compiler and measured arch")
+        return
+    for field, value in [('config', dict(bq=32, bk=16)), ('hints', 'sm_90:1:none:none')]:
+        changed = copy.deepcopy(records)
+        target = next(r for r in changed if r['key'] == ('flash', 'sm_90', 'bf16', 64, 1))
+        target[field] = value
+        assert any('actual plan differs' in p for p in check(changed, ledger)), field
+    changed = copy.deepcopy(records)
+    target = next(r for r in changed if r['key'] == ('flash', 'sm_100', 'bf16', 64, 1))
+    target['ir'] = target['ir'].replace('num_cta_in_cga = 2, ', '')
+    assert any('recorded hints' in p for p in check(changed, ledger)), 'lost trace hints stayed green'
+    target['ir'] = target['ir'].replace('tile=(256x64)', 'tile=(128x64)')
+    assert any('view/MMA' in p for p in check(changed, ledger)), 'lost tile wiring stayed green'
+    print('PASS flash audit controls: missing evidence, median, compiler, measured arch, tile, absent hint and actual IR wiring')
 
 
 
@@ -145,24 +234,32 @@ def check_measurements(data, ledger, displayed):
     return problems
 
 
-def check_matmul(source, ledger, data, dtype="f64"):
+def check_matmul(records, ledger, data, dtype="f64"):
     """Extend the same source-to-evidence gate to the existing GEMM formats.
 
     The complete filtered grid stays here, including the runners up. Shapes
     measure a single architecture choice; they never become selection keys.
     """
     problems = []
-    table = re.search(r'^fn mm_cfg\([^\n]+ = match [^\n]+ \{\n(.*?)^\}', source, re.M | re.S)
-    if not table:
-        return ['missing literal mm_cfg table']
-    lines = table[1].strip().splitlines()
-    all_found = list(MM_ROW.finditer(table[1]))
-    found = [m for m in all_found if re.fullmatch(r'\(("sm_\d+"|_), "' + dtype + r'"\)', m[1].strip())]
     ledger = dict(ledger, rows=[r for r in ledger['rows'] if r['dtype'] == dtype])
-    if len(found) != 3 or len(all_found) != 9 or lines[-1].strip() != '_ -> panic("matmul: available dtypes are f64, f16 and i8")' or len(lines) != 10:
-        problems.append('unreadable matmul table or unsupported dtype fallback')
+    found = [r for r in ledger['rows'] if r['selected']]
     expected_keys = {('sm_90', dtype), ('sm_100', dtype), ('default', dtype)}
     actual_keys, ids = [], []
+    actual = [] if records is None else [r for r in records if r['key'][0] == 'matmul' and r['key'][2] == dtype]
+    if records is not None and ({r['key'] for r in actual} != {('matmul', a, dtype) for a in ARCHES} or len(actual) != len(ARCHES)):
+        problems.append('matmul selector manifest has missing or duplicate domain cases')
+    for item in actual:
+        arch = item['key'][1]
+        rows = [r for r in found if r['table_arch'] == arch]
+        if not rows:
+            rows = [r for r in found if r['table_arch'] == 'default']
+        if len(rows) != 1:
+            problems.append('missing matmul evidence association')
+            continue
+        cfg = rows[0]['config']
+        if item['config'] != {k: cfg[k] for k in ['tm', 'tn', 'tk']} or item['hints'] != expected_hints(arch, cfg):
+            problems.append(f"{item['key']}: actual matmul plan differs from evidence")
+        problems += wiring(item)
     cases = data['cases']
     if {(c['arch'], c['shape']) for c in cases} != {(a, s) for a in ['sm_90', 'sm_100'] for s in ['square', 'skinny']} or len(cases) != 4:
         problems.append('missing or duplicate matmul shape')
@@ -212,26 +309,12 @@ def check_matmul(source, ledger, data, dtype="f64"):
     actual_rejected = [(r['arch'], r['shape'], r['name']) for r in data['filtered']]
     if set(actual_rejected) != rejected or len(actual_rejected) != len(rejected):
         problems.append('matmul recording filter inventory differs from the grid')
-    for m in found:
-        key, tm, tn, tk, occ, cga, evidence, med, base = m.groups()
-        key_match = re.fullmatch(r'\(("sm_\d+"|_), "(' + dtype + r')"\)', key.strip())
-        if not key_match:
-            problems.append('unknown matmul selection key')
-            continue
-        arch = key_match[1].strip('"') if key_match[1] != '_' else 'default'
-        actual_keys.append((arch, key_match[2]))
+    for r in found:
+        arch, evidence, cfg = r['table_arch'], r['id'], r['config']
+        actual_keys.append((arch, dtype))
         ids.append(evidence)
-        records = [r for r in ledger['rows'] if r['id'] == evidence]
-        if len(records) != 1:
-            problems.append(f'{evidence}: expected exactly one matmul measurement')
-            continue
-        r = records[0]
-        cfg = dict(tm=int(tm), tn=int(tn), tk=int(tk), occupancy=int(occ), cga=int(cga))
-        if (r['table_arch'], r['dtype'], r['config']) != (arch, dtype, cfg) or cliff(arch, cfg['tm'], cfg['cga'] or 1):
-            problems.append(f'{evidence}: matmul table configuration differs from measurement')
-        for literal, field in [(med, 'median_ms'), (base, 'baseline_ms')]:
-            if float(literal) != round(r[field], len(literal.split('.')[1])):
-                problems.append(f'{evidence}: matmul {field} differs from measurement')
+        if cliff(arch, cfg['tm'], cfg['cga'] or 1):
+            problems.append(f'{evidence}: rejected matmul cliff configuration')
         if (r['tileiras'], r['opt_level']) != ('13.4.92', 3):
             problems.append(f'{evidence}: missing matmul toolchain')
         selected_cases = [c for c in cases if c['arch'] == r['measured_arch']]
@@ -293,38 +376,28 @@ def check_matmul(source, ledger, data, dtype="f64"):
     return problems
 
 
-def matmul_self_test(source, ledger, data):
+def matmul_self_test(records, ledger, data, dtype='f64'):
     changed = copy.deepcopy(ledger)
-    changed['rows'].pop(0)
-    assert check_matmul(source, changed, data), 'missing matmul evidence stayed green'
-    assert check_matmul(source.replace('mm_config(16, 64, 16, 2, 0, "mmf6490"', 'mm_config(32, 64, 16, 2, 0, "mmf6490"'), ledger, data), 'changed matmul tile stayed green'
-    assert check_matmul(source.replace('"mmf6490", 6.287264', '"mmf6490", 6.297264'), ledger, data), 'changed matmul timing stayed green'
+    changed['rows'] = [r for r in changed['rows'] if not (r['dtype'] == dtype and r['table_arch'] == 'sm_90')]
+    assert check_matmul(records, changed, data, dtype), 'missing matmul evidence stayed green'
+    for field in ['median_ms', 'tileiras']:
+        changed = copy.deepcopy(ledger)
+        row = next(r for r in changed['rows'] if r['dtype'] == dtype)
+        row[field] = 0 if field == 'median_ms' else 'changed'
+        assert check_matmul(records, changed, data, dtype), field
+    if records is not None:
+        changed = copy.deepcopy(records)
+        target = next(r for r in changed if r['key'] == ('matmul', 'sm_90', dtype))
+        target['config']['tk'] *= 2
+        assert check_matmul(changed, ledger, data, dtype), 'changed matmul tile stayed green'
     changed_data = copy.deepcopy(data)
     changed_data['cases'][0]['results'].pop(0)
-    assert check_matmul(source, ledger, changed_data), 'missing matmul grid cell stayed green'
-    changed_data = copy.deepcopy(data)
-    changed_data['cutile_tileiras'] = '13.3.36'
-    assert check_matmul(source, ledger, changed_data), 'wrong matmul comparator compiler stayed green'
-    print('PASS matmul config negative controls: missing evidence, changed tile, changed time, missing grid cell, wrong compiler')
-
-
-def matmul_format_self_test(source, ledger, data, dtype):
-    row = next(r for r in ledger['rows'] if r['dtype'] == dtype and r['table_arch'] == 'sm_90')
-    changed = copy.deepcopy(ledger)
-    changed['rows'] = [r for r in changed['rows'] if r['id'] != row['id']]
-    assert check_matmul(source, changed, data, dtype), 'missing format evidence stayed green'
-    cfg = row['config']
-    literal = f'mm_config({cfg["tm"]}, {cfg["tn"]}, {cfg["tk"]}, {cfg["occupancy"]}, {cfg["cga"]}, "{row["id"]}"'
-    bad = literal.replace(f'({cfg["tm"]},', f'({cfg["tm"] * 2},', 1)
-    assert literal in source
-    assert check_matmul(source.replace(literal, bad), ledger, data, dtype), 'changed format tile stayed green'
-    changed_data = copy.deepcopy(data)
-    changed_data['cases'][0]['results'].pop(0)
-    assert check_matmul(source, ledger, changed_data, dtype), 'missing format grid cell stayed green'
-    changed_data = copy.deepcopy(data)
-    changed_data['cases'][0]['results'][0]['max_abs_err'] = 0.001
-    assert check_matmul(source, ledger, changed_data, dtype), 'inexact corpus stayed green'
-    print(f'PASS {dtype} matmul negative controls: missing evidence, changed tile, missing grid cell, inexact corpus')
+    assert check_matmul(records, ledger, changed_data, dtype), 'missing matmul grid cell stayed green'
+    if dtype != 'f64':
+        changed_data = copy.deepcopy(data)
+        changed_data['cases'][0]['results'][0]['max_abs_err'] = 0.001
+        assert check_matmul(records, ledger, changed_data, dtype), 'inexact corpus stayed green'
+    print(f'PASS {dtype} matmul controls: evidence, tile, time, compiler and measured grid')
 
 
 def check_output_migration(data, ledger):
@@ -371,20 +444,28 @@ def check_output_migration(data, ledger):
 
 
 def main():
-    source, ledger = KERNELS.read_text(), json.loads(LEDGER.read_text())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--self-test', action='store_true')
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--history-only', action='store_true', help='text-only archived evidence checks for tree-policy')
+    group.add_argument('--manifest', type=Path, help='actual JVM/native manifest produced by tile-golden')
+    args = parser.parse_args()
+    records = (None if args.history_only else parse_manifest(args.manifest.read_text())
+               if args.manifest else manifest(KERNELS.read_text()))
+    ledger = json.loads(LEDGER.read_text())
     data = json.loads(LEDGER.with_name("measurements.json").read_text())
     display = (ROOT / "site/gpu-map/flash-perf.tsv").read_text()
     output = json.loads(LEDGER.with_name("a2-output.json").read_text())
-    problems = (check(source, ledger) + check_measurements(data, ledger, display) +
-                check_matmul(source, ledger['matmul'], data['matmul']) +
-                check_matmul(source, ledger['matmul'], data['matmul_f16'], 'f16') +
-                check_matmul(source, ledger['matmul'], data['matmul_i8'], 'i8') +
+    problems = (check(records, ledger) + check_measurements(data, ledger, display) +
+                check_matmul(records, ledger['matmul'], data['matmul']) +
+                check_matmul(records, ledger['matmul'], data['matmul_f16'], 'f16') +
+                check_matmul(records, ledger['matmul'], data['matmul_i8'], 'i8') +
                 check_output_migration(output, ledger))
     for p in problems:
         print(f"FAIL flash config: {p}")
     if problems:
         return 1
-    if sys.argv[1:] == ["--self-test"]:
+    if args.self_test:
         changed_output = copy.deepcopy(output)
         changed_output['cases'].pop()
         assert check_output_migration(changed_output, ledger), 'missing A2 case stayed green'
@@ -392,10 +473,10 @@ def main():
         changed_output['cases'][0]['host_contract']['new_bytes'] *= 2
         assert any('byte contract' in p for p in check_output_migration(changed_output, ledger)), 'old output width stayed green'
         print('PASS A2 evidence controls: missing case and old output width rejected')
-        self_test(source, ledger)
-        matmul_self_test(source, ledger['matmul'], data['matmul'])
+        self_test(records, ledger)
+        matmul_self_test(records, ledger['matmul'], data['matmul'])
         for dtype in ['f16', 'i8']:
-            matmul_format_self_test(source, ledger['matmul'], data['matmul_' + dtype], dtype)
+            matmul_self_test(records, ledger['matmul'], data['matmul_' + dtype], dtype)
         assert check_measurements(data, ledger, display + "changed"), "changed page timings stayed green"
         changed = copy.deepcopy(data)
         next(r for r in changed['alignment_adopted'] if r['name'] == 'kt_approx')['median_ms'] *= 1.2
@@ -404,11 +485,13 @@ def main():
         wrong_compiler['cutile_tileiras'] = '13.3.36'
         assert any('toolchain' in p for p in check_measurements(wrong_compiler, ledger, display)), "a mismatched comparator compiler stayed green"
         print("PASS flash timings: page values and configurations match all 12 same-round cases")
-    elif sys.argv[1:]:
-        return 2
     print("PASS A2 output migration: eight paired cases, host byte contracts, equality and independent reference")
-    print("PASS flash config: eight table cells match eight measured rows; one alternative retained")
-    print("PASS matmul config: nine table cells match complete grids for three dtypes, two architectures and two shapes")
+    if records is None:
+        print("PASS flash history: archived P4-b, P4-c and A2 evidence; executable plan checks run in tile-golden")
+    else:
+        print("PASS flash config: eight logical audit keys match actual plans and recorded IR; historical alternatives retained")
+    print("PASS matmul history: nine choices match complete measured grids for three dtypes" if records is None else
+          "PASS matmul config: nine choices match actual plans, IR and complete measured grids for three dtypes")
     return 0
 
 

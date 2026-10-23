@@ -145,7 +145,7 @@ One kernel, line by line
 
 ## kernel-body
 
-A fused attention, the source of the row statistics above, beside the Tile IR its calls wrote. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table; the colour on a call's name and on the lines it wrote is the same. In the Playground the same function can also be read beside the C and the JVM bytecode it compiles to. The shared `[D, A]` body is recorded here as Float/Float: natural exponentials and exact f64 division. Its BF16/F32 instance keeps base-2 exponentials with FTZ, bf16 probability rounding, and approximate f32 division. The policy is captured before recording.
+A fused attention, the source of the row statistics above, beside the Tile IR its calls wrote. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table; the colour on a call's name and on the lines it wrote is the same. In the Playground the same function can also be read beside the C and the JVM bytecode it compiles to. The shared `[D, A]` body is recorded here as Float/Float: natural exponentials and exact f64 division. Its BF16/F32 instance keeps base-2 exponentials with FTZ, bf16 probability rounding, and approximate f32 division. Tile sizes, problem dimensions and the numeric policy are captured before recording. Architecture choices and entry hints stay in the host plan; measurement records stay in the audit ledger. The f64 recording uses one 32×16 plan with no entry hints.
 
 ## kernel-open
 

@@ -6304,7 +6304,7 @@ sm_100 d64 的 256×64 occupancy=2 cga=2、d128 的 256×128 cga=2。
 只作为候选证据保留，不进入选择表；批量胜者优先，键不加负载类别。
 对账门读取实际 Dawn 配置并与证据核对；删行、改配置或改数字必须红，不能只核存在。
 
-录制前调用 tileir 的配置校验，cga=2 且 bq<128 拒绝，sm_90 上 bq=256 且 cga!=2 拒绝。
+S1 将实测性能过滤移到应用录制侧 `recording_policy`：cga=2 且 row_tile<128 拒绝，sm_90 上 row_tile=256 且 cga!=2 拒绝。tileir 的公开 `check_config` 已删除；库只校验通用 hint 范围、dtype 与形状。
 这些是 tileiras 13.4.92 的实测悬崖（20–80 倍及寄存器溢出），不是数值错误。
 英文报文通过 `at: Loc = caller()` 指到用户的配置调用行，且有允许边界的正例。
 
@@ -6363,7 +6363,7 @@ Playground 的 kernel 与五个配置、形状和工厂辅助函数都由 doc-ch
 因此只调整 f64，P4-b 的临时 bf16 测量程序不作为仓内已有 kernel。基线为 64×64×32、无 hint。
 测量采用 H200 sm_90 与 B200 sm_100，tileiras 13.4.92、`-O3`，2048³ 方阵与 M=4096、N=256、K=2048 瘦长矩阵；
 同进程同流交错 CUDA events，逐格与 torch f64 参考比较，并同轮计时 cuTile 候选和 torch matmul。
-网格复用 §6.42 的 `check_config` 过滤；行块、列块、K 块、occupancy 与 cga 均为录制前的常量。
+网格复用 §6.42 的应用侧 `recording_policy` 过滤；行块、列块、K 块、occupancy 与 cga 均为录制前的常量。
 每个架构的跨形状选择必须比现状快至少 5% 才进表，次优与未选格保留证据。
 
 `mm_cfg(arch, dtype)` 与配置到三参数 kernel 的工厂放在 `scripts/tile-golden/kernels.dawn` 的 matmul 旁。
@@ -6394,7 +6394,7 @@ CUDA events 五轮，每格每轮预热十次，按耗时自适应 3–40 样本
 Dawn 与同配置 cuTile 相差不足 1%，torch 明显更快；不把缩块收益解释成已经解决 f64 的张量核降低。
 最终轮最大绝对差小于 9.7e-13，逐 lane 按既有 `1e-5 + 1e-5·|reference|` 的容差验收，所有格通过。
 两张卡请求锁频但实际忙时未达到请求，仅比较同轮，不把不同运行的绝对时间互比。
-录制前通过同一 `check_config`，报文指到 `mm_record` 的调用者；K 尾部不能被整除时拒绝，避免循环漏掉余项。
+录制前通过同一应用侧 `recording_policy`，报文指到 `mm_record` 的调用者；K 尾部不能被整除时拒绝，避免循环漏掉余项。
 删台账行、改表格配置与绕过两个过滤规则的负控均红，恢复后通过；现有默认 matmul 的累加器变异体继续覆盖同一个循环。
 GPU 页没有 matmul 性能数字，代码卡同时展示默认入口和参数化主体；Playground 无 matmul 样例，配对器无需修改。
 matmul 辅助函数插入后，flash 函数向后移了 73 行；`flash_attn.map` 同步重录 38 个调用，Tile IR 和已录 GPU 输入不变。
@@ -6409,7 +6409,7 @@ P4-d 的格式边界在本刀扩展到仓内已有的 f16 与 i8，不新增运�
 先完成两卡全网格并记录胜者，才修改工厂。基线都是现状 32×32×32、无 hint；
 方阵 4096³，瘦长 M=8192、N=256、K=4096；tileiras 13.4.92、`-O3`。
 行块 {32,64,128,256}，列块与 K 块 {32,64,128}，occupancy {不写,2}，cga {不写,2}。
-复用同一 `check_config`，每架构每格式每形状由 144 格过滤为 sm_90 的 90 格、sm_100 的 108 格；
+复用同一应用侧 `recording_policy`，每架构每格式每形状由 144 格过滤为 sm_90 的 90 格、sm_100 的 108 格；
 792 个 Dawn 格全部汇编成功，加同轮 cuTile 六候选与 torch，848 项结果精确通过。
 五轮 CUDA events、每格每轮预热十次、3–40 样本，固定随机交错，保存逐轮中位数和原始样本。
 
@@ -6631,3 +6631,9 @@ sm_90 d64 单头的五轮均回退约 5.3–5.8%，未以换配置消掉差异�
 IR 上游完全相同，但 nvdisasm 13.4.92 的静态 SASS 中 HGMMA 36→60、EX2 198→330、BF16 pack 96→160，
 与不同循环展开/流水形状一致（推断）；寄存器均为 128，无 stack 或 spill。text 30464→48512 字节，
 TMA store 4→2，末尾 F32→F64 32→0。具体汇编器启发式与各项因果贡献没有拆开，不能由存储减半推断必然加速。
+
+### S1：host 配置分层（2026-10-23）
+
+`FaTiles`/`MmTiles` 只含块尺寸，`FaPlan`/`MmPlan` 在录制端保存 tiles 与原生可选 hints；算法、闭包不接收 plan 或测量记录。f64 只有一份 32×16、无 hints 的 plan。历史 evidence/median/baseline 只在 `scripts/flash-config`，P4-b 记录以具名规范化 SHA256 固定；P4-c/A2 与 matmul 原始网格保留原身份。对账门运行实际 selector 并检查实际 IR 的 view、MMA 与 hints，包括未测尺寸和其它架构的 fallback。
+
+flash recorder 在构造 cells 前拒绝非正 n/d/bh/bq/bk、n 非 bq 或 bk 的整倍数及 I32 乘积溢出；当前 M=N 整块域不扩展。共享样例只构造字面 32×16 tiles，精确 pin 算法闭合依赖，不复制架构选择表。`fa_kv_index`、`FaShape`、`acc_from_out`、二维展平 cells 与原初始化保留，待 S2 单独证明产物变化。设计见 [fa-host-plan-design.md](fa-host-plan-design.md)。

@@ -497,10 +497,10 @@ ccheck "compile: and so is its JVM listing" "$CASES/tile.dawn" jvm \
 # C text is read with every line outside the program's own functions empty, so
 # its line count is still the whole text's (docs/playground-compile-design.md K8).
 # The starter's `main` interprets the kernel and checks it against plain attention,
-# which adds calls of its own to the table (86 in all, including the factory and numeric policy),
+# which adds calls of its own to the table (80 in all, including the factory, f64 numeric policy and literal tiles),
 # so the operator count is a floor: the kernel's seven are there, and no gap.
 ccheck "compile: the flash attention starter's C text pairs its operators, no gap" "$CASES/tile_attn.dawn" c \
-  "$SOUND"' and d["pane"]["kind"]=="c" and d["calls_total"]==86 and sum(c["name"] in ("mul","sub","add","div") for c in d["calls"])>=7 and any(c["name"]=="from_float" for c in d["calls"]) and d["pane"]["total"]>80000 and d["pane"]["shown"]>100 and any("main__flash_1attn" in l for l in d["pane"]["text"])'
+  "$SOUND"' and d["pane"]["kind"]=="c" and d["calls_total"]==80 and sum(c["name"] in ("mul","sub","add","div") for c in d["calls"])>=7 and any(c["name"]=="from_float" for c in d["calls"]) and d["pane"]["total"]>80000 and d["pane"]["shown"]>100 and any("main__flash_1attn" in l for l in d["pane"]["text"])'
 ccheck "compile: the JVM listing of it pairs the same calls" "$CASES/tile_attn.dawn" jvm \
   "$SOUND"' and d["pane"]["kind"]=="jvm" and d["cached"] is False and d["calls"]==prev["calls"]'
 ccheck "compile: a dependency the visitor supplies is not honoured by the C view either" "$CASES/tile_smuggle.dawn" c \

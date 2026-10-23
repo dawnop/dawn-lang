@@ -7,6 +7,10 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.26.0 (2026-10-23)
+
+- Remove `prog.check_config` without a compatibility wrapper. Measured tileiras row tile performance filters belong to the application recording policy; generic hint range, dtype and shape validation remains in tileir.
+
 ## 0.25.1 (2026-10-23)
 
 - Complete the staged if acceptance audit, including value condition refusals, source locations and staged while boundaries. This documentation and test closure keeps 0.25.1: it adds no API, Dev operation or encoding change.

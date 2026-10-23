@@ -1057,6 +1057,14 @@ for k in "${kernels[@]}"; do
       { cat "$work/mm-check.native.err" >&2; fail "matmul recording filters failed natively"; }
     cmp -s "$work/mm-check.jvm" "$work/mm-check.native" || fail "matmul recording checks disagree"
     cat "$work/mm-check.jvm"
+    # Reuse these actual JVM/native builds, keeping tree-policy text only.
+    run_jvm "$work/clean" "$work/config.jvm" --config-manifest ||
+      { cat "$work/config.jvm.err" >&2; fail "selector manifest failed on the JVM"; }
+    run_native "$work/clean.bin" "$work/config.native" --config-manifest ||
+      { cat "$work/config.native.err" >&2; fail "selector manifest failed natively"; }
+    cmp -s "$work/config.jvm" "$work/config.native" || fail "selector manifests disagree"
+    python3 "$root/scripts/flash-config/check.py" --manifest "$work/config.jvm" --self-test ||
+      fail "actual plans, IR wiring or historical evidence disagree"
   fi
   golden="$here/$k.mlir"
   bc_golden="$here/$k.tilebc"
