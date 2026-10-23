@@ -1,15 +1,18 @@
 // Drive target changes through the real pane and its DOM. Different tables
 // deliberately reuse ids for different calls, so carrying an index goes red.
 import { parseHTML } from 'linkedom'
+import { EditorState } from '@codemirror/state'
+import { keymap, type EditorView } from '@codemirror/view'
+import { callMarks, marksOf, pickCall, rangesOf, setCalls } from '../src/call-marks'
 import { ComparePane } from '../src/compile-view'
 import { identityOf, matchIdentity, SELECTION_MISSING } from '../src/compile-state'
 import type { XCall } from '../src/explorer-core'
 
 type Expect = (name: string, got: unknown, want: unknown) => void
 const calls: XCall[] = [
-  { id: 0, parent: -1, name: 'outer', from: [1, 1], to: [1, 17], nfrom: [1, 1], nto: [1, 6] },
-  { id: 1, parent: 0, name: 'inner', from: [1, 7], to: [1, 16], nfrom: [1, 7], nto: [1, 12] },
-  { id: 2, parent: -1, name: 'later', from: [1, 19], to: [1, 26], nfrom: [1, 19], nto: [1, 24] },
+  { id: 0, parent: -1, name: 'outer', from: [1, 1], to: [1, 15], nfrom: [1, 1], nto: [1, 6] },
+  { id: 1, parent: 0, name: 'inner', from: [1, 7], to: [1, 14], nfrom: [1, 7], nto: [1, 12] },
+  { id: 2, parent: -1, name: 'later', from: [1, 17], to: [1, 24], nfrom: [1, 17], nto: [1, 22] },
 ]
 const paired = calls.slice(1).map((c, i) => ({ ...c, id: i, parent: -1 }))
 const wire = (target: string, cs = calls, build = 'b1:same', cached = false) => ({
@@ -39,7 +42,13 @@ export async function comparePaneTests(expect: Expect): Promise<number> {
     req.resolve({ status, json: async () => body })
     await tick()
   }
-  const pane = new ComparePane({ endpoint: '/compile', code: () => code, opened() {}, calls: cs => { marked = cs }, picked: id => { picked = id } })
+  let pane: ComparePane
+  let editor = EditorState.create({ doc: code, extensions: [callMarks({ pick: id => pane.pick(id), none() {}, release: () => { pane.pick(null); return true } })] })
+  pane = new ComparePane({
+    endpoint: '/compile', code: () => code, opened() {},
+    calls: cs => { marked = cs; editor = editor.update({ effects: setCalls.of(rangesOf(editor.doc, cs)) }).state },
+    picked: id => { picked = id; editor = editor.update({ effects: pickCall.of(id) }).state },
+  })
   document.body.appendChild(pane.root as never)
   const statusText = () => pane.root.querySelector('.xp-status')!.textContent
   try {
@@ -52,12 +61,16 @@ export async function comparePaneTests(expect: Expect): Promise<number> {
       matchIdentity(identity, code, 'b1:same', [{ ...paired[0], to: [1, 15] }]),
     ], [null, null, null, null])
     pane.open('c'); await answer(wire('c'))
-    pane.pick(1)
+    editor = editor.update({ selection: { anchor: 8 } }).state
+    const altEnter = editor.facet(keymap).flat().find(k => k.key === 'Alt-Enter')!.run!
+    altEnter({ state: editor } as EditorView)
+    t('Alt-Enter picks the source span through CodeMirror', [marksOf(editor).picked, marksOf(editor).calls[1].span], [1, [6, 13]])
     t('C installs its local table and pick', [marked.length, picked], [3, 1])
     pane.open('jvm')
     t('cold switch clears source marks until its answer arrives', [marked.length, picked], [0, null])
     await answer(wire('jvm', paired))
     t('cold JVM switch resolves inner to id zero', picked, 0)
+    t('JVM remapping installs the same CodeMirror source span under its local id', [marksOf(editor).picked, marksOf(editor).calls[0].span], [0, [6, 13]])
     pane.open('c')
     t('existing C answer restores inner to id one', picked, 1)
     pane.pick(0)
