@@ -38,7 +38,7 @@ use lsp/lspq.{QCx, locals_at, in_for_pattern, find_target, sig_of}
 use lsp/lspdot.{dot_candidates}
 use front/lexer.{SourceView, view_of, slice_cp, lex}
 use front/token.{
-  Token, TokKind, FOR, PIPE, NEWLINE, EOF, IDENT, FN, COLON, PIPEGT,
+  Token, TokKind, FOR, PIPE, NEWLINE, EOF, IDENT, FN, PIPEGT,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET, COMMA, DOT, TYPEIDENT, BANG
 }
 use front/ast.{
@@ -1563,12 +1563,12 @@ pub(pkg) fn call_at(text: String, offset: Int) -> Option[CallAt] = {
   var j = before
   while j >= 0 && toks[j].kind == NEWLINE { j = j - 1 }
   let piped = j >= 0 && toks[j].kind == PIPEGT
-  # a named argument: the current argument starts `name:` and the cursor is
-  # past the colon
+  # A named argument starts with a name and a value separator. The cursor
+  # must be past the separator even when the call is not complete yet.
   let a0 = next_code_token(toks, f.arg_start)
   let a1 = next_code_token(toks, a0 + 1)
   var named: Option[String] = None
-  if a1 < len(toks) && toks[a0].kind == IDENT && toks[a1].kind == COLON && toks[a1].lo < pos {
+  if a1 < len(toks) && toks[a0].kind == IDENT && parser.is_value_separator(toks[a1].kind) && toks[a1].lo < pos {
     named = Some(toks[a0].text)
   }
   Some(CallAt {
@@ -1752,6 +1752,9 @@ test "signature help finds the open call and the argument under the cursor" {
   assert show("let x = str.pad(s, ") == "str.pad 1"
   assert show("let x = f(1,\n  [a, b, ") == "f 1"
   assert show("let x = f(a, fill: ") == "f 1 fill:"
+  assert show("let x = f(a, fill = ") == "f 1 fill:"
+  assert show("let x = mod.f(\n  fill = g(1), first = ") == "mod.f 1 first:"
+  assert show("let x = xs.f(fill = ") == "xs.f 0 fill:"
   assert show("let x = xs |> list.map(") == "|> list.map 0"
   # not a call: a declaration, a tuple, a string, a block in between
   assert show("fn f(a: Int, ") == "-"

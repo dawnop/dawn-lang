@@ -1805,7 +1805,7 @@ match shape {
 | 绑定 | `x` | 恒匹配并绑定 |
 | 通配 | `_` | 恒匹配不绑定 |
 | 构造器 | `Some(x)`, `Rect(w, h)`, `Rect(w = w, ..)` | 按位置或按名解构，`..` 忽略其余字段；只用圆括号 |
-| 记录 | `Point { x, .. }` | 字段解构；只用花括号 |
+| 记录 | `Point { x, y = n, .. }` | 字段解构；只用花括号 |
 | 元组 | `(a, b)` | |
 | 列表 | `[]`, `[x, ..rest]` | 空表 / 头与余下 |
 | 或 | `0 \| 1 \| 2` | 任一匹配（各分支绑定必须一致） |
@@ -2761,7 +2761,7 @@ let m = xs |> len |> dbg  # stderr: [src/main.dawn:5:11] xs |> len = 3
 
 ```dawn
 fn assert_eq[T: Eq + Show](a: T, b: T, at: Loc = caller()) -> Unit =
-  if a != b { panic("${show(a)} != ${show(b)}", at: at) }
+  if a != b { panic("${show(a)} != ${show(b)}", at = at) }
 
 fn sums() -> Unit = assert_eq(1 + 1, 3)   # panic: 2 != 3 at src/t.dawn:4:21
 ```

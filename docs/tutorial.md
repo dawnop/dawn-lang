@@ -278,7 +278,7 @@ pub fn main() -> Unit !io = {
 }
 ```
 ```output
-Point { x: 11.0, y: 2.0 }
+Point { x = 11.0, y = 2.0 }
 ```
 
 What `type` declares is always a new type; to give an existing one an **alias**, use
@@ -864,7 +864,7 @@ true
 pear
 [1, 2, 3]
 ["pawn", "queen"]
-Some(Card { rank: 3, name: "queen" })
+Some(Card { rank = 3, name = "queen" })
 ```
 
 The list functions that go with it are stable sorts that keep the first of a tie:

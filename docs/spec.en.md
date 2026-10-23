@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ efe26082dfa99308 -->
+<!-- doc-check: translation-of docs/spec.md @ a04af5aff556862d -->
 
 # Dawn Language Specification
 
@@ -517,9 +517,9 @@ type Shape =
 ```
 
 - Constructor fields **must** be named; a construction call may pass by position or by name:
-  `Rect(2.0, h: 3.0)`.
+  `Rect(2.0, h = 3.0)`.
 - **A sum-type constructor uses parentheses only**, in construction and in patterns alike:
-  `Rect { w: 2.0, h: 3.0 }` is an error ("constructor `Rect` is built with parentheses"), and so
+  `Rect { w = 2.0, h = 3.0 }` is an error ("constructor `Rect` is built with parentheses"), and so
   is `Rect { w, .. }` in a pattern ("constructor `Rect` is matched with parentheses"). Braces
   belong to records (§2.4): whatever brackets the declaration uses, construction and matching use
   too, one spelling for one thing (since v0.78.0, which closed the second spelling;
@@ -535,11 +535,15 @@ type Shape =
 
 ### 2.4 Records
 
+Value fields and named fields in patterns use `=`; type fields retain `:`. This bridge
+release temporarily also accepts the old value separator `:`. The next release removes it;
+fmt preserves the input separator and does not perform migration.
+
 ```dawn
 type Point = { x: Float, y: Float }
 
-let p = Point { x: 1.0, y: 2.0 }
-let q = Point { ..p, x: 3.0 }     # functional update
+let p = Point { x = 1.0, y = 2.0 }
+let q = Point { ..p, x = 3.0 }     # functional update
 let d = p.x                        # field access
 ```
 
@@ -547,8 +551,8 @@ A record is sugar for a single-constructor product type, and supports pattern ma
 same. Fields are immutable — "modification" is functional update.
 
 **A record can only be built with braces, and only matched with them.** `Point(1.0, 2.0)`,
-`Point(x: 1.0, y: 2.0)` and `Point()` are all errors ("record `Point` must be built with braces"),
-whether the parentheses were written directly or produced by a pipeline (§4.4); `Point(x: a)` in a
+`Point(x = 1.0, y = 2.0)` and `Point()` are all errors ("record `Point` must be built with braces"),
+whether the parentheses were written directly or produced by a pipeline (§4.4); `Point(x = a)` in a
 pattern is an error too ("record `Point` is matched with braces", since v0.78.0). The reason is that spelling and meaning
 correspond one to one: fields in the brace form must be named, and filling a record positionally
 would turn field order into an ABI; a record's bare name is not a constructor function either
@@ -799,8 +803,8 @@ call** (not Python's evaluate-once-and-share):
 fn column(kids: List[Int], align: Int = 0, gap: Int = 0) -> Int = align + gap * len(kids)
 
 column(kids)
-column(kids, gap: 12)
-column(kids, align: 1, gap: 12)
+column(kids, gap = 12)
+column(kids, align = 1, gap = 12)
 ```
 
 - **The default expression must be pure** (neither `!io` nor a named effect): otherwise the
@@ -866,7 +870,7 @@ column(kids, align: 1, gap: 12)
   value loses its field names" (§2.3).
 - **Scope**: top-level functions only (private and module functions included). Local `fn`
   (its calls go through the function-value path), lambdas, constructor fields (records
-  already have `{ ..base, x: v }`), trait methods (Dawn already has a thing called "default"
+  already have `{ ..base, x = v }`), trait methods (Dawn already has a thing called "default"
   — the default method body; and under dictionary passing an impl could not override a value
   default), effect operations (an operation call reads an evidence field and calls a
   closure; there is no symbol to hang one on) and Java methods take none, each with its own
@@ -1053,7 +1057,7 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   function namespace along with the prelude, and get the same treatment as the rest of the
   prelude names — **they can be shadowed by a declaration in this module** (§10.3).
   The parameter names come from this declaration (named arguments, §4.3): the receiver is `it`
-  and the cursor is `c`, so a caller writes `xs.iter_done(c: k)`.
+  and the cursor is `c`, so a caller writes `xs.iter_done(c = k)`.
 - **`Len`** declares one method and no associated types: `trait Len[C] { fn len(x: C) -> Int }`.
   `len(c)` and `c.len()` find the impl by the receiver's type; the impl for `List` ships with std,
   and a user type gets `len` by writing `impl Len[T]`. The name `len` is injected with the prelude
@@ -1324,7 +1328,7 @@ type ShownRepr = { render: fn() -> String }
 pub opaque type Shown = ShownRepr
 
 pub fn shown[T: Show](x: T) -> Shown = {
-  let r: ShownRepr = ShownRepr { render: () => show(x) }
+  let r: ShownRepr = ShownRepr { render = () => show(x) }
   r
 }
 
@@ -1456,12 +1460,12 @@ From lowest to highest:
      **not** restricted: a guard is followed by `->`, not a block, so there is no body to
      swallow.
   3. **Refused when the previous token is `}`**: `if c { 1 } else { 2 } { 3 }`,
-     `match x { ... } { ... }`, `P { x: 1 } { ... }` and `f(a) { ... } { ... }` do not mean
+     `match x { ... } { ... }`, `P { x = 1 } { ... }` and `f(a) { ... } { ... }` do not mean
      applying a block to a value; and "one call takes at most one tail block" holds without
      a rule of its own. To apply a block to a value, parenthesise it first: `(...) { ... }`.
   4. **An uppercase name's braces belong to the record literal** (§2.3): `Column { ... }` is
      a construction, so a tail block never lands on a bare TYPEIDENT — component functions
-     are lowercase. `Column(align: c) { ... }` is not affected: the parentheses come first,
+     are lowercase. `Column(align = c) { ... }` is not affected: the parentheses come first,
      and the block attaches as usual.
   **In tail position the block binds parameters**: the head of `{ x => ... }` is its own
   production, not a block being reinterpreted (the way `Point { x }` uses braces without
@@ -1469,7 +1473,7 @@ From lowest to highest:
   `f(a) { (x => e) }` — the group no longer closes with `=>`, so no head is read.
   **The tail block fills the last declared parameter/field** (Kotlin's rule), whatever named
   arguments came before it — "positional cannot follow named" does not apply to it — and
-  defaults fill the remaining holes (#207): in `column(gap: 12) { text("hi") }` the block
+  defaults fill the remaining holes (#207): in `column(gap = 12) { text("hi") }` the block
   fills `body` and `align` takes its default. If that parameter is already filled the report
   is "the last parameter `body` is already given; the tail block is what fills it".
 - **The tail block is the only trailing-argument form (#206 phase 2)**: the transitional
@@ -1480,26 +1484,28 @@ From lowest to highest:
   tail position: in `f(a) (x) => e` the `(x)` is already the curried call `f(a)(x)`, and the
   two readings cannot be told apart before the `=>` — that argument is about `(`, not
   braces, and it stands.
-- **Named arguments (`f(a: 1)`) are syntactically legal at every call position**, dot calls
+- At a call site, `f(a = b)` always names an argument, whether an enclosing local `a` exists
+  or not. Assignment expressions are not introduced.
+- **Named arguments (`f(a = 1)`) are syntactically legal at every call position**, dot calls
   and applied function values included; whether they are usable is decided by **what the
   callee is** (2026-08-08, #207). **A callee with a signature accepts them**: top-level
   functions, module functions, UFCS/dot calls, pipes, trait methods (the names are the
   **trait declaration's** parameter names; an impl's own spellings are purely local), effect
   operations, and constructors (field names, see §2.3). **A function value does not** — a
-  function type carries no parameter names, so after `let g = f`, `g(a: 1)` is a type error
+  function type carries no parameter names, so after `let g = f`, `g(a = 1)` is a type error
   ("`g` is a function value, and a function type carries no parameter names"). **A Java
   member does not** — Java metadata has no parameter names.
   The slotting rule is the **same one** constructors use: the positional prefix takes slots
   left to right, a name takes the slot it names, names may come in any order, and a
   positional argument may not follow a named one; a dot call's receiver has already taken
-  the first slot positionally, so `x.f(self: y)` reports "parameter `self` is given twice".
+  the first slot positionally, so `x.f(self = y)` reports "parameter `self` is given twice".
   `f(1)(2)` parses, and the meaning is still "the result of `f(1)` must be a function" —
   Dawn has no automatic currying; the second application's callee is a function value, so it
   cannot take names.
 - **Arguments evaluate in written order** (2026-08-08, #207 ruling): call and constructor
   arguments evaluate in the order they are **written** (as in Python / C# / Scala / Swift /
   Kotlin); named arguments reorder the **slotting**, not the evaluation — in
-  `R { b: f(), a: g() }`, `f()` runs before `g()` and each value lands on its own field.
+  `R { b = f(), a = g() }`, `f()` runs before `g()` and each value lands on its own field.
   Omitted defaults evaluate after every written argument, in declaration order (§3.1).
   `..base` can only be written first, and evaluates first. Binary operators evaluate left to
   right (`&&`/`||` still short-circuit). Before this rule, constructors evaluated in
@@ -1632,7 +1638,7 @@ implementations are cross-checked against this, "happens to agree" is not allowe
   The rendering is shaped like legal Dawn source:
   - a constructor with no payload → `Red`; a constructor with positional fields →
     `Circle(1.5)`;
-  - a record → `Point { x: 0.0, y: 2.5 }` (with field names);
+  - a record → `Point { x = 0.0, y = 2.5 }` (with field names);
   - a `String` field is double-quoted and escaped (`"a\nb"`); `Int`/`Float`/`Bool` follow
     their own `to_string`;
   - containers render recursively: `List` → `[a, b]`, a tuple → `(a, b)`, `Option`/`Result`
@@ -1715,7 +1721,7 @@ Either write the qualified call `str.split(s, ",")` (or the pipe `s |> str.split
 needs no import of the bare name), or import selectively and keep the dot.
 
 Named arguments work as usual; the receiver already took the first slot by position, so
-`x.f(self: y)` reports "parameter `self` is given twice" (the named-argument item of §4.3).
+`x.f(self = y)` reports "parameter `self` is given twice" (the named-argument item of §4.3).
 A tail block also lands on a dot call: `xs.each { x => e }` is `each(xs, x => e)`.
 
 ### 4.4 Pipelines
@@ -1955,7 +1961,7 @@ impl Index[Grid] {
   }
 }
 
-let g = Grid { w: 3, cells: [1, 2, 3, 4, 5, 6] }
+let g = Grid { w = 3, cells = [1, 2, 3, 4, 5, 6] }
 let v = g[(2, 1)]                                 # 6
 
 fn first[C: Index](c: C, i: C.Idx) -> C.Item = c[i]   # a generic consumer
@@ -2260,8 +2266,8 @@ to the arm body expression.
 | Literal | `0`, `"yes"`, `true` | matches if equal |
 | Binding | `x` | always matches, and binds |
 | Wildcard | `_` | always matches, binds nothing |
-| Constructor | `Some(x)`, `Rect(w, h)`, `Rect(w: w, ..)` | destructures by position or by name, `..` ignores the remaining fields; parentheses only |
-| Record | `Point { x, .. }` | field destructuring; braces only |
+| Constructor | `Some(x)`, `Rect(w, h)`, `Rect(w = w, ..)` | destructures by position or by name, `..` ignores the remaining fields; parentheses only |
+| Record | `Point { x, y = n, .. }` | field destructuring; braces only |
 | Tuple | `(a, b)` | |
 | List | `[]`, `[x, ..rest]` | empty list / head and rest |
 | Or | `0 \| 1 \| 2` | any alternative matches (the bindings of every alternative must agree) |
@@ -3466,7 +3472,7 @@ through a parameter whose default is `caller()`:
 
 ```dawn
 fn assert_eq[T: Eq + Show](a: T, b: T, at: Loc = caller()) -> Unit =
-  if a != b { panic("${show(a)} != ${show(b)}", at: at) }
+  if a != b { panic("${show(a)} != ${show(b)}", at = at) }
 
 fn sums() -> Unit = assert_eq(1 + 1, 3)   # panic: 2 != 3 at src/t.dawn:4:21
 ```
@@ -3901,7 +3907,7 @@ use java "java.lang.Long"
 
 fn parse(s: String) -> Result[Int, ForeignError] !io =
   catch_fault(() => Long.parseLong(s))
-  # Err(ForeignError { kind: "java.lang.NumberFormatException", message: ..., cause: None })
+  # Err(ForeignError { kind = "java.lang.NumberFormatException", message = ..., cause = None })
 ```
 
 - Signature `catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !e`. The
@@ -4049,7 +4055,7 @@ fn bracket[A, B, !e](resource: A, release: fn(A) -> Unit !e, body: fn(A) -> B !e
 ```
 
 The third parameter is named `body`: `use` is a keyword, so the call
-`bracket(r, close, use: f)` cannot be written at all, and that spelling never had a
+`bracket(r, close, use = f)` cannot be written at all, and that spelling never had a
 caller -- it only ever appeared in the rendered signature.
 
 ```dawn
@@ -4464,7 +4470,7 @@ exp    = ( "e" | "E" ) [ "+" | "-" ] digit { digit }
 radix  = [ "+" | "-" ] rdigit { rdigit }
 ```
 
-`parse_int(s, radix: r)` (`radix` defaults to 10) uses the `radix` production: `rdigit` ∈
+`parse_int(s, radix = r)` (`radix` defaults to 10) uses the `radix` production: `rdigit` ∈
 `0-9 a-z A-Z` (value = 10..35, upper and lower case have the same value), and a digit whose
 value is ≥ radix is rejected; a radix outside 2..36 answers `None`. At radix 10 it is the
 same language as `int`. Before 0.83.0 the radix version was a separate builtin,
@@ -5285,7 +5291,7 @@ pub type Color = Red | Green | Blue derive Show
 type Point = { x: Float, y: Float }
 alias Distance = Float           # transparent alias (§2.6)
 pub opaque type UserId = Int     # opaque outside this module (§2.7)
-const ORIGIN: Point = Point { x: 0.0, y: 0.0 }
+const ORIGIN: Point = Point { x = 0.0, y = 0.0 }
 
 pub trait Named[T] { fn name(x: T) -> String }
 impl Named[Point] { fn name(p: Point) -> String = "point" }

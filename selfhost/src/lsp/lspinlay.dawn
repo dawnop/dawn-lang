@@ -150,13 +150,13 @@ pub fn param_hint(at: Int, pname: String, arg_var: Option[String], shown: Int) -
   if shown <= 1 || pname == "" || pname == "_" || arg_var == Some(pname) {
     None
   } else {
-    Some(Hint { at: at, label: pname ++ ":", kind: HintParam, pad_left: false, pad_right: true, left_out: None })
+    Some(Hint { at: at, label: pname ++ " =", kind: HintParam, pad_left: false, pad_right: true, left_out: None })
   }
 
 ## The arguments a call leaves to their defaults, as one hint: `name: text`
 ## for each, in declaration order, joined by `, `. `text` is the default as
 ## its author spelled it (`Sig.param_defaults`), not a value: a default may
-## read the parameters before it (`from: start(s)` names the callee's `s`), so
+## read the parameters before it (`from = start(s)` names the callee's `s`), so
 ## it is the callee's expression, shown the way signature help shows it.
 ## `lspeval.with_default_values` may later put values in its place (§C4).
 ## A text past `TYPE_HINT_SHOWN` code points is `…`: the hint's news is that
@@ -183,7 +183,7 @@ pub fn default_args_hint(at: Int, omitted: List[DefaultArg], after_arg: Bool, ba
 pub fn default_args_label(shown: List[(String, String)], after_arg: Bool, bare: Bool) -> String = {
   let body = join(map(shown, p => {
     let (pname, text) = p
-    pname ++ ": " ++ text
+    pname ++ " = " ++ text
   }), ", ")
   if bare {
     "(" ++ body ++ ")"
@@ -330,7 +330,7 @@ test "an effect hint needs a named effect and a ground row" {
 test "a parameter name is hidden for one argument and for a same-named variable" {
   match param_hint(5, "gap", None, 2) {
     Some(h) -> {
-      assert h.label == "gap:"
+      assert h.label == "gap ="
       assert h.kind == HintParam
       assert h.pad_right
       assert not h.pad_left
@@ -348,7 +348,7 @@ fn da(name: String, text: String) -> DefaultArg = DefaultArg { name: name, text:
 test "left-out defaults are one hint, comma-led after a written argument" {
   match default_args_hint(9, [da("from", "start(s)")], true, false, 0, 12) {
     Some(h) -> {
-      assert h.label == ", from: start(s)"
+      assert h.label == ", from = start(s)"
       assert h.at == 9
       assert h.kind == HintParam
       assert not h.pad_left
@@ -365,11 +365,11 @@ test "left-out defaults are one hint, comma-led after a written argument" {
     None -> { assert false }
   }
   match default_args_hint(4, [da("a", "1"), da("b", "\" \"")], false, false, 0, 5) {
-    Some(h) -> { assert h.label == "a: 1, b: \" \"" }
+    Some(h) -> { assert h.label == "a = 1, b = \" \"" }
     None -> { assert false }
   }
   match default_args_hint(4, [da("a", "1")], false, true, 0, 5) {
-    Some(h) -> { assert h.label == "(a: 1)" }
+    Some(h) -> { assert h.label == "(a = 1)" }
     None -> { assert false }
   }
   assert default_args_hint(4, [], true, false, 0, 5) == None
@@ -377,7 +377,7 @@ test "left-out defaults are one hint, comma-led after a written argument" {
 
 test "a default's text past the bound is elided, not dropped" {
   match default_args_hint(0, [da("why", str.repeat("x", 26)), da("n", str.repeat("y", 25))], false, false, 0, 1) {
-    Some(h) -> { assert h.label == "why: …, n: " ++ str.repeat("y", 25) }
+    Some(h) -> { assert h.label == "why = …, n = " ++ str.repeat("y", 25) }
     None -> { assert false }
   }
 }
@@ -389,7 +389,7 @@ test "a default shows its value when it fits, else its text, else an ellipsis" {
   assert default_shown("range(0, 100)", Some(str.repeat("x", 26))) == "range(0, 100)"
   assert default_shown(str.repeat("t", 26), Some(str.repeat("x", 26))) == "…"
   assert default_shown(str.repeat("t", 26), Some("1")) == "1"
-  assert default_args_label([("a", "1"), ("b", "2")], true, false) == ", a: 1, b: 2"
+  assert default_args_label([("a", "1"), ("b", "2")], true, false) == ", a = 1, b = 2"
 }
 
 test "a default reads a parameter by any identifier of its name" {
