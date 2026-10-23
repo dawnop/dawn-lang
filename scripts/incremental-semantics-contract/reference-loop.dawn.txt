@@ -51,7 +51,7 @@ pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js:
     # takes the std-only surface away from the code that defines it.
     let (mf, is_std) = std_identity(std, mf0)
     views = map.insert(views, mf.mod_path, identity.declaration_spans(mf.m))
-    for d in mf.pdiags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+    for d in mf.pdiags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
     let parse_failed = len(mf.pdiags) > 0
     # A std source checked here is the bundle's own copy being checked a
     # second time, so its baseline is the one `load_std` gave it -- what the
@@ -69,20 +69,20 @@ pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js:
       ..cx,
       # the module's own name got a vote in `cx_new` and does not get one
       # here: `src/std/foo.dawn` is spelled like std and is not std
-      is_std_module: is_std,
-      std_fns: std.std_fns,
-      moved: std.moved,
-      line_starts: lexer.line_starts_of(mf.text),
-      source: mf.text,
-      site_path: if is_std { None } else { Some(mf.site_path) },
-      mod_path: Some(mf.mod_path),
-      identities: interned,
+      is_std_module = is_std,
+      std_fns = std.std_fns,
+      moved = std.moved,
+      line_starts = lexer.line_starts_of(mf.text),
+      source = mf.text,
+      site_path = if is_std { None } else { Some(mf.site_path) },
+      mod_path = Some(mf.mod_path),
+      identities = interned,
       # std's impls are part of the baseline, not something `use` turns on --
       # and neither are the ones the modules before this got to
-      impl_table: base_impls,
+      impl_table = base_impls,
       # the host's Java signature oracle: jreflect's on the JVM driver, the
       # refusing default anywhere else (a native compiler refuses `use java`)
-      jsig: js
+      jsig = js
     }
     var tm = empty_tmodule()
     var ct = empty_ctout()
@@ -96,7 +96,7 @@ pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js:
           skipped_spans = skipped_spans ++ [located.span]
         }
       }
-      let (cx1, tm1) = check_module_bodies(ModuleHeaders { ..headers, recovered: true, damaged: skipped_paths })
+      let (cx1, tm1) = check_module_bodies(ModuleHeaders { ..headers, recovered = true, damaged = skipped_paths })
       var kept: List[Diag] = []
       for d in cx1.diags {
         var inside = match d.owner {
@@ -107,25 +107,25 @@ pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js:
         for sp in skipped_spans { if start >= sp.lo && start < sp.hi { inside = true } }
         if not inside { kept = kept ++ [d] }
       }
-      cx = Cx { ..cx1, diags: kept }
+      cx = Cx { ..cx1, diags = kept }
       tm = tm1
-      for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+      for d in cx.diags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
     } else if not parse_failed {
       let (cx1, tm1) = check_module(cx, mf.m, exports)
       cx = cx1
       tm = tm1
       if len(cx.diags) == 0 {
-        let scope = ConstScope { path: mf.mod_path, imported: cx.imported_names,
-          renames: cx.import_renames }
+        let scope = ConstScope { path = mf.mod_path, imported = cx.imported_names,
+          renames = cx.import_renames }
         ct = eval_comptime_in(tm, world, scope, std.fn_decls, std.by_owner, std.impl_fns,
           std.std_names, cx.adts, cx.traits, cx.impl_table, mf.class_name, opts)
         if not is_std { world = ct_world_add(world, mf.class_name, scope, tm, ct.consts, true) }
       }
-      for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
-      for d in ct.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+      for d in cx.diags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
+      for d in ct.diags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
     } else {
       let headers = check_module_headers(cx, mf.m, exports)
-      cx = Cx { ..headers.cx, diags: [] }
+      cx = Cx { ..headers.cx, diags = [] }
     }
     interned = cx.identities
     # registration already rejected anything that collided with a key already
@@ -136,14 +136,14 @@ pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js:
     }
     exports = map.insert(exports, mf.mod_path, exports_of(cx, mf.m, mf.mod_path, mf.class_name))
     out = out ++ [CheckedMod {
-      mod_path: mf.mod_path,
-      class_name: mf.class_name,
-      path: mf.path,
-      m: mf.m,
-      cx: cx,
-      tm: tm,
-      ct: ct
+      mod_path = mf.mod_path,
+      class_name = mf.class_name,
+      path = mf.path,
+      m = mf.m,
+      cx = cx,
+      tm = tm,
+      ct = ct
     }]
   }
-  Program { modules: out, diags: diags, decl_spans: views, ct_world: world }
+  Program { modules = out, diags = diags, decl_spans = views, ct_world = world }
 }

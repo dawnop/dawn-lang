@@ -101,7 +101,7 @@ xs |> filter(x => x > 0)    # 选择性引入的短名进管道，零摩擦
 
 ## 六、第三批：形参名（v0.80.0，#210）
 
-具名实参（#207）让 `str.split(s, sep = ",")` 成立，于是 std 的每个形参名都成了 API，
+具名实参（#207）让 `str.split(s, sep: ",")` 成立，于是 std 的每个形参名都成了 API，
 而这些名字从没按「会被调用方写出来」审过。调研见
 `agent-handoff/research-std-param-names-20261001.md`（仓外）：394 个 top-level pub fn、
 997 个形参槽位，外加 prelude trait；改 20 处，其余不动。
@@ -112,7 +112,7 @@ xs |> filter(x => x > 0)    # 选择性引入的短名进管道，零摩擦
    `Bytes`/`Buf` 是 `b`，`Map` 是 `m`，`Char` 是 `c`，`DeviceBuffer` 是 `b`。类型未知的 trait
    接收者，容器类用 `it`（`Iter`、`Index`），值类用 `x`（`Hash`/`Show`/`Display`），
    对称二元用 `a, b`（`Ord`/`Eq`/`Narrow`）。接收者在点调用里本来不可具名
-   （`x.f(xs = y)` 报 given twice），统一它要动 170 多个槽位，只换来形式上的整齐。
+   （`x.f(xs: y)` 报 given twice），统一它要动 170 多个槽位，只换来形式上的整齐。
 2. **单字母可以，当它在整个 std 里只表示一个角色**：`i` 位置、`n` 个数、`x` 元素或 Float
    标量、`f` 回调、`c` 游标或字符（两者从不在同一签名里出现）；术语与公式变量
    （`matmul(m, k, n)`、IEEE 的 `p/emin/emax`）在 `##` 注释写出公式时也可以。

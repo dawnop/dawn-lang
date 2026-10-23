@@ -76,12 +76,12 @@ mutants=(
   # container stops installing a collector of its own and forwards its body's
   # children to whoever installed the outer one. The inner children arrive in
   # the parent, flattened, and the `ul` that should have held them is empty.
-  'nested-leaks-into-outer|s|  emit(el(tag, kids: kids))|  for w in kids { emit(w) }|'
+  'nested-leaks-into-outer|s|  emit(el(tag, kids= kids))|  for w in kids { emit(w) }|'
   # The other half of the same verdict: the container installs its collector,
   # reads it, and then drops what it read. Nothing leaks upward this time,
   # the children simply cease to exist -- which is what an assertion on the
   # outer list alone would not distinguish from the mutant above.
-  'nested-drops-its-kids|s|  emit(el(tag, kids: kids))|  emit(el(tag, kids: []))|'
+  'nested-drops-its-kids|s|  emit(el(tag, kids= kids))|  emit(el(tag, kids= []))|'
   # Verdict three, "a false condition emits nothing at all": the branch runs
   # whatever the condition said. This is the mutant that says the assertion
   # on the false case has teeth, since a collector that emitted a placeholder

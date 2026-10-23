@@ -104,9 +104,9 @@ INF = float("inf")
 # (name, p, emin, emax, call): the formats whose mode sections the corpus
 # prints, and the call that rounds `x` at one of them in mode `m`
 DIRECTED_FORMATS = [
-    ("bf16", 8, -126, 127, "narrow.round_binary(x, 8, -126, 127, mode: narrow.{m})"),
-    ("f32", 24, -126, 127, "narrow.round_f32(x, mode: narrow.{m})"),
-    ("tf32", 11, -126, 127, "narrow.round_tf32(x, mode: narrow.{m})"),
+    ("bf16", 8, -126, 127, "narrow.round_binary(x, 8, -126, 127, mode= narrow.{m})"),
+    ("f32", 24, -126, 127, "narrow.round_f32(x, mode= narrow.{m})"),
+    ("tf32", 11, -126, 127, "narrow.round_tf32(x, mode= narrow.{m})"),
 ]
 OPERATORS = {"add": "+", "sub": "-", "mul": "*", "div": "/"}
 NAN = float("nan")

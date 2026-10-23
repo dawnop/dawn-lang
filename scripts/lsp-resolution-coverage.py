@@ -161,10 +161,10 @@ SINGLE_DEFS = [
     ("trait bound", "[T: Shown]", 4, "", "trait Shown", 6),
     ("trait parameter use", "x: T) -> String\n}", 3, "", "Shown[T]", 6),
     ("builtin type names no declaration", "fn show_it(x: Int)", 14, "", "", None),
-    ("record literal field", "{ x: first, y: 2", 2, "", "{ x: Int", 2),
-    ("record pattern field", "{ x: first, y, label }", 2, "", "{ x: Int", 2),
+    ("record literal field", "{ x = first, y = 2", 2, "", "{ x: Int", 2),
+    ("record pattern field", "{ x = first, y, label }", 2, "", "{ x: Int", 2),
     ("constructor named argument", "Num(v = 3)", 4, "", "Num(v: Int)", 4),
-    ("named argument", "dy: 5", 0, "", "dy: Int = 0", 0),
+    ("named argument", "dy = 5", 0, "", "dy: Int = 0", 0),
     ("var declaration", "var acc", 4, "", "var acc", 0),
     ("let declaration", "let first", 4, "", "let first", 0),
     ("module alias segment", "str.trim(n)", 0, "std/str.dawn", "<module>", 0),
@@ -219,7 +219,7 @@ SINGLE_NEW_HOVERS = [
     ("type parameter hover", "x: T,", 3, "type parameter T"),
     ("effect row hover", "!Env =", 1, "effect Env"),
     ("handler arm op hover", "{ lookup(n) =>", 2, "fn lookup(name: String) -> Int !Env"),
-    ("named argument hover", "dy: 5", 0, "dy: Int"),
+    ("named argument hover", "dy = 5", 0, "dy: Int"),
     ("var declaration hover", "var acc", 4, "var acc: Int"),
 ]
 

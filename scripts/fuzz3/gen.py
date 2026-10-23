@@ -20,7 +20,7 @@ cheap to change while the language moves under it, it must not depend on the
 compiler it is testing (a generator built by a broken compiler generates the
 broken compiler's idea of a program), and it has to run against an old
 release jar for the positive control, whose language is older than HEAD's. So
-the subset below is also the subset the v0.75.0 release accepts.
+the emitted syntax is supported by the current v0.99.0 bootstrap seed.
 
 What it emits. A batch is one file holding N independent cases, so a native
 leg compiles one translation unit per batch instead of one per program (cc is
@@ -37,7 +37,7 @@ backends'.
 The subset is the one research-bug-rate-report 7.3 cut 1 lists: Int, Bool,
 String; let and var; if and match; while with break and continue; functions,
 local recursive functions and closures; List literals and `++`; records and
-`{ ..r, f: e }`; ADTs with `derive Show, Ord`; Result and `?` (and Option's);
+`{ ..r, f = e }`; ADTs with `derive Show, Ord`; Result and `?` (and Option's);
 panic and Never in operand positions; division and modulo by zero. It leans
 on purpose toward the shapes the old defects had in common: a Never-typed
 operand (`break`, `continue`, `return`, a panicking call) in the middle of an
@@ -189,7 +189,7 @@ class CaseGen:
             n = r.randint(0, 2)
             return "[" + ", ".join(self.pick(STR_LITS) for _ in range(n)) + "]" if n else f"{self.p}_snil()"
         if ty == REC:
-            return f"{self.P}R {{ a: {self.int_lit()}, b: {self.pick(STR_LITS)}, c: {self.pick(['true', 'false'])} }}"
+            return f"{self.P}R {{ a = {self.int_lit()}, b = {self.pick(STR_LITS)}, c = {self.pick(['true', 'false'])} }}"
         if ty == ADT:
             k = r.randint(0, 2)
             if k == 0:
@@ -319,8 +319,8 @@ class CaseGen:
             if vs and k < 0.5:
                 f = self.pick(["a", "b", "c"])
                 ft = {"a": INT, "b": STR, "c": BOOL}[f]
-                return f"{self.P}R {{ ..{self.pick(vs).name}, {f}: {e(ft)} }}"
-            return f"{self.P}R {{ a: {e(INT)}, b: {e(STR)}, c: {e(BOOL)} }}"
+                return f"{self.P}R {{ ..{self.pick(vs).name}, {f} = {e(ft)} }}"
+            return f"{self.P}R {{ a = {e(INT)}, b = {e(STR)}, c = {e(BOOL)} }}"
         if ty == ADT:
             if k < 0.3:
                 return f"{self.P}A"

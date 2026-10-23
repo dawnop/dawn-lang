@@ -73,14 +73,14 @@ fn message[T](r: Result[T, ForeignError]) -> String =
 
 fn blank() -> Trace =
   Trace {
-    alloc= "-",
-    upload= "-",
-    roundtrip= "-",
-    launch= "-",
-    sync= "-",
-    download= "-",
-    result= None,
-    note= ""
+    alloc = "-",
+    upload = "-",
+    roundtrip = "-",
+    launch = "-",
+    sync = "-",
+    download = "-",
+    result = None,
+    note = ""
   }
 
 fn release[D](ts: List[DeviceBuffer[D]]) -> Unit !Gpu = {
@@ -116,12 +116,12 @@ fn stages[D](d: Dtype[D], kernel: String, width: Int, xs: List[Float], ys: List[
   let ro = alloc(d, n)
   match (ra, rb, ro) {
     (Ok(a), Ok(b), Ok(out)) -> {
-      let t0 = Trace { ..blank(), alloc= "ok" }
+      let t0 = Trace { ..blank(), alloc = "ok" }
       let up = put(d, a, xs)
       let up2 = put(d, b, ys)
       match (up, up2) {
         (Ok(_), Ok(_)) -> {
-          let t1 = Trace { ..t0, upload= "ok" }
+          let t1 = Trace { ..t0, upload = "ok" }
           let back = get(d, a)
           let back2 = get(d, b)
           let rt = match (back, back2) {
@@ -134,7 +134,7 @@ fn stages[D](d: Dtype[D], kernel: String, width: Int, xs: List[Float], ys: List[
             (Err(e), _) -> e.kind
             (_, Err(e)) -> e.kind
           }
-          let t2 = Trace { ..t1, roundtrip= rt, note= message(back) ++ message(back2) }
+          let t2 = Trace { ..t1, roundtrip = rt, note = message(back) ++ message(back2) }
           let l = launch(kernel, n / width, [erase(buffer_arg(a)), erase(buffer_arg(b)), erase(buffer_arg(out))])
           match l {
             Ok(_) -> {
@@ -147,29 +147,29 @@ fn stages[D](d: Dtype[D], kernel: String, width: Int, xs: List[Float], ys: List[
               }
               Trace {
                 ..t2,
-                launch= "ok",
-                sync= kind(s),
-                download= kind(r),
-                result= value,
-                note= message(s) ++ message(r)
+                launch = "ok",
+                sync = kind(s),
+                download = kind(r),
+                result = value,
+                note = message(s) ++ message(r)
               }
             }
             Err(e) -> {
               release([a, b, out])
-              Trace { ..t2, launch= e.kind, note= e.message }
+              Trace { ..t2, launch = e.kind, note = e.message }
             }
           }
         }
         _ -> {
           let bad = if kind(up) != "ok" { up } else { up2 }
           release([a, b, out])
-          Trace { ..t0, upload= kind(bad), note= message(bad) }
+          Trace { ..t0, upload = kind(bad), note = message(bad) }
         }
       }
     }
     _ -> {
       let bad = if kind(ra) != "ok" { ra } else if kind(rb) != "ok" { rb } else { ro }
-      Trace { ..blank(), alloc= kind(bad), note= message(bad) }
+      Trace { ..blank(), alloc = kind(bad), note = message(bad) }
     }
   }
 }
