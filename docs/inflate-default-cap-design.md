@@ -87,7 +87,7 @@ dawnop-site 后端都不经 inflate。所以改默认的仓内与下游破坏面
 
 tar.gz 一路是确定的崩溃；zip 一路今天拒得住，但堆已经满了，只差一档。
 
-同一个 1 GiB `0xFF` gzip 直接喂 `gzip.gunzip(cap: Some(n))`，在同样的 JVM 参数下扫上界：
+同一个 1 GiB `0xFF` gzip 直接喂 `gzip.gunzip(cap = Some(n))`，在同样的 JVM 参数下扫上界：
 
 | 上界 | `-Xmx2g` 下 | 峰值 RSS | 墙钟 |
 |---|---|---|---|

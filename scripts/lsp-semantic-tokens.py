@@ -88,7 +88,7 @@ fn eval(e: Expr) -> Int !Env =
 
 fn labelled[T: Shown](x: T, fallback: Name) -> String = show_it(x) ++ fallback
 
-fn shift(p: Point, dx: Int, dy: Int = 0) -> Point = Point { ..p, x: p.x + dx, y: p.y + dy }
+fn shift(p: Point, dx: Int, dy: Int = 0) -> Point = Point { ..p, x = p.x + dx, y = p.y + dy }
 
 fn norm(p: Point) -> Int = {
   var acc = 0
@@ -97,12 +97,12 @@ fn norm(p: Point) -> Int = {
 }
 
 fn run() -> Int = {
-  let e = Add(Var("x"), Num(v: 3))
+  let e = Add(Var("x"), Num(v = 3))
   with handle Env { lookup(n) => len(str.trim(n)) }
   fn local_eval() -> Int !Env = lookup("z")
   let first = eval(e) + local_eval() + [1].map(k => k + 1).len()
   let wide = "\U0001F388\U0001F388" ++ str.repeat(SEP, 2)
-  let p = shift(Point { x: first, y: 2, label: wide }, 3, dy: 5)
+  let p = shift(Point { x = first, y = 2, label = wide }, 3, dy = 5)
   norm(p) + len(str.trim(labelled(7, "n")))
 }
 

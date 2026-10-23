@@ -187,8 +187,8 @@ fn greet(name: String, greeting: String = "Hello", punct: String = "!") -> Strin
 
 pub fn main() -> Unit !io = {
   println(greet("Dawn"))
-  println(greet("Dawn", punct: "?"))
-  println(greet(punct: ".", name: "reader", greeting: "Welcome"))
+  println(greet("Dawn", punct = "?"))
+  println(greet(punct = ".", name = "reader", greeting = "Welcome"))
 }
 ```
 ```output
@@ -201,8 +201,8 @@ A default is evaluated afresh on every call that leaves it out, and it has to be
 if it could do io, whether a call did io would depend on whether the caller passed that
 argument. Arguments run in the order they are written, whichever slots they land in.
 The names belong to the signature, so a function value has none: after `let g = greet`,
-`g(name: "x")` is an error and `g` wants all three arguments. Constructors take names the
-same way, their field names standing in for parameter names (`Rect(w: 3.0, h: 4.0)`).
+`g(name = "x")` is an error and `g` wants all three arguments. Constructors take names the
+same way, their field names standing in for parameter names (`Rect(w = 3.0, h = 4.0)`).
 
 See also: [spec.en.md](spec.en.md) §2.1, §3.1, §4.3, §4.4
 
@@ -270,10 +270,10 @@ A record is a product type with named fields, constructed and updated with brace
 type Point = { x: Float, y: Float } derive Show
 
 fn shift(p: Point, dx: Float) -> Point =
-  Point { ..p, x: p.x + dx }
+  Point { ..p, x = p.x + dx }
 
 pub fn main() -> Unit !io = {
-  let a = Point { x: 1.0, y: 2.0 }
+  let a = Point { x = 1.0, y = 2.0 }
   println(to_string(shift(a, 10.0)))
 }
 ```
@@ -488,7 +488,7 @@ as the call; a `{` on the next line is a block statement of its own. In an `if`,
 or `for` header, and after `match`, the braces are the body and not an argument, so
 parenthesise the call there: `if (f(x) { ... }) { ... }`. With named arguments and
 defaults, it is how a function with many options and a body reads at the call site:
-`column(gap: 12) { ... }`.
+`column(gap = 12) { ... }`.
 
 See also: [spec.en.md](spec.en.md) §4.3, §4.5, §6
 
@@ -819,7 +819,7 @@ fn total_area[T: Area](xs: List[T]) -> Float =
   fold(xs, 0.0, (acc, x) => acc + area(x))
 
 pub fn main() -> Unit !io = {
-  let rooms = [Rect { w: 3.0, h: 4.0 }, Rect { w: 2.0, h: 2.0 }]
+  let rooms = [Rect { w = 3.0, h = 4.0 }, Rect { w = 2.0, h = 2.0 }]
   println(to_string(total_area(rooms)))
   # a trait method is an ordinary function name, so a UFCS dot call works too
   println(to_string(rooms[0].bigger_than(10.0)))
@@ -850,7 +850,7 @@ type Card = { rank: Int, name: String } derive Show, Ord
 fn max2[T: Ord](a: T, b: T) -> T = if a < b { b } else { a }
 
 pub fn main() -> Unit !io = {
-  let hand = [Card { rank: 3, name: "queen" }, Card { rank: 1, name: "pawn" }]
+  let hand = [Card { rank = 3, name = "queen" }, Card { rank = 1, name = "pawn" }]
   # derive Ord compares field by field in declaration order (a sum type compares constructors first)
   println(to_string(hand[1] < hand[0]))
   println(max2("pear", "apple"))
@@ -908,7 +908,7 @@ type ShownRepr = { render: fn() -> String }
 pub opaque type Shown = ShownRepr
 
 pub fn shown[T: Show](x: T) -> Shown = {
-  let r: ShownRepr = ShownRepr { render: () => show(x) }
+  let r: ShownRepr = ShownRepr { render = () => show(x) }
   r
 }
 
@@ -979,7 +979,7 @@ fn fetch_or[C: Store](c: C, k: C.Key, fallback: C.Item) -> C.Item =
   }
 
 pub fn main() -> Unit !io = {
-  let s = Shelf { names: ["tea", "rice"] }
+  let s = Shelf { names = ["tea", "rice"] }
   println(fetch_or(s, 1, "nothing"))
   println(fetch_or(s, 5, "nothing"))
 }
@@ -1024,9 +1024,9 @@ impl Iter[Countdown] {
 }
 
 pub fn main() -> Unit !io = {
-  let g = Grid { w: 3, cells: [1, 2, 3, 4, 5, 6] }
+  let g = Grid { w = 3, cells = [1, 2, 3, 4, 5, 6] }
   println("${g[(2, 1)]}")
-  let launch = Countdown { from: 3 }
+  let launch = Countdown { from = 3 }
   for n in launch {
     print("${n} ")
   }
@@ -1822,7 +1822,7 @@ buffers whose formats the entry's type fixes. Before any handler is asked, it ho
 buffers against the cells: a 999-element buffer does not reach the end of a 1000-element
 extent. It also refuses a grid that disagrees with the cells, and an `Out` that shares its
 buffer with another argument. An extent of `DYN_DIM` leaves the number of cells to the
-launch, as in `launch_entry3(entry, buffer_arg(a), buffer_arg(b), buffer_arg(out), grid: [8])`, and then the buffers have to
+launch, as in `launch_entry3(entry, buffer_arg(a), buffer_arg(b), buffer_arg(out), grid = [8])`, and then the buffers have to
 cover the whole of every cell: 1024 elements for eight cells of 128.
 
 The `1998.0` is a reference's answer, not the kernel's. The fake device never runs a
@@ -1939,7 +1939,7 @@ fn run(entry: Entry2[Float, Float]) -> Result[List[Float], ForeignError] !Gpu = 
 }
 
 pub fn main() -> Unit !io = {
-  let (prog, entry) = trace2("softmax", In(F64, cells([3], [4], pad: PadNegInf)),
+  let (prog, entry) = trace2("softmax", In(F64, cells([3], [4], pad = PadNegInf)),
     Out(F64, cells([3], [4])), softmax)
   # the padding is part of the record
   for line in str.split(render(prog), "\n") {
@@ -1989,8 +1989,8 @@ fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
 }
 
 pub fn main() -> Unit !io = {
-  let a = In(F64, cells([256, 256], [64, 32], along: [0, FREE_AXIS]))
-  let b = In(F64, cells([256, 256], [32, 64], along: [FREE_AXIS, 1]))
+  let a = In(F64, cells([256, 256], [64, 32], along = [0, FREE_AXIS]))
+  let b = In(F64, cells([256, 256], [32, 64], along = [FREE_AXIS, 1]))
   let c = Out(F64, cells([256, 256], [64, 64]))     # the grid: 4 by 4 blocks
   let (prog, _entry) = trace3("matmul", a, b, c, matmul)
   # eight trips along K, and one loop with one mmaf in the record
@@ -2050,15 +2050,15 @@ use tileir/prog.{trace2, cells, In, Out}
 
 fn row_softmax(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = load_cell(x)                                   # [32, 64]
-  let p = exp(sub(s, reduce_max(s, keepdims: true)))     # [32, 1], widened to [32, 64]
-  store_cell(out, div(p, reduce_sum(p, keepdims: true)))
+  let p = exp(sub(s, reduce_max(s, keepdims = true)))     # [32, 1], widened to [32, 64]
+  store_cell(out, div(p, reduce_sum(p, keepdims = true)))
 }
 
 # The same, with the first `keepdims` left out.
 fn row_softmax_dropped(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = load_cell(x)
   let p = exp(sub(s, reduce_max(s)))                     # [32]
-  store_cell(out, div(p, reduce_sum(p, keepdims: true)))
+  store_cell(out, div(p, reduce_sum(p, keepdims = true)))
 }
 
 fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
@@ -2084,7 +2084,7 @@ recorded
 tileir: kernel `row_softmax`: op #9 `-`: rhs is tile<32xf64>, declared tile<32x64xf64> (rhs comes from `reduce_max` at src/main.dawn:15:22)
 ```
 
-`reduce_max(s, keepdims: true)` reduces the last dimension (`dim: -1` is the default) and
+`reduce_max(s, keepdims = true)` reduces the last dimension (`dim: -1` is the default) and
 keeps it with length 1: a `[32, 1]` tile, one maximum per row. Where it meets the
 `[32, 64]` tile in `sub`, its dimension of length 1 widens to 64. That is the whole rule:
 an operand of an element-wise operation widens along its dimensions of length 1 when it
@@ -2126,7 +2126,7 @@ use tileir/prog.{Arg, trace2, cells, In, Out, Shared}
 fn transpose(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   let at = idx_add(idx_mul(block_id(1), idx_const(32 * 128)), idx_mul(block_id(0), idx_const(32)))
-  store(out, at, t, strides: Some([1, 128]))     # out's strides, swapped: the layout transposes
+  store(out, at, t, strides = Some([1, 128]))     # out's strides, swapped: the layout transposes
 }
 
 fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
@@ -2158,7 +2158,7 @@ escape hatch: a parameter the kernel addresses itself, through the pointer path.
 `store` writes the tile at an element offset with `out`'s strides swapped, so the tile
 lands transposed and no element moves inside it. Atomics, scatters and a block that
 writes two regions are `Shared` for the same reason, and `grep Shared(` finds every one.
-With no `Out` the grid is the caller's: `launch_entry2(entry, buffer_arg(x), buffer_arg(out), grid: [4, 2])`.
+With no `Out` the grid is the caller's: `launch_entry2(entry, buffer_arg(x), buffer_arg(out), grid = [4, 2])`.
 
 Two more ways out, each a sentence. A kernel that reads one `In` in two shapes takes a
 second view of it with `retile(p, extent, tile)`. `trace1` to `trace5` record kernels of

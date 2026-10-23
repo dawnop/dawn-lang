@@ -1341,7 +1341,7 @@ fn far(n: Int, k: Int = down(1600)) -> Int = n + k
 
 pub fn probe(s: String) -> Int = {
   let a = sep(s)
-  let b = span(lo: 5)
+  let b = span(lo = 5)
   let c = near(1)
   let d = far(1)
   len([a]) + b + c + d

@@ -538,8 +538,8 @@ test "a default that reads earlier parameters folds at comptime" {
     "fn adder(n: Int, f: fn(Int) -> Int = (x) => x + n) -> Int = f(1)\n" ++
     "fn pair[T](a: T, b: T = a) -> List[T] = [a, b]\n" ++
     "const A: Int = span(0)\n" ++
-    "const B: Int = span(hi: 4, lo: 2)\n" ++
-    "const C: Int = span(1, mid: 7)\n" ++
+    "const B: Int = span(hi = 4, lo = 2)\n" ++
+    "const C: Int = span(1, mid = 7)\n" ++
     "const D: Int = adder(41)\n" ++
     "const E: List[String] = pair(\"x\")\n"
   let (m, pdiags) = parser.parse_module(src)
@@ -657,9 +657,9 @@ test "a record update folds at comptime: written fields replaced, the rest kept"
   let src = decl ++
     "type N = { a: Int, b: String }\n" ++
     "const BASE: W = " ++ init ++ "\n" ++
-    "const U: W = W { ..BASE, f37: 700, f2: 200 }\n" ++
+    "const U: W = W { ..BASE, f37 = 700, f2 = 200 }\n" ++
     "const S: Int = U.f2 + U.f37 + U.f5 + BASE.f37\n" ++
-    "const M: N = N { ..N { a: 1, b: \"x\" }, b: \"y\" }\n"
+    "const M: N = N { ..N { a = 1, b = \"x\" }, b = \"y\" }\n"
   let (m, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
   let env: Map[String, ModExports] = map.empty()
@@ -697,7 +697,7 @@ test "a record update lowers to one update node over its bound base" {
   # either written or kept: what both backends read instead of recovering an
   # update from a constructor full of projections.
   let src = "type R = { a: Int, b: Int, c: Int }\n" ++
-    "fn f(r: R, x: Int) -> R = R { ..r, c: x, a: x + 1 }\n"
+    "fn f(r: R, x: Int) -> R = R { ..r, c = x, a = x + 1 }\n"
   let (m, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
   let env: Map[String, ModExports] = map.empty()
@@ -854,7 +854,7 @@ test "a caller() default folds at compile time to the site of the call" {
   # site of the call written in it, and a failure passed an `at` reports that
   # site in the words a backend prints
   let src = "fn here(at: Loc = caller()) -> Loc = at\n" ++
-    "fn check(n: Int, at: Loc = caller()) -> Int = if n > 2 { panic(\"too big\", at: at) } else { n }\n" ++
+    "fn check(n: Int, at: Loc = caller()) -> Int = if n > 2 { panic(\"too big\", at = at) } else { n }\n" ++
     "const A: Loc = comptime { here() }\n" ++
     "const B: Int = comptime { check(3) }\n"
   let (m, pdiags) = parser.parse_module(src)

@@ -16,10 +16,10 @@ var l = broadcast(f_const(F64, 0.0), [BQ, 1])
 var acc = zeros(o)
 for j in d_range(0, n_blocks) {
   let s = mmaf(tq, load_at(k, [j]).permute_tile([1, 0]), lit(0.0)) * lit(scale)
-  let m_new = max(m, s.reduce_max(keepdims: true))
+  let m_new = max(m, s.reduce_max(keepdims = true))
   let p = exp(s - m_new)
   let alpha = exp(m - m_new)
-  l = l * alpha + p.reduce_sum(keepdims: true)
+  l = l * alpha + p.reduce_sum(keepdims = true)
   acc = mmaf(p, load_at(v, [j]), acc * alpha)
   m = m_new
 }

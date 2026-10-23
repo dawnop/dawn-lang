@@ -148,7 +148,7 @@ Pure Dawn sources work on both backends:
 use web/source.{bytes_source, file_source}
 
 let memory = streaming(200, "application/octet-stream", bytes_source(payload))
-let disk = streaming(200, "application/octet-stream", file_source(path), length: Some(size))
+let disk = streaming(200, "application/octet-stream", file_source(path), length = Some(size))
 ```
 
 `file_source` uses `read_range(path, pos, n)` on each read and holds no open
@@ -237,17 +237,17 @@ Set the fields to change and spread the rest:
 ```dawn
 let site = ErrorFormat {
   ..default_errors(),
-  detail_key: "detail",
-  body_too_large: n => "upload limit is ${n} bytes",
+  detail_key = "detail",
+  body_too_large = n => "upload limit is ${n} bytes",
 }
 let cfg = ServerConfig {
-  host: "127.0.0.1", port: 8001, max_body: DEFAULT_MAX_BODY, errors: site,
+  host = "127.0.0.1", port = 8001, max_body = DEFAULT_MAX_BODY, errors = site,
 }
 serve_app_with(cfg, routes, middleware)
 ```
 
 and pass the same value as `fmt:` where the application renders errors
-itself: `error_response(e, fmt: site)`, `query_int_bounded(req, "page", 1, 1,
+itself: `error_response(e, fmt = site)`, `query_int_bounded(req, "page", 1, 1,
 -1, fmt: site)`.
 
 Changes between versions, with migration notes: [CHANGELOG.md](CHANGELOG.md).

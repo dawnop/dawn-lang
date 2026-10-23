@@ -147,7 +147,7 @@ fsmem 原有的三条 handler 测试随 handler 一起走，`std/memfs` 自己�
 std 的公开面是 `io.real_path(path) -> Result[String, ForeignError] !Fs`：
 
 - 先查绝对路径，判据是 `str.starts_with(path, "/")`，与 `fspath.is_absolute` 同一条（std 不能依赖包，见 R1 第 1 条）。
-  不是绝对路径就回 `Err(kind: "io.relative_path")`，**不进 handler**，与 `list_dir`、`run` 的先例同形；
+  不是绝对路径就回 `Err(kind = "io.relative_path")`，**不进 handler**，与 `list_dir`、`run` 的先例同形；
   `io.relative_path` 成为 std 自己铸的第四个 kind（spec 的 IO 小节已同步，中英两版）。
 - 拒绝而不是替调用者绝对化：绝对化要读工作目录，那是 `Env` 的应答。R3 的 `canon_identity` 自己拿 `io.cwd()`，`!Env` 记在它那里。
 - 仓内全部 `with handle Fs` 补臂，共五处：`std/io` 的 `with_fs_real`（调原语）与它测试里的表 handler、

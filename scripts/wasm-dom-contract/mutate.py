@@ -46,7 +46,7 @@ MUTATIONS = {
         (REACTOR,
          "      let attempted = catch_panic(() =>\n",
          "      match current {\n"
-         "        Some(_) -> reactor_state_set(Root(advance: next_line => first(step, next_line)))\n"
+         "        Some(_) -> reactor_state_set(Root(advance = next_line => first(step, next_line)))\n"
          "        None -> ()\n"
          "      }\n"
          "      let attempted = catch_panic(() =>\n"),
@@ -146,8 +146,8 @@ MUTATIONS = {
     # run.sh, held to the todo transcript: two application mutants.
     "todo-msg": ((
         TODO,
-        'value: m.edit, on: [on_value("input", SetEdit)]',
-        'value: m.edit, on: [on_value("input", SetDraft)]',
+        'value = m.edit, on = [on_value("input", SetEdit)]',
+        'value = m.edit, on = [on_value("input", SetDraft)]',
     ),),
     "todo-filter": ((
         TODO,

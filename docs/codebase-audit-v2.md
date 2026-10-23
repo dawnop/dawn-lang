@@ -165,7 +165,7 @@ token recovery、限定 constructor completion，以及 source/`iter_start`/`ite
 placement 由双后端语料和 28 条 production-source compiling mutants 固定；recovery fallback
 复用 checker 的 builtin/namespace 判定，不暴露被 checker 拒绝的 constructor。
 随后 `LIB-19` open → fixed：`Digest` 成为私有 record 上的 `pub opaque type`，只有 `new`
-与 `update` 造得出的状态才存在。修复前 `Digest { h: [], buf: [], total: 0 }` 是合法字面量、
+与 `update` 造得出的状态才存在。修复前 `Digest { h = [], buf = [], total = 0 }` 是合法字面量、
 喂给 `finish` 即 `index 0 out of bounds`，修复后包外构造与字段读取都被拒，私有 record 也不
 按名字泄漏；200 个跨块边界输入的摘要逐字节不变。审计原文说「改一个关键字」是错的：
 `pub opaque type X = { … }` 不能解析（`opaque` 的 target 走 `type_ref`，没有 `LBRACE` 分支），

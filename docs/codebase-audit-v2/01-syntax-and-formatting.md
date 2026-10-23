@@ -93,7 +93,7 @@
   左侧只是第一个参数），写进规范 §4.4 而不是留给实现；不为「视觉上左侧在前」引入
   隐藏临时变量或 `EPipe`。`x |> m.f`（无括号）仍拒绝——模块函数不是裸函数值（§10.3）。
 - **顺带修掉的漏洞：** parser 与 checker 共用一个 `has_parens: Bool`，它分不开
-  `Point { x: 1 }` 与 `Point(1)`——两者都是 `true`，于是记录的 braces-only 规则
+  `Point { x = 1 }` 与 `Point(1)`——两者都是 `true`，于是记录的 braces-only 规则
   （§2.4）在带括号的拼写上根本没生效，`Point(1, 2)` 一直能编过。checker 改用
   `CtorUse = Bare | Braces | Apply`，`Apply + record`（含 pipe 生成的）统一报
   「record must be built with braces」；`x |> Point { ... }` 是**调用一个记录值**，

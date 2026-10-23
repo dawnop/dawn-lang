@@ -158,10 +158,10 @@ fn flash_attn(q: Param[F64], k: Param[F64], v: Param[F64], o: Param[F64]) -> Uni
   let acc = carry(zeros(o))
   d_range(0, ATT_N / FA_BK) { j =>
     let s: Tile[F64] = mul(mma(tq, load_at(k, [j]).transpose(), lit(0.0)), lit(ATT_INV_SQRT_D))
-    let m_new = max(m.get(), reduce_max(s, keepdims: true))
+    let m_new = max(m.get(), reduce_max(s, keepdims = true))
     let p = exp(sub(s, m_new))
     let alpha = exp(sub(m.get(), m_new))
-    l.set(add(mul(l.get(), alpha), reduce_sum(p, keepdims: true)))
+    l.set(add(mul(l.get(), alpha), reduce_sum(p, keepdims = true)))
     acc.set(mma(p, load_at(v, [j]), mul(acc.get(), alpha)))
     m.set(m_new)
   }
@@ -179,10 +179,10 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
   var acc = zeros(o)
   for j in d_range(0, ATT_N / FA_BK) {
     let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), 0.0) * lit(ATT_INV_SQRT_D)
-    let m_new = max(m, reduce_max(s, keepdims: true))
+    let m_new = max(m, reduce_max(s, keepdims = true))
     let p = exp(s - m_new)
     let alpha = exp(m - m_new)
-    l = l * alpha + reduce_sum(p, keepdims: true)
+    l = l * alpha + reduce_sum(p, keepdims = true)
     acc = mma(p, load_at(v, [j]), acc * alpha)
     m = m_new
   }

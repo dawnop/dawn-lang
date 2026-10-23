@@ -27,10 +27,10 @@ reactor driver and the patch interpreter, no dependencies, one
 ## Views
 
 ```dawn
-el("li", class: "row", kids: [
-  button(if t.done { "[x]" } else { "[ ]" }, Toggle(id: t.id)),
-  el("span", on: [on_click(Edit(id: t.id))], kids: [text(t.title)]),
-  button("x", Drop(id: t.id), class: "kill"),
+el("li", class = "row", kids = [
+  button(if t.done { "[x]" } else { "[ ]" }, Toggle(id = t.id)),
+  el("span", on = [on_click(Edit(id = t.id))], kids = [text(t.title)]),
+  button("x", Drop(id = t.id), class = "kill"),
 ])
 ```
 
@@ -61,7 +61,7 @@ compared. A test that wants the message a listener produces calls `deliver`:
 
 ```dawn
 let l = on_value("input", SetDraft)
-assert deliver(l, "buy milk") == SetDraft(text: "buy milk")
+assert deliver(l, "buy milk") == SetDraft(text = "buy milk")
 ```
 
 A payload that does not match what the listener declared is refused with
@@ -69,7 +69,7 @@ A payload that does not match what the listener declared is refused with
 
 ## Keyed children
 
-`keyed(tag, kids: rows)` takes `List[(String, Node[M])]`, so a forgotten key
+`keyed(tag, kids = rows)` takes `List[(String, Node[M])]`, so a forgotten key
 is a type error; `node.with_key` keys one node. Keyed rows keep their DOM
 elements, and with them focus, caret, selection and scroll, when a row is
 inserted, removed or moved. Deleting a middle row of fifty is 2 patches keyed
@@ -119,7 +119,7 @@ before the message is folded.
 `<!DOCTYPE html>`:
 
 ```dawn
-let p = el("p", class: "count", kids: [text("0")])
+let p = el("p", class = "count", kids = [text("0")])
 assert to_html(p) == "<p class=\"count\">0</p>"
 ```
 

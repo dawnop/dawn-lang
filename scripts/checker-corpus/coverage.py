@@ -1739,7 +1739,7 @@ def self_test():
         if len(sites) != 1 or sites[0]['pats'] != expected:
             print('FAIL: tuple wording lost returns or borrowed another slot/binding', sites, file=sys.stderr)
             return 1
-    record = 'Diagnostic { message: "missing exported value", hint: "unrelated suggestion" }'
+    record = 'Diagnostic { message = "missing exported value", hint = "unrelated suggestion" }'
     projected = literal_record_field(record, "message")
     if projected != '"missing exported value"':
         print("FAIL: an explicit record field lost its wording", file=sys.stderr)
@@ -1748,10 +1748,10 @@ def self_test():
         'make(' + record + ')',
         '(' + record + ', "another value")',
         record + '.hint',
-        'Diagnostic { ..other, message: "missing exported value" }',
-        'Diagnostic { message: "first message", message: "second message" }',
-        'Diagnostic { hint: "missing exported value" }',
-        'Diagnostic { message: "missing exported value", hint: { return other } }',
+        'Diagnostic { ..other, message = "missing exported value" }',
+        'Diagnostic { message = "first message", message = "second message" }',
+        'Diagnostic { hint = "missing exported value" }',
+        'Diagnostic { message = "missing exported value", hint = { return other } }',
     ):
         if literal_record_field(opaque, "message") is not None:
             print("FAIL: an unproved record field supplied wording", file=sys.stderr)
@@ -1803,11 +1803,11 @@ def self_test():
     Some(value) -> {
       var hints = []
       for entry in values { hints = hints ++ [entry] }
-      return Diagnostic { message: message, hint: "unrelated suggestion" }
+      return Diagnostic { message = message, hint = "unrelated suggestion" }
     }
     None -> ()
   }
-  Diagnostic { message: message, hint: "unrelated suggestion" }
+  Diagnostic { message = message, hint = "unrelated suggestion" }
 }
 fn query(context, name) = {
   let answer = match name {
@@ -1865,17 +1865,17 @@ fn query(context, name) = {
           var private = false
           for value in values { private = true }
           Some(if private {
-            Diagnostic { message: "private value " ++ name ++ " in module", hint: "private hint" }
+            Diagnostic { message = "private value " ++ name ++ " in module", hint = "private hint" }
           } else {
-            Diagnostic { message: "missing value " ++ name ++ " in exports", hint: "missing hint" }
+            Diagnostic { message = "missing value " ++ name ++ " in exports", hint = "missing hint" }
           })
         }'''},
-        "early": {"params": [], "body": '{ return Some(Diagnostic { message: "live diagnostic" })\n Some(Diagnostic { message: "dead diagnostic" }) }'},
+        "early": {"params": [], "body": '{ return Some(Diagnostic { message = "live diagnostic" })\n Some(Diagnostic { message = "dead diagnostic" }) }'},
         "recursive": {"params": [], "body": 'recursive()'},
         "shadowed": {"params": [], "body": '{ let choice = opaque\n choice() }'},
         "tuple_shadowed": {"params": [], "body": '{ let (choice, other) = opaque\n choice() }'},
         "local_shadowed": {"params": [], "body": '{ fn choice() = opaque\n choice() }'},
-        "argument": {"params": ["message"], "body": 'Some(Diagnostic { message: message, hint: "argument hint" })'},
+        "argument": {"params": ["message"], "body": 'Some(Diagnostic { message = message, hint = "argument hint" })'},
     }
     choice = {"pats": projected_record_patterns("choice()", ("Some", "message"), projection_helpers)}
     for message, expected in [
@@ -1902,7 +1902,7 @@ fn query(context, name) = {
         print("FAIL: record projection ignored its depth bound", file=sys.stderr)
         return 1
     if projected_record_patterns(
-        '(Some(Diagnostic { message: "unreachable tuple diagnostic" }), { return unknown })',
+        '(Some(Diagnostic { message = "unreachable tuple diagnostic" }), { return unknown })',
         (0, "Some", "message"), projection_helpers,
     ):
         print("FAIL: tuple sibling transfer supplied unreachable wording", file=sys.stderr)
@@ -2682,7 +2682,7 @@ fn query(context, name) = {
             return 1
     binder_regions = [
         "let (name, rest) = pair",
-        "let Point { x: name } = point",
+        "let Point { x = name } = point",
         "for [name, ..rest] in rows { name }",
         "with name <- acquire()\nname",
         "name => name",

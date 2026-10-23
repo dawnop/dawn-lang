@@ -47,7 +47,7 @@ MUTATIONS = {
     # an entry whose module was reused keeps the sites it read in a file
     # edited since, instead of moving them with the edit
     'sites-not-moved': [
-        (LSPREF, '          Some(d) -> { next = next ++ [Ref { ..r, def: d }] }\n',
+        (LSPREF, '          Some(d) -> { next = next ++ [Ref { ..r, def = d }] }\n',
          '          Some(_) -> { next = next ++ [r] }\n'),
     ],
 }

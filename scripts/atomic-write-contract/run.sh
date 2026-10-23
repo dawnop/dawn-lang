@@ -195,10 +195,10 @@ expect_inject() { # label, expected-result, expected-content, out, names-staging
 
 inject_helper='## Injected by scripts/atomic-write-contract.
 fn inject_fault(step: String) -> Result[Unit, ForeignError] !Fs =
-  Err(ForeignError { kind: "inject." ++ step, message: "injected", cause: None })
+  Err(ForeignError { kind = "inject." ++ step, message = "injected", cause = None })
 
 fn inject_bytes_fault(step: String) -> Result[Bytes, ForeignError] !Fs =
-  Err(ForeignError { kind: "inject." ++ step, message: "injected", cause: None })'
+  Err(ForeignError { kind = "inject." ++ step, message = "injected", cause = None })'
 
 # 1. create -- a real host failure: the directory takes no new entries. Nothing
 #    is injected, and an unguarded implementation would still succeed here by

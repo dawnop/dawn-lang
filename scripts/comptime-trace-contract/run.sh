@@ -108,7 +108,7 @@ if name == "overwrite-direct-hint":
           match ctl {
             KErr(failure) -> Err((st2, env2, KErr(CtFailure {
               ..failure,
-              hint: \"raised inside the standard library function `\" ++ name ++ \"`\"
+              hint = \"raised inside the standard library function `\" ++ name ++ \"`\"
             })))
             _ -> Err(err)
           }

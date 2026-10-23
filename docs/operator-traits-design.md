@@ -454,14 +454,14 @@ let xv = TyVar("T", -18)
 let xidx = TyAssoc(xv, INDEX_ID, "Idx")
 let xitem = TyAssoc(xv, INDEX_ID, "Item")
 let index = TraitI {
-  id: INDEX_ID, name: "Index", tvar: xv,
-  is_pub: true, owner: None, src_path: None,
-  methods: [("index", MethodSig {
-    sig: prelude_method(INDEX_ID, xv, "index", [xv, xidx], ["c", "i"], xitem),
-    has_default: false
+  id = INDEX_ID, name = "Index", tvar = xv,
+  is_pub = true, owner = None, src_path = None,
+  methods = [("index", MethodSig {
+    sig = prelude_method(INDEX_ID, xv, "index", [xv, xidx], ["c", "i"], xitem),
+    has_default = false
   })],
-  assoc: ["Idx", "Item"],
-  injects: false          # D5
+  assoc = ["Idx", "Item"],
+  injects = false          # D5
 }
 ```
 
@@ -477,14 +477,14 @@ tparam 挂**同一个** tid 的 bound（为 `Show[Option[T]]` 写的），`Index
 
 ```dawn
 # impl[T] Index[List[T]] { type Idx = Int  type Item = T }
-ImplI { trait_id: INDEX_ID, subject: TyList(lt), tparams: [lt],
-        constraints: [[]], derived: true, provided: [],
-        assoc_bindings: [("Idx", TyInt), ("Item", lt)], … }
+ImplI { trait_id = INDEX_ID, subject = TyList(lt), tparams = [lt],
+        constraints = [[]], derived = true, provided = [],
+        assoc_bindings = [("Idx", TyInt), ("Item", lt)], … }
 
 # impl[K: Eq + Hash + Show, V] Index[Map[K, V]] { type Idx = K  type Item = V }
-ImplI { trait_id: INDEX_ID, subject: TyMap(mk, mv), tparams: [mk, mv],
-        constraints: [[EQ_ID, HASH_ID, SHOW_ID], []], derived: true, provided: [],
-        assoc_bindings: [("Idx", mk), ("Item", mv)], … }
+ImplI { trait_id = INDEX_ID, subject = TyMap(mk, mv), tparams = [mk, mv],
+        constraints = [[EQ_ID, HASH_ID, SHOW_ID], []], derived = true, provided = [],
+        assoc_bindings = [("Idx", mk), ("Item", mv)], … }
 ```
 
 这里的关键是 `derived: true`：当前 `primitive_subject` 对 derived impl 走
@@ -543,7 +543,7 @@ fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CEx
 
 ```dawn
 for gt in sg.param_tys {
-  ps ++ [CParam { sym, ty: gt, … }]
+  ps ++ [CParam { sym, ty = gt, … }]
   args ++ [adapt_out(CLocal(sym, gt), gt, subject)]   # 每个形参都往 subject 适配
 }
 ```

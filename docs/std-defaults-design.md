@@ -52,13 +52,13 @@ dev.addf_down(F32, s, a, b)                      # 「向下舍入且 ftz」根�
 
 | 编号 | 合并 | 改前 → 改后 |
 |---|---|---|
-| A1 | narrow：`Rounding = NearestEven \| NearestAway \| TowardZero \| Down \| Up` 成为 `round_binary` / `round_f32` / `round_tf32` 的 `mode` 默认参数，删两个 `*_toward`、两个 `*_away` 与字符串校验（`NearestAway` 来自 T17 的 `round_binary_away` / `round_tf32_away`，调研时还没有） | `round_f32_toward(x, "negative_inf")` → `round_f32(x, mode: Down)`；`round_tf32_away(x)` → `round_tf32(x, mode: NearestAway)` |
-| A2 | inflate：天花板 `cap: Option[Int] = None`，`inflate_end` 并入 `inflate_from(src, from = 0, cap = None)`，`gunzip` / `zip.read` 同理 | `gunzip_bounded(src, Some(n))` → `gunzip(src, cap: Some(n))` |
+| A1 | narrow：`Rounding = NearestEven \| NearestAway \| TowardZero \| Down \| Up` 成为 `round_binary` / `round_f32` / `round_tf32` 的 `mode` 默认参数，删两个 `*_toward`、两个 `*_away` 与字符串校验（`NearestAway` 来自 T17 的 `round_binary_away` / `round_tf32_away`，调研时还没有） | `round_f32_toward(x, "negative_inf")` → `round_f32(x, mode = Down)`；`round_tf32_away(x)` → `round_tf32(x, mode = NearestAway)` |
+| A2 | inflate：天花板 `cap: Option[Int] = None`，`inflate_end` 并入 `inflate_from(src, from = 0, cap = None)`，`gunzip` / `zip.read` 同理 | `gunzip_bounded(src, Some(n))` → `gunzip(src, cap = Some(n))` |
 | A3 | web：`fmt: ErrorFormat = default_errors()` 挪到尾部，`streaming` 收 `length: Option[Int] = None` | `query_int_bounded_with(f, req, ..)` → `query_int_bounded(req, .., fmt: f)` |
-| A4 | gpu 宿主面：`launch(kernel, grid, args, gy = 1, gz = 1)`，`with_gpu_fake(kernels, body, globals = map.empty())` | `launch3(k, gx, gy, gz, hs)` → `launch(k, gx, hs, gy: gy, gz: gz)` |
-| A5 | tileir：`trace_kernel(name, params, body, hints: Hints = [])` | `trace_kernel_hinted("k", ps, hs, f)` → `trace_kernel("k", ps, f, hints: hs)` |
-| A6 | tileir Dev 属性族：`rounding` / `ftz` / `propagate_nan` / `overflow` / `align` / `visibility` / `constant` / `shared` / `unsigned_cmp` 成为默认参数；**明文推翻** `dev.dawn` 刀 T4 那段「属性是名字的一部分」注释 | `addf_down(F32, s, a, b)` → `addf(F32, s, a, b, rounding: Down)` |
-| A7 | bytes：`Base64 = Standard \| StandardRaw \| Url \| UrlRaw` 成为 `to_base64` / `from_base64` 的 `enc` 默认参数 | `to_base64_url(sig)` → `to_base64(sig, enc: UrlRaw)` |
+| A4 | gpu 宿主面：`launch(kernel, grid, args, gy = 1, gz = 1)`，`with_gpu_fake(kernels, body, globals = map.empty())` | `launch3(k, gx, gy, gz, hs)` → `launch(k, gx, hs, gy = gy, gz = gz)` |
+| A5 | tileir：`trace_kernel(name, params, body, hints: Hints = [])` | `trace_kernel_hinted("k", ps, hs, f)` → `trace_kernel("k", ps, f, hints = hs)` |
+| A6 | tileir Dev 属性族：`rounding` / `ftz` / `propagate_nan` / `overflow` / `align` / `visibility` / `constant` / `shared` / `unsigned_cmp` 成为默认参数；**明文推翻** `dev.dawn` 刀 T4 那段「属性是名字的一部分」注释 | `addf_down(F32, s, a, b)` → `addf(F32, s, a, b, rounding = Down)` |
+| A7 | bytes：`Base64 = Standard \| StandardRaw \| Url \| UrlRaw` 成为 `to_base64` / `from_base64` 的 `enc` 默认参数 | `to_base64_url(sig)` → `to_base64(sig, enc = UrlRaw)` |
 | A8 | 只加默认、不删函数：`str.pad_start` / `pad_end` 的 `pad = " "`，`bytes.index_of` 的 `from = 0` | 零调用改动 |
 
 A4、A5、A6 把默认形参放在 body / args **之后**，是为了让现存的位置调用零改动；代价是这些
@@ -270,7 +270,7 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 - **调用方。** `packages/tileref` 8 处、`scripts/tile-gpu-diff/attr_diff.dawn` 1 处、
   `examples/projects/gpu_fake` 1 处，外加 narrow 自己的内联测试（五个模式各有断言，另加「显式写
   `NearestEven` 等于省略」两条）。f32 到 tf32 的 `zero` 原写作 `round_binary_toward(f, 11, -126, 127, "zero")`，
-  现在写 `round_tf32(f, mode: TowardZero)`。
+  现在写 `round_tf32(f, mode = TowardZero)`。
 - **`std/moved.txt`。** `round_binary_toward` 与 `round_f32_toward` 在 v0.82.0 里是公开函数，
   `std-moved-check` 要求登记，补了两行带提示（since 0.83.0）；两个 `*_away` 是 v0.82.0 之后才加的，不登记。
 - **narrow 契约。** 判据不变。`ties-away` 的锚点从 `let n = ...` 那一行改成 `match` 的
@@ -345,13 +345,13 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
   `lower.parser_impl` 只剩 `parse_float`，`lowered_intrinsics` 少两项。`parse_int_radix` 不留别名，
   `std/moved.txt` 登 `builtin parse_int_radix parse_int 0.83.0 0.93.0`。
 - **契约不变。** radix 不在 2..36 答 `None`（不 panic），与原 `parse_int_radix` 的 EBNF 和测试一致；
-  原测试全部改写成 `parse_int(s, radix: n)` 保留，另加「省略等于写 10」与按位置传 radix 两组断言。
+  原测试全部改写成 `parse_int(s, radix = n)` 保留，另加「省略等于写 10」与按位置传 radix 两组断言。
 - **为什么不分两步。** 任务单的前提是「种子阶段之后 selfhost 里的裸 `parse_int` 变成未定义」。实查：
   阶段 A 是种子 jar 配种子自己的 std（`bin/dawn` 924–926 行、`scripts/build-release-jar.sh` 95–96 行），
   裸名落在种子的 builtin；阶段 B/C 是 HEAD 编译器配 HEAD std（`bin/dawn` 941–942 行），裸名经 HEAD 的
   prelude 落到 `std/fmt.parse_int`。两个世界各自都有 `parse_int`，单参调用在两边都合法，所以不存在
   「builtin 与 std 同名并存」的过渡期，一刀即可。唯一两边都写不出来的是带 radix 的调用：种子世界只有
-  `parse_int_radix`，HEAD 世界只有 `parse_int(s, radix: n)`。selfhost 里恰有一处（`front/lexer.dawn`
+  `parse_int_radix`，HEAD 世界只有 `parse_int(s, radix = n)`。selfhost 里恰有一处（`front/lexer.dawn`
   的 `\u{...}`），本刀用私有的 `escape_value` 过渡，读法与原 `parse_int_radix(hex, 16)` 对词法器可观察地
   等价（含 trim 与符号），带测试。
 - **函数值。** 默认值随函数值丢失（spec 3.1），`let f = parse_int` 的类型从 `fn(String) -> Option[Int]`
@@ -391,7 +391,7 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
   `query_int_bounded_with(f, req, ..)` → `query_int_bounded(req, .., fmt: f)`，写在 README 迁移段。
 - **不在本刀。** `serve_app_with`（`cfg` 的默认要读 `port`，等 K6 的 B1）、`json_ok`（C 组，固定的是首参）、
   `hi < 0` 哨兵改 `Option[Int]`（另一裁决）。README 6.0 节同样写明。
-- **负控。** 把 `error_response` 的默认临时改成 `ErrorFormat { ..default_errors(), detail_key: "detail" }`：
+- **负控。** 把 `error_response` 的默认临时改成 `ErrorFormat { ..default_errors(), detail_key = "detail" }`：
   `dawn test packages/web` 红 2 个（`the error body's key is the default one, and configurable`、
   `an HttpError out of range renders as the neutral 500, headers kept`），还原后 88/88 全绿。
 
@@ -418,7 +418,7 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
   反而让一串字节有两个拼写。api-diff 看不见这一条（签名只多了带默认的形参），所以写在这里和 spec §11。
   仓内受影响的调用：site 的 `play_hash` 读回编辑器 `btoa` 写的串，`btoa` 总是补齐，不受影响；dawnop-site
   只用 `to_base64_url` 编码（`pad4(..)`），解码走 `java.util.Base64`，不受影响。dawnop-site 下次升钉把
-  `pad4(bytes.to_base64_url(x))` 写成 `bytes.to_base64(x, enc: bytes.Url)`，`pad4` 可删。
+  `pad4(bytes.to_base64_url(x))` 写成 `bytes.to_base64(x, enc = bytes.Url)`，`pad4` 可删。
 - **`std/moved.txt`。** 四个名字都在 v0.82.0 发布过，登四行（since 0.83.0、until 0.93.0）。
   `from_base64_url` 的提示写明 `UrlRaw` 与 `Url` 各拒对方的拼写，因为旧函数两种都收。
 - **调用方。** `scripts/tile-gpu-diff` 的 `int_diff` / `mm_diff` / `stride_diff` 各 1 处 `launch3`（加导入）、
@@ -499,13 +499,13 @@ fn span(lo: Int, hi: Int = lo + 10, mid: Int = (lo + hi) / 2) -> Int   # 前面�
 
 **写出的实参先按书写顺序全部求值，然后省掉的默认值按声明序逐个求值。**
 
-- 与具名实参乱序：`span(mid: 1, lo: 3)` 先求 `1`、再求 `3`（书写序），然后求 `hi` 的默认值
+- 与具名实参乱序：`span(mid = 1, lo = 3)` 先求 `1`、再求 `3`（书写序），然后求 `hi` 的默认值
   `lo + 10`。默认值看到的永远是「声明在它前面的形参」，与实参写成什么顺序无关。
 - 与尾块：尾块是写出的实参，同样在默认值之前求值；它填最后一个形参（spec §4.3），排在任何
   默认形参之后，所以没有默认值看得见它。`fn each(xs, n: Int = len(xs), body)` 写
   `each(xs) { k => .. }` 时块填 `body`、`n` 读 `xs`。
 - 为什么不按形参序穿插：那样默认值会夹在写出的实参中间求值，「写序」（#207 裁决 1）就不再
-  对写出的实参成立——`f(a, c: tap())` 里 `tap()` 的 io 会排到 `b` 的默认值之后。先全部写出的、
+  对写出的实参成立——`f(a, c = tap())` 里 `tap()` 的 io 会排到 `b` 的默认值之后。先全部写出的、
   后全部默认的，书写序与声明序各管一段，互不打断。Kotlin 是同一个顺序（调用点按书写序求实参，
   `f$default` 里按声明序补默认值）。
 - 看得见吗：默认值是纯的，顺序只在 panic 时看得见（哪个先 panic、panic 前写出的实参的 io

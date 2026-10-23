@@ -52,7 +52,7 @@
 
 - **监听器函数化**（[dom-bridge-design.md](dom-bridge-design.md) §9，提交 `677adaa`）：
   `On[M]` 从装消息值改成装 `fn(String) -> M`，`trait Fill` 和每个应用里的 `impl Fill`
-  一起删掉。DOM 那份 todo 是它的现役消费者：`on_value("input", SetDraft(text: ""))`
+  一起删掉。DOM 那份 todo 是它的现役消费者：`on_value("input", SetDraft(text = ""))`
   变成 `on_value("input", SetDraft)`，应用一个字的胶水都不写。
 
 这两刀合起来，把「一次带值交互要在四处登记」降到两处，把「一段子节点要拆成几个带标注的
@@ -75,7 +75,7 @@ el("div", [("class", root_class(m))], [], [heading, composer, filters, items, st
 
 这一条**与本文的三条路线都无关**：默认参数今天就消得掉它，一件新语言能力都不要。
 提交 `e8472a6` 刚把「默认值的类型可以提到函数自己的类型参数」打开，于是
-`on: List[On[M]] = []` 是合法签名，`el("h1", kids: [text("dawn todo")])` 编得过
+`on: List[On[M]] = []` 是合法签名，`el("h1", kids = [text("dawn todo")])` 编得过
 （探针 P7）。要不要落到 `dsl.dawn` 是包的事。
 
 **二、根视图仍然是「先声明五段、再拼一次」。**
@@ -294,7 +294,7 @@ error: expected the effect to handle (`with handle Ask { ... }`), found `e`
 test "both fields are controlled, so the document renders the model" {
   let field: Node[Msg] =
     el("input", [("class", "field"), ("value", "buy milk")], [on_value("input", SetDraft)], [])
-  assert first_kid(compose_row(update(init(), SetDraft(text: "buy milk")))) == Some(field)
+  assert first_kid(compose_row(update(init(), SetDraft(text = "buy milk")))) == Some(field)
   ...
 }
 ```
@@ -302,7 +302,7 @@ test "both fields are controlled, so the document renders the model" {
 路线一里 `compose_row` 返回 `Unit`，所以它变成：
 
 ```dawn
-assert first_kid(one(collect(() => compose_row(update(init(), SetDraft(text: "buy milk"))))))
+assert first_kid(one(collect(() => compose_row(update(init(), SetDraft(text = "buy milk"))))))
   == Some(field)
 ```
 
@@ -318,7 +318,7 @@ assert first_kid(one(collect(() => compose_row(update(init(), SetDraft(text: "bu
 不返回值。对应的拼写是一个包装：
 
 ```dawn
-keyed("ul", props: [("class", "list")]) {
+keyed("ul", props = [("class", "list")]) {
   for t in visible(m) {
     key(to_string(t.id)) { row(m, t) }
   }
@@ -380,7 +380,7 @@ UI DSL，而且它不是「写起来别扭」，是不可表达。
 语言改动：子节点位置上的一个块，把它的表达式语句收成一个列表。
 
 ```dawn
-el("div", props: [("class", "compose")]) {
+el("div", props = [("class", "compose")]) {
   field
   add
   boom
@@ -456,7 +456,7 @@ error: this Node value is discarded
 **中间那一档，今天就有。** 尾块永远是 thunk，那么让 thunk 返回列表：
 
 ```dawn
-fn el(tag: String, body: fn() -> List[Node] = () => []) -> Node = Elem(tag: tag, kids: body())
+fn el(tag: String, body: fn() -> List[Node] = () => []) -> Node = Elem(tag = tag, kids = body())
 
 el("div") {
   [
@@ -507,45 +507,45 @@ fn el(
   props: List[(String, String)] = [],
   on: List[On] = [],
   body: fn() -> Unit !Emit = () => (),
-) -> Unit !Emit = emit(Elem(tag: tag, props: props, on: on, kids: collect(body), key: None))
+) -> Unit !Emit = emit(Elem(tag = tag, props = props, on = on, kids = collect(body), key = None))
 
 fn keyed(
   tag: String,
   props: List[(String, String)] = [],
   on: List[On] = [],
   body: fn() -> Unit !Emit = () => (),
-) -> Unit !Emit = emit(Elem(tag: tag, props: props, on: on, kids: collect(body), key: None))
+) -> Unit !Emit = emit(Elem(tag = tag, props = props, on = on, kids = collect(body), key = None))
 
 fn key(k: String, body: fn() -> Unit !Emit) -> Unit !Emit = emit(with_key(one(collect(body)), k))
 
-fn text(s: String) -> Unit !Emit = emit(Text(s: s))
+fn text(s: String) -> Unit !Emit = emit(Text(s = s))
 
 # ---- 视图 ----------------------------------------------------------------
 
 fn view(m: Model) -> Node = one(collect(() => root(m)))
 
 fn root(m: Model) -> Unit !Emit =
-  el("div", props: [("class", root_class(m))]) {
+  el("div", props = [("class", root_class(m))]) {
     el("h1") { text("dawn todo") }
     compose_row(m)
     filter_row(m.filter)
-    keyed("ul", props: [("class", "list")]) {
+    keyed("ul", props = [("class", "list")]) {
       for t in visible(m) {
         key(to_string(t.id)) { row(m, t) }
       }
     }
-    el("p", props: [("class", "status")]) { text(summary(m)) }
+    el("p", props = [("class", "status")]) { text(summary(m)) }
   }
 
 fn compose_row(m: Model) -> Unit !Emit =
-  el("div", props: [("class", "compose")]) {
-    el("input", props: [("class", "field"), ("value", m.draft)], on: [on_value("input", SetDraft)])
-    el("button", props: [("class", "add")], on: [on_click(Add)]) { text("add") }
-    el("button", props: [("class", "boom")], on: [on_click(Boom)]) { text("boom") }
+  el("div", props = [("class", "compose")]) {
+    el("input", props = [("class", "field"), ("value", m.draft)], on = [on_value("input", SetDraft)])
+    el("button", props = [("class", "add")], on = [on_click(Add)]) { text("add") }
+    el("button", props = [("class", "boom")], on = [on_click(Boom)]) { text("boom") }
   }
 
 fn filter_row(cur: Filter) -> Unit !Emit =
-  el("div", props: [("class", "filters")]) {
+  el("div", props = [("class", "filters")]) {
     filter_button("all", All, cur)
     filter_button("active", Active, cur)
     filter_button("done", Done, cur)
@@ -554,24 +554,24 @@ fn filter_row(cur: Filter) -> Unit !Emit =
 fn filter_button(label: String, which: Filter, cur: Filter) -> Unit !Emit =
   el(
     "button",
-    props: [("class", if which == cur { "filter on" } else { "filter" })],
-    on: [on_click(Only(f: which))],
+    props = [("class", if which == cur { "filter on" } else { "filter" })],
+    on = [on_click(Only(f = which))],
   ) { text(label) }
 
 fn row(m: Model, t: Todo) -> Unit !Emit =
   if m.editing == Some(t.id) {
-    el("li", props: [("class", "row editing")]) {
-      el("input", props: [("class", "draft"), ("value", m.edit)], on: [on_value("input", SetEdit)])
-      el("button", props: [("class", "save")], on: [on_click(Save)]) { text("save") }
-      el("button", props: [("class", "cancel")], on: [on_click(Cancel)]) { text("cancel") }
+    el("li", props = [("class", "row editing")]) {
+      el("input", props = [("class", "draft"), ("value", m.edit)], on = [on_value("input", SetEdit)])
+      el("button", props = [("class", "save")], on = [on_click(Save)]) { text("save") }
+      el("button", props = [("class", "cancel")], on = [on_click(Cancel)]) { text("cancel") }
     }
   } else {
-    el("li", props: [("class", if t.done { "row done" } else { "row" })]) {
-      el("button", props: [("class", "box")], on: [on_click(Toggle(id: t.id))]) {
+    el("li", props = [("class", if t.done { "row done" } else { "row" })]) {
+      el("button", props = [("class", "box")], on = [on_click(Toggle(id = t.id))]) {
         text(if t.done { "[x]" } else { "[ ]" })
       }
-      el("span", props: [("class", "title")], on: [on_click(Edit(id: t.id))]) { text(t.title) }
-      el("button", props: [("class", "kill")], on: [on_click(Drop(id: t.id))]) { text("x") }
+      el("span", props = [("class", "title")], on = [on_click(Edit(id = t.id))]) { text(t.title) }
+      el("button", props = [("class", "kill")], on = [on_click(Drop(id = t.id))]) { text("x") }
     }
   }
 ```

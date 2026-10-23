@@ -68,7 +68,7 @@ comptime 解释器从来没听说过效果**，任何恢复档都要在检查器
 
 | file:line | 它说了什么 |
 |---|---|
-| `selfhost/src/check/passes.dawn:1202` | `fields ++ [FieldI { name: op.name, ty: TyFn(ptys, ret, EPure) }]`：证据记录里每个操作一个闭包槽，**行是纯的** |
+| `selfhost/src/check/passes.dawn:1202` | `fields ++ [FieldI { name = op.name, ty = TyFn(ptys, ret, EPure) }]`：证据记录里每个操作一个闭包槽，**行是纯的** |
 | `selfhost/src/check/checker.dawn:5709-5711` | 臂按 `Some(field.ty)` 去 `check_lambda`：**臂的类型就是操作的签名** |
 | `selfhost/src/check/checker.dawn:5749-5751` | `with handle` 块的类型**就是**块剩余闭包的返回类型，剩余原地施用恰好一次 |
 
@@ -741,7 +741,7 @@ pop_scope
 
 - 臂本身按 `Some(TyFn(fptys ++ [k_ty], A, EPure))` 去 `check_lambda`，其中
   `k_ty = TyFn([fret], A, EPure)`。binder 由检查器合成一个
-  `LambdaParam { name: kname, ann: None, lo: a.blo, hi: a.bhi }` 追加进 `a.params` 的末尾。
+  `LambdaParam { name = kname, ann = None, lo = a.blo, hi = a.bhi }` 追加进 `a.params` 的末尾。
   这一步是刀 3 的，不是刀 1 白送的：刀 1 存下来的是**名字**（`binder: Option[String]`，
   `front/ast.dawn:201-212`）加两个跨度，不是参数节点。binder 不带注解，类型由期望供给：
   `is_concrete` 对 `TyFn` 直接答 true（`checker.dawn:1197`），所以这条路已经通了，不用改推断。

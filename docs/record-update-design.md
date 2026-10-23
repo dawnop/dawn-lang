@@ -5,7 +5,7 @@
 
 ## 问题
 
-`Cx`（`selfhost/src/check/cx.dawn`，58 个字段）的每次更新 `Cx { ..cx, f: v }` 都降成一次 58 参构造器调用。
+`Cx`（`selfhost/src/check/cx.dawn`，58 个字段）的每次更新 `Cx { ..cx, f = v }` 都降成一次 58 参构造器调用。
 JDK 21 的 C2 表示不了那么多栈传参（JDK-8325467，只修在 JDK 26 b17，21u、25u 均无回移），于是
 `check.cx$Cx::<init>` 报 `unsupported incoming calling sequence`，每个调用它的方法、以及每个内联了这种调用的方法都报
 `unsupported calling sequence`，退回 C1 跑完整个进程。OpenJDK 21.0.11 上一次 `check selfhost` 有 21 条这样的日志。

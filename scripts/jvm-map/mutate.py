@@ -65,8 +65,8 @@ MUTATIONS = {
     ),),
     "hi-is-lo": ((
         EMIT,
-        "JMark { site: site, what: what, lo: lo, inv: inv, hi: hi }",
-        "JMark { site: site, what: what, lo: lo, inv: inv, hi: lo }",
+        "JMark { site = site, what = what, lo = lo, inv = inv, hi = hi }",
+        "JMark { site = site, what = what, lo = lo, inv = inv, hi = lo }",
     ),),
     "absolute": ((
         JMAP,

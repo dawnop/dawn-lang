@@ -48,8 +48,8 @@ CDRIVER = "selfhost/src/c/cdriver.dawn"
 MUTATIONS = {
     "text-leak": ((
         EMITC,
-        "  let st1 = CSt { ..st, out: st.out ++ [l] }\n",
-        "  let st1 = CSt { ..st, out: st.out ++ [if st.mapping { pad(st.ind) ++ text ++ \" \\n\" } else { l }] }\n",
+        "  let st1 = CSt { ..st, out = st.out ++ [l] }\n",
+        "  let st1 = CSt { ..st, out = st.out ++ [if st.mapping { pad(st.ind) ++ text ++ \" \\n\" } else { l }] }\n",
     ),),
     "no-claim": ((
         EMITC,

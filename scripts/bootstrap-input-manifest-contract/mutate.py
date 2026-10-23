@@ -24,10 +24,10 @@ if mutation == "drop-deps-recursion":
     new = '''  (inputs, seen)
 '''
 elif mutation == "drop-package-manifest":
-    old = '''    SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" },
-    SourceInput { kind: InputTree, path: root }
+    old = '''    SourceInput { kind = InputFile, path = parent ++ "/dawn.toml" },
+    SourceInput { kind = InputTree, path = root }
 '''
-    new = '''    SourceInput { kind: InputTree, path: root }
+    new = '''    SourceInput { kind = InputTree, path = root }
 '''
 elif mutation == "persist-internal-absolute":
     old = '''      if str.starts_with(input.path, prefix) {

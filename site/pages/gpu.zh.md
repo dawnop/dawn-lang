@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ 9d49c78401e86372 -->
+<!-- doc-check: translation-of site/pages/gpu.md @ 411078f7472d4f21 -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -120,7 +120,7 @@ kernel 在录制时就被检查：函数体只跑一遍，某个运算的形状�
 
 ## api-occupancy
 
-在 `sm_86` 上，128×128 的 f16 矩阵乘要带 `entry_hints(occupancy: Some(2))`：每个 SM 放得下两块，而不是一块。
+在 `sm_86` 上，128×128 的 f16 矩阵乘要带 `entry_hints(occupancy = Some(2))`：每个 SM 放得下两块，而不是一块。
 
 ## api-surface
 

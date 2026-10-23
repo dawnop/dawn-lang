@@ -130,7 +130,7 @@ mutant was, and one assertion is deliberately weaker than it could be.
 
 ### The one deliberately weak assertion
 
-`named_arg` asserts that `n |> f(a: 2)` is **refused**, and pointedly not which
+`named_arg` asserts that `n |> f(a = 2)` is **refused**, and pointedly not which
 diagnostic says so. Rebuilding the argument list positionally drops the name
 and the call quietly compiles; appending the left side instead leaves the name
 in place and the program is still refused, for a different reason. Pinning the

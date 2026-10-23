@@ -126,7 +126,7 @@ spec §12.6（`docs/spec.md` 的「设备后端：GPU」）与英文译本已随
 今天宿主值一律是 `List[Float]`：`gpu_copy_from_host(handle, data: List[Float])`、`gpu_copy_to_host(handle) -> Result[List[Float], ForeignError]`，
 native 的 `gpu_upload_host`/`gpu_download_host` 在 `selfhost/src/check/types.dawn` 里也是 `TyArray(TyFloat)`。对 `i64` 只在 ±2^53 内精确
 （`std/gpu.dawn` 的格式注释与 `scripts/tile-gpu-diff/dtype_diff.dawn` 的 i64 语料明写了这条债，语料限制在 ±2^52 内）。
-统一之后得到的前提是：`Tensor[T]` 的 `T` 已经是宿主值类型。目标：`copy_from_host(t: Tensor[T], data: List[T])`、`copy_to_host(t) -> List[T]`，
+统一之后得到的前提是：`Tensor[T]` 的 `T` 已经是宿主值类型。目标：`copy_from_host(t = Tensor[T], data: List[T])`、`copy_to_host(t) -> List[T]`，
 `Tensor[U8]` 下得到 `List[U8]`，`Tensor[Int]` 下得到 `List[Int]` 且精确。
 
 ### 6.2 设计要点（待裁）

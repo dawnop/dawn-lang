@@ -166,8 +166,8 @@ dawn fmt」，随 v0.80.0 发布）。** 删除条件已满足：v0.79.0 已发�
 
 | | 记录 `type P = { x: Int }` | 和类型构造器 `Rect(w: Float, h: Float)` |
 |---|---|---|
-| 表达式 | `P { x: 1 }`、`P { ..p, x: 2 }`；`P(1)`/`P(x: 1)`/`P()` 报错（**今天已拒**） | `Rect(1.0, h: 2.0)`；`Rect { w: 1.0, h: 2.0 }` 报错（**新关**） |
-| 模式 | `P { x, .. }`；`P(x: a)`/`P(a)` 报错（**新关**） | `Rect(w, ..)`；`Rect { w, .. }` 报错（**新关**） |
+| 表达式 | `P { x = 1 }`、`P { ..p, x = 2 }`；`P(1)`/`P(x = 1)`/`P()` 报错（**今天已拒**） | `Rect(1.0, h = 2.0)`；`Rect { w = 1.0, h = 2.0 }` 报错（**新关**） |
+| 模式 | `P { x, .. }`；`P(x = a)`/`P(a)` 报错（**新关**） | `Rect(w, ..)`；`Rect { w, .. }` 报错（**新关**） |
 
 新诊断（措辞与今天的记录诊断成对）：
 - `constructor \`Rect\` is built with parentheses: Rect(...)`，hint 同今天的 `constructor: Rect(w: Float, h: Float)`；
@@ -214,9 +214,9 @@ span 为准把 `(` `)` 与 `{` `}` 对换（字段简写 `{ x }` ↔ `(x: x)` �
 
 ### 3.4 负控
 
-- `type P = { x: Int }` 后 `P(x: 1)`（表达式）：旧新都报（已拒）；`match p { P(x: a) -> a }`：旧 ok，新报
+- `type P = { x: Int }` 后 `P(x = 1)`（表达式）：旧新都报（已拒）；`match p { P(x = a) -> a }`：旧 ok，新报
   「matched with braces」（先红）。
-- `type S = A(v: Int) | B`：`A { v: 1 }` 与 `match s { A { v } -> v, B -> 0 }` 旧 ok、新报错。
+- `type S = A(v: Int) | B`：`A { v = 1 }` 与 `match s { A { v } -> v, B -> 0 }` 旧 ok、新报错。
 - 探针 `P()` 表记录：报错且 hint 用 `{}`。
 
 ## 4. SYN-N08：或-模式前导 `|`

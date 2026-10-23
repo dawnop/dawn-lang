@@ -60,7 +60,7 @@ def cross_layer(work):
                     tests.extend([
                         "  with_mem(() => {",
                         "    for checks in [false, true] {",
-                        "      let cx = Cx { bufs: [], lens: [], written: mem.new(0), params: [], dtypes: [], bid: [0, 0, 0], grid: [1, 1, 1], ub: checks }",
+                        "      let cx = Cx { bufs = [], lens = [], written = mem.new(0), params = [], dtypes = [], bid = [0, 0, 0], grid = [1, 1, 1], ub = checks }",
                         "      var got: List[Int] = []",
                         f"      for n in {dawn_list(counts)} {{",
                         "        got = got ++ [" + ", ".join(

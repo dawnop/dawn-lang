@@ -74,11 +74,11 @@ fn apply_env(f: fn(Int) -> Int !Env, x: Int) -> Int !Env = f(x)
 
 fn labelled[T: Shown](x: T, fallback: Name) -> String = show_it(x) ++ fallback
 
-fn shift(p: Point, dx: Int, dy: Int = 0) -> Point = Point { ..p, x: p.x + dx, y: p.y + dy }
+fn shift(p: Point, dx: Int, dy: Int = 0) -> Point = Point { ..p, x = p.x + dx, y = p.y + dy }
 
 fn px(p: Point) -> Int =
   match p {
-    Point { x: first, y, label } -> first + y + len(str.trim(label))
+    Point { x = first, y, label } -> first + y + len(str.trim(label))
   }
 
 fn norm(p: Point) -> Int = {
@@ -88,11 +88,11 @@ fn norm(p: Point) -> Int = {
 }
 
 fn run() -> Int = {
-  let e = Add(Var("x"), Num(v: 3))
+  let e = Add(Var("x"), Num(v = 3))
   with handle Env { lookup(n) => len(str.trim(n)) }
   fn local_eval() -> Int !Env = lookup("z")
   let first = eval(e) + local_eval() + apply_env(k => k + lookup("w"), 1)
-  let p = shift(Point { x: first, y: 2, label: "p" }, 3, dy: 5)
+  let p = shift(Point { x = first, y = 2, label = "p" }, 3, dy = 5)
   norm(p) + px(p) + len(str.trim(labelled(7, "n")))
 }
 
@@ -163,7 +163,7 @@ SINGLE_DEFS = [
     ("builtin type names no declaration", "fn show_it(x: Int)", 14, "", "", None),
     ("record literal field", "{ x: first, y: 2", 2, "", "{ x: Int", 2),
     ("record pattern field", "{ x: first, y, label }", 2, "", "{ x: Int", 2),
-    ("constructor named argument", "Num(v: 3)", 4, "", "Num(v: Int)", 4),
+    ("constructor named argument", "Num(v = 3)", 4, "", "Num(v: Int)", 4),
     ("named argument", "dy: 5", 0, "", "dy: Int = 0", 0),
     ("var declaration", "var acc", 4, "", "var acc", 0),
     ("let declaration", "let first", 4, "", "let first", 0),

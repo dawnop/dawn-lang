@@ -125,7 +125,7 @@ MUTATIONS = {
     "move-source-into-loop": (
         "src/ir/lower.dawn",
         ((
-            '''  (LSt { ..st11, cur_loop: st.cur_loop }, [
+            '''  (LSt { ..st11, cur_loop = st.cur_loop }, [
     CSLet(csym, ct, coll),
     CSLet(isym, cur_t, start_v),
     CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
@@ -143,14 +143,14 @@ MUTATIONS = {
       CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
     ]
   }
-  (LSt { ..st11, cur_loop: st.cur_loop }, statements)
+  (LSt { ..st11, cur_loop = st.cur_loop }, statements)
 ''',
         ),),
     ),
     "move-iter-start-into-loop": (
         "src/ir/lower.dawn",
         ((
-            '''  (LSt { ..st11, cur_loop: st.cur_loop }, [
+            '''  (LSt { ..st11, cur_loop = st.cur_loop }, [
     CSLet(csym, ct, coll),
     CSLet(isym, cur_t, start_v),
     CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
@@ -168,7 +168,7 @@ MUTATIONS = {
       CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
     ]
   }
-  (LSt { ..st11, cur_loop: st.cur_loop }, statements)
+  (LSt { ..st11, cur_loop = st.cur_loop }, statements)
 ''',
         ),),
     ),

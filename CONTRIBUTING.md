@@ -148,6 +148,9 @@ exists is in [docs/gate-drift-guards-design.md](docs/gate-drift-guards-design.md
 **Never add a Claude attribution** (no `Co-Authored-By`, no `Claude-Session`).
 This project is held to open-source standards.
 
+Named arguments and value or pattern fields use `=`, as in `f(size = 2)` and
+`Point { x = 1 }`. Parameter and field types keep `:`, as in `x: Int`.
+
 ## 6. Contracts: do not change them unilaterally
 
 The production service of the [`dawnop-site`](https://github.com/dawnop/dawnop-site)

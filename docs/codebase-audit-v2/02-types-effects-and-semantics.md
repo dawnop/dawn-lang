@@ -472,8 +472,8 @@
   |---|---|
   | `show("hi")` | `"hi"`（带引号） |
   | `to_string("hi")` / `${"hi"}` | `hi`（不带） |
-  | `show(Box { v: "hi" })` | `Box { v: "hi" }`（字段带引号） |
-  | `show('a')` / `${'a'}` / `Box { v: 'a' }` | `97` |
+  | `show(Box { v = "hi" })` | `Box { v = "hi" }`（字段带引号） |
+  | `show('a')` / `${'a'}` / `Box { v = 'a' }` | `97` |
 
   这条区别不是偶然：spec §4.3 已写下「顶层的 `String` 不加引号，嵌套的加」，
   `selfhost/src/ir/interp.dawn:2747` 有一条单测就叫 `` `show` is the nested rendering

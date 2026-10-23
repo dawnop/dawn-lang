@@ -38,8 +38,8 @@ MUTATIONS = {
     ),),
     "unrelated-becomes-inplace": ((
         DIFF,
-        'op: Replace(w: new)',
-        'op: SetSelf(w: new)',
+        'op = Replace(w = new)',
+        'op = SetSelf(w = new)',
     ),),
     "common-prefix-off-by-one": ((
         DIFF,
@@ -103,13 +103,13 @@ MUTATIONS = {
     ),),
     "rekid-styled-loses-its-style": ((
         WIDGET,
-        'Styled(style: s, child: ks[0])',
-        'Styled(style: Plain, child: ks[0])',
+        'Styled(style = s, child = ks[0])',
+        'Styled(style = Plain, child = ks[0])',
     ),),
     "rekid-styled-not-total": ((
         WIDGET,
-        'Styled(s, _) -> if list.is_empty(ks) { w } else { Styled(style: s, child: ks[0]) }',
-        'Styled(s, _) -> Styled(style: s, child: ks[0])',
+        'Styled(s, _) -> if list.is_empty(ks) { w } else { Styled(style = s, child = ks[0]) }',
+        'Styled(s, _) -> Styled(style = s, child = ks[0])',
     ),),
     "relate-ignores-the-style": ((
         WIDGET,
@@ -158,8 +158,8 @@ MUTATIONS = {
     ),),
     "keyed-move-ends-swapped": ((
         DIFF,
-        '          let mv: Op[W] = MoveKid(from: p, to: t)',
-        '          let mv: Op[W] = MoveKid(from: t, to: p)',
+        '          let mv: Op[W] = MoveKid(from = p, to = t)',
+        '          let mv: Op[W] = MoveKid(from = t, to = p)',
     ),),
     "keyed-descends-at-the-old-index": ((
         DIFF,
@@ -192,8 +192,8 @@ MUTATIONS = {
     ),),
     "key-is-not-carried-through-rekid": ((
         NODE,
-        '      Elem(t, p, o, _, k) -> Elem(tag: t, props: p, on: o, kids: ks, key: k)',
-        '      Elem(t, p, o, _, _) -> Elem(tag: t, props: p, on: o, kids: ks, key: None)',
+        '      Elem(t, p, o, _, k) -> Elem(tag = t, props = p, on = o, kids = ks, key = k)',
+        '      Elem(t, p, o, _, _) -> Elem(tag = t, props = p, on = o, kids = ks, key = None)',
     ),),
 }
 

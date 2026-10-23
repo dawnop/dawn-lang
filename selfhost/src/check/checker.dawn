@@ -6063,14 +6063,14 @@ test "a literal at Int or Float is the literal it always was, and elsewhere its 
   # tree can show it. An integer literal at Float is a Float literal; one at
   # a type with a pure FromInt is that impl's call, folded.
   let src = "type M = { n: Int }\n" ++
-    "impl FromInt[M] {\n  fn from_int(n: Int) -> M = M { n: n }\n}\n" ++
+    "impl FromInt[M] {\n  fn from_int(n: Int) -> M = M { n = n }\n}\n" ++
     "fn i() -> Int = 1\n" ++
     "fn f() -> Float = 1.5\n" ++
     "fn n() -> Int = -1\n" ++
     "fn x() -> Float = -2\n" ++
     "fn m() -> M = 3\n" ++
     "type G = { x: Float }\n" ++
-    "impl FromFloat[G] {\n  fn from_float(x: Float) -> G = G { x: x }\n}\n" ++
+    "impl FromFloat[G] {\n  fn from_float(x: Float) -> G = G { x = x }\n}\n" ++
     "fn z() -> G = -0.0\n"
   let (md, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
@@ -9566,9 +9566,9 @@ fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], ex
 fn staged_src(body: String) -> String =
   "type V = { n: Int }\ntype C = { n: Int }\ntype R = { n: Int }\n" ++
   "impl StagedIter[R] {\n  type Item = V\n" ++
-  "  fn staged_for(r: R, body: fn(V) -> Unit) -> Unit = body(V { n: 0 })\n}\n" ++
+  "  fn staged_for(r: R, body: fn(V) -> Unit) -> Unit = body(V { n = 0 })\n}\n" ++
   "impl StagedVar[V] {\n  type Cell = C\n" ++
-  "  fn var_open(v: V) -> C = C { n: v.n }\n  fn var_get(c: C) -> V = V { n: c.n }\n" ++
+  "  fn var_open(v: V) -> C = C { n = v.n }\n  fn var_get(c: C) -> V = V { n = c.n }\n" ++
   "  fn var_set(c: C, v: V) -> Unit = ()\n}\n" ++
   "fn g(a: V, b: V) -> V = a\n" ++ body
 
@@ -9611,7 +9611,7 @@ test "a staged for opens its cells in declaration order, not mention or assignme
   # either would differ from m, l, acc. `k` is declared inside the body and
   # is the body's own; the outer `l` the inner block shadows is still carried,
   # because the body also mentions it outside that block.
-  let src = staged_src("fn f(r: R) -> V = {\n  var m = V { n: 1 }\n  var l = V { n: 2 }\n" ++
+  let src = staged_src("fn f(r: R) -> V = {\n  var m = V { n = 1 }\n  var l = V { n = 2 }\n" ++
       "  var acc = V { n: 3 }\n  var unused = V { n: 4 }\n  for j in r {\n" ++
       "    acc = g(acc, j)\n    { let l = j }\n    var k = j\n    k = g(k, l)\n" ++
       "    l = g(l, m)\n    m = g(m, j)\n  }\n  g(m, g(l, acc))\n}\n")
@@ -9627,7 +9627,7 @@ test "a staged for opens its cells in declaration order, not mention or assignme
 }
 
 test "a read-only var is carried, and a name shadowed in the body is not a mention" {
-  let src = staged_src("fn f(r: R) -> V = {\n  var a = V { n: 1 }\n  var b = V { n: 2 }\n" ++
+  let src = staged_src("fn f(r: R) -> V = {\n  var a = V { n = 1 }\n  var b = V { n = 2 }\n" ++
       "  for j in r {\n    let b = j\n    let x = g(a, b)\n  }\n  g(a, b)\n}\n")
   let (md, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
@@ -9641,7 +9641,7 @@ test "a read-only var is carried, and a name shadowed in the body is not a menti
 
 test "an inner staged loop passes the outer cell through and opens only its own" {
   let src = staged_src("fn f(r: R) -> V = {\n  var s = V { n: 1 }\n  for i in r {\n" ++
-      "    var t = V { n: 2 }\n    for k in r {\n      s = g(s, k)\n      t = g(t, i)\n    }\n" ++
+      "    var t = V { n = 2 }\n    for k in r {\n      s = g(s, k)\n      t = g(t, i)\n    }\n" ++
       "  }\n  s\n}\n")
   let (md, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
@@ -9694,8 +9694,8 @@ fn staged_if_src(body: String) -> String = staged_src(
     "    on_true()\n    on_false()\n  }\n}\n" ++ body)
 
 test "staged if arms share canonical cells and open and write back in declaration order" {
-  let src = staged_if_src("fn f(c: Cond) -> Unit = {\n  var a = V { n: 1 }\n" ++
-      "  var b = V { n: 2 }\n  var ro = V { n: 3 }\n" ++
+  let src = staged_if_src("fn f(c: Cond) -> Unit = {\n  var a = V { n = 1 }\n" ++
+      "  var b = V { n = 2 }\n  var ro = V { n = 3 }\n" ++
       "  if c { b = g(a, ro) } else { a = g(b, ro) }\n}\n")
   let (md, pd) = parser.parse_module(src)
   assert len(pd) == 0
@@ -9740,7 +9740,7 @@ test "staged if arms share canonical cells and open and write back in declaratio
 ## The result protocol has an empty representation, distinct from an initialized V.
 fn staged_value_src(body: String) -> String = staged_if_src(
   "type Slot = { value: Option[V] }\nimpl StagedResult[V] {\n  type Slot = Slot\n" ++
-    "  fn result_open() -> Slot = Slot { value: None }\n" ++
+    "  fn result_open() -> Slot = Slot { value = None }\n" ++
     "  fn result_set(s: Slot, v: V) -> Unit = ()\n  fn result_get(s: Slot) -> V = s.value!\n}\n" ++ body)
 
 test "a staged value stores both arm results and reads its hidden slot after the merge" {
@@ -10253,7 +10253,7 @@ test "a caller() default is the call's site, and is legal nowhere else" {
   assert msgs_of("fn f(s: String = caller()) -> String = s\n") ==
     ["parameter `s` is String but its default value is Loc"]
   # a builtin's `at` is filled the same way
-  assert msgs_of("fn f() -> Int = panic(\"x\")\nfn g(at: Loc) -> Int = panic(\"x\", at: at)\n") == []
+  assert msgs_of("fn f() -> Int = panic(\"x\")\nfn g(at: Loc) -> Int = panic(\"x\", at = at)\n") == []
 }
 
 test "dbg renders through Show, and says so when there is none" {
@@ -14053,7 +14053,7 @@ test "omitted defaults run after the written arguments, in declaration order" {
 test "a default reads the parameters before it, and names the ones it cannot" {
   # earlier parameters, an earlier default, by name and out of order
   assert msgs_of("fn span(lo: Int, hi: Int = lo + 10, mid: Int = (lo + hi) / 2) -> Int = mid\n" ++
-      "fn use_it() -> Int = span(1) + span(1, mid: 0) + span(hi: 4, lo: 2)\n") == []
+      "fn use_it() -> Int = span(1) + span(1, mid = 0) + span(hi = 4, lo = 2)\n") == []
   # a lambda in a default closes over an earlier parameter
   assert msgs_of("fn adder(n: Int, f: fn(Int) -> Int = (x) => x + n) -> Int = f(1)\n") == []
   # generics: the earlier parameter's type is the type parameter
@@ -14104,9 +14104,9 @@ test "the prelude Iter names its cursor `c`, which is what a caller writes" {
     "}\n" ++
     "fn first(t: Two) -> Int = {\n" ++
     "  let k = t.iter_start()\n" ++
-    "  if t.iter_done(c: k) { 0 } else { t.iter_get(c: t.iter_next(c: k)) }\n" ++
+    "  if t.iter_done(c = k) { 0 } else { t.iter_get(c = t.iter_next(c = k)) }\n" ++
     "}\n" ++
-    "fn any_left[C: Iter](xs: C) -> Bool = not xs.iter_done(c: xs.iter_start())\n"
+    "fn any_left[C: Iter](xs: C) -> Bool = not xs.iter_done(c = xs.iter_start())\n"
   assert msgs_of(src) == []
 }
 
@@ -16255,7 +16255,7 @@ test "a lambda parameter a later argument binds waits for that argument" {
   assert len(msgs_of(later_binder_src("chain(1, b => b + 1, a => a * 2, c => c - 1)"))) == 0
   # constructors take the same order, record and positional alike
   assert len(msgs_of(later_binder_src(
-    "{\n  let p = Prog { init: 1, step: (a, m) => inc(a, m), read: a => a * 2 }\n  p.init\n}"))) == 0
+    "{\n  let p = Prog { init = 1, step = (a, m) => inc(a, m), read = a => a * 2 }\n  p.init\n}"))) == 0
   assert len(msgs_of(later_binder_src(
     "match Pair(1, (a, m) => inc(a, m), a => a * 2) {\n  Pair(i, _, _) -> i\n}"))) == 0
   # what the lambda learns is what the later argument said, so a real
@@ -17696,7 +17696,7 @@ test "`cell_take` is not chosen when the right-hand side can fail" {
   }
   # and the shapes that cannot fail keep the take: names, literals,
   # constructors, records, list literals with a spread, field reads and `++`
-  for rhs in ["acc ++ [n]", "[0, ..acc] ++ [R { v: n }.v]"] {
+  for rhs in ["acc ++ [n]", "[0, ..acc] ++ [R { v = n }.v]"] {
     assert list.contains(take_case_prims(rhs), "cell_take")
   }
 }
@@ -18291,7 +18291,7 @@ pub(pkg) fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) 
 
 test "exports_of exposes the pub surface, and imports consume it" {
   let src = "pub type Pt = { x: Int, y: Int }\n" ++
-    "pub fn mk(x: Int, y: Int) -> Pt = Pt { x: x, y: y }\n" ++
+    "pub fn mk(x: Int, y: Int) -> Pt = Pt { x = x, y = y }\n" ++
     "fn hidden() -> Int = 1\n" ++
     "pub const ORIGIN_X: Int = 0\n"
   let (m, pdiags) = parser.parse_module(src)
@@ -18323,7 +18323,7 @@ test "exports_of exposes the pub surface, and imports consume it" {
 
 test "pub(pkg) names reach their own package and stop at its boundary" {
   let src = "pub(pkg) type Seam = { n: Int }\n" ++
-    "pub(pkg) fn seam(n: Int) -> Seam = Seam { n: n }\n" ++
+    "pub(pkg) fn seam(n: Int) -> Seam = Seam { n = n }\n" ++
     "pub fn api(n: Int) -> Int = seam(n).n\n"
   let (m, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
@@ -18514,7 +18514,7 @@ test "a module-qualified type resolves through the alias (LANG-06)" {
     "pub alias Idx = Int\n" ++
     "type Secret = { s: Int }\n" ++
     "pub const ORIGIN_X: Int = 0\n" ++
-    "pub fn mk(x: Int, y: Int) -> Pt = Pt { x: x, y: y }\n"
+    "pub fn mk(x: Int, y: Int) -> Pt = Pt { x = x, y = y }\n"
   let (m, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
   let env0: Map[String, ModExports] = map.empty()
@@ -18893,7 +18893,7 @@ test "bitwise Int operators keep native TAST and Amount reduces before a count i
     "fn shifted(a: Bits) -> Bits = a << 2\n" ++
     "fn move[T: Shl](a: T, n: T.ShlAmount) -> T !T.Shl = a << n\n" ++
     "fn literal() -> Int = move(3, 2)\n" ++
-    "fn named() -> Int = {\n  let x = move(n: 2, a: 3)\n  x\n}\n" ++
+    "fn named() -> Int = {\n  let x = move(n = 2, a = 3)\n  x\n}\n" ++
     "fn earlier[T: Shl](n: T.ShlAmount, a: T) -> T !T.Shl = a << n\n" ++
     "fn reordered() -> Int = {\n  let x = earlier(2, 3)\n  x\n}\n" ++
     "fn inverted(a: Int) -> Int = ~a\n"

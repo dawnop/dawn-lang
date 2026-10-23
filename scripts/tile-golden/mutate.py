@@ -140,7 +140,7 @@ MUTATIONS = {
     ),),
     "for-results-not-rolled-back": ((
         BYTECODE,
-        'fn roll_back(before: W, after: W) -> W = W { ..after, index: before.index, nvals: before.nvals }',
+        'fn roll_back(before: W, after: W) -> W = W { ..after, index = before.index, nvals = before.nvals }',
         'fn roll_back(before: W, after: W) -> W = after',
     ),),
     "addf-no-rounding": ((
@@ -287,8 +287,8 @@ MUTATIONS = {
     ),),
     "assume-same-elements-payload-four-bytes": ((
         BYTECODE,
-        '  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 8)) }',
-        '  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 4)) }',
+        '  W { ..w, body = list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 8)) }',
+        '  W { ..w, body = list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 4)) }',
     ),),
     "assume-bounded-bounds-swapped": ((
         BYTECODE,

@@ -73,7 +73,7 @@ fn eval(e: Expr) -> Int =
 
 fn twice(n: Int) -> Int = n + n
 
-fn shift(p: Point, dx: Int, dy: Int = 0) -> Point = Point { x: p.x + dx, y: p.y + dy }
+fn shift(p: Point, dx: Int, dy: Int = 0) -> Point = Point { x = p.x + dx, y = p.y + dy }
 
 fn origin(x: Int) -> Point = {
   let y = x + 1
@@ -82,7 +82,7 @@ fn origin(x: Int) -> Point = {
 
 fn first(p: Point) -> Int =
   match p {
-    Point { x, y: _ } -> x
+    Point { x, y = _ } -> x
   }
 
 fn apply(twice: fn(Int) -> Int, n: Int) -> Int = twice(n) + twice(n + 1)
@@ -96,10 +96,10 @@ fn asked() -> Int !Env = lookup("a") + lookup("b")
 
 fn run() -> Int = {
   with handle Env { lookup(k) => len(str.trim(k)) }
-  let total = asked() + eval(Add(Num(1), Num(v: 2)))
+  let total = asked() + eval(Add(Num(1), Num(v = 2)))
   var acc = 0
   acc = acc + total
-  acc = acc + area(shift(origin(1), 2, dy: 3)) + first(origin(acc))
+  acc = acc + area(shift(origin(1), 2, dy = 3)) + first(origin(acc))
   acc + twice(acc) + apply(twice, acc) + shadow(acc)
 }
 
@@ -109,7 +109,7 @@ pub fn main() -> Unit !io = {
 
 fn moved(q: Point) -> Point = shift(q, 1)
 
-fn moved2(q: Point) -> Point = q.shift(dy: 2, dx: q.y)
+fn moved2(q: Point) -> Point = q.shift(dy = 2, dx = q.y)
 """
 
 # (label, needle, delta, includeDeclaration, expected occurrences). The cursor
@@ -141,7 +141,7 @@ REFERENCES = [
      ["4:5 lookup", "48:25 lookup", "48:39 lookup", "51:20 lookup"]),
     ("constructor: declaration, pattern, constructions", "Num(v: Int)", 0, True,
      ["8:4 Num", "23:4 Num", "52:33 Num", "52:41 Num"]),
-    ("field: declaration and the named constructor argument", "Num(v: 2)", 4, True,
+    ("field: declaration and the named constructor argument", "Num(v = 2)", 4, True,
      ["8:8 v", "52:45 v"]),
     # the negatives: one spelling, two declarations
     ("shadowed: the let, not the parameter it shadows", "let n = n", 4, True,
