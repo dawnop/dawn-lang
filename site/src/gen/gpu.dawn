@@ -71,7 +71,7 @@ use std/io.{Fs, with_fs_real, with_proc_real}
 use html/page.{Assets, Lang, En, Zh, PageHead, shell_ext, section_crumb, chip, plain_assets, repo_url, lang_path}
 use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html}
-use gen/common.{must_read, must_list, write_page, map_doc_url, doc_files, fn_source, pad2}
+use gen/common.{must_read, must_list, write_page, map_doc_url, doc_files, fn_source, fn_head, pad2}
 use gen/fingerprint.{fingerprint}
 use gen/corpus.{corpus_path}
 use gen/tutorial.{chapter_titles}
@@ -265,7 +265,7 @@ pub fn cut_fn(src: String, name: String) -> Cut = {
   var i = 0
   for l in lines {
     i = i + 1
-    if first == 0 && str.starts_with(l, head) {
+    if first == 0 && fn_head(l, name) {
       first = i
     }
   }
@@ -292,7 +292,7 @@ pub fn cut_def(src: String, name: String) -> Cut = {
   for l in lines {
     i = i + 1
     if first == 0 {
-      if str.starts_with(l, head) {
+      if fn_head(l, name) {
         first = i
         last = i
         braced = str.ends_with(str.trim_end(l), "{")
@@ -1573,7 +1573,7 @@ test "the kernel beside its golden is the whole function, from the lines it name
     let src = must_read(kernels_file())
     let k = cut_fn(src, kernel_name())
     assert k.text != ""
-    assert str.starts_with(k.text, "fn flash_attn(")
+    assert str.starts_with(k.text, "fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](")
     assert str.contains(k.text, "!Dev")
     assert str.ends_with(k.text, "\n}")
     let lines = str.split(src, "\n")
@@ -1716,8 +1716,8 @@ test "flash_attn lines up with its golden, call by call" {
     let loops = filter(m.calls, c => c.name == "d_range")
     assert len(loops) == 1
     let body = filter(m.calls, c => c.parent == loops[0].id)
-    assert len(body) == 25
-    assert len(filter(m.calls, c => c.parent >= 0)) == 25
+    assert len(body) == 26
+    assert len(filter(m.calls, c => c.parent >= 0)) == 26
     # a region call keeps its header on its own line and its terminator and
     # brace on the line its span ends on
     assert len(loops[0].lines) == 2
@@ -1752,6 +1752,7 @@ fn ops_for(name: String) -> List[String] =
     "f_const" -> []
     "lit" -> []
     "scalar" -> []
+    "to" -> []
     "carry" -> []
     "get" -> []
     "set" -> []
@@ -1905,7 +1906,7 @@ test "the facts beside the map are the map's and the files' numbers" {
       }
     assert kf.bytes == size
     assert kf.lines == len(m.ir)
-    assert kf.calls == 38
+    assert kf.calls == 39
     for v in [m.ops, len(m.ir), size, len(m.calls)] {
       assert str.contains(p, "<b>${v}</b>")
     }

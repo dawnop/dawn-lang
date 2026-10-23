@@ -447,10 +447,10 @@ tile_ccheck "compile: a tileir program's pane is the text dawn run prints, and i
 TILE_EXPECTED="$CASES/tile.expected"
 ATTN_GOLDEN="$ROOT/site/play-ui/samples/flash_attn.out"
 export TILE_EXPECTED ATTN_GOLDEN
-ATTN_FIRST=$(grep -n '^fn flash_attn(' "$CASES/tile_attn.dawn" | cut -d: -f1)
+ATTN_FIRST=$(grep -n '^fn flash_attn\[' "$CASES/tile_attn.dawn" | cut -d: -f1)
 export ATTN_FIRST
 tile_ccheck "compile: a kernel with a loop and carried variables is paired call by call" "$CASES/tile_attn.dawn" '{}' \
-  'd["ok"] is True and "unmapped" not in d and d["calls_total"]==25 and d["gaps"]["count"]==0 and any(c["name"]=="d_range" for c in d["calls"]) and any(c["parent"]>=0 and d["calls"][c["parent"]]["name"]=="d_range" for c in d["calls"]) and len(d["pane"]["outs"])==25 and d["pane"]["text"][1].lstrip().startswith("entry @flash_attn") and d["src"]["first"]==int(os.environ["ATTN_FIRST"])'
+  'd["ok"] is True and "unmapped" not in d and d["calls_total"]==26 and d["gaps"]["count"]==0 and any(c["name"]=="d_range" for c in d["calls"]) and any(c["parent"]>=0 and d["calls"][c["parent"]]["name"]=="d_range" for c in d["calls"]) and len(d["pane"]["outs"])==26 and d["pane"]["text"][1].lstrip().startswith("entry @flash_attn") and d["src"]["first"]==int(os.environ["ATTN_FIRST"])'
 tile_ccheck "compile: a kernel the pairing cannot follow keeps its plain pane and says why" "$CASES/tile_hostif.dawn" '{}' \
   'd["ok"] is True and d["phase"]=="compile-view" and "calls" not in d and "host control flow" in d["unmapped"] and d["pane"]["kind"]=="tile" and any("cuda_tile.module" in l for l in d["pane"]["text"]) and "@@tile" not in raw'
 tile_ccheck "compile: a tileir program with a compile error answers a diagnostic, not a pane" "$CASES/tile_broken.dawn" '{}' \
@@ -494,10 +494,10 @@ ccheck "compile: and so is its JVM listing" "$CASES/tile.dawn" jvm \
 # C text is read with every line outside the program's own functions empty, so
 # its line count is still the whole text's (docs/playground-compile-design.md K8).
 # The starter's `main` interprets the kernel and checks it against plain attention,
-# which adds calls of its own to the table (78 in all, including the factory),
+# which adds calls of its own to the table (86 in all, including the factory and numeric policy),
 # so the operator count is a floor: the kernel's seven are there, and no gap.
 ccheck "compile: the flash attention starter's C text pairs its operators, no gap" "$CASES/tile_attn.dawn" c \
-  "$SOUND"' and d["pane"]["kind"]=="c" and d["calls_total"]==78 and sum(c["name"] in ("mul","sub","add","div") for c in d["calls"])>=7 and any(c["name"]=="from_float" for c in d["calls"]) and d["pane"]["total"]>80000 and d["pane"]["shown"]>100 and any("main__flash_1attn" in l for l in d["pane"]["text"])'
+  "$SOUND"' and d["pane"]["kind"]=="c" and d["calls_total"]==86 and sum(c["name"] in ("mul","sub","add","div") for c in d["calls"])>=7 and any(c["name"]=="from_float" for c in d["calls"]) and d["pane"]["total"]>80000 and d["pane"]["shown"]>100 and any("main__flash_1attn" in l for l in d["pane"]["text"])'
 ccheck "compile: the JVM listing of it pairs the same calls" "$CASES/tile_attn.dawn" jvm \
   "$SOUND"' and d["pane"]["kind"]=="jvm" and d["cached"] is False and d["calls"]==prev["calls"]'
 ccheck "compile: a dependency the visitor supplies is not honoured by the C view either" "$CASES/tile_smuggle.dawn" c \

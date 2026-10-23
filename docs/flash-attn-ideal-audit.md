@@ -1,12 +1,20 @@
 # flash_attn 对照理想写法的复核（tileir 0.12）
 
-> 状态：**current**（2026-10-07）。基线 `origin/main` = 50f15459（tileir 0.12.0，K4 已合）。
+> 状态：**current**（2026-10-23 更新；下方保留 10-07 审计）。基线 `origin/main` = 50f15459（tileir 0.12.0，K4 已合）。
 > 理想写法取自 [tileir-011-design.md](tileir-011-design.md) §3.1（0.11 目标写法）、
 > [tileir-k4-design.md](tileir-k4-design.md)（运行期标量）与维护者工作区的
 > research-generic-kernel-report-20261006（泛型 kernel 的目标形状 `fn flash_attn[D, A](.., scale)`）；
 > 外部对照是 Triton 教程 06 的融合注意力（<https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html>，
 > 取其 `_attn_fwd_inner` 与 `_attn_fwd` 的在线 softmax 部分）。
 > 这里没有写进去的数字都没量过。
+
+## 2026-10-23 当前状态
+
+A2 已将 bf16 输出迁为 f32。本次在 A2 合入基线 `5c1bf13f` 上，合并一份 `[D: FloatDtype, A: FloatDtype + ScalarDtype]` 主体、一份泛型五参闭包工厂及类型化录制 helper。Float/Float 保留 `zeros(o)`、自然指数和精确非 FTZ 除法；BF16/F32 保留 `full` 初始化、exp2-FTZ、运行期 log2(e) scale、未收窄 p 的行和、第二 MMA 前的最近偶数 BF16 舍入和近似 FTZ 除法。策略与形状是宿主捕获值，设备 ABI 仍为 Q/K/V/O/scale。
+
+当前编译与录制探针的六对既有 MLIR/tilebc 逐字节不变；36 个架构/维度/头数/格式组合的 TileProg、lower、MLIR、tilebc 也相等。调用图对选定 f64 捕获值严格选臂，并对每个显式设备调用核对编译器位置；同型 `to` 保留一个无 IR 的调用来源。最终门与三卡结果由交付报告记录。方案与边界见 [flash-generic-merge-design.md](flash-generic-merge-design.md)。
+
+P4-c 已提供 `FaShape`/`FaCfg` 和每架构配置工厂，普通 flash 的尺寸参数化已有消费者；剩余 GQA 尺寸与运行期键数交 K3。P3 已对 bf16 采用 exp2-FTZ，f64 继续自然指数。下文保留 10-07 的问题与探针原貌，不能再据此称泛型“待裁”、尺寸“无消费者”或 exp2“缺实测”。P4/A2 的历史性能数据保留原输出格式身份，未称为本次新实测。
 
 ## 1. 之前与之后
 

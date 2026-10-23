@@ -10,15 +10,15 @@ use std/list
 use std/str
 use std/loc
 use std/io.{with_fs_real, write_bytes}
-use std/gpu.{I4}
-use std/dtype.{F64, I64}
+use std/gpu.{I4, ScalarDtype}
+use std/dtype.{F64, I64, Dtype, dtype_name}
 use std/int/i8.{I8}
 use std/int/i16.{I16}
 use std/int/i32.{I32}
 use std/narrow.{F32, BF16, F16, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU, F4E2M1FN, F8E5M3FNU, Rounding, f32}
 use std/float.{INFINITY}
 use tileref/ref.{global_table_a, global_table_b, global_syms_c}
-use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, param, block_id, tile_at, load, store, row_major, permute, coord,
+use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, FloatDtype, host_float, param, block_id, tile_at, load, store, row_major, permute, coord,
   in_range, axis_mask, gather, scatter, axis_strides, ge_i, mma, full, transpose, to, add, sub, mul, div, max, min,
   abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_eq,
   d_loop, carry, get, set, lit, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes, d_reduce,
@@ -2352,89 +2352,57 @@ fn fa_hints(arch: String, c: FaCfg) -> ByArch[EntryHints] =
 fn fa_kv_index(j: Idx, bh: Int, s: Int, c: FaCfg) -> Idx !Dev =
   if bh == 1 { j } else { (block_id(0) / idx_const(s / c.bq)) * idx_const(s / c.bk) + j }
 
-fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float], scale: Param[Float],
-  cfg: FaCfg = fa64_cfg("default", ATT_D), shape: FaShape = fa_shape()) -> Unit !Dev = {
+type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool, acc_from_out: Bool }
+fn fa64_math() -> FaNumerics[Float] = FaNumerics { zero = 0.0, neg_inf = -INFINITY, base2 = false, exp_ftz = false, approx_div = false, div_ftz = false, acc_from_out = true }
+fn fa_bf16_math() -> FaNumerics[F32] = FaNumerics { zero = f32(0.0), neg_inf = f32(-INFINITY), base2 = true, exp_ftz = true, approx_div = true, div_ftz = true, acc_from_out = false }
+
+fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[D], v: Param[D], o: Param[A], scale: Param[A], dt: Dtype[D], math: FaNumerics[A], cfg: FaCfg, shape: FaShape) -> Unit !Dev = {
   let tq = load_cell(q)
-  var m: Tile[Float] = full([cfg.bq, 1], -INFINITY)
-  var l: Tile[Float] = full([cfg.bq, 1], 0.0)
-  var acc = zeros(o)
+  var m: Tile[A] = full([cfg.bq, 1], math.neg_inf)
+  var l: Tile[A] = full([cfg.bq, 1], math.zero)
+  var acc: Tile[A] = if math.acc_from_out { zeros(o) } else { full([cfg.bq, shape.d], math.zero) }
   for j in d_range(0, shape.n / cfg.bk) {
-    let s: Tile[Float] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
+    let s: Tile[A] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
     let m_new = max(m, reduce_max(s, keepdims = true))
-    let p = exp(s - m_new)
-    let alpha = exp(m - m_new)
+    let p = if math.base2 { exp2(s - m_new, ftz = math.exp_ftz) } else { exp(s - m_new) }
+    let alpha = if math.base2 { exp2(m - m_new, ftz = math.exp_ftz) } else { exp(m - m_new) }
     l = l * alpha + reduce_sum(p, keepdims = true)
-    acc = mma(p, load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
+    acc = mma(p.to(dt), load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
     m = m_new
   }
-  store_cell(o, acc / l)
+  store_cell(o, if math.approx_div { div(acc, l, approx = true, ftz = math.div_ftz) } else { acc / l })
 }
 
-# `flash_attn` as the paper runs it (tileir 0.10.0): bf16 queries, keys and
-# values, every product accumulated in f32, and the probabilities narrowed
-# to bf16 before the second product, which is the one place a bf16 kernel
-# rounds that the f64 one does not. The running maximum `m`, the running
-# sum `l` and the accumulator stay f32; `l` sums the f32 probabilities and
-# the accumulator the bf16 ones, as FlashAttention's own kernels do, so the
-# two halves of the final division are not rounded alike. The answer is
-# stored directly as f32. The host buffer holds four bytes per element;
-# no conversion follows the f32 division (A2).
-#
-# sm_86 assembles both products to its bf16 tensor core (`--remarks=
-# tensorcore`: `Tensor-core SM80`); bf16 operands into an f32 accumulator is
-# a row of the dialect's `mmaf` table, bf16 into bf16 is not. Tolerance
-# tier, and not the f64 kernels' tolerance: see scripts/tile-gpu-diff's
-# seq_diff for the bound and what it is derived from.
-#
-# The exponentials are base 2 with `flush_to_zero` (knife P3), the way
-# Triton's tutorial, FlashAttention 2 and 3 and cuTile's own attention
-# sample write them: the launch's `scale` is `log2(e) / sqrt(d)`, so the
-# scores are already in base 2 and `exp2(s - m)` is `exp(scale' * q k^T - m')`
-# with nothing in front of the one `ex2` instruction. Plain `exp` is a
-# seven instruction sequence on this device; `exp2` with `ftz` is the
-# instruction (measured, docs/tile-backend-design.md 6.40). Flushing is safe
-# here for the reason it is in those kernels: a probability below 2^-126 is
-# far below one f32 ulp of the row sum `l`, which holds the row maximum's own
-# term, 1, so flushing it cannot move `l` or the weighted sum.
-fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[F32], scale: Param[F32],
-  cfg: FaCfg = fa_cfg("default", ATT_D), shape: FaShape = fa_shape()) -> Unit !Dev = {
-  let tq = load_cell(q)
-  var m: Tile[F32] = full([cfg.bq, 1], f32(-INFINITY))
-  var l: Tile[F32] = full([cfg.bq, 1], 0.0)
-  var acc: Tile[F32] = full([cfg.bq, shape.d], 0.0)
-  for j in d_range(0, shape.n / cfg.bk) {
-    let s: Tile[F32] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
-    let m_new = max(m, reduce_max(s, keepdims= true))
-    let p = exp2(s - m_new, ftz= true)
-    let alpha = exp2(m - m_new, ftz= true)
-    l = l * alpha + reduce_sum(p, keepdims= true)
-    acc = mma(p.to(BF16), load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
-    m = m_new
+# The two supported instances capture their policy before recording.
+fn fa_kernel[D: FloatDtype, A: FloatDtype + ScalarDtype](dt: Dtype[D], math: FaNumerics[A], c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[D], Param[D], Param[D], Param[A], Param[A]) -> Unit !Dev =
+  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, dt, math, c, FaShape { n = n, d = d, bh = bh })
+
+# FloatDtype alone does not establish a legal MMA pair or a scale convention.
+fn fa_record_typed[D: FloatDtype, A: FloatDtype + ScalarDtype](name: String, arch: String, dt: Dtype[D], acc_dtype: Dtype[A], math: FaNumerics[A], c: FaCfg, d: Int, n: Int, bh: Int, at: Loc = caller()) -> TileProg = {
+  let f64 = dtype_name(dt) == "f64" && dtype_name(acc_dtype) == "f64"
+  let bf16 = dtype_name(dt) == "bf16" && dtype_name(acc_dtype) == "f32"
+  if host_float(math.zero) != 0.0 || host_float(math.neg_inf) != -INFINITY {
+    panic("flash_attn: unsupported numeric constants", at = at)
   }
-  store_cell(o, div(acc, l, approx= true, ftz= true))
+  if not ((f64 && not math.base2 && not math.exp_ftz && not math.approx_div && not math.div_ftz && math.acc_from_out)
+      || (bf16 && math.base2 && math.exp_ftz && math.approx_div && math.div_ftz && not math.acc_from_out)) {
+    panic("flash_attn: unsupported format or numeric policy", at = at)
+  }
+  check_config(arch, c.bq, fa_entry(c), at = at)
+  let q = cells([bh * n, d], [c.bq, d])
+  let kv = cells([bh * n, d], [c.bk, d], along = [FREE_AXIS, 1])
+  let (p, _e) = trace5(name, In(dt, q), In(dt, kv), In(dt, kv), Out(acc_dtype, q), Scalar(acc_dtype),
+    fa_kernel(dt, math, c, n, d, bh), hints = fa_hints(arch, c))
+  p
 }
-
-# Config -> kernel. Every captured value is fixed before recording.
-fn fa_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[Float], Param[Float], Param[Float], Param[Float], Param[Float]) -> Unit !Dev =
-  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, c, FaShape { n = n, d = d, bh = bh })
-
-fn fa_bf16_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[BF16], Param[BF16], Param[BF16], Param[F32], Param[F32]) -> Unit !Dev =
-  (q, k, v, o, scale) => flash_attn_bf16(q, k, v, o, scale, c, FaShape { n= n, d= d, bh= bh })
 
 fn fa_record(arch: String, d: Int, n: Int, bh: Int, bf16: Bool, cfg: Option[FaCfg] = None, at: Loc = caller()) -> TileProg = {
   let c = match cfg { Some(c) -> c
     None -> if bf16 { fa_cfg(arch, d) } else { fa64_cfg(arch, d) } }
-  check_config(arch, c.bq, fa_entry(c), at= at)
-  let q = cells([bh * n, d], [c.bq, d])
-  let kv = cells([bh * n, d], [c.bk, d], along= [FREE_AXIS, 1])
   if bf16 {
-    let (p, _e) = trace5("flash_attn_bf16", In(BF16, q), In(BF16, kv), In(BF16, kv), Out(F32, q), Scalar(F32),
-      fa_bf16_kernel(c, n, d, bh), hints= fa_hints(arch, c))
-    p
+    fa_record_typed("flash_attn_bf16", arch, BF16, F32, fa_bf16_math(), c, d, n, bh, at = at)
   } else {
-    let (p, _e) = trace5("flash_attn", In(F64, q), In(F64, kv), In(F64, kv), Out(F64, q), Scalar(F64),
-      fa_kernel(c, n, d, bh), hints= fa_hints(arch, c))
-    p
+    fa_record_typed("flash_attn", arch, F64, F64, fa64_math(), c, d, n, bh, at = at)
   }
 }
 
@@ -5860,7 +5828,7 @@ fn trace(name: String) -> TileProg = match name {
   "flash_attn" -> {
     let (p, _e) = trace5("flash_attn",
       In(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(F64, fa_kv()), In(F64, fa_kv()),
-      Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), fa_kernel(fa64_cfg("default", ATT_D), ATT_N, ATT_D, 1))
+      Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), fa_kernel(F64, fa64_math(), fa64_cfg("default", ATT_D), ATT_N, ATT_D, 1))
     p
   }
   "flash_bf16_sm90_d64" -> fa_named("flash_bf16_sm90_d64", "sm_90", 64)
@@ -5872,7 +5840,7 @@ fn trace(name: String) -> TileProg = match name {
       In(BF16, cells([ATT_M, ATT_D], [64, ATT_D])),
       In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along= [FREE_AXIS, 1])),
       In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along= [FREE_AXIS, 1])),
-      Out(F32, cells([ATT_M, ATT_D], [64, ATT_D])), Scalar(F32), fa_bf16_kernel(fa_cfg("default", ATT_D), ATT_N, ATT_D, 1))
+      Out(F32, cells([ATT_M, ATT_D], [64, ATT_D])), Scalar(F32), fa_kernel(BF16, fa_bf16_math(), fa_cfg("default", ATT_D), ATT_N, ATT_D, 1))
     p
   }
   "idx_softmax" -> {
@@ -6574,6 +6542,9 @@ fn trace_twice(name: String) -> TileProg = {
   if name == "flash_attn_bf16" || str.starts_with(name, "flash_bf16_sm") {
     flash_output_check(name, first)
   }
+  if name == "flash_attn" || name == "flash_attn_bf16" || str.starts_with(name, "flash_bf16_sm") {
+    flash_policy_check(name, first, name != "flash_attn")
+  }
   if first != second { panic("tile-golden: `${name}` traced twice gave two different programs") } else { () }
   first
 }
@@ -6586,6 +6557,76 @@ fn flash_output_check(name: String, p: TileProg) -> Unit = {
   }
   let text = render(p)
   if str.contains(text, "f64") { panic("A2 ${name}: output view/store must be f32 without widening") }
+}
+
+# Inspect the recorded data flow, independently of the golden text. Ordinary
+# finite samples cannot distinguish every FTZ or division attribute drift.
+fn flash_policy_check(name: String, p: TileProg, bf16: Bool) -> Unit = {
+  let dtype = if bf16 { "f32" } else { "f64" }
+  let input = if bf16 { "bf16" } else { "f64" }
+  if p.params != [ByPtr(input), ByPtr(input), ByPtr(input), ByPtr(dtype), ByValue(dtype)] {
+    panic("generic ${name}: five parameter ABI")
+  }
+  var exps: List[(Int, String, String)] = []
+  var body: List[TileOp] = []
+  var divisions: List[String] = []
+  for op in p.ops {
+    match op {
+      For(_iv, _lo, _hi, _step, _u, init, carry, result, ops) -> {
+        if len(init) != 3 || len(carry) != 3 || len(result) != 3 { panic("generic ${name}: three data carries") }
+        body = ops
+      }
+      BinaryF(_dst, op, dt, _shape, _a, _b) -> {
+        if str.starts_with(op, "divf") { divisions = divisions ++ [op ++ ":" ++ dt] }
+      }
+      If(_r, _c, _t, _f) -> panic("generic ${name}: policy generated device if")
+      _ -> ()
+    }
+  }
+  for op in body {
+    match op {
+      UnaryF(dst, op, dt, _shape, _src) -> {
+        if str.starts_with(op, "exp") { exps = exps ++ [(dst, op, dt)] }
+      }
+      If(_r, _c, _t, _f) -> panic("generic ${name}: policy generated device if")
+      LoadView(_dst, _to, _dt, _view, _index, ti, _ib, _h) -> {
+        if ti != 0 { panic("generic ${name}: In load token") }
+      }
+      _ -> ()
+    }
+  }
+  let exp_op = if bf16 { "exp2_ftz" } else { "exp" }
+  if len(exps) != 2 || list.any(exps, e => { let (_id, op, dt) = e
+    op != exp_op || dt != dtype }) {
+    panic("generic ${name}: exponent policy")
+  }
+  let division = if bf16 { "divf_approx_ftz:f32" } else { "divf:f64" }
+  if divisions != [division] { panic("generic ${name}: division policy") }
+  let (prob, _exp, _dt) = exps[0]
+  var sum_uses_p = false
+  var rounded = prob
+  var mmas = 0
+  for op in body {
+    match op {
+      Reduce(_rs, _dim, _shape, _ids, operands, _args, ops) -> {
+        let sum = list.any(ops, op => match op { BinaryF(_d, "addf", _dt, _s, _a, _b) -> true
+          _ -> false })
+        if sum && operands == [prob] { sum_uses_p = true }
+      }
+      Convert(dst, op, from, into, _shape, src) -> {
+        if bf16 && src == prob && op == "ftof" && from == "f32" && into == "bf16" { rounded = dst }
+      }
+      MmaF(_dst, dt, out, _m, _k, _n, lhs, _rhs, _acc) -> {
+        mmas = mmas + 1
+        if dt != input || out != dtype || (mmas == 2 && (lhs != rounded || (bf16 && rounded == prob))) {
+          panic("generic ${name}: probability MMA type or rounding")
+        }
+      }
+      _ -> ()
+    }
+  }
+  if not sum_uses_p { panic("generic ${name}: l must sum unrounded p") }
+  if mmas != 2 { panic("generic ${name}: two MMA operations") }
 }
 
 # Extra device samples use the actual factory and the architecture's selected

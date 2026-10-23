@@ -145,7 +145,7 @@ One kernel, line by line
 
 ## kernel-body
 
-A fused attention, the source of the row statistics above, beside the Tile IR its calls wrote. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table; the colour on a call's name and on the lines it wrote is the same. In the Playground the same function can also be read beside the C and the JVM bytecode it compiles to.
+A fused attention, the source of the row statistics above, beside the Tile IR its calls wrote. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table; the colour on a call's name and on the lines it wrote is the same. In the Playground the same function can also be read beside the C and the JVM bytecode it compiles to. The shared `[D, A]` body is recorded here as Float/Float: natural exponentials and exact f64 division. Its BF16/F32 instance keeps base-2 exponentials with FTZ, bf16 probability rounding, and approximate f32 division. The policy is captured before recording.
 
 ## kernel-open
 
@@ -166,6 +166,7 @@ the Tile IR it recorded
 ## kernel-note
 
 Click a call's name to mark its span and the Tile IR it wrote. Click a line of Tile IR to find its call. Escape lets go.
+
 
 ## word-line
 
