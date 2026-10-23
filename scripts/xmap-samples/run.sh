@@ -70,6 +70,12 @@ WANT="$(find site/play-ui/samples -maxdepth 1 -name '*.dawn' | wc -l | tr -d ' '
 [ "$N" = "$WANT" ] || fail "expected $WANT programs with no gap, got $N"
 echo "ok: $N programs, no gap"
 
+echo "== C-only tables map independently with no gap =="
+check_run scripts/xmap-samples "$W/raw" "$W/c-only" --strict --c-only >"$W/c-only.log" ||
+  { cat "$W/c-only.log" >&2; fail "C-only mapping has a local gap"; }
+python3 scripts/xmap-samples/compare-c.py "$W/mod" "$W/c-only"
+
+
 [ "$CONTROLS" = 0 ] && { echo "OK: every program maps with no gap (controls skipped)"; exit 0; }
 
 # ---- the controls ----

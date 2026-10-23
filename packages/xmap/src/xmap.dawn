@@ -31,7 +31,7 @@ use std/map
 use dawnmap.{CMap, JMap, CCall, JCall, JFn, parse_c, parse_jvm}
 use javap.{Listing, parse_listing}
 use source.{Src, src_of, at, span_text}
-use table.{Call, TileMap, parse_tile_map, table_from_tile, table_from_maps, check_table}
+use table.{Call, TileMap, parse_tile_map, table_from_tile, table_from_maps, table_from_c, check_table}
 use panes.{Out, PaneBuild, c_pane, jvm_pane, tile_pane, chomp}
 
 ## Which program to map and how: its name, the path its source is shown by,
@@ -196,6 +196,26 @@ pub fn explore(spec: Spec, raw: Raw) -> Result[Built, String] =
   match parse_raw(spec, raw) {
     Err(e) -> Err(e)
     Ok(inp) -> Ok(map_program(spec, inp))
+  }
+
+## A C-only view, independent of the paired oracle. Its gaps describe only
+## the C recording and pane, never agreement between the two backends.
+pub fn explore_c(spec: Spec, source: String, ctext: String, cmap: String) -> Result[Built, String] =
+  match parse_c(cmap) {
+    Err(e) -> Err("the C map: ${e}")
+    Ok(c) -> {
+      let src = src_of(source)
+      let last = len(src.lines) - if str.ends_with(source, "\n") { 1 } else { 0 }
+      let (calls, gaps) = table_from_c(src, spec.module, 1, last, c)
+      let none: List[String] = if len(calls) == 0 { ["${spec.name}: no calls to show"] } else { [] }
+      let pane = c_pane(spec.name, spec.fn_name, str.split(ctext, "\n"), c, spec.module, calls, src)
+      Ok(Built {
+        name = spec.name, path = spec.path, src = src, first = 1, last = last,
+        calls = calls, panes = [pane_of("c", spec, line_count(ctext), pane)],
+        gaps = gaps ++ none ++ check_table(src, calls, 1, last) ++ pane.gaps,
+        skipped = host_only(src, spec, 1, last, c, calls),
+      })
+    }
   }
 
 ## [`explore`], or the first gap as the error.

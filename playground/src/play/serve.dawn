@@ -30,9 +30,9 @@ use std/bytes
 use std/str
 use sha2/sha256
 use play/http1.{read_request, respond, respond_reject, Request}
-use play/routes.{Reply, health, rpc, compile_rpc, view_here}
+use play/routes.{Reply, health, rpc, compile_rpc}
 use play/contract.{parse_request, parse_compile_request}
-use play/exec.{CompilerId, compiler_id, native_ready}
+use play/exec.{CompilerId, compiler_id, deployed_id, native_ready}
 use play/gate.{flock_host}
 use play/job.{job_main}
 
@@ -66,7 +66,7 @@ fn dispatch(req: Request, id: CompilerId) -> Reply !io =
         match req.path {
           "/run" -> rpc(req.body, host, false, false, "${id.version} ${id.build}")
           "/check" -> rpc(req.body, host, true, native_ready(id), "")
-          _ -> compile_rpc(req.body, host, view_here(id))
+          _ -> compile_rpc(req.body, host, id)
         }
       }
   }
@@ -126,6 +126,20 @@ test "the access fields name the program by its digest and never by its text" {
   assert access_fields(health, CompilerId { version = "", build = "" }) == " toolchain=-"
 }
 
+# Parse the compile target before any version probe. Malformed compile
+# requests are refused by routes without needing a toolchain at all.
+fn request_id(req: Request) -> CompilerId !io =
+  if req.path == "/compile" {
+    match bytes.decode_utf8_checked(req.body) {
+      Ok(text) -> match parse_compile_request(text) {
+        Ok((_code, "c")) -> deployed_id()
+        Ok(_) -> compiler_id()
+        Err(_) -> CompilerId { version = "", build = "" }
+      }
+      Err(_) -> CompilerId { version = "", build = "" }
+    }
+  } else { compiler_id() }
+
 ## `job <dir>`: the child `gate.sh` starts holding a slot (play/job).
 pub fn serve_job(dir: String) -> Unit !io = job_main(dir)
 
@@ -137,7 +151,7 @@ pub fn serve_one() -> Unit !io =
       respond_reject(r)
     }
     Ok(req) -> {
-      let id = compiler_id()
+      let id = request_id(req)
       let reply = dispatch(req, id)
       io.eprintln("${reply.status} ${req.method} ${req.path}${access_fields(req, id)}")
       answer(reply)

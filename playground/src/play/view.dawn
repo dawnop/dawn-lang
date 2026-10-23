@@ -5,12 +5,9 @@
 # format's own (the call table, each pane's account of which call wrote which
 # of its lines) as JSON, so the page and the online view share their rules.
 #
-# Why one build serves both targets. The call table is the calls the C map and
-# the JVM map both have a row for, so a request for either text needs both
-# compilers' tables, and the listing is cheap next to them. Building both
-# panes once and keeping both answers under one key means the second tab a
-# visitor opens costs a lookup, which is the design's "the cache absorbs the
-# repeats" (section 8, item 6) without a second compile.
+# The C page maps its native C recording alone. The JVM page still maps both
+# backends as a paired oracle; its C pane is never stored under the C schema.
+# The independent tables can differ in ids, parents, ownership and gaps.
 #
 # What an answer is made of, and why it is stored in two parts. The head
 # (`ok`, `phase`, `target`, `build`, `cached`, `ms`) says what this request
@@ -34,12 +31,12 @@ use std/bytes
 use json/value.{Json, JBool, JInt, JStr, JArr, JObj}
 use json/render.{render}
 use sha2/sha256
-use xmap/xmap.{Spec, Raw, Built, Pane, explore}
+use xmap/xmap.{Spec, Raw, Built, Pane, explore, explore_c}
 use xmap/table.{Call, parse_tile_map, table_from_tile, check_table}
 use xmap/panes.{Out, tile_pane}
 use xmap/source.{at, src_of}
 use play/contract.{Outcome, Compiled, CompileError, Timeout, render_check, render_error, wants_tileir}
-use play/exec.{ViewRaw, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
+use play/exec.{CViewRaw, COk, CFail, CTimedOut, CBroken, CTooLarge, ViewRaw, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
 
 ## The most bytes of text one pane's answer carries.
 pub const PANE_LIMIT: Int = 262144
@@ -56,6 +53,7 @@ const GAPS_SHOWN: Int = 5
 ## the next request with the same program (a compile error may, a failure of
 ## the runner's own may not).
 pub type Viewed =
+  | CShown(rest: String, gaps: Int)
   | Mapped(c: String, jvm: String, gaps: Int)
   | Done(status: Int, body: String, keep: Bool)
 
@@ -66,6 +64,24 @@ pub type Viewed =
 ## different key and not a stale hit. The target is added by the caller.
 pub fn cache_key(toolchain: String, code: String) -> String =
   sha256.hex(bytes.utf8("${toolchain}\n${if wants_tileir(code) { "project" } else { "file" }}\n${code}"))
+
+## Compile schemas are independent of /run and Tile. A C key's toolchain
+## is the canonical deployment identity; only JVM includes javap presence.
+pub fn compile_key(target: String, toolchain: String, code: String) -> String = {
+  let schema = if target == "c" { "play-c-native-v1" } else { "play-jvm-paired-v1" }
+  "${cache_key(schema ++ "\n" ++ toolchain, code)}/${target}"
+}
+
+test "compile schema keys isolate targets and invalidate the old paired store" {
+  let c = compile_key("c", "t", "a")
+  let j = compile_key("jvm", "t present", "a")
+  assert c != "${cache_key("t", "a")}/c"
+  assert j != "${cache_key("t present", "a")}/jvm"
+  assert c != j
+  assert c != compile_key("c", "u", "a")
+  assert c != compile_key("c", "t", "a ")
+  assert j != compile_key("jvm", "t ", "a")
+}
 
 test "the same text in the two forms would be two keys, and a form is a function of the text" {
   assert cache_key("t", "use tileir/dev.{Dev}") == cache_key("t", "use tileir/dev.{Dev}")
@@ -199,6 +215,19 @@ pub fn build_view(code: String, raw: ViewRaw) -> Viewed =
     RawBroken(message) -> Done(500, render_error("the compile view failed: ${message}"), false)
     RawTooLarge(what) -> Done(422, render_error("${what} is too large to show"), true)
     RawOk(p) -> mapped(code, p)
+  }
+
+## The independent C view. This entry cannot accept JVM material.
+pub fn build_c_view(code: String, raw: CViewRaw) -> Viewed =
+  match raw {
+    CFail(outcome) -> Done(200, render_check(outcome), true)
+    CTimedOut(secs) -> Done(200, render_check(CompileError("compilation timed out after ${secs}s")), false)
+    CBroken(message) -> Done(500, render_error("the C view failed: ${message}"), false)
+    CTooLarge(what) -> Done(422, render_error("${what} is too large to show"), true)
+    COk(ctext, cmap, _ms) -> match explore_c(spec(code), code, ctext, cmap) {
+      Err(e) -> Done(500, render_error("the C view failed: ${e}"), false)
+      Ok(b) -> CShown(rest_of(b, "c"), len(b.gaps))
+    }
   }
 
 fn mapped(code: String, p: ViewParts) -> Viewed =

@@ -15,7 +15,7 @@
 // draws those answers (the `xp` classes the site's call-map figure also uses, so the site's
 // stylesheet paints them) and runs the request: the 1.5 s idle recompile that
 // is cancelled by the next keystroke (ruling 3), one request per visible tab
-// (the service keeps the other half of the build), and an answer that is kept,
+// (each target has an independent answer), and an answer that is kept,
 // marked "out of date", when the next one fails.
 import {
   Model,
@@ -26,6 +26,10 @@ import {
 } from './explorer-core'
 import {
   AutoPolicy,
+  identityOf,
+  matchIdentity,
+  SELECTION_MISSING,
+  type CallIdentity,
   NETWORK_MESSAGE,
   TARGETS,
   TILE_NEEDS,
@@ -62,6 +66,8 @@ export interface PaneHost {
 // which has no calls to point at and so no model.
 interface Answer {
   code: string
+  build: string
+  invalid?: boolean
   model: Model | null
   tile?: TileText
   meta: string
@@ -92,6 +98,7 @@ export class ComparePane {
   private target: Target | null = null
   private answers: Partial<Record<Target, Answer>> = {}
   private picked: number | null = null
+  private selection: CallIdentity | null = null
   private lineEls = new Map<number, HTMLElement>()
   private keyEls = new Map<number, HTMLElement[]>()
   private touched: HTMLElement[] = []
@@ -178,7 +185,7 @@ export class ComparePane {
     return this.target !== null
   }
   hasPick(): boolean {
-    return this.picked !== null
+    return this.selection !== null
   }
   // A line for the live region, when the pane is there to be heard.
   announce(message: string) {
@@ -187,7 +194,7 @@ export class ComparePane {
 
   private model(): Model | null {
     const a = this.target && this.answers[this.target]
-    return a ? a.model : null
+    return a && !this.stale ? a.model : null
   }
 
   // The tabs on offer: C and JVM always, Tile IR for a program that imports
@@ -211,6 +218,8 @@ export class ComparePane {
   // Show `target` (the pane opens if it was closed) and compile unless the
   // listing for exactly this code is already in hand.
   open(target: Target) {
+    this.abort()
+    this.clearActive()
     this.target = target
     this.root.hidden = false
     this.syncTabs()
@@ -222,14 +231,13 @@ export class ComparePane {
     this.panel.setAttribute('aria-labelledby', `dp-view-tab-${target}`)
     this.host.opened(target)
     const a = this.answers[target]
-    this.mark(!!a && a.code !== this.host.code())
+    this.mark(!!a && (a.invalid === true || a.code !== this.host.code()))
     if (!a) {
       this.drawNothing()
     } else {
       this.draw(a)
       if (!this.stale) {
-        // the calls of every tab are the same table, but the source's
-        // marks are only right for the code this listing is of
+        // Install this table before resolving the retained source identity.
         this.host.calls(a.model ? a.model.view.calls : [])
         this.reapply()
         this.say(this.pickText())
@@ -246,6 +254,7 @@ export class ComparePane {
     this.root.hidden = true
     this.clearMarks()
     this.picked = null
+    this.selection = null
     this.host.calls([])
     this.host.picked(null)
     this.host.opened(null)
@@ -264,6 +273,8 @@ export class ComparePane {
   // The editor changed: whatever was asked is moot, what is shown is out of
   // date, and, while automatic compiling is on, a quiet 1.5 s asks again.
   edited() {
+    this.selection = null
+    this.clearActive()
     if (this.target === null) return
     this.syncTabs()
     this.abort()
@@ -340,18 +351,19 @@ export class ComparePane {
       this.root.classList.remove('dp-stale')
       this.errBox.hidden = true
       const model = new Model(outcome.view)
-      const a: Answer = { code, model, meta: this.metaOf(outcome) }
+      const a: Answer = { code, build: outcome.build, model, meta: this.metaOf(outcome) }
       this.answers[target] = a
       this.draw(a)
       this.host.calls(outcome.view.calls)
       this.reapply()
-      this.say(this.picked !== null ? this.pickText() : `Compiled. ${HINT}`)
+      this.say(this.selection !== null ? this.pickText() : `Compiled. ${HINT}`)
     } else if (outcome.kind === 'tile') {
       this.stale = false
       this.root.classList.remove('dp-stale')
       this.errBox.hidden = true
       const a: Answer = {
         code,
+        build: outcome.build,
         model: null,
         tile: outcome.tile,
         meta: `${outcome.tile.text.length} of ${outcome.tile.total} lines · ${outcome.cached ? `${outcome.ms} ms, cached` : `${outcome.ms} ms`}`,
@@ -366,7 +378,7 @@ export class ComparePane {
       this.errText.textContent = outcome.text || '(no message)'
       this.errBox.hidden = false
       this.showNotice([])
-      this.mark(true)
+      this.invalidate()
       this.meta.textContent = outcome.kind === 'program' ? outcome.title : 'Compile error'
       // the alert above says what happened; "Compiled." is no longer true
       this.say('')
@@ -392,13 +404,27 @@ export class ComparePane {
   private fail(message: string) {
     this.errBox.hidden = true
     this.showNotice([message])
-    this.mark(true)
+    this.invalidate()
     this.meta.textContent = this.answers[this.target as Target] ? 'Out of date' : ''
     this.say(message)
   }
 
+  private invalidate() {
+    const a = this.target && this.answers[this.target]
+    if (a) a.invalid = true
+    this.clearActive()
+    this.mark(true)
+  }
+
+  private clearActive() {
+    this.clearMarks()
+    this.picked = null
+    this.host.picked(null)
+    this.host.calls([])
+  }
+
   private mark(stale: boolean) {
-    this.stale = stale && Object.keys(this.answers).length > 0
+    this.stale = stale && !!(this.target && this.answers[this.target])
     this.root.classList.toggle('dp-stale', this.stale)
   }
 
@@ -530,6 +556,7 @@ export class ComparePane {
     const again = this.picked === id
     this.clearMarks()
     this.picked = null
+    this.selection = null
     this.host.picked(null)
     const m = this.model()
     const c = m && id !== null ? m.view.calls[id] : null
@@ -537,6 +564,8 @@ export class ComparePane {
       this.say(m ? HINT : '')
       return
     }
+    const a = this.answers[this.target as Target]!
+    this.selection = identityOf(a.code, a.build, c)
     this.picked = id
     this.host.picked(id)
     const first = this.applyMarks(m, id)
@@ -548,17 +577,23 @@ export class ComparePane {
   private pickText(): string {
     const m = this.model()
     const c = m && this.picked !== null ? m.view.calls[this.picked] : null
-    return m && c ? statusText(c, this.label(), m.mark(c.id).hit) : HINT
+    return m && c ? statusText(c, this.label(), m.mark(c.id).hit) : this.selection ? SELECTION_MISSING : HINT
   }
 
   // Draw a pick again on a listing just drawn (a tab switch, a recompile).
   private reapply() {
+    this.picked = null
+    this.host.picked(null)
+    const a = this.target && this.answers[this.target]
     const m = this.model()
-    if (this.picked === null || !m || !m.view.calls[this.picked]) {
-      this.picked = null
-      this.host.picked(null)
+    if (!this.selection || !a) return
+    if (a.code !== this.selection.snapshot || a.build !== this.selection.build) {
+      this.selection = null
       return
     }
+    if (!m) return
+    this.picked = matchIdentity(this.selection, a.code, a.build, m.view.calls)
+    if (this.picked === null) return
     this.host.picked(this.picked)
     const first = this.applyMarks(m, this.picked)
     if (first) this.reveal(first)
@@ -597,7 +632,7 @@ export class ComparePane {
 
   private keydown(ev: KeyboardEvent) {
     if (ev.key === 'Escape') {
-      if (this.picked !== null) {
+      if (this.selection !== null) {
         ev.preventDefault()
         this.pick(null)
       }
