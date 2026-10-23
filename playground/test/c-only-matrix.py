@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import statistics
 import subprocess
 import sys
@@ -50,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix='play-c-matrix.') as work:
     run([ROOT / 'scripts/cc-units.sh', '-o', old, w / 'old-c'])
     empty = w / 'empty'
     empty.mkdir()
-    env = dict(os.environ, DAWNC_BIN=dawnc, PLAY_ANSWERS=str(empty))
+    env = dict(os.environ, DAWNC_BIN=dawnc, PLAY_ANSWERS=str(empty), PLAY_TIMEOUT='10')
 
     def request(binary, code, target, answers=None):
         body = json.dumps({'code': code, 'target': target}).encode()
