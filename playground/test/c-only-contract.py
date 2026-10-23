@@ -100,3 +100,14 @@ with tempfile.TemporaryDirectory(prefix='play-c-contract.') as work:
     assert before == {p.name: p.read_bytes() for p in answers.iterdir()}
     assert not calls.exists(), 'a C cache path reached a JVM executable'
     print('OK: legacy/schema/target/source/toolchain isolation, javap-independent C hit, hit/live byte equality, read-only store')
+
+    # Tool presence and tool execution are different failures on the retained
+    # JVM path. Restore only the real compiler, then fail javap itself.
+    real_dawn = os.environ.get('DAWN_BIN', str(Path(__file__).resolve().parents[2] / 'bin/dawn'))
+    assert request(target='jvm', changes={'PLAY_JAVAP': '/nonexistent/javap'})[0] == 503
+    status, d, _ = request(code=hello + ' ', target='jvm', changes={'DAWN_BIN': real_dawn})
+    assert status == 500 and 'listing tool failed' in d['output'], d
+    assert calls.exists(), 'the JVM probe did not reach the failing listing tool'
+    calls.unlink()
+    assert request()[1]['cached'] is True and not calls.exists()
+    print('OK: JVM javap execution failure is 500; C hit remains usable and independent')
