@@ -21,10 +21,12 @@ the names of the kernel's calls in the order they ran must be EXACTLY the
 names the parser finds in evaluation order (arguments left to right, each
 call after its arguments, a closure handed to a call being that call's
 children). Anything else stops here with both lists printed: a helper with
-an effect, a call under host control flow, a closure bound before the call
+an effect, a call under unknown host control flow, a closure bound before the call
 that runs it, a call of a closure. Which names are calls at all is read off
 packages/tileir/src/dev.dawn (its `called("<name>"` marks); every other call,
 `permute(..)` or `neg_inf()`, records nothing and is looked through.
+Only literal Bool fields of the f64 policy captured by fa_kernel select a
+source arm; every other host condition keeps the global refusal.
 
 The generator is a pure function of files on disk (site/build.sh says why:
 scripts/site-dist-diff.sh runs it on two backends and compares), so the pairing
@@ -50,6 +52,7 @@ header, its terminator and its closing brace.
 """
 
 from pathlib import Path
+import copy
 import contextlib
 import io
 import os
@@ -71,11 +74,11 @@ CUT_AT = "# Trace `name` twice and answer the record, or panic if the two runs d
 
 # (old, new, how many times old must occur)
 EDITS = [
-    ("use tileir/bytecode.{encode, bytecode_version}\n", "", 1),
-    ("use std/io.{with_fs_real, write_bytes}\n", "", 1),
+    ("use tileir/bytecode.{encode, bytecode_version}\n", "\n", 1),
+    ("use std/io.{with_fs_real, write_bytes}\n", "\n", 1),
     # the `--asm-args` mode of main (scripts/tile-gpu-diff) needs it; the cut
     # below removes that main
-    ("use tileir/asm.{tileiras_args}\n", "", 1),
+    ("use tileir/asm.{tileiras_args}\n", "\n", 1),
 ]
 
 MAIN = '''
@@ -91,11 +94,19 @@ pub fn main() -> Unit !io = {
   match line_map(p, calls) {
     Ok(m) -> {
       if m.text != render(p) { panic("%NAME%: the line map's text is not render's") } else { () }
+      println("@@ir")
+      print(m.text)
+      println("@@end")
       println("ops ${op_count(p.ops)}")
       println("head${spans(m.head)}")
       for k in range(0, len(calls)) {
         let c = calls[k]
-        println("call ${k} ${c.parent} ${c.name}${spans(m.calls[k].lines)}")
+        let at = match c.at { Some(a) -> {
+            if loc.path(a) != "src/main.dawn" { panic("a recorded call is outside the displayed source") }
+            "${loc.line(a)}:${loc.col(a)}"
+          }
+          None -> "-" }
+        println("call ${k} ${c.parent} ${c.name} ${at}${spans(m.calls[k].lines)}")
       }
       let (ta, tb) = m.tail
       println("tail ${ta}-${tb}")
@@ -182,7 +193,7 @@ def harness_source(src: str) -> str:
     # The TileOp checks below CUT_AT are removed from this harness too.
     members = [name.strip() for name in found[0].split(",") if name.strip() != "TileOp"]
     members += ["trace_calls", "op_count", "erase"]
-    src = PROG_IMPORT.sub(lambda m: "use tileir/prog.{" + ", ".join(members) + "}\n", src, count=1)
+    src = PROG_IMPORT.sub(lambda m: "use tileir/prog.{" + ", ".join(members) + "}" + "\n" * m.group(0).count("\n"), src, count=1)
     for old, new, times in EDITS:
         if src.count(old) != times:
             fail(f"kernels.dawn has {src.count(old)} of {old.strip()!r}, expected {times}")
@@ -201,13 +212,13 @@ def harness_source(src: str) -> str:
         fail(f"the {NAME} arm is not one traceN call answered as `p`: {body}")
     args = split_args(m.group(2))
     count = int(m.group(1))
-    if len(args) != count + 2 or args[0] != f'"{NAME}"' or args[-1] != 'fa_kernel(fa64_cfg("default", ATT_D), ATT_N, ATT_D, 1)':
+    if len(args) != count + 2 or args[0] != f'"{NAME}"' or args[-1] != 'fa_kernel(F64, fa64_math(), fa64_cfg("default", ATT_D), ATT_N, ATT_D, 1)':
         fail(f"the {NAME} arm does not trace {NAME} itself with {count} markers: {body}")
     markers = args[1:-1]
     formats = [re.match(r'(?:In|Out|Shared|Scalar)\(([A-Z0-9]+)', k).group(1) for k in markers]
     params = ", ".join(f"param({d}, {k})" for k, d in enumerate(formats))
     erased = ", ".join(f"erase({k})" for k in markers)
-    traced = f'trace_calls("{NAME}", [], () => {NAME}({params}), markers = [{erased}])'
+    traced = f'trace_calls("{NAME}", [], () => ({args[-1]})({params}), markers = [{erased}])'
     return src + MAIN.replace("%TRACE%", traced).replace("%NAME%", NAME)
 
 
@@ -241,13 +252,12 @@ def run_harness(src: str) -> str:
     # computes the cache key.
     (HARNESS_DIR / "src").mkdir(parents=True, exist_ok=True)
     main = HARNESS_DIR / "src" / "main.dawn"
+    # Keep the original function text and line count: runtime Loc values
+    # independently verify parser spans. Remove the generated source after
+    # use so it is not a second formatting input to the site.
     text = harness_source(src)
     if not main.exists() or main.read_text(encoding="utf-8") != text:
         main.write_text(text, encoding="utf-8")
-        # a walked-but-ignored file must not break `dawn fmt site --check`
-        r = subprocess.run([dawnc(), "fmt", str(main)], capture_output=True, text=True, cwd=ROOT)
-        if r.returncode != 0:
-            fail("could not format the harness:\n" + (r.stderr or r.stdout)[-2000:])
     r = subprocess.run(["bash", "-c", ". site/dawnc.sh && site_prog gpu_map_harness"],
                        capture_output=True, text=True, cwd=ROOT,
                        env={**os.environ, "DAWNC_BIN": dawnc()})
@@ -257,6 +267,7 @@ def run_harness(src: str) -> str:
     r = subprocess.run([str(exe)], capture_output=True, text=True, cwd=ROOT)
     if r.returncode != 0:
         fail("the harness did not run:\n" + (r.stderr or r.stdout)[-2000:])
+    main.unlink()
     return r.stdout
 
 
@@ -303,7 +314,8 @@ class Env:
     `tiles` the names bound to something tile-valued (so that an operator over
     them is a recorded call and an operator over host numbers is not)."""
 
-    def __init__(self):
+    def __init__(self, policy=None):
+        self.policy = policy or {}
         self.decls, self.cells, self.tiles = [], set(), set()
 
 
@@ -404,13 +416,17 @@ def static_calls(n: Node, dev: set, env: "Env" = None) -> list:
             at = let.lo + SRC[let.lo:let.hi].index(name, 3)
             opened.append({"names": {"carry"}, "span": (let.lo, let.hi), "name_span": (at, at + len(name)),
                            "text": name, "kids": []})
-        inside = Env()
+        inside = Env(env.policy)
         inside.decls, inside.tiles, inside.cells = env.decls, set(env.tiles), set(name for name, _ in carried)
         kids = static_calls(n.kids[2], dev, inside)
         closed = [{"names": {"get"}, "span": (n.lo, n.hi), "name_span": (n.lo, n.lo + 3), "text": "for", "kids": []}
                   for _ in carried]
         return before + opened + [{"names": {node_name(head)}, "span": (n.lo, n.hi), "name_span": (head.lo, head.hi),
-                                   "text": node_name(head), "kids": kids}] + closed
+                                   "text": node_name(head), "site": n.kids[1].lo, "kids": kids}] + closed
+    if kind == "If" and len(n.kids) == 3 and n.kids[0].kind == "FieldAccess":
+        cond = n.kids[0]
+        if len(cond.kids) == 1 and cond.kids[0].kind == "Var" and node_name(cond.kids[0]) == "math" and node_name(cond) in env.policy:
+            return static_calls(n.kids[1 if env.policy[node_name(cond)] else 2], dev, env)
     if kind in ("If", "Match", "For", "While") and any_call(n, dev):
         fail(f"a call under host control flow at {n.lo}..{n.hi}")
     if kind in ("Apply", "MethodCall"):
@@ -536,6 +552,74 @@ def place(src: str):
     return at
 
 
+def fixed_policy(dump):
+    """Read the literal Bool fields of the exact f64 capture used by the harness.
+
+    This is one fixed strategy constructor, not an interpreter. Changes to
+    its shape or an unknown condition fail closed. The runtime locations
+    independently distinguish identical call names in the two source arms.
+    """
+    fn = parse_tree(dump, "fa64_math")
+    bodies = [k for k in fn.kids if k.kind == "Record"]
+    if len(bodies) != 1 or node_name(bodies[0]) != "FaNumerics" or "spread=false" not in bodies[0].text:
+        fail("fa64_math is not a literal FaNumerics constructor")
+    fields = {}
+    for field in bodies[0].kids:
+        name = node_name(field).removeprefix("name=")
+        if len(field.kids) == 1 and field.kids[0].kind == "Bool":
+            if name in fields:
+                fail(f"duplicate numeric policy field {name}")
+            fields[name] = node_name(field.kids[0]) == "true"
+    if set(fields) != {"base2", "exp_ftz", "approx_div", "div_ftz", "acc_from_out"}:
+        fail("fa64_math does not provide exactly the fixed Bool policy fields")
+    return fields
+
+
+def validate_pairs(src, rows, paired):
+    at = place(src)
+    for r, s in zip(rows, paired):
+        site = at(s.get("site", s["span"][0]))
+        if r["at"] != "-" and r["at"] != site:
+            fail(f"source span for row {r['id']} `{r['name']}` starts at {site}, recording says {r['at']}")
+        if src[s["name_span"][0]:s["name_span"][1]] != s["text"]:
+            fail(f"the parser's name span for `{sorted(s['names'])}` holds the wrong text")
+
+
+def expect_refused(label, action):
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            action()
+        except SystemExit:
+            return
+    raise AssertionError(f"{label} stayed green")
+
+
+def strategy_controls(src, body, dev, policy, static, rows, paired):
+    """Faults over this real recording, including two same-named exp sites."""
+    wrong = dict(policy, base2=not policy["base2"])
+    expect_refused("wrong strategy arm", lambda: pair(static_calls(body, dev, Env(wrong)), rows))
+    exp_rows = [i for i, row in enumerate(rows) if row["name"] == "exp"]
+    if len(exp_rows) != 2:
+        fail("the f64 instance did not record both natural exponentials")
+    moved = copy.deepcopy(paired)
+    moved[exp_rows[0]] = copy.deepcopy(paired[exp_rows[1]])
+    expect_refused("same-name wrong source span", lambda: validate_pairs(src, rows, moved))
+    missing = copy.deepcopy(static)
+    missing.pop(0)
+    expect_refused("missing actual call", lambda: pair(missing, rows))
+    unknown = copy.deepcopy(body)
+    def spoil(n):
+        if n.kind == "FieldAccess" and node_name(n) == "base2":
+            n.kids[0].text = "Var unknown_capture"
+        for k in n.kids:
+            spoil(k)
+    spoil(unknown)
+    expect_refused("unknown host condition", lambda: static_calls(unknown, dev, Env(policy)))
+    casts = [r for r in rows if r["name"] == "to"]
+    if len(casts) != 1 or casts[0]["lines"]:
+        fail("the same-format to must retain exactly one call with empty IR")
+
+
 def record() -> str:
     src = KERNELS.read_text(encoding="utf-8")
     dev = set(re.findall(r'called\("([a-z_0-9]+)"', DEV.read_text(encoding="utf-8")))
@@ -550,12 +634,12 @@ def record() -> str:
         fail(f"{NAME} is not a function with a block body")
     global SRC
     SRC = src
-    static = static_calls(body[0], dev)
+    static = static_calls(body[0], dev, Env(fixed_policy(p.stdout)))
     rows, head, tail, ops = [], None, None, None
     for line in ran.splitlines():
         w = line.split(" ")
         if w[0] == "call":
-            rows.append({"id": int(w[1]), "parent": int(w[2]), "name": w[3], "lines": w[4:]})
+            rows.append({"id": int(w[1]), "parent": int(w[2]), "name": w[3], "at": w[4], "lines": w[5:]})
         elif w[0] == "head":
             head = " ".join(w[1:])
         elif w[0] == "tail":
@@ -566,10 +650,11 @@ def record() -> str:
         fail("the harness printed no head, tail or ops line:\n" + ran[-1000:])
     paired = pair(static, rows)
     at = place(src)
-    for s in paired:
-        if src[s["name_span"][0]:s["name_span"][1]] != s["text"]:
-            fail(f"the parser's name span for `{sorted(s['names'])}` holds {src[s['name_span'][0]:s['name_span'][1]]!r}, not {s['text']!r}")
+    validate_pairs(src, rows, paired)
+    strategy_controls(src, body[0], dev, fixed_policy(p.stdout), static, rows, paired)
     golden = (GOLDEN / f"{NAME}.mlir").read_text(encoding="utf-8")
+    if ran.split("@@ir\n", 1)[1].split("@@end\n", 1)[0] != golden:
+        fail("the selected factory recording differs from the full golden text")
     if int(tail.split("-")[1]) - 1 != golden.count("\n"):
         fail(f"the map ends at line {int(tail.split('-')[1]) - 1}, {NAME}.mlir has {golden.count(chr(10))} lines")
     first = src[:fn.lo].count("\n") + 1

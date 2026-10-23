@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ 954f55cfdc730337 -->
+<!-- doc-check: translation-of site/pages/gpu.md @ 8c6742a759e6236e -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -140,7 +140,7 @@ kernel 在录制时就被检查：函数体只跑一遍，某个运算的形状�
 
 ## kernel-body
 
-一个融合注意力 kernel（也就是上面那两行行统计的出处），和它的调用写出的 Tile IR 并排放着。配对来自记录本身和 Dawn 自己的解析器，不来自手写的对照表；调用名和它写出的行是同一种颜色。在 Playground 里还能把同一个函数和它编出来的 C 与 JVM 字节码并排看。
+一个融合注意力 kernel（也就是上面那两行行统计的出处），和它的调用写出的 Tile IR 并排放着。配对来自记录本身和 Dawn 自己的解析器，不来自手写的对照表；调用名和它写出的行是同一种颜色。在 Playground 里还能把同一个函数和它编出来的 C 与 JVM 字节码并排看。 这里把共享的 `[D, A]` 主体录成 Float/Float 实例：自然指数与精确 f64 除法。BF16/F32 实例保留带 FTZ 的二进制指数、bf16 概率舍入和近似 f32 除法。数值策略在录制前捕获。
 
 ## kernel-open
 
@@ -161,6 +161,7 @@ Dawn 源码
 ## kernel-note
 
 点一个调用名，会标出它的整段源码和它写出的 Tile IR。点一行 Tile IR，可以找到写出它的调用。Escape 取消。
+
 
 ## word-line
 

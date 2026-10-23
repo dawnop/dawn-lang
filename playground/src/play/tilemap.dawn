@@ -124,7 +124,7 @@ pub type SCall = { names: List[String], optional: Bool, lo: Int, hi: Int, nlo: I
 # not), the `var`s of the loop being walked (each mention a recorded `get`,
 # each assignment a `set`), and the `var`s declared so far with the span of
 # their declaration.
-type Env = { tiles: List[String], cells: List[String], decls: List[(String, Int, Int)] }
+type Env = { tiles: List[String], cells: List[String], decls: List[(String, Int, Int)], policy: List[(String, Bool)] }
 
 fn call_of(names: List[String], lo: Int, hi: Int, nlo: Int, nhi: Int, text: String, kids: List[SCall]) -> SCall =
   SCall { names = names, optional = false, lo = lo, hi = hi, nlo = nlo, nhi = nhi, text = text, kids = kids }
@@ -214,6 +214,11 @@ fn walk(n: Node, dev: List[String], env: Env, src: String) -> Result[(List[SCall
     }
   } else if n.kind == "For" && len(n.kids) == 3 && staged_head(n.kids[1], dev) != "" {
     walk_staged_for(n, dev, env, src)
+  } else if n.kind == "If" && len(n.kids) == 3 && len(env.policy) > 0 {
+    match selected_arm(n.kids[0], env.policy) {
+      None -> Err("an unknown host policy condition at ${where_is(src, n.lo)}")
+      Some(on) -> walk(n.kids[if on { 1 } else { 2 }], dev, env, src)
+    }
   } else if (n.kind == "If" || n.kind == "Match" || n.kind == "For" || n.kind == "While") && any_call(n, dev) {
     Err("a call under host control flow at ${where_is(src, n.lo)}")
   } else if n.kind == "Apply" || n.kind == "MethodCall" {
@@ -232,7 +237,7 @@ fn walk_let(n: Node, dev: List[String], env: Env, src: String) -> Result[(List[S
       let is_var = str.contains(n.text, "mut=true")
       let tiles = if is_tile || is_var { env2.tiles ++ [name] } else { env2.tiles }
       let decls = if is_var { env2.decls ++ [(name, n.lo, n.hi)] } else { env2.decls }
-      Ok((cs, Env { tiles = tiles, cells = env2.cells, decls = decls }))
+      Ok((cs, Env { ..env2, tiles = tiles, decls = decls, policy = if name == "math" { [] } else { env2.policy } }))
     }
   }
 }
@@ -307,16 +312,16 @@ fn walk_staged_for(n: Node, dev: List[String], env: Env, src: String) -> Result[
           }
         }
       }
-      let inside = Env { tiles = env2.tiles, cells = map(carried, d => {
+      let inside = Env { ..env2, cells = map(carried, d => {
         let (name, _lo, _hi) = d
         name
-      }), decls = env2.decls }
+      }) }
       match walk(n.kids[2], dev, inside, src) {
         Err(e) -> Err(e)
         Ok((kids, inner)) -> {
           let closed = map(carried, _d => call_of(["get"], n.lo, n.hi, n.lo, n.lo + 3, "for", []))
           let region = call_of([second_word(head.text)], n.lo, n.hi, head.lo, head.hi, second_word(head.text), kids)
-          Ok((before ++ opened ++ [region] ++ closed, Env { tiles = env2.tiles, cells = env2.cells, decls = inner.decls }))
+          Ok((before ++ opened ++ [region] ++ closed, Env { ..env2, decls = inner.decls }))
         }
       }
     }
@@ -411,7 +416,7 @@ fn walk_apply(n: Node, dev: List[String], env0: Env, src: String) -> Result[(Lis
 ## The call that records the visitor's kernel and what the walk needs of it:
 ## its markers' count, its span, the spans of its arguments and the kernel
 ## function selected by its final argument.
-pub type Trace = { arity: Int, lo: Int, hi: Int, args: List[(Int, Int)], kernel: String }
+pub type Trace = { arity: Int, lo: Int, hi: Int, args: List[(Int, Int)], kernel: String, value: Node }
 
 # A configuration factory is transparent only when its sole expression is
 # a lambda forwarding the trace parameters unchanged to one named kernel.
@@ -438,6 +443,56 @@ fn trace_kernel(root: Node, value: Node, arity: Int) -> Option[String] = {
   }
 }
 
+# Deliberately bounded wiring for the page's fixed f64 instance. There is no
+# host evaluator: one literal record constructor is forwarded unchanged by
+# the same-file factory. Other expressions keep the existing refusal.
+fn captured_policy(root: Node, value: Node) -> List[(String, Bool)] = {
+  if value.kind != "Apply" || len(value.kids) != 7 || value.kids[0].kind != "Var" || second_word(value.kids[0].text) != "fa_kernel" { return [] }
+  if value.kids[1].kind != "Ctor" || second_word(value.kids[1].text) != "F64" { return [] }
+  let math = value.kids[2]
+  if math.kind != "Apply" || len(math.kids) != 1 || math.kids[0].kind != "Var" || second_word(math.kids[0].text) != "fa64_math" { return [] }
+  let factory = match kernel_fn(root, "fa_kernel") { Some(f) -> f
+    None -> return [] }
+  let lambda = match fn_body(factory) { Some(f) -> f
+    None -> return [] }
+  let rest = filter(lambda.kids, p => p.kind != "LParam")
+  if lambda.kind != "Lambda" || len(rest) != 1 { return [] }
+  let call = rest[0]
+  if call.kind != "Apply" || len(call.kids) != 10 || second_word(call.kids[0].text) != "flash_attn"
+    || call.kids[6].kind != "Var" || second_word(call.kids[6].text) != "dt"
+    || call.kids[7].kind != "Var" || second_word(call.kids[7].text) != "math" { return [] }
+  let factory_params = filter(factory.kids, p => p.kind == "Param")
+  if len(factory_params) != 6 || second_word(factory_params[0].text) != "dt" || second_word(factory_params[1].text) != "math" { return [] }
+  let constructor = match kernel_fn(root, "fa64_math") { Some(f) -> f
+    None -> return [] }
+  if list.any(constructor.kids, k => k.kind == "Param") { return [] }
+  let record = match fn_body(constructor) { Some(f) -> f
+    None -> return [] }
+  if record.kind != "Record" || second_word(record.text) != "FaNumerics" || not str.contains(record.text, "spread=false") { return [] }
+  var policy: List[(String, Bool)] = []
+  for f in record.kids {
+    if len(f.kids) == 1 && f.kids[0].kind == "Bool" {
+      let key = str.drop(second_word(f.text), len("name="))
+      if list.any(policy, p => { let (k, _v) = p
+        k == key }) { return [] }
+      policy = policy ++ [(key, second_word(f.kids[0].text) == "true")]
+    }
+  }
+  let keys = map(policy, p => { let (key, _v) = p
+    key })
+  if len(keys) != 5 || list.any(["base2", "exp_ftz", "approx_div", "div_ftz", "acc_from_out"], k => not list.contains(keys, k)) { return [] }
+  policy
+}
+
+fn selected_arm(cond: Node, policy: List[(String, Bool)]) -> Option[Bool] = {
+  if cond.kind != "FieldAccess" || len(cond.kids) != 1 || cond.kids[0].kind != "Var" || second_word(cond.kids[0].text) != "math" { return None }
+  match list.find(policy, p => { let (key, _v) = p
+    key == second_word(cond.text) }) {
+    Some((_key, value)) -> Some(value)
+    None -> None
+  }
+}
+
 fn find_traces(root: Node, n: Node, out: List[Trace]) -> List[Trace] = {
   var found = out
   if n.kind == "Apply" && len(n.kids) > 0 && n.kids[0].kind == "Var" {
@@ -450,7 +505,7 @@ fn find_traces(root: Node, n: Node, out: List[Trace]) -> List[Trace] = {
         if len(args) == k + 2 && not list.any(args, a => a.kind == "Arg") {
           match trace_kernel(root, last, k) {
             None -> ()
-            Some(kernel) -> { found = found ++ [Trace { arity = k, lo = n.lo, hi = n.hi, args = map(args, a => (a.lo, a.hi)), kernel = kernel }] }
+            Some(kernel) -> { found = found ++ [Trace { arity = k, lo = n.lo, hi = n.hi, args = map(args, a => (a.lo, a.hi)), kernel = kernel, value = last }] }
           }
         }
       }
@@ -501,7 +556,7 @@ pub fn plan(code: String, dump: String, dev: List[String]) -> Result[Plan, Strin
             match fn_body(f) {
               None -> Err("`${t.kernel}` has no body to walk")
               Some(body) ->
-                match walk(body, dev, Env { tiles = [], cells = [], decls = [] }, code) {
+                match walk(body, dev, Env { tiles = [], cells = [], decls = [], policy = captured_policy(root, t.value) }, code) {
                   Err(e) -> Err(e)
                   Ok((calls, _env)) -> {
                     let s = src_of(code)
@@ -858,4 +913,30 @@ test "the probe is the module the plan names, one tap for each marker count" {
   for k in [1, 2, 3, 4, 5] {
     assert str.contains(src, "pub fn tap${k}[")
   }
+}
+
+test "a fixed policy selects only a literal field of the forwarded f64 capture" {
+  let n = (text: String, kids: List[Node]) => test_node(text, kids)
+  let names = ["q", "k", "v", "o", "scale"]
+  let call = n("Apply", [n("Var flash_attn", [])] ++ map(names, x => n("Var ${x}", [])) ++ [n("Var dt", []), n("Var math", []), n("Var c", []), n("Record FaShape", [])])
+  let factory = n("Fn fa_kernel", map(["dt", "math", "c", "n", "d", "bh"], x => n("Param ${x}", [])) ++ [n("Lambda", map(names, x => n("LParam ${x}", [])) ++ [call])])
+  let record = n("Record FaNumerics spread=false", map(["base2", "exp_ftz", "approx_div", "div_ftz", "acc_from_out"], x => n("Arg name=${x}", [n("Bool ${if x == "acc_from_out" { "true" } else { "false" }}", [])])))
+  let root = n("Module", [factory, n("Fn fa64_math", [record])])
+  let value = n("Apply", [n("Var fa_kernel", []), n("Ctor F64", []), n("Apply", [n("Var fa64_math", [])])] ++ map(["cfg", "n", "d", "bh"], x => n("Var ${x}", [])))
+  let policy = captured_policy(root, value)
+  assert len(policy) == 5
+  let cond = n("FieldAccess base2", [n("Var math", [])])
+  assert selected_arm(cond, policy) == Some(false)
+  assert selected_arm(n("FieldAccess base2", [n("Var unknown", [])]), policy) == None
+  let altered = Node { ..call, kids = list.take(call.kids, 7) ++ [n("Apply", [n("Var other_math", [])])] ++ list.drop(call.kids, 8) }
+  let bad_factory = Node { ..factory, kids = filter(factory.kids, k => k.kind != "Lambda") ++ [n("Lambda", map(names, x => n("LParam ${x}", [])) ++ [altered])] }
+  assert captured_policy(n("Module", [bad_factory, n("Fn fa64_math", [record])]), value) == []
+  assert captured_policy(root, Node { ..value, kids = [value.kids[0], n("Ctor BF16", [])] ++ list.drop(value.kids, 2) }) == []
+  let env = Env { tiles = [], cells = [], decls = [], policy = policy }
+  let choose = n("If", [cond, n("Apply", [n("Var exp2", []), n("Var s", [])]), n("Apply", [n("Var exp", []), n("Var s", [])])])
+  match walk(choose, ["exp", "exp2"], env, "") {
+    Ok((calls, _env)) -> { assert map(calls, c => c.names) == [["exp"]] }
+    Err(_e) -> { assert false }
+  }
+  assert failed(walk(Node { ..choose, kids = [n("Var unknown", [])] ++ list.drop(choose.kids, 1) }, ["exp", "exp2"], env, ""))
 }

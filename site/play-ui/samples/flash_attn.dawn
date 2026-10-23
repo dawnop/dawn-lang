@@ -8,11 +8,13 @@
 # interpreter executes the lowered Tile IR block by block with no GPU: the
 # grid is two blocks of 32 query rows, and each block walks the keys in four
 # tiles, carrying the running maximum and sum of an online softmax.
-use std/dtype.{F64}
+use std/dtype.{F64, Dtype}
 use std/io
+use std/gpu.{ScalarDtype}
+use std/narrow.{F32, f32}
 use std/float.{INFINITY}
 use std/list
-use tileir/dev.{Dev, Param, Tile, Idx, idx_const, block_id, load_cell, store_cell, load_at, full, zeros, mma, transpose, scalar, max, exp, reduce_max, reduce_sum, d_range}
+use tileir/dev.{Dev, Param, Tile, FloatDtype, Idx, idx_const, block_id, load_cell, store_cell, load_at, full, zeros, mma, transpose, scalar, max, exp, exp2, div, to, reduce_max, reduce_sum, d_range}
 use tileir/prog.{trace5, cells, In, Out, Scalar, FREE_AXIS}
 use tileinterp/interp.{interp_ref}
 use tileinterp/math.{exp_f}
@@ -42,26 +44,30 @@ fn fa64_cfg(arch: String, _d: Int) -> FaCfg = match (arch, _d) {
 fn fa_kv_index(j: Idx, bh: Int, s: Int, c: FaCfg) -> Idx !Dev =
   if bh == 1 { j } else { (block_id(0) / idx_const(s / c.bq)) * idx_const(s / c.bk) + j }
 
-fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float], scale: Param[Float],
-  cfg: FaCfg = fa64_cfg("default", ATT_D), shape: FaShape = fa_shape()) -> Unit !Dev = {
+type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool, acc_from_out: Bool }
+fn fa64_math() -> FaNumerics[Float] = FaNumerics { zero = 0.0, neg_inf = -INFINITY, base2 = false, exp_ftz = false, approx_div = false, div_ftz = false, acc_from_out = true }
+fn fa_bf16_math() -> FaNumerics[F32] = FaNumerics { zero = f32(0.0), neg_inf = f32(-INFINITY), base2 = true, exp_ftz = true, approx_div = true, div_ftz = true, acc_from_out = false }
+
+fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[D], v: Param[D], o: Param[A], scale: Param[A], dt: Dtype[D], math: FaNumerics[A], cfg: FaCfg, shape: FaShape) -> Unit !Dev = {
   let tq = load_cell(q)
-  var m: Tile[Float] = full([cfg.bq, 1], -INFINITY)
-  var l: Tile[Float] = full([cfg.bq, 1], 0.0)
-  var acc = zeros(o)
+  var m: Tile[A] = full([cfg.bq, 1], math.neg_inf)
+  var l: Tile[A] = full([cfg.bq, 1], math.zero)
+  var acc: Tile[A] = if math.acc_from_out { zeros(o) } else { full([cfg.bq, shape.d], math.zero) }
   for j in d_range(0, shape.n / cfg.bk) {
-    let s: Tile[Float] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
+    let s: Tile[A] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
     let m_new = max(m, reduce_max(s, keepdims = true))
-    let p = exp(s - m_new)
-    let alpha = exp(m - m_new)
+    let p = if math.base2 { exp2(s - m_new, ftz = math.exp_ftz) } else { exp(s - m_new) }
+    let alpha = if math.base2 { exp2(m - m_new, ftz = math.exp_ftz) } else { exp(m - m_new) }
     l = l * alpha + reduce_sum(p, keepdims = true)
-    acc = mma(p, load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
+    acc = mma(p.to(dt), load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
     m = m_new
   }
-  store_cell(o, acc / l)
+  store_cell(o, if math.approx_div { div(acc, l, approx = true, ftz = math.div_ftz) } else { acc / l })
 }
 
-fn fa_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[Float], Param[Float], Param[Float], Param[Float], Param[Float]) -> Unit !Dev =
-  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, c, FaShape { n = n, d = d, bh = bh })
+# The two supported instances capture their policy before recording.
+fn fa_kernel[D: FloatDtype, A: FloatDtype + ScalarDtype](dt: Dtype[D], math: FaNumerics[A], c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[D], Param[D], Param[D], Param[A], Param[A]) -> Unit !Dev =
+  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, dt, math, c, FaShape { n = n, d = d, bh = bh })
 
 # Small deterministic inputs: integers over eight, so every score is a short
 # binary fraction.
@@ -82,7 +88,7 @@ pub fn main() -> Unit !io = {
   let kv = cells([ATT_N, ATT_D], [FA_BK, ATT_D], along = [FREE_AXIS, 1])
   let (prog, _e) = trace5("flash_attn",
     In(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(F64, kv), In(F64, kv),
-    Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), fa_kernel(fa64_cfg("default", ATT_D), ATT_N, ATT_D, 1))
+    Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), fa_kernel(F64, fa64_math(), fa64_cfg("default", ATT_D), ATT_N, ATT_D, 1))
   let q = wave(ATT_M * ATT_D, 1)
   let k = wave(ATT_N * ATT_D, 2)
   let v = wave(ATT_N * ATT_D, 3)

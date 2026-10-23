@@ -106,6 +106,11 @@ pub fn map_doc_url(root: String, docs: List[String], u: String) -> String = {
   }
 }
 
+## An exact function name followed by its parameters or generic parameters.
+## A longer function name must never be mistaken for this definition.
+pub fn fn_head(line: String, name: String) -> Bool =
+  str.starts_with(line, "fn ${name}(") || str.starts_with(line, "fn ${name}[")
+
 ## One top-level function, cut out of a source file: from its `fn <name>(`
 ## line through the first line that is a lone `}`. The front page's listings
 ## and the cuTile page's kernel are both cut with it. A function that moved,
@@ -118,7 +123,7 @@ pub fn fn_source(src: String, name: String) -> String = {
   var done = false
   for l in str.split(src, "\n") {
     if not done {
-      if not on && str.starts_with(l, head) {
+      if not on && fn_head(l, name) {
         on = true
       }
       if on {
@@ -170,4 +175,11 @@ test "take_n and drop_trailing_rule" {
   assert take_n([1, 2, 3], 2) == [1, 2]
   assert drop_trailing_rule([Rule, Rule]) == [Rule]
   assert drop_trailing_rule([]) == []
+}
+
+test "function extraction keeps generic heads and exact name boundaries" {
+  let generic = "fn shared[D](x: D) -> D = {\n  x\n}"
+  assert fn_source("fn shared_other() = {\n  1\n}\n\n" ++ generic, "shared") == generic
+  assert not fn_head("fn shared_other[D](x: D)", "shared")
+  assert not fn_head("fn sharedness(x: Int)", "shared")
 }

@@ -700,6 +700,7 @@ mutants=(
   staged-eager-arm staged-invariance
   staged-token-checks staged-token-unmerged staged-token-join staged-fork-accepted staged-write-leaks
   flash-output-f64 flash-output-one-f64 flash-output-bf16
+  flash-exp-swapped flash-exp-ftz-dropped flash-div-exact flash-div-ftz-dropped flash-l-rounded flash-p-unrounded
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -3248,6 +3249,39 @@ if run_item flash-output-one-f64; then
 fi
 if run_item flash-output-bf16; then
   flash_output_mutant flash-output-bf16 flash_attn_bf16
+fi
+
+# A successfully recorded fixed instance must then fail its named policy
+# oracle. Compiler errors and missing executables do not count.
+flash_policy_mutant() {
+  local m="$1" oracle="$2" backend out
+  kernel_mutant_project "$m"
+  build_native "$work/m-$m" "$work/m-$m.bin" -O0
+  mutant_run "$m" flash_attn_bf16
+  for backend in jvm native; do
+    out="$work/m-$m.flash_attn_bf16.$backend"
+    [ "$(cat "$out.rc")" != 0 ] || fail "$m policy oracle stayed green"
+    grep -q "generic flash_attn_bf16: $oracle" "$out.err" || fail "$m did not reach its named policy oracle"
+  done
+  echo "PASS  mutant: $m (successful build and recording, named numeric policy oracle red on both backends)"
+}
+if run_item flash-exp-swapped; then
+  flash_policy_mutant flash-exp-swapped exponent
+fi
+if run_item flash-exp-ftz-dropped; then
+  flash_policy_mutant flash-exp-ftz-dropped exponent
+fi
+if run_item flash-div-exact; then
+  flash_policy_mutant flash-div-exact division
+fi
+if run_item flash-div-ftz-dropped; then
+  flash_policy_mutant flash-div-ftz-dropped division
+fi
+if run_item flash-l-rounded; then
+  flash_policy_mutant flash-l-rounded l
+fi
+if run_item flash-p-unrounded; then
+  flash_policy_mutant flash-p-unrounded probability
 fi
 
 _item_tick ""

@@ -700,7 +700,7 @@ TILEIR_USE = "use tileir/"
 PINNED_SAMPLES = {
     "flash_attn": (
         "scripts/tile-golden/kernels.dawn",
-        ["flash_attn", "fa_shape", "fa_config", "fa64_cfg", "fa_kv_index", "fa_kernel"],
+        ["flash_attn", "fa_shape", "fa_config", "fa64_cfg", "fa_kv_index", "fa_kernel", "fa64_math", "fa_bf16_math", "FaNumerics"],
     ),
     # The two cards of the GPU page that are not golden kernels. `refused` is
     # two kernels packages/tileir's tests record and hold the refusal of;
@@ -732,7 +732,7 @@ def kernel_text(text: str, name: str) -> str:
     on = False
     braced = False
     for line in text.splitlines():
-        if not on and line.startswith(f"fn {name}("):
+        if not on and re.match(r"^(?:fn|type) " + re.escape(name) + r"(?=[(\[ =])", line):
             on = True
             braced = line.rstrip().endswith("{")
             out.append(line)
