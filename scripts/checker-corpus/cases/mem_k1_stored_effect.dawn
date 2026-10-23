@@ -1,0 +1,29 @@
+# Known-bad acceptance baseline for #847, not a positive test.
+# See docs/mem-capture-scope-design.md section 8 for the required rejection.
+use std/mem
+
+effect Store {
+  fn save(read: fn(Int) -> Int) -> Unit
+  fn fetch() -> (fn(Int) -> Int)
+}
+
+fn store_later(read: fn(Int) -> Int) -> Unit !Store = save(read)
+
+pub fn main() -> Unit !io = {
+  with handle Store {
+    var saved: fn(Int) -> Int = _n => -1
+    save(read) => { saved = read }
+    fetch() => saved
+  }
+  mem.with_mem(() => {
+    let cursor = mem.new(1)
+    store_later(n => mem.with_mem(() => {
+      let offset = mem.at(cursor, 0)
+      mem.set(cursor, 0, offset + n)
+      offset
+    }))
+  })
+  let read = fetch()
+  println(to_string(read(1)))
+  println(to_string(read(1)))
+}

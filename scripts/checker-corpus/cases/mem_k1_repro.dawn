@@ -1,0 +1,18 @@
+# Known-bad acceptance baseline for #847, not a positive test.
+# See docs/mem-capture-scope-design.md section 8 for the required rejection.
+use std/mem
+type Source = { read: fn(Int) -> Int !io }
+fn source() -> Source !io = mem.with_mem(() => {
+  let cursor = mem.new(1)
+  Source { read = n => mem.with_mem(() => {
+    let offset = mem.at(cursor, 0)
+    mem.set(cursor, 0, offset + n)
+    offset
+  }) }
+})
+
+pub fn main() -> Unit !io = {
+  let s = source()
+  println(to_string(s.read(1)))
+  println(to_string(s.read(1)))
+}

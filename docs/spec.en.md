@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ da837a3d701fb8be -->
+<!-- doc-check: translation-of docs/spec.md @ 87a934050574f17d -->
 
 # Dawn Language Specification
 
@@ -2438,6 +2438,39 @@ outside effect position, and is refused everywhere inside one (§6.3).
    in a parameter position binds to the argument's row, and a bound one is compared in the direction
    above.
 
+#### 6.2.1 Mem scopes and captures (settled, pending implementation)
+
+**This section is pending implementation.** The current compiler still accepts #847.
+The current `!Mem` and result-type checks have closure-environment escape and
+peek/poke purity gaps. The following target semantics replace those rules.
+Surface spelling and full constraints are in
+[mem-capture-scope-design.md](mem-capture-scope-design.md) (Chinese).
+
+- Each `with_mem` activation introduces a fresh scope s distinct from every other
+  activation. Buffers, reachable aggregates, generic instances and function
+  environments retain scope dependencies. A function value's capture upper bound
+  and call effects are checked separately. Assignment, joins, fields, opaque
+  representations, exports, dictionaries and substitution cannot erase them.
+  Closures, lists and records used within their scope remain legal.
+- Reading or writing a buffer in s produces `Mem[s]`. A runner discharges only
+  its own `Mem[s]`. An inner t that accesses an outer s retains `Mem[s]`; copying
+  between scopes requires both. Length alone may be pure, but an environment
+  holding the buffer still depends on s. Wrapping peek/poke in another runner
+  cannot make them pure. The purity guarantee and call-site evidence rule remain.
+- A scope's result and residual effects must not mention its fresh s. Writes to
+  outer cells, operations, foreign interfaces or hidden environments must also
+  prove that the destination's valid scopes contain the source dependencies.
+  Returning Unit is no exemption. Runners retain restricted higher-rank
+  quantification over Scope through function values, aliases and exported
+  wrappers. Arbitrary rank-N and existential scope packages are excluded.
+- In the first version, an unhandled ctl effect cannot capture a stack across
+  a Mem boundary. Unknown effect rows need a transferable constraint ruling out
+  such ctl effects. Handling, resuming or dropping a continuation within the
+  scope remains legal. Synthesized continuations retain dependencies of saved
+  frames and evidence and cannot be stored outside the scope. Panic/catch_panic
+  and tail-resumptive handlers remain available. Reads and writes do not become
+  io and effects are not settled at closure creation.
+
 ### 6.3 Effect polymorphism
 
 Higher-order functions use effect variables to forward the effects of their arguments:
@@ -4386,6 +4419,9 @@ two together; one module too many or too few fails it):
   whose row carries `Mem`, or any type variable; only `std/mem` may install a handler for `Mem`; an effect
   operation's signature and a handler's `var` may not contain a buffer; a function
   value carrying `Mem` may not cross a `use java` call)
+  **The current four rules do not close hidden-capture and purity gaps.**
+  Their settled replacement is pending implementation in §6.2.1; the current
+  restrictions above are not a complete guarantee against escape.
 - `std/gpu`: the host side of a GPU, the `Gpu` effect and device buffers (§12.6)
 - `std/memfs`: an in-memory `Fs` handler for tests; the rest of this specification does
   not discuss it, and its design is in [`fs-real-path-design.md`](fs-real-path-design.md)
