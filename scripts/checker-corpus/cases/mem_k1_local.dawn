@@ -1,0 +1,16 @@
+# Known-bad acceptance baseline for #847, not a positive test.
+# See docs/mem-capture-scope-design.md section 8 for the required rejection.
+use std/mem
+pub fn main() -> Unit !io = {
+  let total = mem.with_mem(() => {
+    let cursor = mem.new(1)
+    let read: fn(Int) -> Int = n => mem.with_mem(() => {
+      let offset = mem.at(cursor, 0)
+      mem.set(cursor, 0, offset + n)
+      offset
+    })
+    let first = read(1)
+    first + read(1)
+  })
+  println(to_string(total))
+}

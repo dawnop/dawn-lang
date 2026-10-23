@@ -1,0 +1,97 @@
+# These behaviors must survive #847 even though scope binders and annotations
+# will need migration. In particular, local mutable state is not an io effect,
+# and a returned function may create independent state on each call.
+use std/mem
+use std/mem.{Mem}
+
+type Holder = { b: I64Buf }
+type Source = { read: fn(Int) -> Int !Mem }
+
+fn bind[T](value: T, read: fn(T, Int) -> Int !e) -> (fn(Int) -> Int !e) =
+  n => read(value, n)
+
+fn local() -> Int = mem.with_mem(() => {
+  let held = Holder { b = mem.new(1) }
+  let bufs = [held.b, mem.new(2)]
+  let callback: fn(Int) -> Int !Mem = bind(bufs[0], (b: I64Buf, n: Int) => {
+    let old = mem.at(b, 0)
+    mem.set(b, 0, old + n)
+    old
+  })
+  let source = Source { read = callback }
+  let size: fn() -> Int = () => len(bufs[1])
+  let first = source.read(1)
+  first + source.read(1) + size()
+})
+
+fn nested() -> Int = mem.with_mem(() => {
+  let outer = mem.from_list([5, 6])
+  let result = mem.with_mem(() => {
+    let inner = mem.new(2)
+    mem.copy_from(inner, 0, outer, 0, 2)
+    mem.set(outer, 0, mem.at(inner, 1))
+    mem.at(inner, 0)
+  })
+  result + mem.at(outer, 0)
+})
+
+# Every invocation creates fresh state; the returned environment holds only n.
+fn independent(n: Int) -> (fn(Int) -> Int) = x => mem.with_mem(() => {
+  let b = mem.new(1)
+  mem.set(b, 0, n + x)
+  mem.at(b, 0)
+})
+
+fn recursive(n: Int) -> Int = mem.with_mem(() => {
+  let b = mem.from_list([n])
+  if n == 0 { mem.at(b, 0) } else { mem.at(b, 0) + recursive(n - 1) }
+})
+
+effect Tick { fn tick() -> Int }
+ctl effect Ask { fn ask() -> Int }
+
+fn handler_capture() -> Int = mem.with_mem(() => {
+  let b = mem.from_list([9])
+  with handle Tick { tick() => mem.at(b, 0) }
+  tick()
+})
+
+fn control_inside() -> Int = mem.with_mem(() => {
+  with handle Ask { ask() resume k => k(4) }
+  let b = mem.from_list([3])
+  mem.at(b, 0) + ask()
+})
+
+fn dropped_inside() -> Int = mem.with_mem(() => {
+  with handle Ask { ask() resume k => 41 }
+  let b = mem.new(1)
+  let n = ask()
+  mem.set(b, 0, n)
+  mem.at(b, 0)
+})
+
+fn panic_inside() -> Int = mem.with_mem(() => {
+  let b = mem.new(1)
+  match catch_panic(() => mem.at(b, 2)) {
+    Ok(n) -> n
+    Err(_) -> len(b)
+  }
+})
+
+fn floats() -> List[Float] = mem.with_mem(() => {
+  let b = mem.f64_from_list([1.5, 2.5])
+  mem.f64_to_list(b)
+})
+
+pub fn main() -> Unit !io = {
+  println(to_string(local()))
+  println(to_string(nested()))
+  let f = independent(10)
+  println(to_string(f(1) + f(1)))
+  println(to_string(recursive(3)))
+  println(to_string(handler_capture()))
+  println(to_string(control_inside()))
+  println(to_string(dropped_inside()))
+  println(to_string(panic_inside()))
+  println(to_string(floats()))
+}

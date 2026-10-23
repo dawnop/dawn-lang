@@ -1,0 +1,22 @@
+# Known-bad: a continuation is stored in an ADT while retaining Mem frames.
+# The callback type alone currently hides its captured evidence and buffer.
+use std/mem
+ctl effect Ask { fn ask() -> Int }
+type Step = Ready(value: Int) | Waiting(next: fn(Int) -> Step)
+fn park() -> Step = mem.with_mem(() => {
+  with handle Ask { ask() resume k => Waiting(k) }
+  let b = mem.new(1)
+  let n = ask()
+  mem.set(b, 0, n)
+  Ready(mem.at(b, 0))
+})
+pub fn main() -> Unit !io = match park() {
+  Ready(n) -> println(to_string(n))
+  Waiting(k) -> {
+    println("0")
+    match k(7) {
+      Ready(n) -> println(to_string(n))
+      Waiting(next) -> discard(next)
+    }
+  }
+}
