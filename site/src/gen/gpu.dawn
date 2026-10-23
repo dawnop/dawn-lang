@@ -134,9 +134,9 @@ pub fn parse_table(name: String, text: String) -> Result[Coverage, String] = {
   } else {
     let rows = seen
     Ok(Coverage {
-      name: name,
-      total: len(rows),
-      counts: map(statuses(), st => (st, len(filter(rows, x => x == st)))),
+      name = name,
+      total = len(rows),
+      counts = map(statuses(), st => (st, len(filter(rows, x => x == st)))),
     })
   }
 }
@@ -170,7 +170,7 @@ pub fn table_rows(table: String, text: String) -> List[CovRow] = {
         let ev = if fields[6] == "-" { none } else { filter(str.split(fields[6], ","), e => e != "") }
         let note = if fields[7] == "-" { "" } else { fields[7] }
         let knife = if fields[4] == "-" { "" } else { fields[4] }
-        out = out ++ [CovRow { table: table, name: fields[0], status: fields[3], knife: knife, evidence: ev, note: note }]
+        out = out ++ [CovRow { table = table, name = fields[0], status = fields[3], knife = knife, evidence = ev, note = note }]
       }
     }
   }
@@ -226,7 +226,7 @@ pub fn parse_check_output(out: String) -> List[Coverage] = {
               }
               (st, k)
             })
-            found = found ++ [Coverage { name: name, total: total, counts: counts }]
+            found = found ++ [Coverage { name = name, total = total, counts = counts }]
           }
           None -> ()
         }
@@ -273,7 +273,7 @@ pub fn cut_fn(src: String, name: String) -> Cut = {
   if first < 1 || last <= first || lines[first - 1] != str.split(text, "\n")[0] || lines[last - 1] != "}" {
     panic("cutting `${head}...`: lines ${first} to ${last} are not the function fn_source cut")
   }
-  Cut { first: first, last: last, text: text }
+  Cut { first = first, last = last, text = text }
 }
 
 # ---- the API cards ----
@@ -313,7 +313,7 @@ pub fn cut_def(src: String, name: String) -> Cut = {
   if first == 0 || (braced && not done) {
     panic("no `${head}...` to cut")
   }
-  Cut { first: first, last: last, text: join(list.take(list.drop(lines, first - 1), last - first + 1), "\n") }
+  Cut { first = first, last = last, text = join(list.take(list.drop(lines, first - 1), last - first + 1), "\n") }
 }
 
 ## A kernel's arm of the dispatch in kernels.dawn: from `  "name" -> {` to
@@ -337,7 +337,7 @@ pub fn cut_arm(src: String, name: String) -> Cut = {
   if first == 0 || last == 0 {
     panic("no dispatch arm `${head}` closed by `  }` to cut")
   }
-  Cut { first: first, last: last, text: join(list.take(list.drop(lines, first - 1), last - first + 1), "\n") }
+  Cut { first = first, last = last, text = join(list.take(list.drop(lines, first - 1), last - first + 1), "\n") }
 }
 
 ## `text` with the indent all its lines share taken off: an arm of the
@@ -362,10 +362,10 @@ pub type ApiCard = { key: String, kernel: String, cuts: List[Cut] }
 ## shape operations become, where a kernel `Shared` only for want of a
 ## `reshape` would leave the card the day one lands.
 pub fn api_cards(src: String) -> List[ApiCard] =
-  [ApiCard { key: "cells", kernel: "vadd", cuts: [cut_def(src, "vadd"), cut_arm(src, "vadd"), cut_def(src, "run_of")] },
-    ApiCard { key: "shapes", kernel: "softmax", cuts: [cut_def(src, "softmax")] },
-    ApiCard { key: "out", kernel: "matmul", cuts: [cut_def(src, "matmul"), cut_def(src, "mm_body"), cut_arm(src, "matmul")] },
-    ApiCard { key: "shared", kernel: "histogram", cuts: [cut_def(src, "histogram"), cut_arm(src, "histogram")] }]
+  [ApiCard { key = "cells", kernel = "vadd", cuts = [cut_def(src, "vadd"), cut_arm(src, "vadd"), cut_def(src, "run_of")] },
+    ApiCard { key = "shapes", kernel = "softmax", cuts = [cut_def(src, "softmax")] },
+    ApiCard { key = "out", kernel = "matmul", cuts = [cut_def(src, "matmul"), cut_def(src, "mm_body"), cut_arm(src, "matmul")] },
+    ApiCard { key = "shared", kernel = "histogram", cuts = [cut_def(src, "histogram"), cut_arm(src, "histogram")] }]
 
 ## A test of a package, from `test "<title>" {` to the `}` that closes it.
 pub fn cut_test(src: String, title: String) -> Cut = {
@@ -387,7 +387,7 @@ pub fn cut_test(src: String, title: String) -> Cut = {
   if first == 0 || last == 0 {
     panic("no test `${head}` closed by `}` to cut")
   }
-  Cut { first: first, last: last, text: join(list.take(list.drop(lines, first - 1), last - first + 1), "\n") }
+  Cut { first = first, last = last, text = join(list.take(list.drop(lines, first - 1), last - first + 1), "\n") }
 }
 
 ## One piece of code of a card that is cut from a package's source: the file
@@ -422,12 +422,12 @@ pub fn show_cards(refused_src: String, host_src: String) -> List[ShowCard] = {
   let refused = (name: String, i: Int) => {
     let (call, msg) = calls[i]
     let shown = if str.ends_with(call, ", ") { "${call}..)" } else { call }
-    Piece { file: refused_file(), cut: cut_def(refused_src, name), after: ["# ${shown} refuses:", "# ${msg}"] }
+    Piece { file = refused_file(), cut = cut_def(refused_src, name), after = ["# ${shown} refuses:", "# ${msg}"] }
   }
-  let host = (name: String) => Piece { file: host_file(), cut: cut_def(host_src, name), after: [] }
-  [ShowCard { key: "refused", sample: "refused", pieces: [refused("into_first_store", 0), refused("vadd_half", 1)] },
-    ShowCard { key: "host", sample: "host_launch", pieces: [host("vadd"), host("vadd_prog"), host("run"),
-      Piece { file: host_file(), cut: cut_test(host_src, host_test_title()), after: [] }] }]
+  let host = (name: String) => Piece { file = host_file(), cut = cut_def(host_src, name), after = [] }
+  [ShowCard { key = "refused", sample = "refused", pieces = [refused("into_first_store", 0), refused("vadd_half", 1)] },
+    ShowCard { key = "host", sample = "host_launch", pieces = [host("vadd"), host("vadd_prog"), host("run"),
+      Piece { file = host_file(), cut = cut_test(host_src, host_test_title()), after = [] }] }]
 }
 
 ## The calls of flash_attn the keepdims card points at: each named reduction
@@ -542,15 +542,15 @@ pub fn parse_ledger_line(file: String, l: String) -> Result[Ledger, String] = {
     } else {
       let (ex, tol) = tiers(note)
       Ok(Ledger {
-        file: file,
-        commit: str.take(cols[0], 12),
-        date: cols[1],
-        driver: cols[2],
-        tileiras: cols[3],
-        arch: cols[4],
-        result: cols[5],
-        exact: ex,
-        tolerance: tol,
+        file = file,
+        commit = str.take(cols[0], 12),
+        date = cols[1],
+        driver = cols[2],
+        tileiras = cols[3],
+        arch = cols[4],
+        result = cols[5],
+        exact = ex,
+        tolerance = tol,
       })
     }
   }
@@ -687,7 +687,7 @@ pub fn place_mutants(golden_run: String, device_run: String, rows: List[CovRow])
   for n in golden {
     match golden_gate(golden_run, n) {
       Ok(g) -> {
-        out = out ++ [Mutant { name: n, gate: g }]
+        out = out ++ [Mutant { name = n, gate = g }]
       }
       Err(e) -> panic(e)
     }
@@ -709,7 +709,7 @@ pub fn place_mutants(golden_run: String, device_run: String, rows: List[CovRow])
   for m in cited {
     if not list.contains(golden, m) {
       if names_word(device_run, m) {
-        out = out ++ [Mutant { name: m, gate: 2 }]
+        out = out ++ [Mutant { name = m, gate = 2 }]
       } else {
         lost = lost ++ [m]
       }
@@ -763,17 +763,17 @@ pub fn load_facts() -> Facts !Fs = {
   let rows = read_rows()
   let (muts, _lost) = place_mutants(must_read("scripts/tile-golden/run.sh"), must_read("scripts/tile-gpu-diff/run.sh"), rows)
   Facts {
-    tables: read_tables(),
-    rows: rows,
-    golden: golden,
-    ledgers: read_ledgers(),
-    kernel: cut,
-    flash: load_map(cut),
-    bytes: size,
-    mutants: muts,
-    cards: api_cards(src),
-    shows: show_cards(must_read(refused_file()), must_read(host_file())),
-    timings: flash_timings(),
+    tables = read_tables(),
+    rows = rows,
+    golden = golden,
+    ledgers = read_ledgers(),
+    kernel = cut,
+    flash = load_map(cut),
+    bytes = size,
+    mutants = muts,
+    cards = api_cards(src),
+    shows = show_cards(must_read(refused_file()), must_read(host_file())),
+    timings = flash_timings(),
   }
 }
 
@@ -1115,12 +1115,12 @@ pub type KernelFacts = { calls: Int, ops: Int, lines: Int, bytes: Int, rows: Lis
 pub fn kernel_facts(f: Facts, m: KernelMap) -> KernelFacts = {
   let (rows, muts) = cited_by(f, m.name)
   KernelFacts {
-    calls: len(m.calls),
-    ops: m.ops,
-    lines: len(m.ir),
-    bytes: f.bytes,
-    rows: map(rows, r => r.name),
-    mutants: muts,
+    calls = len(m.calls),
+    ops = m.ops,
+    lines = len(m.ir),
+    bytes = f.bytes,
+    rows = map(rows, r => r.name),
+    mutants = muts,
   }
 }
 
@@ -1385,13 +1385,13 @@ fn gpu_page_with(a: Assets, js: String, ex_js: String, lang: Lang, f: Facts, doc
   let mu = (u: String) => map_doc_url(root, docs, u)
   let title = plain(c, "title")
   let head = PageHead {
-    crumbs: [section_crumb(lang, root, "gpu", false)],
-    title: line(c, "title", mu),
-    lede: line(c, "lede", mu),
-    meta: [chip("<code>!Dev</code> · Tile IR · <code>tileiras</code>"),
+    crumbs = [section_crumb(lang, root, "gpu", false)],
+    title = line(c, "title", mu),
+    lede = line(c, "lede", mu),
+    meta = [chip("<code>!Dev</code> · Tile IR · <code>tileiras</code>"),
       chip("${f.golden} " ++ line(c, "chip-golden", mu)), chip("${len(f.ledgers)} " ++ line(c, "chip-gpus", mu))],
-    extra: hero_ir(hero_lines()),
-    cls: "col",
+    extra = hero_ir(hero_lines()),
+    cls = "col",
   }
   let main = `<main class="wrap page gpu-page">` ++ "\n"
     ++ prose(c, mu, "layers") ++ "\n" ++ layers(c, mu) ++ "\n"
@@ -2001,9 +2001,9 @@ test "the head's background is real Tile IR from the goldens" {
 test "the cutters take a definition and an arm whole" {
   let src = "fn a(x: Int) -> Int =\n  x + 1\n\n#\n# Why b.\n# More.\nfn b() -> Int = {\n  1\n}\nfn c() -> Int = 2\n"
     ++ "fn trace(n: String) = match n {\n  \"b\" -> {\n    let p = b()\n    p\n  }\n}\n"
-  assert cut_def(src, "a") == Cut { first: 1, last: 2, text: "fn a(x: Int) -> Int =\n  x + 1" }
-  assert cut_def(src, "b") == Cut { first: 7, last: 9, text: "fn b() -> Int = {\n  1\n}" }
-  assert cut_def(src, "c") == Cut { first: 10, last: 10, text: "fn c() -> Int = 2" }
+  assert cut_def(src, "a") == Cut { first = 1, last = 2, text = "fn a(x: Int) -> Int =\n  x + 1" }
+  assert cut_def(src, "b") == Cut { first = 7, last = 9, text = "fn b() -> Int = {\n  1\n}" }
+  assert cut_def(src, "c") == Cut { first = 10, last = 10, text = "fn c() -> Int = 2" }
   let arm = cut_arm(src, "b")
   assert arm.first == 12 && arm.last == 15
   assert dedent(arm.text) == "\"b\" -> {\n  let p = b()\n  p\n}"

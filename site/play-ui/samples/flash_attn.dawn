@@ -26,12 +26,12 @@ const ATT_INV_SQRT_D: Float = 0.17677669529663687
 
 type FaShape = { n: Int, d: Int, bh: Int }
 
-fn fa_shape() -> FaShape = FaShape { n: ATT_N, d: ATT_D, bh: 1 }
+fn fa_shape() -> FaShape = FaShape { n = ATT_N, d = ATT_D, bh = 1 }
 
 type FaCfg = { bq: Int, bk: Int, occ: Int, cga: Int, evidence: String, median: Float, baseline: Float }
 
 fn fa_config(bq: Int, bk: Int, occ: Int, cga: Int, evidence: String, median: Float, baseline: Float) -> FaCfg =
-  FaCfg { bq: bq, bk: bk, occ: occ, cga: cga, evidence: evidence, median: median, baseline: baseline }
+  FaCfg { bq = bq, bk = bk, occ = occ, cga = cga, evidence = evidence, median = median, baseline = baseline }
 
 fn fa64_cfg(arch: String, _d: Int) -> FaCfg = match (arch, _d) {
   ("sm_90", _) -> fa_config(32, 16, 0, 0, "f6490", 14.12, 93.87)
@@ -50,10 +50,10 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
   var acc = zeros(o)
   for j in d_range(0, shape.n / cfg.bk) {
     let s: Tile[Float] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
-    let m_new = max(m, reduce_max(s, keepdims: true))
+    let m_new = max(m, reduce_max(s, keepdims = true))
     let p = exp(s - m_new)
     let alpha = exp(m - m_new)
-    l = l * alpha + reduce_sum(p, keepdims: true)
+    l = l * alpha + reduce_sum(p, keepdims = true)
     acc = mma(p, load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
     m = m_new
   }
@@ -61,7 +61,7 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
 }
 
 fn fa_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[Float], Param[Float], Param[Float], Param[Float], Param[Float]) -> Unit !Dev =
-  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, c, FaShape { n: n, d: d, bh: bh })
+  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, c, FaShape { n = n, d = d, bh = bh })
 
 # Small deterministic inputs: integers over eight, so every score is a short
 # binary fraction.
@@ -79,7 +79,7 @@ fn plain_row(q: List[Float], k: List[Float], v: List[Float], i: Int) -> List[Flo
 }
 
 pub fn main() -> Unit !io = {
-  let kv = cells([ATT_N, ATT_D], [FA_BK, ATT_D], along: [FREE_AXIS, 1])
+  let kv = cells([ATT_N, ATT_D], [FA_BK, ATT_D], along = [FREE_AXIS, 1])
   let (prog, _e) = trace5("flash_attn",
     In(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(F64, kv), In(F64, kv),
     Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), fa_kernel(fa64_cfg("default", ATT_D), ATT_N, ATT_D, 1))

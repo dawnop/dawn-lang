@@ -37,8 +37,8 @@ fn vadd_prog() -> TileProg = {
 fn tail(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), W)
   let m = tail_mask(blk, [W], 10)
-  let t = load(x, blk, [W], mask: Some(m), pad: Some(broadcast(f_const(F64, 0.5), [W])))
-  store(out, blk, mul(t, f_const(F64, 2.0)), mask: Some(m))
+  let t = load(x, blk, [W], mask = Some(m), pad = Some(broadcast(f_const(F64, 0.5), [W])))
+  store(out, blk, mul(t, f_const(F64, 2.0)), mask = Some(m))
 }
 
 fn tail_prog() -> TileProg = trace_kernel("tail", [ByPtr("f64"), ByPtr("f64")], () => tail(param(F64, 0), param(F64, 1)))
@@ -113,7 +113,7 @@ fn fused32_prog() -> TileProg =
 fn exp2_pair(x: Param[F32], out: Param[Float]) -> Unit !Dev = {
   let t = load(x, idx_const(0), [W])
   store(out, idx_const(0), float_to_float(exp2(t), F64))
-  store(out, idx_const(W), float_to_float(exp2(t, ftz: true), F64))
+  store(out, idx_const(W), float_to_float(exp2(t, ftz = true), F64))
 }
 
 fn exp2_pair_prog() -> TileProg =
@@ -148,7 +148,7 @@ fn overrun_prog() -> TileProg = trace_kernel("overrun", [ByPtr("f64"), ByPtr("f6
 # are unspecified on the device, and storing them is using them.
 fn leak(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let m = tail_mask(idx_const(0), [W], 5)
-  store(out, idx_const(0), load(x, idx_const(0), [W], mask: Some(m)))
+  store(out, idx_const(0), load(x, idx_const(0), [W], mask = Some(m)))
 }
 
 fn leak_prog() -> TileProg = trace_kernel("leak", [ByPtr("f64"), ByPtr("f64")], () => leak(param(F64, 0), param(F64, 1)))
@@ -342,7 +342,7 @@ test "a store past the end of its buffer is undefined behaviour, refused" {
     Ok(_) -> { assert false }
   }
   # with the checks off the lanes outside the buffer are dropped
-  assert interp_kernel(k, [2], ["f64", "f64"], [floats(W, _i => 1.0), floats(W, _i => 0.0)], [], ub_checks: false)
+  assert interp_kernel(k, [2], ["f64", "f64"], [floats(W, _i => 1.0), floats(W, _i => 0.0)], [], ub_checks = false)
     == Ok([(1, floats(W, _i => 1.0))])
 }
 

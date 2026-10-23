@@ -1314,13 +1314,13 @@ fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match 
         Num(nm) -> nm
         PtrTo(_nm) -> "ptr"
       }
-      put(env, dst, VTen(Ten { buf: bs[0], base: os[0], shape: ext, strides: st, elem: en }))
+      put(env, dst, VTen(Ten { buf = bs[0], base = os[0], shape = ext, strides = st, elem = en }))
     }
     _ -> internal("make_tensor_view of a value that is not a scalar pointer")
   }
   MakePartitionView(dst, s, _st, t) -> match (get(env, cx, s), t) {
     (VTen(ten), PartitionView(tile, _e, _sh, _str, dim_map, padding)) ->
-      put(env, dst, VPart(Part { ten: ten, tile: tile, dim_map: dim_map, padding: padding }))
+      put(env, dst, VPart(Part { ten = ten, tile = tile, dim_map = dim_map, padding = padding }))
     _ -> internal("make_partition_view of a value that is not a tensor view")
   }
   GetTensorShape(dsts, s, _st, _rt) -> match get(env, cx, s) {
@@ -1684,8 +1684,8 @@ fn without_site(message: String) -> String = match str.last_index_of(message, " 
 fn error_of(message: String) -> InterpError = {
   let kinds = ["interp.unsupported_op", "interp.ub", "interp.bad_launch", "interp.internal"]
   match list.find(kinds, kd => str.starts_with(message, kd ++ ": ")) {
-    Some(kd) -> InterpError { kind: kd, message: unwrap_or(str.strip_prefix(without_site(message), kd ++ ": "), message) }
-    None -> InterpError { kind: "interp.internal", message: message }
+    Some(kd) -> InterpError { kind = kd, message = unwrap_or(str.strip_prefix(without_site(message), kd ++ ": "), message) }
+    None -> InterpError { kind = "interp.internal", message = message }
   }
 }
 
@@ -1699,7 +1699,7 @@ fn error_of(message: String) -> InterpError = {
 pub fn interp_kernel(k: Kernel, grid: List[Int], dtypes: List[String], ins: List[List[Float]],
   scalars: List[Float], ub_checks: Bool = true) -> Result[List[(Int, List[Float])], InterpError] =
   match unsupported_in(k) {
-    Some(why) -> Err(InterpError { kind: "interp.unsupported_op", message: why })
+    Some(why) -> Err(InterpError { kind = "interp.unsupported_op", message = why })
     None -> match catch_panic(() => with_mem(() => run(k, grid3(grid), dtypes, ins, scalars, ub_checks))) {
       Ok(w) -> Ok(w)
       Err(e) -> Err(error_of(e.message))
@@ -1711,12 +1711,12 @@ fn run(k: Kernel, grid: List[Int], dtypes: List[String], ins: List[List[Float]],
   let params = params_of(k, dtypes, scalars)
   let bufs = list.map(ins, xs => mem.f64_from_list(xs))
   let written = mem.new(len(ins))
-  let base = Cx { bufs: bufs, lens: list.map(ins, xs => len(xs)), written: written, params: params, bid: [0, 0, 0],
-    grid: grid, ub: ub, dtypes: dtypes }
+  let base = Cx { bufs = bufs, lens = list.map(ins, xs => len(xs)), written = written, params = params, bid = [0, 0, 0],
+    grid = grid, ub = ub, dtypes = dtypes }
   for z in range(0, grid[2]) {
     for y in range(0, grid[1]) {
       for x in range(0, grid[0]) {
-        let (_env, _flow) = run_body(Cx { ..base, bid: [x, y, z] }, map.empty(), k.body)
+        let (_env, _flow) = run_body(Cx { ..base, bid = [x, y, z] }, map.empty(), k.body)
       }
     }
   }
@@ -1748,9 +1748,9 @@ test "approximate division uses a correctly rounded reference and flushes both e
 
 test "integer shifts mask all counts even when UB checks are enabled" {
   with_mem(() => {
-    let base = Cx { bufs: [], lens: [], written: mem.new(0), params: [], dtypes: [], bid: [0, 0, 0], grid: [1, 1, 1], ub: true }
+    let base = Cx { bufs = [], lens = [], written = mem.new(0), params = [], dtypes = [], bid = [0, 0, 0], grid = [1, 1, 1], ub = true }
     for checks in [true, false] {
-      let cx = Cx { ..base, ub: checks }
+      let cx = Cx { ..base, ub = checks }
       for w in [8, 16, 32, 64] {
         let lo = if w == 64 { 1 << 63 } else { 0 - (1 << (w - 1)) }
         for n in [0, w, 0 - w, lo] {

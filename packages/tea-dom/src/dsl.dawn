@@ -28,7 +28,7 @@ use json/render.{render}
 use wire.{enc_node}
 
 ## A text node.
-pub fn text[M](s: String) -> Node[M] = Text(s: s)
+pub fn text[M](s: String) -> Node[M] = Text(s = s)
 
 ## The general element: tag, properties, listeners, children, class.
 ##
@@ -55,7 +55,7 @@ pub fn el[M](
   on: List[On[M]] = [],
   kids: List[Node[M]] = [],
   class: String = "",
-) -> Node[M] = Elem(tag: tag, props: classed(class, props), on: on, kids: kids, key: None)
+) -> Node[M] = Elem(tag = tag, props = classed(class, props), on = on, kids = kids, key = None)
 
 # The `class:` rule, in the one place every spelling below reads it from: an
 # empty class is no prop at all, a nonempty one is the first prop there is.
@@ -74,7 +74,7 @@ fn classed(class: String, props: List[(String, String)]) -> List[(String, String
 ## function is built here. The two below take the function, because there the
 ## message is a function of what arrived.
 pub fn on_click[M](msg: M) -> On[M] =
-  On { event: "click", payload: NoData, to_msg: _p => msg }
+  On { event = "click", payload = NoData, to_msg = _p => msg }
 
 ## The element's value, turned into a message by `f`.
 ##
@@ -85,13 +85,13 @@ pub fn on_click[M](msg: M) -> On[M] =
 ## keystroke) and `change` (one when the field is left) is the application's
 ## and is the difference between eight turns and one.
 pub fn on_value[M](event: String, f: fn(String) -> M) -> On[M] =
-  On { event: event, payload: Value, to_msg: f }
+  On { event = event, payload = Value, to_msg = f }
 
 ## `ev.key`, turned into a message by `f`. `keydown` is the usual event; the
 ## host does not call `preventDefault` for this kind, or the keystroke would be
 ## swallowed on its way to the element.
 pub fn on_key[M](event: String, f: fn(String) -> M) -> On[M] =
-  On { event: event, payload: Key, to_msg: f }
+  On { event = event, payload = Key, to_msg = f }
 
 ## An element whose children are paired by identity rather than by position.
 ## Each child arrives with the string that names it, which is the shape
@@ -112,35 +112,35 @@ pub fn keyed[M](
   class: String = "",
 ) -> Node[M] =
   Elem(
-    tag: tag,
-    props: classed(class, props),
-    on: on,
-    kids: list.map(kids, entry => {
+    tag = tag,
+    props = classed(class, props),
+    on = on,
+    kids = list.map(kids, entry => {
       let (k, w) = entry
       with_key(w, k)
     }),
-    key: None,
+    key = None,
   )
 
 ## A container and nothing else, which is what most of a view is made of.
 ## `div(kids: rows)`, `div(class: "row", kids: rows)`, or `div()` for the empty
 ## one; anything wanting a listener or a second prop is `el("div", ..)`.
 pub fn div[M](kids: List[Node[M]] = [], class: String = "") -> Node[M] =
-  Elem(tag: "div", props: classed(class, []), on: [], kids: kids, key: None)
+  Elem(tag = "div", props = classed(class, []), on = [], kids = kids, key = None)
 
 ## A `span` holding one string.
 pub fn span[M](s: String, class: String = "") -> Node[M] =
-  Elem(tag: "span", props: classed(class, []), on: [], kids: [Text(s: s)], key: None)
+  Elem(tag = "span", props = classed(class, []), on = [], kids = [Text(s = s)], key = None)
 
 ## A button labelled `label` whose click means `msg`. The DOM analogue of
 ## `tea_term/dsl.button`, and like it the message is data in the tree.
 pub fn button[M](label: String, msg: M, class: String = "") -> Node[M] =
   Elem(
-    tag: "button",
-    props: classed(class, []),
-    on: [on_click(msg)],
-    kids: [Text(s: label)],
-    key: None,
+    tag = "button",
+    props = classed(class, []),
+    on = [on_click(msg)],
+    kids = [Text(s = label)],
+    key = None,
   )
 
 ## A text field: the one input a view builds often enough to have a word for,
@@ -155,7 +155,7 @@ pub fn button[M](label: String, msg: M, class: String = "") -> Node[M] =
 ## that disappeared when the model went empty would leave the browser's own
 ## text sitting there.
 pub fn input[M](class: String = "", value: String = "", on: List[On[M]] = []) -> Node[M] =
-  Elem(tag: "input", props: classed(class, [("value", value)]), on: on, kids: [], key: None)
+  Elem(tag = "input", props = classed(class, [("value", value)]), on = on, kids = [], key = None)
 
 ## An element whose inside belongs to someone else: a custom element the page
 ## registered, with third-party JavaScript running behind it.
@@ -179,7 +179,7 @@ pub fn foreign[M](
   props: List[(String, String)] = [],
   on: List[On[M]] = [],
   class: String = "",
-) -> Node[M] = Elem(tag: tag, props: classed(class, props), on: on, kids: [], key: None)
+) -> Node[M] = Elem(tag = tag, props = classed(class, props), on = on, kids = [], key = None)
 
 # A message type for the test blocks below; real apps bring their own.
 # `Said` is the one carrying a payload: its bare name is the `fn(String) -> M`
@@ -192,44 +192,44 @@ derive Show
 
 test "the wrappers build exactly the constructors they name" {
   let b: Node[ProbeMsg] = button("go", Ping)
-  let click: On[ProbeMsg] = On { event: "click", payload: NoData, to_msg: _p => Ping }
-  assert b == Elem(tag: "button", props: [], on: [click], kids: [Text(s: "go")], key: None)
+  let click: On[ProbeMsg] = On { event = "click", payload = NoData, to_msg = _p => Ping }
+  assert b == Elem(tag = "button", props = [], on = [click], kids = [Text(s = "go")], key = None)
   assert deliver(click, "") == Ping
   let t: Node[ProbeMsg] = text("hi")
-  assert t == Text(s: "hi")
-  assert div([t]) == Elem(tag: "div", props: [], on: [], kids: [t], key: None)
-  assert div([t], class: "row") == Elem(
-    tag: "div",
-    props: [("class", "row")],
-    on: [],
-    kids: [t],
-    key: None,
+  assert t == Text(s = "hi")
+  assert div([t]) == Elem(tag = "div", props = [], on = [], kids = [t], key = None)
+  assert div([t], class = "row") == Elem(
+    tag = "div",
+    props = [("class", "row")],
+    on = [],
+    kids = [t],
+    key = None,
   )
   # The two orders are one node: naming both is what lets the class come first
   # on the page and second in the call.
-  assert div(class: "row", kids: [t]) == div([t], class: "row")
+  assert div(class = "row", kids = [t]) == div([t], class = "row")
   let sp: Node[ProbeMsg] = span("hi")
-  assert sp == Elem(tag: "span", props: [], on: [], kids: [t], key: None)
-  let titled: Node[ProbeMsg] = span("hi", class: "title")
+  assert sp == Elem(tag = "span", props = [], on = [], kids = [t], key = None)
+  let titled: Node[ProbeMsg] = span("hi", class = "title")
   assert titled == Elem(
-    tag: "span",
-    props: [("class", "title")],
-    on: [],
-    kids: [t],
-    key: None,
+    tag = "span",
+    props = [("class", "title")],
+    on = [],
+    kids = [t],
+    key = None,
   )
-  assert button("go", Ping, class: "add") == Elem(
-    tag: "button",
-    props: [("class", "add")],
-    on: [click],
-    kids: [Text(s: "go")],
-    key: None,
+  assert button("go", Ping, class = "add") == Elem(
+    tag = "button",
+    props = [("class", "add")],
+    on = [click],
+    kids = [Text(s = "go")],
+    key = None,
   )
-  let typed: On[ProbeMsg] = On { event: "input", payload: Value, to_msg: _p => Pong }
+  let typed: On[ProbeMsg] = On { event = "input", payload = Value, to_msg = _p => Pong }
   let general: Node[ProbeMsg] = el("input", [("value", "7")], [typed], [])
-  assert general == Elem(tag: "input", props: [("value", "7")], on: [typed], kids: [], key: None)
+  assert general == Elem(tag = "input", props = [("value", "7")], on = [typed], kids = [], key = None)
   # And the same node with every optional argument omitted instead of empty.
-  assert el("input", props: [("value", "7")], on: [typed]) == general
+  assert el("input", props = [("value", "7")], on = [typed]) == general
 }
 
 ## `class:` is one leading prop. This is the assertion the whole re-cut rests
@@ -241,39 +241,39 @@ test "the wrappers build exactly the constructors they name" {
 test "class is exactly one prop and it goes first" {
   # Alone, it is the props list.
   let want: Node[ProbeMsg] = Elem(
-    tag: "li",
-    props: [("class", "row")],
-    on: [],
-    kids: [],
-    key: None,
+    tag = "li",
+    props = [("class", "row")],
+    on = [],
+    kids = [],
+    key = None,
   )
-  let sugared: Node[ProbeMsg] = el("li", class: "row")
+  let sugared: Node[ProbeMsg] = el("li", class = "row")
   let spelled: Node[ProbeMsg] = el("li", [("class", "row")])
   assert sugared == want
   assert spelled == want
   # With props of its own, it is *prepended* -- first, not last. Appending
   # here is what the mutant does and this line is what catches it.
-  assert props_of(el("li", [("id", "a"), ("data-n", "1")], class: "row")) == [
+  assert props_of(el("li", [("id", "a"), ("data-n", "1")], class = "row")) == [
     ("class", "row"),
     ("id", "a"),
     ("data-n", "1"),
   ]
   # An empty class is no prop at all, which is what lets it be the default.
   assert props_of(el("li", [("id", "a")])) == [("id", "a")]
-  assert props_of(el("li", [("id", "a")], class: "")) == [("id", "a")]
+  assert props_of(el("li", [("id", "a")], class = "")) == [("id", "a")]
   assert props_of(el("li")) == []
   assert props_of(div()) == []
   assert props_of(span("hi")) == []
   # Nothing deduplicates: two classes asked for are two props delivered, the
   # sugar's first.
-  assert props_of(el("li", [("class", "b")], class: "a")) == [("class", "a"), ("class", "b")]
+  assert props_of(el("li", [("class", "b")], class = "a")) == [("class", "a"), ("class", "b")]
   # The helpers read the same rule from the same place.
-  assert props_of(div(class: "row")) == [("class", "row")]
-  assert props_of(span("hi", class: "title")) == [("class", "title")]
-  assert props_of(button("go", Ping, class: "add")) == [("class", "add")]
-  assert props_of(keyed("ul", class: "list")) == [("class", "list")]
-  assert props_of(keyed("ul", [("id", "a")], class: "list")) == [("class", "list"), ("id", "a")]
-  assert props_of(foreign("x-editor", [("doc", "v1")], class: "pane")) == [
+  assert props_of(div(class = "row")) == [("class", "row")]
+  assert props_of(span("hi", class = "title")) == [("class", "title")]
+  assert props_of(button("go", Ping, class = "add")) == [("class", "add")]
+  assert props_of(keyed("ul", class = "list")) == [("class", "list")]
+  assert props_of(keyed("ul", [("id", "a")], class = "list")) == [("class", "list"), ("id", "a")]
+  assert props_of(foreign("x-editor", [("doc", "v1")], class = "pane")) == [
     ("class", "pane"),
     ("doc", "v1"),
   ]
@@ -288,20 +288,20 @@ fn props_of(n: Node[ProbeMsg]) -> List[(String, String)] =
 ## `input` is `el("input", ..)` with the two props a controlled field always
 ## has and the children it cannot have.
 test "input is a controlled field with no children" {
-  let heard: On[ProbeMsg] = On { event: "input", payload: Value, to_msg: Said }
-  assert input(class: "field", value: "buy milk", on: [heard]) == Elem(
-    tag: "input",
-    props: [("class", "field"), ("value", "buy milk")],
-    on: [heard],
-    kids: [],
-    key: None,
+  let heard: On[ProbeMsg] = On { event = "input", payload = Value, to_msg = Said }
+  assert input(class = "field", value = "buy milk", on = [heard]) == Elem(
+    tag = "input",
+    props = [("class", "field"), ("value", "buy milk")],
+    on = [heard],
+    kids = [],
+    key = None,
   )
   # The `value` prop is there when the model's text is empty, which is the
   # half that makes clearing the model clear the box.
-  assert props_of(input(class: "field")) == [("class", "field"), ("value", "")]
+  assert props_of(input(class = "field")) == [("class", "field"), ("value", "")]
   assert props_of(input()) == [("value", "")]
   # And there is nowhere to put a child.
-  let filled: Node[ProbeMsg] = input(value: "x")
+  let filled: Node[ProbeMsg] = input(value = "x")
   assert list.is_empty(kids(filled))
 }
 
@@ -310,16 +310,16 @@ test "the three listener spellings differ in the payload and nothing else" {
   # What the other two buy is that the reading is a value in the tree, so
   # `relate` sees a change to it (`node.dawn`) and the wire encodes it
   # (`wire.dawn`) without either of them being told about this file.
-  assert on_click(Ping) == On { event: "click", payload: NoData, to_msg: _p => Ping }
-  assert on_value("input", Said) == On { event: "input", payload: Value, to_msg: Said }
-  assert on_key("keydown", Said) == On { event: "keydown", payload: Key, to_msg: Said }
+  assert on_click(Ping) == On { event = "click", payload = NoData, to_msg = _p => Ping }
+  assert on_value("input", Said) == On { event = "input", payload = Value, to_msg = Said }
+  assert on_key("keydown", Said) == On { event = "keydown", payload = Key, to_msg = Said }
   # Same event, same message function, three different listeners.
   assert on_value("keydown", Said) != on_key("keydown", Said)
-  assert on_value("input", Said) != On { event: "input", payload: NoData, to_msg: Said }
+  assert on_value("input", Said) != On { event = "input", payload = NoData, to_msg = Said }
   # And the message is the function's answer, which is the half `==` on the
   # tree deliberately cannot see.
-  assert deliver(on_value("input", Said), "typed") == Said(what: "typed")
-  assert deliver(on_key("keydown", Said), "Enter") == Said(what: "Enter")
+  assert deliver(on_value("input", Said), "typed") == Said(what = "typed")
+  assert deliver(on_key("keydown", Said), "Enter") == Said(what = "Enter")
   # A `NoData` listener is handed the empty string and ignores it.
   assert deliver(on_click(Ping), "") == Ping
 }
@@ -333,11 +333,11 @@ test "foreign is el with the kids argument gone, not a new node kind" {
   # constructor's, so neither the wire nor the bridge can treat the tag
   # specially. The seven ops stay seven.
   let plain: Node[ProbeMsg] = Elem(
-    tag: "code-editor",
-    props: [("doc", "v1")],
-    on: [on_value("change", Said)],
-    kids: [],
-    key: None,
+    tag = "code-editor",
+    props = [("doc", "v1")],
+    on = [on_value("change", Said)],
+    kids = [],
+    key = None,
   )
   assert render(enc_node(w)) == render(enc_node(plain))
 }
@@ -345,14 +345,14 @@ test "foreign is el with the kids argument gone, not a new node kind" {
 test "keyed hands each child the string that names it" {
   let rows: Node[ProbeMsg] = keyed("ul", [], [], [("a", span("A")), ("b", span("B"))])
   let want: Node[ProbeMsg] = Elem(
-    tag: "ul",
-    props: [],
-    on: [],
-    kids: [with_key(span("A"), "a"), with_key(span("B"), "b")],
-    key: None,
+    tag = "ul",
+    props = [],
+    on = [],
+    kids = [with_key(span("A"), "a"), with_key(span("B"), "b")],
+    key = None,
   )
   assert rows == want
-  let named: Node[ProbeMsg] = keyed("ul", kids: [("a", span("A")), ("b", span("B"))])
+  let named: Node[ProbeMsg] = keyed("ul", kids = [("a", span("A")), ("b", span("B"))])
   assert named == want
   # The element itself is unkeyed. A key names a node among its siblings, and
   # a keyed container is keyed by whatever list it is a member of, not by the
@@ -362,9 +362,9 @@ test "keyed hands each child the string that names it" {
   # this is called. The pair is accepted and the key is dropped, which is the
   # honest outcome: there is nowhere to put it.
   let mixed: Node[ProbeMsg] = keyed("p", [], [], [("t", text("hi"))])
-  assert mixed == Elem(tag: "p", props: [], on: [], kids: [Text(s: "hi")], key: None)
+  assert mixed == Elem(tag = "p", props = [], on = [], kids = [Text(s = "hi")], key = None)
   # A keyed container with no children is a container, not an error.
-  let empty: Node[ProbeMsg] = keyed("ul", class: "list")
+  let empty: Node[ProbeMsg] = keyed("ul", class = "list")
   let no_kids: List[Node[ProbeMsg]] = []
-  assert empty == Elem(tag: "ul", props: [("class", "list")], on: [], kids: no_kids, key: None)
+  assert empty == Elem(tag = "ul", props = [("class", "list")], on = [], kids = no_kids, key = None)
 }

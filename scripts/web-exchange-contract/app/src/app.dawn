@@ -58,7 +58,7 @@ fn granted(req: Request) -> Result[Response, HttpError] !io =
 
 fn need_token(req: Request) -> Result[Unit, HttpError] !io =
   if header(req, "x-token") != Some("ok") {
-    Err(HttpError { ..http_error(401, "unauthorized"), headers: [("WWW-Authenticate", "Token")] })
+    Err(HttpError { ..http_error(401, "unauthorized"), headers= [("WWW-Authenticate", "Token")] })
   } else {
     Ok(())
   }
@@ -109,11 +109,11 @@ fn trace(event: String) -> Unit !io = with_env_real(() => {
 # Cap each read below the requested size: the next offset must count the
 # actual bytes returned, even across the binary segment and the short tail.
 fn observed(base: BodySource) -> BodySource = BodySource {
-  read: (pos, n) => {
+  read= (pos, n) => {
     trace("read ${pos}")
     base.read(pos, if n < 6 { n } else { 6 })
   },
-  close: () => { base.close()
+  close= () => { base.close()
     trace("close") },
 }
 
@@ -130,8 +130,8 @@ fn stream_file(_req: Request) -> Result[Response, HttpError] !io = with_fs_real(
   }
   let base = file_source(path)
   let owned = BodySource {
-    read: base.read,
-    close: () => { base.close()
+    read= base.read,
+    close= () => { base.close()
       let _ = with_fs_real(() => delete(path))
       () },
   }
@@ -139,7 +139,7 @@ fn stream_file(_req: Request) -> Result[Response, HttpError] !io = with_fs_real(
 })
 
 fn stream_failure(_req: Request) -> Result[Response, HttpError] !io =
-  Ok(streaming(200, "application/octet-stream", observed(file_source("/nonexistent/web-read-pos-source")), length: Some(STREAM_LEN)))
+  Ok(streaming(200, "application/octet-stream", observed(file_source("/nonexistent/web-read-pos-source")), length= Some(STREAM_LEN)))
 
 # Transfer ownership by renaming the spill: request cleanup runs when the
 # handler returns, before the response is pumped. The response source owns
@@ -155,14 +155,14 @@ fn spill_back(req: Request) -> Result[Response, HttpError] !io = match req.body_
       }
       let base = file_source(owned_path)
       let owned = BodySource {
-        read: base.read,
-        close: () => {
+        read= base.read,
+        close= () => {
           base.close()
           let _ = with_fs_real(() => delete(owned_path))
           ()
         },
       }
-      Ok(streaming(200, "application/octet-stream", owned, length: Some(n)))
+      Ok(streaming(200, "application/octet-stream", owned, length= Some(n)))
     }
     Err(e) -> panic(e.message)
   })
@@ -172,16 +172,16 @@ fn stream_chunked(_req: Request) -> Result[Response, HttpError] !io =
   Ok(streaming(200, "application/octet-stream", make_source()))
 
 fn stream_sized(_req: Request) -> Result[Response, HttpError] !io =
-  Ok(streaming(200, "application/octet-stream", make_source(), length: Some(STREAM_LEN)))
+  Ok(streaming(200, "application/octet-stream", make_source(), length= Some(STREAM_LEN)))
 
 fn stream_short(_req: Request) -> Result[Response, HttpError] !io =
-  Ok(streaming(200, "application/octet-stream", make_source(), length: Some(STREAM_LEN + 7)))
+  Ok(streaming(200, "application/octet-stream", make_source(), length= Some(STREAM_LEN + 7)))
 
 fn stream_long(_req: Request) -> Result[Response, HttpError] !io =
-  Ok(streaming(200, "application/octet-stream", make_source(), length: Some(STREAM_LEN - 4)))
+  Ok(streaming(200, "application/octet-stream", make_source(), length= Some(STREAM_LEN - 4)))
 
 fn stream_no_content(_req: Request) -> Result[Response, HttpError] !io =
-  Ok(streaming(204, "application/octet-stream", make_source(), length: Some(STREAM_LEN)))
+  Ok(streaming(204, "application/octet-stream", make_source(), length= Some(STREAM_LEN)))
 
 ## The route table both servers serve.
 pub fn routes() -> List[Route] = [
@@ -215,7 +215,7 @@ fn stamping(next: Handler) -> Handler =
   req =>
   match next(req) {
     Ok(r) -> Ok(with_header(r, "X-Stamped", "1"))
-    Err(e) -> Err(HttpError { ..e, headers: e.headers ++ [("X-Stamped", "1")] })
+    Err(e) -> Err(HttpError { ..e, headers= e.headers ++ [("X-Stamped", "1")] })
   }
 
 ## The middleware both servers run, outermost first.

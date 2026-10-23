@@ -124,9 +124,9 @@ pub(pkg) fn new(std: StdCtx, opts: CtOpts, js: Jsig, max_modules: Int) -> Sessio
   if max_modules < 0 { panic("negative analysis cache limit") }
   let none: Map[String, Entry] = map.empty()
   State {
-    std: std, opts: opts, js: js, memo: none,
-    max_modules: max_modules,
-    baseline: initial_carry(std)
+    std = std, opts = opts, js = js, memo = none,
+    max_modules = max_modules,
+    baseline = initial_carry(std)
   }
 }
 
@@ -134,7 +134,7 @@ pub(pkg) fn new(std: StdCtx, opts: CtOpts, js: Jsig, max_modules: Int) -> Sessio
 pub fn evict(owner: Session) -> Session = {
   let session: State = owner
   let none: Map[String, Entry] = map.empty()
-  State { ..session, memo: none }
+  State { ..session, memo = none }
 }
 
 ## A permanent cold switch for this owner; reconstruct an owner to re-enable.
@@ -142,14 +142,14 @@ pub fn evict(owner: Session) -> Session = {
 pub fn disable_reuse(owner: Session) -> Session = {
   let session: State = owner
   let none: Map[String, Entry] = map.empty()
-  State { ..session, memo: none, max_modules: 0 }
+  State { ..session, memo = none, max_modules = 0 }
 }
 
 ## The whole loaded module, except that its line starts are taken as equal:
 ## they are a function of the text, which is compared, and a list compares
 ## element by element, so comparing them again cost every reused module a
 ## walk over its lines.
-fn same_input(a: LoadedModule, b: LoadedModule) -> Bool = LoadedModule { ..a, line_starts: b.line_starts } == b
+fn same_input(a: LoadedModule, b: LoadedModule) -> Bool = LoadedModule { ..a, line_starts = b.line_starts } == b
 
 ## A module's export surface: equal, and every table in the same order.
 ## `==` on a map ignores the order entries were inserted in, and an importer
@@ -212,7 +212,7 @@ fn reads_of(m: Module, exports: Map[String, ModExports], seen: Set[String]) -> (
       }
       None -> None
     }
-    reads = reads ++ [Read { path: u.path, found: found, names: names }]
+    reads = reads ++ [Read { path = u.path, found = found, names = names }]
   }
   (reads, if lists_std { Some(std_names_of(exports)) } else { None })
 }
@@ -366,7 +366,7 @@ fn current_selective(cx: Cx, e: Entry, carry: AnalysisCarry, fresh: Set[String])
       }
     }
   }
-  if changed { Cx { ..cx, selective_exports: stored } } else { cx }
+  if changed { Cx { ..cx, selective_exports = stored } } else { cx }
 }
 
 ## A reused step's contribution to the carry, as the cold path would leave it.
@@ -392,7 +392,7 @@ fn kept(
   if not reads_hold(e, carry.exports, seen, fresh, named_base) { return None }
   if not comptime_reads_hold(e, seen, rechecked, baseline) { return None }
   if not (impls_is == Some(e.pred) || same_rows(carry.impls, e.impls_in)) { return None }
-  if ids_is == Some(e.pred) { return Some(Kept { identities: e.step.after.identities, minted: e.minted }) }
+  if ids_is == Some(e.pred) { return Some(Kept { identities = e.step.after.identities, minted = e.minted }) }
   if len(e.step.diags) > 0 { return None }
   let rows = minted_by(e)
   var ids = carry.identities
@@ -403,7 +403,7 @@ fn kept(
       None -> { ids = map.insert(ids, k, v) }
     }
   }
-  Some(Kept { identities: ids, minted: Some(rows) })
+  Some(Kept { identities = ids, minted = Some(rows) })
 }
 
 pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io = {
@@ -481,19 +481,19 @@ pub(pkg) fn analyze_placing[S](
         let path = e.step.checked.mod_path
         let own = map.get(e.step.after.exports, path).expect("the step's own export surface")
         carry = AnalysisCarry { ..carry,
-          exports: map.insert(carry.exports, path, own),
-          impls: e.step.after.impls,
-          identities: k.identities,
-          ct_world: world_after(carry.ct_world, e.step.checked, e.step.comptime_runs == 1,
+          exports = map.insert(carry.exports, path, own),
+          impls = e.step.after.impls,
+          identities = k.identities,
+          ct_world = world_after(carry.ct_world, e.step.checked, e.step.comptime_runs == 1,
             identity != None) }
         # the cold step's context ends on the table the carry now holds
         let cx: Cx = e.step.checked.cx
-        let ids_cx = if ids_is == Some(e.pred) { cx } else { Cx { ..cx, identities: k.identities } }
-        let checked_mod = CheckedMod { ..e.step.checked, cx: current_selective(ids_cx, e, carry, fresh) }
+        let ids_cx = if ids_is == Some(e.pred) { cx } else { Cx { ..cx, identities = k.identities } }
+        let checked_mod = CheckedMod { ..e.step.checked, cx = current_selective(ids_cx, e, carry, fresh) }
         ids_is = if ids_is == Some(e.pred) { Some(Some(raw.mod_path)) } else { None }
         impls_is = Some(Some(raw.mod_path))
-        Entry { ..e, pred: pred, impls_in: impls_in, ids_in: ids_in, minted: k.minted,
-          step: ModuleStep { ..e.step, checked: checked_mod } }
+        Entry { ..e, pred = pred, impls_in = impls_in, ids_in = ids_in, minted = k.minted,
+          step = ModuleStep { ..e.step, checked = checked_mod } }
       }
       None -> {
         let (reads, std_names) = reads_of(raw.m, carry.exports, seen)
@@ -547,13 +547,13 @@ pub(pkg) fn analyze_placing[S](
         impls_is = next_impls
         ids_is = next_ids
         carry = AnalysisCarry { ..carry,
-          exports: map.insert(carry.exports, path, own),
-          impls: impls,
-          identities: ids,
-          ct_world: computed.after.ct_world }
+          exports = map.insert(carry.exports, path, own),
+          impls = impls,
+          identities = ids,
+          ct_world = computed.after.ct_world }
         Entry {
-          raw: raw, std_identity: identity, pred: pred, reads: reads, std_names: std_names,
-          impls_in: impls_in, ids_in: ids_in, minted: None, step: computed
+          raw = raw, std_identity = identity, pred = pred, reads = reads, std_names = std_names,
+          impls_in = impls_in, ids_in = ids_in, minted = None, step = computed
         }
       }
     }
@@ -564,8 +564,8 @@ pub(pkg) fn analyze_placing[S](
     # is its step's, which is current, because its text is.
     let own_spans = map.get(step.after.decl_spans, step.checked.mod_path)
       .expect("the step's own declaration spans")
-    carry = AnalysisCarry { ..carry, decl_spans: map.insert(carry.decl_spans, step.checked.mod_path, own_spans) }
-    entry = Entry { ..entry, step: ModuleStep { ..step, after: carry } }
+    carry = AnalysisCarry { ..carry, decl_spans = map.insert(carry.decl_spans, step.checked.mod_path, own_spans) }
+    entry = Entry { ..entry, step = ModuleStep { ..step, after = carry } }
     seen = set.insert(seen, step.checked.mod_path)
     diags = diags ++ step.diags
     modules = modules ++ [entry.step.checked]
@@ -575,19 +575,19 @@ pub(pkg) fn analyze_placing[S](
     }
     pred = Some(raw.mod_path)
     if set.has(watch, raw.mod_path) {
-      told = placed(told, raw.mod_path, Program { modules: modules, diags: loaded.diags ++ step.diags,
-        decl_spans: carry.decl_spans, ct_world: carry.ct_world })
+      told = placed(told, raw.mod_path, Program { modules = modules, diags = loaded.diags ++ step.diags,
+        decl_spans = carry.decl_spans, ct_world = carry.ct_world })
     }
   }
   let update = Update {
-    session: State { ..session, memo: memo },
-    program: Program { modules: modules, diags: diags, decl_spans: carry.decl_spans,
-      ct_world: carry.ct_world },
-    stats: Stats {
-      reused_modules: reused, checked_modules: checked, comptime_modules: ct_runs,
-      retained_modules: retained
+    session = State { ..session, memo = memo },
+    program = Program { modules = modules, diags = diags, decl_spans = carry.decl_spans,
+      ct_world = carry.ct_world },
+    stats = Stats {
+      reused_modules = reused, checked_modules = checked, comptime_modules = ct_runs,
+      retained_modules = retained
     },
-    reused: reused_paths
+    reused = reused_paths
   }
   (update, told)
 }

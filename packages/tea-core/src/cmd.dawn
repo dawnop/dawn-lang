@@ -98,7 +98,7 @@ pub fn fetches[M](c: Cmd[M]) -> List[FetchReq] =
   match c {
     NoCmd -> []
     SendMsg(_) -> []
-    Fetch(url, tag) -> [FetchReq { url: url, tag: tag }]
+    Fetch(url, tag) -> [FetchReq { url = url, tag = tag }]
     BatchCmd(cs) -> {
       let empty: List[FetchReq] = []
       list.fold(cs, empty, (acc, inner) => acc ++ fetches(inner))
@@ -208,18 +208,18 @@ derive Show
 
 fn probe_step(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
   match msg {
-    Bump -> (Probe { ..m, n: m.n + 1 }, NoCmd)
-    Twice -> (m, SendMsg(msg: Bump))
-    Both -> (m, BatchCmd(cmds: [SendMsg(msg: Note(mark: "a")), SendMsg(msg: Note(mark: "b"))]))
-    Note(mark) -> (Probe { ..m, log: m.log ++ mark }, NoCmd)
+    Bump -> (Probe { ..m, n = m.n + 1 }, NoCmd)
+    Twice -> (m, SendMsg(msg = Bump))
+    Both -> (m, BatchCmd(cmds = [SendMsg(msg = Note(mark = "a")), SendMsg(msg = Note(mark = "b"))]))
+    Note(mark) -> (Probe { ..m, log = m.log ++ mark }, NoCmd)
     # A message that re-issues itself: the one shape the limit exists for.
-    Spin -> (Probe { ..m, n: m.n + 1 }, SendMsg(msg: Spin))
+    Spin -> (Probe { ..m, n = m.n + 1 }, SendMsg(msg = Spin))
   }
 
-fn blank() -> Probe = Probe { n: 0, log: "" }
+fn blank() -> Probe = Probe { n = 0, log = "" }
 
 test "a command-free turn is one update and nothing else" {
-  assert fold_msg(blank(), Bump, probe_step) == Probe { n: 1, log: "" }
+  assert fold_msg(blank(), Bump, probe_step) == Probe { n = 1, log = "" }
   let none: Cmd[ProbeMsg] = NoCmd
   assert msgs(none) == []
 }
@@ -227,26 +227,26 @@ test "a command-free turn is one update and nothing else" {
 test "`SendMsg` is one more update in the same turn" {
   # `Twice` changes no field itself, so a model that moved is the fold moving
   # it: the commanded `Bump` ran and its result is what the turn answers.
-  assert fold_msg(blank(), Twice, probe_step) == Probe { n: 1, log: "" }
+  assert fold_msg(blank(), Twice, probe_step) == Probe { n = 1, log = "" }
 }
 
 test "a batch runs in the order it was written" {
-  assert fold_msg(blank(), Both, probe_step) == Probe { n: 0, log: "ab" }
-  assert msgs(BatchCmd(cmds: [SendMsg(msg: Note(mark: "a")), SendMsg(msg: Note(mark: "b"))]))
-    == [Note(mark: "a"), Note(mark: "b")]
+  assert fold_msg(blank(), Both, probe_step) == Probe { n = 0, log = "ab" }
+  assert msgs(BatchCmd(cmds = [SendMsg(msg = Note(mark = "a")), SendMsg(msg = Note(mark = "b"))]))
+    == [Note(mark = "a"), Note(mark = "b")]
 }
 
 test "nested batches flatten left to right, and `NoCmd` is the identity" {
-  let inner: Cmd[ProbeMsg] = BatchCmd(cmds: [SendMsg(msg: Bump), NoCmd])
-  let outer: Cmd[ProbeMsg] = BatchCmd(cmds: [NoCmd, inner, SendMsg(msg: Note(mark: "z"))])
-  assert msgs(outer) == [Bump, Note(mark: "z")]
-  let empty: Cmd[ProbeMsg] = BatchCmd(cmds: [])
+  let inner: Cmd[ProbeMsg] = BatchCmd(cmds = [SendMsg(msg = Bump), NoCmd])
+  let outer: Cmd[ProbeMsg] = BatchCmd(cmds = [NoCmd, inner, SendMsg(msg = Note(mark = "z"))])
+  assert msgs(outer) == [Bump, Note(mark = "z")]
+  let empty: Cmd[ProbeMsg] = BatchCmd(cmds = [])
   assert msgs(empty) == []
 }
 
 test "messages that arrive together are folded in order, uncounted" {
-  assert fold_msgs(blank(), [Note(mark: "x"), Bump, Note(mark: "y")], probe_step)
-    == Probe { n: 1, log: "xy" }
+  assert fold_msgs(blank(), [Note(mark = "x"), Bump, Note(mark = "y")], probe_step)
+    == Probe { n = 1, log = "xy" }
   let nothing: List[ProbeMsg] = []
   assert fold_msgs(blank(), nothing, probe_step) == blank()
 }
@@ -256,7 +256,7 @@ test "a chain shorter than the limit runs to its end and the model is the last o
   # allowed, so the counter reaches one more than that (the uncommanded first
   # `Spin` is not counted) and nothing panics.
   let m = fold_msg(blank(), Spin, spin_capped)
-  assert m == Probe { n: CMD_FOLD_LIMIT + 1, log: "" }
+  assert m == Probe { n = CMD_FOLD_LIMIT + 1, log = "" }
 }
 
 # `Spin` stopped at the limit: the same runaway shape, cut off one message
@@ -265,9 +265,9 @@ fn spin_capped(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
   match msg {
     Spin ->
       if m.n >= CMD_FOLD_LIMIT {
-        (Probe { ..m, n: m.n + 1 }, NoCmd)
+        (Probe { ..m, n = m.n + 1 }, NoCmd)
       } else {
-        (Probe { ..m, n: m.n + 1 }, SendMsg(msg: Spin))
+        (Probe { ..m, n = m.n + 1 }, SendMsg(msg = Spin))
       }
     _ -> probe_step(m, msg)
   }
@@ -296,7 +296,7 @@ test "the limit counts every commanded message, batch fan-out included" {
   }
   # And one message under the limit is allowed, which is what says the
   # comparison is on the count and not on the shape.
-  assert fold_msg(blank(), Bump, fan_out_ok) == Probe { n: 1, log: "" }
+  assert fold_msg(blank(), Bump, fan_out_ok) == Probe { n = 1, log = "" }
 }
 
 fn notes(n: Int) -> List[Cmd[ProbeMsg]] = {
@@ -305,20 +305,20 @@ fn notes(n: Int) -> List[Cmd[ProbeMsg]] = {
 }
 
 fn notes_go(i: Int, n: Int, acc: List[Cmd[ProbeMsg]]) -> List[Cmd[ProbeMsg]] =
-  if i >= n { acc } else { notes_go(i + 1, n, acc ++ [SendMsg(msg: Note(mark: ""))]) }
+  if i >= n { acc } else { notes_go(i + 1, n, acc ++ [SendMsg(msg = Note(mark = ""))]) }
 
 # Both fan out on the first message only: what is under test is the count one
 # command contributes, and a step that fanned out on every message would be a
 # runaway rather than a wide batch.
 fn fan_out(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
   match msg {
-    Bump -> (m, BatchCmd(cmds: notes(CMD_FOLD_LIMIT + 1)))
+    Bump -> (m, BatchCmd(cmds = notes(CMD_FOLD_LIMIT + 1)))
     _ -> probe_step(m, msg)
   }
 
 fn fan_out_ok(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
   match msg {
-    Bump -> (Probe { ..m, n: m.n + 1 }, BatchCmd(cmds: notes(CMD_FOLD_LIMIT)))
+    Bump -> (Probe { ..m, n = m.n + 1 }, BatchCmd(cmds = notes(CMD_FOLD_LIMIT)))
     _ -> probe_step(m, msg)
   }
 
@@ -330,23 +330,23 @@ fn fan_out_ok(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
 
 fn fetch_step(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
   match msg {
-    Bump -> (Probe { ..m, n: m.n + 1 }, Fetch(url: "/a.json", tag: "a"))
-    Both -> (m, BatchCmd(cmds: [
-      Fetch(url: "/b.json", tag: "b"),
-      SendMsg(msg: Bump),
-      BatchCmd(cmds: [Fetch(url: "/c.json", tag: "c"), NoCmd]),
+    Bump -> (Probe { ..m, n = m.n + 1 }, Fetch(url = "/a.json", tag = "a"))
+    Both -> (m, BatchCmd(cmds = [
+      Fetch(url = "/b.json", tag = "b"),
+      SendMsg(msg = Bump),
+      BatchCmd(cmds = [Fetch(url = "/c.json", tag = "c"), NoCmd]),
     ]))
     _ -> probe_step(m, msg)
   }
 
 test "a fetch is not a message, and fetches flatten left to right" {
-  let c: Cmd[ProbeMsg] = BatchCmd(cmds: [
-    Fetch(url: "/x", tag: "1"),
-    SendMsg(msg: Bump),
-    BatchCmd(cmds: [Fetch(url: "/y", tag: "2")]),
+  let c: Cmd[ProbeMsg] = BatchCmd(cmds = [
+    Fetch(url = "/x", tag = "1"),
+    SendMsg(msg = Bump),
+    BatchCmd(cmds = [Fetch(url = "/y", tag = "2")]),
   ])
   assert msgs(c) == [Bump]
-  assert fetches(c) == [FetchReq { url: "/x", tag: "1" }, FetchReq { url: "/y", tag: "2" }]
+  assert fetches(c) == [FetchReq { url = "/x", tag = "1" }, FetchReq { url = "/y", tag = "2" }]
   let none: Cmd[ProbeMsg] = NoCmd
   assert fetches(none) == []
 }
@@ -354,18 +354,18 @@ test "a fetch is not a message, and fetches flatten left to right" {
 test "fold_cmds answers the model and the requests, and runs nothing for them" {
   let (m, asked) = fold_cmds(blank(), Bump, fetch_step)
   # `Bump` moved the model once itself; the fetch it commanded added nothing.
-  assert m == Probe { n: 1, log: "" }
-  assert asked == [FetchReq { url: "/a.json", tag: "a" }]
+  assert m == Probe { n = 1, log = "" }
+  assert asked == [FetchReq { url = "/a.json", tag = "a" }]
 }
 
 test "fetches commanded through a batch keep their order next to messages" {
   let (m, asked) = fold_cmds(blank(), Both, fetch_step)
   # the batch's `SendMsg(Bump)` ran (and itself asked for /a.json, after /b and /c)
-  assert m == Probe { n: 1, log: "" }
+  assert m == Probe { n = 1, log = "" }
   assert asked == [
-    FetchReq { url: "/b.json", tag: "b" },
-    FetchReq { url: "/c.json", tag: "c" },
-    FetchReq { url: "/a.json", tag: "a" },
+    FetchReq { url = "/b.json", tag = "b" },
+    FetchReq { url = "/c.json", tag = "c" },
+    FetchReq { url = "/a.json", tag = "a" },
   ]
 }
 
@@ -377,7 +377,7 @@ test "a driver with no host refuses a fetch rather than dropping it" {
     }
   }
   # and the positive control: a fetch-free turn is untouched
-  assert fold_msg(blank(), Note(mark: "k"), fetch_step) == Probe { n: 0, log: "k" }
+  assert fold_msg(blank(), Note(mark = "k"), fetch_step) == Probe { n = 0, log = "k" }
 }
 
 test "fetches count against the turn's limit like messages" {
@@ -392,7 +392,7 @@ test "fetches count against the turn's limit like messages" {
 
 fn fetch_fan_out(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
   match msg {
-    Bump -> (m, BatchCmd(cmds: many_fetches(0, CMD_FOLD_LIMIT + 1, empty_cmds())))
+    Bump -> (m, BatchCmd(cmds = many_fetches(0, CMD_FOLD_LIMIT + 1, empty_cmds())))
     _ -> probe_step(m, msg)
   }
 
@@ -402,6 +402,6 @@ fn many_fetches(i: Int, n: Int, acc: List[Cmd[ProbeMsg]]) -> List[Cmd[ProbeMsg]]
   if i >= n {
     acc
   } else {
-    let one: Cmd[ProbeMsg] = Fetch(url: "/z", tag: "z")
+    let one: Cmd[ProbeMsg] = Fetch(url = "/z", tag = "z")
     many_fetches(i + 1, n, acc ++ [one])
   }

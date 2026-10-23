@@ -28,7 +28,7 @@ fn union(a: Set[Int], b: Set[Int]) -> Set[Int] = {
 }
 
 fn result(e: CExpr, next: Int) -> Prepared =
-  Prepared { expr: e, jumps: set.empty(), next: next }
+  Prepared { expr = e, jumps = set.empty(), next = next }
 
 ## Core deliberately gives CBox no source type (cex_ty returns TyError).
 ## Its JVM result is nevertheless a real erased reference, not bottom.
@@ -64,7 +64,7 @@ fn many(es: List[CExpr], next: Int) -> (List[CExpr], Set[Int], Int) = {
 fn eager(es: List[CExpr], next: Int, ty: Ty, build: fn(List[CExpr]) -> CExpr) -> Prepared = {
   let (args, jumps, n0) = many(es, next)
   if set.is_empty(jumps) {
-    return Prepared { expr: build(args), jumps: jumps, next: n0 }
+    return Prepared { expr = build(args), jumps = jumps, next = n0 }
   }
   var n = n0
   var lets: List[CStmt] = []
@@ -72,13 +72,13 @@ fn eager(es: List[CExpr], next: Int, ty: Ty, build: fn(List[CExpr]) -> CExpr) ->
   for a in args {
     let t = value_ty(a)
     if no_value(a) {
-      return Prepared { expr: CBlock(lets, Some(a), ty), jumps: jumps, next: n }
+      return Prepared { expr = CBlock(lets, Some(a), ty), jumps = jumps, next = n }
     }
     lets = lets ++ [CSLet(n, t, a)]
     vals = vals ++ [CLocal(n, t)]
     n = n + 1
   }
-  Prepared { expr: CBlock(lets, Some(build(vals)), ty), jumps: jumps, next: n }
+  Prepared { expr = CBlock(lets, Some(build(vals)), ty), jumps = jumps, next = n }
 }
 
 fn optional(e: Option[CExpr], next: Int) -> (Option[CExpr], Set[Int], Int) =
@@ -135,7 +135,7 @@ fn foreign(j: CJava, next: Int) -> (CJava, Set[Int], Int) = {
   # Keep Java adaptation (including bridge allocation and evidence snapshots)
   # at its original position relative to later argument effects. The emitter
   # spills AFTER each conversion, in the Java representation.
-  (CJava { ..j, target: target, args: args, sam_evs: evs }, jumps, n)
+  (CJava { ..j, target = target, args = args, sam_evs = evs }, jumps, n)
 }
 
 fn visit(e: CExpr, next: Int) -> Prepared =
@@ -144,10 +144,10 @@ fn visit(e: CExpr, next: Int) -> Prepared =
       CFnRef(_, _, _) | CDictRef(_, _, _, _) | CConstRef(_, _, _) | CComptime(_, _, _) ->
       result(e, next)
     CBreak(id) | CContinue(id) ->
-      Prepared { expr: e, jumps: set.insert(set.empty(), id), next: next }
+      Prepared { expr = e, jumps = set.insert(set.empty(), id), next = next }
     CReturn(v) -> {
       let (v2, jumps, n) = optional(v, next)
-      Prepared { expr: CReturn(v2), jumps: jumps, next: n }
+      Prepared { expr = CReturn(v2), jumps = jumps, next = n }
     }
     CBlock(stmts, tail, ty) -> {
       var out: List[CStmt] = []
@@ -160,20 +160,20 @@ fn visit(e: CExpr, next: Int) -> Prepared =
         n = n2
       }
       let (t2, tj, n2) = optional(tail, n)
-      Prepared { expr: CBlock(out, t2, ty), jumps: union(jumps, tj), next: n2 }
+      Prepared { expr = CBlock(out, t2, ty), jumps = union(jumps, tj), next = n2 }
     }
     CIf(c, t, f, ty) -> {
       let cp = visit(c, next)
       let tp = visit(t, cp.next)
       let (f2, fj, n) = optional(f, tp.next)
-      Prepared { expr: CIf(cp.expr, tp.expr, f2, ty),
-        jumps: union(union(cp.jumps, tp.jumps), fj), next: n }
+      Prepared { expr = CIf(cp.expr, tp.expr, f2, ty),
+        jumps = union(union(cp.jumps, tp.jumps), fj), next = n }
     }
     CBinary(op, l, r, ty) ->
       if op == CAnd || op == COr {
         let lp = visit(l, next)
         let rp = visit(r, lp.next)
-        Prepared { ..rp, expr: CBinary(op, lp.expr, rp.expr, ty), jumps: union(lp.jumps, rp.jumps) }
+        Prepared { ..rp, expr = CBinary(op, lp.expr, rp.expr, ty), jumps = union(lp.jumps, rp.jumps) }
       } else {
         eager([l, r], next, ty, xs => CBinary(op, xs[0], xs[1], ty))
       }
@@ -207,39 +207,39 @@ fn visit(e: CExpr, next: Int) -> Prepared =
     CListLit(args, ty) -> eager(args, next, ty, xs => CListLit(xs, ty))
     CUnary(op, v, ty) -> {
       let p = visit(v, next)
-      Prepared { ..p, expr: CUnary(op, p.expr, ty) }
+      Prepared { ..p, expr = CUnary(op, p.expr, ty) }
     }
     CBox(v, ty) -> {
       let p = visit(v, next)
-      Prepared { ..p, expr: CBox(p.expr, ty) }
+      Prepared { ..p, expr = CBox(p.expr, ty) }
     }
     CUnbox(v, ty) -> {
       let p = visit(v, next)
-      Prepared { ..p, expr: CUnbox(p.expr, ty) }
+      Prepared { ..p, expr = CUnbox(p.expr, ty) }
     }
     CField(v, aid, ci, idx, ty) -> {
       let p = visit(v, next)
-      Prepared { ..p, expr: CField(p.expr, aid, ci, idx, ty) }
+      Prepared { ..p, expr = CField(p.expr, aid, ci, idx, ty) }
     }
     CIsCtor(v, aid, ci) -> {
       let p = visit(v, next)
-      Prepared { ..p, expr: CIsCtor(p.expr, aid, ci) }
+      Prepared { ..p, expr = CIsCtor(p.expr, aid, ci) }
     }
     CTagOf(v, aid) -> {
       let p = visit(v, next)
-      Prepared { ..p, expr: CTagOf(p.expr, aid) }
+      Prepared { ..p, expr = CTagOf(p.expr, aid) }
     }
     CTupleGet(v, idx, ty) -> {
       let p = visit(v, next)
-      Prepared { ..p, expr: CTupleGet(p.expr, idx, ty) }
+      Prepared { ..p, expr = CTupleGet(p.expr, idx, ty) }
     }
     CDictArg(v, owner, key, idx, ty) -> {
       let p = visit(v, next)
-      Prepared { ..p, expr: CDictArg(p.expr, owner, key, idx, ty) }
+      Prepared { ..p, expr = CDictArg(p.expr, owner, key, idx, ty) }
     }
     CDup(v, ty) -> {
       let p = visit(v, next)
-      Prepared { ..p, expr: CDup(p.expr, ty) }
+      Prepared { ..p, expr = CDup(p.expr, ty) }
     }
     CSteal(_, _) -> panic("operand: CSteal is C-only and reached the JVM backend")
     CReset(_, _, _) -> panic("operand: CReset is C-only and reached the JVM backend")
@@ -247,7 +247,7 @@ fn visit(e: CExpr, next: Int) -> Prepared =
     CExtern(_, _, _, _, _) -> panic("operand: an unselected C extern reached the JVM backend")
     CForeign(j, ty, site) -> {
       let (j2, jumps, n) = foreign(j, next)
-      Prepared { expr: CForeign(j2, ty, site), jumps: jumps, next: n }
+      Prepared { expr = CForeign(j2, ty, site), jumps = jumps, next = n }
     }
   }
 
@@ -258,7 +258,7 @@ fn refill(fields: List[CUpdField], vals: List[CExpr]) -> List[CUpdField] = {
   for f in fields {
     match f.value {
       Some(_) -> {
-        out = out ++ [CUpdField { ..f, value: Some(vals[k]) }]
+        out = out ++ [CUpdField { ..f, value = Some(vals[k]) }]
         k = k + 1
       }
       None -> { out = out ++ [f] }

@@ -38,7 +38,7 @@ pub fn init(_flags: Option[String]) -> (Book, Model) = {
     titles = titles ++ ["entry number ${i}"]
     i = i + 1
   }
-  (Book { titles: titles }, Model { q: "", sel: 0, hits: [] })
+  (Book { titles= titles }, Model { q= "", sel= 0, hits= [] })
 }
 
 fn hits_for(q: String) -> List[Int] = {
@@ -54,25 +54,25 @@ fn hits_for(q: String) -> List[Int] = {
 
 pub fn update(_b: Book, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
   match msg {
-    Typed(text) -> (Model { q: text, sel: 0, hits: hits_for(text) }, NoCmd)
+    Typed(text) -> (Model { q= text, sel= 0, hits= hits_for(text) }, NoCmd)
     Pressed(key) ->
-      if key == "ArrowDown" { (Model { ..m, sel: m.sel + 1 }, NoCmd) } else { (m, NoCmd) }
-    Hovered(at) -> (Model { ..m, sel: at }, NoCmd)
+      if key == "ArrowDown" { (Model { ..m, sel= m.sel + 1 }, NoCmd) } else { (m, NoCmd) }
+    Hovered(at) -> (Model { ..m, sel= at }, NoCmd)
     Chose(_) -> (m, NoCmd)
   }
 
 fn row(b: Book, m: Model, at: Int, id: Int) -> Node[Msg] =
   el(
     "li",
-    class: if at == m.sel { "row is-sel" } else { "row" },
-    on: [
-      On { event: "mouseenter", payload: NoData, to_msg: _p => Hovered(at: at) },
-      On { event: "click", payload: NoData, to_msg: _p => Chose(at: at) },
+    class= if at == m.sel { "row is-sel" } else { "row" },
+    on= [
+      On { event= "mouseenter", payload= NoData, to_msg= _p => Hovered(at= at) },
+      On { event= "click", payload= NoData, to_msg= _p => Chose(at= at) },
     ],
-    kids: [
-      span(b.titles[id], class: "title"),
-      span("fn ${b.titles[id]}()", class: "detail"),
-      span("matched ${m.q} at ${id}", class: "note"),
+    kids= [
+      span(b.titles[id], class= "title"),
+      span("fn ${b.titles[id]}()", class= "detail"),
+      span("matched ${m.q} at ${id}", class= "note"),
     ],
   )
 
@@ -83,14 +83,14 @@ pub fn view(b: Book, m: Model) -> Node[Msg] = {
     items = items ++ [row(b, m, at, id)]
     at = at + 1
   }
-  div(class: "panel", kids: [
-    input(class: "field", value: m.q, on: [on_value("input", Typed), on_key("keydown", Pressed)]),
-    el("ul", class: "rows", kids: items),
-    div(class: "foot", kids: [span("${len(m.hits)} results")]),
+  div(class= "panel", kids= [
+    input(class= "field", value= m.q, on= [on_value("input", Typed), on_key("keydown", Pressed)]),
+    el("ul", class= "rows", kids= items),
+    div(class= "foot", kids= [span("${len(m.hits)} results")]),
   ])
 }
 
-fn quoted(s: String) -> String = render(JStr(value: s))
+fn quoted(s: String) -> String = render(JStr(value= s))
 
 pub fn encode(m: Model) -> String =
   "{\"q\":" ++ quoted(m.q)
@@ -107,12 +107,12 @@ pub fn decode(s: String) -> Model =
   match parse(s) {
     Ok(j) ->
       Model {
-        q: match field(j, "q") { Some(JStr(v)) -> v, _ -> "" },
-        sel: match field(j, "sel") { Some(JInt(v)) -> v, _ -> 0 },
-        hits: match field(j, "hits") {
+        q= match field(j, "q") { Some(JStr(v)) -> v, _ -> "" },
+        sel= match field(j, "sel") { Some(JInt(v)) -> v, _ -> 0 },
+        hits= match field(j, "hits") {
           Some(JArr(items)) -> list.map(items, h => match h { JInt(v) -> v, _ -> 0 })
           _ -> []
         },
       }
-    Err(_) -> Model { q: "", sel: 0, hits: [] }
+    Err(_) -> Model { q= "", sel= 0, hits= [] }
   }

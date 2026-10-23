@@ -82,8 +82,8 @@ type Defs = {
 fn gather(d: Defs, s: CStmt) -> Defs =
   match s {
     CSLet(sym, ty, init) ->
-      if is_ref_ty(ty) { add_def(Defs { ..d, bound: set.insert(d.bound, sym) }, sym, init) } else { d }
-    CSAssign(sym, v) -> add_def(Defs { ..d, assigned: set.insert(d.assigned, sym) }, sym, v)
+      if is_ref_ty(ty) { add_def(Defs { ..d, bound = set.insert(d.bound, sym) }, sym, init) } else { d }
+    CSAssign(sym, v) -> add_def(Defs { ..d, assigned = set.insert(d.assigned, sym) }, sym, v)
     _ -> d
   }
 
@@ -92,7 +92,7 @@ fn add_def(d: Defs, sym: Int, e: CExpr) -> Defs = {
     Some(es) -> es
     None -> []
   }
-  Defs { ..d, defs: map.insert(d.defs, sym, prior ++ [e]) }
+  Defs { ..d, defs = map.insert(d.defs, sym, prior ++ [e]) }
 }
 
 ## Whether `e` reads a value kept alive by something in `ok`: a bare symbol of
@@ -134,7 +134,7 @@ fn reads_kept(ok: Set[Int], e: CExpr) -> Bool =
 ## The let-bound symbols of `f` that are views, given the module-wide
 ## dictionary symbols (a dictionary is never counted and so never a root).
 pub fn view_syms(dicts: Set[Int], f: CFun) -> Set[Int] = {
-  let empty = Defs { defs: map.empty(), bound: set.empty(), assigned: set.empty() }
+  let empty = Defs { defs = map.empty(), bound = set.empty(), assigned = set.empty() }
   let d = cwalk.fold_expr(f.body, empty, (a: Defs, _e: CExpr) => a, gather)
   if len(d.bound) == 0 { return set.empty() }
   # the roots: borrowed reference parameters nothing reassigns
@@ -177,9 +177,9 @@ pub fn view_syms(dicts: Set[Int], f: CFun) -> Set[Int] = {
 
 fn t_fn(mode: CParam, body: CExpr) -> CFun =
   CFun {
-    name: "f", owner: "m", captures: [], params: [mode], dicts: [], evs: [],
-    ret: TyInt, body: body, is_test: false, impl_of: None, default_of: None,
-    origin: ""
+    name = "f", owner = "m", captures = [], params = [mode], dicts = [], evs = [],
+    ret = TyInt, body = body, is_test = false, impl_of = None, default_of = None,
+    origin = ""
   }
 
 fn t_node() -> Ty = TyList(TyInt)
@@ -191,7 +191,7 @@ fn t_views(p: CParam, stmts: List[CStmt]) -> List[Int] = {
   set.to_list(view_syms(none, t_fn(p, CBlock(stmts, Some(CInt(0)), TyInt))))
 }
 
-fn t_borrowed() -> CParam = CParam { sym: 1, ty: t_node(), mode: CBorrowed }
+fn t_borrowed() -> CParam = CParam { sym = 1, ty = t_node(), mode = CBorrowed }
 
 test "a projection chain over a borrowed parameter is a view" {
   let lt = t_node()
@@ -204,7 +204,7 @@ test "a projection chain over a borrowed parameter is a view" {
 
 test "nothing is a view of an owned parameter" {
   let lt = t_node()
-  let owned = CParam { sym: 1, ty: lt, mode: COwned }
+  let owned = CParam { sym = 1, ty = lt, mode = COwned }
   assert len(t_views(owned, [CSLet(2, lt, t_child(1))])) == 0
 }
 

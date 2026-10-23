@@ -79,10 +79,10 @@ fn item_of(line: String) -> Item = {
   match str.rsplit_once(body, " @") {
     Some((_head, tail)) ->
       match range_of(tail) {
-        Some((lo, hi)) -> Item { depth: depth, text: body, lo: lo, hi: hi }
-        None -> Item { depth: depth, text: body, lo: -1, hi: -1 }
+        Some((lo, hi)) -> Item { depth = depth, text = body, lo = lo, hi = hi }
+        None -> Item { depth = depth, text = body, lo = -1, hi = -1 }
       }
-    None -> Item { depth: depth, text: body, lo: -1, hi: -1 }
+    None -> Item { depth = depth, text = body, lo = -1, hi = -1 }
   }
 }
 
@@ -95,7 +95,7 @@ fn build(items: List[Item], i: Int) -> (Node, Int) = {
     kids = kids ++ [k]
     j = next
   }
-  (Node { kind: first_word(it.text), text: it.text, lo: it.lo, hi: it.hi, kids: kids }, j)
+  (Node { kind = first_word(it.text), text = it.text, lo = it.lo, hi = it.hi, kids = kids }, j)
 }
 
 ## The tree of a `dawn parse` dump, or why it is not one.
@@ -127,7 +127,7 @@ pub type SCall = { names: List[String], optional: Bool, lo: Int, hi: Int, nlo: I
 type Env = { tiles: List[String], cells: List[String], decls: List[(String, Int, Int)] }
 
 fn call_of(names: List[String], lo: Int, hi: Int, nlo: Int, nhi: Int, text: String, kids: List[SCall]) -> SCall =
-  SCall { names: names, optional: false, lo: lo, hi: hi, nlo: nlo, nhi: nhi, text: text, kids: kids }
+  SCall { names = names, optional = false, lo = lo, hi = hi, nlo = nlo, nhi = nhi, text = text, kids = kids }
 
 fn operator_names(op: String) -> List[String] =
   if op == "ADD" {
@@ -232,7 +232,7 @@ fn walk_let(n: Node, dev: List[String], env: Env, src: String) -> Result[(List[S
       let is_var = str.contains(n.text, "mut=true")
       let tiles = if is_tile || is_var { env2.tiles ++ [name] } else { env2.tiles }
       let decls = if is_var { env2.decls ++ [(name, n.lo, n.hi)] } else { env2.decls }
-      Ok((cs, Env { tiles: tiles, cells: env2.cells, decls: decls }))
+      Ok((cs, Env { tiles = tiles, cells = env2.cells, decls = decls }))
     }
   }
 }
@@ -307,16 +307,16 @@ fn walk_staged_for(n: Node, dev: List[String], env: Env, src: String) -> Result[
           }
         }
       }
-      let inside = Env { tiles: env2.tiles, cells: map(carried, d => {
+      let inside = Env { tiles = env2.tiles, cells = map(carried, d => {
         let (name, _lo, _hi) = d
         name
-      }), decls: env2.decls }
+      }), decls = env2.decls }
       match walk(n.kids[2], dev, inside, src) {
         Err(e) -> Err(e)
         Ok((kids, inner)) -> {
           let closed = map(carried, _d => call_of(["get"], n.lo, n.hi, n.lo, n.lo + 3, "for", []))
           let region = call_of([second_word(head.text)], n.lo, n.hi, head.lo, head.hi, second_word(head.text), kids)
-          Ok((before ++ opened ++ [region] ++ closed, Env { tiles: env2.tiles, cells: env2.cells, decls: inner.decls }))
+          Ok((before ++ opened ++ [region] ++ closed, Env { tiles = env2.tiles, cells = env2.cells, decls = inner.decls }))
         }
       }
     }
@@ -374,7 +374,7 @@ fn walk_apply(n: Node, dev: List[String], env0: Env, src: String) -> Result[(Lis
         # source. It may also stay a host number (`full(.., 0.0)`), so the
         # entry is optional: the pairing takes it when the run has the `lit`
         # row here and leaves it when it does not.
-        before = before ++ [SCall { names: ["lit"], optional: true, lo: inner.lo, hi: inner.hi, nlo: inner.lo, nhi: inner.hi, text: str.slice(src, inner.lo, inner.hi), kids: [] }]
+        before = before ++ [SCall { names = ["lit"], optional = true, lo = inner.lo, hi = inner.hi, nlo = inner.lo, nhi = inner.hi, text = str.slice(src, inner.lo, inner.hi), kids = [] }]
       }
     }
   }
@@ -450,7 +450,7 @@ fn find_traces(root: Node, n: Node, out: List[Trace]) -> List[Trace] = {
         if len(args) == k + 2 && not list.any(args, a => a.kind == "Arg") {
           match trace_kernel(root, last, k) {
             None -> ()
-            Some(kernel) -> { found = found ++ [Trace { arity: k, lo: n.lo, hi: n.hi, args: map(args, a => (a.lo, a.hi)), kernel: kernel }] }
+            Some(kernel) -> { found = found ++ [Trace { arity = k, lo = n.lo, hi = n.hi, args = map(args, a => (a.lo, a.hi)), kernel = kernel }] }
           }
         }
       }
@@ -501,7 +501,7 @@ pub fn plan(code: String, dump: String, dev: List[String]) -> Result[Plan, Strin
             match fn_body(f) {
               None -> Err("`${t.kernel}` has no body to walk")
               Some(body) ->
-                match walk(body, dev, Env { tiles: [], cells: [], decls: [] }, code) {
+                match walk(body, dev, Env { tiles = [], cells = [], decls = [] }, code) {
                   Err(e) -> Err(e)
                   Ok((calls, _env)) -> {
                     let s = src_of(code)
@@ -512,7 +512,7 @@ pub fn plan(code: String, dump: String, dev: List[String]) -> Result[Plan, Strin
                       str.slice(code, alo, ahi)
                     }), ", ")
                     let renamed = str.take(code, t.lo) ++ "explore_probe.tap${t.arity}(" ++ str.slice(code, t.lo, t.hi) ++ ", " ++ again ++ ")" ++ str.drop(code, t.hi)
-                    Ok(Plan { program: "use explore_probe\n" ++ renamed, kernel: t.kernel, first: first, last: last, calls: calls })
+                    Ok(Plan { program = "use explore_probe\n" ++ renamed, kernel = t.kernel, first = first, last = last, calls = calls })
                   }
                 }
             }
@@ -558,7 +558,7 @@ pub fn read_recording(output: String) -> Result[Recording, String] = {
     } else if w[0] == "call" && len(w) >= 4 {
       match (parse_int(w[1]), parse_int(w[2])) {
         (Some(id), Some(parent)) -> {
-          rows = rows ++ [Row { id: id, parent: parent, name: w[3], lines: list.drop(w, 4) }]
+          rows = rows ++ [Row { id = id, parent = parent, name = w[3], lines = list.drop(w, 4) }]
         }
         _ -> {
           return Err("the recording has a call row with no numbers")
@@ -573,7 +573,7 @@ pub fn read_recording(output: String) -> Result[Recording, String] = {
   if not ended || ops == "" || tail == "" || len(text) == 0 {
     Err("the program printed no complete recording")
   } else {
-    Ok(Recording { ops: ops, head: head, tail: tail, rows: rows, text: text })
+    Ok(Recording { ops = ops, head = head, tail = tail, rows = rows, text = text })
   }
 }
 
@@ -780,7 +780,7 @@ fn failed[T](r: Result[T, String]) -> Bool =
 fn dev() -> List[String] = ["load_cell", "store_cell", "add", "full", "lit"]
 
 fn test_node(text: String, kids: List[Node]) -> Node =
-  Node { kind: first_word(text), text: text, lo: 0, hi: 0, kids: kids }
+  Node { kind = first_word(text), text = text, lo = 0, hi = 0, kids = kids }
 
 test "a factory maps only a lambda forwarding the kernel parameters in order" {
   let params = map(["a", "b", "out"], n => test_node("LParam ${n}", []))
@@ -790,10 +790,10 @@ test "a factory maps only a lambda forwarding the kernel parameters in order" {
   let value = test_node("Apply", [test_node("Var configured", []), test_node("Int 128", [])])
   assert trace_kernel(root(call), value, 3) == Some("vadd")
   assert trace_kernel(root(call), value, 2) == None
-  let swapped = Node { ..call, kids: [call.kids[0], vars[1], vars[0], vars[2]] }
+  let swapped = Node { ..call, kids = [call.kids[0], vars[1], vars[0], vars[2]] }
   assert trace_kernel(root(swapped), value, 3) == None
   assert trace_kernel(root(test_node("If", [call])), value, 3) == None
-  let unknown = Node { ..value, kids: [test_node("Var missing", [])] }
+  let unknown = Node { ..value, kids = [test_node("Var missing", [])] }
   assert trace_kernel(root(call), unknown, 3) == None
 }
 
@@ -820,7 +820,7 @@ test "the recording is read only when it ends" {
   match read_recording(whole) {
     Ok(r) -> {
       assert r.text == ["a"]
-      assert r.rows == [Row { id: 0, parent: -1, name: "add", lines: ["2-3"] }]
+      assert r.rows == [Row { id = 0, parent = -1, name = "add", lines = ["2-3"] }]
       assert (r.ops, r.head, r.tail) == ("3", "1-2", "3-4")
     }
     Err(e) -> { assert e == "" }
@@ -842,7 +842,7 @@ test "the pairing writes the map, and stops at the first name that differs" {
         }
         Err(e) -> { assert e == "" }
       }
-      let swapped = Recording { ..rec, rows: [Row { id: 0, parent: -1, name: "load_cell", lines: [] }, Row { id: 1, parent: -1, name: "mul", lines: [] }] }
+      let swapped = Recording { ..rec, rows = [Row { id = 0, parent = -1, name = "load_cell", lines = [] }, Row { id = 1, parent = -1, name = "mul", lines = [] }] }
       assert failed(tile_map(VADD_CODE, p, swapped))
     }
     _ -> { assert false }

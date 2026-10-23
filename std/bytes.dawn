@@ -60,14 +60,14 @@ const CHUNK: Int = 4096
 const CHUNK_MASK: Int = 4095
 
 ## An empty buffer.
-pub fn buf() -> Buf = BufRep { chunks: array_new(), tail: array_new() }
+pub fn buf() -> Buf = BufRep { chunks = array_new(), tail = array_new() }
 
 # A full tail becomes the next chunk.
 fn settle(chunks: Array[Bytes], tail: Array[Int]) -> BufRep =
   if array_len(tail) == CHUNK {
-    BufRep { chunks: array_push(chunks, bytes_pack_int(tail, 1, true)), tail: array_new() }
+    BufRep { chunks = array_push(chunks, bytes_pack_int(tail, 1, true)), tail = array_new() }
   } else {
-    BufRep { chunks: chunks, tail: tail }
+    BufRep { chunks = chunks, tail = tail }
   }
 
 ## Append one byte. A value outside 0..255 is truncated, as a byte store is.
@@ -107,7 +107,7 @@ pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
       }
     }
   }
-  BufRep { chunks: chunks, tail: tail }
+  BufRep { chunks = chunks, tail = tail }
 }
 
 # The prelude's `len` is the `Len` trait (docs/len-trait-design.md); this is its
@@ -191,7 +191,7 @@ pub type Utf8Error = { offset: Int } derive Show
 ## application that must not act on bytes it was not sent asks this one.
 pub fn decode_utf8_checked(b: Bytes) -> Result[String, Utf8Error] =
   match first_malformed(b) {
-    Some(i) -> Err(Utf8Error { offset: i })
+    Some(i) -> Err(Utf8Error { offset = i })
     None -> Ok(bytes_decode_utf8(b))
   }
 
@@ -938,33 +938,33 @@ test "base64 answers RFC 4648's vectors, in both of its alphabets" {
   assert from_base64("Zm9vYmE=") == Some(utf8("fooba"))
   assert from_base64("Zm9vYmFy") == Some(utf8("foobar"))
   # leaving the encoding out is writing `Standard`
-  assert to_base64(utf8("f"), enc: Standard) == "Zg=="
-  assert from_base64("Zg==", enc: Standard) == Some(utf8("f"))
+  assert to_base64(utf8("f"), enc = Standard) == "Zg=="
+  assert from_base64("Zg==", enc = Standard) == Some(utf8("f"))
   # the raw encodings write the same characters and omit the padding
-  assert to_base64(utf8(""), enc: StandardRaw) == ""
-  assert to_base64(utf8("f"), enc: StandardRaw) == "Zg"
-  assert to_base64(utf8("fo"), enc: StandardRaw) == "Zm8"
-  assert to_base64(utf8("foo"), enc: StandardRaw) == "Zm9v"
-  assert to_base64(utf8("foobar"), enc: UrlRaw) == "Zm9vYmFy"
-  assert to_base64(utf8("f"), enc: UrlRaw) == "Zg"
-  assert to_base64(utf8("f"), enc: Url) == "Zg=="
+  assert to_base64(utf8(""), enc = StandardRaw) == ""
+  assert to_base64(utf8("f"), enc = StandardRaw) == "Zg"
+  assert to_base64(utf8("fo"), enc = StandardRaw) == "Zm8"
+  assert to_base64(utf8("foo"), enc = StandardRaw) == "Zm9v"
+  assert to_base64(utf8("foobar"), enc = UrlRaw) == "Zm9vYmFy"
+  assert to_base64(utf8("f"), enc = UrlRaw) == "Zg"
+  assert to_base64(utf8("f"), enc = Url) == "Zg=="
   # the two alphabets differ in exactly the last two symbols, which 0xFB 0xFF
   # is chosen to reach: it encodes to values 62 and 63
   let high = freeze(put(put(buf(), 0xFB), 0xFF))
   assert to_base64(high) == "+/8="
-  assert to_base64(high, enc: StandardRaw) == "+/8"
-  assert to_base64(high, enc: Url) == "-_8="
-  assert to_base64(high, enc: UrlRaw) == "-_8"
+  assert to_base64(high, enc = StandardRaw) == "+/8"
+  assert to_base64(high, enc = Url) == "-_8="
+  assert to_base64(high, enc = UrlRaw) == "-_8"
   assert from_base64("+/8=") == Some(high)
-  assert from_base64("+/8", enc: StandardRaw) == Some(high)
-  assert from_base64("-_8=", enc: Url) == Some(high)
-  assert from_base64("-_8", enc: UrlRaw) == Some(high)
+  assert from_base64("+/8", enc = StandardRaw) == Some(high)
+  assert from_base64("-_8=", enc = Url) == Some(high)
+  assert from_base64("-_8", enc = UrlRaw) == Some(high)
   # which alphabet a string is in is the caller's claim, so no decoder
   # guesses -- a mismatch is None rather than different bytes
   assert from_base64("-_8=") == None
-  assert from_base64("+/8=", enc: Url) == None
-  assert from_base64("-_8", enc: StandardRaw) == None
-  assert from_base64("+/8", enc: UrlRaw) == None
+  assert from_base64("+/8=", enc = Url) == None
+  assert from_base64("-_8", enc = StandardRaw) == None
+  assert from_base64("+/8", enc = UrlRaw) == None
 }
 
 test "base64 reads padding the way Go's encoding/base64 does" {
@@ -973,18 +973,18 @@ test "base64 reads padding the way Go's encoding/base64 does" {
   # not in RawStdEncoding's or RawURLEncoding's alphabet).
   assert from_base64("Zg") == None
   assert from_base64("Zm8") == None
-  assert from_base64("_w", enc: Url) == None
-  assert from_base64("_w==", enc: Url) == Some(freeze(put(buf(), 0xFF)))
-  assert from_base64("_w", enc: UrlRaw) == Some(freeze(put(buf(), 0xFF)))
-  assert from_base64("_w==", enc: UrlRaw) == None
-  assert from_base64("Zg", enc: StandardRaw) == Some(utf8("f"))
-  assert from_base64("Zg==", enc: StandardRaw) == None
-  assert from_base64("Zm8=", enc: StandardRaw) == None
+  assert from_base64("_w", enc = Url) == None
+  assert from_base64("_w==", enc = Url) == Some(freeze(put(buf(), 0xFF)))
+  assert from_base64("_w", enc = UrlRaw) == Some(freeze(put(buf(), 0xFF)))
+  assert from_base64("_w==", enc = UrlRaw) == None
+  assert from_base64("Zg", enc = StandardRaw) == Some(utf8("f"))
+  assert from_base64("Zg==", enc = StandardRaw) == None
+  assert from_base64("Zm8=", enc = StandardRaw) == None
   # a full group needs no padding in either kind, and nothing is nothing
-  assert from_base64("Zm9v", enc: StandardRaw) == Some(utf8("foo"))
-  assert from_base64("Zm9v", enc: Url) == Some(utf8("foo"))
-  assert from_base64("", enc: Url) == Some(utf8(""))
-  assert from_base64("", enc: UrlRaw) == Some(utf8(""))
+  assert from_base64("Zm9v", enc = StandardRaw) == Some(utf8("foo"))
+  assert from_base64("Zm9v", enc = Url) == Some(utf8("foo"))
+  assert from_base64("", enc = Url) == Some(utf8(""))
+  assert from_base64("", enc = UrlRaw) == Some(utf8(""))
   # every encoding reads back what it writes
   var every = buf()
   for i in range(0, 256) {
@@ -992,9 +992,9 @@ test "base64 reads padding the way Go's encoding/base64 does" {
   }
   let all = freeze(every)
   assert from_base64(to_base64(all)) == Some(all)
-  assert from_base64(to_base64(all, enc: StandardRaw), enc: StandardRaw) == Some(all)
-  assert from_base64(to_base64(all, enc: Url), enc: Url) == Some(all)
-  assert from_base64(to_base64(all, enc: UrlRaw), enc: UrlRaw) == Some(all)
+  assert from_base64(to_base64(all, enc = StandardRaw), enc = StandardRaw) == Some(all)
+  assert from_base64(to_base64(all, enc = Url), enc = Url) == Some(all)
+  assert from_base64(to_base64(all, enc = UrlRaw), enc = UrlRaw) == Some(all)
 }
 
 test "from_base64 refuses everything that is not one spelling of some bytes" {
@@ -1012,7 +1012,7 @@ test "from_base64 refuses everything that is not one spelling of some bytes" {
   # a leftover group of one character encodes no byte at all
   assert from_base64("A") == None
   assert from_base64("ZZZZA") == None
-  assert from_base64("A", enc: StandardRaw) == None
+  assert from_base64("A", enc = StandardRaw) == None
   # nothing may follow the padding
   assert from_base64("A=B") == None
   assert from_base64("AQ==A") == None
@@ -1020,9 +1020,9 @@ test "from_base64 refuses everything that is not one spelling of some bytes" {
   # two characters and would both be one byte, but only one of them has zero
   # in the bits the byte does not reach -- without the check they would decode
   # to the same 0x01 and no encoder could ever produce `AB`.
-  assert from_base64("AQ", enc: StandardRaw) == Some(freeze(put(buf(), 0x01)))
+  assert from_base64("AQ", enc = StandardRaw) == Some(freeze(put(buf(), 0x01)))
   assert from_base64("AA==") == Some(freeze(put(buf(), 0x00)))
-  assert from_base64("AB", enc: StandardRaw) == None
+  assert from_base64("AB", enc = StandardRaw) == None
   assert from_base64("AB==") == None
   assert from_base64("AC==") == None
   assert from_base64("AAB=") == None
@@ -1064,28 +1064,28 @@ test "decode_utf8_checked refuses at the byte the sequence went wrong" {
   # mark the lossy decoder leaves
   assert decode_utf8_checked(of("efbfbd")) == Ok("\u{FFFD}")
   # a byte that continues nothing, and one that leads nothing
-  assert decode_utf8_checked(of("80")) == Err(Utf8Error { offset: 0 })
-  assert decode_utf8_checked(of("ff")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("80")) == Err(Utf8Error { offset = 0 })
+  assert decode_utf8_checked(of("ff")) == Err(Utf8Error { offset = 0 })
   # the offset is a position in the input, not in the decoded text
-  assert decode_utf8_checked(of("61ff62")) == Err(Utf8Error { offset: 1 })
-  assert decode_utf8_checked(of("e4b8ad61ff")) == Err(Utf8Error { offset: 4 })
+  assert decode_utf8_checked(of("61ff62")) == Err(Utf8Error { offset = 1 })
+  assert decode_utf8_checked(of("e4b8ad61ff")) == Err(Utf8Error { offset = 4 })
   # an overlong form is not the character it encodes: `c0 af` is not `/`
-  assert decode_utf8_checked(of("c0af")) == Err(Utf8Error { offset: 0 })
-  assert decode_utf8_checked(of("e080af")) == Err(Utf8Error { offset: 0 })
-  assert decode_utf8_checked(of("f08fbfbf")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("c0af")) == Err(Utf8Error { offset = 0 })
+  assert decode_utf8_checked(of("e080af")) == Err(Utf8Error { offset = 0 })
+  assert decode_utf8_checked(of("f08fbfbf")) == Err(Utf8Error { offset = 0 })
   # a surrogate half is not a code point a string may hold, and the code point
   # just below the block is
-  assert decode_utf8_checked(of("eda080")) == Err(Utf8Error { offset: 0 })
-  assert decode_utf8_checked(of("edbfbf")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("eda080")) == Err(Utf8Error { offset = 0 })
+  assert decode_utf8_checked(of("edbfbf")) == Err(Utf8Error { offset = 0 })
   assert decode_utf8_checked(of("ed9fbf")) == Ok("\u{D7FF}")
   # nothing above U+10FFFF, and the last code point below it
-  assert decode_utf8_checked(of("f4908080")) == Err(Utf8Error { offset: 0 })
-  assert decode_utf8_checked(of("f5808080")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("f4908080")) == Err(Utf8Error { offset = 0 })
+  assert decode_utf8_checked(of("f5808080")) == Err(Utf8Error { offset = 0 })
   assert decode_utf8_checked(of("f48fbfbf")) == Ok("\u{10FFFF}")
   # a sequence the input ends in the middle of is refused where it began
-  assert decode_utf8_checked(of("61c3")) == Err(Utf8Error { offset: 1 })
-  assert decode_utf8_checked(of("e282")) == Err(Utf8Error { offset: 0 })
-  assert decode_utf8_checked(of("f09f92")) == Err(Utf8Error { offset: 0 })
+  assert decode_utf8_checked(of("61c3")) == Err(Utf8Error { offset = 1 })
+  assert decode_utf8_checked(of("e282")) == Err(Utf8Error { offset = 0 })
+  assert decode_utf8_checked(of("f09f92")) == Err(Utf8Error { offset = 0 })
 }
 
 test "decode_utf8_checked refuses exactly what decode_utf8_lossy rewrites" {

@@ -57,7 +57,7 @@ pub fn apply[M](w: Widget[M], ps: List[Patch[M]]) -> Widget[M] =
   list.fold(ps, w, (acc, p) => apply_one(acc, p.path, p.op))
 
 fn replace_at[M](path: List[Int], new: Widget[M]) -> List[Patch[M]] = {
-  let p: Patch[M] = Patch { path: path, op: Replace(w: new) }
+  let p: Patch[M] = Patch { path= path, op= Replace(w= new) }
   [p]
 }
 
@@ -75,7 +75,7 @@ fn diff_at[M: Eq](old: Widget[M], new: Widget[M], path: List[Int]) -> List[Patch
           if s1 == s2 {
             inner
           } else {
-            let sp: Patch[M] = Patch { path: path, op: SetStyle(style: s2) }
+            let sp: Patch[M] = Patch { path= path, op= SetStyle(style= s2) }
             [sp] ++ inner
           }
         }
@@ -112,10 +112,10 @@ fn diff_kids[M: Eq](
   if i < common {
     diff_kids(old, new, path, i + 1, acc ++ diff_at(old[i], new[i], path ++ [i]))
   } else if len(new) > common {
-    let ap: Patch[M] = Patch { path: path, op: AppendKids(ws: list.drop(new, common)) }
+    let ap: Patch[M] = Patch { path= path, op= AppendKids(ws= list.drop(new, common)) }
     acc ++ [ap]
   } else if len(old) > common {
-    let tp: Patch[M] = Patch { path: path, op: TruncateKids(keep: common) }
+    let tp: Patch[M] = Patch { path= path, op= TruncateKids(keep= common) }
     acc ++ [tp]
   } else {
     acc
@@ -131,12 +131,12 @@ fn apply_one[M](w: Widget[M], path: List[Int], op: Op[M]) -> Widget[M] =
     match w {
       Styled(style, child) ->
         if i == 0 {
-          Styled(style: style, child: apply_one(child, rest, op))
+          Styled(style= style, child= apply_one(child, rest, op))
         } else {
           w
         }
-      Row(kids) -> Row(kids: patch_kid(kids, i, rest, op))
-      Column(kids) -> Column(kids: patch_kid(kids, i, rest, op))
+      Row(kids) -> Row(kids= patch_kid(kids, i, rest, op))
+      Column(kids) -> Column(kids= patch_kid(kids, i, rest, op))
       _ -> w
     }
   }
@@ -153,19 +153,19 @@ fn apply_op[M](w: Widget[M], op: Op[M]) -> Widget[M] =
     Replace(n) -> n
     SetStyle(s) ->
       match w {
-        Styled(_, child) -> Styled(style: s, child: child)
+        Styled(_, child) -> Styled(style= s, child= child)
         _ -> w
       }
     AppendKids(ws) ->
       match w {
-        Row(kids) -> Row(kids: kids ++ ws)
-        Column(kids) -> Column(kids: kids ++ ws)
+        Row(kids) -> Row(kids= kids ++ ws)
+        Column(kids) -> Column(kids= kids ++ ws)
         _ -> w
       }
     TruncateKids(keep) ->
       match w {
-        Row(kids) -> Row(kids: list.take(kids, keep))
-        Column(kids) -> Column(kids: list.take(kids, keep))
+        Row(kids) -> Row(kids= list.take(kids, keep))
+        Column(kids) -> Column(kids= list.take(kids, keep))
         _ -> w
       }
   }
@@ -180,74 +180,74 @@ fn rt(a: Widget[ProbeMsg], b: Widget[ProbeMsg]) -> Bool = apply(a, diff(a, b)) =
 
 test "diff of a tree with itself is empty" {
   let w: Widget[ProbeMsg] =
-    Column(kids: [
-      Styled(style: Bold, child: Text(s: "t")),
-      Row(kids: [Button(label: "go", on_press: Ping), Text(s: "x")]),
+    Column(kids= [
+      Styled(style= Bold, child= Text(s= "t")),
+      Row(kids= [Button(label= "go", on_press= Ping), Text(s= "x")]),
     ])
   assert list.is_empty(diff(w, w))
-  let leaf: Widget[ProbeMsg] = Text(s: "a")
+  let leaf: Widget[ProbeMsg] = Text(s= "a")
   assert list.is_empty(diff(leaf, leaf))
 }
 
 test "apply replays diff back to the new tree" {
-  assert rt(Text(s: "a"), Text(s: "b"))
+  assert rt(Text(s= "a"), Text(s= "b"))
   assert rt(
-    Styled(style: Bold, child: Text(s: "x")),
-    Styled(style: Dim, child: Text(s: "x")),
+    Styled(style= Bold, child= Text(s= "x")),
+    Styled(style= Dim, child= Text(s= "x")),
   )
-  assert rt(Row(kids: [Text(s: "a")]), Column(kids: [Text(s: "a")]))
-  assert rt(Button(label: "go", on_press: Ping), Button(label: "go", on_press: Pong))
+  assert rt(Row(kids= [Text(s= "a")]), Column(kids= [Text(s= "a")]))
+  assert rt(Button(label= "go", on_press= Ping), Button(label= "go", on_press= Pong))
   assert rt(
-    Column(kids: [Text(s: "same"), Row(kids: [Text(s: "old"), Text(s: "keep")])]),
-    Column(kids: [Text(s: "same"), Row(kids: [Text(s: "new"), Text(s: "keep")])]),
+    Column(kids= [Text(s= "same"), Row(kids= [Text(s= "old"), Text(s= "keep")])]),
+    Column(kids= [Text(s= "same"), Row(kids= [Text(s= "new"), Text(s= "keep")])]),
   )
 }
 
 test "list growth, shrink, and middle deletion all roundtrip" {
-  let one: Widget[ProbeMsg] = Column(kids: [Text(s: "a")])
-  let three: Widget[ProbeMsg] = Column(kids: [Text(s: "a"), Text(s: "b"), Text(s: "c")])
+  let one: Widget[ProbeMsg] = Column(kids= [Text(s= "a")])
+  let three: Widget[ProbeMsg] = Column(kids= [Text(s= "a"), Text(s= "b"), Text(s= "c")])
   assert rt(one, three)
   assert rt(three, one)
-  let mid: Widget[ProbeMsg] = Column(kids: [Text(s: "a"), Text(s: "c")])
+  let mid: Widget[ProbeMsg] = Column(kids= [Text(s= "a"), Text(s= "c")])
   assert rt(three, mid)
 }
 
 test "an unchanged sibling is never mentioned" {
-  let a: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "two"), Text(s: "three")])
-  let b: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "TWO"), Text(s: "three")])
-  let want: List[Patch[ProbeMsg]] = [Patch { path: [1], op: Replace(w: Text(s: "TWO")) }]
+  let a: Widget[ProbeMsg] = Column(kids= [Text(s= "one"), Text(s= "two"), Text(s= "three")])
+  let b: Widget[ProbeMsg] = Column(kids= [Text(s= "one"), Text(s= "TWO"), Text(s= "three")])
+  let want: List[Patch[ProbeMsg]] = [Patch { path= [1], op= Replace(w= Text(s= "TWO")) }]
   assert diff(a, b) == want
 }
 
 test "a style-only change is one SetStyle, the child is untouched" {
-  let child: Widget[ProbeMsg] = Row(kids: [Text(s: "deep"), Button(label: "b", on_press: Ping)])
-  let want: List[Patch[ProbeMsg]] = [Patch { path: [], op: SetStyle(style: Dim) }]
-  assert diff(Styled(style: Bold, child: child), Styled(style: Dim, child: child)) == want
+  let child: Widget[ProbeMsg] = Row(kids= [Text(s= "deep"), Button(label= "b", on_press= Ping)])
+  let want: List[Patch[ProbeMsg]] = [Patch { path= [], op= SetStyle(style= Dim) }]
+  assert diff(Styled(style= Bold, child= child), Styled(style= Dim, child= child)) == want
 }
 
 test "tail growth is one append, tail shrink is one truncate" {
-  let a: Widget[ProbeMsg] = Column(kids: [Text(s: "a")])
-  let b: Widget[ProbeMsg] = Column(kids: [Text(s: "a"), Text(s: "b"), Text(s: "c")])
+  let a: Widget[ProbeMsg] = Column(kids= [Text(s= "a")])
+  let b: Widget[ProbeMsg] = Column(kids= [Text(s= "a"), Text(s= "b"), Text(s= "c")])
   let grow: List[Patch[ProbeMsg]] =
-    [Patch { path: [], op: AppendKids(ws: [Text(s: "b"), Text(s: "c")]) }]
+    [Patch { path= [], op= AppendKids(ws= [Text(s= "b"), Text(s= "c")]) }]
   assert diff(a, b) == grow
-  let shrink: List[Patch[ProbeMsg]] = [Patch { path: [], op: TruncateKids(keep: 1) }]
+  let shrink: List[Patch[ProbeMsg]] = [Patch { path= [], op= TruncateKids(keep= 1) }]
   assert diff(b, a) == shrink
 }
 
 test "paths descend through Styled at index 0" {
   let a: Widget[ProbeMsg] =
-    Column(kids: [Text(s: "k"), Styled(style: Bold, child: Text(s: "old"))])
+    Column(kids= [Text(s= "k"), Styled(style= Bold, child= Text(s= "old"))])
   let b: Widget[ProbeMsg] =
-    Column(kids: [Text(s: "k"), Styled(style: Bold, child: Text(s: "new"))])
-  let want: List[Patch[ProbeMsg]] = [Patch { path: [1, 0], op: Replace(w: Text(s: "new")) }]
+    Column(kids= [Text(s= "k"), Styled(style= Bold, child= Text(s= "new"))])
+  let want: List[Patch[ProbeMsg]] = [Patch { path= [1, 0], op= Replace(w= Text(s= "new")) }]
   assert diff(a, b) == want
   assert apply(a, diff(a, b)) == b
 }
 
 test "middle deletion rewrites the tail pairwise, cost pinned not hidden" {
-  let a: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "two"), Text(s: "three")])
-  let b: Widget[ProbeMsg] = Column(kids: [Text(s: "one"), Text(s: "three")])
+  let a: Widget[ProbeMsg] = Column(kids= [Text(s= "one"), Text(s= "two"), Text(s= "three")])
+  let b: Widget[ProbeMsg] = Column(kids= [Text(s= "one"), Text(s= "three")])
   assert len(diff(a, b)) == 2
   assert apply(a, diff(a, b)) == b
 }

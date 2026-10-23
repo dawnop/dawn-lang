@@ -3370,7 +3370,7 @@ pub fn attr_round_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]])
       let c = narrow.round_f32(y[i])
       let mode = if seg % 2 == 0 { narrow.Down } else { narrow.Up }
       let exact = if seg < 2 { a + c } else if seg < 4 { a * c } else { a / c }
-      round_to(dt, narrow.round_f32(exact, mode: mode))
+      round_to(dt, narrow.round_f32(exact, mode = mode))
     }
   })
 }
@@ -3733,25 +3733,25 @@ pub fn attr_ftof_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) 
       let r = if seg == 0 {
         f
       } else if seg == 1 {
-        narrow.round_f32(v, mode: narrow.TowardZero)
+        narrow.round_f32(v, mode = narrow.TowardZero)
       } else if seg == 2 {
-        narrow.round_f32(v, mode: narrow.Down)
+        narrow.round_f32(v, mode = narrow.Down)
       } else if seg == 3 {
-        narrow.round_f32(v, mode: narrow.Up)
+        narrow.round_f32(v, mode = narrow.Up)
       } else if seg == 4 {
         narrow.round_tf32(f)
       } else if seg == 5 {
-        narrow.round_tf32(f, mode: narrow.TowardZero)
+        narrow.round_tf32(f, mode = narrow.TowardZero)
       } else if seg == 6 {
-        narrow.round_tf32(f, mode: narrow.NearestAway)
+        narrow.round_tf32(f, mode = narrow.NearestAway)
       } else if seg == 7 {
         narrow.round_f16(f)
       } else if seg == 8 {
-        narrow.round_binary(f, 11, -14, 15, mode: narrow.TowardZero)
+        narrow.round_binary(f, 11, -14, 15, mode = narrow.TowardZero)
       } else if seg == 9 {
         narrow.round_bf16(f)
       } else {
-        narrow.round_binary(f, 8, -126, 127, mode: narrow.TowardZero)
+        narrow.round_binary(f, 8, -126, 127, mode = narrow.TowardZero)
       }
       round_to(dt, r)
     }
@@ -5349,7 +5349,7 @@ test "the online softmax answers what the three-launch chain does, including whe
   }
   # narrowing the probabilities to bf16 moves the answer, by less than one
   # bf16 step (2^-7 relative at most) of the largest value
-  let narrowed = flash_attn_ref(m, n, d, bk, scale, ["f64", "f64", "f64", "f64"], [q, k, v, old], p_round: "bf16")
+  let narrowed = flash_attn_ref(m, n, d, bk, scale, ["f64", "f64", "f64", "f64"], [q, k, v, old], p_round = "bf16")
   let moved = list.fold(range(0, m * d), 0.0, (a, i) => {
     let e = if narrowed[i] > got[i] { narrowed[i] - got[i] } else { got[i] - narrowed[i] }
     if e > a { e } else { a }
@@ -5360,7 +5360,7 @@ test "the online softmax answers what the three-launch chain does, including whe
   # launch does, is the same attention: the argument rounds to binary32 and
   # the answer is held to a few binary32 ulps, not to the f64 tolerance above
   let log2e = 1.4426950408889634
-  let base2 = flash_attn_ref(m, n, d, bk, scale * log2e, ["f64", "f64", "f64", "f64"], [q, k, v, old], base2: true)
+  let base2 = flash_attn_ref(m, n, d, bk, scale * log2e, ["f64", "f64", "f64", "f64"], [q, k, v, old], base2 = true)
   for i in range(0, m * d) {
     assert close(base2[i], got[i], 1.0e-5)
   }

@@ -98,11 +98,11 @@ derive Show
 
 # ---- outbound ----------------------------------------------------------
 
-fn jpath(p: List[Int]) -> Json = JArr(items: list.map(p, i => JInt(value: i)))
+fn jpath(p: List[Int]) -> Json = JArr(items = list.map(p, i => JInt(value = i)))
 
 fn jprop(kv: (String, String)) -> Json = {
   let (k, v) = kv
-  JArr(items: [JStr(value: k), JStr(value: v)])
+  JArr(items = [JStr(value = k), JStr(value = v)])
 }
 
 ## One listener, as the host needs to see it: the event name, plus the kind of
@@ -120,22 +120,22 @@ fn jprop(kv: (String, String)) -> Json = {
 ## because the host reads it and the host is JavaScript.
 fn jevent[M](e: On[M]) -> Json =
   match e.payload {
-    NoData -> JStr(value: e.event)
-    Value -> JArr(items: [JStr(value: e.event), JStr(value: "value")])
-    Key -> JArr(items: [JStr(value: e.event), JStr(value: "key")])
+    NoData -> JStr(value = e.event)
+    Value -> JArr(items = [JStr(value = e.event), JStr(value = "value")])
+    Key -> JArr(items = [JStr(value = e.event), JStr(value = "key")])
   }
 
 ## An element's own data: everything but its children. The payload of a
 ## `SetSelf`, and the first half of a full node.
 pub fn enc_self[M](n: Node[M]) -> Json =
   match n {
-    Text(s) -> JObj(entries: map.from([("t", JStr(value: "text")), ("s", JStr(value: s))]))
+    Text(s) -> JObj(entries = map.from([("t", JStr(value = "text")), ("s", JStr(value = s))]))
     Elem(tag, props, on, _, _) ->
-      JObj(entries: map.from([
-        ("t", JStr(value: "elem")),
-        ("tag", JStr(value: tag)),
-        ("props", JArr(items: list.map(props, p => jprop(p)))),
-        ("on", JArr(items: list.map(on, e => jevent(e)))),
+      JObj(entries = map.from([
+        ("t", JStr(value = "elem")),
+        ("tag", JStr(value = tag)),
+        ("props", JArr(items = list.map(props, p => jprop(p)))),
+        ("on", JArr(items = list.map(on, e => jevent(e)))),
       ]))
   }
 
@@ -144,12 +144,12 @@ pub fn enc_node[M](n: Node[M]) -> Json =
   match n {
     Text(_) -> enc_self(n)
     Elem(tag, props, on, ks, _) ->
-      JObj(entries: map.from([
-        ("t", JStr(value: "elem")),
-        ("tag", JStr(value: tag)),
-        ("props", JArr(items: list.map(props, p => jprop(p)))),
-        ("on", JArr(items: list.map(on, e => jevent(e)))),
-        ("kids", JArr(items: list.map(ks, k => enc_node(k)))),
+      JObj(entries = map.from([
+        ("t", JStr(value = "elem")),
+        ("tag", JStr(value = tag)),
+        ("props", JArr(items = list.map(props, p => jprop(p)))),
+        ("on", JArr(items = list.map(on, e => jevent(e)))),
+        ("kids", JArr(items = list.map(ks, k => enc_node(k)))),
       ]))
   }
 
@@ -163,48 +163,48 @@ pub fn enc_node[M](n: Node[M]) -> Json =
 pub fn enc_patch[M](p: Patch[Node[M]]) -> Json =
   match p.op {
     Replace(w) ->
-      JObj(entries: map.from([
+      JObj(entries = map.from([
         ("path", jpath(p.path)),
-        ("op", JStr(value: "replace")),
+        ("op", JStr(value = "replace")),
         ("node", enc_node(w)),
       ]))
     SetSelf(w) ->
-      JObj(entries: map.from([
+      JObj(entries = map.from([
         ("path", jpath(p.path)),
-        ("op", JStr(value: "set-self")),
+        ("op", JStr(value = "set-self")),
         ("node", enc_self(w)),
       ]))
     AppendKids(ws) ->
-      JObj(entries: map.from([
+      JObj(entries = map.from([
         ("path", jpath(p.path)),
-        ("op", JStr(value: "append")),
-        ("nodes", JArr(items: list.map(ws, w => enc_node(w)))),
+        ("op", JStr(value = "append")),
+        ("nodes", JArr(items = list.map(ws, w => enc_node(w)))),
       ]))
     TruncateKids(keep) ->
-      JObj(entries: map.from([
+      JObj(entries = map.from([
         ("path", jpath(p.path)),
-        ("op", JStr(value: "truncate")),
-        ("keep", JInt(value: keep)),
+        ("op", JStr(value = "truncate")),
+        ("keep", JInt(value = keep)),
       ]))
     InsertKid(at, w) ->
-      JObj(entries: map.from([
+      JObj(entries = map.from([
         ("path", jpath(p.path)),
-        ("op", JStr(value: "insert")),
-        ("at", JInt(value: at)),
+        ("op", JStr(value = "insert")),
+        ("at", JInt(value = at)),
         ("node", enc_node(w)),
       ]))
     RemoveKid(at) ->
-      JObj(entries: map.from([
+      JObj(entries = map.from([
         ("path", jpath(p.path)),
-        ("op", JStr(value: "remove")),
-        ("at", JInt(value: at)),
+        ("op", JStr(value = "remove")),
+        ("at", JInt(value = at)),
       ]))
     MoveKid(from, to) ->
-      JObj(entries: map.from([
+      JObj(entries = map.from([
         ("path", jpath(p.path)),
-        ("op", JStr(value: "move")),
-        ("from", JInt(value: from)),
-        ("to", JInt(value: to)),
+        ("op", JStr(value = "move")),
+        ("from", JInt(value = from)),
+        ("to", JInt(value = to)),
       ]))
   }
 
@@ -253,7 +253,7 @@ pub fn reply_ok_asking[M](
   }
 }
 
-fn quoted(s: String) -> String = render(JStr(value: s))
+fn quoted(s: String) -> String = render(JStr(value = s))
 
 fn put_path(out: List[String], p: List[Int]) -> List[String] =
   out ++ ["{\"path\":[" ++ join(list.map(p, i => to_string(i)), ",") ++ "],\"op\":"]
@@ -326,10 +326,10 @@ fn put_nodes[M](out: List[String], ns: List[Node[M]]) -> List[String] = {
 ## sentence. The host holds its document unchanged: an error carries no
 ## patches at all, so there is no half-applied frame.
 pub fn reply_err(kind: String, message: String) -> String =
-  render(JObj(entries: map.from([
-    ("ok", JBool(value: false)),
-    ("kind", JStr(value: kind)),
-    ("error", JStr(value: message)),
+  render(JObj(entries = map.from([
+    ("ok", JBool(value = false)),
+    ("kind", JStr(value = kind)),
+    ("error", JStr(value = message)),
   ])))
 
 # ---- inbound -----------------------------------------------------------
@@ -378,14 +378,14 @@ fn ints(items: List[Json], acc: List[Int]) -> Option[List[Int]] =
 ## with the reason.
 pub fn decode_request(line: String) -> Request =
   match parse(line) {
-    Err(e) -> Bad(reason: "not JSON: " ++ error_text(e))
+    Err(e) -> Bad(reason = "not JSON: " ++ error_text(e))
     Ok(JObj(entries)) ->
       match as_string(field(entries, "op")) {
-        None -> Bad(reason: "no `op` field")
+        None -> Bad(reason = "no `op` field")
         Some("init") ->
           match as_opt_string(field(entries, "flags")) {
-            Some(fl) -> Init(flags: fl)
-            None -> Bad(reason: "an `init`'s `flags` if present must be a string")
+            Some(fl) -> Init(flags = fl)
+            None -> Bad(reason = "an `init`'s `flags` if present must be a string")
           }
         Some("event") ->
           match (
@@ -395,10 +395,10 @@ pub fn decode_request(line: String) -> Request =
             as_opt_string(field(entries, "payload")),
           ) {
             (Some(m), Some(p), Some(ev), Some(pl)) ->
-              Event(model: m, path: p, event: ev, payload: pl)
+              Event(model = m, path = p, event = ev, payload = pl)
             _ ->
               Bad(
-                reason:
+                reason =
                   "an `event` needs `model`, an integer `path` and `event`, " ++
                   "and a `payload` if present must be a string",
               )
@@ -411,20 +411,20 @@ pub fn decode_request(line: String) -> Request =
           ) {
             (Some(m), Some(tag), Some(JBool(true))) ->
               match as_string(field(entries, "body")) {
-                Some(body) -> Supply(model: m, tag: tag, outcome: Ok(body))
-                None -> Bad(reason: "a successful `supply` needs a string `body`")
+                Some(body) -> Supply(model = m, tag = tag, outcome = Ok(body))
+                None -> Bad(reason = "a successful `supply` needs a string `body`")
               }
             (Some(m), Some(tag), Some(JBool(false))) ->
               match as_string(field(entries, "error")) {
-                Some(why) -> Supply(model: m, tag: tag, outcome: Err(why))
-                None -> Bad(reason: "a failed `supply` needs a string `error`")
+                Some(why) -> Supply(model = m, tag = tag, outcome = Err(why))
+                None -> Bad(reason = "a failed `supply` needs a string `error`")
               }
             _ ->
-              Bad(reason: "a `supply` needs `model`, `tag` and a boolean `ok`")
+              Bad(reason = "a `supply` needs `model`, `tag` and a boolean `ok`")
           }
-        Some(other) -> Bad(reason: "unknown op `" ++ other ++ "`")
+        Some(other) -> Bad(reason = "unknown op `" ++ other ++ "`")
       }
-    Ok(_) -> Bad(reason: "the request must be a JSON object")
+    Ok(_) -> Bad(reason = "the request must be a JSON object")
   }
 
 # ---- tests -------------------------------------------------------------
@@ -435,10 +435,10 @@ type ProbeMsg =
 derive Show
 
 fn hear(event: String, msg: ProbeMsg) -> On[ProbeMsg] =
-  On { event: event, payload: NoData, to_msg: _p => msg }
+  On { event = event, payload = NoData, to_msg = _p => msg }
 
 fn btn(label: String, m: ProbeMsg) -> Node[ProbeMsg] =
-  Elem(tag: "button", props: [], on: [hear("click", m)], kids: [Text(s: label)], key: None)
+  Elem(tag = "button", props = [], on = [hear("click", m)], kids = [Text(s = label)], key = None)
 
 test "a node encodes as its own data plus its children" {
   let n: Node[ProbeMsg] = btn("go", Ping)
@@ -447,7 +447,7 @@ test "a node encodes as its own data plus its children" {
     "\"kids\":[{\"t\":\"text\",\"s\":\"go\"}]}"
   assert render(enc_self(n)) ==
     "{\"t\":\"elem\",\"tag\":\"button\",\"props\":[],\"on\":[\"click\"]}"
-  let t: Node[ProbeMsg] = Text(s: "hi")
+  let t: Node[ProbeMsg] = Text(s = "hi")
   assert render(enc_node(t)) == "{\"t\":\"text\",\"s\":\"hi\"}"
 }
 
@@ -462,7 +462,7 @@ test "a listener that asks for nothing encodes as the bare name it always did" {
   # listener in both recorded transcripts is this shape, which is why the
   # payload feature moves none of their bytes.
   let quiet: Node[ProbeMsg] =
-    Elem(tag: "span", props: [], on: [hear("click", Ping), hear("blur", Pong)], kids: [], key: None)
+    Elem(tag = "span", props = [], on = [hear("click", Ping), hear("blur", Pong)], kids = [], key = None)
   assert render(enc_self(quiet)) ==
     "{\"t\":\"elem\",\"tag\":\"span\",\"props\":[],\"on\":[\"click\",\"blur\"]}"
 }
@@ -470,15 +470,15 @@ test "a listener that asks for nothing encodes as the bare name it always did" {
 test "a listener that asks for something says so, and says which" {
   # A pair, so the host can see the difference: same event name, two readings.
   let typed: Node[ProbeMsg] = Elem(
-    tag: "input",
-    props: [],
-    on: [
-      On { event: "input", payload: Value, to_msg: _p => Ping },
-      On { event: "keydown", payload: Key, to_msg: _p => Pong },
+    tag = "input",
+    props = [],
+    on = [
+      On { event = "input", payload = Value, to_msg = _p => Ping },
+      On { event = "keydown", payload = Key, to_msg = _p => Pong },
       hear("blur", Pong),
     ],
-    kids: [],
-    key: None,
+    kids = [],
+    key = None,
   )
   assert render(enc_self(typed)) ==
     "{\"t\":\"elem\",\"tag\":\"input\",\"props\":[]," ++
@@ -487,42 +487,42 @@ test "a listener that asks for something says so, and says which" {
   # a host told the wrong one reads the wrong thing off the event, and this
   # is where that becomes visible rather than at the first keystroke.
   let quiet: Node[ProbeMsg] =
-    Elem(tag: "input", props: [], on: [hear("input", Ping)], kids: [], key: None)
+    Elem(tag = "input", props = [], on = [hear("input", Ping)], kids = [], key = None)
   let loud: Node[ProbeMsg] = Elem(
-    tag: "input",
-    props: [],
-    on: [On { event: "input", payload: Value, to_msg: _p => Ping }],
-    kids: [],
-    key: None,
+    tag = "input",
+    props = [],
+    on = [On { event = "input", payload = Value, to_msg = _p => Ping }],
+    kids = [],
+    key = None,
   )
   assert render(enc_node(quiet)) != render(enc_node(loud))
 }
 
 test "SetSelf ships the node without its children" {
   let big: Node[ProbeMsg] =
-    Elem(tag: "div", props: [("class", "b")], on: [], kids: [btn("a", Ping), btn("b", Pong)], key: None)
-  let p: Patch[Node[ProbeMsg]] = Patch { path: [], op: SetSelf(w: big) }
+    Elem(tag = "div", props = [("class", "b")], on = [], kids = [btn("a", Ping), btn("b", Pong)], key = None)
+  let p: Patch[Node[ProbeMsg]] = Patch { path = [], op = SetSelf(w = big) }
   assert render(enc_patch(p)) ==
     "{\"path\":[],\"op\":\"set-self\"," ++
     "\"node\":{\"t\":\"elem\",\"tag\":\"div\",\"props\":[[\"class\",\"b\"]],\"on\":[]}}"
 }
 
 test "every op has a wire name, and the address travels with it" {
-  let leaf: Node[ProbeMsg] = Text(s: "x")
-  let r: Patch[Node[ProbeMsg]] = Patch { path: [1, 0], op: Replace(w: leaf) }
+  let leaf: Node[ProbeMsg] = Text(s = "x")
+  let r: Patch[Node[ProbeMsg]] = Patch { path = [1, 0], op = Replace(w = leaf) }
   assert render(enc_patch(r)) ==
     "{\"path\":[1,0],\"op\":\"replace\",\"node\":{\"t\":\"text\",\"s\":\"x\"}}"
-  let a: Patch[Node[ProbeMsg]] = Patch { path: [2], op: AppendKids(ws: [leaf]) }
+  let a: Patch[Node[ProbeMsg]] = Patch { path = [2], op = AppendKids(ws = [leaf]) }
   assert render(enc_patch(a)) ==
     "{\"path\":[2],\"op\":\"append\",\"nodes\":[{\"t\":\"text\",\"s\":\"x\"}]}"
-  let t: Patch[Node[ProbeMsg]] = Patch { path: [], op: TruncateKids(keep: 3) }
+  let t: Patch[Node[ProbeMsg]] = Patch { path = [], op = TruncateKids(keep = 3) }
   assert render(enc_patch(t)) == "{\"path\":[],\"op\":\"truncate\",\"keep\":3}"
-  let i: Patch[Node[ProbeMsg]] = Patch { path: [0], op: InsertKid(at: 2, w: leaf) }
+  let i: Patch[Node[ProbeMsg]] = Patch { path = [0], op = InsertKid(at = 2, w = leaf) }
   assert render(enc_patch(i)) ==
     "{\"path\":[0],\"op\":\"insert\",\"at\":2,\"node\":{\"t\":\"text\",\"s\":\"x\"}}"
-  let d: Patch[Node[ProbeMsg]] = Patch { path: [0], op: RemoveKid(at: 2) }
+  let d: Patch[Node[ProbeMsg]] = Patch { path = [0], op = RemoveKid(at = 2) }
   assert render(enc_patch(d)) == "{\"path\":[0],\"op\":\"remove\",\"at\":2}"
-  let m: Patch[Node[ProbeMsg]] = Patch { path: [0], op: MoveKid(from: 3, to: 1) }
+  let m: Patch[Node[ProbeMsg]] = Patch { path = [0], op = MoveKid(from = 3, to = 1) }
   assert render(enc_patch(m)) == "{\"path\":[0],\"op\":\"move\",\"from\":3,\"to\":1}"
 }
 
@@ -540,44 +540,44 @@ test "a key is a guest-side fact and has no wire encoding" {
 # The tree spelling of a reply: what `reply_ok` wrote before it wrote text
 # directly, and the oracle the test below holds it to.
 fn reply_by_tree[M](model: String, ps: List[Patch[Node[M]]]) -> String =
-  render(JObj(entries: map.from([
-    ("ok", JBool(value: true)),
-    ("model", JStr(value: model)),
-    ("patches", JArr(items: list.map(ps, p => enc_patch(p)))),
+  render(JObj(entries = map.from([
+    ("ok", JBool(value = true)),
+    ("model", JStr(value = model)),
+    ("patches", JArr(items = list.map(ps, p => enc_patch(p)))),
   ])))
 
 test "a reply written as text is the reply the encoders describe, byte for byte" {
   # Strings that need escaping in every position a string can take: a text
   # node, a tag, a prop's name and value, an event name, and the model.
   let odd = "q\"u\\o\nte\t\u{0001}é"
-  let leaf: Node[ProbeMsg] = Text(s: odd)
+  let leaf: Node[ProbeMsg] = Text(s = odd)
   let field: Node[ProbeMsg] = Elem(
-    tag: "input",
-    props: [("value", odd), (odd, "x"), ("class", "")],
-    on: [
-      On { event: "input", payload: Value, to_msg: _p => Ping },
-      On { event: odd, payload: Key, to_msg: _p => Pong },
+    tag = "input",
+    props = [("value", odd), (odd, "x"), ("class", "")],
+    on = [
+      On { event = "input", payload = Value, to_msg = _p => Ping },
+      On { event = odd, payload = Key, to_msg = _p => Pong },
       hear("blur", Pong),
     ],
-    kids: [],
-    key: Some("k"),
+    kids = [],
+    key = Some("k"),
   )
   let deep: Node[ProbeMsg] =
-    Elem(tag: "ul", props: [("class", "rows")], on: [], kids: [
-      Elem(tag: "li", props: [], on: [hear("click", Ping)], kids: [leaf, btn("go", Pong)], key: None),
+    Elem(tag = "ul", props = [("class", "rows")], on = [], kids = [
+      Elem(tag = "li", props = [], on = [hear("click", Ping)], kids = [leaf, btn("go", Pong)], key = None),
       field,
-      Elem(tag: "li", props: [], on: [], kids: [], key: None),
-    ], key: None)
+      Elem(tag = "li", props = [], on = [], kids = [], key = None),
+    ], key = None)
   let ps: List[Patch[Node[ProbeMsg]]] = [
-    Patch { path: [], op: Replace(w: deep) },
-    Patch { path: [1, 0], op: Replace(w: leaf) },
-    Patch { path: [2], op: SetSelf(w: deep) },
-    Patch { path: [2, 1], op: AppendKids(ws: [leaf, field, deep]) },
-    Patch { path: [0], op: AppendKids(ws: []) },
-    Patch { path: [], op: TruncateKids(keep: 3) },
-    Patch { path: [0, 4], op: InsertKid(at: 2, w: field) },
-    Patch { path: [0], op: RemoveKid(at: 2) },
-    Patch { path: [7, 0, 1], op: MoveKid(from: 3, to: 1) },
+    Patch { path = [], op = Replace(w = deep) },
+    Patch { path = [1, 0], op = Replace(w = leaf) },
+    Patch { path = [2], op = SetSelf(w = deep) },
+    Patch { path = [2, 1], op = AppendKids(ws = [leaf, field, deep]) },
+    Patch { path = [0], op = AppendKids(ws = []) },
+    Patch { path = [], op = TruncateKids(keep = 3) },
+    Patch { path = [0, 4], op = InsertKid(at = 2, w = field) },
+    Patch { path = [0], op = RemoveKid(at = 2) },
+    Patch { path = [7, 0, 1], op = MoveKid(from = 3, to = 1) },
   ]
   var n = 0
   while n <= len(ps) {
@@ -606,11 +606,11 @@ test "an opaque model stays opaque, quotes and newlines included" {
 
 test "requests decode, and a bad one is an answer rather than a panic" {
   let bare: Option[String] = None
-  assert decode_request("{\"op\":\"init\"}") == Init(flags: bare)
+  assert decode_request("{\"op\":\"init\"}") == Init(flags = bare)
   assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[0,1],\"event\":\"click\"}") ==
-    Event(model: "3", path: [0, 1], event: "click", payload: bare)
+    Event(model = "3", path = [0, 1], event = "click", payload = bare)
   assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[],\"event\":\"x\"}") ==
-    Event(model: "3", path: [], event: "x", payload: bare)
+    Event(model = "3", path = [], event = "x", payload = bare)
   match decode_request("not json at all") {
     Bad(r) -> { assert r != "" }
     _ -> { assert false }
@@ -639,14 +639,14 @@ test "an init carries flags when the host sent some, and nothing when it did not
   # one: an application reading `None` is an application told the page brought
   # nothing, which is what `{"op":"init"}` has always meant.
   let bare: Option[String] = None
-  assert decode_request("{\"op\":\"init\"}") == Init(flags: bare)
-  assert decode_request("{\"op\":\"init\",\"flags\":\"{}\"}") == Init(flags: Some("{}"))
+  assert decode_request("{\"op\":\"init\"}") == Init(flags = bare)
+  assert decode_request("{\"op\":\"init\",\"flags\":\"{}\"}") == Init(flags = Some("{}"))
   # Opaque, and carried verbatim: what is inside is the application's to
   # parse, and this module never looks. Quotes and newlines survive for the
   # reason the model's do.
   assert decode_request("{\"op\":\"init\",\"flags\":\"a\\\"b\\nc\"}") ==
-    Init(flags: Some("a\"b\nc"))
-  assert decode_request("{\"op\":\"init\",\"flags\":\"\"}") == Init(flags: Some(""))
+    Init(flags = Some("a\"b\nc"))
+  assert decode_request("{\"op\":\"init\",\"flags\":\"\"}") == Init(flags = Some(""))
   # Present but not a string is a refusal, exactly as a payload's is.
   match decode_request("{\"op\":\"init\",\"flags\":7}") {
     Bad(r) -> { assert str.contains(r, "`flags`") }
@@ -665,16 +665,16 @@ test "a payload is optional, is a string, and is nothing else" {
   # difference.
   assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[1],\"event\":\"input\"," ++
       "\"payload\":\"buy milk\"}") ==
-    Event(model: "3", path: [1], event: "input", payload: Some("buy milk"))
+    Event(model = "3", path = [1], event = "input", payload = Some("buy milk"))
   assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[1],\"event\":\"input\"," ++
       "\"payload\":\"\"}") ==
-    Event(model: "3", path: [1], event: "input", payload: Some(""))
+    Event(model = "3", path = [1], event = "input", payload = Some(""))
   # A quote and a newline inside a payload cannot end the field or the line,
   # for the reason the model cannot: `json/parser` puts back what
   # `JSON.stringify` escaped.
   assert decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[1],\"event\":\"input\"," ++
       "\"payload\":\"a\\\"b\\nc\"}") ==
-    Event(model: "3", path: [1], event: "input", payload: Some("a\"b\nc"))
+    Event(model = "3", path = [1], event = "input", payload = Some("a\"b\nc"))
   # Present but not a string is a refusal, not a coercion and not a shrug.
   match decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[1],\"event\":\"input\"," ++
       "\"payload\":7}") {
@@ -698,8 +698,8 @@ test "a reply that asked for nothing is the reply it always was" {
 test "fetches ride after the patches, in order, escaped like any string" {
   let none: List[Patch[Node[ProbeMsg]]] = []
   let asked = [
-    FetchReq { url: "/a.json", tag: "a" },
-    FetchReq { url: "/q\"x", tag: "t\n" },
+    FetchReq { url = "/a.json", tag = "a" },
+    FetchReq { url = "/q\"x", tag = "t\n" },
   ]
   assert reply_ok_asking("m", none, asked) ==
     "{\"ok\":true,\"model\":\"m\",\"patches\":[],\"fetch\":[" ++
@@ -708,11 +708,11 @@ test "fetches ride after the patches, in order, escaped like any string" {
 
 test "a supply carries its outcome as a value, failure included" {
   assert decode_request("{\"op\":\"supply\",\"model\":\"3\",\"tag\":\"t\",\"ok\":true,\"body\":\"hi\"}") ==
-    Supply(model: "3", tag: "t", outcome: Ok("hi"))
+    Supply(model = "3", tag = "t", outcome = Ok("hi"))
   assert decode_request("{\"op\":\"supply\",\"model\":\"3\",\"tag\":\"t\",\"ok\":true,\"body\":\"\"}") ==
-    Supply(model: "3", tag: "t", outcome: Ok(""))
+    Supply(model = "3", tag = "t", outcome = Ok(""))
   assert decode_request("{\"op\":\"supply\",\"model\":\"3\",\"tag\":\"t\",\"ok\":false,\"error\":\"HTTP 404\"}") ==
-    Supply(model: "3", tag: "t", outcome: Err("HTTP 404"))
+    Supply(model = "3", tag = "t", outcome = Err("HTTP 404"))
 }
 
 test "a malformed supply is an answer, not a panic" {

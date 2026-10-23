@@ -121,7 +121,7 @@ fn is_word(p: P, st: St, ahead: Int, w: String) -> Bool = {
 fn adv(p: P, st: St) -> (St, Token) = {
   let t = p.toks[st.pos]
   if st.pos < len(p.toks) - 1 {
-    (St { ..st, pos: st.pos + 1 }, t)
+    (St { ..st, pos = st.pos + 1 }, t)
   } else {
     (st, t)
   }
@@ -238,12 +238,12 @@ pub fn parse_module_marked(text: String) -> (Module, List[Diag], ParseMarks) = {
 
 fn parse_marked(text: String) -> (Module, List[Diag], List[Char], List[Token], ParseMarks) = {
   let (cps, toks, lexds) = lex_cps(text)
-  let p = P { toks: toks, cps: Some(cps) }
+  let p = P { toks = toks, cps = Some(cps) }
   let (decls, ds, marks) = parse_decls(p, lexds)
   # A clean parse has nothing to relocate, so it never pays for the scan, and
   # it never takes the second pass: that pass exists only for a parse that ran
   # off the end of the file inside a bracket.
-  if len(ds) == 0 { return (Module { decls: number_examples(decls) }, ds, cps, toks, marks) }
+  if len(ds) == 0 { return (Module { decls = number_examples(decls) }, ds, cps, toks, marks) }
   let scan = scan_delims(toks, cps)
   let none: List[Closing] = []
   let (plan, pairs) = match scan {
@@ -254,7 +254,7 @@ fn parse_marked(text: String) -> (Module, List[Diag], List[Char], List[Token], P
     }
   }
   if len(plan) == 0 {
-    return (Module { decls: number_examples(decls) }, note_cut_openers(toks, cps, place_unclosed(toks, cps, scan, ds)), cps, toks, marks)
+    return (Module { decls = number_examples(decls) }, note_cut_openers(toks, cps, place_unclosed(toks, cps, scan, ds)), cps, toks, marks)
   }
   # The second pass (docs/parser-recovery-design.md §5'): close each block
   # left open before the next column-0 declaration head and parse again. The
@@ -262,17 +262,17 @@ fn parse_marked(text: String) -> (Module, List[Diag], List[Char], List[Token], P
   # in no output text. The marks are the second pass's, like the tree they
   # describe: a declaration that swallowed a made-up closer is damaged there.
   let ptoks = with_closers(toks, plan)
-  let (decls2, ds2, marks2) = parse_decls(P { toks: ptoks, cps: Some(cps) }, lexds)
+  let (decls2, ds2, marks2) = parse_decls(P { toks = ptoks, cps = Some(cps) }, lexds)
   let placed = if len(ds2) == 0 { ds2 } else { place_unclosed(ptoks, cps, scan_delims(ptoks, cps), ds2) }
   let mine = list.map(plan, c => closing_diag(toks, cps, pairs, c))
-  (Module { decls: number_examples(decls2) }, note_cut_openers(ptoks, cps, merge_diags(placed, mine)), cps, toks, marks2)
+  (Module { decls = number_examples(decls2) }, note_cut_openers(ptoks, cps, merge_diags(placed, mine)), cps, toks, marks2)
 }
 
 ## One pass over a token stream: every top-level declaration, with broken ones
 ## reported and skipped, after the diagnostics the lexer left. The marks are
 ## taken here, as each declaration is read or given up (§6).
 fn parse_decls(p: P, lexds: List[Diag]) -> (List[Decl], List[Diag], ParseMarks) = {
-  var st = St { pos: 0, diags: lexds, repairs: 0 }
+  var st = St { pos = 0, diags = lexds, repairs = 0 }
   var decls: List[Decl] = []
   var damaged: List[Bool] = []
   var lost = false
@@ -287,14 +287,14 @@ fn parse_decls(p: P, lexds: List[Diag]) -> (List[Decl], List[Diag], ParseMarks) 
       }
       Err(fe) -> {
         let (st2, d) = fe
-        let resumed = sync_decl(p, st, St { ..st2, diags: st2.diags ++ [d] })
+        let resumed = sync_decl(p, st, St { ..st2, diags = st2.diags ++ [d] })
         if drops_decl(p, st, resumed) { lost = true }
         st = resumed
       }
     }
     st = skip_nl(p, st)
   }
-  (decls, st.diags, ParseMarks { damaged: damaged, lost: lost })
+  (decls, st.diags, ParseMarks { damaged = damaged, lost = lost })
 }
 
 ## Whether reading the declaration that spans tokens `[from.pos, to.pos)`
@@ -343,7 +343,7 @@ fn drops_decl(p: P, start: St, resumed: St) -> Bool = {
   }
   var k = start.pos + 1
   while k < resumed.pos {
-    if starts_top_decl(p, St { ..start, pos: k }) { return true }
+    if starts_top_decl(p, St { ..start, pos = k }) { return true }
     k = k + 1
   }
   false
@@ -397,14 +397,14 @@ fn scan_delims(toks: List[Token], cps: List[Char]) -> Option[DelimScan] = {
         if first_bad == None { first_bad = Some(i) }
         lost = lost ++ list.drop(stack, j + 1)
       }
-      pairs = pairs ++ [DelimPair { open: stack[j], close: i }]
+      pairs = pairs ++ [DelimPair { open = stack[j], close = i }]
       stack = list.take(stack, j)
     } else if len(stack) > 0 && may_head(k) && column_zero(cps, toks[i].lo) {
-      heads = heads ++ [ColZero { at: i, open: stack }]
+      heads = heads ++ [ColZero { at = i, open = stack }]
     }
     i = i + 1
   }
-  Some(DelimScan { stack: stack, lost: lost, first_bad: first_bad, pairs: pairs, heads: heads })
+  Some(DelimScan { stack = stack, lost = lost, first_bad = first_bad, pairs = pairs, heads = heads })
 }
 
 ## The token kinds a declaration head can begin with (`classify_top_decl`);
@@ -440,8 +440,8 @@ fn closings(p: P, sc: DelimScan) -> List[Closing] = {
   if len(sc.stack) == 0 { return out }
   for h in sc.heads {
     let n = len(h.open)
-    if n > done && is_prefix(h.open, sc.stack) && starts_top_decl(p, St { pos: h.at, diags: [], repairs: 0 }) {
-      out = out ++ [Closing { at: h.at, openers: list.slice(sc.stack, done, n) }]
+    if n > done && is_prefix(h.open, sc.stack) && starts_top_decl(p, St { pos = h.at, diags = [], repairs = 0 }) {
+      out = out ++ [Closing { at = h.at, openers = list.slice(sc.stack, done, n) }]
       done = n
     }
   }
@@ -475,12 +475,12 @@ fn with_closers(toks: List[Token], plan: List[Closing]) -> List[Token] = {
         Some(x) -> x
         None -> RBRACE
       }
-      out = out ++ [Token { ..h, kind: ck, text: closer_text(o), hi: h.lo, segs: [] }]
+      out = out ++ [Token { ..h, kind = ck, text = closer_text(o), hi = h.lo, segs = [] }]
       k = k - 1
     }
     # and a line end after them, as a formatted file has: a block followed by
     # `fn` on its own line is a trailing-closure spelling the parser refuses
-    out = out ++ [Token { ..h, kind: NEWLINE, text: "\\n", hi: h.lo, segs: [] }]
+    out = out ++ [Token { ..h, kind = NEWLINE, text = "\\n", hi = h.lo, segs = [] }]
     from = c.at
   }
   out ++ list.drop(toks, from)
@@ -493,9 +493,9 @@ fn closing_diag(toks: List[Token], cps: List[Char], pairs: List[DelimPair], c: C
   let inner = toks[c.openers[len(c.openers) - 1]]
   let h = toks[c.at]
   let resume = Note {
-    msg: "expected `" ++ closer_text(inner.kind) ++ "` before this declaration",
-    lo: h.lo,
-    hi: h.hi
+    msg = "expected `" ++ closer_text(inner.kind) ++ "` before this declaration",
+    lo = h.lo,
+    hi = h.hi
   }
   unclosed_report(toks, suspect_pair(toks, cps, pairs, toks[c.openers[0]].lo, c.at), inner, resume)
 }
@@ -529,9 +529,9 @@ fn closer_text(k: TokKind) -> String =
 ## the innermost opener still open, whose closer is the one expected first.
 fn eof_note(last_open: Token, eof: Token) -> Note =
   Note {
-    msg: "expected `" ++ closer_text(last_open.kind) ++ "` before the end of the file",
-    lo: eof.lo,
-    hi: eof.hi
+    msg = "expected `" ++ closer_text(last_open.kind) ++ "` before the end of the file",
+    lo = eof.lo,
+    hi = eof.hi
   }
 
 fn is_closer(k: TokKind) -> Bool = k == RPAREN || k == RBRACKET || k == RBRACE
@@ -568,9 +568,9 @@ fn ran_out_note(toks: List[Token], open_all: List[Int], first_bad: Option[Int], 
   let o = toks[open_all[len(open_all) - 1]]
   match first_bad {
     Some(b) -> Note {
-      msg: "expected `" ++ closer_text(o.kind) ++ "` before this `" ++ toks[b].text ++ "`",
-      lo: toks[b].lo,
-      hi: toks[b].hi
+      msg = "expected `" ++ closer_text(o.kind) ++ "` before this `" ++ toks[b].text ++ "`",
+      lo = toks[b].lo,
+      hi = toks[b].hi
     }
     None -> eof_note(o, eof)
   }
@@ -637,12 +637,12 @@ fn unclosed_report(toks: List[Token], suspect: Option[DelimPair], fallback: Toke
       Diag {
         ..pd_h("unclosed `" ++ o.text ++ "`", o.lo, o.hi,
           "this `" ++ o.text ++ "` is probably missing its own `" ++ c.text ++ "`"),
-        notes: [
+        notes = [
           Note {
-            msg: "this `" ++ c.text ++ "` closes it but is indented differently, " ++
+            msg = "this `" ++ c.text ++ "` closes it but is indented differently, " ++
               "so it probably belongs to an outer `" ++ o.text ++ "`",
-            lo: c.lo,
-            hi: c.hi
+            lo = c.lo,
+            hi = c.hi
           },
           last
         ]
@@ -651,7 +651,7 @@ fn unclosed_report(toks: List[Token], suspect: Option[DelimPair], fallback: Toke
     None -> Diag {
       ..pd_h("unclosed `" ++ fallback.text ++ "`", fallback.lo, fallback.hi,
         "add the `" ++ closer_text(fallback.kind) ++ "` this `" ++ fallback.text ++ "` is missing"),
-      notes: [last]
+      notes = [last]
     }
   }
 
@@ -694,7 +694,7 @@ fn place_unclosed(toks: List[Token], cps: List[Char], scan: Option[DelimScan], d
   if scan == None { return ds }
   let sc = match scan {
     Some(x) -> x
-    None -> DelimScan { stack: [], lost: [], first_bad: None, pairs: [], heads: [] }
+    None -> DelimScan { stack = [], lost = [], first_bad = None, pairs = [], heads = [] }
   }
   let stack = sc.stack
   let lost = sc.lost
@@ -780,8 +780,8 @@ fn note_cut_openers(toks: List[Token], cps: List[Char], ds: List[Diag]) -> List[
         if same_line(cps, t.lo, d.lo) || named || closed_from(toks, at, t.kind) {
           out = out ++ [d]
         } else {
-          let note = Note { msg: "unclosed `" ++ t.text ++ "`", lo: t.lo, hi: t.hi }
-          out = out ++ [Diag { ..d, notes: [note] }]
+          let note = Note { msg = "unclosed `" ++ t.text ++ "`", lo = t.lo, hi = t.hi }
+          out = out ++ [Diag { ..d, notes = [note] }]
         }
       }
       None -> { out = out ++ [d] }
@@ -864,7 +864,7 @@ fn classify_top_decl(p: P, st: St) -> Option[TopDeclHead] = {
         st0 = adv1(p, adv1(p, adv1(p, st0)))
         vis = VisPkg
       } else {
-        return Some(TopDeclHead { kind: HBadPubScope, st: st0, vis: vis })
+        return Some(TopDeclHead { kind = HBadPubScope, st = st0, vis = vis })
       }
     }
   }
@@ -898,7 +898,7 @@ fn classify_top_decl(p: P, st: St) -> Option[TopDeclHead] = {
     else if vis != VisPrivate { Some(HBadPub) }
     else { None }
   match kind {
-    Some(head) -> Some(TopDeclHead { kind: head, st: st0, vis: vis })
+    Some(head) -> Some(TopDeclHead { kind = head, st = st0, vis = vis })
     None -> None
   }
 }
@@ -939,10 +939,10 @@ fn starts_top_decl(p: P, st: St) -> Bool =
 ## path steps at least one token from `start` or later before it searches, as
 ## before, so the loop in `parse_module_lexed` cannot revisit a position.
 fn sync_decl(p: P, start: St, st: St) -> St = {
-  var s = if st.pos < start.pos { St { ..st, pos: start.pos } } else { st }
+  var s = if st.pos < start.pos { St { ..st, pos = start.pos } } else { st }
   var k = start.pos + 1
   while k < s.pos {
-    let at = St { ..s, pos: k }
+    let at = St { ..s, pos = k }
     if joined_decl_head(p, at) { return at }
     k = k + 1
   }
@@ -1113,7 +1113,7 @@ fn module_use(p: P, st: St, kw: Token) -> PR[Decl] = {
     # only special right after a whole-module path, never reserved)
     if is_word(p, st2, 0, "as") {
       let (st_al, an) = want(p, adv1(p, st2), IDENT, "an alias name after `as`")?
-      let als = ImportName { name: an.text, lo: an.lo, hi: an.hi, local: None }
+      let als = ImportName { name = an.text, lo = an.lo, hi = an.hi, local = None }
       return Ok((st_al, DUseModule(segs, None, Some(als), kw.lo, an.hi, nlo, nhi)))
     }
     return Ok((st2, DUseModule(segs, None, None, kw.lo, nhi, nlo, nhi)))
@@ -1143,10 +1143,10 @@ fn module_use(p: P, st: St, kw: Token) -> PR[Decl] = {
         return Err((st_r, pd_h("`" ++ n.text ++ " as " ++ r.text ++ "` renames nothing", n.lo, r.hi,
           "write `" ++ n.text ++ "`")))
       }
-      local = Some(ImportRename { name: r.text, lo: r.lo, hi: r.hi })
+      local = Some(ImportRename { name = r.text, lo = r.lo, hi = r.hi })
       st8b = st_r
     }
-    names = names ++ [ImportName { name: n.text, lo: n.lo, hi: n.hi, local: local }]
+    names = names ++ [ImportName { name = n.text, lo = n.lo, hi = n.hi, local = local }]
     st7 = skip_nl(p, st8b)
     if at_kind(p, st7, COMMA) { st7 = skip_nl(p, adv1(p, st7)) } else { break }
   }
@@ -1211,7 +1211,7 @@ fn test_decl(p: P, st: St) -> PR[Decl] = {
         first.lo, end,
         "write `test f`, `test T` or `test T.Ctor`, or name it with a string")))
     }
-    let of = ExampleOf { name: first.text, ctor: ctor }
+    let of = ExampleOf { name = first.text, ctor = ctor }
     let (st4, body) = block_expr(p, st3)?
     return Ok((st4, DTest("example " ++ example_spelling(of), body, kw.lo, e_hi(body), first.lo, hi, Some(of))))
   }
@@ -1308,7 +1308,7 @@ fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl])] = 
         return Err((st3, pd_h("an effect parameter cannot be constrained",
           bang.lo, n.hi, "trait bounds constrain type parameters, not effects")))
       }
-      effs = effs ++ [EffParamDecl { name: n.text, lo: bang.lo, hi: n.hi }]
+      effs = effs ++ [EffParamDecl { name = n.text, lo = bang.lo, hi = n.hi }]
       if at_kind(p, st3, COMMA) { st1 = adv1(p, st3) } else {
         st1 = st3
         break
@@ -1321,17 +1321,17 @@ fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl])] = 
     if at_kind(p, st3, COLON) {
       let st4 = adv1(p, st3)
       let (st5, first) = want(p, st4, TYPEIDENT, "a trait name after `:`")?
-      bounds = [Bound { name: first.text, lo: first.lo, hi: first.hi }]
+      bounds = [Bound { name = first.text, lo = first.lo, hi = first.hi }]
       st3 = st5
       while at_kind(p, st3, PLUS) {
         let st6 = adv1(p, st3)
         let (st7, b) = want(p, st6, TYPEIDENT, "a trait name after `+`")?
-        bounds = bounds ++ [Bound { name: b.text, lo: b.lo, hi: b.hi }]
+        bounds = bounds ++ [Bound { name = b.text, lo = b.lo, hi = b.hi }]
         st3 = st7
       }
     }
     let end = if len(bounds) > 0 { bounds[len(bounds) - 1].hi } else { n.hi }
-    out = out ++ [TypeParamDecl { name: n.text, bounds: bounds, lo: n.lo, hi: end }]
+    out = out ++ [TypeParamDecl { name = n.text, bounds = bounds, lo = n.lo, hi = end }]
     if at_kind(p, st3, COMMA) { st1 = adv1(p, st3) } else {
       st1 = st3
       break
@@ -1365,19 +1365,19 @@ fn alias_decl(p: P, st: St, vis: Vis, is_opaque: Bool) -> PR[Decl] = {
   let (st5, target) = type_ref(p, st4)?
   let names = map(tparam_decls, t => t.name)
   Ok((st5, DType(TypeDeclR {
-    vis: vis,
-    is_opaque: is_opaque,
-    name: name.text,
-    tparams: names,
-    eparams: map(eparam_decls, e => e.name),
-    ctors: [],
-    is_record: false,
-    derives: [],
-    alias_target: Some(target),
-    lo: kw.lo,
-    hi: t_hi(target),
-    nlo: name.lo,
-    nhi: name.hi
+    vis = vis,
+    is_opaque = is_opaque,
+    name = name.text,
+    tparams = names,
+    eparams = map(eparam_decls, e => e.name),
+    ctors = [],
+    is_record = false,
+    derives = [],
+    alias_target = Some(target),
+    lo = kw.lo,
+    hi = t_hi(target),
+    nlo = name.lo,
+    nhi = name.hi
   })))
 }
 
@@ -1422,7 +1422,7 @@ fn type_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
     var look = st8.pos
     while p.toks[look].kind == NEWLINE { look = look + 1 }
     if p.toks[look].kind != PIPE { break }
-    var st9 = St { ..st8, pos: look + 1 }
+    var st9 = St { ..st8, pos = look + 1 }
     st9 = skip_nl(p, st9)
     let (st10, c) = ctor_decl(p, st9)?
     ctors = ctors ++ [c]
@@ -1433,19 +1433,19 @@ fn type_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
     ctors[len(ctors) - 1].hi
   }
   Ok((st11, DType(TypeDeclR {
-    vis: vis,
-    is_opaque: false,
-    name: name.text,
-    tparams: tparams,
-    eparams: eparams,
-    ctors: ctors,
-    is_record: false,
-    derives: derives,
-    alias_target: None,
-    lo: kw.lo,
-    hi: end,
-    nlo: name.lo,
-    nhi: name.hi
+    vis = vis,
+    is_opaque = false,
+    name = name.text,
+    tparams = tparams,
+    eparams = eparams,
+    ctors = ctors,
+    is_record = false,
+    derives = derives,
+    alias_target = None,
+    lo = kw.lo,
+    hi = end,
+    nlo = name.lo,
+    nhi = name.hi
   })))
 }
 
@@ -1454,19 +1454,19 @@ fn type_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
 fn parse_derives(p: P, st: St) -> PR[List[Bound]] = {
   var look = st.pos
   while p.toks[look].kind == NEWLINE { look = look + 1 }
-  let at_look = St { ..st, pos: look }
+  let at_look = St { ..st, pos = look }
   if not is_word(p, at_look, 0, "derive") {
     let none: List[Bound] = []
     return Ok((st, none))
   }
-  var st1 = St { ..st, pos: look + 1 }
+  var st1 = St { ..st, pos = look + 1 }
   let (st2, first) = want(p, st1, TYPEIDENT, "a trait name to derive (Show or Ord)")?
-  var out = [Bound { name: first.text, lo: first.lo, hi: first.hi }]
+  var out = [Bound { name = first.text, lo = first.lo, hi = first.hi }]
   var st3 = st2
   while at_kind(p, st3, COMMA) {
     let st4 = adv1(p, st3)
     let (st5, n) = want(p, st4, TYPEIDENT, "a trait name to derive")?
-    out = out ++ [Bound { name: n.text, lo: n.lo, hi: n.hi }]
+    out = out ++ [Bound { name = n.text, lo = n.lo, hi = n.hi }]
     st3 = st5
   }
   Ok((st3, out))
@@ -1488,7 +1488,7 @@ fn record_decl(
     let (st2, f) = want(p, st1, IDENT, "a field name")?
     let (st3, _) = want(p, st2, COLON, "`:` (record fields must be typed)")?
     let (st4, t) = type_ref(p, st3)?
-    fields = fields ++ [FieldDecl { name: f.text, tref: t, lo: f.lo, hi: t_hi(t) }]
+    fields = fields ++ [FieldDecl { name = f.text, tref = t, lo = f.lo, hi = t_hi(t) }]
     st1 = skip_nl(p, st4)
     if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
   }
@@ -1497,29 +1497,29 @@ fn record_decl(
     return Err((st5, pd("a record must declare at least one field", kw.lo, close.hi)))
   }
   let ctor = CtorDecl {
-    name: name.text,
-    fields: fields,
-    lo: name.lo,
-    hi: close.hi,
-    nlo: name.lo,
-    nhi: name.hi
+    name = name.text,
+    fields = fields,
+    lo = name.lo,
+    hi = close.hi,
+    nlo = name.lo,
+    nhi = name.hi
   }
   let (st6, derives) = parse_derives(p, st5)?
   let end = if len(derives) > 0 { derives[len(derives) - 1].hi } else { close.hi }
   Ok((st6, DType(TypeDeclR {
-    vis: vis,
-    is_opaque: false,
-    name: name.text,
-    tparams: tparams,
-    eparams: eparams,
-    ctors: [ctor],
-    is_record: true,
-    derives: derives,
-    alias_target: None,
-    lo: kw.lo,
-    hi: end,
-    nlo: name.lo,
-    nhi: name.hi
+    vis = vis,
+    is_opaque = false,
+    name = name.text,
+    tparams = tparams,
+    eparams = eparams,
+    ctors = [ctor],
+    is_record = true,
+    derives = derives,
+    alias_target = None,
+    lo = kw.lo,
+    hi = end,
+    nlo = name.lo,
+    nhi = name.hi
   })))
 }
 
@@ -1527,12 +1527,12 @@ fn ctor_decl(p: P, st: St) -> PR[CtorDecl] = {
   let (st1, name) = want(p, st, TYPEIDENT, "a constructor name (uppercase)")?
   if not at_kind(p, st1, LPAREN) {
     return Ok((st1, CtorDecl {
-      name: name.text,
-      fields: [],
-      lo: name.lo,
-      hi: name.hi,
-      nlo: name.lo,
-      nhi: name.hi
+      name = name.text,
+      fields = [],
+      lo = name.lo,
+      hi = name.hi,
+      nlo = name.lo,
+      nhi = name.hi
     }))
   }
   var st2 = skip_nl(p, adv1(p, st1))
@@ -1541,7 +1541,7 @@ fn ctor_decl(p: P, st: St) -> PR[CtorDecl] = {
     let (st3, f) = want(p, st2, IDENT, "a field name (constructor fields must be named)")?
     let (st4, _) = want(p, st3, COLON, "`:` (constructor fields must be typed)")?
     let (st5, t) = type_ref(p, st4)?
-    fields = fields ++ [FieldDecl { name: f.text, tref: t, lo: f.lo, hi: t_hi(t) }]
+    fields = fields ++ [FieldDecl { name = f.text, tref = t, lo = f.lo, hi = t_hi(t) }]
     st2 = skip_nl(p, st5)
     if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
   }
@@ -1552,12 +1552,12 @@ fn ctor_decl(p: P, st: St) -> PR[CtorDecl] = {
       "drop the parentheses for a no-payload constructor: ${name.text}")))
   }
   Ok((st6, CtorDecl {
-    name: name.text,
-    fields: fields,
-    lo: name.lo,
-    hi: close.hi,
-    nlo: name.lo,
-    nhi: name.hi
+    name = name.text,
+    fields = fields,
+    lo = name.lo,
+    hi = close.hi,
+    nlo = name.lo,
+    nhi = name.hi
   }))
 }
 
@@ -1626,18 +1626,18 @@ fn fn_decl(p: P, st: St, vis: Vis, in_impl: Bool) -> PR[FnDecl] = {
   let st12 = skip_nl(p, st11)
   let (st13, body) = expression(p, st12, false)?
   Ok((st13, FnDecl {
-    vis: vis,
-    name: name_tok.text,
-    tparams: tparams,
-    eparams: eparams,
-    params: params,
-    ret: ret,
-    effs: effs,
-    body: body,
-    lo: fn_tok.lo,
-    hi: e_hi(body),
-    nlo: name_tok.lo,
-    nhi: name_tok.hi
+    vis = vis,
+    name = name_tok.text,
+    tparams = tparams,
+    eparams = eparams,
+    params = params,
+    ret = ret,
+    effs = effs,
+    body = body,
+    lo = fn_tok.lo,
+    hi = e_hi(body),
+    nlo = name_tok.lo,
+    nhi = name_tok.hi
   }))
 }
 
@@ -1662,12 +1662,12 @@ fn typed_params(p: P, st: St, what: String) -> PR[List[Param]] = {
       st4 = st6
     }
     params = params ++ [Param {
-      name: n.text,
-      tref: t,
-      default: dflt,
-      default_src: dsrc,
-      lo: n.lo,
-      hi: n.hi
+      name = n.text,
+      tref = t,
+      default = dflt,
+      default_src = dsrc,
+      lo = n.lo,
+      hi = n.hi
     }]
     st1 = skip_nl(p, st4)
     if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
@@ -1763,11 +1763,11 @@ fn trait_assoc(p: P, st: St) -> PR[AssocDecl] = {
       "the `= Type` binding belongs in each impl, not in the trait")))
   }
   Ok((st2, AssocDecl {
-    name: name_tok.text,
-    lo: kw.lo,
-    hi: name_tok.hi,
-    nlo: name_tok.lo,
-    nhi: name_tok.hi
+    name = name_tok.text,
+    lo = kw.lo,
+    hi = name_tok.hi,
+    nlo = name_tok.lo,
+    nhi = name_tok.hi
   }))
 }
 
@@ -1799,12 +1799,12 @@ fn trait_eff_assoc(p: P, st: St) -> PR[EffAssocDecl] = {
         "bind it in each impl (effect " ++ name_tok.text ++ " = !SomeEffect)")))
   }
   Ok((st3, EffAssocDecl {
-    name: name_tok.text,
-    default: default,
-    lo: kw.lo,
-    hi: hi,
-    nlo: name_tok.lo,
-    nhi: name_tok.hi
+    name = name_tok.text,
+    default = default,
+    lo = kw.lo,
+    hi = hi,
+    nlo = name_tok.lo,
+    nhi = name_tok.hi
   }))
 }
 
@@ -1835,15 +1835,15 @@ fn trait_method(p: P, st: St) -> PR[TraitMethod] = {
     None -> tok_at(p, st9.pos, -1).hi
   }
   Ok((st9, TraitMethod {
-    name: name_tok.text,
-    params: params,
-    ret: ret,
-    effs: effs,
-    body: body,
-    lo: fn_tok.lo,
-    hi: end,
-    nlo: name_tok.lo,
-    nhi: name_tok.hi
+    name = name_tok.text,
+    params = params,
+    ret = ret,
+    effs = effs,
+    body = body,
+    lo = fn_tok.lo,
+    hi = end,
+    nlo = name_tok.lo,
+    nhi = name_tok.hi
   }))
 }
 
@@ -1881,14 +1881,14 @@ fn effect_decl(p: P, st: St, vis: Vis, is_ctl: Bool) -> PR[Decl] = {
     return Err((st7, pd("an effect must declare at least one operation", kw.lo, close.hi)))
   }
   Ok((st7, DEffect(EffectDeclR {
-    vis: vis,
-    is_ctl: is_ctl,
-    name: name.text,
-    ops: ops,
-    lo: kw.lo,
-    hi: close.hi,
-    nlo: name.lo,
-    nhi: name.hi
+    vis = vis,
+    is_ctl = is_ctl,
+    name = name.text,
+    ops = ops,
+    lo = kw.lo,
+    hi = close.hi,
+    nlo = name.lo,
+    nhi = name.hi
   })))
 }
 
@@ -1916,13 +1916,13 @@ fn effect_op(p: P, st: St) -> PR[EffectOp] = {
   }
   let end = tok_at(p, st7.pos, -1).hi
   Ok((st7, EffectOp {
-    name: name_tok.text,
-    params: params,
-    ret: ret,
-    lo: fn_tok.lo,
-    hi: end,
-    nlo: name_tok.lo,
-    nhi: name_tok.hi
+    name = name_tok.text,
+    params = params,
+    ret = ret,
+    lo = fn_tok.lo,
+    hi = end,
+    nlo = name_tok.lo,
+    nhi = name_tok.hi
   }))
 }
 
@@ -1987,12 +1987,12 @@ fn impl_assoc(p: P, st: St) -> PR[AssocBind] = {
     "`=` (an impl binds each associated type: type " ++ name_tok.text ++ " = Int)")?
   let (st4, tref) = type_ref(p, st3)?
   Ok((st4, AssocBind {
-    name: name_tok.text,
-    tref: tref,
-    lo: kw.lo,
-    hi: t_hi(tref),
-    nlo: name_tok.lo,
-    nhi: name_tok.hi
+    name = name_tok.text,
+    tref = tref,
+    lo = kw.lo,
+    hi = t_hi(tref),
+    nlo = name_tok.lo,
+    nhi = name_tok.hi
   }))
 }
 
@@ -2008,12 +2008,12 @@ fn impl_eff_bind(p: P, st: St) -> PR[EffAssocBind] = {
   let (st4, tail) = eff_bind_row(p, st3)?
   let (atoms, hi) = tail
   Ok((st4, EffAssocBind {
-    name: name_tok.text,
-    atoms: atoms,
-    lo: kw.lo,
-    hi: hi,
-    nlo: name_tok.lo,
-    nhi: name_tok.hi
+    name = name_tok.text,
+    atoms = atoms,
+    lo = kw.lo,
+    hi = hi,
+    nlo = name_tok.lo,
+    nhi = name_tok.hi
   }))
 }
 
@@ -2110,7 +2110,7 @@ fn type_args(p: P, st: St, hi0: Int) -> PR[(List[TypeRef], List[EffArg], Int)] =
       let bang = tok_at(p, st2.pos, 0)
       let (st3, atoms) = effect_group(p, st2)?
       let end = tok_at(p, st3.pos, -1).hi
-      eargs = eargs ++ [EffArg { atoms: atoms, lo: bang.lo, hi: end }]
+      eargs = eargs ++ [EffArg { atoms = atoms, lo = bang.lo, hi = end }]
       if at_kind(p, st3, COMMA) { st2 = adv1(p, st3) } else {
         st2 = st3
         break
@@ -2241,7 +2241,7 @@ fn effect_name_token(p: P, st: St, projections: Bool) -> PR[Token] = {
       return Err((st3, perr_h(p, st3, "an effect reference has at most two name segments",
         "use `alias.Effect` for an imported effect or `T.E` for an associated projection")))
     }
-    return Ok((st3, Token { ..n, text: n.text ++ "." ++ m.text, hi: m.hi }))
+    return Ok((st3, Token { ..n, text = n.text ++ "." ++ m.text, hi = m.hi }))
   }
   Ok((st1, n))
 }
@@ -2345,7 +2345,7 @@ fn local_fn_stmt(p: P, st: St) -> PR[Stmt] = {
       return Err((st7, perr_h(p, st7, "local function parameters cannot take default values",
         "lift the function to the top level")))
     }
-    params = params ++ [LambdaParam { name: n.text, ann: Some(t), lo: n.lo, hi: n.hi }]
+    params = params ++ [LambdaParam { name = n.text, ann = Some(t), lo = n.lo, hi = n.hi }]
     st4 = skip_nl(p, st7)
     if at_kind(p, st4, COMMA) { st4 = skip_nl(p, adv1(p, st4)) } else { break }
   }
@@ -2512,7 +2512,7 @@ fn pipe_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
     var look = st1.pos
     while p.toks[look].kind == NEWLINE { look = look + 1 }
     if p.toks[look].kind != PIPEGT { break }
-    let st2 = skip_nl(p, St { ..st1, pos: look + 1 })
+    let st2 = skip_nl(p, St { ..st1, pos = look + 1 })
     let (st3, rhs) = or_expr(p, st2, nb)?
     # `x |> f(a)` is `f(x, a)`: the pipe is argument insertion into an ordinary
     # call, and nothing else (SYN-05). When the right side already ends in a
@@ -2551,7 +2551,7 @@ fn lead1(p: P, st: St, op: TokKind) -> St =
   } else {
     var look = st.pos
     while p.toks[look].kind == NEWLINE { look = look + 1 }
-    if p.toks[look].kind == op { St { ..st, pos: look } } else { st }
+    if p.toks[look].kind == op { St { ..st, pos = look } } else { st }
   }
 
 fn lead_op(p: P, st: St, classify: fn(TokKind) -> Option[BinOp]) -> St =
@@ -2561,7 +2561,7 @@ fn lead_op(p: P, st: St, classify: fn(TokKind) -> Option[BinOp]) -> St =
       var look = st.pos
       while p.toks[look].kind == NEWLINE { look = look + 1 }
       match classify(p.toks[look].kind) {
-        Some(_) -> St { ..st, pos: look }
+        Some(_) -> St { ..st, pos = look }
         None -> st
       }
     }
@@ -2916,7 +2916,7 @@ fn postfix_tail(p: P, st: St, initial: Expr, nb: Bool) -> PR[Expr] = {
       var look = st1.pos
       while p.toks[look].kind == NEWLINE { look = look + 1 }
       if p.toks[look].kind != DOT { return Ok((st1, e)) }
-      st1 = St { ..st1, pos: look }
+      st1 = St { ..st1, pos = look }
     } else {
       return Ok((st1, e))
     }
@@ -3110,12 +3110,12 @@ fn header_record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
     Ok(r) -> {
       let (st2, e) = r
       let d = pd_h("a record literal here needs parentheses", name.lo, e_hi(e), hint)
-      Ok((St { ..st2, repairs: st2.repairs + 1, diags: insert_diag(st2.diags, before, d) }, e))
+      Ok((St { ..st2, repairs = st2.repairs + 1, diags = insert_diag(st2.diags, before, d) }, e))
     }
     Err(fe) -> {
       let (st2, d0) = fe
       let d = pd_h("a record literal here needs parentheses", name.lo, brace.hi, hint)
-      Err((St { ..st2, diags: insert_diag(st2.diags, before, d) }, d0))
+      Err((St { ..st2, diags = insert_diag(st2.diags, before, d) }, d0))
     }
   }
 }
@@ -3137,7 +3137,7 @@ fn starts_next_item(k: TokKind) -> Bool =
 ## The item after it is parsed normally, so later errors in the same
 ## declaration are still found, and the literal still ends at its own closer.
 fn missing_comma(p: P, st: St, close: String, items: String) -> St =
-  St { ..st, repairs: st.repairs + 1, diags: st.diags ++ [perr_h(p, st,
+  St { ..st, repairs = st.repairs + 1, diags = st.diags ++ [perr_h(p, st,
     "expected `,` or " ++ close ++ ", found " ++ found_tok(cur(p, st)),
     "a comma is missing between two " ++ items)] }
 
@@ -3153,7 +3153,7 @@ fn call_args(p: P, st: St) -> Result[(St, List[Arg], Token), (St, Diag)] = {
       let (st2, arg_name) = adv(p, st1)
       let st3 = skip_nl(p, adv1(p, st2))
       let (st4, value) = expression(p, st3, false)?
-      args = args ++ [Arg { name: Some(arg_name.text), e: value, trailing: false, lo: arg_name.lo, hi: e_hi(value) }]
+      args = args ++ [Arg { name = Some(arg_name.text), e = value, trailing = false, lo = arg_name.lo, hi = e_hi(value) }]
       st1 = st4
     } else {
       let (st2, value) = expression(p, st1, false)?
@@ -3197,7 +3197,7 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
     if is_value_separator(kind_of(p, st2)) {
       let st3 = skip_nl(p, adv1(p, st2))
       let (st4, value) = expression(p, st3, false)?
-      args = args ++ [Arg { name: Some(f.text), e: value, trailing: false, lo: f.lo, hi: e_hi(value) }]
+      args = args ++ [Arg { name = Some(f.text), e = value, trailing = false, lo = f.lo, hi = e_hi(value) }]
       st1 = st4
     } else if at_kind(p, st2, LPAREN) {
       # `Column { text("a") }`: an uppercase name takes its braces as a record
@@ -3210,7 +3210,7 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
     } else {
       # shorthand { x } means { x: x }
       let value = EVar(f.text, f.lo, f.hi)
-      args = args ++ [Arg { name: Some(f.text), e: value, trailing: false, lo: f.lo, hi: f.hi }]
+      args = args ++ [Arg { name = Some(f.text), e = value, trailing = false, lo = f.lo, hi = f.hi }]
       st1 = st2
     }
     st1 = skip_nl(p, st1)
@@ -3249,18 +3249,18 @@ fn str_lit(p: P, st: St, t: Token) -> PR[Expr] = {
         let (subtoks, lexds) = lex_at(src, o)
         diags = diags ++ lexds
         if len(lexds) > 0 { repairs = repairs + 1 }
-        let subp = P { toks: subtoks, cps: None }
-        let sst = St { pos: 0, diags: diags, repairs: repairs }
+        let subp = P { toks = subtoks, cps = None }
+        let sst = St { pos = 0, diags = diags, repairs = repairs }
         match expression(subp, sst, false) {
           Err(fe) -> {
             let (fst, d) = fe
-            return Err((St { ..st, diags: fst.diags }, d))
+            return Err((St { ..st, diags = fst.diags }, d))
           }
           Ok(r) -> {
             let (sst2, e) = r
             let sst3 = skip_nl(subp, sst2)
             if not at_kind(subp, sst3, EOF) {
-              return Err((St { ..st, diags: sst3.diags },
+              return Err((St { ..st, diags = sst3.diags },
                 perr(subp, sst3, "trailing content in interpolation")))
             }
             diags = sst3.diags
@@ -3271,7 +3271,7 @@ fn str_lit(p: P, st: St, t: Token) -> PR[Expr] = {
       }
     }
   }
-  Ok((St { ..st, diags: diags, repairs: repairs }, EStr(parts, t.lo, t.hi)))
+  Ok((St { ..st, diags = diags, repairs = repairs }, EStr(parts, t.lo, t.hi)))
 }
 
 ## `( name [: type] , ... )`, the parameter list both lambda spellings share.
@@ -3299,7 +3299,7 @@ fn lambda_params(p: P, st: St, bare: Bool) -> Result[(St, List[LambdaParam]), (S
       ann = Some(t)
       st4 = st6
     }
-    params = params ++ [LambdaParam { name: name.text, ann: ann, lo: name.lo, hi: name.hi }]
+    params = params ++ [LambdaParam { name = name.text, ann = ann, lo = name.lo, hi = name.hi }]
     st2 = skip_nl(p, st4)
     if at_kind(p, st2, COMMA) {
       st2 = skip_nl(p, adv1(p, st2))
@@ -3372,7 +3372,7 @@ fn tail_block_lambda(p: P, st: St) -> PR[Expr] = {
     # `{ x => ... }`: the same one-token lookahead the bare arrow lambda uses
     let (st3, name) = adv(p, st1)
     st2 = adv1(p, st3)
-    params = [LambdaParam { name: name.text, ann: None, lo: name.lo, hi: name.hi }]
+    params = [LambdaParam { name = name.text, ann = None, lo = name.lo, hi = name.hi }]
   } else if at_kind(p, st1, LPAREN) && paren_is_lambda(p, st1) {
     # `{ (a, b) => ... }` / `{ (x: Int) => ... }` / `{ () => ... }`
     let (st3, ps) = lambda_params(p, st1, true)?
@@ -3404,7 +3404,7 @@ fn bare_lambda1(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let (st1, name) = adv(p, st)
   let st2 = skip_nl(p, adv1(p, st1))
   let (st3, body) = expression(p, st2, nb)?
-  let param = LambdaParam { name: name.text, ann: None, lo: name.lo, hi: name.hi }
+  let param = LambdaParam { name = name.text, ann = None, lo = name.lo, hi = name.hi }
   Ok((st3, ELambda([param], body, false, name.lo, e_hi(body))))
 }
 
@@ -3476,7 +3476,7 @@ fn list_elem(p: P, st: St) -> PR[ListElem] = {
 fn if_chain_arms(e: Expr) -> Option[List[ListIfArm]] =
   match e {
     EIf(cond, thn, els, _, _) -> {
-      let here = ListIfArm { cond: cond, body: thn }
+      let here = ListIfArm { cond = cond, body = thn }
       match els {
         None -> Some([here])
         Some(inner) ->
@@ -3592,7 +3592,7 @@ fn block_body(
         }
         Err(fe) -> {
           let (st2, d) = fe
-          st1 = sync_stmt(p, st1, St { ..st2, diags: st2.diags ++ [d] })
+          st1 = sync_stmt(p, st1, St { ..st2, diags = st2.diags ++ [d] })
         }
       }
     } else {
@@ -3604,7 +3604,7 @@ fn block_body(
         }
         Err(fe) -> {
           let (st2, d) = fe
-          st1 = sync_stmt(p, st1, St { ..st2, diags: st2.diags ++ [d] })
+          st1 = sync_stmt(p, st1, St { ..st2, diags = st2.diags ++ [d] })
         }
       }
     }
@@ -3669,7 +3669,7 @@ fn with_stmt(p: P, st: St) -> PR[Expr] = {
   let rest_lo = cur(p, st6).lo
   let (st7, stmts, tail) = block_body(p, st6)?
   let rest_hi = cur(p, st7).lo
-  let param = LambdaParam { name: name.text, ann: None, lo: name.lo, hi: name.hi }
+  let param = LambdaParam { name = name.text, ann = None, lo = name.lo, hi = name.hi }
   let body = EBlock(stmts, tail, rest_lo, rest_hi)
   let lam = ELambda([param], body, true, kw.lo, rest_hi)
   Ok((st7, from_with(attach_trailing(callee, lam), kw.lo)))
@@ -3788,13 +3788,13 @@ fn handler_cell(p: P, st: St, after_arm: Bool) -> PR[HandlerCell] = {
   let st5 = skip_nl(p, st4)
   let (st6, init) = expression(p, st5, false)?
   Ok((st6, HandlerCell {
-    name: name.text,
-    ann: ann,
-    init: init,
-    lo: kw.lo,
-    hi: e_hi(init),
-    nlo: name.lo,
-    nhi: name.hi
+    name = name.text,
+    ann = ann,
+    init = init,
+    lo = kw.lo,
+    hi = e_hi(init),
+    nlo = name.lo,
+    nhi = name.hi
   }))
 }
 
@@ -3848,16 +3848,16 @@ fn handler_arm(p: P, st: St) -> PR[HandlerArm] = {
   let st5 = skip_nl(p, st4)
   let (st6, body) = expression(p, st5, false)?
   Ok((st6, HandlerArm {
-    name: name.text,
-    params: params,
-    binder: binder,
-    body: body,
-    lo: name.lo,
-    hi: e_hi(body),
-    nlo: name.lo,
-    nhi: name.hi,
-    blo: blo,
-    bhi: bhi
+    name = name.text,
+    params = params,
+    binder = binder,
+    body = body,
+    lo = name.lo,
+    hi = e_hi(body),
+    nlo = name.lo,
+    nhi = name.hi,
+    blo = blo,
+    bhi = bhi
   }))
 }
 
@@ -3931,7 +3931,7 @@ fn assign_target_error(p: P, st: St, target: Expr) -> Diag = {
 ## is the enclosing block's. A scan that runs into EOF falls back to the old
 ## rule, so one really unclosed `{` does not swallow the rest of the file.
 fn sync_stmt(p: P, start: St, failed: St) -> St = {
-  var s = St { pos: start.pos, diags: failed.diags, repairs: failed.repairs + 1 }
+  var s = St { pos = start.pos, diags = failed.diags, repairs = failed.repairs + 1 }
   var parens = 0
   var brackets = 0
   var braces = 0
@@ -3974,7 +3974,7 @@ fn sync_line(p: P, st: St) -> St = {
 ## separate arms outside every nested delimiter; an unmatched top-level `}` is
 ## the current match's close and must stop recovery before a later declaration.
 fn sync_arm(p: P, start: St, failed: St) -> St = {
-  var s = St { pos: start.pos, diags: failed.diags, repairs: failed.repairs + 1 }
+  var s = St { pos = start.pos, diags = failed.diags, repairs = failed.repairs + 1 }
   var parens = 0
   var brackets = 0
   var braces = 0
@@ -4023,7 +4023,7 @@ fn match_expr(p: P, st: St) -> PR[Expr] = {
       Err(ed) -> {
         # a broken arm is reported and skipped; the remaining arms still parse
         let (ste, d) = ed
-        st4 = sync_arm(p, st4, St { ..ste, diags: ste.diags ++ [d] })
+        st4 = sync_arm(p, st4, St { ..ste, diags = ste.diags ++ [d] })
       }
       Ok(sa) -> {
         let (st5, arm) = sa
@@ -4038,7 +4038,7 @@ fn match_expr(p: P, st: St) -> PR[Expr] = {
         } else {
           let d = perr_h(p, st5, "expected a newline, `,` or `}` after this match arm",
             "put the next arm on a new line or after `,`; wrap statement bodies in braces: `-> { ... }`")
-          st4 = sync_arm(p, st5, St { ..st5, diags: st5.diags ++ [d] })
+          st4 = sync_arm(p, st5, St { ..st5, diags = st5.diags ++ [d] })
         }
       }
     }
@@ -4063,7 +4063,7 @@ fn match_arm(p: P, st: St) -> PR[MatchArm] = {
   let (st7, _) = want(p, st2, ARROW, "`->`")?
   let st8 = skip_nl(p, st7)
   let (st9, body) = expression(p, st8, false)?
-  Ok((st9, MatchArm { pat: pat, guard: guard, body: body, lo: pat_lo(pat), hi: e_hi(body) }))
+  Ok((st9, MatchArm { pat = pat, guard = guard, body = body, lo = pat_lo(pat), hi = e_hi(body) }))
 }
 
 # ---- patterns ----
@@ -4271,12 +4271,12 @@ fn ctor_pat(p: P, st: St) -> PR[Pattern] = {
       let (st4, arg_name) = adv(p, st2)
       let st5 = skip_nl(p, adv1(p, st4))
       let (st6, pt) = pattern_p(p, st5)?
-      args = args ++ [PatArg { name: Some(arg_name.text), nlo: arg_name.lo, nhi: arg_name.hi,
-        pat: pt }]
+      args = args ++ [PatArg { name = Some(arg_name.text), nlo = arg_name.lo, nhi = arg_name.hi,
+        pat = pt }]
       st2 = st6
     } else {
       let (st7, pt) = pattern_p(p, st2)?
-      args = args ++ [PatArg { name: None, nlo: pat_lo(pt), nhi: pat_hi(pt), pat: pt }]
+      args = args ++ [PatArg { name = None, nlo = pat_lo(pt), nhi = pat_hi(pt), pat = pt }]
       st2 = st7
     }
     st2 = skip_nl(p, st2)
@@ -4305,12 +4305,12 @@ fn record_pat(p: P, st: St, name: Token) -> PR[Pattern] = {
     if is_value_separator(kind_of(p, st3)) {
       let st4 = skip_nl(p, adv1(p, st3))
       let (st5, sub) = pattern_p(p, st4)?
-      args = args ++ [PatArg { name: Some(f.text), nlo: f.lo, nhi: f.hi, pat: sub }]
+      args = args ++ [PatArg { name = Some(f.text), nlo = f.lo, nhi = f.hi, pat = sub }]
       st1 = st5
     } else {
       # shorthand { x } binds field x to x
-      args = args ++ [PatArg { name: Some(f.text), nlo: f.lo, nhi: f.hi,
-        pat: PBind(f.text, f.lo, f.hi) }]
+      args = args ++ [PatArg { name = Some(f.text), nlo = f.lo, nhi = f.hi,
+        pat = PBind(f.text, f.lo, f.hi) }]
       st1 = st3
     }
     st1 = skip_nl(p, st1)

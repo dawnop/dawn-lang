@@ -597,19 +597,19 @@ type L = {
 ## that FIRST needed it, because that is where it is emitted.
 pub type Owner = { op: Int, inner: List[List[Owner]] } derive Show
 
-fn fresh(l: L) -> (L, Int) = (L { ..l, next: l.next + 1 }, l.next)
+fn fresh(l: L) -> (L, Int) = (L { ..l, next = l.next + 1 }, l.next)
 
-fn emit(l: L, i: Instr) -> L = L { ..l, body: l.body ++ [i], owners: l.owners ++ [Owner { op: l.at, inner: [] }] }
+fn emit(l: L, i: Instr) -> L = L { ..l, body = l.body ++ [i], owners = l.owners ++ [Owner { op = l.at, inner = [] }] }
 
 # A region instruction, with the owners of the bodies it holds.
 fn emit_region(l: L, i: Instr, inner: List[List[Owner]]) -> L =
-  L { ..l, body: l.body ++ [i], owners: l.owners ++ [Owner { op: l.at, inner: inner }] }
+  L { ..l, body = l.body ++ [i], owners = l.owners ++ [Owner { op = l.at, inner = inner }] }
 
 # An empty instruction list for a region's body, in the scope of `l`.
-fn opened(l: L) -> L = L { ..l, body: [], owners: [] }
+fn opened(l: L) -> L = L { ..l, body = [], owners = [] }
 
 fn bind(l: L, handle: Int, r: Ref, t: Ty) -> L =
-  L { ..l, names: map.insert(l.names, handle, r), tys: map.insert(l.tys, handle, t) }
+  L { ..l, names = map.insert(l.names, handle, r), tys = map.insert(l.tys, handle, t) }
 
 fn ref_of(l: L, handle: Int, what: String) -> Ref = match map.get(l.names, handle) {
   Some(r) -> r
@@ -726,7 +726,7 @@ fn offsets(l0: L, base: Int, shape: List[Int], strides: List[Int]) -> (L, Ref) =
         let (lf, sum) = fresh(le)
         (emit(lf, AddInt(sum, full, sofar, term)), Val(sum))
       })
-      (L { ..l2, memo: map.insert(l2.memo, key, acc) }, acc)
+      (L { ..l2, memo = map.insert(l2.memo, key, acc) }, acc)
     }
   }
 }
@@ -743,7 +743,7 @@ fn pointers(l0: L, param: Int, dtype: String, base: Int, shape: List[Int], strid
       let (l2, pn) = spread_rank0(l1, Arg(param), Tile([], p), shape, p)
       let (l3, pt) = fresh(l2)
       let l4 = emit(l3, Offset(pt, pn, off, Tile(shape, p), i32_tile(shape)))
-      (L { ..l4, memo: map.insert(l4.memo, key, Val(pt)) }, Val(pt))
+      (L { ..l4, memo = map.insert(l4.memo, key, Val(pt)) }, Val(pt))
     }
   }
 }
@@ -765,13 +765,13 @@ fn index_pointers(l0: L, param: Int, dtype: String, index: Int, shape: List[Int]
       let (l1, pn) = spread_rank0(l0, Arg(param), Tile([], p), shape, p)
       let (l2, pt) = fresh(l1)
       let l3 = emit(l2, Offset(pt, pn, off, Tile(shape, p), i32_tile(shape)))
-      (L { ..l3, memo: map.insert(l3.memo, key, Val(pt)) }, Val(pt))
+      (L { ..l3, memo = map.insert(l3.memo, key, Val(pt)) }, Val(pt))
     }
   }
 }
 
 # One operation lowered, as the next one in depth-first order.
-fn lower_op(l: L, op: TileOp) -> L = lower_one(L { ..l, at: l.next_op, next_op: l.next_op + 1 }, op)
+fn lower_op(l: L, op: TileOp) -> L = lower_one(L { ..l, at = l.next_op, next_op = l.next_op + 1 }, op)
 
 fn lower_one(l0: L, op: TileOp) -> L = match op {
   MakeToken(dst) -> {
@@ -1454,7 +1454,7 @@ fn lower_loop(l0: L, inits: List[Int], carried: List[Int], results: List[Int], b
 fn close_scope(before: L, inner: L) -> L = {
   let opened = list.filter(map.keys(inner.names), h => not map.has(before.names, h))
   let closed = list.fold(opened, before.closed, (m, h) => map.insert(m, h, ()))
-  L { ..before, next: inner.next, closed: closed, next_op: inner.next_op }
+  L { ..before, next = inner.next, closed = closed, next_op = inner.next_op }
 }
 
 # The values a region's terminator yields, or a refusal when the region does
@@ -1581,12 +1581,12 @@ pub fn lower(prog: TileProg) -> Kernel = {
 ## loop `lower` runs, not a second one, so the table and the instructions
 ## cannot disagree.
 pub fn lower_spans(prog: TileProg) -> (Kernel, List[Owner]) = {
-  var l = L { next: 0, names: map.empty(), tys: map.empty(), closed: map.empty(), memo: map.empty(), body: [],
-    owners: [], at: 0, next_op: 0 }
+  var l = L { next = 0, names = map.empty(), tys = map.empty(), closed = map.empty(), memo = map.empty(), body = [],
+    owners = [], at = 0, next_op = 0 }
   for op in prog.ops {
     l = lower_op(l, op)
   }
-  (Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret], hints: prog.hints, producer: prog.producer, debug: prog.debug }, l.owners)
+  (Kernel { name = prog.name, params = prog.params, globals = prog.globals, body = l.body ++ [Ret], hints = prog.hints, producer = prog.producer, debug = prog.debug }, l.owners)
 }
 
 ## How many instructions `body` is, a region's own body counted: the number
@@ -1697,13 +1697,13 @@ pub fn defines_inside(body: List[Instr]) -> List[Int] = {
 # shared, the token chain is carried, and a dangling handle is refused.
 
 fn two_loads_one_param() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "twice",
-  params: [ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "twice",
+  params = [ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 128),
@@ -1743,13 +1743,13 @@ test "the pointer ladder for one parameter at one index is emitted once, not onc
 # through the same tile: no `base`, no strides, one index tile serving two
 # memory operations.
 fn gather_then_scatter() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "indexed",
-  params: [ByPtr("i32"), ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "indexed",
+  params = [ByPtr("i32"), ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     IdxConst(1, 0),
     Load(2, 3, 0, "i32", 1, [8], [1], None, None, 0, []),
@@ -1773,7 +1773,7 @@ test "a gather offsets the parameter by the index tile itself: no iota, no strid
 
 test "a gather and a scatter through one index tile into one parameter share the pointer tile" {
   let k = lower(TileProg { ..gather_then_scatter(),
-    ops: list.take(gather_then_scatter().ops, 4) ++ [Scatter(6, 1, "f64", 2, [8], 4, None, 5)] })
+    ops = list.take(gather_then_scatter().ops, 4) ++ [Scatter(6, 1, "f64", 2, [8], 4, None, 5)] })
   # both memory operations name parameter 1 through the same index tile,
   # so the reshape / broadcast / offset trio is emitted once
   assert len(list.filter(k.body, is_offset)) == 2
@@ -1784,7 +1784,7 @@ test "an atomic addresses through the index tile the way a gather does, and shar
   # through the same index tile: one reshape / broadcast / offset trio for
   # the index load and one for the two of them together
   let k = lower(TileProg { ..gather_then_scatter(),
-    ops: list.take(gather_then_scatter().ops, 4)
+    ops = list.take(gather_then_scatter().ops, 4)
       ++ [AtomicRMW(6, 7, 1, "f64", "add", 2, [8], 4, None, 5)] })
   let f64_8 = Tile([8], Num("f64"))
   let p64_8 = Tile([8], PtrTo("f64"))
@@ -1813,13 +1813,13 @@ test "the ladder reads the entry parameter as an argument, not as a value" {
 
 test "K4.1: a ScalarArg lowers to no instruction: its handle is the entry parameter itself, and it has no owner row" {
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "scalar",
-    params: [ByValue("i32")],
-    globals: [],
-    ops: [MakeToken(0), ScalarArg(1, 0, "i32"), IdxConst(2, 8), IdxMul(3, 1, 2)],
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "scalar",
+    params = [ByValue("i32")],
+    globals = [],
+    ops = [MakeToken(0), ScalarArg(1, 0, "i32"), IdxConst(2, 8), IdxMul(3, 1, 2)],
   }
   let (k, owners) = lower_spans(p)
   assert k.params == [ByValue("i32")]
@@ -1837,13 +1837,13 @@ test "K4.1: a ScalarArg lowers to no instruction: its handle is the entry parame
 
 test "block ids along the three axes bind the matching result of one get_tile_block_id" {
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "axes",
-    params: [ByPtr("f64")],
-    globals: [],
-    ops: [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "axes",
+    params = [ByPtr("f64")],
+    globals = [],
+    ops = [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
       Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, [])]
   }
   let k = lower(p)
@@ -1857,13 +1857,13 @@ test "lowering the same program twice gives the same table" {
 
 # The sum kernel as prog.dawn's test records it: four chunks of 128.
 fn sum_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "sum",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "sum",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 4),
@@ -1890,13 +1890,13 @@ fn sum_prog() -> TileProg = TileProg {
 # The loop knife T5 added, in the table's own vocabulary: a `Loop` with no
 # bounds whose body ends in the exit `if` and a `continue`.
 fn spin_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "spin",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "spin",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 8),
@@ -1995,13 +1995,13 @@ test "after a loop the store consumes the loop's results, not values from inside
 # The reduction kernel prog.dawn records: a block-wide sum, spread back to
 # one lane and stored at element 0.
 fn total_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "total",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "total",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 8),
@@ -2056,13 +2056,13 @@ test "spread lowers to a reshape to one lane and a broadcast to the width" {
 }
 
 fn branch_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "branch",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "branch",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 8),
@@ -2106,7 +2106,7 @@ test "an if lowers to one IfElse whose two branches are numbered after its resul
 test "a value one branch of an if defined is refused by name in the other and after it" {
   # the store takes the then branch's addf (8) instead of the if's result (10)
   let bad = TileProg { ..branch_prog(),
-    ops: list.take(branch_prog().ops, 8) ++ [Store(11, 1, "f64", 3, [8], [1], 8, None, 5, [])] }
+    ops = list.take(branch_prog().ops, 8) ++ [Store(11, 1, "f64", 3, [8], [1], 8, None, 5, [])] }
   match catch_panic(() => lower(bad)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "which a loop body defined and which is not visible after the loop") }
@@ -2116,7 +2116,7 @@ test "a value one branch of an if defined is refused by name in the other and af
 test "a value a loop body defined is refused by name after the loop" {
   # the store's token is the body's load token (17) instead of the loop's token result (20)
   let bad = TileProg { ..sum_prog(),
-    ops: list.take(sum_prog().ops, 11) ++ [Store(23, 1, "f64", 1, [128], [1], 19, None, 17, [])] }
+    ops = list.take(sum_prog().ops, 11) ++ [Store(23, 1, "f64", 1, [128], [1], 19, None, 17, [])] }
   match catch_panic(() => lower(bad)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "`store token` refers to handle 17, which a loop body defined and which is not visible after the loop") }
@@ -2125,12 +2125,12 @@ test "a value a loop body defined is refused by name after the loop" {
 
 test "a loop whose carried lists disagree, or whose body does not end in continue, is refused" {
   let short = TileProg { ..sum_prog(),
-    ops: list.take(sum_prog().ops, 10) ++ [For(11, 9, 10, 8, false, [6, 7], [12], [19, 20], [Continue([12, 13])])] }
+    ops = list.take(sum_prog().ops, 10) ++ [For(11, 9, 10, 8, false, [6, 7], [12], [19, 20], [Continue([12, 13])])] }
   match catch_panic(() => lower(short)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "a loop carrying 2 value(s) names 1 inside and 2 after") }
   }
-  let open = TileProg { ..sum_prog(), ops: list.take(sum_prog().ops, 10)
+  let open = TileProg { ..sum_prog(), ops = list.take(sum_prog().ops, 10)
       ++ [For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [BinaryF(14, "addf", "f64", [128], 12, 12)])] }
   match catch_panic(() => lower(open)) {
     Ok(_) -> { assert false }
@@ -2139,8 +2139,8 @@ test "a loop whose carried lists disagree, or whose body does not end in continu
 }
 
 test "P4: a tensor view claims buffer alignment before an arbitrary element offset" {
-  let k = lower(TileProg { name: "view", params: [ByPtr("f64")], hints: [], globals: [], producer: None, debug: None,
-    ops: [MakeToken(0), BlockId(1, 0), TensorViewOf(2, 0, "f64", 1, [16], [1], [], [])] })
+  let k = lower(TileProg { name = "view", params = [ByPtr("f64")], hints = [], globals = [], producer = None, debug = None,
+    ops = [MakeToken(0), BlockId(1, 0), TensorViewOf(2, 0, "f64", 1, [16], [1], [], [])] })
   let pt = Tile([], PtrTo("f64"))
   let none: Option[Int] = None
   assert k.body[2] == AssumeTile(4, Arg(0), DivBy(16, none, none), pt)
@@ -2150,7 +2150,7 @@ test "P4: a tensor view claims buffer alignment before an arbitrary element offs
 
 test "S3: hand-built if yields must have identical complete types" {
   for other in [ConstF(9, "f32", [8], 2.0), ConstF(9, "f64", [4], 2.0), MakeToken(9)] {
-    let p = TileProg { ..branch_prog(), ops: list.take(branch_prog().ops, 7) ++ [
+    let p = TileProg { ..branch_prog(), ops = list.take(branch_prog().ops, 7) ++ [
       If([10], 7, [ConstF(8, "f64", [8], 1.0), Yield([8])], [other, Yield([9])])
     ] }
     match catch_panic(() => lower(p)) {

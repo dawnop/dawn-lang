@@ -342,11 +342,11 @@ type Seq = {
 }
 
 fn step(kernel: String, gx: Int, gy: Int, gz: Int, args: List[String]) -> Step =
-  Step { kernel: kernel, gx: gx, gy: gy, gz: gz, args: args, scalars: [] }
+  Step { kernel= kernel, gx= gx, gy= gy, gz= gz, args= args, scalars= [] }
 
 ## A step that also hands the kernel scalars, after its buffers.
 fn step_scalars(kernel: String, gx: Int, gy: Int, gz: Int, args: List[String], scalars: List[gpu.LaunchArg]) -> Step =
-  Step { kernel: kernel, gx: gx, gy: gy, gz: gz, args: args, scalars: scalars }
+  Step { kernel= kernel, gx= gx, gy= gy, gz= gz, args= args, scalars= scalars }
 
 ## `body(0) ++ body(1) ++ .. ++ body(n - 1)`: a fixed-length repetition
 ## whose length is a host value and whose rounds may differ.
@@ -393,7 +393,7 @@ fn message[T](r: Result[T, ForeignError]) -> String = match r {
 }
 
 fn blank() -> Trace =
-  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+  Trace { alloc= "-", upload= "-", launch= "-", sync= "-", download= "-", result= None, note= "" }
 
 # Allocate and fill one buffer per entry, in order.
 fn alloc_all(bufs: List[Buf]) -> Result[List[Int], ForeignError] !Gpu = {
@@ -473,20 +473,20 @@ fn launch_all(hs: List[Int], bufs: List[Buf], steps: List[Step], i: Int,
 fn stages(bufs: List[Buf], steps: List[Step], reads: List[String],
   at: Int, reset: String, trip: String) -> Trace !Gpu =
   match alloc_all(bufs) {
-    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Err(e) -> Trace { ..blank(), alloc= e.kind, note= e.message }
     Ok(hs) -> {
-      let t0 = Trace { ..blank(), alloc: "ok" }
+      let t0 = Trace { ..blank(), alloc= "ok" }
       match upload_all(hs, bufs) {
         Err(e) -> {
           release(hs)
-          Trace { ..t0, upload: e.kind, note: e.message }
+          Trace { ..t0, upload= e.kind, note= e.message }
         }
         Ok(_) -> {
-          let t1 = Trace { ..t0, upload: "ok" }
+          let t1 = Trace { ..t0, upload= "ok" }
           match launch_all(hs, bufs, steps, 0, at, reset, trip) {
             Err(e) -> {
               release(hs)
-              Trace { ..t1, launch: e.kind, note: e.message }
+              Trace { ..t1, launch= e.kind, note= e.message }
             }
             Ok(_) -> {
               let s = gpu.gpu_sync()
@@ -498,11 +498,11 @@ fn stages(bufs: List[Buf], steps: List[Step], reads: List[String],
               }
               Trace {
                 ..t1,
-                launch: "ok",
-                sync: kind(s),
-                download: kind(r),
-                result: value,
-                note: message(s) ++ message(r)
+                launch= "ok",
+                sync= kind(s),
+                download= kind(r),
+                result= value,
+                note= message(s) ++ message(r)
               }
             }
           }
@@ -692,49 +692,49 @@ fn km_labels() -> List[Float] = list.map(range(0, KM_N), _i => 0.0 - 1.0)
 ## Three launches, two intermediates, and a FAN IN: the third launch is the
 ## first that reads what an earlier one wrote.
 fn lora_seq() -> Seq = Seq {
-  name: "lora",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "x", dtype: "f64", data: wave(3, LORA_M * LORA_DIN, 0.1) },
-    Buf { name: "w", dtype: "f64", data: wave(5, LORA_DOUT * LORA_DIN, 0.02) },
-    Buf { name: "a", dtype: "f64", data: wave(7, LORA_RANK * LORA_DIN, 0.02) },
-    Buf { name: "b", dtype: "f64", data: wave(11, LORA_DOUT * LORA_RANK, 0.02) },
-    Buf { name: "base", dtype: "f64", data: sentinels(LORA_M * LORA_DOUT) },
-    Buf { name: "h", dtype: "f64", data: sentinels(LORA_M * LORA_RANK) },
-    Buf { name: "out", dtype: "f64", data: sentinels(LORA_M * LORA_DOUT) }
+  name= "lora",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "x", dtype= "f64", data= wave(3, LORA_M * LORA_DIN, 0.1) },
+    Buf { name= "w", dtype= "f64", data= wave(5, LORA_DOUT * LORA_DIN, 0.02) },
+    Buf { name= "a", dtype= "f64", data= wave(7, LORA_RANK * LORA_DIN, 0.02) },
+    Buf { name= "b", dtype= "f64", data= wave(11, LORA_DOUT * LORA_RANK, 0.02) },
+    Buf { name= "base", dtype= "f64", data= sentinels(LORA_M * LORA_DOUT) },
+    Buf { name= "h", dtype= "f64", data= sentinels(LORA_M * LORA_RANK) },
+    Buf { name= "out", dtype= "f64", data= sentinels(LORA_M * LORA_DOUT) }
   ],
-  steps: [
+  steps= [
     step("lora_base", 1, LORA_DOUT / 32, 1, ["x", "w", "base"]),
     step("lora_hidden", 1, 1, 1, ["x", "a", "h"]),
     step("lora_out", 1, LORA_DOUT / 32, 1, ["base", "h", "b", "out"])
   ],
-  reads: ["out"],
-  via: "base",
-  stale_at: 2
+  reads= ["out"],
+  via= "base",
+  stale_at= 2
 }
 
 ## leetgpu 6 (Softmax Attention): S = Q K^T / sqrt(d), P = softmax(S) by
 ## row, O = P V. Three launches in a chain, which is the shape twelve of
 ## the attention problems share.
 fn attn_seq() -> Seq = Seq {
-  name: "attention",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "q", dtype: "f64", data: wave(3, ATT_M * ATT_D, 0.1) },
-    Buf { name: "k", dtype: "f64", data: wave(5, ATT_N * ATT_D, 0.1) },
-    Buf { name: "v", dtype: "f64", data: wave(7, ATT_N * ATT_D, 0.1) },
-    Buf { name: "s", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
-    Buf { name: "p", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
-    Buf { name: "o", dtype: "f64", data: sentinels(ATT_M * ATT_D) }
+  name= "attention",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "q", dtype= "f64", data= wave(3, ATT_M * ATT_D, 0.1) },
+    Buf { name= "k", dtype= "f64", data= wave(5, ATT_N * ATT_D, 0.1) },
+    Buf { name= "v", dtype= "f64", data= wave(7, ATT_N * ATT_D, 0.1) },
+    Buf { name= "s", dtype= "f64", data= sentinels(ATT_M * ATT_N) },
+    Buf { name= "p", dtype= "f64", data= sentinels(ATT_M * ATT_N) },
+    Buf { name= "o", dtype= "f64", data= sentinels(ATT_M * ATT_D) }
   ],
-  steps: [
+  steps= [
     step("attn_scores", ATT_M / 32, ATT_N / 32, 1, ["q", "k", "s"]),
     step("attn_softmax", ATT_M, 1, 1, ["s", "p"]),
     step("attn_context", ATT_M / 32, 1, 1, ["p", "v", "o"])
   ],
-  reads: ["o"],
-  via: "s",
-  stale_at: 1
+  reads= ["o"],
+  via= "s",
+  stale_at= 1
 }
 
 ## leetgpu 37 (Matrix Power): `MP_P - 1` products, the host ping-ponging
@@ -749,19 +749,19 @@ fn matpow_steps(n: Int) -> List[Step] =
 fn matpow_read(n: Int) -> List[String] = if n == 0 { ["m"] } else { [matpow_acc(n - 1)] }
 
 fn matpow_bufs() -> List[Buf] = [
-  Buf { name: "m", dtype: "f64", data: wave(3, MP_N * MP_N, 0.05) },
-  Buf { name: "t0", dtype: "f64", data: sentinels(MP_N * MP_N) },
-  Buf { name: "t1", dtype: "f64", data: sentinels(MP_N * MP_N) }
+  Buf { name= "m", dtype= "f64", data= wave(3, MP_N * MP_N, 0.05) },
+  Buf { name= "t0", dtype= "f64", data= sentinels(MP_N * MP_N) },
+  Buf { name= "t1", dtype= "f64", data= sentinels(MP_N * MP_N) }
 ]
 
 fn matpow_of(n: Int) -> Seq = Seq {
-  name: "matpow",
-  tier: "tolerance",
-  bufs: matpow_bufs(),
-  steps: matpow_steps(n),
-  reads: matpow_read(n),
-  via: "t0",
-  stale_at: 1
+  name= "matpow",
+  tier= "tolerance",
+  bufs= matpow_bufs(),
+  steps= matpow_steps(n),
+  reads= matpow_read(n),
+  via= "t0",
+  stale_at= 1
 }
 
 fn matpow_seq() -> Seq = matpow_of(MP_P - 1)
@@ -771,27 +771,27 @@ fn matpow_seq() -> Seq = matpow_of(MP_P - 1)
 ## twice, on two weight buffers into two outputs, which is the case a
 ## ledger of one kernel per problem cannot spell at all.
 fn swiglu_seq() -> Seq = Seq {
-  name: "swiglu",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "x", dtype: "f64", data: wave(3, SW_M * SW_DMODEL, 0.1) },
-    Buf { name: "wg", dtype: "f64", data: wave(5, SW_DMODEL * SW_DFFN, 0.02) },
-    Buf { name: "wu", dtype: "f64", data: wave(7, SW_DMODEL * SW_DFFN, 0.02) },
-    Buf { name: "wd", dtype: "f64", data: wave(11, SW_DFFN * SW_DMODEL, 0.02) },
-    Buf { name: "gate", dtype: "f64", data: sentinels(SW_M * SW_DFFN) },
-    Buf { name: "up", dtype: "f64", data: sentinels(SW_M * SW_DFFN) },
-    Buf { name: "h", dtype: "f64", data: sentinels(SW_M * SW_DFFN) },
-    Buf { name: "out", dtype: "f64", data: sentinels(SW_M * SW_DMODEL) }
+  name= "swiglu",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "x", dtype= "f64", data= wave(3, SW_M * SW_DMODEL, 0.1) },
+    Buf { name= "wg", dtype= "f64", data= wave(5, SW_DMODEL * SW_DFFN, 0.02) },
+    Buf { name= "wu", dtype= "f64", data= wave(7, SW_DMODEL * SW_DFFN, 0.02) },
+    Buf { name= "wd", dtype= "f64", data= wave(11, SW_DFFN * SW_DMODEL, 0.02) },
+    Buf { name= "gate", dtype= "f64", data= sentinels(SW_M * SW_DFFN) },
+    Buf { name= "up", dtype= "f64", data= sentinels(SW_M * SW_DFFN) },
+    Buf { name= "h", dtype= "f64", data= sentinels(SW_M * SW_DFFN) },
+    Buf { name= "out", dtype= "f64", data= sentinels(SW_M * SW_DMODEL) }
   ],
-  steps: [
+  steps= [
     step("swiglu_proj", 1, SW_DFFN / 32, 1, ["x", "wg", "gate"]),
     step("swiglu_proj", 1, SW_DFFN / 32, 1, ["x", "wu", "up"]),
     step("swiglu_act", SW_M * SW_DFFN / SW_ACT_TILE, 1, 1, ["gate", "up", "h"]),
     step("swiglu_down", 1, SW_DMODEL / 32, 1, ["h", "wd", "out"])
   ],
-  reads: ["out"],
-  via: "gate",
-  stale_at: 2
+  reads= ["out"],
+  via= "gate",
+  stale_at= 2
 }
 
 ## leetgpu 73 (All-Pairs Shortest Paths): APSP_N Floyd-Warshall rounds IN
@@ -799,21 +799,21 @@ fn swiglu_seq() -> Seq = Seq {
 ## longest sequence here, the only one that is EXACT tier, and the only one
 ## whose every launch is the same kernel on the same buffers.
 fn apsp_bufs() -> List[Buf] = {
-  var out: List[Buf] = [Buf { name: "d", dtype: "f64", data: apsp_matrix() }]
+  var out: List[Buf] = [Buf { name= "d", dtype= "f64", data= apsp_matrix() }]
   for k in range(0, APSP_N) {
-    out = out ++ [Buf { name: "k${k}", dtype: "i32", data: [to_float(k)] }]
+    out = out ++ [Buf { name= "k${k}", dtype= "i32", data= [to_float(k)] }]
   }
   out
 }
 
 fn apsp_seq() -> Seq = Seq {
-  name: "apsp",
-  tier: "exact",
-  bufs: apsp_bufs(),
-  steps: repeat(APSP_N, k => [step("apsp_step", 1, 1, 1, ["d", "k${k}"])]),
-  reads: ["d"],
-  via: "d",
-  stale_at: 1
+  name= "apsp",
+  tier= "exact",
+  bufs= apsp_bufs(),
+  steps= repeat(APSP_N, k => [step("apsp_step", 1, 1, 1, ["d", "k${k}"])]),
+  reads= ["d"],
+  via= "d",
+  stale_at= 1
 }
 
 ## leetgpu 53, 55, 59 and 112 (knife 17): four attention variants that
@@ -824,24 +824,24 @@ fn apsp_seq() -> Seq = Seq {
 ## kernel's name, because a copy for each would say four times that they
 ## are the same sequence and once, somewhere, be wrong about it.
 fn masked_attn_seq(name: String, kernel: String) -> Seq = Seq {
-  name: name,
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "q", dtype: "f64", data: wave(3, ATT_M * ATT_D, 0.1) },
-    Buf { name: "k", dtype: "f64", data: wave(5, ATT_N * ATT_D, 0.1) },
-    Buf { name: "v", dtype: "f64", data: wave(7, ATT_N * ATT_D, 0.1) },
-    Buf { name: "s", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
-    Buf { name: "p", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
-    Buf { name: "o", dtype: "f64", data: sentinels(ATT_M * ATT_D) }
+  name= name,
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "q", dtype= "f64", data= wave(3, ATT_M * ATT_D, 0.1) },
+    Buf { name= "k", dtype= "f64", data= wave(5, ATT_N * ATT_D, 0.1) },
+    Buf { name= "v", dtype= "f64", data= wave(7, ATT_N * ATT_D, 0.1) },
+    Buf { name= "s", dtype= "f64", data= sentinels(ATT_M * ATT_N) },
+    Buf { name= "p", dtype= "f64", data= sentinels(ATT_M * ATT_N) },
+    Buf { name= "o", dtype= "f64", data= sentinels(ATT_M * ATT_D) }
   ],
-  steps: [
+  steps= [
     step(kernel, ATT_M / 32, ATT_N / 32, 1, ["q", "k", "s"]),
     step("attn_softmax", ATT_M, 1, 1, ["s", "p"]),
     step("attn_context", ATT_M / 32, 1, 1, ["p", "v", "o"])
   ],
-  reads: ["o"],
-  via: "s",
-  stale_at: 1
+  reads= ["o"],
+  via= "s",
+  stale_at= 1
 }
 
 fn causal_seq() -> Seq = masked_attn_seq("causal", "attn_causal")
@@ -858,22 +858,22 @@ fn sinks_seq() -> Seq = masked_attn_seq("sinks", "attn_sinks")
 ## -- so the decay folds into the score launch and what remains is the same
 ## context product knife 16 recorded.
 fn decay_seq() -> Seq = Seq {
-  name: "decay",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "q", dtype: "f64", data: wave(3, ATT_M * ATT_D, 0.1) },
-    Buf { name: "k", dtype: "f64", data: wave(5, ATT_N * ATT_D, 0.1) },
-    Buf { name: "v", dtype: "f64", data: wave(7, ATT_N * ATT_D, 0.1) },
-    Buf { name: "s", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
-    Buf { name: "o", dtype: "f64", data: sentinels(ATT_M * ATT_D) }
+  name= "decay",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "q", dtype= "f64", data= wave(3, ATT_M * ATT_D, 0.1) },
+    Buf { name= "k", dtype= "f64", data= wave(5, ATT_N * ATT_D, 0.1) },
+    Buf { name= "v", dtype= "f64", data= wave(7, ATT_N * ATT_D, 0.1) },
+    Buf { name= "s", dtype= "f64", data= sentinels(ATT_M * ATT_N) },
+    Buf { name= "o", dtype= "f64", data= sentinels(ATT_M * ATT_D) }
   ],
-  steps: [
+  steps= [
     step("attn_decay", ATT_M / 32, ATT_N / 32, 1, ["q", "k", "s"]),
     step("attn_context", ATT_M / 32, 1, 1, ["s", "v", "o"])
   ],
-  reads: ["o"],
-  via: "s",
-  stale_at: 1
+  reads= ["o"],
+  via= "s",
+  stale_at= 1
 }
 
 ## The true class of each row: `(5 i + 3) mod C`, which is a permutation of
@@ -888,21 +888,21 @@ fn cce_labels() -> List[Float] =
 ## `changed_by_first` is 1 of 1 and not thousands, and why that is still a
 ## measurement.
 fn cce_seq() -> Seq = Seq {
-  name: "cce",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "logits", dtype: "f64", data: wave(3, CCE_N * CCE_C, 0.5) },
-    Buf { name: "labels", dtype: "i32", data: cce_labels() },
-    Buf { name: "rows", dtype: "f64", data: sentinels(CCE_N) },
-    Buf { name: "loss", dtype: "f64", data: sentinels(1) }
+  name= "cce",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "logits", dtype= "f64", data= wave(3, CCE_N * CCE_C, 0.5) },
+    Buf { name= "labels", dtype= "i32", data= cce_labels() },
+    Buf { name= "rows", dtype= "f64", data= sentinels(CCE_N) },
+    Buf { name= "loss", dtype= "f64", data= sentinels(1) }
   ],
-  steps: [
+  steps= [
     step("cce_row", CCE_N, 1, 1, ["logits", "labels", "rows"]),
     step("cce_mean", 1, 1, 1, ["rows", "loss"])
   ],
-  reads: ["loss"],
-  via: "rows",
-  stale_at: 1
+  reads= ["loss"],
+  via= "rows",
+  stale_at= 1
 }
 
 ## leetgpu 12 (Multi-Head Attention): MHA_H independent attentions over
@@ -912,24 +912,24 @@ fn cce_seq() -> Seq = Seq {
 ## are its own MHA_N by MHA_N block, so all the heads together are a taller
 ## matrix of the same rows and the softmax does not have to know.
 fn mha_seq() -> Seq = Seq {
-  name: "mha",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "q", dtype: "f64", data: wave(3, MHA_N * MHA_DMODEL, 0.1) },
-    Buf { name: "k", dtype: "f64", data: wave(5, MHA_N * MHA_DMODEL, 0.1) },
-    Buf { name: "v", dtype: "f64", data: wave(7, MHA_N * MHA_DMODEL, 0.1) },
-    Buf { name: "s", dtype: "f64", data: sentinels(MHA_H * MHA_N * MHA_N) },
-    Buf { name: "p", dtype: "f64", data: sentinels(MHA_H * MHA_N * MHA_N) },
-    Buf { name: "o", dtype: "f64", data: sentinels(MHA_N * MHA_DMODEL) }
+  name= "mha",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "q", dtype= "f64", data= wave(3, MHA_N * MHA_DMODEL, 0.1) },
+    Buf { name= "k", dtype= "f64", data= wave(5, MHA_N * MHA_DMODEL, 0.1) },
+    Buf { name= "v", dtype= "f64", data= wave(7, MHA_N * MHA_DMODEL, 0.1) },
+    Buf { name= "s", dtype= "f64", data= sentinels(MHA_H * MHA_N * MHA_N) },
+    Buf { name= "p", dtype= "f64", data= sentinels(MHA_H * MHA_N * MHA_N) },
+    Buf { name= "o", dtype= "f64", data= sentinels(MHA_N * MHA_DMODEL) }
   ],
-  steps: [
+  steps= [
     step("mha_scores", MHA_N / MHA_T, MHA_N / MHA_T, MHA_H, ["q", "k", "s"]),
     step("attn_softmax", MHA_H * MHA_N, 1, 1, ["s", "p"]),
     step("mha_context", MHA_N / MHA_T, 1, MHA_H, ["p", "v", "o"])
   ],
-  reads: ["o"],
-  via: "s",
-  stale_at: 1
+  reads= ["o"],
+  via= "s",
+  stale_at= 1
 }
 
 ## leetgpu 26 (Multi-Head Cross-Attention): the same three launches as
@@ -938,24 +938,24 @@ fn mha_seq() -> Seq = Seq {
 ## heads' score blocks lie one after another and a softmax by row does not
 ## need to know which head or which query a row belongs to.
 fn xattn_seq() -> Seq = Seq {
-  name: "xattn",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "q", dtype: "f64", data: wave(3, XA_M * XA_DMODEL, 0.1) },
-    Buf { name: "k", dtype: "f64", data: wave(5, XA_N * XA_DMODEL, 0.1) },
-    Buf { name: "v", dtype: "f64", data: wave(7, XA_N * XA_DMODEL, 0.1) },
-    Buf { name: "s", dtype: "f64", data: sentinels(XA_H * XA_M * XA_N) },
-    Buf { name: "p", dtype: "f64", data: sentinels(XA_H * XA_M * XA_N) },
-    Buf { name: "o", dtype: "f64", data: sentinels(XA_M * XA_DMODEL) }
+  name= "xattn",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "q", dtype= "f64", data= wave(3, XA_M * XA_DMODEL, 0.1) },
+    Buf { name= "k", dtype= "f64", data= wave(5, XA_N * XA_DMODEL, 0.1) },
+    Buf { name= "v", dtype= "f64", data= wave(7, XA_N * XA_DMODEL, 0.1) },
+    Buf { name= "s", dtype= "f64", data= sentinels(XA_H * XA_M * XA_N) },
+    Buf { name= "p", dtype= "f64", data= sentinels(XA_H * XA_M * XA_N) },
+    Buf { name= "o", dtype= "f64", data= sentinels(XA_M * XA_DMODEL) }
   ],
-  steps: [
+  steps= [
     step("xattn_scores", XA_M / XA_T, XA_N / XA_T, XA_H, ["q", "k", "s"]),
     step("attn_softmax", XA_H * XA_M, 1, 1, ["s", "p"]),
     step("xattn_context", XA_M / XA_T, 1, XA_H, ["p", "v", "o"])
   ],
-  reads: ["o"],
-  via: "s",
-  stale_at: 1
+  reads= ["o"],
+  via= "s",
+  stale_at= 1
 }
 
 ## leetgpu 80 (Grouped Query Attention): GQ_HQ attentions over GQ_HKV key
@@ -964,24 +964,24 @@ fn xattn_seq() -> Seq = Seq {
 ## an `Idx` has no division; the middle launch is `attn_softmax` over
 ## GQ_HQ * GQ_S rows.
 fn gqa_seq() -> Seq = Seq {
-  name: "gqa",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "q", dtype: "f64", data: wave(3, GQ_HQ * GQ_S * GQ_D, 0.1) },
-    Buf { name: "k", dtype: "f64", data: wave(5, GQ_HKV * GQ_S * GQ_D, 0.1) },
-    Buf { name: "v", dtype: "f64", data: wave(7, GQ_HKV * GQ_S * GQ_D, 0.1) },
-    Buf { name: "s", dtype: "f64", data: sentinels(GQ_HQ * GQ_S * GQ_S) },
-    Buf { name: "p", dtype: "f64", data: sentinels(GQ_HQ * GQ_S * GQ_S) },
-    Buf { name: "o", dtype: "f64", data: sentinels(GQ_HQ * GQ_S * GQ_D) }
+  name= "gqa",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "q", dtype= "f64", data= wave(3, GQ_HQ * GQ_S * GQ_D, 0.1) },
+    Buf { name= "k", dtype= "f64", data= wave(5, GQ_HKV * GQ_S * GQ_D, 0.1) },
+    Buf { name= "v", dtype= "f64", data= wave(7, GQ_HKV * GQ_S * GQ_D, 0.1) },
+    Buf { name= "s", dtype= "f64", data= sentinels(GQ_HQ * GQ_S * GQ_S) },
+    Buf { name= "p", dtype= "f64", data= sentinels(GQ_HQ * GQ_S * GQ_S) },
+    Buf { name= "o", dtype= "f64", data= sentinels(GQ_HQ * GQ_S * GQ_D) }
   ],
-  steps: [
+  steps= [
     step("gqa_scores", GQ_GROUPS, 1, GQ_HKV, ["q", "k", "s"]),
     step("attn_softmax", GQ_HQ * GQ_S, 1, 1, ["s", "p"]),
     step("gqa_context", GQ_GROUPS, 1, GQ_HKV, ["p", "v", "o"])
   ],
-  reads: ["o"],
-  via: "s",
-  stale_at: 1
+  reads= ["o"],
+  via= "s",
+  stale_at= 1
 }
 
 ## leetgpu 109 (GRPO Surrogate Loss): the group-normalised advantages, then
@@ -989,25 +989,25 @@ fn gqa_seq() -> Seq = Seq {
 ## GR_B * GR_G rows. The third launch is reused byte for byte, which is
 ## what makes this the first non-attention reuse here.
 fn grpo_seq() -> Seq = Seq {
-  name: "grpo",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "rewards", dtype: "f64", data: wave(3, GR_B * GR_G, 0.5) },
-    Buf { name: "log_pi", dtype: "f64", data: wave(5, GR_B * GR_G * GR_S, 0.1) },
-    Buf { name: "log_pi_old", dtype: "f64", data: wave(7, GR_B * GR_G * GR_S, 0.1) },
-    Buf { name: "log_ref", dtype: "f64", data: wave(11, GR_B * GR_G * GR_S, 0.1) },
-    Buf { name: "adv", dtype: "f64", data: sentinels(GR_B * GR_G) },
-    Buf { name: "rows", dtype: "f64", data: sentinels(GR_B * GR_G) },
-    Buf { name: "loss", dtype: "f64", data: sentinels(1) }
+  name= "grpo",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "rewards", dtype= "f64", data= wave(3, GR_B * GR_G, 0.5) },
+    Buf { name= "log_pi", dtype= "f64", data= wave(5, GR_B * GR_G * GR_S, 0.1) },
+    Buf { name= "log_pi_old", dtype= "f64", data= wave(7, GR_B * GR_G * GR_S, 0.1) },
+    Buf { name= "log_ref", dtype= "f64", data= wave(11, GR_B * GR_G * GR_S, 0.1) },
+    Buf { name= "adv", dtype= "f64", data= sentinels(GR_B * GR_G) },
+    Buf { name= "rows", dtype= "f64", data= sentinels(GR_B * GR_G) },
+    Buf { name= "loss", dtype= "f64", data= sentinels(1) }
   ],
-  steps: [
+  steps= [
     step("grpo_adv", GR_B, 1, 1, ["rewards", "adv"]),
     step("grpo_row", GR_B * GR_G, 1, 1, ["log_pi", "log_pi_old", "log_ref", "adv", "rows"]),
     step("cce_mean", 1, 1, 1, ["rows", "loss"])
   ],
-  reads: ["loss"],
-  via: "adv",
-  stale_at: 1
+  reads= ["loss"],
+  via= "adv",
+  stale_at= 1
 }
 
 ## leetgpu 20 (K-Means Clustering): KM_ITERS rounds of assign-then-average,
@@ -1015,22 +1015,22 @@ fn grpo_seq() -> Seq = Seq {
 ## is TWO launches, the first sequence whose intermediate is a buffer of
 ## i32 labels, and the second that is exact tier.
 fn kmeans_seq() -> Seq = Seq {
-  name: "kmeans",
-  tier: "exact",
-  bufs: [
-    Buf { name: "dx", dtype: "f64", data: km_x() },
-    Buf { name: "dy", dtype: "f64", data: km_y() },
-    Buf { name: "lab", dtype: "i32", data: km_labels() },
-    Buf { name: "cx", dtype: "f64", data: km_cx() },
-    Buf { name: "cy", dtype: "f64", data: km_cy() }
+  name= "kmeans",
+  tier= "exact",
+  bufs= [
+    Buf { name= "dx", dtype= "f64", data= km_x() },
+    Buf { name= "dy", dtype= "f64", data= km_y() },
+    Buf { name= "lab", dtype= "i32", data= km_labels() },
+    Buf { name= "cx", dtype= "f64", data= km_cx() },
+    Buf { name= "cy", dtype= "f64", data= km_cy() }
   ],
-  steps: repeat(KM_ITERS, _i => [
+  steps= repeat(KM_ITERS, _i => [
     step("kmeans_assign", KM_N, 1, 1, ["dx", "dy", "cx", "cy", "lab"]),
     step("kmeans_centroid", KM_K, 1, 1, ["dx", "dy", "lab", "cx", "cy"])
   ]),
-  reads: ["cx"],
-  via: "lab",
-  stale_at: 1
+  reads= ["cx"],
+  via= "lab",
+  stale_at= 1
 }
 
 ## leetgpu 96 (INT8 KV-Cache Attention): one query a head against an int8
@@ -1039,26 +1039,26 @@ fn kmeans_seq() -> Seq = Seq {
 ## matrix and a softmax by row does not need to know which head a row is.
 ## The first sequence here whose buffers are not all f64.
 fn kv_seq() -> Seq = Seq {
-  name: "kv",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "q", dtype: "f64", data: wave(3, KV_H * KV_D, 0.1) },
-    Buf { name: "k", dtype: "i8", data: kv_cache(37, KV_H * KV_S * KV_D) },
-    Buf { name: "v", dtype: "i8", data: kv_cache(53, KV_H * KV_S * KV_D) },
-    Buf { name: "ks", dtype: "f64", data: kv_scale(13, KV_H * KV_S) },
-    Buf { name: "vs", dtype: "f64", data: kv_scale(17, KV_H * KV_S) },
-    Buf { name: "s", dtype: "f64", data: sentinels(KV_H * KV_S) },
-    Buf { name: "p", dtype: "f64", data: sentinels(KV_H * KV_S) },
-    Buf { name: "o", dtype: "f64", data: sentinels(KV_H * KV_D) }
+  name= "kv",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "q", dtype= "f64", data= wave(3, KV_H * KV_D, 0.1) },
+    Buf { name= "k", dtype= "i8", data= kv_cache(37, KV_H * KV_S * KV_D) },
+    Buf { name= "v", dtype= "i8", data= kv_cache(53, KV_H * KV_S * KV_D) },
+    Buf { name= "ks", dtype= "f64", data= kv_scale(13, KV_H * KV_S) },
+    Buf { name= "vs", dtype= "f64", data= kv_scale(17, KV_H * KV_S) },
+    Buf { name= "s", dtype= "f64", data= sentinels(KV_H * KV_S) },
+    Buf { name= "p", dtype= "f64", data= sentinels(KV_H * KV_S) },
+    Buf { name= "o", dtype= "f64", data= sentinels(KV_H * KV_D) }
   ],
-  steps: [
+  steps= [
     step("kv_scores", KV_H, 1, 1, ["q", "k", "ks", "s"]),
     step("attn_softmax", KV_H, 1, 1, ["s", "p"]),
     step("kv_context", KV_H, 1, 1, ["p", "v", "vs", "o"])
   ],
-  reads: ["o"],
-  via: "s",
-  stale_at: 1
+  reads= ["o"],
+  via= "s",
+  stale_at= 1
 }
 
 ## leetgpu 111 (Softmax Attention Backward): SEVEN launches, THREE outputs
@@ -1072,22 +1072,22 @@ fn kv_seq() -> Seq = Seq {
 ## judgement looked at one of them would be satisfied by a device that
 ## never wrote the other two.
 fn attn_bwd_seq() -> Seq = Seq {
-  name: "attnbwd",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "q", dtype: "f64", data: wave(3, ATT_M * ATT_D, 0.1) },
-    Buf { name: "k", dtype: "f64", data: wave(5, ATT_N * ATT_D, 0.1) },
-    Buf { name: "v", dtype: "f64", data: wave(7, ATT_N * ATT_D, 0.1) },
-    Buf { name: "do", dtype: "f64", data: wave(11, ATT_M * ATT_D, 0.1) },
-    Buf { name: "s", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
-    Buf { name: "p", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
-    Buf { name: "dp", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
-    Buf { name: "ds", dtype: "f64", data: sentinels(ATT_M * ATT_N) },
-    Buf { name: "dq", dtype: "f64", data: sentinels(ATT_M * ATT_D) },
-    Buf { name: "dk", dtype: "f64", data: sentinels(ATT_N * ATT_D) },
-    Buf { name: "dv", dtype: "f64", data: sentinels(ATT_N * ATT_D) }
+  name= "attnbwd",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "q", dtype= "f64", data= wave(3, ATT_M * ATT_D, 0.1) },
+    Buf { name= "k", dtype= "f64", data= wave(5, ATT_N * ATT_D, 0.1) },
+    Buf { name= "v", dtype= "f64", data= wave(7, ATT_N * ATT_D, 0.1) },
+    Buf { name= "do", dtype= "f64", data= wave(11, ATT_M * ATT_D, 0.1) },
+    Buf { name= "s", dtype= "f64", data= sentinels(ATT_M * ATT_N) },
+    Buf { name= "p", dtype= "f64", data= sentinels(ATT_M * ATT_N) },
+    Buf { name= "dp", dtype= "f64", data= sentinels(ATT_M * ATT_N) },
+    Buf { name= "ds", dtype= "f64", data= sentinels(ATT_M * ATT_N) },
+    Buf { name= "dq", dtype= "f64", data= sentinels(ATT_M * ATT_D) },
+    Buf { name= "dk", dtype= "f64", data= sentinels(ATT_N * ATT_D) },
+    Buf { name= "dv", dtype= "f64", data= sentinels(ATT_N * ATT_D) }
   ],
-  steps: [
+  steps= [
     step("attn_scores", ATT_M / 32, ATT_N / 32, 1, ["q", "k", "s"]),
     step("attn_softmax", ATT_M, 1, 1, ["s", "p"]),
     step("attn_bwd_mmt", ATT_N / 32, 1, 1, ["p", "do", "dv"]),
@@ -1096,9 +1096,9 @@ fn attn_bwd_seq() -> Seq = Seq {
     step("attn_context", ATT_M / 32, 1, 1, ["ds", "k", "dq"]),
     step("attn_bwd_mmt", ATT_N / 32, 1, 1, ["ds", "q", "dk"])
   ],
-  reads: ["dq", "dk", "dv"],
-  via: "s",
-  stale_at: 1
+  reads= ["dq", "dk", "dv"],
+  via= "s",
+  stale_at= 1
 }
 
 ## leetgpu 56 (Linear Self-Attention): S = phi(K)^T V, z = sum_j phi(K)[j],
@@ -1107,39 +1107,39 @@ fn attn_bwd_seq() -> Seq = Seq {
 ## sum written as a product. The reuse here is on an OPERAND, where knife
 ## 17's was on a mask, knife 18's on a grid and knife 19's on a scale.
 fn lin_attn_seq() -> Seq = Seq {
-  name: "linattn",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "q", dtype: "f64", data: wave(3, LA_M * LA_D, 0.1) },
-    Buf { name: "k", dtype: "f64", data: wave(5, LA_M * LA_D, 0.1) },
-    Buf { name: "v", dtype: "f64", data: wave(7, LA_M * LA_D, 0.1) },
-    Buf { name: "ones", dtype: "f64", data: la_ones() },
-    Buf { name: "s", dtype: "f64", data: sentinels(LA_D * LA_D) },
-    Buf { name: "z", dtype: "f64", data: sentinels(LA_D * LA_D) },
-    Buf { name: "out", dtype: "f64", data: sentinels(LA_M * LA_D) }
+  name= "linattn",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "q", dtype= "f64", data= wave(3, LA_M * LA_D, 0.1) },
+    Buf { name= "k", dtype= "f64", data= wave(5, LA_M * LA_D, 0.1) },
+    Buf { name= "v", dtype= "f64", data= wave(7, LA_M * LA_D, 0.1) },
+    Buf { name= "ones", dtype= "f64", data= la_ones() },
+    Buf { name= "s", dtype= "f64", data= sentinels(LA_D * LA_D) },
+    Buf { name= "z", dtype= "f64", data= sentinels(LA_D * LA_D) },
+    Buf { name= "out", dtype= "f64", data= sentinels(LA_M * LA_D) }
   ],
-  steps: [
+  steps= [
     step("lin_attn_s", 1, 1, 1, ["k", "v", "s"]),
     step("lin_attn_s", 1, 1, 1, ["k", "ones", "z"]),
     step("lin_attn_out", LA_M / 32, 1, 1, ["q", "s", "z", "out"])
   ],
-  reads: ["out"],
-  via: "s",
-  stale_at: 2
+  reads= ["out"],
+  via= "s",
+  stale_at= 2
 }
 
 ## leetgpu 33's pivot indices: one one-element i32 buffer a Gauss-Jordan
 ## step, the way `apsp_bufs` carries one a Floyd-Warshall round.
 fn ols_bufs() -> List[Buf] = {
   var out: List[Buf] = [
-    Buf { name: "x", dtype: "f64", data: wave(5, OLS_N * OLS_F, 0.1) },
-    Buf { name: "y", dtype: "f64", data: wave(3, OLS_N, 0.5) },
-    Buf { name: "a", dtype: "f64", data: sentinels(OLS_F * OLS_W) }
+    Buf { name= "x", dtype= "f64", data= wave(5, OLS_N * OLS_F, 0.1) },
+    Buf { name= "y", dtype= "f64", data= wave(3, OLS_N, 0.5) },
+    Buf { name= "a", dtype= "f64", data= sentinels(OLS_F * OLS_W) }
   ]
   for k in range(0, OLS_F) {
-    out = out ++ [Buf { name: "k${k}", dtype: "i32", data: [to_float(k)] }]
+    out = out ++ [Buf { name= "k${k}", dtype= "i32", data= [to_float(k)] }]
   }
-  out ++ [Buf { name: "beta", dtype: "f64", data: sentinels(OLS_F) }]
+  out ++ [Buf { name= "beta", dtype= "f64", data= sentinels(OLS_F) }]
 }
 
 ## leetgpu 33 (Ordinary Least Squares): the augmented normal equations,
@@ -1155,15 +1155,15 @@ fn ols_bufs() -> List[Buf] = {
 ## column of `X`), or seven of its eight lanes would be zero and the
 ## verdict would be reading a constant.
 fn ols_seq() -> Seq = Seq {
-  name: "ols",
-  tier: "exact",
-  bufs: ols_bufs(),
-  steps: [step("ols_gram", 1, 1, 1, ["x", "y", "a"])]
+  name= "ols",
+  tier= "exact",
+  bufs= ols_bufs(),
+  steps= [step("ols_gram", 1, 1, 1, ["x", "y", "a"])]
     ++ repeat(OLS_F, k => [step("ols_elim", 1, 1, 1, ["a", "k${k}"])])
     ++ [step("ols_beta", 1, 1, 1, ["a", "beta"])],
-  reads: ["beta"],
-  via: "a",
-  stale_at: 1
+  reads= ["beta"],
+  via= "a",
+  stale_at= 1
 }
 
 ## leetgpu 74 (GPT-2 Transformer Block): twelve launches over eight new
@@ -1181,36 +1181,36 @@ fn ols_seq() -> Seq = Seq {
 ##
 ## `via` is the first normalisation's output, read by the launch after it.
 fn gpt2_seq() -> Seq = Seq {
-  name: "gpt2",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "x", dtype: "f64", data: wave(3, GP_S * GP_D, 0.1) },
-    Buf { name: "ln1w", dtype: "f64", data: gain(5, GP_D, 0.02) },
-    Buf { name: "ln1b", dtype: "f64", data: wave(7, GP_D, 0.01) },
-    Buf { name: "wqkv", dtype: "f64", data: wave(11, GP_D * 3 * GP_D, 0.05) },
-    Buf { name: "bqkv", dtype: "f64", data: wave(13, 3 * GP_D, 0.02) },
-    Buf { name: "wo", dtype: "f64", data: wave(17, GP_D * GP_D, 0.05) },
-    Buf { name: "bo", dtype: "f64", data: wave(23, GP_D, 0.02) },
-    Buf { name: "ln2w", dtype: "f64", data: gain(29, GP_D, 0.02) },
-    Buf { name: "ln2b", dtype: "f64", data: wave(31, GP_D, 0.01) },
-    Buf { name: "wfc", dtype: "f64", data: wave(37, GP_D * GP_F, 0.05) },
-    Buf { name: "bfc", dtype: "f64", data: wave(41, GP_F, 0.02) },
-    Buf { name: "wproj", dtype: "f64", data: wave(43, GP_F * GP_D, 0.05) },
-    Buf { name: "bproj", dtype: "f64", data: wave(47, GP_D, 0.02) },
-    Buf { name: "xn", dtype: "f64", data: sentinels(GP_S * GP_D) },
-    Buf { name: "qkv", dtype: "f64", data: sentinels(GP_S * 3 * GP_D) },
-    Buf { name: "s", dtype: "f64", data: sentinels(GP_H * GP_S * GP_S) },
-    Buf { name: "p", dtype: "f64", data: sentinels(GP_H * GP_S * GP_S) },
-    Buf { name: "ctx", dtype: "f64", data: sentinels(GP_S * GP_D) },
-    Buf { name: "ap", dtype: "f64", data: sentinels(GP_S * GP_D) },
-    Buf { name: "hid", dtype: "f64", data: sentinels(GP_S * GP_D) },
-    Buf { name: "hn", dtype: "f64", data: sentinels(GP_S * GP_D) },
-    Buf { name: "fc", dtype: "f64", data: sentinels(GP_S * GP_F) },
-    Buf { name: "act", dtype: "f64", data: sentinels(GP_S * GP_F) },
-    Buf { name: "pr", dtype: "f64", data: sentinels(GP_S * GP_D) },
-    Buf { name: "out", dtype: "f64", data: sentinels(GP_S * GP_D) }
+  name= "gpt2",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "x", dtype= "f64", data= wave(3, GP_S * GP_D, 0.1) },
+    Buf { name= "ln1w", dtype= "f64", data= gain(5, GP_D, 0.02) },
+    Buf { name= "ln1b", dtype= "f64", data= wave(7, GP_D, 0.01) },
+    Buf { name= "wqkv", dtype= "f64", data= wave(11, GP_D * 3 * GP_D, 0.05) },
+    Buf { name= "bqkv", dtype= "f64", data= wave(13, 3 * GP_D, 0.02) },
+    Buf { name= "wo", dtype= "f64", data= wave(17, GP_D * GP_D, 0.05) },
+    Buf { name= "bo", dtype= "f64", data= wave(23, GP_D, 0.02) },
+    Buf { name= "ln2w", dtype= "f64", data= gain(29, GP_D, 0.02) },
+    Buf { name= "ln2b", dtype= "f64", data= wave(31, GP_D, 0.01) },
+    Buf { name= "wfc", dtype= "f64", data= wave(37, GP_D * GP_F, 0.05) },
+    Buf { name= "bfc", dtype= "f64", data= wave(41, GP_F, 0.02) },
+    Buf { name= "wproj", dtype= "f64", data= wave(43, GP_F * GP_D, 0.05) },
+    Buf { name= "bproj", dtype= "f64", data= wave(47, GP_D, 0.02) },
+    Buf { name= "xn", dtype= "f64", data= sentinels(GP_S * GP_D) },
+    Buf { name= "qkv", dtype= "f64", data= sentinels(GP_S * 3 * GP_D) },
+    Buf { name= "s", dtype= "f64", data= sentinels(GP_H * GP_S * GP_S) },
+    Buf { name= "p", dtype= "f64", data= sentinels(GP_H * GP_S * GP_S) },
+    Buf { name= "ctx", dtype= "f64", data= sentinels(GP_S * GP_D) },
+    Buf { name= "ap", dtype= "f64", data= sentinels(GP_S * GP_D) },
+    Buf { name= "hid", dtype= "f64", data= sentinels(GP_S * GP_D) },
+    Buf { name= "hn", dtype= "f64", data= sentinels(GP_S * GP_D) },
+    Buf { name= "fc", dtype= "f64", data= sentinels(GP_S * GP_F) },
+    Buf { name= "act", dtype= "f64", data= sentinels(GP_S * GP_F) },
+    Buf { name= "pr", dtype= "f64", data= sentinels(GP_S * GP_D) },
+    Buf { name= "out", dtype= "f64", data= sentinels(GP_S * GP_D) }
   ],
-  steps: [
+  steps= [
     step("gpt_ln", GP_S, 1, 1, ["x", "ln1w", "ln1b", "xn"]),
     step("gpt_qkv", 1, 3 * GP_D / 32, 1, ["xn", "wqkv", "bqkv", "qkv"]),
     step("gpt_scores", 1, 1, GP_H, ["qkv", "s"]),
@@ -1224,9 +1224,9 @@ fn gpt2_seq() -> Seq = Seq {
     step("gpt_down", 1, GP_D / 32, 1, ["act", "wproj", "bproj", "pr"]),
     step("vadd", GP_S * GP_D / 128, 1, 1, ["hid", "pr", "out"])
   ],
-  reads: ["out"],
-  via: "xn",
-  stale_at: 1
+  reads= ["out"],
+  via= "xn",
+  stale_at= 1
 }
 
 ## leetgpu 93 (Llama Transformer Block): seventeen launches, the longest
@@ -1246,40 +1246,40 @@ fn gpt2_seq() -> Seq = Seq {
 ## V is deliberately NOT rotated: RoPE applies to Q and K, and the ninth
 ## launch reads `v` and not a rotated copy of it.
 fn llama_seq() -> Seq = Seq {
-  name: "llama",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "x", dtype: "f64", data: wave(3, LM_S * LM_D, 0.1) },
-    Buf { name: "rw1", dtype: "f64", data: gain(5, LM_D, 0.02) },
-    Buf { name: "wq", dtype: "f64", data: wave(7, LM_HQ * LM_HD * LM_D, 0.05) },
-    Buf { name: "wk", dtype: "f64", data: wave(11, LM_HKV * LM_HD * LM_D, 0.05) },
-    Buf { name: "wv", dtype: "f64", data: wave(13, LM_HKV * LM_HD * LM_D, 0.05) },
-    Buf { name: "cs", dtype: "f64", data: wave(17, LM_S * LM_HD / 2, 0.1) },
-    Buf { name: "sn", dtype: "f64", data: wave(23, LM_S * LM_HD / 2, 0.1) },
-    Buf { name: "wo", dtype: "f64", data: wave(29, LM_D * LM_D, 0.05) },
-    Buf { name: "rw2", dtype: "f64", data: gain(31, LM_D, 0.02) },
-    Buf { name: "wg", dtype: "f64", data: wave(37, LM_F * LM_D, 0.05) },
-    Buf { name: "wu", dtype: "f64", data: wave(41, LM_F * LM_D, 0.05) },
-    Buf { name: "wd", dtype: "f64", data: wave(43, LM_D * LM_F, 0.05) },
-    Buf { name: "xn", dtype: "f64", data: sentinels(LM_S * LM_D) },
-    Buf { name: "q", dtype: "f64", data: sentinels(LM_HQ * LM_S * LM_HD) },
-    Buf { name: "k", dtype: "f64", data: sentinels(LM_HKV * LM_S * LM_HD) },
-    Buf { name: "v", dtype: "f64", data: sentinels(LM_HKV * LM_S * LM_HD) },
-    Buf { name: "qr", dtype: "f64", data: sentinels(LM_HQ * LM_S * LM_HD) },
-    Buf { name: "kr", dtype: "f64", data: sentinels(LM_HKV * LM_S * LM_HD) },
-    Buf { name: "s", dtype: "f64", data: sentinels(LM_HQ * LM_S * LM_S) },
-    Buf { name: "p", dtype: "f64", data: sentinels(LM_HQ * LM_S * LM_S) },
-    Buf { name: "ctx", dtype: "f64", data: sentinels(LM_HQ * LM_S * LM_HD) },
-    Buf { name: "ap", dtype: "f64", data: sentinels(LM_S * LM_D) },
-    Buf { name: "hid", dtype: "f64", data: sentinels(LM_S * LM_D) },
-    Buf { name: "hn", dtype: "f64", data: sentinels(LM_S * LM_D) },
-    Buf { name: "gate", dtype: "f64", data: sentinels(LM_S * LM_F) },
-    Buf { name: "up", dtype: "f64", data: sentinels(LM_S * LM_F) },
-    Buf { name: "act", dtype: "f64", data: sentinels(LM_S * LM_F) },
-    Buf { name: "dn", dtype: "f64", data: sentinels(LM_S * LM_D) },
-    Buf { name: "out", dtype: "f64", data: sentinels(LM_S * LM_D) }
+  name= "llama",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "x", dtype= "f64", data= wave(3, LM_S * LM_D, 0.1) },
+    Buf { name= "rw1", dtype= "f64", data= gain(5, LM_D, 0.02) },
+    Buf { name= "wq", dtype= "f64", data= wave(7, LM_HQ * LM_HD * LM_D, 0.05) },
+    Buf { name= "wk", dtype= "f64", data= wave(11, LM_HKV * LM_HD * LM_D, 0.05) },
+    Buf { name= "wv", dtype= "f64", data= wave(13, LM_HKV * LM_HD * LM_D, 0.05) },
+    Buf { name= "cs", dtype= "f64", data= wave(17, LM_S * LM_HD / 2, 0.1) },
+    Buf { name= "sn", dtype= "f64", data= wave(23, LM_S * LM_HD / 2, 0.1) },
+    Buf { name= "wo", dtype= "f64", data= wave(29, LM_D * LM_D, 0.05) },
+    Buf { name= "rw2", dtype= "f64", data= gain(31, LM_D, 0.02) },
+    Buf { name= "wg", dtype= "f64", data= wave(37, LM_F * LM_D, 0.05) },
+    Buf { name= "wu", dtype= "f64", data= wave(41, LM_F * LM_D, 0.05) },
+    Buf { name= "wd", dtype= "f64", data= wave(43, LM_D * LM_F, 0.05) },
+    Buf { name= "xn", dtype= "f64", data= sentinels(LM_S * LM_D) },
+    Buf { name= "q", dtype= "f64", data= sentinels(LM_HQ * LM_S * LM_HD) },
+    Buf { name= "k", dtype= "f64", data= sentinels(LM_HKV * LM_S * LM_HD) },
+    Buf { name= "v", dtype= "f64", data= sentinels(LM_HKV * LM_S * LM_HD) },
+    Buf { name= "qr", dtype= "f64", data= sentinels(LM_HQ * LM_S * LM_HD) },
+    Buf { name= "kr", dtype= "f64", data= sentinels(LM_HKV * LM_S * LM_HD) },
+    Buf { name= "s", dtype= "f64", data= sentinels(LM_HQ * LM_S * LM_S) },
+    Buf { name= "p", dtype= "f64", data= sentinels(LM_HQ * LM_S * LM_S) },
+    Buf { name= "ctx", dtype= "f64", data= sentinels(LM_HQ * LM_S * LM_HD) },
+    Buf { name= "ap", dtype= "f64", data= sentinels(LM_S * LM_D) },
+    Buf { name= "hid", dtype= "f64", data= sentinels(LM_S * LM_D) },
+    Buf { name= "hn", dtype= "f64", data= sentinels(LM_S * LM_D) },
+    Buf { name= "gate", dtype= "f64", data= sentinels(LM_S * LM_F) },
+    Buf { name= "up", dtype= "f64", data= sentinels(LM_S * LM_F) },
+    Buf { name= "act", dtype= "f64", data= sentinels(LM_S * LM_F) },
+    Buf { name= "dn", dtype= "f64", data= sentinels(LM_S * LM_D) },
+    Buf { name= "out", dtype= "f64", data= sentinels(LM_S * LM_D) }
   ],
-  steps: [
+  steps= [
     step("llama_rms", LM_S, 1, 1, ["x", "rw1", "xn"]),
     step("llama_qkv", 1, LM_HQ, 1, ["xn", "wq", "q"]),
     step("llama_qkv", 1, LM_HKV, 1, ["xn", "wk", "k"]),
@@ -1298,9 +1298,9 @@ fn llama_seq() -> Seq = Seq {
     step("llama_down", 1, LM_D / 32, 1, ["act", "wd", "dn"]),
     step("vadd", LM_S * LM_D / 128, 1, 1, ["hid", "dn", "out"])
   ],
-  reads: ["out"],
-  via: "xn",
-  stale_at: 1
+  reads= ["out"],
+  via= "xn",
+  stale_at= 1
 }
 
 ## The fused kernel's keys: `attention`'s, with the second FA_BK-key block
@@ -1317,10 +1317,10 @@ fn flash_keys() -> List[Float] = {
 
 ## q, k, v and o of the fused kernel, in its argument order.
 fn flash_bufs() -> List[Buf] = [
-  Buf { name: "q", dtype: "f64", data: wave(3, ATT_M * ATT_D, 0.1) },
-  Buf { name: "k", dtype: "f64", data: flash_keys() },
-  Buf { name: "v", dtype: "f64", data: wave(7, ATT_N * ATT_D, 0.1) },
-  Buf { name: "o", dtype: "f64", data: sentinels(ATT_M * ATT_D) }
+  Buf { name= "q", dtype= "f64", data= wave(3, ATT_M * ATT_D, 0.1) },
+  Buf { name= "k", dtype= "f64", data= flash_keys() },
+  Buf { name= "v", dtype= "f64", data= wave(7, ATT_N * ATT_D, 0.1) },
+  Buf { name= "o", dtype= "f64", data= sentinels(ATT_M * ATT_D) }
 ]
 
 ## FlashAttention: leetgpu 6 again, in ONE launch of the fused kernel. Not
@@ -1334,13 +1334,13 @@ fn flash_bufs() -> List[Buf] = [
 ## buffers, which is the online softmax against the textbook one. Of the four mutants only
 ## `last-launch-dropped` can reach a one-launch sequence.
 fn flash_seq() -> Seq = Seq {
-  name: "flash",
-  tier: "tolerance",
-  bufs: flash_bufs(),
-  steps: [step_scalars("flash_attn", ATT_M / FA_BQ, 1, 1, ["q", "k", "v", "o"], [gpu.erase(gpu.scalar_arg(ATT_INV_SQRT_D))])],
-  reads: ["o"],
-  via: "o",
-  stale_at: 0
+  name= "flash",
+  tier= "tolerance",
+  bufs= flash_bufs(),
+  steps= [step_scalars("flash_attn", ATT_M / FA_BQ, 1, 1, ["q", "k", "v", "o"], [gpu.erase(gpu.scalar_arg(ATT_INV_SQRT_D))])],
+  reads= ["o"],
+  via= "o",
+  stale_at= 0
 }
 
 ## The bf16 FlashAttention (tileir 0.10.0): `flash`'s buffers in bf16, the
@@ -1348,23 +1348,23 @@ fn flash_seq() -> Seq = Seq {
 ## not a buffer format std/gpu moves). The upload rounds q, k and v to bf16
 ## on both devices, so the reference sees the values the kernel does.
 fn flash_bf16_bufs() -> List[Buf] = [
-  Buf { name: "q", dtype: "bf16", data: wave(3, ATT_M * ATT_D, 0.1) },
-  Buf { name: "k", dtype: "bf16", data: flash_keys() },
-  Buf { name: "v", dtype: "bf16", data: wave(7, ATT_N * ATT_D, 0.1) },
-  Buf { name: "o", dtype: "f64", data: sentinels(ATT_M * ATT_D) }
+  Buf { name= "q", dtype= "bf16", data= wave(3, ATT_M * ATT_D, 0.1) },
+  Buf { name= "k", dtype= "bf16", data= flash_keys() },
+  Buf { name= "v", dtype= "bf16", data= wave(7, ATT_N * ATT_D, 0.1) },
+  Buf { name= "o", dtype= "f64", data= sentinels(ATT_M * ATT_D) }
 ]
 
 ## `flash` at bf16 with an f32 accumulator, one launch like `flash`, and
 ## the one sequence held to a tolerance of its own (`tolerance_of`).
 fn flash_bf16_seq() -> Seq = Seq {
-  name: "flash_bf16",
-  tier: "tolerance",
-  bufs: flash_bf16_bufs(),
-  steps: [step_scalars("flash_attn_bf16", ATT_M / FA_BF_BQ, 1, 1, ["q", "k", "v", "o"],
+  name= "flash_bf16",
+  tier= "tolerance",
+  bufs= flash_bf16_bufs(),
+  steps= [step_scalars("flash_attn_bf16", ATT_M / FA_BF_BQ, 1, 1, ["q", "k", "v", "o"],
     [gpu.erase(gpu.scalar_arg(narrow.f32(ATT_INV_SQRT_D * LOG2_E)))])],
-  reads: ["o"],
-  via: "o",
-  stale_at: 0
+  reads= ["o"],
+  via= "o",
+  stale_at= 0
 }
 
 ## The tolerance a sequence is held to, `(atol, rtol)`: leetgpu's for every
@@ -1414,20 +1414,20 @@ fn tolerance_of(name: String) -> (Float, Float) =
 ## mutant must be GREEN, which is what says the mutant catches the
 ## dependency and not merely the presence of a second launch.
 fn decoupled_seq() -> Seq = Seq {
-  name: "decoupled",
-  tier: "tolerance",
-  bufs: [
-    Buf { name: "m", dtype: "f64", data: wave(3, MP_N * MP_N, 0.05) },
-    Buf { name: "c0", dtype: "f64", data: sentinels(MP_N * MP_N) },
-    Buf { name: "c1", dtype: "f64", data: sentinels(MP_N * MP_N) }
+  name= "decoupled",
+  tier= "tolerance",
+  bufs= [
+    Buf { name= "m", dtype= "f64", data= wave(3, MP_N * MP_N, 0.05) },
+    Buf { name= "c0", dtype= "f64", data= sentinels(MP_N * MP_N) },
+    Buf { name= "c1", dtype= "f64", data= sentinels(MP_N * MP_N) }
   ],
-  steps: [
+  steps= [
     step("matpow_step", 1, 1, 1, ["m", "m", "c0"]),
     step("matpow_step", 1, 1, 1, ["m", "m", "c1"])
   ],
-  reads: ["c1"],
-  via: "c0",
-  stale_at: 1
+  reads= ["c1"],
+  via= "c0",
+  stale_at= 1
 }
 
 fn sequences() -> List[Seq] =
@@ -1621,12 +1621,12 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
         flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ss[0], dts, ins))))])
   } else if name == "flash_bf16" {
     map.from([("flash_attn_bf16", (4, last_out_with((dts, ins, ss) =>
-        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BF_BK, ss[0], dts, ins, p_round: "bf16", base2: true))))])
+        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BF_BK, ss[0], dts, ins, p_round= "bf16", base2= true))))])
   } else if name == "flash_bf16_unrounded" {
     # NOT a sequence of `sequences()`: the control's reference, the honest
     # one with `p_round` left out (see `tolerance_of`).
     map.from([("flash_attn_bf16", (4, last_out_with((dts, ins, ss) =>
-        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BF_BK, ss[0], dts, ins, base2: true))))])
+        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BF_BK, ss[0], dts, ins, base2= true))))])
   } else if name == "apsp" {
     map.from([("apsp_step", (2, (dts, ins, _ss) => [(0, apsp_step_ref(APSP_N, dts, ins))]))])
   } else {
@@ -1652,7 +1652,7 @@ fn first_grid(steps: List[Step]) -> List[Step] =
     steps
   } else {
     let g = steps[0]
-    list.map(steps, s => Step { ..s, gx: g.gx, gy: g.gy, gz: g.gz })
+    list.map(steps, s => Step { ..s, gx= g.gx, gy= g.gy, gz= g.gz })
   }
 
 ## The names, in the order run.sh reads them.
@@ -1662,11 +1662,11 @@ pub fn mutants() -> List[String] =
 
 fn mutated(name: String, s: Seq) -> Seq =
   if name == "launch-order-swapped" {
-    Seq { ..s, steps: reversed(s.steps) }
+    Seq { ..s, steps= reversed(s.steps) }
   } else if name == "last-launch-dropped" {
-    Seq { ..s, steps: dropped_last(s.steps) }
+    Seq { ..s, steps= dropped_last(s.steps) }
   } else if name == "grid-of-later-launch-copied-from-the-first" {
-    Seq { ..s, steps: first_grid(s.steps) }
+    Seq { ..s, steps= first_grid(s.steps) }
   } else {
     s
   }
@@ -1853,7 +1853,7 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     # the unrounded one) and is held on every driver; the second puts the
     # device's own answer in the same chair and is held when it ran.
     if s.name == "flash_bf16" {
-      let forgetful = run_fake(Seq { ..s, name: "flash_bf16_unrounded" }, 0 - 1, "", "")
+      let forgetful = run_fake(Seq { ..s, name= "flash_bf16_unrounded" }, 0 - 1, "", "")
       io.println("control unrounded-reference host sequence=${s.name} verdict ${verdict(s.tier, tol, fake, forgetful)}"
           ++ " miss ${miss_line(forgetful, fake, tol)}")
       io.println("control unrounded-reference device sequence=${s.name} verdict ${verdict(s.tier, tol, forgetful, real)}")
@@ -1890,7 +1890,7 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
   # uploaded. Nearly free, and without them `repeat(n)` could be off by
   # one in a way every sequence above would agree with.
   let one = run_fake(matpow_of(1), 0 - 1, "", "")
-  let single = run_fake(Seq { ..matpow_of(1), steps: [step("matpow_step", 1, 1, 1, ["m", "m", "t0"])] },
+  let single = run_fake(Seq { ..matpow_of(1), steps= [step("matpow_step", 1, 1, 1, ["m", "m", "t0"])] },
     0 - 1, "", "")
   let zero = run_fake(matpow_of(0), 0 - 1, "", "")
   io.println("probe repeat one_round_equals_single=${rendered(one.result) == rendered(single.result)}"
@@ -1902,7 +1902,7 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
   let fb = flash_bufs()
   let chain = attn_seq()
   let fused = run_fake(flash_seq(), 0 - 1, "", "")
-  let chained = run_fake(Seq { ..chain, bufs: list.take(fb, 3) ++ list.drop(chain.bufs, 3) }, 0 - 1, "", "")
+  let chained = run_fake(Seq { ..chain, bufs= list.take(fb, 3) ++ list.drop(chain.bufs, 3) }, 0 - 1, "", "")
   io.println("probe flash rows_raised=${flash_rows_raised(fb)} fused_vs_three_launch=${miss_line(fused, chained, (ATOL, RTOL))}")
   # How many launches each sequence actually issued, for the ledger: the
   # one number about this family a reader of ledger.txt cannot get anywhere

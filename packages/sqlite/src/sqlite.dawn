@@ -9,7 +9,7 @@ pub opaque type Db = Int
 opaque type Stmt = Int
 
 fn unsupported() -> ForeignError = ForeignError {
-  kind: "sqlite.unsupported_backend", message: "SQLite requires Linux native", cause: None
+  kind = "sqlite.unsupported_backend", message = "SQLite requires Linux native", cause = None
 }
 fn sq_open(path: String, uri: Bool) -> Result[Int, ForeignError] !io =
   extern c "sqlite_open" else Err(unsupported())
@@ -30,8 +30,8 @@ fn finish[T](result: Result[T, ForeignError], cleanup: Result[Unit, ForeignError
     (Err(error), Ok(_)) -> Err(error)
     (Ok(_), Err(error)) -> Err(error)
     (Err(error), Err(clean)) -> Err(ForeignError {
-      kind: error.kind, message: error.message ++ "; cleanup: " ++ clean.kind ++ ": " ++ clean.message,
-      cause: error.cause
+      kind = error.kind, message = error.message ++ "; cleanup: " ++ clean.kind ++ ": " ++ clean.message,
+      cause = error.cause
     })
   }
 
@@ -51,8 +51,8 @@ fn with_stmt[T, !e](db: Db, sql: String, body: fn(Stmt) -> Result[T, ForeignErro
 }
 
 test "cleanup preserves the primary error" {
-  let primary = ForeignError { kind: "primary", message: "body", cause: None }
-  let clean = ForeignError { kind: "cleanup", message: "close", cause: None }
+  let primary = ForeignError { kind = "primary", message = "body", cause = None }
+  let clean = ForeignError { kind = "cleanup", message = "close", cause = None }
   let result: Result[Int, ForeignError] = finish(Err(primary), Err(clean))
   match result {
     Err(error) -> { assert error.kind == "primary"
@@ -119,7 +119,7 @@ pub type Rows = { names: List[String], rows: List[List[Value]] }
 pub type TxMode = Deferred | Immediate
 
 fn error(kind: String, message: String) -> ForeignError =
-  ForeignError { kind: "sqlite." ++ kind, message: message, cause: None }
+  ForeignError { kind = "sqlite." ++ kind, message = message, cause = None }
 
 fn bind_args(db: Db, stmt: Stmt, args: List[Value]) -> Result[Unit, ForeignError] !io = {
   let count = sq_bind_count(db, stmt)?
@@ -172,7 +172,7 @@ pub fn query(db: Db, sql: String, args: List[Value], cols: List[Col]) -> Result[
     rows = rows ++ [row]
     step = sq_step(db, stmt)?
   }
-  Ok(Rows { names: names, rows: rows })
+  Ok(Rows { names = names, rows = rows })
 }
 
 ## Execute one statement and discard any returned rows. DDL and transaction

@@ -528,15 +528,15 @@ fn add_edit(
 ) -> Items = {
   if name == "_" || set.has(it.seen, name) { return it }
   Items {
-    out: it.out ++ [CItem {
-      label: name,
-      kind: kind,
-      detail: detail,
-      sort_text: Some(rank ++ name),
-      from: from,
-      edit: edit
+    out = it.out ++ [CItem {
+      label = name,
+      kind = kind,
+      detail = detail,
+      sort_text = Some(rank ++ name),
+      from = from,
+      edit = edit
     }],
-    seen: set.insert(it.seen, name)
+    seen = set.insert(it.seen, name)
   }
 }
 
@@ -588,7 +588,7 @@ fn use_completions(
   if str.trim(from_code_points(rest)) == "" && path != "" {
     let d: Option[String] =
       Some("`use " ++ path ++ " as <name>` — rename the module in this file")
-    return [CItem { label: "as", kind: 14, detail: d, sort_text: Some("0as"), from: None, edit: None }]
+    return [CItem { label = "as", kind = 14, detail = d, sort_text = Some("0as"), from = None, edit = None }]
   }
   let none2: List[CItem] = []
   none2
@@ -628,7 +628,7 @@ fn path_items(
 ) -> List[CItem] !io = {
   let parts = str.split(typed, "/")
   let prefix = list.take(parts, len(parts) - 1)
-  var it = Items { out: [], seen: set.empty() }
+  var it = Items { out = [], seen = set.empty() }
   it = seg_items(it, prefix, sort(map.keys(candidates)), "0")
   var std_paths: List[String] = []
   for mp in sort(map.keys(qc.std.exports)) {
@@ -663,7 +663,7 @@ fn import_items(
     if t == "}" || str.contains(t, "}") { return none }
     if t != "" { seen = set.insert(seen, t) }
   }
-  var it = Items { out: [], seen: seen }
+  var it = Items { out = [], seen = seen }
   # A module already in the program has been checked, so its exports carry
   # rendered signatures. The one being imported by the line under the cursor
   # has not -- that `use` is what would have loaded it, and it does not parse
@@ -883,7 +883,7 @@ fn qualified_pattern_constructors(qc: QCx, module_alias: String) -> List[CItem] 
   let none: List[CItem] = []
   match qualified_exports(qc, module_alias) {
     Some(ex) -> {
-      var it = Items { out: [], seen: set.empty() }
+      var it = Items { out = [], seen = set.empty() }
       for name in map.keys(ex.ctors) {
         it = add(it, name, 20, Some("constructor from ${module_alias}"), "0")
       }
@@ -959,7 +959,7 @@ fn use_line_at(v: SourceView, lo: Int, e: Int) -> Option[UseLine] = {
     while j < n && cps[j] != '}' { j = j + 1 }
     while j < n && cps[j] != '\n' { j = j + 1 }
     hi = if j < n { j + 1 } else { n }
-    return Some(UseLine { path: path, binds: None, lo: lo, hi: hi })
+    return Some(UseLine { path = path, binds = None, lo = lo, hi = hi })
   }
   while i < e && (cps[i] == ' ' || cps[i] == '\t') { i = i + 1 }
   if word_then_space(cps, i, "as", e) {
@@ -967,10 +967,10 @@ fn use_line_at(v: SourceView, lo: Int, e: Int) -> Option[UseLine] = {
     while a < e && is_space(cps[a]) { a = a + 1 }
     var b = a
     while b < e && is_word(cps[b]) { b = b + 1 }
-    return Some(UseLine { path: path, binds: Some(from_code_points(slice_cps(cps, a, b))), lo: lo, hi: hi })
+    return Some(UseLine { path = path, binds = Some(from_code_points(slice_cps(cps, a, b))), lo = lo, hi = hi })
   }
   let segs = str.split(path, "/")
-  Some(UseLine { path: path, binds: Some(segs[len(segs) - 1]), lo: lo, hi: hi })
+  Some(UseLine { path = path, binds = Some(segs[len(segs) - 1]), lo = lo, hi = hi })
 }
 
 ## Where `use <path>` goes, and the text to insert there. `dawn fmt` keeps
@@ -994,14 +994,14 @@ pub(pkg) fn use_edit(cps: List[Char], uses: List[UseLine], path: String) -> UseE
     }
     if sorted {
       for u in stds {
-        if u.path > path { return UseEdit { at: u.lo, text: line, path: path } }
+        if u.path > path { return UseEdit { at = u.lo, text = line, path = path } }
       }
     }
     let at = stds[len(stds) - 1].hi
     let lead = if at == n && n > 0 && cps[n - 1] != '\n' { "\n" } else { "" }
-    return UseEdit { at: at, text: lead ++ line, path: path }
+    return UseEdit { at = at, text = lead ++ line, path = path }
   }
-  if len(uses) > 0 { return UseEdit { at: uses[0].lo, text: line, path: path } }
+  if len(uses) > 0 { return UseEdit { at = uses[0].lo, text = line, path = path } }
   # the first line of code, and the comment lines directly above it
   var starts: List[Int] = []
   var i = 0
@@ -1025,11 +1025,11 @@ pub(pkg) fn use_edit(cps: List[Char], uses: List[UseLine], path: String) -> UseE
         at = starts[k]
         k = k - 1
       }
-      UseEdit { at: at, text: line ++ "\n", path: path }
+      UseEdit { at = at, text = line ++ "\n", path = path }
     }
     None -> {
       let lead = if n > 0 && cps[n - 1] != '\n' { "\n" } else { "" }
-      UseEdit { at: n, text: lead ++ line, path: path }
+      UseEdit { at = n, text = lead ++ line, path = path }
     }
   }
 }
@@ -1062,7 +1062,7 @@ fn alias_of(mp: String) -> String = {
 }
 
 fn with_edit(items: List[CItem], edit: UseEdit) -> List[CItem] =
-  list.map(items, it => CItem { ..it, edit: Some(edit) })
+  list.map(items, it => CItem { ..it, edit = Some(edit) })
 
 ## After `alias.`: the members of the module `alias` names. One the buffer
 ## imports lists as a `use` line's `.{ }` would; a std module it does not
@@ -1072,7 +1072,7 @@ fn member_items(qc: QCx, v: SourceView, alias_name: String, locals: Set[String])
   let none: List[CItem] = []
   if set.has(locals, alias_name) { return none }
   let uses = scan_uses(v)
-  let fresh = Items { out: [], seen: set.empty() }
+  let fresh = Items { out = [], seen = set.empty() }
   match use_bound(uses, alias_name) {
     Some(mp) ->
       match map.get(qc.exports_env, mp) {
@@ -1198,7 +1198,7 @@ pub(pkg) fn completions_at(
   let nb = len(before)
   let in_return_type = return_type_tail(slice_cps(cps, 0, ws))
   if effect_reference_tail(from_code_points(slice_cps(cps, 0, ws))) {
-    var effects = Items { out: [], seen: set.empty() }
+    var effects = Items { out = [], seen = set.empty() }
     if nb > 0 && before[nb - 1] == '.' {
       match qualified_alias_before_dot(cps, ws) {
         Some(pair) -> {
@@ -1262,10 +1262,10 @@ pub(pkg) fn completions_at(
     }
     var we = pos
     while we < n && is_word(cps[we]) { we = we + 1 }
-    return Completions { items: [], incomplete: false, dot: Some((ws - 1, we)) }
+    return Completions { items = [], incomplete = false, dot = Some((ws - 1, we)) }
   }
 
-  var it = Items { out: [], seen: set.empty() }
+  var it = Items { out = [], seen = set.empty() }
   if in_for_pattern(qc, pos) {
     return whole(add_adt_completions(qc, it, false).out)
   }
@@ -1324,7 +1324,7 @@ pub(pkg) fn completions_at(
   it = add(it, "derive", 14, nd2, "3")
   # module members as `alias.name`, once the word has a first character;
   # before that the list is incomplete, and the client asks again as it grows
-  if ws == pos { return Completions { items: it.out, incomplete: true, dot: None } }
+  if ws == pos { return Completions { items = it.out, incomplete = true, dot = None } }
   whole(qualified_items(qc, v, it, from_code_points(slice_cps(cps, ws, pos)), names_of(locals)).out)
 }
 
@@ -1344,7 +1344,7 @@ fn for_on_line(cps: List[Char], ls: Int, pos: Int) -> Bool =
 ## (`use std/str.{split}`: a dot call needs the name unqualified).
 pub(pkg) fn dot_completions_at(qc: QCx, v: SourceView, dot: Int) -> List[CItem] = {
   let uses = scan_uses(v)
-  var it = Items { out: [], seen: set.empty() }
+  var it = Items { out = [], seen = set.empty() }
   for c in dot_candidates(qc, v.cps, dot, local_names(qc, dot), foreign_modules(qc, uses)) {
     it = match c.module {
       Some(mp) -> {
@@ -1382,7 +1382,7 @@ fn foreign_modules(qc: QCx, uses: List[UseLine]) -> List[ModExports] = {
   out
 }
 
-fn whole(items: List[CItem]) -> Completions = Completions { items: items, incomplete: false, dot: None }
+fn whole(items: List[CItem]) -> Completions = Completions { items = items, incomplete = false, dot = None }
 
 ## The names of the locals in scope at `pos`: `x.` after one of them is not
 ## a module's members.
@@ -1445,7 +1445,7 @@ fn interp_code_start(cps: List[Char], pos: Int) -> Option[Int] = {
       if ch == '\\' {
         i = i + 2
       } else if ch == '$' && i + 1 < n && cps[i + 1] == '{' {
-        stack = stack ++ [Frame { kind: 4, start: i + 2, depth: 0 }]
+        stack = stack ++ [Frame { kind = 4, start = i + 2, depth = 0 }]
         i = i + 2
       } else if top == 3 && ch == '"' && i + 2 < n && cps[i + 1] == '"' && cps[i + 2] == '"' {
         stack = list.take(stack, len(stack) - 1)
@@ -1458,10 +1458,10 @@ fn interp_code_start(cps: List[Char], pos: Int) -> Option[Int] = {
       }
     } else if ch == '"' {
       if i + 2 < n && cps[i + 1] == '"' && cps[i + 2] == '"' {
-        stack = stack ++ [Frame { kind: 3, start: i, depth: 0 }]
+        stack = stack ++ [Frame { kind = 3, start = i, depth = 0 }]
         i = i + 3
       } else {
-        stack = stack ++ [Frame { kind: 2, start: i, depth: 0 }]
+        stack = stack ++ [Frame { kind = 2, start = i, depth = 0 }]
         i = i + 1
       }
     } else if ch == '#' && len(stack) == 0 {
@@ -1477,14 +1477,14 @@ fn interp_code_start(cps: List[Char], pos: Int) -> Option[Int] = {
       if i < n && cps[i] == '\'' { i = i + 1 }
     } else if top == 4 && ch == '{' {
       let f = stack[len(stack) - 1]
-      stack = list.take(stack, len(stack) - 1) ++ [Frame { ..f, depth: f.depth + 1 }]
+      stack = list.take(stack, len(stack) - 1) ++ [Frame { ..f, depth = f.depth + 1 }]
       i = i + 1
     } else if top == 4 && ch == '}' {
       let f = stack[len(stack) - 1]
       stack = if f.depth == 0 {
         list.take(stack, len(stack) - 1)
       } else {
-        list.take(stack, len(stack) - 1) ++ [Frame { ..f, depth: f.depth - 1 }]
+        list.take(stack, len(stack) - 1) ++ [Frame { ..f, depth = f.depth - 1 }]
       }
       i = i + 1
     } else {
@@ -1523,7 +1523,7 @@ pub(pkg) fn call_at(text: String, offset: Int) -> Option[CallAt] = {
   match interp_code_start(v.cps, pos) {
     Some(start) -> {
       return match call_at(from_code_points(slice_cps(v.cps, start, pos)), pos - start) {
-        Some(c) -> Some(CallAt { ..c, name_lo: c.name_lo + start, name_hi: c.name_hi + start })
+        Some(c) -> Some(CallAt { ..c, name_lo = c.name_lo + start, name_hi = c.name_hi + start })
         None -> None
       }
     }
@@ -1536,13 +1536,13 @@ pub(pkg) fn call_at(text: String, offset: Int) -> Option[CallAt] = {
     let tk = toks[i]
     if tk.kind == EOF || tk.lo >= pos { break }
     if tk.kind == LPAREN || tk.kind == LBRACKET || tk.kind == LBRACE {
-      stack = stack ++ [Open { kind: tk.kind, at: i, commas: 0, arg_start: i + 1 }]
+      stack = stack ++ [Open { kind = tk.kind, at = i, commas = 0, arg_start = i + 1 }]
     } else if tk.kind == RPAREN || tk.kind == RBRACKET || tk.kind == RBRACE {
       if len(stack) > 0 { stack = list.take(stack, len(stack) - 1) }
     } else if tk.kind == COMMA && len(stack) > 0 {
       let top = stack[len(stack) - 1]
       stack = list.take(stack, len(stack) - 1) ++
-        [Open { ..top, commas: top.commas + 1, arg_start: i + 1 }]
+        [Open { ..top, commas = top.commas + 1, arg_start = i + 1 }]
     }
     i = i + 1
   }
@@ -1572,13 +1572,13 @@ pub(pkg) fn call_at(text: String, offset: Int) -> Option[CallAt] = {
     named = Some(toks[a0].text)
   }
   Some(CallAt {
-    name: callee.text,
-    name_lo: callee.lo,
-    name_hi: callee.hi,
-    qualifier: qualifier,
-    commas: f.commas,
-    named: named,
-    piped: piped
+    name = callee.text,
+    name_lo = callee.lo,
+    name_hi = callee.hi,
+    qualifier = qualifier,
+    commas = f.commas,
+    named = named,
+    piped = piped
   })
 }
 
@@ -1709,7 +1709,7 @@ test "one `/` steps down one level, and a directory keeps its slash" {
     join(map(items, it => it.label ++ ":" ++ to_string(it.kind)), " ")
   let paths = ["front/lexer", "front/ast", "front/fmt/rules", "main", "check/types"]
   let none: List[String] = []
-  let fresh = Items { out: [], seen: set.empty() }
+  let fresh = Items { out = [], seen = set.empty() }
   # Module=9 for a path that can be imported as it stands, Folder=19 for one
   # that is only a step -- and a directory is offered once however many
   # modules are under it.

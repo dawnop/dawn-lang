@@ -87,7 +87,7 @@ derive Show
 
 ## The model a fresh page starts from.
 pub fn init() -> Model =
-  Model { todos: [], next_id: 1, filter: All, draft: "", edit: "", editing: None }
+  Model { todos = [], next_id = 1, filter = All, draft = "", edit = "", editing = None }
 
 impl App[Model] {
   type Msg = Msg
@@ -99,49 +99,49 @@ impl App[Model] {
   # here instead of calling `update` from inside itself.
   fn update(m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
     match msg {
-      SetDraft(t) -> (Model { ..m, draft: t }, NoCmd)
-      SetEdit(t) -> (Model { ..m, edit: t }, NoCmd)
+      SetDraft(t) -> (Model { ..m, draft = t }, NoCmd)
+      SetEdit(t) -> (Model { ..m, edit = t }, NoCmd)
       Add ->
         if str.trim(m.draft) == "" {
           (m, NoCmd)
         } else {
           (Model {
             ..m,
-            todos: m.todos ++ [Todo { id: m.next_id, title: str.trim(m.draft), done: false }],
-            next_id: m.next_id + 1,
-            draft: "",
+            todos = m.todos ++ [Todo { id = m.next_id, title = str.trim(m.draft), done = false }],
+            next_id = m.next_id + 1,
+            draft = "",
           }, NoCmd)
         }
       Toggle(id) ->
         (Model {
           ..m,
-          todos: list.map(m.todos, t => if t.id == id { Todo { ..t, done: not t.done } } else { t }),
+          todos = list.map(m.todos, t => if t.id == id { Todo { ..t, done = not t.done } } else { t }),
         }, NoCmd)
       Drop(id) ->
         (Model {
           ..m,
-          todos: list.filter(m.todos, t => t.id != id),
-          editing: if m.editing == Some(id) { None } else { m.editing },
-          edit: if m.editing == Some(id) { "" } else { m.edit },
+          todos = list.filter(m.todos, t => t.id != id),
+          editing = if m.editing == Some(id) { None } else { m.editing },
+          edit = if m.editing == Some(id) { "" } else { m.edit },
         }, NoCmd)
-      Only(f) -> (Model { ..m, filter: f }, NoCmd)
-      Edit(id) -> (Model { ..m, editing: Some(id), edit: title_of(m.todos, id) }, NoCmd)
+      Only(f) -> (Model { ..m, filter = f }, NoCmd)
+      Edit(id) -> (Model { ..m, editing = Some(id), edit = title_of(m.todos, id) }, NoCmd)
       Save ->
         match m.editing {
           Some(id) ->
             if str.trim(m.edit) == "" {
-              (Model { ..m, editing: None, edit: "" }, NoCmd)
+              (Model { ..m, editing = None, edit = "" }, NoCmd)
             } else {
               (Model {
                 ..m,
-                todos: retitle(m.todos, id, str.trim(m.edit)),
-                editing: None,
-                edit: "",
+                todos = retitle(m.todos, id, str.trim(m.edit)),
+                editing = None,
+                edit = "",
               }, NoCmd)
             }
           None -> (m, NoCmd)
         }
-      Cancel -> (Model { ..m, editing: None, edit: "" }, NoCmd)
+      Cancel -> (Model { ..m, editing = None, edit = "" }, NoCmd)
       # Deliberate, and the only unhandled failure in this tree: `tea_dom`'s
       # `serve` catches it at the boundary, the host keeps its model, and the
       # next message is answered normally. The counter carries the same
@@ -150,13 +150,13 @@ impl App[Model] {
     }
 
   fn view(m: Model) -> Node[Msg] = {
-    let heading: Node[Msg] = el("h1", kids: [text("dawn todo")])
+    let heading: Node[Msg] = el("h1", kids = [text("dawn todo")])
     let composer: Node[Msg] = compose_row(m)
     let filters: Node[Msg] = filter_row(m.filter)
     let items: Node[Msg] =
-      el("ul", class: "list", kids: list.map(visible(m), t => row(m, t)))
-    let status: Node[Msg] = el("p", class: "status", kids: [text(summary(m))])
-    div(class: root_class(m), kids: [heading, composer, filters, items, status])
+      el("ul", class = "list", kids = list.map(visible(m), t => row(m, t)))
+    let status: Node[Msg] = el("p", class = "status", kids = [text(summary(m))])
+    div(class = root_class(m), kids = [heading, composer, filters, items, status])
   }
 }
 
@@ -169,7 +169,7 @@ fn title_of(ts: List[Todo], id: Int) -> String =
   }
 
 fn retitle(ts: List[Todo], id: Int, title: String) -> List[Todo] =
-  list.map(ts, t => if t.id == id { Todo { ..t, title: title } } else { t })
+  list.map(ts, t => if t.id == id { Todo { ..t, title = title } } else { t })
 
 ## The items the current filter admits, in insertion order.
 pub fn visible(m: Model) -> List[Todo] =
@@ -196,21 +196,21 @@ fn root_class(m: Model) -> String =
 # characters is one -- and the two halves are what keep the model and the
 # document agreeing on what is in the box.
 fn compose_row(m: Model) -> Node[Msg] = {
-  let field: Node[Msg] = input(class: "field", value: m.draft, on: [on_value("input", SetDraft)])
-  let add: Node[Msg] = button("add", Add, class: "add")
-  let boom: Node[Msg] = button("boom", Boom, class: "boom")
-  div(class: "compose", kids: [field, add, boom])
+  let field: Node[Msg] = input(class = "field", value = m.draft, on = [on_value("input", SetDraft)])
+  let add: Node[Msg] = button("add", Add, class = "add")
+  let boom: Node[Msg] = button("boom", Boom, class = "boom")
+  div(class = "compose", kids = [field, add, boom])
 }
 
 fn filter_row(cur: Filter) -> Node[Msg] =
-  div(class: "filters", kids: [
+  div(class = "filters", kids = [
     filter_button("all", All, cur),
     filter_button("active", Active, cur),
     filter_button("done", Done, cur),
   ])
 
 fn filter_button(label: String, which: Filter, cur: Filter) -> Node[Msg] =
-  button(label, Only(f: which), class: if which == cur { "filter on" } else { "filter" })
+  button(label, Only(f = which), class = if which == cur { "filter on" } else { "filter" })
 
 # Two shapes, decided by a field of the model rather than by the row: an
 # `<li>` being edited has a field and two verbs, an `<li>` at rest has a
@@ -219,16 +219,16 @@ fn filter_button(label: String, which: Filter, cur: Filter) -> Node[Msg] =
 # an outright `replace` rather than a text patch.
 fn row(m: Model, t: Todo) -> Node[Msg] =
   if m.editing == Some(t.id) {
-    el("li", class: "row editing", kids: [
-      input(class: "draft", value: m.edit, on: [on_value("input", SetEdit)]),
-      button("save", Save, class: "save"),
-      button("cancel", Cancel, class: "cancel"),
+    el("li", class = "row editing", kids = [
+      input(class = "draft", value = m.edit, on = [on_value("input", SetEdit)]),
+      button("save", Save, class = "save"),
+      button("cancel", Cancel, class = "cancel"),
     ])
   } else {
-    el("li", class: if t.done { "row done" } else { "row" }, kids: [
-      button(if t.done { "[x]" } else { "[ ]" }, Toggle(id: t.id), class: "box"),
-      el("span", class: "title", on: [on_click(Edit(id: t.id))], kids: [text(t.title)]),
-      button("x", Drop(id: t.id), class: "kill"),
+    el("li", class = if t.done { "row done" } else { "row" }, kids = [
+      button(if t.done { "[x]" } else { "[ ]" }, Toggle(id = t.id), class = "box"),
+      el("span", class = "title", on = [on_click(Edit(id = t.id))], kids = [text(t.title)]),
+      button("x", Drop(id = t.id), class = "kill"),
     ])
   }
 
@@ -247,7 +247,7 @@ fn summary(m: Model) -> String = {
 fn turn(m: Model, msg: Msg) -> Model = fold_msg(m, msg, update)
 
 test "this application commands nothing, so a turn is exactly its update" {
-  let (m, c) = init().update(SetDraft(text: "buy milk"))
+  let (m, c) = init().update(SetDraft(text = "buy milk"))
   assert m.draft == "buy milk"
   let nothing: Cmd[Msg] = NoCmd
   assert c == nothing
@@ -259,7 +259,7 @@ fn seed_go(m: Model, i: Int, n: Int) -> Model =
   if i > n {
     m
   } else {
-    seed_go(m.turn(SetDraft(text: "task" ++ to_string(i))).turn(Add), i + 1, n)
+    seed_go(m.turn(SetDraft(text = "task" ++ to_string(i))).turn(Add), i + 1, n)
   }
 
 test "a payload lands in the field the listener that heard it names" {
@@ -270,14 +270,14 @@ test "a payload lands in the field the listener that heard it names" {
   # The composer's field and the row editor's field are two listeners that are
   # equal as far as the reconciler and the host are concerned, and mean two
   # different things. That is the whole of what has to be right here.
-  assert on_value("input", SetDraft).deliver("buy milk") == SetDraft(text: "buy milk")
-  assert on_value("input", SetEdit).deliver("new") == SetEdit(text: "new")
+  assert on_value("input", SetDraft).deliver("buy milk") == SetDraft(text = "buy milk")
+  assert on_value("input", SetEdit).deliver("new") == SetEdit(text = "new")
   # The two the wire cannot tell apart.
   assert on_value("input", SetDraft) == on_value("input", SetEdit)
   # A button's listener ignores what it is handed, which is what lets the
   # boundary pass `""` to every `NoData` listener.
   assert on_click(Add).deliver("buy milk") == Add
-  assert on_click(Toggle(id: 3)).deliver("buy milk") == Toggle(id: 3)
+  assert on_click(Toggle(id = 3)).deliver("buy milk") == Toggle(id = 3)
   # And the field it lands in is the field `update` then writes.
   let composing = init().turn(on_value("input", SetDraft).deliver("buy milk"))
   assert composing.draft == "buy milk"
@@ -290,12 +290,12 @@ test "each of the two fields in the view is wired to its own message" {
   # row; `listener_of` reads the one listener each declares.
   match init().compose_row().first_kid().listener_of() {
     None -> { assert false }
-    Some(l) -> { assert deliver(l, "buy milk") == SetDraft(text: "buy milk") }
+    Some(l) -> { assert deliver(l, "buy milk") == SetDraft(text = "buy milk") }
   }
-  let open = seeded(2).turn(Edit(id: 2))
-  match row(open, Todo { id: 2, title: "task2", done: false }).first_kid().listener_of() {
+  let open = seeded(2).turn(Edit(id = 2))
+  match row(open, Todo { id = 2, title = "task2", done = false }).first_kid().listener_of() {
     None -> { assert false }
-    Some(l) -> { assert deliver(l, "task2!") == SetEdit(text: "task2!") }
+    Some(l) -> { assert deliver(l, "task2!") == SetEdit(text = "task2!") }
   }
 }
 
@@ -312,16 +312,16 @@ fn listener_of(n: Option[Node[Msg]]) -> Option[On[Msg]] =
 test "typing is one message whatever the length of what was typed" {
   # The thing the key palette could not do. A title of any length, a paste, an
   # IME commit: one `input` event, one message, one turn.
-  let m = init().turn(SetDraft(text: "buy milk and eggs"))
+  let m = init().turn(SetDraft(text = "buy milk and eggs"))
   assert m.draft == "buy milk and eggs"
   # A field the user emptied is an empty draft rather than an unchanged one:
   # the payload is the field's value, not a keystroke to append.
-  assert turn(m, SetDraft(text: "")).draft == ""
+  assert turn(m, SetDraft(text = "")).draft == ""
 }
 
 test "add commits the draft and clears it" {
-  let m = init().turn(SetDraft(text: "buy milk")).turn(Add)
-  assert m.todos == [Todo { id: 1, title: "buy milk", done: false }]
+  let m = init().turn(SetDraft(text = "buy milk")).turn(Add)
+  assert m.todos == [Todo { id = 1, title = "buy milk", done = false }]
   assert m.draft == ""
   assert m.next_id == 2
   # An empty draft is not a todo.
@@ -331,20 +331,20 @@ test "add commits the draft and clears it" {
 test "toggle, drop and filter are the plain list operations" {
   let m = seeded(3)
   assert len(m.todos) == 3
-  let t = turn(m, Toggle(id: 2))
+  let t = turn(m, Toggle(id = 2))
   assert t.todos[1].done
-  assert visible(Model { ..t, filter: Active }).len() == 2
-  assert visible(Model { ..t, filter: Done }).len() == 1
-  let d = turn(t, Drop(id: 2))
+  assert visible(Model { ..t, filter = Active }).len() == 2
+  assert visible(Model { ..t, filter = Done }).len() == 1
+  let d = turn(t, Drop(id = 2))
   assert len(d.todos) == 2
   assert d.todos[1].id == 3
 }
 
 test "an edit is a second field, and the two never feed each other" {
-  let m = seeded(3).turn(Edit(id: 2))
+  let m = seeded(3).turn(Edit(id = 2))
   assert m.editing == Some(2)
   assert m.edit == "task2"
-  let typing = turn(m, SetEdit(text: "task2!"))
+  let typing = turn(m, SetEdit(text = "task2!"))
   assert typing.edit == "task2!"
   # The composer's draft is untouched while a row is open, which is the
   # assertion the routing mutant in scripts/wasm-dom-contract breaks.
@@ -358,8 +358,8 @@ test "an edit is a second field, and the two never feed each other" {
 }
 
 test "dropping the row being edited closes the editor" {
-  let m = seeded(3).turn(Edit(id: 2))
-  let d = turn(m, Drop(id: 2))
+  let m = seeded(3).turn(Edit(id = 2))
+  let d = turn(m, Drop(id = 2))
   assert d.editing == None
   assert d.edit == ""
 }
@@ -376,7 +376,7 @@ test "the view is a value, so a frame is one assertion" {
       assert len(kids) == 5
     }
   }
-  match seeded(1).turn(Edit(id: 1)).view() {
+  match seeded(1).turn(Edit(id = 1)).view() {
     Text(_) -> { assert false }
     Elem(_, props, ..) -> { assert props == [("class", "todo editing")] }
   }
@@ -386,11 +386,11 @@ test "both fields are controlled, so the document renders the model" {
   # A `value` prop carrying the model's text, on each of the two. Without it
   # the field would be the browser's and nothing could clear it -- `Add`
   # clears the draft, and this is what makes that reach the screen.
-  let field: Node[Msg] = input(class: "field", value: "buy milk", on: [on_value("input", SetDraft)])
-  assert init().turn(SetDraft(text: "buy milk")).compose_row().first_kid() == Some(field)
-  let editor: Node[Msg] = input(class: "draft", value: "task2", on: [on_value("input", SetEdit)])
-  let open = seeded(2).turn(Edit(id: 2))
-  assert row(open, Todo { id: 2, title: "task2", done: false }).first_kid() == Some(editor)
+  let field: Node[Msg] = input(class = "field", value = "buy milk", on = [on_value("input", SetDraft)])
+  assert init().turn(SetDraft(text = "buy milk")).compose_row().first_kid() == Some(field)
+  let editor: Node[Msg] = input(class = "draft", value = "task2", on = [on_value("input", SetEdit)])
+  let open = seeded(2).turn(Edit(id = 2))
+  assert row(open, Todo { id = 2, title = "task2", done = false }).first_kid() == Some(editor)
 }
 
 fn first_kid(n: Node[Msg]) -> Option[Node[Msg]] =

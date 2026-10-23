@@ -169,7 +169,7 @@ fn message[T](r: Result[T, ForeignError]) -> String = match r {
 }
 
 fn blank() -> Trace =
-  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", results: None, note: "" }
+  Trace { alloc= "-", upload= "-", launch= "-", sync= "-", download= "-", results= None, note= "" }
 
 # Allocate and fill one buffer per (format, contents) pair, in order.
 fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignError] !Gpu = {
@@ -214,20 +214,20 @@ fn release(hs: List[Int]) -> Unit !Gpu = {
 fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Float])],
   reads: List[Int]) -> Trace !Gpu =
   match alloc_all(bufs) {
-    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Err(e) -> Trace { ..blank(), alloc= e.kind, note= e.message }
     Ok(hs) -> {
-      let t0 = Trace { ..blank(), alloc: "ok" }
+      let t0 = Trace { ..blank(), alloc= "ok" }
       match upload_all(hs, bufs) {
         Err(e) -> {
           release(hs)
-          Trace { ..t0, upload: e.kind, note: e.message }
+          Trace { ..t0, upload= e.kind, note= e.message }
         }
         Ok(_) -> {
-          let t1 = Trace { ..t0, upload: "ok" }
+          let t1 = Trace { ..t0, upload= "ok" }
           match gpu.gpu_launch(kernel, gx, gy, gz, list.map(hs, h => gpu.Buffer(h))) {
             Err(e) -> {
               release(hs)
-              Trace { ..t1, launch: e.kind, note: e.message }
+              Trace { ..t1, launch= e.kind, note= e.message }
             }
             Ok(_) -> {
               let s = gpu.gpu_sync()
@@ -239,11 +239,11 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Fl
               }
               Trace {
                 ..t1,
-                launch: "ok",
-                sync: kind(s),
-                download: kind(r),
-                results: value,
-                note: message(s) ++ message(r)
+                launch= "ok",
+                sync= kind(s),
+                download= kind(r),
+                results= value,
+                note= message(s) ++ message(r)
               }
             }
           }

@@ -10,13 +10,13 @@ use types.{BodySource}
 ## has no resource to release. Negative positions or sizes are caller bugs.
 pub fn bytes_source(data: Bytes) -> BodySource =
   BodySource {
-    read: (pos, n) => {
+    read = (pos, n) => {
       if pos < 0 || n < 0 { panic("bytes_source: pos and n must not be negative") }
       let start = if pos < len(data) { pos } else { len(data) }
       let count = if n < len(data) - start { n } else { len(data) - start }
       bytes.slice(data, start, start + count)
     },
-    close: () => (),
+    close = () => (),
   }
 
 ## A source reading a file in ranges, opening and closing it on every read.
@@ -26,11 +26,11 @@ pub fn bytes_source(data: Bytes) -> BodySource =
 ## the server's pump catches that panic and still closes the source.
 pub fn file_source(path: String) -> BodySource =
   BodySource {
-    read: (pos, n) => with_fs_real(() => match read_range(path, pos, n) {
+    read = (pos, n) => with_fs_real(() => match read_range(path, pos, n) {
       Ok(piece) -> piece
       Err(e) -> panic("file_source: ${e.kind}: ${e.message}")
     }),
-    close: () => (),
+    close = () => (),
   }
 
 test "bytes sources read ranges, short tails and EOF without a captured cursor" {

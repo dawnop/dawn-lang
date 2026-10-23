@@ -581,7 +581,7 @@ fn block(indent: String, body: List[Instr], owners: List[Owner]) -> List[(String
 
 # The owner of a line no operation issued, and of every line when the
 # caller did not ask (`render_kernel`).
-fn no_owner() -> Owner = Owner { op: 0 - 1, inner: [] }
+fn no_owner() -> Owner = Owner { op = 0 - 1, inner = [] }
 
 fn owner_at(owners: List[Owner], k: Int) -> Owner = if k < len(owners) { owners[k] } else { no_owner() }
 
@@ -698,7 +698,7 @@ pub fn text_debug(prog: TileProg, dir: String, file: String) -> DebugInfo = {
   let k = lower(prog)
   # the module line, the globals, then the entry line, then the body
   let entry = 2 + len(k.globals)
-  DebugInfo { dir: dir, file: file, line: entry, col: 3, locs: positions(k.body, entry + 1, 5) }
+  DebugInfo { dir = dir, file = file, line = entry, col = 3, locs = positions(k.body, entry + 1, 5) }
 }
 
 ## The lines of `render(prog)` one call the kernel made is answerable for,
@@ -772,8 +772,8 @@ pub fn line_map(prog: TileProg, calls: List[Call]) -> Result[LineMap, String] = 
           if len(tail) != 1 {
             Err("`${prog.name}`'s text has lines no operation owns before its end")
           } else {
-            let rows = list.map(range(0, len(calls)), j => CallLines { name: calls[j].name, parent: calls[j].parent, lines: ranges_of(j) })
-            Ok(LineMap { text: join(text), head: ranges_of(0 - 2), calls: rows, tail: tail[0] })
+            let rows = list.map(range(0, len(calls)), j => CallLines { name = calls[j].name, parent = calls[j].parent, lines = ranges_of(j) })
+            Ok(LineMap { text = join(text), head = ranges_of(0 - 2), calls = rows, tail = tail[0] })
           }
         }
       }
@@ -849,13 +849,13 @@ pub fn render(prog: TileProg) -> String = render_kernel(lower(prog))
 # program's, and the value names are the table's numbers.
 
 fn two_loads_one_param() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "twice",
-  params: [ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "twice",
+  params = [ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 128),
@@ -888,13 +888,13 @@ test "the token chain in the text is the program's: make_token feeds the first l
 
 test "an atomic spells its ordering, its scope and (for the rmw) its mode, and answers a value and a token" {
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "atomics",
-    params: [ByPtr("i32"), ByPtr("i32")],
-    globals: [],
-    ops: [
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "atomics",
+    params = [ByPtr("i32"), ByPtr("i32")],
+    globals = [],
+    ops = [
       MakeToken(0),
       IdxConst(1, 0),
       Load(2, 3, 0, "i32", 1, [8], [1], None, None, 0, []),
@@ -920,27 +920,27 @@ test "an atomic spells its ordering, its scope and (for the rmw) its mode, and a
 }
 
 test "the entry signature lists every parameter as a scalar pointer tile of its format" {
-  let p = TileProg { producer: None, debug: None, hints: [], name: "k", params: [ByPtr("f32"), ByPtr("f64")], globals: [], ops: [MakeToken(0)] }
+  let p = TileProg { producer = None, debug = None, hints = [], name = "k", params = [ByPtr("f32"), ByPtr("f64")], globals = [], ops = [MakeToken(0)] }
   let text = render(p)
   assert str.starts_with(text, "cuda_tile.module @m {\n  entry @k(%arg0: tile<ptr<f32>>, %arg1: tile<ptr<f64>>) {\n")
   assert str.ends_with(text, "    return\n  }\n}\n")
 }
 
 test "K4.1: a by-value parameter is a rank-0 tile of its format in the entry signature, beside the pointers" {
-  let p = TileProg { producer: None, debug: None, hints: [], name: "k", params: [ByPtr("f32"), ByValue("i32"), ByValue("f64")], globals: [], ops: [MakeToken(0)] }
+  let p = TileProg { producer = None, debug = None, hints = [], name = "k", params = [ByPtr("f32"), ByValue("i32"), ByValue("f64")], globals = [], ops = [MakeToken(0)] }
   let text = render(p)
   assert str.starts_with(text, "cuda_tile.module @m {\n  entry @k(%arg0: tile<ptr<f32>>, %arg1: tile<i32>, %arg2: tile<f64>) {\n")
 }
 
 test "block ids along the three axes bind the matching result of one get_tile_block_id" {
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "axes",
-    params: [ByPtr("f64")],
-    globals: [],
-    ops: [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "axes",
+    params = [ByPtr("f64")],
+    globals = [],
+    ops = [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
       Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, [])]
   }
   let text = render(p)
@@ -959,13 +959,13 @@ test "rendering the same program twice gives the same text" {
 }
 
 fn sum_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "sum",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "sum",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 4),
@@ -1001,13 +1001,13 @@ test "a loop is its header with the carried values, a body two columns in, and a
 }
 
 fn spin_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "spin",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "spin",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 8),
@@ -1036,13 +1036,13 @@ test "a loop is its header with the carried values, an if that breaks, and the c
 
 test "an early return inside a loop is an if around the dialect's bare return, and the conversions print the modifier and the mode" {
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "t17",
-    params: [ByPtr("f64"), ByPtr("i32")],
-    globals: [],
-    ops: [
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "t17",
+    params = [ByPtr("f64"), ByPtr("i32")],
+    globals = [],
+    ops = [
       MakeToken(0),
       BlockId(1, 0),
       IdxConst(2, 8),
@@ -1072,13 +1072,13 @@ test "an early return inside a loop is an if around the dialect's bare return, a
 }
 
 fn total_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "total",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "total",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 8),
@@ -1105,13 +1105,13 @@ test "a reduction is its header with the dimension, the identities and the regio
 }
 
 fn branch_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "branch",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "branch",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 8),
@@ -1141,13 +1141,13 @@ test "the transcendentals spell the modifiers they carry and no others" {
   # such field at all before bytecode 13.3; exp2 and rsqrt take
   # flush_to_zero, which only `exp2_ftz` sets
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "m",
-    params: [ByPtr("f64")],
-    globals: [],
-    ops: [
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "m",
+    params = [ByPtr("f64")],
+    globals = [],
+    ops = [
       MakeToken(0),
       BlockId(1, 0),
       IdxConst(2, 8),
@@ -1179,13 +1179,13 @@ test "the transcendentals spell the modifiers they carry and no others" {
 test "assert, assume and print_tko spell the dialect's own assembly, predicate prefix dropped and format string escaped" {
   let none: Option[Int] = None
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "dbg",
-    params: [ByPtr("i32"), ByPtr("i32")],
-    globals: [],
-    ops: [
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "dbg",
+    params = [ByPtr("i32"), ByPtr("i32")],
+    globals = [],
+    ops = [
       MakeToken(0),
       BlockId(1, 0),
       IdxConst(2, 8),
@@ -1222,13 +1222,13 @@ test "assert, assume and print_tko spell the dialect's own assembly, predicate p
 
 test "the fence prints its token bare and the gdc signals print it as the optional clause, with the result type stated" {
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "fences",
-    params: [],
-    globals: [],
-    ops: [MakeToken(0), TokenOnly(1, "gdc_wait_tko", 0), TokenOnly(2, "memory_fence_alias_tko", 1),
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "fences",
+    params = [],
+    globals = [],
+    ops = [MakeToken(0), TokenOnly(1, "gdc_wait_tko", 0), TokenOnly(2, "memory_fence_alias_tko", 1),
       TokenOnly(3, "gdc_launch_dependents_tko", 2)]
   }
   let text = render(p)
@@ -1258,13 +1258,13 @@ test "index arithmetic spells as scalar i32 constant, addi and muli" {
 
 test "the shape operations spell the dialect's own assembly: brackets on extract, `dim =` on cat, a bare list on permute" {
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "shapes",
-    params: [ByPtr("f64"), ByPtr("f64")],
-    globals: [],
-    ops: [
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "shapes",
+    params = [ByPtr("f64"), ByPtr("f64")],
+    globals = [],
+    ops = [
       MakeToken(0),
       BlockId(1, 0),
       NumBlocks(2, 0),
@@ -1291,13 +1291,13 @@ test "the shape operations spell the dialect's own assembly: brackets on extract
 
 test "insert names its subtile, its destination in brackets and both types, and fpowi both formats" {
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "t16",
-    params: [ByPtr("f64"), ByPtr("i32"), ByPtr("f64")],
-    globals: [],
-    ops: [
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "t16",
+    params = [ByPtr("f64"), ByPtr("i32"), ByPtr("f64")],
+    globals = [],
+    ops = [
       MakeToken(0),
       BlockId(1, 0),
       Load(2, 3, 0, "f64", 1, [16, 8], [8, 1], None, None, 0, []),
@@ -1325,13 +1325,13 @@ test "insert names its subtile, its destination in brackets and both types, and 
 
 test "the pointer surface spells the ladder a body built, its three conversions and a load through it" {
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "ptrs",
-    params: [ByPtr("f64"), ByPtr("i32")],
-    globals: [],
-    ops: [
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "ptrs",
+    params = [ByPtr("f64"), ByPtr("i32")],
+    globals = [],
+    ops = [
       MakeToken(0),
       BlockId(1, 0),
       MakePtrs(2, 0, "f64", [8]),
@@ -1360,13 +1360,13 @@ test "the pointer surface spells the ladder a body built, its three conversions 
 
 test "a fork issues two stores from one token and joins them before the load that follows" {
   let p = TileProg {
-    producer: None,
-    debug: None,
-    hints: [],
-    name: "fork",
-    params: [ByPtr("f64"), ByPtr("f64")],
-    globals: [],
-    ops: [
+    producer = None,
+    debug = None,
+    hints = [],
+    name = "fork",
+    params = [ByPtr("f64"), ByPtr("f64")],
+    globals = [],
+    ops = [
       MakeToken(0),
       BlockId(1, 0),
       ConstF(2, "f64", [8], 1.0),
@@ -1385,19 +1385,19 @@ test "a fork issues two stores from one token and joins them before the load tha
 }
 
 fn globals_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "g",
-  params: [ByPtr("f64")],
-  globals: [
-    Global { sym: "tbl", dtype: "f64", values: [1.0, 2.5], align: 0, is_private: false, constant: false },
-    Global { sym: "pad", dtype: "i32", values: [7.0], align: 128, is_private: false, constant: false },
-    Global { sym: "hid", dtype: "f64", values: [3.0], align: 0, is_private: true, constant: false },
-    Global { sym: "ro", dtype: "f64", values: [4.0], align: 0, is_private: false, constant: true },
-    Global { sym: "both", dtype: "f64", values: [5.0], align: 64, is_private: true, constant: true }
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "g",
+  params = [ByPtr("f64")],
+  globals = [
+    Global { sym = "tbl", dtype = "f64", values = [1.0, 2.5], align = 0, is_private = false, constant = false },
+    Global { sym = "pad", dtype = "i32", values = [7.0], align = 128, is_private = false, constant = false },
+    Global { sym = "hid", dtype = "f64", values = [3.0], align = 0, is_private = true, constant = false },
+    Global { sym = "ro", dtype = "f64", values = [4.0], align = 0, is_private = false, constant = true },
+    Global { sym = "both", dtype = "f64", values = [5.0], align = 64, is_private = true, constant = true }
   ],
-  ops: [MakeToken(0), GetGlobal(1, "tbl", "f64", [8])]
+  ops = [MakeToken(0), GetGlobal(1, "tbl", "f64", [8])]
 }
 
 test "a global prints above the entry, its alignment only when it is not the dialect's default, and get_global names the symbol" {
@@ -1558,7 +1558,7 @@ test "a side table shifted by one operation is refused, not drawn" {
   # the fourth starts where the third used to end
   let shifted = list.map(range(0, len(calls)), k => {
     let c = calls[k]
-    if k == 2 { Call { ..c, ops_to: c.ops_to - 1 } } else { c }
+    if k == 2 { Call { ..c, ops_to = c.ops_to - 1 } } else { c }
   })
   assert is_err(line_map(p, shifted))
   let dropped = list.take(calls, 5)
@@ -1588,7 +1588,7 @@ fn summed(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let first = load(x, tile_at(b, 128), [128])
   let one = idx_const(1)
   let acc = carry(first)
-  for k in d_range(one, idx_const(4), step: By(one)) { acc.set(add(acc.get(), load(x, tile_at(k, 128), [128]))) }
+  for k in d_range(one, idx_const(4), step = By(one)) { acc.set(add(acc.get(), load(x, tile_at(k, 128), [128]))) }
   store(out, tile_at(b, 128), acc.get())
 }
 
@@ -1655,8 +1655,8 @@ fn nested(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let one = idx_const(1)
   let first = load(x, z, [8])
   let acc = carry(first)
-  for _i in d_range(z, one, step: By(one)) {
-    for _j in d_range(z, one, step: By(one)) {
+  for _i in d_range(z, one, step = By(one)) {
+    for _j in d_range(z, one, step = By(one)) {
       let u = acc.get()
       acc.set(add(u, broadcast(d_reduce(u, 0.0, (a, e) => max(a, e)), [8])))
     }
@@ -1680,7 +1680,7 @@ fn regions(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load(x, z, [8])
   let c = lt(t, t)
   let r = d_reduce(t, 0.0, (a, e) => max(a, e))
-  let s = d_scan(t, 0.0, (a, e) => max(a, e), reverse: true)
+  let s = d_scan(t, 0.0, (a, e) => max(a, e), reverse = true)
   let stop = gt(r, r)
   let w = carry(s)
   d_loop {
@@ -1741,7 +1741,7 @@ fn sentinels(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let n = idx_const(2)
   s("4")
   let acc = carry(t)
-  for k in d_range(i0, n, step: By(n)) {
+  for k in d_range(i0, n, step = By(n)) {
     s("5")
     let v = load(x, k, [8])
     s("6")
@@ -1867,10 +1867,10 @@ test "PR-2: every cell view, an In's and an Out's, claims 16-byte alignment on t
 fn merged_combos(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let b = tile_at(block_id(0), 128)
   let m = tail_mask(b, [128], 1000)
-  let h = [for_arch("sm_86", ptr_hints(latency: Some(2)))]
-  let t = load(a, b, [128], strides: Some([1]), hints: h)
-  let u = load(a, b, [128], mask: Some(m))
-  store(o, b, add(t, u), strides: Some([1]), mask: Some(m), hints: h)
+  let h = [for_arch("sm_86", ptr_hints(latency = Some(2)))]
+  let t = load(a, b, [128], strides = Some([1]), hints = h)
+  let u = load(a, b, [128], mask = Some(m))
+  store(o, b, add(t, u), strides = Some([1]), mask = Some(m), hints = h)
 }
 
 test "PR-2: a hinted load, a masked load with no padding value and a masked hinted store render as the dialect spells them" {
@@ -1887,7 +1887,7 @@ fn promised_copy(x: Param[Float], o: Param[Float], pad: Padding, load_promise: L
   let src = partition_view(tensor_view(x, zero, [64, 32], [32, 1]), [16, 16], [0, 1], pad)
   let dst = partition_view(tensor_view(o, zero, [64, 32], [32, 1]), [16, 16], [0, 1], NoPadding)
   let at = [block_id(0), block_id(1)]
-  store_view(dst, at, load_view(src, at, inbounds: load_promise), inbounds: store_promise)
+  store_view(dst, at, load_view(src, at, inbounds = load_promise), inbounds = store_promise)
 }
 
 fn promised_text(pad: Padding, load_promise: List[Bool], store_promise: List[Bool]) -> String =

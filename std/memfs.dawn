@@ -108,7 +108,7 @@ fn path_parent(p: String) -> Option[String] = {
 # ---- the table ----
 
 fn ferr(kind: String, what: String, path: String) -> ForeignError =
-  ForeignError { kind: "memfs.${kind}", message: what ++ ": " ++ path, cause: None }
+  ForeignError { kind = "memfs.${kind}", message = what ++ ": " ++ path, cause = None }
 
 fn key(st: MemFs, p: String) -> String = path_absolute(p, st.base)
 
@@ -182,7 +182,7 @@ fn mem_mkdirs(st: MemFs, p: String) -> (MemFs, Result[Unit, ForeignError]) = {
   if map.has(st.files, k) {
     return (st, Err(ferr("not_a_directory", "a file is in the way", k)))
   }
-  (MemFs { ..st, dirs: map.insert(with_ancestors(st.dirs, k), k, true) }, Ok(()))
+  (MemFs { ..st, dirs = map.insert(with_ancestors(st.dirs, k), k, true) }, Ok(()))
 }
 
 fn mem_write(st: MemFs, p: String, content: Bytes) -> (MemFs, Result[Unit, ForeignError]) = {
@@ -192,8 +192,8 @@ fn mem_write(st: MemFs, p: String, content: Bytes) -> (MemFs, Result[Unit, Forei
   }
   (MemFs {
     ..st,
-    files: map.insert(st.files, k, content),
-    dirs: with_ancestors(st.dirs, k)
+    files = map.insert(st.files, k, content),
+    dirs = with_ancestors(st.dirs, k)
   }, Ok(()))
 }
 
@@ -241,13 +241,13 @@ fn mem_size(st: MemFs, p: String) -> Result[Int, ForeignError] = {
 fn mem_delete(st: MemFs, p: String) -> (MemFs, Result[Bool, ForeignError]) = {
   let k = key(st, p)
   if map.has(st.files, k) {
-    return (MemFs { ..st, files: map.remove(st.files, k) }, Ok(true))
+    return (MemFs { ..st, files = map.remove(st.files, k) }, Ok(true))
   }
   if is_dir_key(st, k) {
     if len(child_names(st, k)) > 0 {
       return (st, Err(ferr("not_empty", "directory not empty", k)))
     }
-    return (MemFs { ..st, dirs: map.remove(st.dirs, k) }, Ok(true))
+    return (MemFs { ..st, dirs = map.remove(st.dirs, k) }, Ok(true))
   }
   (st, Ok(false))
 }
@@ -261,8 +261,8 @@ fn mem_rename(st: MemFs, src: String, dst: String) -> (MemFs, Result[Unit, Forei
     Some(content) ->
       return (MemFs {
         ..st,
-        files: map.insert(map.remove(st.files, s), d, content),
-        dirs: with_ancestors(st.dirs, d)
+        files = map.insert(map.remove(st.files, s), d, content),
+        dirs = with_ancestors(st.dirs, d)
       }, Ok(()))
     None -> ()
   }
@@ -283,7 +283,7 @@ fn mem_rename(st: MemFs, src: String, dst: String) -> (MemFs, Result[Unit, Forei
       dirs = map.insert(map.remove(dirs, g), d ++ str.drop(g, len(s)), true)
     }
   }
-  (MemFs { ..st, files: files, dirs: with_ancestors(dirs, d) }, Ok(()))
+  (MemFs { ..st, files = files, dirs = with_ancestors(dirs, d) }, Ok(()))
 }
 
 ## A name nothing else holds, created before it is handed out -- the property
@@ -296,7 +296,7 @@ fn mem_temp(
 ) -> (MemFs, Result[String, ForeignError]) = {
   let dir = if parent == "" { "/tmp" } else { key(st, parent) }
   let path = dir ++ "/" ++ prefix ++ to_string(st.seq)
-  let bumped = MemFs { ..st, seq: st.seq + 1 }
+  let bumped = MemFs { ..st, seq = st.seq + 1 }
   let (next, made) =
     if as_dir { mem_mkdirs(bumped, path) } else { mem_write(bumped, path, bytes.utf8("")) }
   match made {
@@ -380,7 +380,7 @@ pub const BASE: String = "/dawn-memfs"
 ## life of one table, which a parameter says and a host query only happens to
 ## provide.
 pub fn empty(base: String) -> MemFs =
-  MemFs { base: base, files: map.empty(), dirs: map.empty(), links: map.empty(), seq: 0 }
+  MemFs { base = base, files = map.empty(), dirs = map.empty(), links = map.empty(), seq = 0 }
 
 ## `st` with one more file in it, holding `contents` as UTF-8; the directories
 ## above it come along. A directory already at `path` leaves `st` as it was.
@@ -398,7 +398,7 @@ pub fn put(st: MemFs, path: String, contents: String) -> MemFs = {
 pub fn link(st: MemFs, at: String, target: String) -> MemFs = {
   let k = key(st, at)
   if map.has(st.files, k) || is_dir_key(st, k) { return st }
-  MemFs { ..st, links: map.insert(st.links, k, target), dirs: with_ancestors(st.dirs, k) }
+  MemFs { ..st, links = map.insert(st.links, k, target), dirs = with_ancestors(st.dirs, k) }
 }
 
 ## The file at `path` as UTF-8 text, or `None` when nothing is there.

@@ -64,14 +64,14 @@ type Facts = {
 
 fn gather_expr(f: Facts, e: CExpr) -> Facts =
   match e {
-    CUpdate(CLocal(b, _), _, _, _, _) -> Facts { ..f, bases: set.insert(f.bases, b) }
-    CForeign(_, _, _) -> Facts { ..f, foreign: true }
+    CUpdate(CLocal(b, _), _, _, _, _) -> Facts { ..f, bases = set.insert(f.bases, b) }
+    CForeign(_, _, _) -> Facts { ..f, foreign = true }
     _ -> f
   }
 
 fn gather_stmt(f: Facts, s: CStmt) -> Facts =
   match s {
-    CSAssign(sym, _) -> Facts { ..f, assigned: set.insert(f.assigned, sym) }
+    CSAssign(sym, _) -> Facts { ..f, assigned = set.insert(f.assigned, sym) }
     _ -> f
   }
 
@@ -151,11 +151,11 @@ fn stable(cx: Cx, t: Int, rest: List[CStmt], tail: Option[CExpr]) -> Bool =
   if not set.has(cx.facts.assigned, t) { true } else { not set.has(assigned_in(rest, tail), t) }
 
 fn elim_fn(dicts: Set[Int], f: CFun) -> CFun = {
-  let empty = Facts { assigned: set.empty(), bases: set.empty(), foreign: false }
+  let empty = Facts { assigned = set.empty(), bases = set.empty(), foreign = false }
   let facts = cwalk.fold_expr(f.body, empty, gather_expr, gather_stmt)
   if facts.foreign { return f }
-  let cx = Cx { facts: facts, dicts: dicts }
-  CFun { ..f, body: rename(cx, map.empty(), f.body) }
+  let cx = Cx { facts = facts, dicts = dicts }
+  CFun { ..f, body = rename(cx, map.empty(), f.body) }
 }
 
 ## The module with its alias `let`s renamed away. Idempotent.
@@ -167,23 +167,23 @@ pub fn elim_module(m: CModule) -> CModule = {
     for d in f.dicts { dicts = set.insert(dicts, d.sym) }
   }
   let shared = dicts
-  CModule { ..m, fns: list.map(m.fns, (f: CFun) => elim_fn(shared, f)) }
+  CModule { ..m, fns = list.map(m.fns, (f: CFun) => elim_fn(shared, f)) }
 }
 
 # ---- tests ----
 
 fn t_fn(params: List[CParam], ret: Ty, body: CExpr) -> CFun =
   CFun {
-    name: "f", owner: "m", captures: [], params: params, dicts: [], evs: [],
-    ret: ret, body: body, is_test: false, impl_of: None, default_of: None,
-    origin: ""
+    name = "f", owner = "m", captures = [], params = params, dicts = [], evs = [],
+    ret = ret, body = body, is_test = false, impl_of = None, default_of = None,
+    origin = ""
   }
 
-fn t_mod(fns: List[CFun]) -> CModule = CModule { owner: "m", fns: fns, dicts: [], next_sym: 100 }
+fn t_mod(fns: List[CFun]) -> CModule = CModule { owner = "m", fns = fns, dicts = [], next_sym = 100 }
 
 fn t_node() -> Ty = TyList(TyInt)
 
-fn t_param(sym: Int) -> CParam = CParam { sym: sym, ty: t_node(), mode: COwned }
+fn t_param(sym: Int) -> CParam = CParam { sym = sym, ty = t_node(), mode = COwned }
 
 ## How many `let`s the first function's top block still has.
 fn t_lets(m: CModule) -> Int =
@@ -265,7 +265,7 @@ test "an alias that is itself assigned is a variable and stays" {
 
 test "the base of a record update keeps its binding" {
   let lt = t_node()
-  let upd = CUpdate(CLocal(2, lt), 7, 0, [CUpdField { ty: TyInt, value: None }], lt)
+  let upd = CUpdate(CLocal(2, lt), 7, 0, [CUpdField { ty = TyInt, value = None }], lt)
   let body = CBlock([CSLet(2, lt, CLocal(1, lt))], Some(upd), lt)
   let m = elim_module(t_mod([t_fn([t_param(1)], lt, body)]))
   assert t_lets(m) == 1
@@ -273,7 +273,7 @@ test "the base of a record update keeps its binding" {
 
 test "a scalar alias is not touched" {
   let body = CBlock([CSLet(2, TyInt, CLocal(1, TyInt))], Some(CLocal(2, TyInt)), TyInt)
-  let m = elim_module(t_mod([t_fn([CParam { sym: 1, ty: TyInt, mode: COwned }], TyInt, body)]))
+  let m = elim_module(t_mod([t_fn([CParam { sym = 1, ty = TyInt, mode = COwned }], TyInt, body)]))
   assert t_lets(m) == 1
 }
 

@@ -55,10 +55,10 @@ fn allowed(path: String) -> Option[String] =
 
 fn dispatch(req: Request, id: CompilerId) -> Reply !io =
   match allowed(req.path) {
-    None -> Reply { status: 404, body: "{\"error\":\"Not Found\"}" }
+    None -> Reply { status = 404, body = "{\"error\":\"Not Found\"}" }
     Some(m) ->
       if m != req.method {
-        Reply { status: 405, body: "{\"error\":\"Method Not Allowed\"}" }
+        Reply { status = 405, body = "{\"error\":\"Method Not Allowed\"}" }
       } else if req.path == "/health" {
         health(id)
       } else {
@@ -110,20 +110,20 @@ fn digest(code: String) -> String = sha256.hex(bytes.utf8(code))
 fn routed(path: String) -> Bool = match allowed(path) { None -> false, Some(_) -> true }
 
 test "the access fields name the program by its digest and never by its text" {
-  let id = CompilerId { version: "0.94.0", build: "b1:96af8ed9c5f2" }
+  let id = CompilerId { version = "0.94.0", build = "b1:96af8ed9c5f2" }
   let code = "secret-marker"
   let body = bytes.utf8("{\"code\":\"secret-marker\"}")
-  let run = Request { method: "POST", path: "/run", query: "", headers: [], body: body }
+  let run = Request { method = "POST", path = "/run", query = "", headers = [], body = body }
   let line = access_fields(run, id)
   assert line == " toolchain=0.94.0/b1:96af8ed9c5f2 src_sha256=${digest(code)}"
   assert digest(code) == "6c18de180764abc1fd49ffb69213b99c8519525409db100d52d29be7aad93404"
   assert not str.contains(line, "secret-marker")
-  let compile = Request { method: "POST", path: "/compile", query: "", headers: [], body: bytes.utf8("{\"code\":\"x\",\"target\":\"c\"}") }
+  let compile = Request { method = "POST", path = "/compile", query = "", headers = [], body = bytes.utf8("{\"code\":\"x\",\"target\":\"c\"}") }
   assert access_fields(compile, id) == " toolchain=0.94.0/b1:96af8ed9c5f2 src_sha256=${digest("x")} target=c"
-  let bad = Request { method: "POST", path: "/check", query: "", headers: [], body: bytes.utf8("not json") }
+  let bad = Request { method = "POST", path = "/check", query = "", headers = [], body = bytes.utf8("not json") }
   assert access_fields(bad, id) == " toolchain=0.94.0/b1:96af8ed9c5f2 src_sha256=-"
-  let health = Request { method: "GET", path: "/health", query: "", headers: [], body: bytes.utf8("") }
-  assert access_fields(health, CompilerId { version: "", build: "" }) == " toolchain=-"
+  let health = Request { method = "GET", path = "/health", query = "", headers = [], body = bytes.utf8("") }
+  assert access_fields(health, CompilerId { version = "", build = "" }) == " toolchain=-"
 }
 
 ## `job <dir>`: the child `gate.sh` starts holding a slot (play/job).

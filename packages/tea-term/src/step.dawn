@@ -60,45 +60,45 @@ impl App[Counter] {
   type View = Widget[CounterMsg]
   fn update(m: Counter, msg: CounterMsg) -> (Counter, Cmd[CounterMsg]) =
     match msg {
-      Inc -> (Counter { n: m.n + 1 }, NoCmd)
-      Dec -> (Counter { n: m.n - 1 }, NoCmd)
-      Undo -> (m, SendMsg(msg: Dec))
+      Inc -> (Counter { n = m.n + 1 }, NoCmd)
+      Dec -> (Counter { n = m.n - 1 }, NoCmd)
+      Undo -> (m, SendMsg(msg = Dec))
     }
-  fn view(m: Counter) -> Widget[CounterMsg] = Text(s: "n=" ++ to_string(m.n))
+  fn view(m: Counter) -> Widget[CounterMsg] = Text(s = "n=" ++ to_string(m.n))
 }
 
 test "step returns the new model and the rendered frame" {
-  let (m, frame) = step(Counter { n: 41 }, Inc, view)
-  assert m == Counter { n: 42 }
+  let (m, frame) = step(Counter { n = 41 }, Inc, view)
+  assert m == Counter { n = 42 }
   assert frame == "n=42"
 }
 
 test "a step discharges the message's command before it paints" {
   # `Undo` moves nothing itself and commands a `Dec`; the frame is rendered
   # from the model the whole turn ends with, not from the update's own answer.
-  let (m, frame) = step(Counter { n: 42 }, Undo, view)
-  assert m == Counter { n: 41 }
+  let (m, frame) = step(Counter { n = 42 }, Undo, view)
+  assert m == Counter { n = 41 }
   assert frame == "n=41"
-  let (next, ps) = diff_step(Counter { n: 42 }, Undo, view)
-  assert next == Counter { n: 41 }
+  let (next, ps) = diff_step(Counter { n = 42 }, Undo, view)
+  assert next == Counter { n = 41 }
   let want: List[Patch[Widget[CounterMsg]]] =
-    [Patch { path: [], op: Replace(w: Text(s: "n=41")) }]
+    [Patch { path = [], op = Replace(w = Text(s = "n=41")) }]
   assert ps == want
 }
 
 test "the impl of App is two lines more than before the split" {
-  let (once, _) = update(Counter { n: 0 }, Inc)
+  let (once, _) = update(Counter { n = 0 }, Inc)
   let (m, _) = update(once, Inc)
-  assert m == Counter { n: 2 }
+  assert m == Counter { n = 2 }
   let (back, _) = update(m, Dec)
-  assert view(back) == Text(s: "n=1")
+  assert view(back) == Text(s = "n=1")
 }
 
 test "a driver reaches the reconciler by pinning the tree as its own parameter" {
-  let (next, ps) = diff_step(Counter { n: 0 }, Inc, view)
-  assert next == Counter { n: 1 }
+  let (next, ps) = diff_step(Counter { n = 0 }, Inc, view)
+  assert next == Counter { n = 1 }
   let want: List[Patch[Widget[CounterMsg]]] =
-    [Patch { path: [], op: Replace(w: Text(s: "n=1")) }]
+    [Patch { path = [], op = Replace(w = Text(s = "n=1")) }]
   assert ps == want
-  assert apply(view(Counter { n: 0 }), ps) == view(next)
+  assert apply(view(Counter { n = 0 }), ps) == view(next)
 }

@@ -69,7 +69,7 @@ const PUMP_CHUNK: Int = 8192
 ## stall until 8 KiB had arrived instead of passing each piece on, which is the
 ## first-byte-out-immediately property the streaming body exists for.
 pub fn input_source(s: InputStream) -> BodySource =
-  BodySource { read: (_pos, n) => read_ready(s, n), close: () => s.close() }
+  BodySource { read = (_pos, n) => read_ready(s, n), close = () => s.close() }
 
 fn read_ready(s: InputStream, n: Int) -> Bytes !io = {
   let first = s.readNBytes(1)!
@@ -133,7 +133,7 @@ fn close_exchange_quietly(ex: HttpExchange) -> Unit !io = {
 fn finish_exchange(ex: HttpExchange, errors: ErrorFormat) -> Unit !io = {
   with x <- bracket(ex, close_exchange_quietly)
   if x.getResponseCode() == -1 {
-    let _ = catch_fault(() => write_response(x, error_response(http_error(500, errors.internal_message), fmt: errors)))
+    let _ = catch_fault(() => write_response(x, error_response(http_error(500, errors.internal_message), fmt = errors)))
     ()
   }
 }
@@ -370,15 +370,15 @@ fn bodyless_request(ex: HttpExchange, meta: Option[RouteMeta]) -> Request !io = 
     None -> no_query
   }
   Request {
-    method: ex.getRequestMethod()!,
-    path: uri.getPath()!,
-    raw_path: uri.getRawPath()!,
-    params: no_params,
-    query: q,
-    headers: read_headers(ex),
-    body: bytes.utf8(""),
-    body_file: None,
-    route: meta,
+    method = ex.getRequestMethod()!,
+    path = uri.getPath()!,
+    raw_path = uri.getRawPath()!,
+    params = no_params,
+    query = q,
+    headers = read_headers(ex),
+    body = bytes.utf8(""),
+    body_file = None,
+    route = meta,
   }
 }
 
@@ -419,7 +419,7 @@ fn build_request(
   run_guard(guard, base, errors, log_line)?
   let body = if streaming { bytes.utf8("") } else { read_body(errors, ex, limit)? }
   let bf: Option[String] = if streaming { Some(spill_body(errors, ex, own)?) } else { None }
-  Ok(Request { ..base, body: body, body_file: bf })
+  Ok(Request { ..base, body = body, body_file = bf })
 }
 
 # The ownership rule for a spilled body, with its two moving parts passed in so
@@ -625,7 +625,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
     Ok(r) -> r
     Err(m) -> {
       println("request panicked: ${m.message}")
-      error_response(http_error(500, errors.internal_message), fmt: errors)
+      error_response(http_error(500, errors.internal_message), fmt = errors)
     }
   }
   write_response(ex, response)
@@ -705,10 +705,10 @@ pub fn start(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware
   # rightly treats test stdout as a deterministic artifact.) The classic
   # entry points below keep the message.
   ServerHandleRep {
-    server: server,
-    port: server.getAddress()!.getPort(),
-    executor: pool,
-    done: CountDownLatch.new(1),
+    server = server,
+    port = server.getAddress()!.getPort(),
+    executor = pool,
+    done = CountDownLatch.new(1),
   }
 }
 
@@ -750,7 +750,7 @@ pub fn stop(h: ServerHandle, grace_secs: Int) -> Unit !io = {
 ## default error wording. Most programs want exactly this.
 pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
   serve_app_with(
-    ServerConfig { host: "127.0.0.1", port: port, max_body: DEFAULT_MAX_BODY, errors: default_errors() },
+    ServerConfig { host = "127.0.0.1", port = port, max_body = DEFAULT_MAX_BODY, errors = default_errors() },
     routes, middleware)
 
 ## start + announce + join under a config the caller owns — the entry point for
@@ -944,7 +944,7 @@ fn stamping(next: Handler) -> Handler =
   } else {
     match next(req) {
       Ok(r) -> Ok(with_header(r, "X-Stamped", "1"))
-      Err(e) -> Err(HttpError { ..e, headers: e.headers ++ [("X-Stamped", "1")] })
+      Err(e) -> Err(HttpError { ..e, headers = e.headers ++ [("X-Stamped", "1")] })
     }
   }
 
@@ -1203,7 +1203,7 @@ test "a stream of stated length that ends early is a truncation, not a success" 
 }
 
 test "a stream's Content-Length is its stated length, and an unsized stream has none" {
-  let sized = () => streaming(200, "video/mp4", test_source_of(bytes.utf8("abcd")), length: Some(4))
+  let sized = () => streaming(200, "video/mp4", test_source_of(bytes.utf8("abcd")), length = Some(4))
   let unsized = () => streaming(200, "video/mp4", test_source_of(bytes.utf8("abcd")))
   # the stated length is the one a handler may repeat
   match catch_panic(() => with_header(sized(), "Content-Length", "4")) {
@@ -1220,7 +1220,7 @@ test "a stream's Content-Length is its stated length, and an unsized stream has 
     Err(m) -> { assert str.contains(m.message, "unknown length") }
   }
   # a byte count is not negative
-  match catch_panic(() => streaming(200, "video/mp4", test_source_of(bytes.utf8("")), length: Some(-1))) {
+  match catch_panic(() => streaming(200, "video/mp4", test_source_of(bytes.utf8("")), length = Some(-1))) {
     Ok(_) -> { assert false }
     Err(m) -> { assert str.contains(m.message, "illegal stream length -1") }
   }
@@ -1229,9 +1229,9 @@ test "a stream's Content-Length is its stated length, and an unsized stream has 
 test "a sized stream goes out with its exact Content-Length, and a short one ends short" {
   let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   srv.createContext("/whole", ex =>
-      write_response(ex, streaming(200, "application/octet-stream", test_source_of(bytes.utf8("streamed")), length: Some(8))))
+      write_response(ex, streaming(200, "application/octet-stream", test_source_of(bytes.utf8("streamed")), length = Some(8))))
   srv.createContext("/short", ex =>
-      write_response(ex, streaming(200, "application/octet-stream", test_source_of(bytes.utf8("abc")), length: Some(10))))
+      write_response(ex, streaming(200, "application/octet-stream", test_source_of(bytes.utf8("abc")), length = Some(10))))
   srv.start()
   let port = srv.getAddress()!.getPort()
   let whole = test_connect("GET", "http://127.0.0.1:${port}/whole")
@@ -1307,10 +1307,10 @@ test "a tail capture reaches the handler as segments, so %2F survives it" {
 
 test "param refuses to read a tail capture as one string" {
   let req = Request {
-    method: "GET", path: "/dav/a/b", raw_path: "/dav/a/b",
-    params: map.from([("rest", ["a/b", "c"]), ("id", ["7"])]),
-    query: map.empty(), headers: map.empty(), body: bytes.utf8(""),
-    body_file: None, route: None,
+    method = "GET", path = "/dav/a/b", raw_path = "/dav/a/b",
+    params = map.from([("rest", ["a/b", "c"]), ("id", ["7"])]),
+    query = map.empty(), headers = map.empty(), body = bytes.utf8(""),
+    body_file = None, route = None,
   }
   # a single-segment capture reads exactly as before
   assert param(req, "id") == Ok("7")
@@ -1420,7 +1420,7 @@ test "a query parameter repeated on the wire arrives whole" {
 }
 
 test "lifecycle: port 0 binds a real port, serves, and join returns after stop" {
-  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY, errors: default_errors() }
+  let cfg = ServerConfig { host = "127.0.0.1", port = 0, max_body = DEFAULT_MAX_BODY, errors = default_errors() }
   let h = start(cfg, [route_get("/hello", hello_handler)], [])
   # the OS picked the port; the handle reports the real one, and it works
   assert handle_port(h) > 0
@@ -1441,7 +1441,7 @@ test "lifecycle: port 0 binds a real port, serves, and join returns after stop" 
 }
 
 test "stop shuts the request executor down, and does so even if the JDK's stop throws" {
-  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY, errors: default_errors() }
+  let cfg = ServerConfig { host = "127.0.0.1", port = 0, max_body = DEFAULT_MAX_BODY, errors = default_errors() }
   let h = start(cfg, [route_get("/hello", hello_handler)], [])
   let rep: ServerHandleRep = h
   # the pool is live while the server is: it answers a request on it
@@ -1473,7 +1473,7 @@ test "stop shuts the request executor down, and does so even if the JDK's stop t
 test "start refuses a body ceiling that is not positive" {
   # 0 used to switch the ceiling off; now it is a config error at startup
   for bad in [0, -1] {
-    let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: bad, errors: default_errors() }
+    let cfg = ServerConfig { host = "127.0.0.1", port = 0, max_body = bad, errors = default_errors() }
     match catch_panic(() => start(cfg, [route_get("/hello", hello_handler)], [])) {
       Ok(_) -> { assert false }
       Err(m) -> { assert str.contains(m.message, "max_body must be a positive byte count") }
@@ -1482,7 +1482,7 @@ test "start refuses a body ceiling that is not positive" {
 }
 
 test "start refuses a broken route table before binding a socket" {
-  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY, errors: default_errors() }
+  let cfg = ServerConfig { host = "127.0.0.1", port = 0, max_body = DEFAULT_MAX_BODY, errors = default_errors() }
   let r = catch_panic(() => start(cfg, [route_get("/a/{unclosed", hello_handler)], []))
   match r {
     Ok(_) -> {
@@ -1508,7 +1508,7 @@ test "a panic is a 500 the application words: default, then configured" {
   # configured: the bytes this framework used to emit unconditionally, which
   # one application's frontend reads (FastAPI's key, its own 500 text)
   let fastapi = ErrorFormat {
-    ..default_errors(), detail_key: "detail", internal_message: "服务器内部错误", param_separator: "：",
+    ..default_errors(), detail_key = "detail", internal_message = "服务器内部错误", param_separator = "：",
   }
   let b = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   b.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, fastapi, ex))
@@ -1599,8 +1599,8 @@ test "a completed spill hands its path over, and the Request is what drops it" {
       # ... and the Request holding it is what releases it (`drop_body_file` is
       # the bracket release `handle` installs around the handler call)
       drop_body_file(Request {
-        method: "PUT", path: "/x", raw_path: "/x", params: map.empty(), query: map.empty(),
-        headers: map.empty(), body: bytes.utf8(""), body_file: Some(p), route: None,
+        method = "PUT", path = "/x", raw_path = "/x", params = map.empty(), query = map.empty(),
+        headers = map.empty(), body = bytes.utf8(""), body_file = Some(p), route = None,
       })
       assert file_exists(p) == false
     }
@@ -1650,7 +1650,7 @@ fn spilled_size(req: Request) -> Result[Response, HttpError] !io =
 # off the captures the server filled in.
 fn need_token(req: Request) -> Result[Unit, HttpError] !io =
   if header(req, "Authorization") != Some("Bearer ok") {
-    Err(HttpError { ..http_error(401, "unauthorized"), headers: [("WWW-Authenticate", "Bearer")] })
+    Err(HttpError { ..http_error(401, "unauthorized"), headers = [("WWW-Authenticate", "Bearer")] })
   } else if param_segs(req, "rest") == ["locked"] {
     Err(http_error(403, "locked"))
   } else {
@@ -1786,10 +1786,10 @@ test "an in-memory route's body_limit replaces max_body, in both directions" {
 fn custom_errors() -> ErrorFormat =
   ErrorFormat {
     ..default_errors(),
-    body_too_large: n => "too big, limit ${n}",
-    not_found: "no such page",
-    method_not_allowed: "wrong verb",
-    dot_segment: "no dots",
+    body_too_large = n => "too big, limit ${n}",
+    not_found = "no such page",
+    method_not_allowed = "wrong verb",
+    dot_segment = "no dots",
   }
 
 test "a custom ErrorFormat words all three 413 sites" {
@@ -1920,7 +1920,7 @@ fn fatal_handler(_req: Request) -> Result[Response, HttpError] !io = {
 }
 
 test "a JVM Error in a handler still answers 500 and closes the exchange" {
-  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY, errors: default_errors() }
+  let cfg = ServerConfig { host = "127.0.0.1", port = 0, max_body = DEFAULT_MAX_BODY, errors = default_errors() }
   let h = start(cfg, [route_get("/fatal", fatal_handler), route_get("/hello", hello_handler)], [])
   let port = handle_port(h)
   # catch_panic does not see an Error, so this request used to get nothing:

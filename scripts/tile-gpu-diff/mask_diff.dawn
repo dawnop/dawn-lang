@@ -81,14 +81,14 @@ fn message[T](r: Result[T, ForeignError]) -> String = match r {
 
 fn blank() -> Trace =
   Trace {
-    alloc: "-",
-    upload: "-",
-    roundtrip: "-",
-    launch: "-",
-    sync: "-",
-    download: "-",
-    result: None,
-    note: ""
+    alloc= "-",
+    upload= "-",
+    roundtrip= "-",
+    launch= "-",
+    sync= "-",
+    download= "-",
+    result= None,
+    note= ""
   }
 
 fn release(ts: List[DeviceBuffer[Float]]) -> Unit !Gpu = {
@@ -127,26 +127,26 @@ fn upload_all(ts: List[DeviceBuffer[Float]], data: List[List[Float]], i: Int) ->
 fn stages(kernel: String, grid: Int, data: List[List[Float]]) -> Trace !Gpu = {
   let size = len(data[0])
   match alloc_many(len(data), size, []) {
-    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Err(e) -> Trace { ..blank(), alloc= e.kind, note= e.message }
     Ok(ts) -> {
-      let t0 = Trace { ..blank(), alloc: "ok" }
+      let t0 = Trace { ..blank(), alloc= "ok" }
       match upload_all(ts, data, 0) {
         Err(e) -> {
           release(ts)
-          Trace { ..t0, upload: e.kind, note: e.message }
+          Trace { ..t0, upload= e.kind, note= e.message }
         }
         Ok(_) -> {
-          let t1 = Trace { ..t0, upload: "ok" }
+          let t1 = Trace { ..t0, upload= "ok" }
           let back = copy_to_host(ts[0])
           let rt = match back {
             Ok(v) -> if to_string(v) == to_string(data[0]) { "same" } else { "differ" }
             Err(e) -> e.kind
           }
-          let t2 = Trace { ..t1, roundtrip: rt, note: message(back) }
+          let t2 = Trace { ..t1, roundtrip= rt, note= message(back) }
           match launch(kernel, grid, list.map(ts, t => erase(buffer_arg(t)))) {
             Err(e) -> {
               release(ts)
-              Trace { ..t2, launch: e.kind, note: e.message }
+              Trace { ..t2, launch= e.kind, note= e.message }
             }
             Ok(_) -> {
               let s = sync()
@@ -158,11 +158,11 @@ fn stages(kernel: String, grid: Int, data: List[List[Float]]) -> Trace !Gpu = {
               }
               Trace {
                 ..t2,
-                launch: "ok",
-                sync: kind(s),
-                download: kind(r),
-                result: value,
-                note: message(s) ++ message(r)
+                launch= "ok",
+                sync= kind(s),
+                download= kind(r),
+                result= value,
+                note= message(s) ++ message(r)
               }
             }
           }

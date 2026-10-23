@@ -82,7 +82,7 @@ pub fn parse_tile_map(text: String) -> Result[TileMap, String] = {
     if w[0] == "call" && len(w) >= 6 && not list.contains(["carry", "get", "set"], w[3]) {
       match (parse_span(w[4]), parse_span(w[5])) {
         (Some((a, b)), Some((na, nb))) -> {
-          calls = calls ++ [TileCall { name: w[3], lo: a, hi: b, nlo: na, nhi: nb, lines: list.drop(w, 6) }]
+          calls = calls ++ [TileCall { name = w[3], lo = a, hi = b, nlo = na, nhi = nb, lines = list.drop(w, 6) }]
         }
         _ -> {
           return Err("not a call row: ${join(w, " ")}")
@@ -98,7 +98,7 @@ pub fn parse_tile_map(text: String) -> Result[TileMap, String] = {
         match str.split_once(w[1], "-") {
           Some((a, b)) ->
             match (parse_int(a), parse_int(b)) {
-              (Some(x), Some(y)) -> Ok(TileMap { first: x, last: y, calls: calls })
+              (Some(x), Some(y)) -> Ok(TileMap { first = x, last = y, calls = calls })
               _ -> Err("the fn row's lines are not numbers: ${w[1]}")
             }
           None -> Err("the fn row's lines are not a range: ${w[1]}")
@@ -121,10 +121,10 @@ fn narrowest(ps: List[Call]) -> Call = list.fold(list.drop(ps, 1), ps[0], (best,
 ## call by span as its parent.
 pub fn tree(rows: List[Call]) -> List[Call] = {
   let sorted = sort_by(rows, by_span)
-  let numbered = map(range(0, len(sorted)), i => Call { ..sorted[i], id: i })
+  let numbered = map(range(0, len(sorted)), i => Call { ..sorted[i], id = i })
   map(numbered, r => {
     let holders = filter(numbered, p => holds(p, r))
-    Call { ..r, parent: if len(holders) == 0 { -1 } else { narrowest(holders).id } }
+    Call { ..r, parent = if len(holders) == 0 { -1 } else { narrowest(holders).id } }
   })
 }
 
@@ -136,7 +136,7 @@ pub fn table_from_tile(src: Src, t: TileMap) -> List[Call] =
     let (l1, c1) = c.hi
     let (n0, m0) = c.nlo
     let (n1, m1) = c.nhi
-    Call { id: 0, parent: -1, name: c.name, lo: off(src, l0, c0), hi: off(src, l1, c1), nlo: off(src, n0, m0), nhi: off(src, n1, m1), lines: c.lines }
+    Call { id = 0, parent = -1, name = c.name, lo = off(src, l0, c0), hi = off(src, l1, c1), nlo = off(src, n0, m0), nhi = off(src, n1, m1), lines = c.lines }
   }))
 
 # ---- the host maps ----
@@ -252,14 +252,14 @@ pub fn table_from_maps(src: Src, module: String, first: Int, last: Int, c: CMap,
     let (lo, hi, nlo) = k
     match ident_at(src, nlo) {
       Some(name) -> {
-        rows = rows ++ [Call { id: 0, parent: -1, name: name, lo: lo, hi: hi, nlo: nlo, nhi: nlo + len(name), lines: [] }]
+        rows = rows ++ [Call { id = 0, parent = -1, name = name, lo = lo, hi = hi, nlo = nlo, nhi = nlo + len(name), lines = [] }]
       }
       None -> {
         let cw = what_of(c_what(c, module, k))
         let named: Option[(String, Int)] = if cw != "" && cw == what_of(j_what(j, module, k)) { unspelled_name(src, lo, hi, nlo, cw) } else { None }
         match named {
           Some((name, nhi)) -> {
-            rows = rows ++ [Call { id: 0, parent: -1, name: name, lo: lo, hi: hi, nlo: nlo, nhi: nhi, lines: [] }]
+            rows = rows ++ [Call { id = 0, parent = -1, name = name, lo = lo, hi = hi, nlo = nlo, nhi = nhi, lines = [] }]
           }
           None -> {
             gaps = gaps ++ ["the call at ${pos(at(src, lo))} has its name at ${pos(at(src, nlo))}, which is no identifier"]
@@ -378,9 +378,9 @@ fn is_err[A](r: Result[A, String]) -> Bool =
 
 test "a call inside another's span has it as its parent, the innermost one" {
   let src = sample_src()
-  let outer = Call { id: 0, parent: -1, name: "f", lo: 10, hi: 40, nlo: 10, nhi: 11, lines: [] }
-  let mid = Call { ..outer, name: "g", lo: 12, hi: 30, nlo: 12, nhi: 13 }
-  let inner = Call { ..outer, name: "h", lo: 14, hi: 20, nlo: 14, nhi: 15 }
+  let outer = Call { id = 0, parent = -1, name = "f", lo = 10, hi = 40, nlo = 10, nhi = 11, lines = [] }
+  let mid = Call { ..outer, name = "g", lo = 12, hi = 30, nlo = 12, nhi = 13 }
+  let inner = Call { ..outer, name = "h", lo = 14, hi = 20, nlo = 14, nhi = 15 }
   let t = tree([inner, outer, mid])
   assert map(t, c => (c.name, c.id, c.parent)) == [("f", 0, -1), ("g", 1, 0), ("h", 2, 1)]
   assert children_of(t) == [[1], [2], []]
@@ -409,7 +409,7 @@ test "a table is checked against the source it names" {
       let table = table_from_tile(src, t)
       assert check_table(src, table, 4, 9) == []
       assert len(check_table(src, table, 8, 9)) > 0
-      let moved = map(table, c => if c.name == "mma" { Call { ..c, nlo: c.nlo + 1, nhi: c.nhi + 1 } } else { c })
+      let moved = map(table, c => if c.name == "mma" { Call { ..c, nlo = c.nlo + 1, nhi = c.nhi + 1 } } else { c })
       assert str.contains(check_table(src, moved, 4, 9)[0], "the text at 5:4 is")
     }
   }

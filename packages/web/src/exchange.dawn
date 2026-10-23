@@ -95,7 +95,7 @@ pub fn guard_of(d: Dispatch) -> Option[Guard] =
   match d {
     Found(route, params) ->
       match route.guard {
-        Some(g) -> Some((rq: Request) => g(Request { ..rq, params: params }))
+        Some(g) -> Some((rq: Request) => g(Request { ..rq, params = params }))
         None -> None
       }
     NoPath -> None
@@ -136,7 +136,7 @@ pub fn run_dispatch(errors: ErrorFormat, d: Dispatch, req: Request) -> Result[Re
   match d {
     NoPath -> Err(http_error(404, errors.not_found))
     WrongMethod -> Err(http_error(405, errors.method_not_allowed))
-    Found(route, params) -> route.handler(Request { ..req, params: params })
+    Found(route, params) -> route.handler(Request { ..req, params = params })
   }
 
 ## Compose the middleware and run `core` under them, rendering whatever comes
@@ -155,10 +155,10 @@ pub fn serve_through(
   let app = fold(rev(middleware), core, (h, m) => m(h))
   match catch_panic(() => app(req)) {
     Ok(Ok(r)) -> r
-    Ok(Err(e)) -> error_response(e, fmt: errors)
+    Ok(Err(e)) -> error_response(e, fmt = errors)
     Err(m) -> {
       log("request panicked: ${m.message}")
-      error_response(http_error(500, errors.internal_message), fmt: errors)
+      error_response(http_error(500, errors.internal_message), fmt = errors)
     }
   }
 }
@@ -271,8 +271,8 @@ pub type Transport = {
 ## rest of stdin after a refused body is the caller's to drain.
 pub fn stdio_transport() -> Transport =
   Transport {
-    read: (_pos, n) => read_stdin(n),
-    write: b => {
+    read = (_pos, n) => read_stdin(n),
+    write = b => {
       write_stdout(b)
       flush_stdout()
     },
@@ -288,7 +288,7 @@ pub type ExchangeConfig = { max_body: Int, errors: ErrorFormat }
 
 ## The neutral configuration: `DEFAULT_MAX_BODY` and `default_errors()`.
 pub fn exchange_config() -> ExchangeConfig =
-  ExchangeConfig { max_body: DEFAULT_MAX_BODY, errors: default_errors() }
+  ExchangeConfig { max_body = DEFAULT_MAX_BODY, errors = default_errors() }
 
 # ---- parsing the head ----
 
@@ -493,7 +493,7 @@ fn parse_head(raw: Bytes) -> Result[Head, HttpError] = {
       }
       let (method, raw_path, raw_query, http10) = parse_request_line(first)?
       let headers = parse_headers(rest)?
-      Ok(Head { method: method, raw_path: raw_path, raw_query: raw_query, http10: http10, headers: headers })
+      Ok(Head { method = method, raw_path = raw_path, raw_query = raw_query, http10 = http10, headers = headers })
     }
   }
 }
@@ -816,15 +816,15 @@ fn bodyless_request(h: Head, meta: Option[RouteMeta]) -> Request = {
     None -> no_query
   }
   Request {
-    method: h.method,
-    path: decode_path_seg(h.raw_path),
-    raw_path: h.raw_path,
-    params: no_params,
-    query: q,
-    headers: h.headers,
-    body: bytes.utf8(""),
-    body_file: None,
-    route: meta,
+    method = h.method,
+    path = decode_path_seg(h.raw_path),
+    raw_path = h.raw_path,
+    params = no_params,
+    query = q,
+    headers = h.headers,
+    body = bytes.utf8(""),
+    body_file = None,
+    route = meta,
   }
 }
 
@@ -850,10 +850,10 @@ fn build_request(
       None -> None
     }
     let path = spill_stream(t, body_pos, kind, own, errors, log)?
-    Ok(Request { ..base, body_file: Some(path) })
+    Ok(Request { ..base, body_file = Some(path) })
   } else {
     let body = read_body(t, body_pos, kind, body_ceiling(meta, max_body), errors)?
-    Ok(Request { ..base, body: body })
+    Ok(Request { ..base, body = body })
   }
 }
 
@@ -1014,7 +1014,7 @@ fn report_pump(outcome: PumpOutcome, log: fn(String) -> Unit !io) -> Unit !io =
 # answers it itself, before any Dawn runs; the answer here is the framework's
 # own JSON error in the application's wording.
 fn refuse(t: Transport, e: HttpError, errors: ErrorFormat, log: fn(String) -> Unit !io) -> Unit !io =
-  write_response(t, "GET", false, error_response(e, fmt: errors), log)
+  write_response(t, "GET", false, error_response(e, fmt = errors), log)
 
 # ---- the exchange ----
 
@@ -1095,7 +1095,7 @@ fn serve_request(cfg: ExchangeConfig, routes: List[Route], middleware: List[Midd
     Ok(r) -> r
     Err(m) -> {
       log("request panicked: ${m.message}")
-      error_response(http_error(500, errors.internal_message), fmt: errors)
+      error_response(http_error(500, errors.internal_message), fmt = errors)
     }
   }
   write_response(t, h.method, h.http10, response, log)
@@ -1113,7 +1113,7 @@ fn from_bytes(data: Bytes) -> fn(Int, Int) -> Bytes !io =
   (pos, n) => bytes.slice(data, pos, pos + n)
 
 fn fake(s: String) -> Transport =
-  Transport { read: from_bytes(bytes.utf8(s)), write: _b => () }
+  Transport { read = from_bytes(bytes.utf8(s)), write = _b => () }
 
 fn head_of(s: String) -> Result[Head, HttpError] = parse_head(bytes.utf8(s))
 
@@ -1268,7 +1268,7 @@ test "a counted body is read to its length, in pieces if the stream gives them" 
     Err(e) -> { assert e.status == 400 }
   }
   # a stream that hands out one byte at a time is the same body
-  let slow = Transport { read: (pos, _n) => bytes.slice(bytes.utf8("hello world"), pos, pos + 1), write: _b => () }
+  let slow = Transport { read = (pos, _n) => bytes.slice(bytes.utf8("hello world"), pos, pos + 1), write = _b => () }
   assert read_exact(slow, 0, 11) == Ok(bytes.utf8("hello world"))
 }
 
@@ -1290,7 +1290,7 @@ test "the head is read up to the blank line and not a byte past it" {
   }
 }
 
-fn src() -> BodySource = BodySource { read: (_pos, _n) => bytes.utf8(""), close: () => () }
+fn src() -> BodySource = BodySource { read = (_pos, _n) => bytes.utf8(""), close = () => () }
 
 test "framing: exact for text and bytes, chunked only for a stream of unknown length" {
   assert framing(200, Empty) == Sized(0)
@@ -1345,7 +1345,7 @@ test "a chunk on the wire is its size in hex, the bytes, CRLF" {
 }
 
 fn panicking_source() -> BodySource =
-  BodySource { read: (_pos, _n) => panic("source bug"), close: () => () }
+  BodySource { read = (_pos, _n) => panic("source bug"), close = () => () }
 
 test "a pump ends clean, short, or as a panic, and each says so" {
   assert pump_with(src(), None, _up => 3) == Pumped
@@ -1360,10 +1360,10 @@ test "a pump ends clean, short, or as a panic, and each says so" {
 }
 
 test "the body ceiling is the route's, else the server's, and a raw-body route has none of its own" {
-  let plain = Some(RouteMeta { method: "POST", pattern: "/a", tags: [], body_limit: None })
-  let own = Some(RouteMeta { method: "POST", pattern: "/a", tags: [], body_limit: Some(7) })
-  let raw = Some(RouteMeta { method: "POST", pattern: "/a", tags: ["raw-body"], body_limit: None })
-  let raw_own = Some(RouteMeta { method: "POST", pattern: "/a", tags: ["raw-body"], body_limit: Some(7) })
+  let plain = Some(RouteMeta { method = "POST", pattern = "/a", tags = [], body_limit = None })
+  let own = Some(RouteMeta { method = "POST", pattern = "/a", tags = [], body_limit = Some(7) })
+  let raw = Some(RouteMeta { method = "POST", pattern = "/a", tags = ["raw-body"], body_limit = None })
+  let raw_own = Some(RouteMeta { method = "POST", pattern = "/a", tags = ["raw-body"], body_limit = Some(7) })
   assert body_ceiling(None, 100) == Some(100)
   assert body_ceiling(plain, 100) == Some(100)
   assert body_ceiling(own, 100) == Some(7)
