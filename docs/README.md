@@ -31,6 +31,8 @@ prints how many there are on every run.
 
 SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 
+Playground 补全生成入口：[play-ui-builtins-design.md](play-ui-builtins-design.md)。
+
 | 文档 | 生命周期 | 说明 |
 |---|---|---|
 | [codebase-audit-v2.md](codebase-audit-v2.md) | current | v0.60 冻结严重度与证据、机器权威的当前四状态分区、冻结 P1 映射和执行顺序。 |

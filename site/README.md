@@ -216,6 +216,12 @@ fetch 失败或版本不认识时面板照旧只搜标题，底栏照旧写「�
 
 ## 构建
 
+Playground 补全表在 npm 的 prebuild/predev/pretest 中通过
+`site/dawnc.sh` 选择的 `dawnc doc --builtins` 每次重新生成。
+独立 npm 与整站构建共用入口，`DAWNC_BIN` 优先；不再读取旧的
+`site/build/builtins.json`。工具或 JSON 失败会停止构建，不回落 JVM。
+未提供工具时首次构建 dawnc 仍可能用 JVM 种子链，`web-jvm` 包文档也仍需 JVM。
+
 ```bash
 site/build.sh          # dawnc doc --stdlib → play-ui → dawnc → tea reactors → 清空 dist → dawnc run site
 # 三个 wasm（demo 两个 + 搜索面板）要 clang 20+（带 wasm32 sysroot）。缺了就跳过并
