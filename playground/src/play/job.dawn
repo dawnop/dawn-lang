@@ -25,7 +25,7 @@ pub fn exec_job(job: Job) -> JobResult !io =
     JRun(code) -> JOutcome(execute(code))
     JCheck(code, native) -> JOutcome(check(code, native))
     JView(code, native) -> JViewRaw(view_raw(code, native))
-    JTile(code) -> JTileRaw(tile_job(code))
+    JTile(code, native) -> JTileRaw(tile_job(code, native))
   }
 
 ## Strings as bytes: each is `<its UTF-8 byte length>\n` and then those bytes.
@@ -67,7 +67,7 @@ pub fn encode_job(job: Job) -> Bytes =
     JRun(code) -> ["run", code]
     JCheck(code, native) -> ["check", code, flag(native)]
     JView(code, native) -> ["view", code, flag(native)]
-    JTile(code) -> ["tile", code]
+    JTile(code, native) -> ["tile", code, flag(native)]
   })
 
 pub fn decode_job(b: Bytes) -> Option[Job] =
@@ -75,7 +75,7 @@ pub fn decode_job(b: Bytes) -> Option[Job] =
     Some(["run", code]) -> Some(JRun(code))
     Some(["check", code, native]) -> Some(JCheck(code, native == "1"))
     Some(["view", code, native]) -> Some(JView(code, native == "1"))
-    Some(["tile", code]) -> Some(JTile(code))
+    Some(["tile", code, native]) -> Some(JTile(code, native == "1"))
     _ -> None
   }
 
@@ -187,7 +187,7 @@ pub fn job_main(dir: String) -> Unit !io = {
 }
 
 test "a job survives the round trip" {
-  for j in [JRun("fn main() = ()"), JCheck("é\nz", true), JView("a", false), JTile("")] {
+  for j in [JRun("fn main() = ()"), JCheck("é\nz", true), JView("a", false), JTile("", false), JTile("é\nz", true)] {
     assert decode_job(encode_job(j)) == Some(j)
   }
   assert decode_job(bytes.utf8("3\nab")) == None

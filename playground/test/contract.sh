@@ -90,7 +90,7 @@ export PLAY_COMPILE_TIMEOUT=60
 # fail-closed since the audit). There is no systemd-run wrapper on a dev box or
 # in CI, so this harness is exactly the caller that has to say so.
 export PLAY_UNSAFE_LOCAL=1
-# The native compiler /check and the C view prefer (play/exec.native_ready).
+# The native compiler preferred by /check, C emission and Tile IR parsing.
 # The runner only uses one of the release `dawn` is, so the cases below skip
 # unless PLAY_TEST_DAWNC (default: ./dawnc-linux-x86_64, what
 # scripts/release-native.sh writes) says the same version. It runs behind a
@@ -108,6 +108,11 @@ if [ -n "$want_ver" ] && [ "$want_ver" = "$have_ver" ]; then
   printf '#!/bin/sh\nprintf "%%s\\n" "$1" >>"%s"\nexec "%s" "$@"\n' "$NATLOG" "$DAWNC_REAL" >"$NATIVE_DIR/dawnc"
   chmod 755 "$NATIVE_DIR/dawnc"
   export DAWNC_BIN="$NATIVE_DIR/dawnc"
+  JVMLOG="$NATIVE_DIR/jvm-calls"
+  : >"$JVMLOG"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$1" >>"%s"\nexec "%s" "$@"\n' "$JVMLOG" "$ROOT/bin/dawn" >"$NATIVE_DIR/dawn"
+  chmod 755 "$NATIVE_DIR/dawn"
+  export DAWN_BIN="$NATIVE_DIR/dawn"
 else
   echo "note: no dawnc of release '$want_ver' (PLAY_TEST_DAWNC=$DAWNC_REAL, found '$have_ver'); the native cases are skipped"
   export DAWNC_BIN=/nonexistent/dawnc
@@ -357,6 +362,7 @@ tile = open(f"{root}/playground/test/tile_vadd.dawn", encoding="utf-8").read()
 open(f"{out}/tile.dawn", "w", encoding="utf-8").write(tile)
 for name in ("tile_hostif", "tile_broken"):
     open(f"{out}/{name}.dawn", "w", encoding="utf-8").write(open(f"{root}/playground/test/{name}.dawn", encoding="utf-8").read())
+open(f"{out}/tile_syntax.dawn", "w", encoding="utf-8").write(tile + "\nfn broken(\n")
 # the flash attention starter: the Playground's own sample, not a copy of it
 open(f"{out}/tile_attn.dawn", "w", encoding="utf-8").write(open(f"{root}/site/play-ui/samples/flash_attn.dawn", encoding="utf-8").read())
 open(f"{out}/tile_smuggle.dawn", "w", encoding="utf-8").write("use json/value.{Json}\npub fn smuggled(j: Json) -> Json = j\n" + tile)
@@ -671,17 +677,101 @@ PY
   done
   ok_case "native emitc: tileir C views use dawnc and match the JVM response bytes, including errors" "$st"
 
+  # Count parse itself on both tools. A --version call cannot satisfy this,
+  # and the probe still has to compile with the JVM after a native parse.
+  st=0
+  for name in tile tile_hostif tile_broken tile_syntax; do
+    n0=$(grep -c '^parse$' "$NATLOG" || true)
+    j0=$(grep -c '^parse$' "$JVMLOG" || true)
+    b0=$(grep -c '^build$' "$JVMLOG" || true)
+    data=$(compile_body "$CASES/$name.dawn" tile)
+    post "$SOCK" compile "$data" >"$CASES/$name.native-tile"
+    n1=$(grep -c '^parse$' "$NATLOG" || true)
+    j1=$(grep -c '^parse$' "$JVMLOG" || true)
+    b1=$(grep -c '^build$' "$JVMLOG" || true)
+    [ "$n1" -eq "$((n0 + 1))" ] && [ "$j1" -eq "$j0" ] && [ "$b1" -gt "$b0" ] || st=1
+    post "$SOCK2" compile "$data" >"$CASES/$name.jvm-tile"
+    python3 - "$CASES/$name.native-tile" "$CASES/$name.jvm-tile" "$name" <<'PYTILE' || st=1
+import json, re, sys
+a, b = [open(p, "rb").read() for p in sys.argv[1:3]]
+d = json.loads(a)
+assert d["ok"] is (sys.argv[3] in ("tile", "tile_hostif")), d
+if sys.argv[3] == "tile":
+    assert d["target"] == "tile" and d["gaps"]["count"] == 0 and "unmapped" not in d, d
+elif sys.argv[3] == "tile_hostif":
+    assert "host control flow" in d["unmapped"], d
+else:
+    assert d["phase"] == "compile" and "pane" not in d, d
+norm = lambda t: re.sub(rb'"ms":[0-9]+', b'"ms":0', t)
+assert norm(a) == norm(b), (a, b)
+PYTILE
+  done
+  ok_case "native parse: Tile IR uses one dawnc parse, no JVM parse, and matches JVM response bytes" "$st"
+
+  # Tool selection and parse failures keep their existing categories. Only
+  # an empty failure or the native refusal retries parse with the JVM.
+  cat >"$NATIVE_DIR/parse-fault" <<'FAULT'
+#!/bin/sh
+if [ "$1" = --version ]; then
+  if [ "$PLAY_TEST_PARSE_FAULT" = wrong ]; then echo 'dawnc 0.0.0 (native)'; exit 0; fi
+  exec "$PLAY_TEST_DAWNC_REAL" "$@"
+fi
+printf '%s\n' "$1" >>"$PLAY_TEST_PARSE_LOG"
+case "$PLAY_TEST_PARSE_FAULT" in
+  timeout) exec sleep 6 ;;
+  empty) exit 1 ;;
+  refusal) echo 'error: `use java` is not available in this compiler'; exit 1 ;;
+  diagnostic) echo 'error: parse failed'; exit 1 ;;
+esac
+exec "$PLAY_TEST_DAWNC_REAL" "$@"
+FAULT
+  chmod 755 "$NATIVE_DIR/parse-fault"
+  st=0
+  data=$(compile_body "$CASES/tile.dawn" tile)
+  for fault in missing wrong timeout empty refusal diagnostic; do
+    tool="$NATIVE_DIR/parse-fault"
+    [ "$fault" != missing ] || tool=/nonexistent/dawnc
+    : >"$NATIVE_DIR/fault-calls"
+    j0=$(grep -c '^parse$' "$JVMLOG" || true)
+    printf 'POST /compile HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "${#data}" "$data" |
+      PLAY_TEST_DAWNC_REAL="$DAWNC_REAL" PLAY_TEST_PARSE_LOG="$NATIVE_DIR/fault-calls" \
+      PLAY_TEST_PARSE_FAULT="$fault" DAWNC_BIN="$tool" PLAY_COMPILE_TIMEOUT=3 \
+      "$NATIVE_BIN" serve >"$CASES/$fault.http" 2>"$CASES/$fault.log"
+    n1=$(grep -c '^parse$' "$NATIVE_DIR/fault-calls" || true)
+    j1=$(grep -c '^parse$' "$JVMLOG" || true)
+    case "$fault" in
+      missing|wrong) [ "$n1" -eq 0 ] && [ "$j1" -eq "$((j0 + 1))" ] || st=1 ;;
+      empty|refusal) [ "$n1" -eq 1 ] && [ "$j1" -eq "$((j0 + 1))" ] || st=1 ;;
+      *) [ "$n1" -eq 1 ] && [ "$j1" -eq "$j0" ] || st=1 ;;
+    esac
+    python3 - "$CASES/$fault.http" "$CASES/tile.jvm-tile" "$fault" <<'PYFAULT' || st=1
+import json, re, sys
+a = open(sys.argv[1], "rb").read().split(b"\r\n\r\n", 1)[1]
+b = open(sys.argv[2], "rb").read()
+d = json.loads(a)
+assert d["ok"] is True and d["cached"] is False, d
+if sys.argv[3] in ("timeout", "diagnostic"):
+    assert d["unmapped"] == ("the parse timed out" if sys.argv[3] == "timeout" else "the program does not parse"), d
+    assert "calls" not in d and d["pane"]["kind"] == "tile", d
+else:
+    norm = lambda t: re.sub(rb'"ms":[0-9]+', b'"ms":0', t)
+    assert norm(a) == norm(b), (a, b)
+PYFAULT
+  done
+  ok_case "native parse: missing or wrong tools fall back, refusals retry, and timeouts or diagnostics keep the plain pane" "$st"
+
   # The answer key names the toolchain and staging form, not which compiler
-  # executable supplied the identical C text. A native-warmed project answer
-  # must therefore also serve the JVM-only runner, with the same bytes.
+  # executable supplied the identical text and mapping. A native-warmed
+  # project answer must also serve the JVM-only runner, with the same bytes.
   mkdir -p "$NATIVE_DIR/samples"
   cp "$CASES/tile.dawn" "$NATIVE_DIR/samples/tile.dawn"
   st=0
   "$NATIVE_BIN" warm "$NATIVE_DIR/samples" "$NATIVE_DIR/answers" >"$NATIVE_DIR/warm.log" 2>&1 || st=1
-  data=$(compile_body "$CASES/tile.dawn" c)
-  printf 'POST /compile HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "${#data}" "$data" |
-    PLAY_ANSWERS="$NATIVE_DIR/answers" DAWNC_BIN=/nonexistent/dawnc "$NATIVE_BIN" serve 2>/dev/null >"$CASES/tile.hit-http"
-  python3 - "$CASES/tile.hit-http" "$CASES/tile.native-c" <<'PY' || st=1
+  for target in c tile; do
+    data=$(compile_body "$CASES/tile.dawn" "$target")
+    printf 'POST /compile HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "${#data}" "$data" |
+      PLAY_ANSWERS="$NATIVE_DIR/answers" DAWNC_BIN=/nonexistent/dawnc "$NATIVE_BIN" serve 2>/dev/null >"$CASES/tile.hit-http"
+    python3 - "$CASES/tile.hit-http" "$CASES/tile.native-$target" <<'PY' || st=1
 import json, re, sys
 hit = open(sys.argv[1], "rb").read().split(b"\r\n\r\n", 1)[1]
 live = open(sys.argv[2], "rb").read()
@@ -689,7 +779,8 @@ assert json.loads(hit)["cached"] is True and json.loads(live)["cached"] is False
 norm = lambda t: re.sub(rb'"ms":[0-9]+', b'"ms":0', t).replace(b'"cached":true', b'"cached":false')
 assert norm(hit) == norm(live), (hit, live)
 PY
-  ok_case "store: a tileir C view warmed with dawnc is reusable by the JVM-only runner" "$st"
+  done
+  ok_case "store: tileir C and Tile IR views warmed with dawnc are reusable by the JVM-only runner" "$st"
 
   kill -TERM "-$SRV2" 2>/dev/null || true
   rm -f "$LOG2"

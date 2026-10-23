@@ -841,15 +841,15 @@ const PARSE_LIMIT: Int = 4194304
 ## sandboxed units of the same kind as /run's, under the same budgets; the
 ## second only happens when the first came to no answer of its own, so the
 ## visitor never waits for two timeouts.
-pub fn tile_job(code: String) -> TileRaw !io =
-  match tile_try(code) {
+pub fn tile_job(code: String, native: Bool) -> TileRaw !io =
+  match tile_try(code, native) {
     TriedMapped(map, golden, ms) -> TileMapped(map, golden, ms)
     TriedSettled(outcome) -> TilePlain(outcome, "")
     TriedNot(why) -> TilePlain(execute(code), why)
   }
 
-fn tile_try(code: String) -> Tried !io =
-  match tile_plan(code) {
+fn tile_try(code: String, native: Bool) -> Tried !io =
+  match tile_plan(code, native) {
     Err(why) -> TriedNot(why)
     Ok(p) -> with_fs_real(() => with_files(
       [
@@ -862,9 +862,9 @@ fn tile_try(code: String) -> Tried !io =
     ))
   }
 
-# The plan for `code`: `dawn parse` of it in a unit, then the walk of the
+# The plan for `code`: the version-matched parser in a unit, then the walk of the
 # dump (play/tilemap.dawn). Nothing of the visitor's is run.
-fn tile_plan(code: String) -> Result[Plan, String] !io = {
+fn tile_plan(code: String, native: Bool) -> Result[Plan, String] !io = {
   let names = with_fs_real(() => match io.read_file("${packages_root()}/tileir/src/dev.dawn") {
     Ok(text) -> dev_names(text)
     Err(_) -> []
@@ -872,20 +872,28 @@ fn tile_plan(code: String) -> Result[Plan, String] !io = {
   if len(names) == 0 {
     Err("the recording's call names are unavailable")
   } else {
-    with_fs_real(() => with_files([("orig.dawn", code)], msg => Err(msg), (dir, box) => parsed(dir, box, code, names)))
+    with_fs_real(() => with_files([("orig.dawn", code)], msg => Err(msg), (dir, box) => parsed(dir, box, code, names, native)))
   }
 }
 
-fn parsed(dir: String, box: String, code: String, names: List[String]) -> Result[Plan, String] !io = {
+fn parsed(dir: String, box: String, code: String, names: List[String], native: Bool) -> Result[Plan, String] !io = {
   let out = "${dir}/parse.txt"
   let unit = fresh_unit()
-  match run_timed(sandboxed(unit, box, [dawn_bin(), "parse", "${box}/orig.dawn"]), out, "${dir}/parse.rc", compile_timeout_secs(), stop_argv(unit)) {
+  let parser = if native { native_bin() } else { dawn_bin() }
+  match run_timed(sandboxed(unit, box, [parser, "parse", "${box}/orig.dawn"]), out, "${dir}/parse.rc", compile_timeout_secs(), stop_argv(unit)) {
     None -> Err("the parse timed out")
     Some(0) -> {
       let (dump, cut) = read_capped_to(out, PARSE_LIMIT, dir)
       if cut { Err("the parse is too large to map") } else { plan(code, dump, names) }
     }
-    Some(_) -> Err("the program does not parse")
+    Some(_) -> {
+      let (diags, cut) = read_capped_to(out, PARSE_LIMIT, dir)
+      if native && not cut && native_declined(diags) {
+        parsed(dir, box, code, names, false)
+      } else {
+        Err("the program does not parse")
+      }
+    }
   }
 }
 
@@ -983,7 +991,7 @@ fn probe_compiler_id() -> CompilerId !io = {
   }
 }
 
-# Whether /check and the C view may use the native `dawnc`: it answers
+# Whether /check, C emission and Tile IR parsing may use native `dawnc`: it answers
 # `--version` and says the same release `dawn` does. Asked once at startup,
 # with `compiler_id`, and a "no" is logged once here, not per request: the
 # runner is then exactly the JVM-only runner it was. A missing `dawnc` is the
