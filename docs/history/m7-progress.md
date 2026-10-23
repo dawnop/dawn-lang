@@ -37,6 +37,18 @@
 
 ---
 
+## staged if 后续核账（2026-10-23）
+
+本项是 staged for 之后的设备条件协议，包含后续补裁的值形式；不改变上述 M7 历史任务的边界。
+最终承诺、覆盖与不做清单见 [staged if 设计](../staged-if-design.md)。
+
+| 阶段 | PR 与提交 | 交付 |
+|---|---|---|
+| S0/S1 | [#845](https://github.com/dawnop/dawn-lang/pull/845)，合入 `823e488c`、`7c8781b4`、`c680c800`（提交 head `6d5c370d`） | 设计、StagedCond/StagedResult、共享格子、确定赋值、效果、诊断与 LSP |
+| S2 | [#855](https://github.com/dawnop/dawn-lang/pull/855)，合入 `81cc1302`（提交 head `196ba231`） | Tile 资格与结果槽，旧消费者及 debug 逐字节不变 |
+| S3 | [#856](https://github.com/dawnop/dawn-lang/pull/856)，合入 `0dbaee49`（提交 head `cff471d3`） | 条件访存、原子与循环，区域 token、保守 fork 冲突 |
+| S4 | [#858](https://github.com/dawnop/dawn-lang/pull/858)，验收冻结 `9cb37a89`（交付 head 见 PR） | 最终输入负控总表、三本串行设备台账、全门及 tile CI、文档收尾；tileir 保持 0.25.1 |
+
 ## 序 1 — 补齐常见标准库函数（✅）
 
 **语言侧**（`dawn-lang`，提交 `1784358`）：新增六个内建。

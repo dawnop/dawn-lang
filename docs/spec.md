@@ -1451,7 +1451,10 @@ let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
   两臂可含 load/store/atomic 与 staged for，token 分别从同一入口起链，在 if 末经结果合流；
   未推进的臂 yield 入口 token，纯分支不新增 token 结果。写集合保守取两臂并集，
   并行 fork 的写若可能重叠或别名不明则拒绝；互斥两臂写同一地址合法。
-  reduce/scan 祖先内仍拒绝访存和循环。
+  reduce/scan 祖先内仍拒绝访存和循环。条件的单元素形状 `[1]` 也不是 rank-0；逐 lane 选择继续显式使用
+  select 或访存 mask，不做隐式 any/all。只读 In load 不推进 token；区域 token 通过显式元数据识别，
+  不把纯分支的末数据结果当 token。`while` 仍要求宿主 Bool，没有 StagedCond 的 while 改写。
+  记录期错误指向用户调用或 trace 边界；trait 方法没有独立 caller 参数，不承诺 if 关键字的精确位置。
   break/continue/return/`?` 不得离开 staged 条件臂，诊断点名 staged if；臂内宿主循环的局部跳转
   与局部函数自身 return 仍合法。语言不规定设备类型或 rank，库须自行验证条件。
 

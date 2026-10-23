@@ -9,6 +9,8 @@ Chinese).
 
 ## 0.25.1 (2026-10-23)
 
+- Complete the staged if acceptance audit, including value condition refusals, source locations and staged while boundaries. This documentation and test closure keeps 0.25.1: it adds no API, Dev operation or encoding change.
+
 - Support conditional loads, stores, atomics and staged loops in Unit and Tile value branches.
 - Merge memory order through an if token result, preserving pure branch bytes and the read-only In fast path.
 - Track region token results explicitly through trials and conservatively include both arms in fork conflict checks.
