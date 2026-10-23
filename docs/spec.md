@@ -410,8 +410,8 @@ type Shape =
   | Point                       # 无载荷构造器
 ```
 
-- 构造器字段**必须**带名字；构造调用可按位置或按名：`Rect(2.0, h: 3.0)`。
-- **和类型构造器只用圆括号**，构造与模式同规：`Rect { w: 2.0, h: 3.0 }` 是错误
+- 构造器字段**必须**带名字；构造调用可按位置或按名：`Rect(2.0, h = 3.0)`。
+- **和类型构造器只用圆括号**，构造与模式同规：`Rect { w = 2.0, h = 3.0 }` 是错误
   （「constructor `Rect` is built with parentheses」），模式里的 `Rect { w, .. }` 同样是错误
   （「constructor `Rect` is matched with parentheses」）。花括号属于记录（§2.4）：声明用什么括号，
   构造和匹配就用什么括号，一种东西一种拼写（v0.78.0 起，此前两种都接受；
@@ -425,19 +425,22 @@ type Shape =
 
 ### 2.4 记录（record）
 
+值字段与模式的具名字段统一用 `=`；类型字段仍用 `:`。本过桥 release 临时也接受
+旧的值字段 `:`，下一 release 删除；fmt 保留输入的分隔符，不负责迁移。
+
 ```dawn
 type Point = { x: Float, y: Float }
 
-let p = Point { x: 1.0, y: 2.0 }
-let q = Point { ..p, x: 3.0 }     # 函数式更新
+let p = Point { x = 1.0, y = 2.0 }
+let q = Point { ..p, x = 3.0 }     # 函数式更新
 let d = p.x                        # 字段访问
 ```
 
 记录是单构造器积类型的糖，同样支持模式匹配。字段不可变——"修改"即函数式更新。
 
-**记录只能用花括号构造，也只能用花括号匹配。** `Point(1.0, 2.0)`、`Point(x: 1.0, y: 2.0)`、`Point()`
+**记录只能用花括号构造，也只能用花括号匹配。** `Point(1.0, 2.0)`、`Point(x = 1.0, y = 2.0)`、`Point()`
 都是错误（「record `Point` must be built with braces」），无论括号是直接写的还是
-由管道（§4.4）生成的；模式里的 `Point(x: a)` 同样是错误（「record `Point` is matched with braces」，
+由管道（§4.4）生成的；模式里的 `Point(x = a)` 同样是错误（「record `Point` is matched with braces」，
 v0.78.0 起）。理由是拼写与含义一一对应：花括号形式的字段必须带名，
 按位置填一个记录会让字段顺序变成 ABI；而记录的裸名（§2.3 末条）也不是构造函数。
 `x |> Point { ... }` 不是「填字段」，它是在**调用一个记录值**，报「不可调用」。
@@ -636,8 +639,8 @@ fn greet(name: String) -> Unit !io = {
 fn column(kids: List[Int], align: Int = 0, gap: Int = 0) -> Int = align + gap * len(kids)
 
 column(kids)
-column(kids, gap: 12)
-column(kids, align: 1, gap: 12)
+column(kids, gap = 12)
+column(kids, align = 1, gap = 12)
 ```
 
 - **默认值表达式必须纯**（`!io` 与具名效果都不行）：否则函数的效果行会随「调用方
@@ -687,7 +690,7 @@ column(kids, align: 1, gap: 12)
 - **把函数当值用则默认值丢失**：`let g = f` 之后 `g` 的类型是全参的 `fn(A, B, C) -> R`
   ——与「构造器裸名当函数值时字段名丢失」（§2.3）是同一条纪律。
 - **范围**：只有顶层函数（含私有、模块函数）。局部 fn（其调用走函数值路）、lambda、
-  构造器字段（record 已有 `{ ..base, x: v }`）、trait 方法（Dawn 已有一个叫「default」
+  构造器字段（record 已有 `{ ..base, x = v }`）、trait 方法（Dawn 已有一个叫「default」
   的东西——默认方法体；且字典传递下 impl 无法覆盖值默认）、effect operation
   （operation 调用是读证据字段 + 调闭包，没有可挂符号）、Java 方法都不收，各自报错说明理由。
 
@@ -835,7 +838,7 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   `Map`/`Set` 各提供一个 impl（元素分别是 `T`/单字符 `String`/`Int` 字节/
   `(K, V)`/`T`）；用户类型实现 `Iter` 即可被 `for` 迭代。四个方法名随 prelude
   注入函数命名空间，与其余 prelude 名同待遇——**可被本模块的声明遮蔽**（§10.3）。
-  形参名取自这份声明（具名实参，§4.3）：接收者 `it`、游标 `c`，所以写 `xs.iter_done(c: k)`。
+  形参名取自这份声明（具名实参，§4.3）：接收者 `it`、游标 `c`，所以写 `xs.iter_done(c = k)`。
 - **`Len`** 声明一个方法、无关联类型：`trait Len[C] { fn len(x: C) -> Int }`。
   `len(c)` 与 `c.len()` 按接收者类型找 impl；`List` 的 impl 随 std 提供，用户类型
   写 `impl Len[T]` 即得 `len`。`len` 这个名字随 prelude 注入（上条），但 impl 体里的
@@ -1037,7 +1040,7 @@ type ShownRepr = { render: fn() -> String }
 pub opaque type Shown = ShownRepr
 
 pub fn shown[T: Show](x: T) -> Shown = {
-  let r: ShownRepr = ShownRepr { render: () => show(x) }
+  let r: ShownRepr = ShownRepr { render = () => show(x) }
   r
 }
 
@@ -1154,18 +1157,18 @@ let area = {
      加括号即恢复——`if (f(x) { ... }) { ... }`。match 臂的 guard **不禁**：
      guard 后面跟 `->` 不跟块，没有可被吃掉的体。
   3. **前一个记号是 `}` 时拒绝**：`if c { 1 } else { 2 } { 3 }`、
-     `match x { ... } { ... }`、`P { x: 1 } { ... }`、`f(a) { ... } { ... }`
+     `match x { ... } { ... }`、`P { x = 1 } { ... }`、`f(a) { ... } { ... }`
      都不是把块应用到值上的意思；顺带「一次调用至多一个尾块」不需要另立规则。
      要把块应用到一个值，先加括号：`(...) { ... }`。
   4. **大写名的花括号归记录字面量**（§2.3）：`Column { ... }` 是构造，
-     尾块永远落不到裸 TYPEIDENT 上；组件函数用小写名。`Column(align: c) { ... }`
+     尾块永远落不到裸 TYPEIDENT 上；组件函数用小写名。`Column(align = c) { ... }`
      不受此限——括号在前，块照常附加。
   **尾块在尾块位绑定形参**：`{ x => ... }` 的头是独立产生式，不是「块被重新解释」
   （如同 `Point { x }` 用花括号但不是块）。要写「值是一个 lambda 的块」，
   加括号即可：`f(a) { (x => e) }`——括号组不再以 `=>` 收尾，头就读不出来。
   **尾块填最后一个声明的形参/字段**（Kotlin 同规），与它前面有没有具名实参无关，
   「位置实参不得跟在具名实参后」对它豁免；默认值填剩下的洞（#207）：
-  `column(gap: 12) { text("hi") }` 里块填 `body`、`align` 走默认。
+  `column(gap = 12) { text("hi") }` 里块填 `body`、`align` 走默认。
   那个形参已被填过则报「the last parameter `body` is already given;
   the tail block is what fills it」。
 - **尾块是唯一的尾实参形式（#206 期 2）**：过渡期接受的 `f(a) fn(x) => e`
@@ -1173,21 +1176,22 @@ let area = {
   声明（§3.1）和函数类型（§2.2）；旧尾闭包拼写会得到迁移到尾块的专有诊断。
   裸箭头 lambda 仍进不了尾位：`f(a) (x) => e` 里 `(x)` 已是柯里化调用 `f(a)(x)`，
   两种读法在 `=>` 之前无法区分——这条与花括号无关，维持原判。
-- **具名实参（`f(a: 1)`）语法上在每个调用位置都合法**，包括点调用与应用函数值；
+- 调用位置的 `f(a = b)` 永远是标签，与外层是否存在局部 `a` 无关；不引入赋值表达式。
+- **具名实参（`f(a = 1)`）语法上在每个调用位置都合法**，包括点调用与应用函数值；
   能不能用由 **callee 是什么**决定（2026-08-08，#207）。**带签名的 callee 接受**：
   顶层函数、模块函数、UFCS/点调用、管道、trait 方法（名字取 **trait 声明**的形参名，
   impl 的形参名纯属局部）、effect operation、构造器（字段名，见 §2.3）。
-  **函数值不接受**——函数类型不携带参数名，`let g = f` 之后 `g(a: 1)` 是类型错误
+  **函数值不接受**——函数类型不携带参数名，`let g = f` 之后 `g(a = 1)` 是类型错误
   （「`g` is a function value, and a function type carries no parameter names」）；
   **Java 成员不接受**——Java 元数据里没有形参名。
   分派规则与构造器是**同一份**：位置前缀从左到右占槽，具名按名占槽、具名之间可任意重排，
   位置实参不得跟在具名实参之后；点调用的接收者已按位置占掉第一个槽，
-  `x.f(self: y)` 报的是「parameter `self` is given twice」。
+  `x.f(self = y)` 报的是「parameter `self` is given twice」。
   `f(1)(2)` 能解析，语义仍是「`f(1)` 的结果必须是函数」——Dawn 没有自动柯里化；
   第二次应用的 callee 是函数值，故不可具名。
 - **实参求值顺序 = 写序**（2026-08-08，#207 裁决）：调用与构造的实参一律按**书写顺序**
   求值（与 Python / C# / Scala / Swift / Kotlin 相同）；具名实参重排的是**落槽**，
-  不是求值顺序——`R { b: f(), a: g() }` 先跑 `f()` 后跑 `g()`，值各归各的字段。
+  不是求值顺序——`R { b = f(), a = g() }` 先跑 `f()` 后跑 `g()`，值各归各的字段。
   省掉的默认值在全部写出的实参之后、按声明序求值（§3.1）。
   `..base` 在语法上只能写在最前，也最先求值。二元运算符从左到右（`&&`/`||` 短路照旧）。
   此前构造器按**声明序**求值、C 后端把实参顺序留给 C（gcc 从右到左）——两者都已按本条修正，
@@ -1282,7 +1286,7 @@ let area = {
   （`impl[T: Show] Show[Box[T]]`）。`to_string` 的签名是 `[T: Show]`。
   渲染形如合法 Dawn 源码：
   - 无载荷构造器 → `Red`；带位置字段的构造器 → `Circle(1.5)`；
-  - 记录 → `Point { x: 0.0, y: 2.5 }`（带字段名）；
+  - 记录 → `Point { x = 0.0, y = 2.5 }`（带字段名）；
   - `String` 字段带双引号并转义（`"a\nb"`）；`Int`/`Float`/`Bool` 同各自 `to_string`；
   - 容器递归渲染：`List` → `[a, b]`、元组 → `(a, b)`、`Option`/`Result` 随载荷（`Some(Red)`）。
     `Map`/`Set` 没有字面量语法，渲染成**重建它的那个调用**：`map.from([(k, v), ...])`、
@@ -1345,7 +1349,7 @@ error: undefined function: split
 要么写限定调用 `str.split(s, ",")`（或管道 `s |> str.split(",")`，限定名不需要引入），
 要么选择性引入后用点写法。
 
-具名实参照常可用，接收者已按位置占掉第一个槽：`x.f(self: y)` 报
+具名实参照常可用，接收者已按位置占掉第一个槽：`x.f(self = y)` 报
 「parameter `self` is given twice」（§4.3 具名实参一条）。尾块也落在点调用上：
 `xs.each { x => e }` 就是 `each(xs, x => e)`。
 
@@ -1537,7 +1541,7 @@ impl Index[Grid] {
   }
 }
 
-let g = Grid { w: 3, cells: [1, 2, 3, 4, 5, 6] }
+let g = Grid { w = 3, cells = [1, 2, 3, 4, 5, 6] }
 let v = g[(2, 1)]                                 # 6
 
 fn first[C: Index](c: C, i: C.Idx) -> C.Item = c[i]   # 泛型消费者
@@ -1800,7 +1804,7 @@ match shape {
 | 字面量 | `0`, `"yes"`, `true` | 相等则匹配 |
 | 绑定 | `x` | 恒匹配并绑定 |
 | 通配 | `_` | 恒匹配不绑定 |
-| 构造器 | `Some(x)`, `Rect(w, h)`, `Rect(w: w, ..)` | 按位置或按名解构，`..` 忽略其余字段；只用圆括号 |
+| 构造器 | `Some(x)`, `Rect(w, h)`, `Rect(w = w, ..)` | 按位置或按名解构，`..` 忽略其余字段；只用圆括号 |
 | 记录 | `Point { x, .. }` | 字段解构；只用花括号 |
 | 元组 | `(a, b)` | |
 | 列表 | `[]`, `[x, ..rest]` | 空表 / 头与余下 |
@@ -3095,7 +3099,7 @@ use java "java.lang.Long"
 
 fn parse(s: String) -> Result[Int, ForeignError] !io =
   catch_fault(() => Long.parseLong(s))
-  # Err(ForeignError { kind: "java.lang.NumberFormatException", message: ..., cause: None })
+  # Err(ForeignError { kind = "java.lang.NumberFormatException", message = ..., cause = None })
 ```
 
 - 签名 `catch_fault[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !e`。被护闭包的行
@@ -3206,7 +3210,7 @@ Dawn 没有 `try`/`finally`，也不打算有（§9.8 那对屏障是**拦**，�
 fn bracket[A, B, !e](resource: A, release: fn(A) -> Unit !e, body: fn(A) -> B !e) -> B !e
 ```
 
-第三个参数叫 `body`：`use` 是关键字，`bracket(r, close, use: f)` 这个调用写不出来，
+第三个参数叫 `body`：`use` 是关键字，`bracket(r, close, use = f)` 这个调用写不出来，
 所以那个拼写从来没有调用方，只在渲染出的签名里出现。
 
 ```dawn
@@ -3521,7 +3525,7 @@ exp    = ( "e" | "E" ) [ "+" | "-" ] digit { digit }
 radix  = [ "+" | "-" ] rdigit { rdigit }
 ```
 
-`parse_int(s, radix: r)`（`radix` 缺省 10）用 `radix` 产生式：`rdigit` ∈ `0-9 a-z A-Z`
+`parse_int(s, radix = r)`（`radix` 缺省 10）用 `radix` 产生式：`rdigit` ∈ `0-9 a-z A-Z`
 （值 = 10..35，大小写同值），数字值 ≥ radix 拒绝；radix 不在 2..36 内答 `None`。radix 为 10
 时它与 `int` 是同一语言。0.83.0 以前 radix 版本是另一个 builtin `parse_int_radix`，现已并入。整数超出 64 位范围是 `None` 不是环绕。
 **有意排除**（今天的宿主解析器有的收、Dawn 一律拒绝）：下划线、`0x` 前缀与十六进制浮点
@@ -4129,7 +4133,7 @@ pub type Color = Red | Green | Blue derive Show
 type Point = { x: Float, y: Float }
 alias Distance = Float           # 透明别名（§2.6）
 pub opaque type UserId = Int     # 模块外看不穿（§2.7）
-const ORIGIN: Point = Point { x: 0.0, y: 0.0 }
+const ORIGIN: Point = Point { x = 0.0, y = 0.0 }
 
 pub trait Named[T] { fn name(x: T) -> String }
 impl Named[Point] { fn name(p: Point) -> String = "point" }
