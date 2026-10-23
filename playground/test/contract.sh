@@ -711,9 +711,33 @@ PYTILE
   ok_case "native parse: Tile IR uses one dawnc parse, no JVM parse, and matches JVM response bytes" "$st"
 
   # Tool selection and parse failures keep their existing categories. The
-  # timeout budget also covers the real JVM probe build, so leave it enough
-  # room under concurrent gates; the timeout stub exceeds the whole budget. Only
-  # an empty failure or the native refusal retries parse with the JVM.
+  # three-second budget belongs to the injected parse timeout. A real vadd
+  # build can take longer than that, so build its plain fallback beforehand.
+  # The timeout case still stages and runs that jar through the real recovery
+  # path, uncached. Other faults use the normal compiler budget. Only an empty
+  # failure or the native refusal retries parse with the JVM.
+  RECOVERY_PROJ="$NATIVE_DIR/recovery"
+  mkdir -p "$RECOVERY_PROJ/src"
+  cp "$CASES/tile.dawn" "$RECOVERY_PROJ/src/main.dawn"
+  sed 's/name = "tp"/name = "tile"/' "$TILE_PROJ/dawn.toml" >"$RECOVERY_PROJ/dawn.toml"
+  "$DAWN_BIN" build "$RECOVERY_PROJ" -o "$RECOVERY_PROJ/prog.jar"
+  cat >"$NATIVE_DIR/recovery-dawn" <<'RECOVERY'
+#!/bin/sh
+set -eu
+if [ "$1" = build ]; then
+  # Refuse a different program, including an instrumented probe: a prebuilt
+  # jar must not hide a failure to choose the plain fallback after timeout.
+  [ "$#" -eq 4 ] && [ "$3" = -o ]
+  cmp "$2/src/main.dawn" "$PLAY_TEST_RECOVERY_PROJ/src/main.dawn"
+  cmp "$2/dawn.toml" "$PLAY_TEST_RECOVERY_PROJ/dawn.toml"
+  [ ! -e "$2/src/explore_probe.dawn" ]
+  cp "$PLAY_TEST_RECOVERY_PROJ/prog.jar" "$4"
+  echo build >>"$PLAY_TEST_RECOVERY_PROJ/calls"
+else
+  exec "$PLAY_TEST_RECOVERY_DAWN" "$@"
+fi
+RECOVERY
+  chmod 755 "$NATIVE_DIR/recovery-dawn"
   cat >"$NATIVE_DIR/parse-fault" <<'FAULT'
 #!/bin/sh
 if [ "$1" = --version ]; then
@@ -722,7 +746,7 @@ if [ "$1" = --version ]; then
 fi
 printf '%s\n' "$1" >>"$PLAY_TEST_PARSE_LOG"
 case "$PLAY_TEST_PARSE_FAULT" in
-  timeout) exec sleep 20 ;;
+  timeout) exec sleep 6 ;;
   empty) exit 1 ;;
   refusal) echo 'error: `use java` is not available in this compiler'; exit 1 ;;
   diagnostic) echo 'error: parse failed'; exit 1 ;;
@@ -735,11 +759,19 @@ FAULT
   for fault in missing wrong timeout empty refusal diagnostic; do
     tool="$NATIVE_DIR/parse-fault"
     [ "$fault" != missing ] || tool=/nonexistent/dawnc
+    budget=$PLAY_COMPILE_TIMEOUT
+    compiler=$DAWN_BIN
+    if [ "$fault" = timeout ]; then
+      budget=3
+      compiler="$NATIVE_DIR/recovery-dawn"
+    fi
     : >"$NATIVE_DIR/fault-calls"
+    : >"$RECOVERY_PROJ/calls"
     j0=$(grep -c '^parse$' "$JVMLOG" || true)
     printf 'POST /compile HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "${#data}" "$data" |
       PLAY_TEST_DAWNC_REAL="$DAWNC_REAL" PLAY_TEST_PARSE_LOG="$NATIVE_DIR/fault-calls" \
-      PLAY_TEST_PARSE_FAULT="$fault" DAWNC_BIN="$tool" PLAY_COMPILE_TIMEOUT=10 \
+      PLAY_TEST_PARSE_FAULT="$fault" DAWNC_BIN="$tool" PLAY_COMPILE_TIMEOUT="$budget" \
+      PLAY_TEST_RECOVERY_PROJ="$RECOVERY_PROJ" PLAY_TEST_RECOVERY_DAWN="$DAWN_BIN" DAWN_BIN="$compiler" \
       "$NATIVE_BIN" serve >"$CASES/$fault.http" 2>"$CASES/$fault.log"
     n1=$(grep -c '^parse$' "$NATIVE_DIR/fault-calls" || true)
     j1=$(grep -c '^parse$' "$JVMLOG" || true)
@@ -748,6 +780,9 @@ FAULT
       empty|refusal) [ "$n1" -eq 1 ] && [ "$j1" -eq "$((j0 + 1))" ] || st=1 ;;
       *) [ "$n1" -eq 1 ] && [ "$j1" -eq "$j0" ] || st=1 ;;
     esac
+    if [ "$fault" = timeout ]; then
+      [ "$(wc -l <"$RECOVERY_PROJ/calls")" -eq 1 ] || st=1
+    fi
     python3 - "$CASES/$fault.http" "$CASES/tile.jvm-tile" "$fault" <<'PYFAULT' || st=1
 import json, re, sys
 a = open(sys.argv[1], "rb").read().split(b"\r\n\r\n", 1)[1]
@@ -757,6 +792,7 @@ assert d["ok"] is True and d["cached"] is False, d
 if sys.argv[3] in ("timeout", "diagnostic"):
     assert d["unmapped"] == ("the parse timed out" if sys.argv[3] == "timeout" else "the program does not parse"), d
     assert "calls" not in d and d["pane"]["kind"] == "tile", d
+    assert d["pane"]["text"] == json.loads(b)["pane"]["text"], d
 else:
     norm = lambda t: re.sub(rb'"ms":[0-9]+', b'"ms":0', t)
     assert norm(a) == norm(b), (a, b)
