@@ -28,6 +28,8 @@ def cliff(arch, bq, cga):
 
 def check(source, ledger):
     problems = []
+    if ledger.get("flash_output_dtype") != "f64":
+        problems.append("historical selection evidence must retain its f64 output format")
     rows = []
     for name, dtype in [("fa_cfg", "bf16"), ("fa64_cfg", "f64")]:
         match = re.search(r'^fn ' + name + r'\([^\n]+ = match [^\n]+ \{\n(.*?)^\}', source, re.M | re.S)
@@ -118,6 +120,8 @@ def check_measurements(data, ledger, displayed):
         for r in c['results']:
             if r['n'] <= 0 or len(r['round_medians']) != 5 or r['median_ms'] <= 0 or r['p90_ms'] < r['median_ms']:
                 problems.append('incomplete timing samples')
+    if data.get('flash_output_dtype') != 'f64':
+        problems.append('historical P4-c timings must retain their f64 output format')
     if len(data['accuracy']) != 8 or any(r['miss'] > 1.0 for r in data['accuracy']):
         problems.append('approximate division exceeded the existing tolerance or lacks a comparison')
     if (data['tileiras'] != '13.4.92' or data['cutile_tileiras'] != '13.4.92' or
@@ -323,19 +327,71 @@ def matmul_format_self_test(source, ledger, data, dtype):
     print(f'PASS {dtype} matmul negative controls: missing evidence, changed tile, missing grid cell, inexact corpus')
 
 
+def check_output_migration(data, ledger):
+    """Keep A2 evidence separate from the historical configuration search."""
+    problems = []
+    expected = {(arch, d, bh, n) for arch in ['sm_90', 'sm_100']
+                for d in [64, 128] for bh, n in [(1, 16384), (32, 4096)]}
+    cases = data['cases']
+    actual = {(c['key'].split('_bh')[0], c['d'], c['bh'], c['n']) for c in cases}
+    if actual != expected or len(cases) != len(expected):
+        problems.append('A2 requires exactly eight paired output cases')
+    if (data['old_output_dtype'], data['new_output_dtype']) != ('f64', 'f32'):
+        problems.append('A2 evidence must distinguish old f64 and new f32 output')
+    if len(data['metadata']) != 2 or {m['arch'] for m in data['metadata']} != {'sm_90', 'sm_100'} or any(
+            (m['tileiras'], m['rounds'], m['reps'], m['warmup']) != ('13.4.92', 5, 80, 10)
+            for m in data['metadata']):
+        problems.append('A2 paired timing toolchain or method is incomplete')
+    for c in cases:
+        arch = c['key'].split('_bh')[0]
+        rows = [r for r in ledger['rows'] if r['selected'] and r['table_arch'] == arch and r['table_d'] == c['d']]
+        if len(rows) != 1 or rows[0]['config'] != c['config']:
+            problems.append(f"A2 {c['key']}: selected configuration changed")
+        n = c['bh'] * c['n'] * c['d']
+        h = c['host_contract']
+        if (h['elements'], h['old_bytes'], h['new_bytes']) != (n, 8*n, 4*n):
+            problems.append(f"A2 {c['key']}: downloaded output byte contract changed")
+        if c['neq'] != 0 or c['max_delta'] != 0:
+            problems.append(f"A2 {c['key']}: finite host Float output equality failed")
+        if set(c['reference_miss']) != {'old', 'new'} or any(not math.isfinite(v) or not 0 <= v <= 1 for v in c['reference_miss'].values()):
+            problems.append(f"A2 {c['key']}: independent reference exceeded the unchanged bound")
+        rounds = c['round_medians']
+        if len(rounds) != 5 or len(c['round_new_over_old']) != 5:
+            problems.append(f"A2 {c['key']}: missing paired rounds")
+        else:
+            if any(not math.isclose(r['new']/r['old'], ratio) for r, ratio in zip(rounds, c['round_new_over_old'])):
+                problems.append(f"A2 {c['key']}: paired ratio differs from measurements")
+            if min(c['round_new_over_old']) > 1.05:
+                reviews = [r for r in data['regression_reviews'] if r['key'] == c['key']]
+                if len(reviews) != 1 or not reviews[0]['repeat_round_medians'] or not reviews[0]['sass']:
+                    problems.append(f"A2 {c['key']}: sustained regression lacks repeat and code review")
+        if any(not 0 < t['median_ms'] <= t['p90_ms'] for t in c['timings'].values()):
+            problems.append(f"A2 {c['key']}: invalid timing distribution")
+    return problems
+
+
 def main():
     source, ledger = KERNELS.read_text(), json.loads(LEDGER.read_text())
     data = json.loads(LEDGER.with_name("measurements.json").read_text())
     display = (ROOT / "site/gpu-map/flash-perf.tsv").read_text()
+    output = json.loads(LEDGER.with_name("a2-output.json").read_text())
     problems = (check(source, ledger) + check_measurements(data, ledger, display) +
                 check_matmul(source, ledger['matmul'], data['matmul']) +
                 check_matmul(source, ledger['matmul'], data['matmul_f16'], 'f16') +
-                check_matmul(source, ledger['matmul'], data['matmul_i8'], 'i8'))
+                check_matmul(source, ledger['matmul'], data['matmul_i8'], 'i8') +
+                check_output_migration(output, ledger))
     for p in problems:
         print(f"FAIL flash config: {p}")
     if problems:
         return 1
     if sys.argv[1:] == ["--self-test"]:
+        changed_output = copy.deepcopy(output)
+        changed_output['cases'].pop()
+        assert check_output_migration(changed_output, ledger), 'missing A2 case stayed green'
+        changed_output = copy.deepcopy(output)
+        changed_output['cases'][0]['host_contract']['new_bytes'] *= 2
+        assert any('byte contract' in p for p in check_output_migration(changed_output, ledger)), 'old output width stayed green'
+        print('PASS A2 evidence controls: missing case and old output width rejected')
         self_test(source, ledger)
         matmul_self_test(source, ledger['matmul'], data['matmul'])
         for dtype in ['f16', 'i8']:
@@ -350,6 +406,7 @@ def main():
         print("PASS flash timings: page values and configurations match all 12 same-round cases")
     elif sys.argv[1:]:
         return 2
+    print("PASS A2 output migration: eight paired cases, host byte contracts, equality and independent reference")
     print("PASS flash config: eight table cells match eight measured rows; one alternative retained")
     print("PASS matmul config: nine table cells match complete grids for three dtypes, two architectures and two shapes")
     return 0

@@ -1,5 +1,5 @@
 cuda_tile.module @m {
-  entry @flash_bf16_sm90_d128(%arg0: tile<ptr<bf16>>, %arg1: tile<ptr<bf16>>, %arg2: tile<ptr<bf16>>, %arg3: tile<ptr<f64>>, %arg4: tile<f32>) optimization_hints=<sm_90 = {occupancy = 2}> {
+  entry @flash_bf16_sm90_d128(%arg0: tile<ptr<bf16>>, %arg1: tile<ptr<bf16>>, %arg2: tile<ptr<bf16>>, %arg3: tile<ptr<f32>>, %arg4: tile<f32>) optimization_hints=<sm_90 = {occupancy = 2}> {
     %0 = make_token : token
     %1 = assume div_by<16>, %arg0 : tile<ptr<bf16>>
     %2 = make_tensor_view %1, shape = [256, 128], strides = [128, 1] : tensor_view<256x128xbf16, strides=[128, 1]>
@@ -54,11 +54,10 @@ cuda_tile.module @m {
     }
     %63 = broadcast %19 : tile<64x1xf32> -> tile<64x128xf32>
     %64 = divf %20, %63 rounding<approx> flush_to_zero : tile<64x128xf32>
-    %65 = ftof %64 rounding<nearest_even> : tile<64x128xf32> -> tile<64x128xf64>
-    %66 = assume div_by<16>, %arg3 : tile<ptr<f64>>
-    %67 = make_tensor_view %66, shape = [256, 128], strides = [128, 1] : tensor_view<256x128xf64, strides=[128, 1]>
-    %68 = make_partition_view %67 : partition_view<tile=(64x128), padding_value = zero, tensor_view<256x128xf64, strides=[128, 1]>, dim_map=[0, 1]>
-    %69 = store_view_tko weak %65, %68[%4, %8] token=%0 : tile<64x128xf64>, partition_view<tile=(64x128), padding_value = zero, tensor_view<256x128xf64, strides=[128, 1]>, dim_map=[0, 1]>, tile<i32> -> token
+    %65 = assume div_by<16>, %arg3 : tile<ptr<f32>>
+    %66 = make_tensor_view %65, shape = [256, 128], strides = [128, 1] : tensor_view<256x128xf32, strides=[128, 1]>
+    %67 = make_partition_view %66 : partition_view<tile=(64x128), padding_value = zero, tensor_view<256x128xf32, strides=[128, 1]>, dim_map=[0, 1]>
+    %68 = store_view_tko weak %64, %67[%4, %8] token=%0 : tile<64x128xf32>, partition_view<tile=(64x128), padding_value = zero, tensor_view<256x128xf32, strides=[128, 1]>, dim_map=[0, 1]>, tile<i32> -> token
     return
   }
 }

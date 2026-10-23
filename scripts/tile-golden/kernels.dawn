@@ -2377,8 +2377,8 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
 # sum `l` and the accumulator stay f32; `l` sums the f32 probabilities and
 # the accumulator the bf16 ones, as FlashAttention's own kernels do, so the
 # two halves of the final division are not rounded alike. The answer is
-# widened to f64 to be stored, exactly: f32 is a tile format and not a
-# buffer format std/gpu moves, and widening adds no rounding to compare.
+# stored directly as f32. The host buffer holds four bytes per element;
+# no conversion follows the f32 division (A2).
 #
 # sm_86 assembles both products to its bf16 tensor core (`--remarks=
 # tensorcore`: `Tensor-core SM80`); bf16 operands into an f32 accumulator is
@@ -2396,7 +2396,7 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
 # here for the reason it is in those kernels: a probability below 2^-126 is
 # far below one f32 ulp of the row sum `l`, which holds the row maximum's own
 # term, 1, so flushing it cannot move `l` or the weighted sum.
-fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Float], scale: Param[F32],
+fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[F32], scale: Param[F32],
   cfg: FaCfg = fa_cfg("default", ATT_D), shape: FaShape = fa_shape()) -> Unit !Dev = {
   let tq = load_cell(q)
   var m: Tile[F32] = full([cfg.bq, 1], f32(-INFINITY))
@@ -2411,14 +2411,14 @@ fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Floa
     acc = mma(p.to(BF16), load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
     m = m_new
   }
-  store_cell(o, div(acc, l, approx= true, ftz= true).to(F64))
+  store_cell(o, div(acc, l, approx= true, ftz= true))
 }
 
 # Config -> kernel. Every captured value is fixed before recording.
 fn fa_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[Float], Param[Float], Param[Float], Param[Float], Param[Float]) -> Unit !Dev =
   (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, c, FaShape { n = n, d = d, bh = bh })
 
-fn fa_bf16_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[BF16], Param[BF16], Param[BF16], Param[Float], Param[F32]) -> Unit !Dev =
+fn fa_bf16_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[BF16], Param[BF16], Param[BF16], Param[F32], Param[F32]) -> Unit !Dev =
   (q, k, v, o, scale) => flash_attn_bf16(q, k, v, o, scale, c, FaShape { n= n, d= d, bh= bh })
 
 fn fa_record(arch: String, d: Int, n: Int, bh: Int, bf16: Bool, cfg: Option[FaCfg] = None, at: Loc = caller()) -> TileProg = {
@@ -2428,7 +2428,7 @@ fn fa_record(arch: String, d: Int, n: Int, bh: Int, bf16: Bool, cfg: Option[FaCf
   let q = cells([bh * n, d], [c.bq, d])
   let kv = cells([bh * n, d], [c.bk, d], along= [FREE_AXIS, 1])
   if bf16 {
-    let (p, _e) = trace5("flash_attn_bf16", In(BF16, q), In(BF16, kv), In(BF16, kv), Out(F64, q), Scalar(F32),
+    let (p, _e) = trace5("flash_attn_bf16", In(BF16, q), In(BF16, kv), In(BF16, kv), Out(F32, q), Scalar(F32),
       fa_bf16_kernel(c, n, d, bh), hints= fa_hints(arch, c))
     p
   } else {
@@ -5872,7 +5872,7 @@ fn trace(name: String) -> TileProg = match name {
       In(BF16, cells([ATT_M, ATT_D], [64, ATT_D])),
       In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along= [FREE_AXIS, 1])),
       In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along= [FREE_AXIS, 1])),
-      Out(F64, cells([ATT_M, ATT_D], [64, ATT_D])), Scalar(F32), fa_bf16_kernel(fa_cfg("default", ATT_D), ATT_N, ATT_D, 1))
+      Out(F32, cells([ATT_M, ATT_D], [64, ATT_D])), Scalar(F32), fa_bf16_kernel(fa_cfg("default", ATT_D), ATT_N, ATT_D, 1))
     p
   }
   "idx_softmax" -> {
@@ -6571,9 +6571,36 @@ fn scalar_wide(xf: Param[Float], xi: Param[Int], a: Param[Float], k: Param[Int],
 fn trace_twice(name: String) -> TileProg = {
   let first = trace(name)
   let second = trace(name)
+  if name == "flash_attn_bf16" || str.starts_with(name, "flash_bf16_sm") {
+    flash_output_check(name, first)
+  }
   if first != second { panic("tile-golden: `${name}` traced twice gave two different programs") } else { () }
   first
 }
+
+# These guards run on each of the five recording entries, independently of
+# the golden bytes. A self-consistent f64 rollback must fail before launch.
+fn flash_output_check(name: String, p: TileProg) -> Unit = {
+  if p.params != [ByPtr("bf16"), ByPtr("bf16"), ByPtr("bf16"), ByPtr("f32"), ByValue("f32")] {
+    panic("A2 ${name}: output entry must be f32")
+  }
+  let text = render(p)
+  if str.contains(text, "f64") { panic("A2 ${name}: output view/store must be f32 without widening") }
+}
+
+# Extra device samples use the actual factory and the architecture's selected
+# configuration. They are not additional golden entries or tuning candidates.
+fn flash_output_records(arch: String, dir: String) -> Unit !io = {
+  for d in [32, 64, 128] {
+    let p = fa_record(arch, d, 512, 2, true)
+    flash_output_check("sample${d}", p)
+    match with_fs_real(() => write_bytes("${dir}/a2_d${d}.tilebc", encode(p))) {
+      Ok(_) -> ()
+      Err(e) -> panic("A2 cannot write sample: ${e}")
+    }
+  }
+}
+
 
 # Not a golden, and not one of `trace`'s arms for that reason: the probe
 # run.sh's out-along-twice-accepted mutant records, an Out cut along one
@@ -6688,6 +6715,7 @@ fn staged_token_checks() -> Unit = {
 }
 
 pub fn main() -> Unit !io = match args() {
+  ["--flash-output-record", arch, dir] -> flash_output_records(arch, dir)
   ["--staged-token-checks"] -> {
     staged_token_checks()
     println("PASS staged if token merge and conservative fork conflicts")

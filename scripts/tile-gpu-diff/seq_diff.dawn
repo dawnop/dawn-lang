@@ -1344,14 +1344,13 @@ fn flash_seq() -> Seq = Seq {
 }
 
 ## The bf16 FlashAttention (tileir 0.10.0): `flash`'s buffers in bf16, the
-## output f64 (the kernel widens its f32 answer exactly to store it: f32 is
-## not a buffer format std/gpu moves). The upload rounds q, k and v to bf16
+## output f32, four bytes per element. The upload rounds q, k and v to bf16
 ## on both devices, so the reference sees the values the kernel does.
 fn flash_bf16_bufs() -> List[Buf] = [
   Buf { name = "q", dtype = "bf16", data = wave(3, ATT_M * ATT_D, 0.1) },
   Buf { name = "k", dtype = "bf16", data = flash_keys() },
   Buf { name = "v", dtype = "bf16", data = wave(7, ATT_N * ATT_D, 0.1) },
-  Buf { name = "o", dtype = "f64", data = sentinels(ATT_M * ATT_D) }
+  Buf { name = "o", dtype = "f32", data = sentinels(ATT_M * ATT_D) }
 ]
 
 ## `flash` at bf16 with an f32 accumulator, one launch like `flash`, and

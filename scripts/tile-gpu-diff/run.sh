@@ -2780,6 +2780,39 @@ case "$staged_verdict" in
   *) cat "$work/staged.err" >&2; fail "staged_if_diff disagreed or printed no verdict (exit $rc)" ;;
 esac
 
+# A2 typed output witnesses use additional recordings from the same factory.
+"$root/bin/dawn" run "$asm_proj" -- --flash-output-record "$gpu_name" "$work" > "$work/a2-record.out" 2> "$work/a2-record.err" ||
+  { cat "$work/a2-record.err" >&2; fail "A2 sample recording failed"; }
+for d in 32 64 128; do
+  assemble_golden flash_attn_bf16 "$work/a2_d$d.tilebc" "$work/a2_d$d.cubin"
+done
+build_native "$root/std" "$work/flash-output.bin" "$here/flash_output_diff.dawn"
+rc=0
+device "$work/flash-output.bin" "$gpu_name" "$work/a2_d32.cubin" "$work/a2_d64.cubin" "$work/a2_d128.cubin" > "$work/flash-output.out" 2> "$work/flash-output.err" || rc=$?
+cat "$work/flash-output.out"
+[ "$rc" = 0 ] && [ "$(verdict_of "$work/flash-output.out")" = pass ] ||
+  { cat "$work/flash-output.err" >&2; fail "A2 typed output contract or dyadic precision witness failed"; }
+
+# A valid BF16-rounding variant must assemble and launch, then fail the
+# exact finite witness. The existing general flash tolerance is unchanged.
+a2_tree="$work/a2-mutant"
+mkdir -p "$a2_tree/scripts/tile-golden" "$work/a2-red"
+cp "$golden/kernels.dawn" "$a2_tree/scripts/tile-golden/kernels.dawn"
+python3 "$golden/mutate.py" flash-output-bf16 "$a2_tree"
+cp "$a2_tree/scripts/tile-golden/kernels.dawn" "$asm_proj/src/main.dawn"
+"$root/bin/dawn" run "$asm_proj" -- --flash-output-record "$gpu_name" "$work/a2-red" > "$work/a2-red/record.out" 2> "$work/a2-red/record.err" ||
+  { cat "$work/a2-red/record.err" >&2; fail "A2 precision mutant failed to record"; }
+for d in 32 64 128; do
+  assemble_golden flash_attn_bf16 "$work/a2-red/a2_d$d.tilebc" "$work/a2-red/a2_d$d.cubin"
+done
+cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
+rc=0
+device "$work/flash-output.bin" "$gpu_name" "$work/a2-red/a2_d32.cubin" "$work/a2-red/a2_d64.cubin" "$work/a2-red/a2_d128.cubin" > "$work/a2-red/device.out" 2> "$work/a2-red/device.err" || rc=$?
+[ "$rc" != 0 ] || fail "A2 BF16 output precision mutant stayed green"
+grep -q 'A2 finite dyadic mean' "$work/a2-red/device.err" ||
+  { cat "$work/a2-red/device.err" >&2; fail "A2 precision mutant missed its named oracle"; }
+echo "PASS  mutant: flash-output-bf16 (valid cubin, finite dyadic mean oracle red)"
+
 # The ledger records one verdict for the tree: every family passes (or was
 # skipped on purpose), or it is the first thing that stopped one of them. The
 # list is in run order and is the only place the fold reads; fold_verdict.sh
@@ -5896,7 +5929,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
   scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn scripts/tile-gpu-diff/scalar_diff.dawn \
-  scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
+  scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
   scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py scripts/tile-gpu-diff/fold_verdict.sh)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
