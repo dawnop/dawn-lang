@@ -1,5 +1,6 @@
 // Exercise editor decisions without a browser or gateway, so regressions in
 // syntax and LSP routing can run offline against the same CodeMirror objects.
+import { comparePaneTests } from './compare-pane-selftest'
 import {
   builtinsLoaded,
   dawn,
@@ -1112,6 +1113,7 @@ blackholeClient.stop()
   expect('the session exposes the LSPClient plugin for views', Array.isArray(core.extension()), true)
 }
 
+fails += await comparePaneTests(expect)
 fails += compileViewTests(expect)
 fails += sanitizeTests(expect)
 fails += panesTests(expect)

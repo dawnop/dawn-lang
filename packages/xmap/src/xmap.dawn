@@ -411,3 +411,71 @@ test "a map that is not one is an error at the door" {
   assert is_err(explore(demo_spec(), Raw { ..demo_raw(), cmap = demo_raw().jmap }))
   assert is_err(explore(demo_spec(), Raw { ..demo_raw(), jmap = "" }))
 }
+
+test "C-only outer and inner calls keep their own tree while the paired oracle keeps the intersection" {
+  let inp = demo()
+  for missing in [0, 1] {
+    let j = JMap { ..inp.jmap, calls = filter(inp.jmap.calls, r => r != inp.jmap.calls[missing]) }
+    let paired = map_program(demo_spec(), Inputs { ..inp, jmap = j })
+    let (calls, gaps) = table_from_c(inp.src, "demo", 1, 3, inp.cmap)
+    assert gaps == []
+    assert map(calls, c => (c.id, c.parent, c.name)) == [(0, -1, "println"), (1, 0, "show")]
+    assert len(paired.calls) == 1 && paired.calls[0].parent == -1
+    assert str.contains(paired.gaps[0], "and not in the other")
+  }
+  let c = CMap { ..inp.cmap, calls = [inp.cmap.calls[1]] }
+  let paired = map_program(demo_spec(), Inputs { ..inp, cmap = c })
+  let (calls, gaps) = table_from_c(inp.src, "demo", 1, 3, c)
+  assert map(calls, c => (c.id, c.parent, c.name)) == [(0, -1, "show")]
+  assert gaps == [] && str.contains(paired.gaps[0], "in the jvm map")
+}
+
+test "C-only entry has one pane and local gaps, without parsing a JVM recording" {
+  let r = demo_raw()
+  match explore_c(demo_spec(), r.source, r.ctext, r.cmap) {
+    Err(_) -> { assert false }
+    Ok(c) -> {
+      let paired = map_program(demo_spec(), demo())
+      assert c.calls == paired.calls && c.panes == [paired.panes[0]] && c.gaps == []
+    }
+  }
+  assert is_err(explore_c(demo_spec(), r.source, r.ctext, ""))
+  assert is_err(explore_c(demo_spec(), r.source, r.ctext, r.jmap))
+  match explore_c(demo_spec(), r.source, r.ctext, "dawnmap\t1\tc\n") {
+    Ok(b) -> { assert len(b.calls) == 0 && str.contains(b.gaps[0], "no calls to show") }
+    Err(_) -> { assert false }
+  }
+}
+
+test "C-only deduplicates instances by nlo but panes still aggregate by span" {
+  let inp = demo()
+  let first = inp.cmap.calls[0]
+  let repeated = CMap { ..inp.cmap, calls = inp.cmap.calls ++ [CCall { ..first, what = "another meaning" }] }
+  let (calls, gaps) = table_from_c(inp.src, "demo", 1, 3, repeated)
+  assert calls == map_program(demo_spec(), inp).calls && gaps == []
+  let same_span = CMap { ..repeated, calls = repeated.calls ++ [CCall { ..first, nlo = Some(36) }] }
+  let (rows, faults) = table_from_c(inp.src, "demo", 1, 3, same_span)
+  assert faults == [] && len(rows) == 3
+  assert map(rows, r => r.parent) == [-1, -1, 0]
+  let pane = c_pane("demo", "main", inp.ctext, same_span, "demo", rows, inp.src)
+  assert pane.outs[0] == pane.outs[1]
+  assert table_from_c(inp.src, "other", 1, 3, repeated) == ([], [])
+  assert table_from_c(inp.src, "demo", 3, 3, repeated) == ([], [])
+}
+
+test "C-only nonidentifiers require consistent local what, identifiers deliberately do not" {
+  let inp = demo()
+  let src = src_of("a * b; 0.0; 3; 😀f()")
+  let base = inp.cmap.calls[0]
+  let op = CCall { ..base, lo = Some(0), hi = Some(5), nlo = Some(2), what = "impl mul" }
+  let literal = CCall { ..base, lo = Some(7), hi = Some(10), nlo = Some(7), what = "impl from_float" }
+  let integer = CCall { ..base, lo = Some(12), hi = Some(13), nlo = Some(12), what = "default from_int" }
+  let ident = CCall { ..base, lo = Some(16), hi = Some(19), nlo = Some(16), what = "anything" }
+  let c = CMap { ..inp.cmap, calls = [op, literal, integer, ident] }
+  let (rows, gaps) = table_from_c(src, "demo", 1, 1, c)
+  assert gaps == []
+  assert map(rows, c => (c.name, c.nlo, c.nhi)) == [("mul", 2, 3), ("from_float", 7, 10), ("from_int", 12, 13), ("f", 16, 17)]
+  let bad = CMap { ..c, calls = c.calls ++ [CCall { ..op, what = "impl add" }] }
+  let (kept, faults) = table_from_c(src, "demo", 1, 1, bad)
+  assert len(kept) == 3 && len(faults) == 1
+}

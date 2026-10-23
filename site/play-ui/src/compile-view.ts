@@ -230,6 +230,7 @@ export class ComparePane {
     })
     this.panel.setAttribute('aria-labelledby', `dp-view-tab-${target}`)
     this.host.opened(target)
+    this.errBox.hidden = true
     const a = this.answers[target]
     this.mark(!!a && (a.invalid === true || a.code !== this.host.code()))
     if (!a) {
@@ -372,7 +373,7 @@ export class ComparePane {
       this.draw(a)
       this.host.calls([])
       this.reapply()
-      this.say(a.tile?.unmapped ? 'Tile IR. The calls could not be matched to it.' : 'Tile IR: the text the program printed.')
+      this.say(this.selection ? SELECTION_MISSING : a.tile?.unmapped ? 'Tile IR. The calls could not be matched to it.' : 'Tile IR: the text the program printed.')
     } else if (outcome.kind === 'diagnostics' || outcome.kind === 'program') {
       this.errHead.textContent = outcome.kind === 'program' ? outcome.title : 'Compile error'
       this.errText.textContent = outcome.text || '(no message)'

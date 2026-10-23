@@ -379,3 +379,41 @@ test "a pairing becomes calls and a pane with an out for each" {
     TileFailed(_, body) -> { assert body == "" }
   }
 }
+
+test "pane byte boundaries leave whole Unicode lines or no part of one" {
+  assert fit([str.repeat("a", PANE_LIMIT - 1)], PANE_LIMIT) == (1, false)
+  assert fit([str.repeat("a", PANE_LIMIT)], PANE_LIMIT) == (0, true)
+  assert fit([str.repeat("é", (PANE_LIMIT - 2) / 2)], PANE_LIMIT) == (1, false)
+  assert fit([str.repeat("é", PANE_LIMIT / 2)], PANE_LIMIT) == (0, true)
+}
+
+test "native map errors and timeouts are not cacheable verdicts" {
+  match build_c_view("f()", COk("", "bad map", 0)) {
+    Done(500, _, false) -> ()
+    _ -> { assert false }
+  }
+  match build_c_view("f()", CTimedOut(1)) {
+    Done(200, _, false) -> ()
+    _ -> { assert false }
+  }
+  match build_c_view("f()", CFail(CompileError("verdict"))) {
+    Done(200, _, true) -> ()
+    _ -> { assert false }
+  }
+}
+
+test "the call boundary keeps a valid prefix and repairs a parent beyond it" {
+  let src = src_of("f()")
+  let call = Call { id = 0, parent = -1, name = "f", lo = 0, hi = 3, nlo = 0, nhi = 1, lines = [] }
+  let out = Out { lines = [], marks = [], key = [] }
+  for size in [CALL_LIMIT, CALL_LIMIT + 1] {
+    let calls = map(range_list(size), i => Call { ..call, id = i, parent = if i == 0 { CALL_LIMIT } else { -1 } })
+    let pane = Pane { kind = "c", file = "prog.c.txt", total = 1, text = ["f();"], outs = map(calls, _c => out) }
+    let built = Built { name = "prog", path = "prog.dawn", src = src, first = 1, last = 1, calls = calls, panes = [pane], gaps = [], skipped = 0 }
+    let body = rest_of(built, "c")
+    assert str.contains(body, "\"calls_total\":${size}")
+    assert str.contains(body, "\"calls_truncated\":${if size > CALL_LIMIT { "true" } else { "false" }}")
+    assert not str.contains(body, "\"id\":${CALL_LIMIT},")
+    assert not str.contains(body, "\"parent\":${CALL_LIMIT}")
+  }
+}

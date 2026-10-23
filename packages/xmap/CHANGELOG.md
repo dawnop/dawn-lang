@@ -1,5 +1,11 @@
 # xmap changelog
 
+## 0.1.4 (2026-10-23)
+
+Add `explore_c` and `table_from_c` for an independent C call table and pane.
+Gaps describe local C mapping; a zero count does not prove agreement with JVM.
+The paired entries and strict oracle retain their previous semantics.
+
 ## 0.1.3 (2026-10-19)
 
 A call the host maps record whose name span starts at no identifier is named

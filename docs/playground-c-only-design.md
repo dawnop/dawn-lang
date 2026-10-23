@@ -1,8 +1,8 @@
 # Playground C 独立视图
 
-状态：按 2026-10-23 协调者裁决实施，验收结果回填本文。基线 `fdebffc0aca84ef8346a550381488912cb247a89`。
+> 状态：**current**。按 2026-10-23 协调者裁决实施，实现入口已落地，完整交付 SHA 与门禁证据记在交接报告。基线 `fdebffc0aca84ef8346a550381488912cb247a89`。
 
-C 请求目前先探测 JVM 工具链，然后生成 C/JVM 两张 map，以交集建表。这既使 C 页依赖 javap，也把双后端缺口混入 C 页的 gaps。方案 A 把两种用途分开：C 页只映射 native emitc 的 C map，JVM 页保留原有 paired oracle。`table_from_maps`、`explore`、`explore_strict` 不变。
+本刀之前 C 请求先探测 JVM 工具链，然后生成 C/JVM 两张 map，以交集建表。这既使 C 页依赖 javap，也把双后端缺口混入 C 页的 gaps。方案 A 把两种用途分开：C 页只映射 native emitc 的 C map，JVM 页保留原有 paired oracle。`table_from_maps`、`explore`、`explore_strict` 不变。
 
 独立入口只接收源码、C text 和 C map。筛 module 与范围，按 `(lo,hi,nlo)` 去重、排序；标识符仍从源码读，不比较 what；非标识符只核对 C 同键 what，再识别运算符或数字。tree、check_table、pane 按 `(lo,hi)` 聚合及直接子项扣行规则保持。C 的 gap=0 只证明 C 局部映射，不证明 JVM 与它一致。
 
@@ -17,3 +17,5 @@ UI 的局部 id 只在当前表内有效。跨页保留源码快照、build 与 
 同提交交付站点和 runner；当前 wire 没有 schema 字段，build 无法识别同工具链的协议混版，旧标签页必须刷新。canary 不能全局忽略 calls/outs/gaps：C 的集合、编号、parent、行归属和 gaps 可按上述规则改变；C pane text/src/total 与 JVM paired payload 保持。编译器源码及 emit C/map 字节不在改动范围，因此没有预先声明 Emit-Change 或推进版本的理由。
 
 不做的（理由）：不改 JVM 对照语义，不以 C map 伪造 JMap；不修 emitter 漏图（遇到则保留失败例交协调者）；不新增运行期缓存或无 JDK 完整部署模式；不改 /run、Tile 键；不部署或访问服务器。门禁证据由协调者发布。
+
+实现记录：`adb4dfa9e1fac0a22792914b42151b34a385aada` 新增独立 xmap、native job/result、目标能力和答案 schema，并将 UI 切页改为源码身份。验收补充包括局部映射夹具、真实 pane DOM 交互、8 MiB/262144 bytes/2000 calls 边界、HTTP 哨兵、旧 runner 同工具链逐字节 oracle、完整 warm、交错五组性能和六类源码变异负控。所有重门通过外部门禁执行；不修改工作流步骤，因此无需重录 steps lock。
