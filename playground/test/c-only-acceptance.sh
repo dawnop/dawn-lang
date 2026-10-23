@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# The full paired oracle and each interleaved timing group need their own gate
-# budget. Keep setup identical while allowing the five groups to run apart.
+# The paired correctness matrix is a regression gate. Modes 0..4 and all are
+# manual old-vs-new performance acceptance tools, not per-push gates or speed
+# ratchets. The measured five-group data lives in agent-handoff's
+# play-c-only-view-report-20261023.md. Keep their toolchain and limits identical.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"

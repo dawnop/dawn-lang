@@ -12,10 +12,10 @@ C 与 JVM 使用独立 schema 前缀的答案键，共用请求与 warm helper�
 
 UI 的局部 id 只在当前表内有效。跨页保留源码快照、build 与 `(name,from,to,nfrom,nto)`，目的表唯一匹配后换成局部 id。缺失、歧义或截断不高亮并说明，回原页可恢复。编辑、取消与关闭清空身份，过期异步结果不应用；Tile 中转相同。503 按目标解释，旧 listing 必须 stale 并清除活动高亮，C 状态独立。
 
-验收保留旧 paired 严格门，增加 C-only 夹具、HTTP 零 JVM 哨兵、错误/缓存隔离和前端交互负控。逐个记录 14 侧栏及 3 个工程补充的身份集合、id/parent/outs/gaps 差分；相同工具链与原料下 JVM 除 ms/cached 外字节不变。性能需本刀交错至少五组实测，不引用历史倍率。
+验收保留旧 paired 严格门，增加 C-only 夹具、HTTP 零 JVM 哨兵、错误/缓存隔离和前端交互负控。逐个记录 14 侧栏及 3 个工程补充的身份集合、id/parent/outs/gaps 差分；相同工具链与原料下 JVM 除 ms/cached 外字节不变。性能采用本刀交错五组实测，不引用历史倍率。该旧/新对比是一次性验收工具，不是每次 push 的回归门或速度门槛；原始数据与中位数保存在 `agent-handoff/play-c-only-view-report-20261023.md`，需重新验收时手动运行 `playground/test/c-only-acceptance.sh 0` 到 `4`，或用 `all` 一次运行五组。
 
 同提交交付站点和 runner；当前 wire 没有 schema 字段，build 无法识别同工具链的协议混版，旧标签页必须刷新。canary 不能全局忽略 calls/outs/gaps：C 的集合、编号、parent、行归属和 gaps 可按上述规则改变；C pane text/src/total 与 JVM paired payload 保持。编译器源码及 emit C/map 字节不在改动范围，因此没有预先声明 Emit-Change 或推进版本的理由。
 
 不做的（理由）：不改 JVM 对照语义，不以 C map 伪造 JMap；不修 emitter 漏图（遇到则保留失败例交协调者）；不新增运行期缓存或无 JDK 完整部署模式；不改 /run、Tile 键；不部署或访问服务器。门禁证据由协调者发布。
 
-实现记录：`adb4dfa9e1fac0a22792914b42151b34a385aada` 新增独立 xmap、native job/result、目标能力和答案 schema，并将 UI 切页改为源码身份。验收补充包括局部映射夹具、真实 pane DOM 交互、8 MiB/262144 bytes/2000 calls 边界、HTTP 哨兵、旧 runner 同工具链逐字节 oracle、完整 warm、交错五组性能和六类源码变异负控。所有重门通过外部门禁执行。完整 HTTP/制品/预热矩阵独立为一个作业，五组交错性能各一个作业，避免把五组性能测量塞进普通 route contract 的预算；新增步骤已重录 steps lock。
+实现记录：`f87312045145e3d04f5d2a564e57e436acb3ced1` 新增独立 xmap、native job/result、目标能力和答案 schema，并将 UI 切页改为源码身份。验收补充包括局部映射夹具、真实 pane DOM 交互、8 MiB/262144 bytes/2000 calls 边界、HTTP 哨兵、旧 runner 同工具链逐字节 oracle、完整 warm、交错五组性能和六类源码变异负控。所有重门通过外部门禁执行。完整 HTTP/制品/预热矩阵保留一个常驻作业，性能组仅保留手动入口。矩阵的最终命中检查复用同作业前半段已取得的 28 份 C/JVM 冷响应，保留完整 warm、答案数量、冷库为空、cached 标志及仅归一 ms/cached 的逐字节断言；不重复发出这 28 个编译请求。HTTP 哨兵和源码变异负控继续由原 Playground contract 作业执行。steps lock 随作业移除重录。

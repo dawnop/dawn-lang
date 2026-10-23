@@ -4,6 +4,7 @@
 The baseline is the dispatched source revision, built with the same compiler
 and limits. Preserve all payload fields, map local ids through source identity,
 and report interleaved measurements rather than asserting a speed multiplier.
+Matrix mode is a regression gate; timing modes are manual acceptance tools.
 """
 import hashlib
 import base64
@@ -71,6 +72,7 @@ with tempfile.TemporaryDirectory(prefix='play-c-matrix.') as work:
         return json.loads(payload), payload, ms
 
     if mode == 'matrix':
+        cold_views = {}
         samples = sorted((ROOT / 'site/play-ui/samples').glob('*.dawn'))
         supplements = [ROOT / 'playground/test' / f'{n}.dawn' for n in ('tile_vadd', 'tile_hostif', 'tile_broken')]
         for source in samples + supplements:
@@ -103,6 +105,8 @@ with tempfile.TemporaryDirectory(prefix='play-c-matrix.') as work:
             aj, abj, _ = request(old, code, 'jvm')
             bc, bbc, _ = request(runner, code, 'c')
             bj, bbj, _ = request(runner, code, 'jvm')
+            cold_views[source, 'c'] = (bc, bbc)
+            cold_views[source, 'jvm'] = (bj, bbj)
             assert norm(abj) == norm(bbj), (source.stem, 'JVM paired contract changed')
             # Keep all four wire bodies losslessly in the step log, independently
             # of the human-readable identity diff. No timing field is discarded.
@@ -147,10 +151,14 @@ with tempfile.TemporaryDirectory(prefix='play-c-matrix.') as work:
         run([runner, 'warm', ROOT / 'site/play-ui/samples', warmed], env=env)
         wanted = sum(3 + ('use tileir/' in p.read_text()) for p in samples)
         assert len(list(warmed.iterdir())) == wanted
+        # Warm must leave the cold serving store empty. Reuse the cold bodies
+        # already checked above for the identical hit/live assertions below;
+        # each request is a fresh process with the same input and environment.
+        assert not any(empty.iterdir()), 'warm populated the cold answer store'
         for source in samples:
             for target in ('c', 'jvm'):
                 code = source.read_text()
-                live, lb, _ = request(runner, code, target)
+                live, lb = cold_views[source, target]
                 hit, hb, _ = request(runner, code, target, warmed)
                 assert not live['cached'] and hit['cached'] and norm(lb) == norm(hb), (source.stem, target, 'hit/live bytes')
         print(f'OK: {len(samples)} sidebar samples, {len(supplements)} project supplements, JVM byte oracle, full warm {wanted} answers, C/JVM byte-identical hits', flush=True)
