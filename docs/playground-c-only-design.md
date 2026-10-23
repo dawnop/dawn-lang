@@ -18,4 +18,4 @@ UI 的局部 id 只在当前表内有效。跨页保留源码快照、build 与 
 
 不做的（理由）：不改 JVM 对照语义，不以 C map 伪造 JMap；不修 emitter 漏图（遇到则保留失败例交协调者）；不新增运行期缓存或无 JDK 完整部署模式；不改 /run、Tile 键；不部署或访问服务器。门禁证据由协调者发布。
 
-实现记录：`adb4dfa9e1fac0a22792914b42151b34a385aada` 新增独立 xmap、native job/result、目标能力和答案 schema，并将 UI 切页改为源码身份。验收补充包括局部映射夹具、真实 pane DOM 交互、8 MiB/262144 bytes/2000 calls 边界、HTTP 哨兵、旧 runner 同工具链逐字节 oracle、完整 warm、交错五组性能和六类源码变异负控。所有重门通过外部门禁执行；不修改工作流步骤，因此无需重录 steps lock。
+实现记录：`adb4dfa9e1fac0a22792914b42151b34a385aada` 新增独立 xmap、native job/result、目标能力和答案 schema，并将 UI 切页改为源码身份。验收补充包括局部映射夹具、真实 pane DOM 交互、8 MiB/262144 bytes/2000 calls 边界、HTTP 哨兵、旧 runner 同工具链逐字节 oracle、完整 warm、交错五组性能和六类源码变异负控。所有重门通过外部门禁执行。完整 HTTP/制品/预热矩阵独立为一个作业，五组交错性能各一个作业，避免把五组性能测量塞进普通 route contract 的预算；新增步骤已重录 steps lock。
