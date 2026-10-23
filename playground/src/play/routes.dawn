@@ -272,3 +272,35 @@ test "without javap the view is refused with a 503 that says why" {
   let with_javap = View { toolchain = "", build = "", javap = true, tile = false, native = false }
   assert match unavailable(with_javap, "jvm") { Some(_) -> false, None -> true }
 }
+
+test "paired success and cacheable failure only write the requested schema key" {
+  let view = View { toolchain = "tool present", build = "build", javap = true, tile = false, native = true }
+  let key = compile_key("jvm", view.toolchain, "code")
+  let host = Host {
+    call = (_wait, _job) => None,
+    keep_get = _key => None,
+    keep_put = (written, line) => {
+      assert written == key
+      assert not str.contains(line, "C poison")
+    },
+  }
+  let success = mapped(host, view, "jvm", key, tick(), Mapped("C poison", "\"pane\":{}}", 0))
+  assert success.status == 200 && str.contains(success.body, "\"pane\":{}")
+  let failure = mapped(host, view, "jvm", key, tick(), Done(200, "diagnostic", true))
+  assert failure.body == "diagnostic"
+  let no_write = Host { ..host, keep_put = (_key, _line) => { assert false } }
+  assert mapped(no_write, view, "jvm", key, tick(), Done(500, "infra", false)).status == 500
+}
+
+test "native capability and metadata are checked independently of JVM" {
+  let c = View { toolchain = "canonical", build = "build", javap = false, tile = false, native = true }
+  assert unavailable(c, "c") == None
+  match unavailable(View { ..c, native = false }, "c") {
+    Some(r) -> { assert r.status == 503 && str.contains(r.body, "dawnc") }
+    None -> { assert false }
+  }
+  match unavailable(View { ..c, build = "" }, "c") {
+    Some(r) -> { assert r.status == 503 && str.contains(r.body, "metadata") }
+    None -> { assert false }
+  }
+}

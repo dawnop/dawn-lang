@@ -6,6 +6,7 @@ Pairs a program's source with the C text and the JVM bytecode it compiles to: wh
 use xmap/xmap
 
 let built = xmap.explore(spec, raw)           # Result[Built, String], gaps inside
+let c = xmap.explore_c(spec, source, ctext, cmap) # independent C table and pane
 let strict = xmap.explore_strict(spec, raw)   # the first gap as the error
 let text = xmap.to_xmap(b)                    # the `.xmap` rows the Playground's compile view reads
 ```
@@ -19,6 +20,7 @@ nothing here starts a process or reads a file.
 | Function | What it answers |
 |---|---|
 | `explore(spec, raw)` | the program mapped, with every gap listed in `gaps`; an error only when a part of `raw` cannot be read at all |
+| `explore_c(spec, source, ctext, cmap)` | C calls and one C pane; local C gaps only, with no JVM input |
 | `explore_strict(spec, raw)` | the same, or the first gap as the error |
 | `parse_raw(spec, raw)`, `map_program(spec, inputs)` | the two halves of `explore`, for a caller that wants to change one part in between |
 | `to_xmap(built)`, `pane_text(pane)` | the `.xmap` text and a pane's text |
@@ -30,3 +32,9 @@ of its line, a method `javap` does not list. A call with a gap is shown without
 its lines in that pane; the pane's text is always whole.
 
 Changes between versions: [CHANGELOG.md](CHANGELOG.md).
+
+The C-only entry deduplicates `(lo, hi, nlo)` and derives parents from spans.
+Its ids, parents, ownership and gaps can differ from the paired entry. A zero
+gap count here proves only local C mapping. The paired entry and strict oracle
+retain their intersection and cross-backend diagnostics. Pane aggregation by
+`(lo, hi)` and identifier naming from source are shared intentionally.

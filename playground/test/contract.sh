@@ -96,7 +96,10 @@ export PLAY_UNSAFE_LOCAL=1
 # scripts/release-native.sh writes) says the same version. It runs behind a
 # wrapper that logs the subcommand each call was made with, which is how the
 # cases tell "dawnc answered" from "the JVM compiler answered".
-DAWNC_REAL="${PLAY_TEST_DAWNC:-$ROOT/dawnc-linux-x86_64}"
+# C requests are strictly native, so this contract always supplies a real
+# compiler. Reuse the same source-stamped recipe as the frontend build.
+DAWNC_REAL=$(cd "$ROOT" && DAWNC_BIN="${PLAY_TEST_DAWNC:-}" bash -euc '. site/dawnc.sh; site_dawnc')
+case "$DAWNC_REAL" in /*) ;; *) DAWNC_REAL="$ROOT/$DAWNC_REAL" ;; esac
 NATIVE_DIR=""
 want_ver=$("$DAWN_BIN" --version 2>/dev/null | sed -n 's/^dawn \([0-9][0-9.]*\) .*/\1/p' | tail -n 1)
 have_ver=""
@@ -114,8 +117,8 @@ if [ -n "$want_ver" ] && [ "$want_ver" = "$have_ver" ]; then
   chmod 755 "$NATIVE_DIR/dawn"
   export DAWN_BIN="$NATIVE_DIR/dawn"
 else
-  echo "note: no dawnc of release '$want_ver' (PLAY_TEST_DAWNC=$DAWNC_REAL, found '$have_ver'); the native cases are skipped"
-  export DAWNC_BIN=/nonexistent/dawnc
+  echo "FAIL: no dawnc of release '$want_ver' (PLAY_TEST_DAWNC=$DAWNC_REAL, found '$have_ver'); the native cases are skipped"
+  exit 1
 fi
 # The work root is this run's own, so the run-output case below can name the
 # exact directory that must not reach a response (dawn-lang #401). The socket
@@ -625,11 +628,9 @@ if [ -n "$NATIVE_DIR" ]; then
   [ "$(tail -n 1 "$NATLOG")" = "emitc" ] || st=1
   A="$a" B="$b" python3 -c '
 import os,json
-def drop(t):
-    d=json.loads(t); d.pop("ms",None); d.pop("cached",None); return d
-a,b=drop(os.environ["A"]),drop(os.environ["B"])
-assert a["ok"] is True and a==b, (a,b)' || st=1
-  ok_case "native emitc: the C view (text and map) equals the JVM compiler's" "$st"
+a,b=map(json.loads,(os.environ["A"],os.environ["B"]))
+assert a["ok"] is True and b["ok"] is False and "dawnc unavailable" in b["output"], (a,b)' || st=1
+  ok_case "native emitc: C succeeds natively and a runner without dawnc refuses it" "$st"
 
   # Projects use the same native commands as files. Count the subcommand,
   # not --version (every request probes that even if it then uses the JVM).
@@ -672,10 +673,11 @@ if d["ok"]:
     assert d["target"] == "c" and d["pane"]["kind"] == "c" and d["gaps"]["count"] == 0, d
 else:
     assert d["phase"] == "compile" and "undefined function: nope" in d["output"], d
-assert re.sub(rb'"ms":[0-9]+', b'"ms":0', a) == re.sub(rb'"ms":[0-9]+', b'"ms":0', b), (a, b)
+ref = json.loads(b)
+assert ref["ok"] is False and "dawnc unavailable" in ref["output"], ref
 PY
   done
-  ok_case "native emitc: tileir C views use dawnc and match the JVM response bytes, including errors" "$st"
+  ok_case "native emitc: tileir C views use dawnc and refuse to fall back when dawnc is unavailable" "$st"
 
   # Count parse itself on both tools. A --version call cannot satisfy this,
   # and the probe still has to compile with the JVM after a native parse.
@@ -767,7 +769,7 @@ PYFAULT
   cp "$CASES/tile.dawn" "$NATIVE_DIR/samples/tile.dawn"
   st=0
   "$NATIVE_BIN" warm "$NATIVE_DIR/samples" "$NATIVE_DIR/answers" >"$NATIVE_DIR/warm.log" 2>&1 || st=1
-  for target in c tile; do
+  for target in tile; do
     data=$(compile_body "$CASES/tile.dawn" "$target")
     printf 'POST /compile HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "${#data}" "$data" |
       PLAY_ANSWERS="$NATIVE_DIR/answers" DAWNC_BIN=/nonexistent/dawnc "$NATIVE_BIN" serve 2>/dev/null >"$CASES/tile.hit-http"
@@ -780,7 +782,7 @@ norm = lambda t: re.sub(rb'"ms":[0-9]+', b'"ms":0', t).replace(b'"cached":true',
 assert norm(hit) == norm(live), (hit, live)
 PY
   done
-  ok_case "store: tileir C and Tile IR views warmed with dawnc are reusable by the JVM-only runner" "$st"
+  ok_case "store: Tile IR warm answers remain reusable without dawnc; C checks capability before hits" "$st"
 
   kill -TERM "-$SRV2" 2>/dev/null || true
   rm -f "$LOG2"
@@ -846,11 +848,11 @@ if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: a hit on /run is
 hit_c=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$STORE_C" "$URL/compile" || true)
 st=0
 LIVE="$live_c" HIT="$hit_c" python3 -c '
-import os,json
-def drop(t):
-    d=json.loads(t); d.pop("ms",None); c=d.pop("cached"); return d, c
-(a, ca), (b, cb) = drop(os.environ["LIVE"]), drop(os.environ["HIT"])
-assert ca is False and cb is True and a == b and a["ok"] is True, (ca, cb)' || st=1
+import os,json,re
+live,hit = os.environ["LIVE"],os.environ["HIT"]
+assert json.loads(live)["cached"] is False and json.loads(hit)["cached"] is True
+norm = lambda t: re.sub(r"\"ms\":[0-9]+", "\"ms\":0", t).replace("\"cached\":true", "\"cached\":false")
+assert norm(live) == norm(hit), (live,hit)' || st=1
 if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: a hit on /compile is the live view with cached:true"; else fail=$((fail + 1)); echo "FAIL  store: a hit on /compile is the live view with cached:true"; fi
 
 # Negative controls: the program with one more byte, and the same program under
@@ -877,6 +879,12 @@ grep -q 'no answer was kept for: broken.dawn run' "$WORK.warm.log" || st=1
 [ "$st" = "0" ] || cat "$WORK.warm.log"
 rm -f "$WORK.warm.log"
 if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: a sample that gets no answer fails the warm-up"; else fail=$((fail + 1)); echo "FAIL  store: a sample that gets no answer fails the warm-up"; fi
+
+# The strict C path is checked from the real HTTP entry, with JVM probes and
+# tools poisoned. This cannot be satisfied by the native happy path alone.
+python3 -I -B test/c-only-contract.py "$NATIVE_BIN" "$DAWNC_REAL"
+python3 -I -B test/c-only-matrix.py "$NATIVE_BIN" "$DAWNC_REAL"
+python3 -I -B "$ROOT/scripts/play-c-only-contract/controls.py" "$DAWNC_REAL"
 
 # The access log names each program by the SHA-256 of its `code` field, with
 # the toolchain that answered it, and never by its text: a program carrying a

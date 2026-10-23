@@ -61,6 +61,7 @@ ADAPTERS = {
     "lsp-workspace-contract": ("selfhost",),
     "pattern-or-contract": ("selfhost",),
     "pipe-contract": (".",),
+    "play-c-only-contract": (".",),
     "project-plan-contract": (".",),
     "range-bound-order-contract": (".",),
     "rc-contract": ("runtime/c",),

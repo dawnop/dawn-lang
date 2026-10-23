@@ -492,11 +492,11 @@ fn execute_staged(dir: String, box: String, input: String) -> Outcome !io =
 # module's class. Nothing is run. Pairing them is packages/xmap's job, in the
 # runner's own process, on text this module has bounded (play/view.dawn).
 #
-# Both compilers run for either target. The call table is the calls both
+# Both compilers run for the JVM target. The call table is the calls both
 # side tables have a row for (that is how a call one backend lost is found
-# and counted as a gap instead of silently shown), so even a request for the C
-# text needs the JVM table, and the listing is the one more unit that makes the
-# other target's answer cacheable under the same key.
+# and counted as a gap instead of silently shown), so the paired C
+# text in this paired oracle uses the JVM table. The independent C job below
+# never enters this path and never stores the paired C answer.
 #
 # Each phase is its own `systemd-run` unit with every limit the other phases
 # have (sandbox/run-sandboxed.sh), and the three share one wall-clock budget,
@@ -1057,7 +1057,7 @@ fn probe_compiler_id() -> CompilerId !io = {
 # Whether /check, C emission and Tile IR parsing may use native `dawnc`: it answers
 # `--version` and says the same release `dawn` does. Asked once at startup,
 # with `compiler_id`, and a "no" is logged once here, not per request: the
-# runner is then exactly the JVM-only runner it was. A missing `dawnc` is the
+# caller decides whether to fall back (/check, JVM, Tile) or refuse (C). A missing `dawnc` is the
 # ordinary case on a dev box and says nothing alarming; a present one of
 # another release is a deploy that shipped half a toolchain, so it is named.
 # Only the version is compared, not the `b1:` digest: the jar and the native
@@ -1325,4 +1325,19 @@ test "remove_tree says why a tree it cannot empty stays, and cleans one it can" 
   assert present(dir)
   sh_run(["chmod", "0755", "${dir}/box/classes"])
   assert remove_tree(dir) == None
+}
+
+test "view raw limits accept exactly eight MiB and reject the next byte" {
+  let dir = fresh_dir()
+  with d <- bracket(dir, cleanup)
+  with_fs_real(() => {
+    let path = "${d}/raw"
+    let _ = io.write_file(path, str.repeat("a", VIEW_RAW_LIMIT))
+    match raw_file(path, "the C map", d) {
+      Ok(text) -> { assert len(bytes.utf8(text)) == VIEW_RAW_LIMIT }
+      Err(_) -> { assert false }
+    }
+    let _ = io.write_file(path, str.repeat("a", VIEW_RAW_LIMIT) ++ "é")
+    assert raw_file(path, "the C map", d) == Err(RawTooLarge("the C map"))
+  })
 }

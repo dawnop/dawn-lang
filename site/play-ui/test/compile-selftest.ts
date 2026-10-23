@@ -168,7 +168,8 @@ export function compileViewTests(expect: Expect): number {
   t('a body that is not JSON is a failure, not a crash', classify(502, null, 'c'), { kind: 'failed', status: 502, detail: '' })
   const said = [429, 413, 422, 503, 500].map((s) => messageOf(classify(s, null, 'c')))
   t('every failure has its own sentence', new Set(said).size, 5)
-  t('503 says javap is the reason', said[3].includes('javap'), true)
+  t('C 503 names native capability', said[3].includes('native dawnc'), true)
+  t('JVM 503 names javap', messageOf(classify(503, null, 'jvm')).includes('javap'), true)
   t('a network error has a sentence', NETWORK_MESSAGE.length > 0, true)
   t('a clean answer has no notes', notesOf(readView(wire())!, 'C'), [])
   const gappy = readView(wire({ gaps: { count: 2, first: ['a', 'b'] }, calls_truncated: true, calls_total: 9 }))!
@@ -190,7 +191,7 @@ export function compileViewTests(expect: Expect): number {
   t('the tab is offered for a program that imports tileir', [wantsTileir('use tileir/dev.{Dev}\n'), wantsTileir('use std/io\n'), wantsTileir('use tileir.dev')], [true, false, false])
   t('the tabs are C, JVM and Tile IR', TARGETS.map((x) => x.label), ['C', 'JVM', 'Tile IR'])
   t('the program\'s text is the pane', classify(200, tileWire(), 'tile'), {
-    kind: 'tile', tile: { text: ['cuda_tile.module @m {', '}'], total: 2, truncated: false }, cached: false, ms: 2600,
+    kind: 'tile', tile: { text: ['cuda_tile.module @m {', '}'], total: 2, truncated: false }, build: 'b1:x', cached: false, ms: 2600,
   })
   // a kernel whose calls were paired with the source answers as a listing
   const paired = (over: Record<string, unknown> = {}) =>
@@ -201,7 +202,7 @@ export function compileViewTests(expect: Expect): number {
   t('a paired answer whose calls do not check is unreadable', classify(200, paired({ calls: [{ ...CALLS[0], id: 5 }] }), 'tile').kind, 'unreadable')
   t('a paired answer is not the C tab\'s', classify(200, paired(), 'c').kind, 'unreadable')
   t('without calls the tile tab keeps the plain text, with the reason', classify(200, tileWire({ unmapped: 'a call under host control flow at line 9' }), 'tile'), {
-    kind: 'tile', tile: { text: ['cuda_tile.module @m {', '}'], total: 2, truncated: false, unmapped: 'a call under host control flow at line 9' }, cached: false, ms: 2600,
+    kind: 'tile', tile: { text: ['cuda_tile.module @m {', '}'], total: 2, truncated: false, unmapped: 'a call under host control flow at line 9' }, build: 'b1:x', cached: false, ms: 2600,
   })
   t('the reason is a note under the tabs', tileNotes({ text: ['a'], total: 1, truncated: false, unmapped: 'x' }), ['Calls are not matched to the Tile IR: x.'])
   t('a tile answer is not another tab\'s', [classify(200, tileWire(), 'c').kind, classify(200, wire(), 'tile').kind], ['unreadable', 'unreadable'])
@@ -212,7 +213,7 @@ export function compileViewTests(expect: Expect): number {
   ], [{ kind: 'program', title: 'Run error', text: 'boom' }, { kind: 'program', title: 'Timed out', text: 'x' }])
   t('a compile error of the tile program is the diagnostics', classify(200, { ok: false, phase: 'compile', output: 'e' }, 'tile').kind, 'diagnostics')
   t('the server\'s one-sentence refusal is what the reader sees', messageOf(classify(400, { ok: false, phase: 'error', output: 'the Tile IR view needs a program that imports tileir' }, 'tile')), 'the Tile IR view needs a program that imports tileir')
-  t('503 for the tile tab does not blame javap', [messageOf(classify(503, null, 'tile')).includes('javap'), messageOf(classify(503, null, 'c')).includes('javap')], [false, true])
+  t('503 for the tile tab does not blame javap', [messageOf(classify(503, null, 'tile')).includes('javap'), messageOf(classify(503, null, 'c')).includes('javap')], [false, false])
   t('without tileir the tab says what it needs', TILE_NEEDS.includes('tileir'), true)
   t('a cut tile text says how much is shown', tileNotes({ text: ['a'], total: 9, truncated: true }), ['The Tile IR text is cut: showing 1 of 9 lines.'])
   t('a whole tile text has no notes', tileNotes({ text: ['a'], total: 1, truncated: false }), [])

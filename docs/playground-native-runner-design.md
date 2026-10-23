@@ -6,6 +6,8 @@
 > 本稿建立在 PR #630（`/check` 与 `/compile` 的 C 视图改走 native `dawnc`，未合并时以其描述与 diff 为准）之上。
 > 起草时本稿只有第三节三组实测和一份刀序，各刀的落地记录写在第七节对应条目下。
 
+2026-10-23 C 独立视图更新见 [playground-c-only-design.md](playground-c-only-design.md)：先解析 target，再选择能力与工具链。C 仅信有效部署元数据、只探测 dawnc，独立 C job/result 不携带 JVM 原料；缺工具/元数据为 503，native 空诊断失败为 500，均不回落 JVM。/check 与 JVM 页策略保留。答案仍只由部署写；C 与 JVM 各有 schema 前缀，warm 明确请求两页。旧运行期双页缓存描述是历史，不能作为当前实现约束。
+
 ## 一、要什么，不要什么
 
 要：Playground 的 runner **进程本身**不再是常驻 JVM。今天它是 `dawn run /opt/dawn/playground`：JVM 先编译 runner 源码再跑，

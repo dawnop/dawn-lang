@@ -6,6 +6,8 @@
 > 第十二、十三节，已合）、M7（静态对照页，`site/explorer/record.py`，已合）。优先级：在线展示线 P1，
 > 与 GPU API 并列。
 
+2026-10-23 当前合同：[C 独立视图设计](playground-c-only-design.md) 取代下文双页共用交集与运行期缓存的描述。C 请求从入口到映射只用 native emitc，JVM 页仍用旧配对入口。两表的 id/parent/outs/gaps 可不同；跨页用源码快照、build 和完整源码身份唯一匹配，不能沿用数值 id。C 的 gap=0 仅证明局部 C 映射。样例答案只在部署 warm 时写，C/JVM 分别使用 schema 键，逐目标预热；通用运行期缓存已撤销。C 缺元数据或匹配 dawnc 答 503，Java 程序保留 native 拒绝；JVM 缺 javap 只影响 JVM 页。旧交集严格门继续运行。
+
 ## 一、要什么，不要什么
 
 要：Playground 的编辑器旁多一个「产物」窗格，标签页 `Output | C | JVM | Tile IR`。用户改代码，窗格里是这段代码现编出来的
