@@ -1247,15 +1247,17 @@ test "with_request removes the request directory when the body fails" {
 # Test-only: a stand-in for the sandbox wrapper with the property that matters.
 # `run` starts the work in a session of its own and waits for it, so killing the
 # wrapper's group leaves the work running, as killing `sudo` leaves the unit; `stop`
-# ends the work by the pid `run` recorded under the unit id.
+# ends the work by the pid `run` recorded under the unit id. A detached supervisor
+# reaps the work, and stop waits for that reap, matching systemctl's synchronous
+# stop instead of racing signal delivery or an orphan's eventual reap by init.
 fn fake_wrapper(d: String) -> String !io = {
   let path = "${d}/fake-sandbox.sh"
   let body =
     "#!/bin/sh\n" ++
     "d=\$(dirname \"\$0\")\n" ++
     "case \"\$1\" in\n" ++
-    "  run) id=\$2; shift 2; setsid \"\$@\" & echo \$! > \"\$d/\$id.pid\"; wait \$! ;;\n" ++
-    "  stop) kill \"\$(cat \"\$d/\$2.pid\")\" ;;\n" ++
+    "  run) id=\$2; shift 2; setsid sh -c 'file=\$1; shift; \"\$@\" & pid=\$!; echo \$pid > \"\$file\"; wait \$pid' sh \"\$d/\$id.pid\" \"\$@\" & wait \$! ;;\n" ++
+    "  stop) pid=\$(cat \"\$d/\$2.pid\"); kill \"\$pid\"; while kill -0 \"\$pid\" 2>/dev/null; do sleep 0.01; done ;;\n" ++
     "esac\n"
   let _ = with_fs_real(() => io.write_file(path, body))
   path
