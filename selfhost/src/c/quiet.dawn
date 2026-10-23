@@ -72,16 +72,16 @@ pub type Policy = {
 }
 
 pub fn strict() -> Policy =
-  Policy { intrinsics: false, dynamic: false, callees: false, division: false }
+  Policy { intrinsics = false, dynamic = false, callees = false, division = false }
 
 ## `""` is the real analysis; the others are the mutants the harness names.
 pub fn policy_named(name: String) -> Option[Policy] =
   match name {
     "" -> Some(strict())
-    "intrinsics" -> Some(Policy { ..strict(), intrinsics: true })
-    "dynamic" -> Some(Policy { ..strict(), dynamic: true })
-    "callees" -> Some(Policy { ..strict(), callees: true })
-    "division" -> Some(Policy { ..strict(), division: true })
+    "intrinsics" -> Some(Policy { ..strict(), intrinsics = true })
+    "dynamic" -> Some(Policy { ..strict(), dynamic = true })
+    "callees" -> Some(Policy { ..strict(), callees = true })
+    "division" -> Some(Policy { ..strict(), division = true })
     _ -> None
   }
 
@@ -92,11 +92,11 @@ pub fn key(owner: String, name: String) -> String = owner ++ "\n" ++ name
 type Facts = { loud: Bool, calls: List[String] }
 
 fn join_facts(a: Facts, b: Facts) -> Facts =
-  Facts { loud: a.loud || b.loud, calls: a.calls ++ b.calls }
+  Facts { loud = a.loud || b.loud, calls = a.calls ++ b.calls }
 
-fn none() -> Facts = Facts { loud: false, calls: [] }
+fn none() -> Facts = Facts { loud = false, calls = [] }
 
-fn loud_fact() -> Facts = Facts { loud: true, calls: [] }
+fn loud_fact() -> Facts = Facts { loud = true, calls = [] }
 
 fn scalar_ty(t: Ty) -> Bool =
   match peel_opaque(t) {
@@ -161,7 +161,7 @@ fn walk(p: Policy, e: CExpr) -> Facts =
     CCall(callee, args, _, _) -> {
       let a = walk_all(p, args)
       match callee {
-        CDirect(owner, name) -> join_facts(a, Facts { loud: false, calls: [key(owner, name)] })
+        CDirect(owner, name) -> join_facts(a, Facts { loud = false, calls = [key(owner, name)] })
         CDynamic(target) ->
           join_facts(a, if p.dynamic { walk(p, target) } else { loud_fact() })
         CMethod(dict, _, _, _, _) ->
@@ -204,7 +204,7 @@ fn walk(p: Policy, e: CExpr) -> Facts =
           CMod -> not (scalar_ty(cex_ty(left)) && (p.division || peel_opaque(cex_ty(left)) != TyInt))
           _ -> not scalar_ty(cex_ty(left))
         }
-      if own { Facts { ..operands, loud: true } } else { operands }
+      if own { Facts { ..operands, loud = true } } else { operands }
     }
     CUnary(_, operand, _) -> walk(p, operand)
     CIf(cond, thn, els, _) -> join_facts(join_facts(walk(p, cond), walk(p, thn)), walk_opt(p, els))

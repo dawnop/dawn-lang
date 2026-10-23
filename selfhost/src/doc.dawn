@@ -64,7 +64,7 @@ type W = {
   errs: List[String]
 }
 
-fn w_new() -> W = W { parts: [], indent: 0, need_comma: false, trailing_key: false, errs: [] }
+fn w_new() -> W = W { parts = [], indent = 0, need_comma = false, trailing_key = false, errs = [] }
 
 ## What `dawn doc` prints: the JSON, or one line per doc link that resolves
 ## to nothing (`<module>:<line>: doc link [`name`] <why>`), in which case the
@@ -73,53 +73,53 @@ pub(pkg) alias DocOut = Result[String, List[String]]
 
 fn w_out(w: W) -> DocOut = if len(w.errs) > 0 { Err(w.errs) } else { Ok(w_done(w)) }
 
-fn pad(w: W) -> W = W { ..w, parts: w.parts ++ [str.repeat("  ", w.indent)] }
+fn pad(w: W) -> W = W { ..w, parts = w.parts ++ [str.repeat("  ", w.indent)] }
 
 fn pre_value(w: W) -> W =
   if w.trailing_key {
-    W { ..w, parts: w.parts ++ [" "], trailing_key: false, need_comma: false }
+    W { ..w, parts = w.parts ++ [" "], trailing_key = false, need_comma = false }
   } else {
-    let w1 = W { ..w, parts: w.parts ++ [if w.need_comma { ",\n" } else { "\n" }] }
+    let w1 = W { ..w, parts = w.parts ++ [if w.need_comma { ",\n" } else { "\n" }] }
     let w2 = pad(w1)
-    W { ..w2, need_comma: false }
+    W { ..w2, need_comma = false }
   }
 
 fn open_obj(w: W) -> W = {
   let w1 = pre_value(w)
-  W { ..w1, parts: w1.parts ++ ["{"], indent: w1.indent + 1, need_comma: false }
+  W { ..w1, parts = w1.parts ++ ["{"], indent = w1.indent + 1, need_comma = false }
 }
 
 fn close_obj(w: W) -> W = {
-  let w1 = pad(W { ..w, indent: w.indent - 1, parts: w.parts ++ ["\n"] })
-  W { ..w1, parts: w1.parts ++ ["}"], need_comma: true }
+  let w1 = pad(W { ..w, indent = w.indent - 1, parts = w.parts ++ ["\n"] })
+  W { ..w1, parts = w1.parts ++ ["}"], need_comma = true }
 }
 
 fn open_arr(w: W) -> W = {
   let w1 = pre_value(w)
-  W { ..w1, parts: w1.parts ++ ["["], indent: w1.indent + 1, need_comma: false }
+  W { ..w1, parts = w1.parts ++ ["["], indent = w1.indent + 1, need_comma = false }
 }
 
 ## `any` = whether the array got at least one element (decides the closing
 ## bracket's own line, as JsonWriter does).
 fn close_arr(w: W, any: Bool) -> W = {
-  let w1 = W { ..w, indent: w.indent - 1 }
-  let w2 = if any { pad(W { ..w1, parts: w1.parts ++ ["\n"] }) } else { w1 }
-  W { ..w2, parts: w2.parts ++ ["]"], need_comma: true }
+  let w1 = W { ..w, indent = w.indent - 1 }
+  let w2 = if any { pad(W { ..w1, parts = w1.parts ++ ["\n"] }) } else { w1 }
+  W { ..w2, parts = w2.parts ++ ["]"], need_comma = true }
 }
 
 fn w_key(w: W, k: String) -> W = {
-  let w1 = pad(W { ..w, parts: w.parts ++ [if w.need_comma { ",\n" } else { "\n" }] })
-  W { ..w1, parts: w1.parts ++ ["${quote(k)}:"], need_comma: false, trailing_key: true }
+  let w1 = pad(W { ..w, parts = w.parts ++ [if w.need_comma { ",\n" } else { "\n" }] })
+  W { ..w1, parts = w1.parts ++ ["${quote(k)}:"], need_comma = false, trailing_key = true }
 }
 
 fn w_str(w: W, s: String) -> W = {
   let w1 = pre_value(w)
-  W { ..w1, parts: w1.parts ++ [quote(s)], need_comma: true }
+  W { ..w1, parts = w1.parts ++ [quote(s)], need_comma = true }
 }
 
 fn w_bool(w: W, b: Bool) -> W = {
   let w1 = pre_value(w)
-  W { ..w1, parts: w1.parts ++ [if b { "true" } else { "false" }], need_comma: true }
+  W { ..w1, parts = w1.parts ++ [if b { "true" } else { "false" }], need_comma = true }
 }
 
 fn w_field(w: W, k: String, v: String) -> W = w_str(w_key(w, k), v)
@@ -132,7 +132,7 @@ fn w_field_opt(w: W, k: String, v: Option[String]) -> W = {
     Some(s) -> w_str(w1, s)
     None -> {
       let w2 = pre_value(w1)
-      W { ..w2, parts: w2.parts ++ ["null"], need_comma: true }
+      W { ..w2, parts = w2.parts ++ ["null"], need_comma = true }
     }
   }
 }
@@ -145,7 +145,7 @@ fn w_field_opt(w: W, k: String, v: Option[String]) -> W = {
 type Lk = { sc: LinkScope, mods: Map[String, Module], ds: DocSrc }
 
 fn lk_of(cm: CheckedMod, mods: Map[String, Module], ds: DocSrc) -> Lk =
-  Lk { sc: LinkScope { path: cm.mod_path, m: cm.m, cx: cm.cx }, mods: mods, ds: ds }
+  Lk { sc = LinkScope { path = cm.mod_path, m = cm.m, cx = cm.cx }, mods = mods, ds = ds }
 
 ## The links of `doc`, whose first line is line `first` of its module, as a
 ## `links` array right after the doc, one entry per distinct link text in the
@@ -169,7 +169,7 @@ fn w_links(w: W, lk: Lk, doc: Option[String], first: Int) -> W = {
         }
       Err(why) -> {
         let at = "${lk.sc.path}:${first + l.line}"
-        w1 = W { ..w1, errs: w1.errs ++ ["${at}: doc link [`${l.text}`] does not resolve: ${why}"] }
+        w1 = W { ..w1, errs = w1.errs ++ ["${at}: doc link [`${l.text}`] does not resolve: ${why}"] }
       }
     }
   }
@@ -963,7 +963,7 @@ fn prelude_traits_json(w0: W, adts: Adts, traits: Traits) -> W = {
 ## `module_json` matches `class_name` against. `path` is unused here: the
 ## source text is already in hand, so nothing re-reads the file.
 fn std_checked_mod(mp: String, cx: Cx, tm: TModule, ct: CtOut, m: Module) -> CheckedMod =
-  CheckedMod { mod_path: mp, class_name: mp, path: "", m: m, cx: cx, tm: tm, ct: ct }
+  CheckedMod { mod_path = mp, class_name = mp, path = "", m = m, cx = cx, tm = tm, ct = ct }
 
 ## The full standard library reference: the prelude's own names, the prelude
 ## traits, and every user-visible std module with its types, traits, consts and

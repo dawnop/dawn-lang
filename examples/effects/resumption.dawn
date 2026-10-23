@@ -49,9 +49,9 @@ fn update(m: Model, msg: Msg) -> Model !Fetch =
   match msg {
     Typed(name) -> {
       let body = fetch("/greet?name=" ++ name)
-      Model { greeting: body, asked: m.asked + 1 }
+      Model { greeting = body, asked = m.asked + 1 }
     }
-    Cleared -> Model { greeting: "", asked: m.asked }
+    Cleared -> Model { greeting = "", asked = m.asked }
   }
 
 ## What one turn produced. `Waiting` carries the continuation, which is an
@@ -75,15 +75,15 @@ fn step_once(m: Model, msg: Msg) -> Step = {
 ## The session: the model, plus the continuation the last turn left behind.
 type Session = { model: Model, pending: Option[fn(String) -> Step] }
 
-fn start() -> Session = Session { model: Model { greeting: "", asked: 0 }, pending: None }
+fn start() -> Session = Session { model = Model { greeting = "", asked = 0 }, pending = None }
 
 fn render(m: Model) -> String = "greeting=${m.greeting} asked=${to_string(m.asked)}"
 
 ## Fold whatever a turn produced back into the session, and say what happened.
 fn settle(s: Session, st: Step) -> (Session, String) =
   match st {
-    Done(m) -> (Session { model: m, pending: None }, render(m))
-    Waiting(url, k) -> (Session { model: s.model, pending: Some(k) }, "GET ${url}")
+    Done(m) -> (Session { model = m, pending = None }, render(m))
+    Waiting(url, k) -> (Session { model = s.model, pending = Some(k) }, "GET ${url}")
   }
 
 ## One line of input. `body` and `cancel` are the two answers a pending
@@ -101,14 +101,14 @@ fn turn(state: Option[Session], line: String) -> (Option[Session], Option[String
 fn respond(s: Session, line: String) -> (Session, String) =
   if str.starts_with(line, "body ") {
     match s.pending {
-      Some(k) -> settle(Session { model: s.model, pending: None }, k(str.drop(line, 5)))
+      Some(k) -> settle(Session { model = s.model, pending = None }, k(str.drop(line, 5)))
       None -> (s, "nothing is pending")
     }
   } else if line == "cancel" {
     match s.pending {
       Some(k) -> {
         discard(k)
-        (Session { model: s.model, pending: None }, "cancelled")
+        (Session { model = s.model, pending = None }, "cancelled")
       }
       None -> (s, "nothing is pending")
     }
@@ -154,7 +154,7 @@ pub fn main() -> Unit !io =
   session.serve(turn, e => "failed: ${e.message}")
 
 test "the body arrives as a value inside update, not as a message" {
-  let asked = step_once(Model { greeting: "", asked: 0 }, Typed("ada"))
+  let asked = step_once(Model { greeting = "", asked = 0 }, Typed("ada"))
   assert waiting_on(asked) == Some("/greet?name=ada")
   match asked {
     Waiting(_, k) -> {
@@ -167,7 +167,7 @@ test "the body arrives as a value inside update, not as a message" {
 }
 
 test "a message that asks nothing finishes in one turn" {
-  let st = step_once(Model { greeting: "hi", asked: 3 }, Cleared)
+  let st = step_once(Model { greeting = "hi", asked = 3 }, Cleared)
   let nothing: Option[String] = None
   assert waiting_on(st) == nothing
   assert finished(st) == "greeting= asked=3"

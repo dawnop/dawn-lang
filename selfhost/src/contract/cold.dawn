@@ -33,8 +33,8 @@ fn std_context() -> StdCtx !Fs !Env !io =
 fn source(name: String, text: String) -> LoadedModule = {
   let (m, pdiags, marks) = parser.parse_module_marked(text)
   LoadedModule {
-    mod_path: name, class_name: name, path: name ++ ".dawn", site_path: name ++ ".dawn",
-    text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pdiags, marks: marks, pkg: None, entry: false
+    mod_path = name, class_name = name, path = name ++ ".dawn", site_path = name ++ ".dawn",
+    text = text, line_starts = lexer.line_starts_of(text), m = m, pdiags = pdiags, marks = marks, pkg = None, entry = false
   }
 }
 
@@ -49,7 +49,7 @@ test "cold observation is nested and leaves the program unchanged" {
   io.with_fs_real(() => io.with_env_real(() => {
     let std = std_context()
     let m = source("answer", "pub fn answer() -> Int = 42\n")
-    let loaded = LoadResult { modules: [m], diags: [] }
+    let loaded = LoadResult { modules = [m], diags = [] }
     let events = ArrayList.new()
     let observed = analyze_observed(loaded, std, ct_default(), jsig_refused(),
       Some((name, stage, entering) => {
@@ -144,15 +144,15 @@ test "cold program diagnostics start with the current loader result" {
     let bad = source("bad", "pub fn broken() -> Int = false\n")
     let (_, diagnostics) = parser.parse_module("pub fn (\n")
     assert len(diagnostics) > 0
-    let loader = LocDiag { path: "loader", d: diagnostics[0] }
-    let loaded = LoadResult { modules: [bad], diags: [loader] }
+    let loader = LocDiag { path = "loader", d = diagnostics[0] }
+    let loaded = LoadResult { modules = [bad], diags = [loader] }
     let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
     let step = analyze_module_step(bad, initial_carry(std), std, ct_default(), jsig_refused(), None)
     assert len(prog.diags) == len(step.diags) + 1
     assert prog.diags[0].path == "loader"
     assert prog.diags[1].path == "bad.dawn"
-    let assembled = Program { modules: [step.checked], diags: [loader] ++ step.diags,
-      decl_spans: step.after.decl_spans, ct_world: step.after.ct_world }
+    let assembled = Program { modules = [step.checked], diags = [loader] ++ step.diags,
+      decl_spans = step.after.decl_spans, ct_world = step.after.ct_world }
     assert checkdump.render(prog) == checkdump.render(assembled)
   }))
 }

@@ -1268,8 +1268,8 @@ pub fn f8e8m0_of_bits(bits: Int) -> Float = {
 
 test "rounding breaks ties to even and rounds away otherwise" {
   # NearestEven is the default mode, so naming it changes nothing
-  assert round_f32(1.0 + 1.0 / 16777216.0, mode: NearestEven) == round_f32(1.0 + 1.0 / 16777216.0)
-  assert round_binary(1.0 + 3.0 / 256.0, 8, -126, 127, mode: NearestEven) == 1.0 + 1.0 / 64.0
+  assert round_f32(1.0 + 1.0 / 16777216.0, mode = NearestEven) == round_f32(1.0 + 1.0 / 16777216.0)
+  assert round_binary(1.0 + 3.0 / 256.0, 8, -126, 127, mode = NearestEven) == 1.0 + 1.0 / 64.0
   # 1 + 2^-8 sits exactly between 1 and 1 + 2^-7 in bf16; the even one wins
   assert round_bf16(1.0 + 1.0 / 256.0) == 1.0
   # 1 + 3 * 2^-8 sits between 1 + 2^-7 and 1 + 2^-6; even is the upper one
@@ -1345,45 +1345,45 @@ test "directed rounding takes the neighbour on the named side" {
   # 1 + 2^-8 lies strictly between 1 and 1 + 2^-7 in bf16, so the three
   # modes disagree with each other and with the tie-to-even answer above
   let between = 1.0 + 1.0 / 256.0
-  assert round_binary(between, 8, -126, 127, mode: TowardZero) == 1.0
-  assert round_binary(between, 8, -126, 127, mode: Down) == 1.0
-  assert round_binary(between, 8, -126, 127, mode: Up) == 1.0 + 1.0 / 128.0
+  assert round_binary(between, 8, -126, 127, mode = TowardZero) == 1.0
+  assert round_binary(between, 8, -126, 127, mode = Down) == 1.0
+  assert round_binary(between, 8, -126, 127, mode = Up) == 1.0 + 1.0 / 128.0
   # the same value negated: `TowardZero` and `Up` now name the same
   # neighbour and `Down` names the other one
-  assert round_binary(-between, 8, -126, 127, mode: TowardZero) == -1.0
-  assert round_binary(-between, 8, -126, 127, mode: Up) == -1.0
-  assert round_binary(-between, 8, -126, 127, mode: Down) == -(1.0 + 1.0 / 128.0)
+  assert round_binary(-between, 8, -126, 127, mode = TowardZero) == -1.0
+  assert round_binary(-between, 8, -126, 127, mode = Up) == -1.0
+  assert round_binary(-between, 8, -126, 127, mode = Down) == -(1.0 + 1.0 / 128.0)
   # a value already on the grid does not move, in any mode or sign
-  assert round_binary(1.0 + 1.0 / 128.0, 8, -126, 127, mode: TowardZero) == 1.0 + 1.0 / 128.0
-  assert round_binary(-1.0, 8, -126, 127, mode: Down) == -1.0
-  assert round_f32(0.5, mode: Up) == 0.5
+  assert round_binary(1.0 + 1.0 / 128.0, 8, -126, 127, mode = TowardZero) == 1.0 + 1.0 / 128.0
+  assert round_binary(-1.0, 8, -126, 127, mode = Down) == -1.0
+  assert round_f32(0.5, mode = Up) == 0.5
   # binary32, where the last place is 2^-24 at 1: a third of it up and down
-  assert round_f32(1.0 + 1.0 / 50331648.0, mode: Up) == 1.0 + 1.0 / 8388608.0
-  assert round_f32(1.0 + 1.0 / 50331648.0, mode: Down) == 1.0
+  assert round_f32(1.0 + 1.0 / 50331648.0, mode = Up) == 1.0 + 1.0 / 8388608.0
+  assert round_f32(1.0 + 1.0 / 50331648.0, mode = Down) == 1.0
   # subnormals: the f32 quantum below 2^-126 is 2^-149, and 1.5 quanta
   # goes to one or to two depending on the side
   let subnormal = 1.5 * 1.401298464324817e-45
-  assert round_f32(subnormal, mode: TowardZero) == 1.401298464324817e-45
-  assert round_f32(subnormal, mode: Up) == 2.802596928649634e-45
-  assert round_f32(-subnormal, mode: Down) == -2.802596928649634e-45
+  assert round_f32(subnormal, mode = TowardZero) == 1.401298464324817e-45
+  assert round_f32(subnormal, mode = Up) == 2.802596928649634e-45
+  assert round_f32(-subnormal, mode = Down) == -2.802596928649634e-45
   # under the smallest subnormal, one side is zero and the other is it
-  assert round_f32(1.0e-46, mode: TowardZero) == 0.0
-  assert round_f32(1.0e-46, mode: Up) == 1.401298464324817e-45
+  assert round_f32(1.0e-46, mode = TowardZero) == 0.0
+  assert round_f32(1.0e-46, mode = Up) == 1.401298464324817e-45
   # OVERFLOW is the one place these differ from round_binary in kind:
   # towards the sign it is the infinity, away from it the largest finite
-  assert round_f32(1.0e39, mode: Up) == inf
-  assert round_f32(1.0e39, mode: TowardZero) == 3.4028234663852886e38
-  assert round_f32(1.0e39, mode: Down) == 3.4028234663852886e38
-  assert round_f32(-1.0e39, mode: Down) == -inf
-  assert round_f32(-1.0e39, mode: TowardZero) == -3.4028234663852886e38
-  assert round_f32(-1.0e39, mode: Up) == -3.4028234663852886e38
+  assert round_f32(1.0e39, mode = Up) == inf
+  assert round_f32(1.0e39, mode = TowardZero) == 3.4028234663852886e38
+  assert round_f32(1.0e39, mode = Down) == 3.4028234663852886e38
+  assert round_f32(-1.0e39, mode = Down) == -inf
+  assert round_f32(-1.0e39, mode = TowardZero) == -3.4028234663852886e38
+  assert round_f32(-1.0e39, mode = Up) == -3.4028234663852886e38
   # the non-finite values pass through, as they do for round_binary
-  assert round_f32(inf, mode: TowardZero) == inf
-  assert round_f32(-inf, mode: Up) == -inf
-  let nan = round_f32(0.0 / 0.0, mode: Down)
+  assert round_f32(inf, mode = TowardZero) == inf
+  assert round_f32(-inf, mode = Up) == -inf
+  let nan = round_f32(0.0 / 0.0, mode = Down)
   assert nan != nan
-  assert round_f32(0.0, mode: Up) == 0.0
-  assert 1.0 / round_f32(-0.0, mode: Up) == -inf
+  assert round_f32(0.0, mode = Up) == 0.0
+  assert 1.0 / round_f32(-0.0, mode = Up) == -inf
 }
 
 test "ties away from zero move a tie up in magnitude and leave everything else to round_binary" {
@@ -1392,34 +1392,34 @@ test "ties away from zero move a tie up in magnitude and leave everything else t
   # 1 (even) and 1 + 2^-10 (odd): the two rules disagree, in both signs
   let tie = 1.0 + 1.0 / 2048.0
   assert round_tf32(tie) == 1.0
-  assert round_tf32(tie, mode: NearestAway) == 1.0 + 1.0 / 1024.0
+  assert round_tf32(tie, mode = NearestAway) == 1.0 + 1.0 / 1024.0
   assert round_tf32(-tie) == -1.0
-  assert round_tf32(-tie, mode: NearestAway) == -(1.0 + 1.0 / 1024.0)
+  assert round_tf32(-tie, mode = NearestAway) == -(1.0 + 1.0 / 1024.0)
   # a tie whose lower neighbour is ODD goes up under both rules
   let odd_tie = 1.0 + 3.0 / 2048.0
   assert round_tf32(odd_tie) == 1.0 + 1.0 / 512.0
-  assert round_tf32(odd_tie, mode: NearestAway) == 1.0 + 1.0 / 512.0
+  assert round_tf32(odd_tie, mode = NearestAway) == 1.0 + 1.0 / 512.0
   # off a tie the two agree, on either side of it
-  assert round_tf32(tie + 1.0 / 1048576.0, mode: NearestAway) == round_tf32(tie + 1.0 / 1048576.0)
-  assert round_tf32(tie - 1.0 / 1048576.0, mode: NearestAway) == 1.0
+  assert round_tf32(tie + 1.0 / 1048576.0, mode = NearestAway) == round_tf32(tie + 1.0 / 1048576.0)
+  assert round_tf32(tie - 1.0 / 1048576.0, mode = NearestAway) == 1.0
   # the general function, at bfloat16's eight bits: 1 + 2^-8 is a tie there
-  assert round_binary(1.0 + 1.0 / 256.0, 8, -126, 127, mode: NearestAway) == 1.0 + 1.0 / 128.0
+  assert round_binary(1.0 + 1.0 / 256.0, 8, -126, 127, mode = NearestAway) == 1.0 + 1.0 / 128.0
   assert round_binary(1.0 + 1.0 / 256.0, 8, -126, 127) == 1.0
   # a tie on the subnormal grid: tf32's quantum below 2^-126 is 2^-136, and
   # half of it rounds to it under ties-away and to zero under ties-to-even
   let q = 1.401298464324817e-45 * 8192.0
-  assert round_tf32(q / 2.0, mode: NearestAway) == q
+  assert round_tf32(q / 2.0, mode = NearestAway) == q
   assert round_tf32(q / 2.0) == 0.0
   # the largest binary32 value is past tf32's last midpoint, so it
   # overflows under both rules
-  assert round_tf32(3.4028234663852886e38, mode: NearestAway) == inf
+  assert round_tf32(3.4028234663852886e38, mode = NearestAway) == inf
   assert round_tf32(3.4028234663852886e38) == inf
   # the non-finite values and the zeros pass through
-  assert round_tf32(inf, mode: NearestAway) == inf
-  assert round_tf32(-inf, mode: NearestAway) == -inf
-  let nan = round_tf32(0.0 / 0.0, mode: NearestAway)
+  assert round_tf32(inf, mode = NearestAway) == inf
+  assert round_tf32(-inf, mode = NearestAway) == -inf
+  let nan = round_tf32(0.0 / 0.0, mode = NearestAway)
   assert nan != nan
-  assert 1.0 / round_tf32(-0.0, mode: NearestAway) == -inf
+  assert 1.0 / round_tf32(-0.0, mode = NearestAway) == -inf
 }
 
 test "the trait operations are the format's, with the theorem's rounding" {

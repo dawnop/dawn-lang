@@ -510,9 +510,9 @@ fn load_chosen_std_with(
   let (idx_text, idx_from_dir) = match index {
     Ok(pair) -> pair
     Err(m) -> return Err(StdLoadError {
-      origin: StdEmbedded,
-      declared: Some(VERSION),
-      why: StdFileMissing("modules.txt", m)
+      origin = StdEmbedded,
+      declared = Some(VERSION),
+      why = StdFileMissing("modules.txt", m)
     })
   }
   let origin = if idx_from_dir { StdFromDir(dir) } else { StdEmbedded }
@@ -523,7 +523,7 @@ fn load_chosen_std_with(
   match declared {
     Some(v) ->
       if v != VERSION {
-        return Err(StdLoadError { origin: origin, declared: declared, why: StdVersionSkew })
+        return Err(StdLoadError { origin = origin, declared = declared, why = StdVersionSkew })
       }
     None -> ()
   }
@@ -540,7 +540,7 @@ fn load_chosen_std_with(
     }
   }
   if len(missing) > 0 {
-    return Err(StdLoadError { origin: origin, declared: declared, why: StdModulesMissing(missing) })
+    return Err(StdLoadError { origin = origin, declared = declared, why = StdModulesMissing(missing) })
   }
   # Which modules this load keeps. Everything unless the embedded copy was
   # asked to prune for a program: then the base modules and the program's
@@ -612,7 +612,7 @@ fn load_chosen_std_with(
     }
     if len(pdiags) > 0 {
       return Err(StdLoadError {
-        origin: origin, declared: declared, why: StdModuleParse(mod_path, pdiags[0].msg)
+        origin = origin, declared = declared, why = StdModuleParse(mod_path, pdiags[0].msg)
       })
     }
     impls_before = map.insert(impls_before, mod_path, impls)
@@ -622,28 +622,28 @@ fn load_chosen_std_with(
     # for is std by construction, whatever any of them is called
     cx = Cx {
       ..cx,
-      is_std_module: true,
-      std_trusted: trusted,
-      line_starts: lexer.line_starts_of(text),
-      identities: interned,
-      impl_table: impls
+      is_std_module = true,
+      std_trusted = trusted,
+      line_starts = lexer.line_starts_of(text),
+      identities = interned,
+      impl_table = impls
     }
     # no std_fns here: std cannot implicitly import itself
     let (cx1, tm) = check_module(cx, m, exports)
     if len(cx1.diags) > 0 {
       return Err(StdLoadError {
-        origin: origin, declared: declared, why: StdModuleCheck(mod_path, cx1.diags[0].msg)
+        origin = origin, declared = declared, why = StdModuleCheck(mod_path, cx1.diags[0].msg)
       })
     }
     # std folds with no host FFI: it has no `use java` at all, and ct_default()
     # is where that stops being a convention
-    let scope = ConstScope { path: mod_path, imported: cx1.imported_names,
-      renames: cx1.import_renames }
+    let scope = ConstScope { path = mod_path, imported = cx1.imported_names,
+      renames = cx1.import_renames }
     let ct = eval_comptime_in(tm, ct_world, scope, fn_decls, by_owner, impl_fns, set.empty(),
       cx1.adts, cx1.traits, cx1.impl_table, mod_path, ct_default())
     if len(ct.diags) > 0 {
       return Err(StdLoadError {
-        origin: origin, declared: declared, why: StdModuleEval(mod_path, ct.diags[0].msg)
+        origin = origin, declared = declared, why = StdModuleEval(mod_path, ct.diags[0].msg)
       })
     }
     let exp = exports_of(cx1, m, mod_path, mod_path)
@@ -691,25 +691,25 @@ fn load_chosen_std_with(
   var std_names: Set[String] = set.empty()
   for k in map.keys(fn_decls) { std_names = set.insert(std_names, k) }
   Ok(StdCtx {
-    exports: exports,
-    std_fns: std_fns,
-    moved: moved,
-    fn_decls: fn_decls,
-    by_owner: by_owner,
-    impl_fns: impl_fns,
-    std_names: std_names,
-    adts: adts,
-    impls: impls,
-    identities: interned,
-    mods: mods,
-    srcs: srcs,
-    dir: match origin {
+    exports = exports,
+    std_fns = std_fns,
+    moved = moved,
+    fn_decls = fn_decls,
+    by_owner = by_owner,
+    impl_fns = impl_fns,
+    std_names = std_names,
+    adts = adts,
+    impls = impls,
+    identities = interned,
+    mods = mods,
+    srcs = srcs,
+    dir = match origin {
       StdFromDir(d) -> Some(canon_identity(d))
       StdEmbedded -> None
     },
-    dir_modules: dir_modules,
-    impls_before: impls_before,
-    ct_world: ct_world
+    dir_modules = dir_modules,
+    impls_before = impls_before,
+    ct_world = ct_world
   })
 }
 
@@ -1199,7 +1199,7 @@ test "float rendering and parsing fold through std/fmt, not the host" {
     var cx = cx_new(None, None)
     # `parse_int` is a prelude function (K19), so the bare name needs the
     # prelude the analyzer hands every user module
-    cx = Cx { ..cx, identities: std.identities, impl_table: std.impls, std_fns: std.std_fns }
+    cx = Cx { ..cx, identities = std.identities, impl_table = std.impls, std_fns = std.std_fns }
     let (cx1, tm) = check_module(cx, m, std.exports)
     assert len(cx1.diags) == 0
     let ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns,
@@ -1455,7 +1455,7 @@ fn upper_of_hello(std: StdCtx) -> Option[CValue] !io = {
   let (m, pdiags) = parser.parse_module(src)
   if len(pdiags) > 0 { panic("the probe does not parse: ${pdiags[0].msg}") }
   var cx = cx_new(None, None)
-  cx = Cx { ..cx, identities: std.identities, impl_table: std.impls }
+  cx = Cx { ..cx, identities = std.identities, impl_table = std.impls }
   let (cx1, tm) = check_module(cx, m, std.exports)
   if len(cx1.diags) > 0 { panic("the probe does not check: ${cx1.diags[0].msg}") }
   let ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns,
@@ -1615,7 +1615,7 @@ test "a private std function is outside std's public API, not a missing `pub` (#
       let (m, pdiags) = parser.parse_module(src)
       assert len(pdiags) == 0
       var cx = cx_new(None, None)
-      cx = Cx { ..cx, identities: std.identities, impl_table: std.impls, moved: std.moved }
+      cx = Cx { ..cx, identities = std.identities, impl_table = std.impls, moved = std.moved }
       let (cx1, _) = check_module(cx, m, std.exports)
       cx1.diags
     }

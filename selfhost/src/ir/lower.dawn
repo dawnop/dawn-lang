@@ -205,10 +205,10 @@ fn site_at(st: LSt, lo: Int, hi: Int, nlo: Int) -> CSite =
   if st.base < 0 || nlo == NO_NAME { CNoSite } else { CAt(lo - st.base, hi - st.base, nlo - st.base) }
 
 fn fresh_sym(st: LSt) -> (LSt, Int) =
-  (LSt { ..st, next_sym: st.next_sym + 1 }, st.next_sym)
+  (LSt { ..st, next_sym = st.next_sym + 1 }, st.next_sym)
 
 fn fresh_loop(st: LSt) -> (LSt, Int) =
-  (LSt { ..st, next_loop: st.next_loop + 1 }, st.next_loop)
+  (LSt { ..st, next_loop = st.next_loop + 1 }, st.next_loop)
 
 # ---- boxing ----
 
@@ -433,7 +433,7 @@ fn dyn_evidence(st: LSt, evid: List[TExpr]) -> (LSt, List[CExpr]) =
 ## mints an `XEvRead` and `ev_slot` answers it out of this parameter.
 fn fn_value_evs(st: LSt) -> (LSt, List[CParam]) = {
   let (st1, sym) = fresh_sym(st)
-  (st1, [CParam { sym: sym, ty: erased_ev_ty(), mode: COwned }])
+  (st1, [CParam { sym = sym, ty = erased_ev_ty(), mode = COwned }])
 }
 
 ## **The §2.5 guard, as an assertion.**
@@ -1434,14 +1434,14 @@ pub(pkg) fn subst_subject(
   }
   Sig {
     ..sg,
-    param_tys: ps,
-    ret: reduce_ty_effs_via_bindings(
+    param_tys = ps,
+    ret = reduce_ty_effs_via_bindings(
       reduce_via_bindings(subst(sg.ret, m, map.empty()), tr.id, subject, bindings),
       vid, tr.id, ebindings),
     # the row too: the impl method's declared labels are its evidence layout,
     # and this signature is what every devirtualised call spells (the checker
     # held the impl to exactly these labels)
-    eff: reduce_eff_via_bindings(sg.eff, vid, tr.id, ebindings)
+    eff = reduce_eff_via_bindings(sg.eff, vid, tr.id, ebindings)
   }
 }
 
@@ -1544,13 +1544,13 @@ fn dict_def(
   # dictionary, and without the reservation that would recurse forever
   var st1 = LSt {
     ..st,
-    dicts: st.dicts ++
+    dicts = st.dicts ++
       [CDictDef {
-        key: key,
-        trait_id: tid,
-        subject: subject,
-        nargs: nargs,
-        slots: []
+        key = key,
+        trait_id = tid,
+        subject = subject,
+        nargs = nargs,
+        slots = []
       }]
   }
   var slots: List[CDictSlot] = []
@@ -1563,12 +1563,12 @@ fn dict_def(
   var out: List[CDictDef] = []
   for d in st1.dicts {
     if d.key == key {
-      out = out ++ [CDictDef { ..d, slots: slots }]
+      out = out ++ [CDictDef { ..d, slots = slots }]
     } else {
       out = out ++ [d]
     }
   }
-  (LSt { ..st1, dicts: out }, key)
+  (LSt { ..st1, dicts = out }, key)
 }
 
 ## One slot: the impl's own method, the trait's default, or -- where there is
@@ -1740,7 +1740,7 @@ fn make_bridge(
     for gt in sg.param_tys {
       let (st2, sym) = fresh_sym(st1)
       st1 = st2
-      ps = ps ++ [CParam { sym: sym, ty: gt, mode: COwned }]
+      ps = ps ++ [CParam { sym = sym, ty = gt, mode = COwned }]
       args = args ++ [adapt_out(CLocal(sym, gt), gt, psig.param_tys[i])]
       i = i + 1
     }
@@ -1776,19 +1776,19 @@ fn make_bridge(
       let (eid, _) = l
       let (stv, esym) = fresh_sym(st1)
       st1 = stv
-      evps = evps ++ [CParam { sym: esym, ty: TyAdt(eid, []), mode: COwned }]
+      evps = evps ++ [CParam { sym = esym, ty = TyAdt(eid, []), mode = COwned }]
       evlocals = evlocals ++ [CLocal(esym, TyAdt(eid, []))]
     }
     for _v in eff_vars(sabi) {
       let (stv, esym) = fresh_sym(st1)
       st1 = stv
-      evps = evps ++ [CParam { sym: esym, ty: erased_ev_ty(), mode: COwned }]
+      evps = evps ++ [CParam { sym = esym, ty = erased_ev_ty(), mode = COwned }]
       evlocals = evlocals ++ [CLocal(esym, erased_ev_ty())]
     }
     for _a in eff_assocs(sabi) {
       let (stv, esym) = fresh_sym(st1)
       st1 = stv
-      evps = evps ++ [CParam { sym: esym, ty: erased_ev_ty(), mode: COwned }]
+      evps = evps ++ [CParam { sym = esym, ty = erased_ev_ty(), mode = COwned }]
       evlocals = evlocals ++ [CLocal(esym, erased_ev_ty())]
     }
     var ies: List[CExpr] = []
@@ -1798,20 +1798,20 @@ fn make_bridge(
     }
     let call = CCall(CImpl(iowner, tid, subject, method), args ++ ds ++ ies, psig.ret, CNoSite)
     let f = CFun {
-      name: name,
-      owner: st1.owner,
-      captures: [],
-      params: ps,
-      dicts: [CParam { sym: dsym, ty: TyAdt(-1, []), mode: COwned }],
-      evs: evps,
-      ret: sg.ret,
-      body: adapt_in(call, psig.ret, sg.ret),
-      is_test: false,
-      impl_of: None,
-      default_of: None,
-      origin: ""
+      name = name,
+      owner = st1.owner,
+      captures = [],
+      params = ps,
+      dicts = [CParam { sym = dsym, ty = TyAdt(-1, []), mode = COwned }],
+      evs = evps,
+      ret = sg.ret,
+      body = adapt_in(call, psig.ret, sg.ret),
+      is_test = false,
+      impl_of = None,
+      default_of = None,
+      origin = ""
     }
-    (LSt { ..st1, lifted: st1.lifted ++ [f] }, name)
+    (LSt { ..st1, lifted = st1.lifted ++ [f] }, name)
   }
 }
 
@@ -1940,7 +1940,7 @@ fn make_prim_slot(
   for gt in sg.param_tys {
     let (st2, sym) = fresh_sym(st1)
     st1 = st2
-    ps = ps ++ [CParam { sym: sym, ty: gt, mode: COwned }]
+    ps = ps ++ [CParam { sym = sym, ty = gt, mode = COwned }]
     # Per parameter, not `subject` for all of them: see `prim_param_ty`. For
     # Eq/Ord/Hash/Show every parameter *is* the subject, so this is the same
     # expression it always was.
@@ -1959,7 +1959,7 @@ fn make_prim_slot(
     }
     ai = ai + 1
   }
-  let (st4a, body0) = prim_relation(LSt { ..st1, dict_env: env }, tid, subject, args)
+  let (st4a, body0) = prim_relation(LSt { ..st1, dict_env = env }, tid, subject, args)
   # ...and the result crosses back out the same way. A scalar answer needs no
   # box, which is every relation but `Index`.
   let body = adapt_in(body0, prim_ret_ty(tid, subject), sg.ret)
@@ -1974,23 +1974,23 @@ fn make_prim_slot(
   for _a in eff_assocs(sig_abi_eff(sg)) {
     let (stv, esym) = fresh_sym(st4)
     st4 = stv
-    evps = evps ++ [CParam { sym: esym, ty: erased_ev_ty(), mode: COwned }]
+    evps = evps ++ [CParam { sym = esym, ty = erased_ev_ty(), mode = COwned }]
   }
   let f = CFun {
-    name: name,
-    owner: st4.owner,
-    captures: [],
-    params: ps,
-    dicts: [CParam { sym: dsym, ty: dict_ty(), mode: COwned }],
-    evs: evps,
-    ret: sg.ret,
-    body: body,
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    origin: ""
+    name = name,
+    owner = st4.owner,
+    captures = [],
+    params = ps,
+    dicts = [CParam { sym = dsym, ty = dict_ty(), mode = COwned }],
+    evs = evps,
+    ret = sg.ret,
+    body = body,
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    origin = ""
   }
-  (LSt { ..st4, lifted: st4.lifted ++ [f], dict_env: st.dict_env }, name)
+  (LSt { ..st4, lifted = st4.lifted ++ [f], dict_env = st.dict_env }, name)
 }
 
 # ---- structural equality (docs/semantics-closure-design.md 3) ----
@@ -2242,7 +2242,7 @@ fn struct_rel_fn(st: LSt, rel: Rel, t: Ty) -> (LSt, String) = {
   while k < rel.arity {
     let (stA, sym) = fresh_sym(st1)
     st1 = stA
-    ps = ps ++ [CParam { sym: sym, ty: t, mode: COwned }]
+    ps = ps ++ [CParam { sym = sym, ty = t, mode = COwned }]
     xs = xs ++ [CLocal(sym, t)]
     k = k + 1
   }
@@ -2255,37 +2255,37 @@ fn struct_rel_fn(st: LSt, rel: Rel, t: Ty) -> (LSt, String) = {
     let (gt, gty) = g
     let (stA, dsym) = fresh_sym(stD)
     stD = stA
-    dps = dps ++ [CParam { sym: dsym, ty: dict_ty(), mode: COwned }]
+    dps = dps ++ [CParam { sym = dsym, ty = dict_ty(), mode = COwned }]
     env = map.insert(env, dict_key(gt, gty), CLocal(dsym, dict_ty()))
   }
   # publish the name before building the body: a recursive type reaches this
   # same function from inside itself, and without the reservation that
   # recurses until the stack ends
   let stub = CFun {
-    name: name,
-    owner: stD.owner,
-    captures: [],
-    params: ps,
-    dicts: dps,
-    evs: [],
-    ret: rel.ret,
-    body: rel.unit_answer,
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    origin: ""
+    name = name,
+    owner = stD.owner,
+    captures = [],
+    params = ps,
+    dicts = dps,
+    evs = [],
+    ret = rel.ret,
+    body = rel.unit_answer,
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    origin = ""
   }
-  let st2 = LSt { ..stD, lifted: stD.lifted ++ [stub], dict_env: env }
+  let st2 = LSt { ..stD, lifted = stD.lifted ++ [stub], dict_env = env }
   let (st3, body) = rel_body(st2, rel, xs, t)
   var out: List[CFun] = []
   for f in st3.lifted {
     if f.name == name {
-      out = out ++ [CFun { ..f, body: body }]
+      out = out ++ [CFun { ..f, body = body }]
     } else {
       out = out ++ [f]
     }
   }
-  (LSt { ..st3, lifted: out, dict_env: st.dict_env }, name)
+  (LSt { ..st3, lifted = out, dict_env = st.dict_env }, name)
 }
 
 ## One arm of a composite type as the relations see it: the constructor it is
@@ -2304,7 +2304,7 @@ fn components(st: LSt, t: Ty) -> List[Arm] =
         parts = parts ++ [(i, et)]
         i = i + 1
       }
-      [Arm { ci: -1, parts: parts }]
+      [Arm { ci = -1, parts = parts }]
     }
     TyAdt(aid, _) -> {
       var arms: List[Arm] = []
@@ -2316,7 +2316,7 @@ fn components(st: LSt, t: Ty) -> List[Arm] =
           parts = parts ++ [(idx, concrete_field_ty(st, t, aid, ci, idx))]
           idx = idx + 1
         }
-        arms = arms ++ [Arm { ci: ci, parts: parts }]
+        arms = arms ++ [Arm { ci = ci, parts = parts }]
         ci = ci + 1
       }
       arms
@@ -2395,21 +2395,21 @@ fn rel_chain(
 
 fn eq_rel() -> Rel =
   Rel {
-    tid: EQ_ID,
-    method: "eq",
-    arity: 2,
-    ret: TyBool,
-    unit_answer: CBool(true),
-    is_scalar: is_eq_scalar,
+    tid = EQ_ID,
+    method = "eq",
+    arity = 2,
+    ret = TyBool,
+    unit_answer = CBool(true),
+    is_scalar = is_eq_scalar,
     # From here on `CBinary(CEq, ..)` means this and nothing else.
-    scalar_op: eq_scalar,
-    peels_opaque: true,
-    ground_is_final: true,
-    fallback: foreign_eq,
-    fold_arm: eq_fold,
-    skips_bare: false,
+    scalar_op = eq_scalar,
+    peels_opaque = true,
+    ground_is_final = true,
+    fallback = foreign_eq,
+    fold_arm = eq_fold,
+    skips_bare = false,
     # several arms: the last `else` is the honest `false`
-    union: (st, xs, t, chain) => chain(st, CBool(false))
+    union = (st, xs, t, chain) => chain(st, CBool(false))
   }
 
 fn eq_scalar(xs: List[CExpr], t: Ty) -> CExpr = CBinary(CEq, xs[0], xs[1], TyBool)
@@ -2477,20 +2477,20 @@ fn eq_fold(
 
 fn cmp_rel() -> Rel =
   Rel {
-    tid: ORD_ID,
-    method: "cmp",
-    arity: 2,
-    ret: TyInt,
-    unit_answer: CInt(0),
-    is_scalar: is_ord_scalar,
-    scalar_op: cmp_scalar,
-    peels_opaque: true,
-    ground_is_final: true,
-    fallback: no_ordering,
+    tid = ORD_ID,
+    method = "cmp",
+    arity = 2,
+    ret = TyInt,
+    unit_answer = CInt(0),
+    is_scalar = is_ord_scalar,
+    scalar_op = cmp_scalar,
+    peels_opaque = true,
+    ground_is_final = true,
+    fallback = no_ordering,
     # one arm or one of several: nothing to disagree about but the fields
-    fold_arm: (st, xs, t, ci, parts, init) => lexicographic(st, parts, 0),
-    skips_bare: false,
-    union: cmp_union
+    fold_arm = (st, xs, t, ci, parts, init) => lexicographic(st, parts, 0),
+    skips_bare = false,
+    union = cmp_union
   }
 
 fn cmp_scalar(xs: List[CExpr], t: Ty) -> CExpr = CIntrinsic("cmp", xs, TyInt, CNoSite)
@@ -2579,21 +2579,21 @@ fn lexicographic(st: LSt, parts: List[CExpr], i: Int) -> (LSt, CExpr) = {
 
 fn hash_rel() -> Rel =
   Rel {
-    tid: HASH_ID,
-    method: "hash",
-    arity: 1,
-    ret: TyInt,
+    tid = HASH_ID,
+    method = "hash",
+    arity = 1,
+    ret = TyInt,
     # Unit's is the structural seed (spec 3.5): a value with no parts folds
     # nothing into it.
-    unit_answer: CInt(1),
+    unit_answer = CInt(1),
     # Float is deliberately not among the scalars (types.hash_scalars): no
     # hash can agree with an equality where -0.0 == 0.0.
-    is_scalar: is_hash_scalar,
-    scalar_op: hash_scalar,
-    peels_opaque: true,
-    ground_is_final: true,
-    fallback: foreign_hash,
-    fold_arm: hash_fold,
+    is_scalar = is_hash_scalar,
+    scalar_op = hash_scalar,
+    peels_opaque = true,
+    ground_is_final = true,
+    fallback = foreign_hash,
+    fold_arm = hash_fold,
     # A constructor with no fields has nothing to fold, so its answer *is* the
     # seed -- which is what the chain's final `else` says. Only the ones with
     # fields need an arm, and a union of bare tags needs no test at all: `Ty`
@@ -2601,8 +2601,8 @@ fn hash_rel() -> Rel =
     # thirteen times which one they are to arrive at the same expression is
     # the sort of thing a structural expansion writes if nobody looks at what
     # it wrote.
-    skips_bare: true,
-    union: hash_union
+    skips_bare = true,
+    union = hash_union
   }
 
 fn hash_scalar(xs: List[CExpr], t: Ty) -> CExpr = CIntrinsic("hash", xs, TyInt, CNoSite)
@@ -2691,21 +2691,21 @@ fn cat(a: CExpr, b: CExpr) -> CExpr = CBinary(CConcat, a, b, TyString)
 
 fn show_rel() -> Rel =
   Rel {
-    tid: SHOW_ID,
-    method: "show",
-    arity: 1,
-    ret: TyString,
+    tid = SHOW_ID,
+    method = "show",
+    arity = 1,
+    ret = TyString,
     # the scalar no backend renders: the spelling of its one value
-    unit_answer: CStr("()"),
-    is_scalar: is_show_scalar,
-    scalar_op: show_scalar,
-    peels_opaque: false,
-    ground_is_final: false,
-    fallback: show_erased,
-    fold_arm: (st, xs, t, ci, parts, init) => (st, render_arm(st, t, ci, parts)),
-    skips_bare: false,
+    unit_answer = CStr("()"),
+    is_scalar = is_show_scalar,
+    scalar_op = show_scalar,
+    peels_opaque = false,
+    ground_is_final = false,
+    fallback = show_erased,
+    fold_arm = (st, xs, t, ci, parts, init) => (st, render_arm(st, t, ci, parts)),
+    skips_bare = false,
     # the last `else` is unreachable-but-honest: `x` is one of the arms
-    union: (st, xs, t, chain) => chain(st, CStr(""))
+    union = (st, xs, t, chain) => chain(st, CStr(""))
   }
 
 ## The show scalars (types.dawn's `show_scalars`) past Unit, each with its own
@@ -2981,7 +2981,7 @@ fn enter_wit_env(st: LSt, w: WitRef) -> (LSt, Map[String, CExpr]) =
         }
         i = i + 1
       }
-      (LSt { ..st1, dict_env: env }, st.dict_env)
+      (LSt { ..st1, dict_env = env }, st.dict_env)
     }
     _ -> (st, st.dict_env)
   }
@@ -3039,7 +3039,7 @@ fn lower_trait_call(
     # site -- no dictionary for the whole is ever built.
     let (st3, saved) = enter_wit_env(st1, ws[0])
     let (st4, e) = prim_relation(st3, tid, subject_of(ws[0]), vs)
-    return (LSt { ..st4, dict_env: saved }, e)
+    return (LSt { ..st4, dict_env = saved }, e)
   }
   match ws[0] {
     WForward(sym) -> {
@@ -3110,7 +3110,7 @@ fn lower_trait_call(
 # ---- lambda lifting ----
 
 fn fresh_lam(st: LSt) -> (LSt, String) =
-  (LSt { ..st, next_lam: st.next_lam + 1 }, "lambda$${to_string(st.next_lam)}")
+  (LSt { ..st, next_lam = st.next_lam + 1 }, "lambda$${to_string(st.next_lam)}")
 
 fn params_of_fn_ty(t: Ty) -> List[Ty] =
   match t {
@@ -3202,7 +3202,7 @@ fn self_tail_jump(st: LSt, args: List[TExpr]) -> (LSt, CExpr) = {
     stmts = stmts ++ [CSAssign(sc.params[i], CLocal(t, ty))]
     i = i + 1
   }
-  (LSt { ..st2, self_tail: true },
+  (LSt { ..st2, self_tail = true },
     CBlock(stmts, Some(CContinue(sc.loop_id)), TyNever))
 }
 
@@ -3226,7 +3226,7 @@ fn lift_lambda(
   var cap_inner: List[CExpr] = []
   for c in captures {
     let ct = sym_ty(st1, c, TyError)
-    caps = caps ++ [CParam { sym: c, ty: ct, mode: COwned }]
+    caps = caps ++ [CParam { sym = c, ty = ct, mode = COwned }]
     cap_args = cap_args ++ [
       match self_value(st1, c) {
         Some(v) -> v
@@ -3241,7 +3241,7 @@ fn lift_lambda(
   var i = 0
   for p in params {
     let pt = if i < len(pts) { pts[i] } else { sym_ty(st1, p, TyError) }
-    ps = ps ++ [CParam { sym: p, ty: pt, mode: COwned }]
+    ps = ps ++ [CParam { sym = p, ty = pt, mode = COwned }]
     ptys = ptys ++ [pt]
     i = i + 1
   }
@@ -3249,14 +3249,14 @@ fn lift_lambda(
   let sc: Option[SelfCtx] =
     match self_sym {
       Some(sy) -> Some(SelfCtx {
-        sym: Some(sy),
-        owner: st1b.owner,
-        name: name,
-        caps: cap_inner,
-        params: params,
-        ptys: ptys,
-        fty: ty,
-        loop_id: lid
+        sym = Some(sy),
+        owner = st1b.owner,
+        name = name,
+        caps = cap_inner,
+        params = params,
+        ptys = ptys,
+        fty = ty,
+        loop_id = lid
       })
       None -> None
     }
@@ -3271,37 +3271,37 @@ fn lift_lambda(
     }
   let (st2, cbody0) = lower_expr(LSt {
     ..st1c,
-    ret_ty: ret_of_fn_ty(ty),
-    self_ctx: sc,
-    tail: true,
-    self_tail: false,
-    ev_env: [],
-    ev_own: own
+    ret_ty = ret_of_fn_ty(ty),
+    self_ctx = sc,
+    tail = true,
+    self_tail = false,
+    ev_env = [],
+    ev_own = own
   }, body)
   let cbody1 = adapt_in(cbody0, tex_ty(body), ret_of_fn_ty(ty))
   let cbody = wrap_self_loop(st2.self_tail, lid, cbody1, ret_of_fn_ty(ty))
   let f = CFun {
-    name: name,
-    owner: st2.owner,
-    captures: caps,
-    params: ps,
-    dicts: [],
-    evs: evps,
-    ret: ret_of_fn_ty(ty),
-    body: cbody,
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    origin: st2.origin
+    name = name,
+    owner = st2.owner,
+    captures = caps,
+    params = ps,
+    dicts = [],
+    evs = evps,
+    ret = ret_of_fn_ty(ty),
+    body = cbody,
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    origin = st2.origin
   }
   (LSt {
     ..st2,
-    lifted: st2.lifted ++ [f],
-    self_ctx: st.self_ctx,
-    tail: st.tail,
-    self_tail: st.self_tail,
-    ev_env: st.ev_env,
-    ev_own: st.ev_own
+    lifted = st2.lifted ++ [f],
+    self_ctx = st.self_ctx,
+    tail = st.tail,
+    self_tail = st.self_tail,
+    ev_env = st.ev_env,
+    ev_own = st.ev_own
   }, CClosure(name, st2.owner, cap_args, ty))
 }
 
@@ -3322,27 +3322,27 @@ fn lift_ctor_value(st: LSt, adt: Int, ci: Int, ty: Ty) -> (LSt, CExpr) = {
   for pt in pts {
     let (st3, sym) = fresh_sym(st2)
     st2 = st3
-    ps = ps ++ [CParam { sym: sym, ty: pt, mode: COwned }]
+    ps = ps ++ [CParam { sym = sym, ty = pt, mode = COwned }]
     let declared = declared_field_ty(st2, adt, ci, i)
     args = args ++ [adapt_in(CLocal(sym, pt), pt, declared)]
     i = i + 1
   }
   let (st5, evps) = fn_value_evs(st2)
   let f = CFun {
-    name: lam,
-    owner: st5.owner,
-    captures: [],
-    params: ps,
-    dicts: [],
-    evs: evps,
-    ret: ret,
-    body: CCtor(adt, ci, args, ret),
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    origin: ""
+    name = lam,
+    owner = st5.owner,
+    captures = [],
+    params = ps,
+    dicts = [],
+    evs = evps,
+    ret = ret,
+    body = CCtor(adt, ci, args, ret),
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    origin = ""
   }
-  (LSt { ..st5, lifted: st5.lifted ++ [f] }, CClosure(lam, st5.owner, [], ty))
+  (LSt { ..st5, lifted = st5.lifted ++ [f] }, CClosure(lam, st5.owner, [], ty))
 }
 
 ## A top-level function used as a value becomes a closure over a wrapper
@@ -3374,7 +3374,7 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
   for pt in pts {
     let (st3, sym) = fresh_sym(st2)
     st2 = st3
-    ps = ps ++ [CParam { sym: sym, ty: pt, mode: COwned }]
+    ps = ps ++ [CParam { sym = sym, ty = pt, mode = COwned }]
     let d = if i < len(decl_pts) { decl_pts[i] } else { pt }
     args = args ++ [adapt_in(CLocal(sym, pt), pt, d)]
     i = i + 1
@@ -3416,20 +3416,20 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
     None -> ret
   }
   let f = CFun {
-    name: lam,
-    owner: st5.owner,
-    captures: [],
-    params: ps,
-    dicts: [],
-    evs: evps,
-    ret: ret,
-    body: adapt_out(CCall(CDirect(owner, name), args ++ inner_evs, decl_ret, CNoSite), decl_ret, ret),
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    origin: ""
+    name = lam,
+    owner = st5.owner,
+    captures = [],
+    params = ps,
+    dicts = [],
+    evs = evps,
+    ret = ret,
+    body = adapt_out(CCall(CDirect(owner, name), args ++ inner_evs, decl_ret, CNoSite), decl_ret, ret),
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    origin = ""
   }
-  (LSt { ..st5, lifted: st5.lifted ++ [f] }, CClosure(lam, st5.owner, [], ty))
+  (LSt { ..st5, lifted = st5.lifted ++ [f] }, CClosure(lam, st5.owner, [], ty))
 }
 
 ## A builtin used as a value: a wrapper whose body is the call `name(p1, ..)`,
@@ -3467,7 +3467,7 @@ fn lift_builtin_value(st: LSt, name: String, ty: Ty) -> (LSt, CExpr) = {
   for pt in params_of_fn_ty(ty) {
     let (st3, sym) = fresh_sym(st2)
     st2 = st3
-    ps = ps ++ [CParam { sym: sym, ty: pt, mode: COwned }]
+    ps = ps ++ [CParam { sym = sym, ty = pt, mode = COwned }]
     args = args ++ [XLocal(sym, "", 0, 0, pt)]
   }
   let (st4, evps) = fn_value_evs(st2)
@@ -3484,36 +3484,36 @@ fn lift_builtin_value(st: LSt, name: String, ty: Ty) -> (LSt, CExpr) = {
   let no_wits: List[WitRef] = []
   let (st5, body) = lower_expr(LSt {
     ..st4,
-    ret_ty: ret,
-    self_ctx: None,
-    tail: false,
-    self_tail: false,
-    ev_env: [],
-    ev_own: own
+    ret_ty = ret,
+    self_ctx = None,
+    tail = false,
+    self_tail = false,
+    ev_env = [],
+    ev_own = own
   }, XCallBuiltin(name, args, no_wits, evid, 0, 0, NO_NAME, ret))
   let f = CFun {
-    name: lam,
-    owner: st5.owner,
-    captures: [],
-    params: ps,
-    dicts: [],
-    evs: evps,
-    ret: ret,
-    body: body,
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    origin: ""
+    name = lam,
+    owner = st5.owner,
+    captures = [],
+    params = ps,
+    dicts = [],
+    evs = evps,
+    ret = ret,
+    body = body,
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    origin = ""
   }
   (LSt {
     ..st5,
-    lifted: st5.lifted ++ [f],
-    ret_ty: st.ret_ty,
-    self_ctx: st.self_ctx,
-    tail: st.tail,
-    self_tail: st.self_tail,
-    ev_env: st.ev_env,
-    ev_own: st.ev_own
+    lifted = st5.lifted ++ [f],
+    ret_ty = st.ret_ty,
+    self_ctx = st.self_ctx,
+    tail = st.tail,
+    self_tail = st.self_tail,
+    ev_env = st.ev_env,
+    ev_own = st.ev_own
   }, CClosure(lam, st5.owner, [], ty))
 }
 
@@ -3554,14 +3554,14 @@ test "a builtin taken as a value lowers as the call it wraps" {
     }
   }
   let initial = LSt {
-    next_sym: 0, next_loop: 0, owner: "app", cur_loop: -1,
-    ret_ty: TyUnit, syms: map.empty(), lifted: [], next_lam: 0,
-    traits: prelude_traits(), impls: map.empty(), adts: prelude_adts(),
-    prog_fns: fns, intrs: it, dicts: [], dict_env: map.empty(),
-    self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None,
-    base: -1,
-    origin: "",
-    ct_inline: false
+    next_sym = 0, next_loop = 0, owner = "app", cur_loop = -1,
+    ret_ty = TyUnit, syms = map.empty(), lifted = [], next_lam = 0,
+    traits = prelude_traits(), impls = map.empty(), adts = prelude_adts(),
+    prog_fns = fns, intrs = it, dicts = [], dict_env = map.empty(),
+    self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
+    base = -1,
+    origin = "",
+    ct_inline = false
   }
   for n in lowered_intrinsics() {
     let sg = map.get(it, n).expect("a lowered name is an intrinsic").sig
@@ -3606,7 +3606,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
   # tail position is consumed here and re-established only by the arms that
   # propagate it, so every other descent is non-tail by construction
   let tl = st0.tail
-  let st = LSt { ..st0, tail: false }
+  let st = LSt { ..st0, tail = false }
   match e {
     XInt(v, _, _) -> (st, CInt(v))
     # `Char` is opaque over Int, so a character literal is its code point --
@@ -3702,10 +3702,10 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       }
     XIf(cond, thn, els, _, _, ty) -> {
       let (st1, c) = lower_expr(st, cond)
-      let (st2, t) = lower_expr(LSt { ..st1, tail: tl }, thn)
+      let (st2, t) = lower_expr(LSt { ..st1, tail = tl }, thn)
       match els {
         Some(ee) -> {
-          let (st3, f) = lower_expr(LSt { ..st2, tail: tl }, ee)
+          let (st3, f) = lower_expr(LSt { ..st2, tail = tl }, ee)
           (st3, CIf(c, t, Some(f), ty))
         }
         None -> (st2, CIf(c, t, None, ty))
@@ -3715,7 +3715,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       let (st1, ss) = lower_stmts(st, stmts)
       match tail {
         Some(t) -> {
-          let (st2, tv) = lower_expr(LSt { ..st1, tail: tl }, t)
+          let (st2, tv) = lower_expr(LSt { ..st1, tail = tl }, t)
           match t {
             XJava(_, _, _, _, tail_ty) ->
               if ty == TyUnit && tail_ty != TyUnit {
@@ -3732,7 +3732,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     XReturn(v, _, _) ->
       match v {
         Some(inner) -> {
-          let (st1, cv) = lower_expr(LSt { ..st, tail: true }, inner)
+          let (st1, cv) = lower_expr(LSt { ..st, tail = true }, inner)
           if diverges(cv) { return (st1, cv) }
           (st1, CReturn(Some(adapt_in(cv, tex_ty(inner), st1.ret_ty))))
         }
@@ -3997,7 +3997,7 @@ fn lower_java(st: LSt, call: TJavaCall, ty: Ty, site: CSite) -> (LSt, CExpr) = {
     sevs = sevs ++ [(idx, v)]
   }
   (st1, CForeign(CJava {
-    call: call, target: tgt, args: args, arg_tys: tys, sam_evs: sevs
+    call = call, target = tgt, args = args, arg_tys = tys, sam_evs = sevs
   }, ty, site))
 }
 
@@ -4260,10 +4260,10 @@ fn lower_ctor(
     let declared = declared_field_ty(st1, adt, ci, fi)
     match s {
       Some(i) -> {
-        fields = fields ++ [CUpdField { ty: declared,
-          value: Some(adapt_in(ws[i], tex_ty(written[i]), declared)) }]
+        fields = fields ++ [CUpdField { ty = declared,
+          value = Some(adapt_in(ws[i], tex_ty(written[i]), declared)) }]
       }
-      None -> { fields = fields ++ [CUpdField { ty: declared, value: None }] }
+      None -> { fields = fields ++ [CUpdField { ty = declared, value = None }] }
     }
     fi = fi + 1
   }
@@ -4315,14 +4315,14 @@ fn slots_monotonic(slots: List[Option[Int]]) -> Bool = {
 
 test "dictionary constructors and slots keep their argument shape in either request order" {
   let initial = LSt {
-    next_sym: 0, next_loop: 0, owner: "dictionary_shapes", cur_loop: -1,
-    ret_ty: TyUnit, syms: map.empty(), lifted: [], next_lam: 0,
-    traits: prelude_traits(), impls: map.empty(), adts: prelude_adts(),
-    prog_fns: map.empty(), intrs: intrinsics(), dicts: [], dict_env: map.empty(),
-    self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None,
-    base: -1,
-    origin: "",
-    ct_inline: false
+    next_sym = 0, next_loop = 0, owner = "dictionary_shapes", cur_loop = -1,
+    ret_ty = TyUnit, syms = map.empty(), lifted = [], next_lam = 0,
+    traits = prelude_traits(), impls = map.empty(), adts = prelude_adts(),
+    prog_fns = map.empty(), intrs = intrinsics(), dicts = [], dict_env = map.empty(),
+    self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
+    base = -1,
+    origin = "",
+    ct_inline = false
   }
   for bridge in [false, true] {
     # Exercise both slot producers directly. The explicit implementation is
@@ -4331,8 +4331,8 @@ test "dictionary constructors and slots keep their argument shape in either requ
     if bridge {
       for imp in prelude_impls() {
         if imp.trait_id == EQ_ID && imp.subject == TyInt {
-          start = LSt { ..start, impls: insert_impl(start.impls,
-            ImplI { ..imp, provided: ["eq"], owner: Some("implementation") }) }
+          start = LSt { ..start, impls = insert_impl(start.impls,
+            ImplI { ..imp, provided = ["eq"], owner = Some("implementation") }) }
         }
       }
     }
@@ -4376,15 +4376,15 @@ test "constructor arguments evaluate in written order" {
   # out backwards.
   var order: List[String] = []
   let pm = CParam {
-    ty: {
+    ty = {
       order = order ++ ["ty"]
       TyInt
     },
-    sym: {
+    sym = {
       order = order ++ ["sym"]
       7
     },
-    mode: COwned
+    mode = COwned
   }
   assert order == ["ty", "sym"]
   assert pm.sym == 7 && pm.ty == TyInt
@@ -4392,19 +4392,19 @@ test "constructor arguments evaluate in written order" {
 
 test "a tuple literal scrutinee is matched by component unless an arm needs the tuple" {
   let initial = LSt {
-    next_sym: 100, next_loop: 0, owner: "tuple_scrutinee", cur_loop: -1,
-    ret_ty: TyUnit, syms: map.empty(), lifted: [], next_lam: 0,
-    traits: prelude_traits(), impls: map.empty(), adts: prelude_adts(),
-    prog_fns: map.empty(), intrs: intrinsics(), dicts: [], dict_env: map.empty(),
-    self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None,
-    base: -1,
-    origin: "",
-    ct_inline: false
+    next_sym = 100, next_loop = 0, owner = "tuple_scrutinee", cur_loop = -1,
+    ret_ty = TyUnit, syms = map.empty(), lifted = [], next_lam = 0,
+    traits = prelude_traits(), impls = map.empty(), adts = prelude_adts(),
+    prog_fns = map.empty(), intrs = intrinsics(), dicts = [], dict_env = map.empty(),
+    self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
+    base = -1,
+    origin = "",
+    ct_inline = false
   }
   let tt = TyTuple([TyInt, TyInt])
   let lit = XTupleLit([XInt(1, 0, 0), XInt(2, 0, 0)], 0, 0, tt)
   let body = XInt(0, 0, 0)
-  let arm = (p: TPat) => TArm { pat: p, guard: None, body: body }
+  let arm = (p: TPat) => TArm { pat = p, guard = None, body = body }
   let pair = TPTuple([TPBind(10, "a"), TPLit(LInt(2))])
 
   # every arm a tuple pattern or a wildcard: two component locals, in the
@@ -4543,7 +4543,7 @@ fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty, tl: Bool) -> (LS
     let (st6, setup, cond, binds) =
       if split { tuple_arm_test(st5, comps, cts, arm.pat) } else { pat_test(st5, subj, arm.pat, sty) }
     st5 = st6
-    let (st7, armb) = lower_expr(LSt { ..st5, tail: tl }, arm.body)
+    let (st7, armb) = lower_expr(LSt { ..st5, tail = tl }, arm.body)
     st5 = st7
     let taken =
       if produces {
@@ -4859,7 +4859,7 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
       # the condition is evaluated outside the loop's own scope but inside
       # it at runtime, so it is lowered with cur_loop already set: a
       # `break` in a condition is legal and belongs to this loop
-      let inner_st = LSt { ..st1, cur_loop: lid }
+      let inner_st = LSt { ..st1, cur_loop = lid }
       let (st2, c) = lower_expr(inner_st, cond)
       let (st3, b) = lower_expr(st2, body)
       # the test becomes an explicit break, so the loop node itself is
@@ -4867,7 +4867,7 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
       let inner = CBlock(
         [CSIf(CUnary(CNot, c, TyBool), CBreak(lid), None), CSDiscard(b)],
         None, TyUnit)
-      (LSt { ..st3, cur_loop: st.cur_loop }, [CSLoop(lid, inner, None)])
+      (LSt { ..st3, cur_loop = st.cur_loop }, [CSLoop(lid, inner, None)])
     }
     TSFor(pat, item_ty, from, to, wit, body, _, _, _) -> {
       match to {
@@ -4881,7 +4881,7 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
           let (st5, bsym) = fresh_sym(st4)
           let iv = CLocal(isym, item_ty)
           let (st6, pattern_stmts) = lower_irrefutable_pattern(st5, iv, pat, item_ty)
-          let (st7, b) = lower_expr(LSt { ..st6, cur_loop: lid }, body)
+          let (st7, b) = lower_expr(LSt { ..st6, cur_loop = lid }, body)
           # induction is explicit: init, test, body, step. The step lives on
           # the loop node rather than at the end of the body so that
           # `continue` runs it -- see core.CSLoop.
@@ -4891,7 +4891,7 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
           ] ++ pattern_stmts ++ [CSDiscard(b)]
           let inner = CBlock(inner_stmts, None, TyUnit)
           let step = CSAssign(isym, CBinary(CAdd, iv, CInt(1), TyInt))
-          (LSt { ..st7, cur_loop: st.cur_loop }, [
+          (LSt { ..st7, cur_loop = st.cur_loop }, [
             CSLet(isym, item_ty, lo_v),
             CSLet(bsym, TyInt, hi_v),
             CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
@@ -4957,7 +4957,7 @@ fn lower_for_iter(
   let (st9, item_sym) = fresh_sym(st8)
   let item = CLocal(item_sym, item_ty)
   let (st10, pattern_stmts) = lower_irrefutable_pattern(st9, item, pat, item_ty)
-  let (st11, b) = lower_expr(LSt { ..st10, cur_loop: lid }, body)
+  let (st11, b) = lower_expr(LSt { ..st10, cur_loop = lid }, body)
   let inner_stmts = [
     CSIf(done_v, CBreak(lid), None),
     CSLet(item_sym, item_ty, get_v)
@@ -4966,7 +4966,7 @@ fn lower_for_iter(
   # the step lives on the loop node rather than at the end of the body so
   # that `continue` runs it -- see core.CSLoop
   let step = CSAssign(isym, next_v)
-  (LSt { ..st11, cur_loop: st.cur_loop }, [
+  (LSt { ..st11, cur_loop = st.cur_loop }, [
     CSLet(csym, ct, coll),
     CSLet(isym, cur_t, start_v),
     CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
@@ -5138,7 +5138,7 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   var params: List[CParam] = []
   var i = 0
   for pt in f.sig.param_tys {
-    params = params ++ [CParam { sym: f.param_syms[i], ty: pt, mode: COwned }]
+    params = params ++ [CParam { sym = f.param_syms[i], ty = pt, mode = COwned }]
     i = i + 1
   }
   var dicts: List[CParam] = []
@@ -5146,13 +5146,13 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     # the checker already typed the hidden dictionary parameters; carrying
     # that type here keeps a backend from having to reach behind Core into
     # the symbol table
-    dicts = dicts ++ [CParam { sym: d, ty: sym_ty(st, d, TyError), mode: COwned }]
+    dicts = dicts ++ [CParam { sym = d, ty = sym_ty(st, d, TyError), mode = COwned }]
   }
   # evidence follows the dictionaries, in the order the checker recorded --
   # the callee's half of the convention whose caller half is in lower_expr
   var evs: List[CParam] = []
   for e in f.ev_syms {
-    evs = evs ++ [CParam { sym: e, ty: sym_ty(st, e, TyError), mode: COwned }]
+    evs = evs ++ [CParam { sym = e, ty = sym_ty(st, e, TyError), mode = COwned }]
   }
   # the same list addressed by atom, so a dynamic call site inside this body
   # can find the slot its callee's row is asking for (`ev_forward`).
@@ -5175,28 +5175,28 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   let sc: Option[SelfCtx] =
     if plain {
       Some(SelfCtx {
-        sym: None,
-        owner: owner,
-        name: f.name,
-        caps: [],
-        params: f.param_syms,
-        ptys: f.sig.param_tys,
-        fty: TyUnit,
-        loop_id: lid
+        sym = None,
+        owner = owner,
+        name = f.name,
+        caps = [],
+        params = f.param_syms,
+        ptys = f.sig.param_tys,
+        fty = TyUnit,
+        loop_id = lid
       })
     } else {
       None
     }
   let st_in = LSt {
     ..stl,
-    ret_ty: f.sig.ret,
-    self_ctx: sc,
-    tail: true,
-    self_tail: false,
-    ev_env: ev_env,
-    ev_own: None,
-    base: f.base,
-    origin: f.decl
+    ret_ty = f.sig.ret,
+    self_ctx = sc,
+    tail = true,
+    self_tail = false,
+    ev_env = ev_env,
+    ev_own = None,
+    base = f.base,
+    origin = f.decl
   }
   let (st1, body0) = lower_expr(st_in, f.body)
   # the tail value is a return too
@@ -5204,27 +5204,27 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   let body = wrap_self_loop(st1.self_tail, lid, body1, f.sig.ret)
   (LSt {
     ..st1,
-    ret_ty: st.ret_ty,
-    self_ctx: st.self_ctx,
-    tail: st.tail,
-    self_tail: st.self_tail,
-    ev_env: st.ev_env,
-    ev_own: st.ev_own,
-    base: st.base,
-    origin: st.origin
+    ret_ty = st.ret_ty,
+    self_ctx = st.self_ctx,
+    tail = st.tail,
+    self_tail = st.self_tail,
+    ev_env = st.ev_env,
+    ev_own = st.ev_own,
+    base = st.base,
+    origin = st.origin
   }, CFun {
-    name: f.name,
-    owner: owner,
-    captures: [],
-    params: params,
-    dicts: dicts,
-    evs: evs,
-    ret: f.sig.ret,
-    body: body,
-    is_test: f.is_test,
-    impl_of: f.impl_of,
-    default_of: f.default_of,
-    origin: f.decl
+    name = f.name,
+    owner = owner,
+    captures = [],
+    params = params,
+    dicts = dicts,
+    evs = evs,
+    ret = f.sig.ret,
+    body = body,
+    is_test = f.is_test,
+    impl_of = f.impl_of,
+    default_of = f.default_of,
+    origin = f.decl
   })
 }
 
@@ -5268,29 +5268,29 @@ pub fn lower_expr_in(
 ) -> (CExpr, List[CFun], List[CDictDef], Int) = {
   let top = top_sym(syms)
   let st = LSt {
-    next_sym: top + 1,
-    next_loop: 0,
-    owner: owner,
-    cur_loop: -1,
-    ret_ty: tex_ty(e),
-    syms: syms,
-    lifted: [],
-    next_lam: lam_start,
-    traits: traits,
-    impls: impls,
-    adts: adts,
-    prog_fns: prog_fns,
-    intrs: intrs,
-    dicts: [],
-    dict_env: map.empty(),
-    self_ctx: None,
-    tail: false,
-    self_tail: false,
-    ev_env: [],
-    ev_own: None,
-    base: -1,
-    origin: "",
-    ct_inline: false
+    next_sym = top + 1,
+    next_loop = 0,
+    owner = owner,
+    cur_loop = -1,
+    ret_ty = tex_ty(e),
+    syms = syms,
+    lifted = [],
+    next_lam = lam_start,
+    traits = traits,
+    impls = impls,
+    adts = adts,
+    prog_fns = prog_fns,
+    intrs = intrs,
+    dicts = [],
+    dict_env = map.empty(),
+    self_ctx = None,
+    tail = false,
+    self_tail = false,
+    ev_env = [],
+    ev_own = None,
+    base = -1,
+    origin = "",
+    ct_inline = false
   }
   let (st1, ce) = lower_expr(st, e)
   (ce, st1.lifted, st1.dicts, st1.next_lam)
@@ -5320,29 +5320,29 @@ pub fn lower_fn_only(
 ) -> (CFun, List[CFun], List[CDictDef], Int) = {
   let top = top_sym(syms)
   let st = LSt {
-    next_sym: top + 1,
-    next_loop: 0,
-    owner: owner,
-    cur_loop: -1,
-    ret_ty: TyUnit,
-    syms: syms,
-    lifted: [],
-    next_lam: lam_start,
-    traits: traits,
-    impls: impls,
-    adts: adts,
-    prog_fns: prog_fns,
-    intrs: intrs,
-    dicts: [],
-    dict_env: map.empty(),
-    self_ctx: None,
-    tail: false,
-    self_tail: false,
-    ev_env: [],
-    ev_own: None,
-    base: -1,
-    origin: "",
-    ct_inline: true
+    next_sym = top + 1,
+    next_loop = 0,
+    owner = owner,
+    cur_loop = -1,
+    ret_ty = TyUnit,
+    syms = syms,
+    lifted = [],
+    next_lam = lam_start,
+    traits = traits,
+    impls = impls,
+    adts = adts,
+    prog_fns = prog_fns,
+    intrs = intrs,
+    dicts = [],
+    dict_env = map.empty(),
+    self_ctx = None,
+    tail = false,
+    self_tail = false,
+    ev_env = [],
+    ev_own = None,
+    base = -1,
+    origin = "",
+    ct_inline = true
   }
   let (st1, cf) = lower_fn(st, owner, f)
   (cf, st1.lifted, st1.dicts, st1.next_lam)
@@ -5398,29 +5398,29 @@ pub fn lower_module_full(
   # integer for every module and `densify` below brings both domains back
   # down to one run from zero.
   var st = LSt {
-    next_sym: identity.temporary_floor(),
-    next_loop: 0,
-    owner: owner,
-    cur_loop: -1,
-    ret_ty: TyUnit,
-    syms: tm.syms,
-    lifted: [],
-    next_lam: 0,
-    traits: traits,
-    impls: impls,
-    adts: adts,
-    prog_fns: prog_fns,
-    intrs: intrinsics(),
-    dicts: [],
-    dict_env: map.empty(),
-    self_ctx: None,
-    tail: false,
-    self_tail: false,
-    ev_env: [],
-    ev_own: None,
-    base: -1,
-    origin: "",
-    ct_inline: false
+    next_sym = identity.temporary_floor(),
+    next_loop = 0,
+    owner = owner,
+    cur_loop = -1,
+    ret_ty = TyUnit,
+    syms = tm.syms,
+    lifted = [],
+    next_lam = 0,
+    traits = traits,
+    impls = impls,
+    adts = adts,
+    prog_fns = prog_fns,
+    intrs = intrinsics(),
+    dicts = [],
+    dict_env = map.empty(),
+    self_ctx = None,
+    tail = false,
+    self_tail = false,
+    ev_env = [],
+    ev_own = None,
+    base = -1,
+    origin = "",
+    ct_inline = false
   }
   var fns: List[(CFun, List[CFun])] = []
   var flat: List[CFun] = []
@@ -5452,13 +5452,13 @@ pub fn lower_module_full(
     }
   }
   let m = CModule {
-    owner: owner,
-    fns: prod_fns,
-    dicts: prod_dicts,
-    next_sym: prod_next_sym
+    owner = owner,
+    fns = prod_fns,
+    dicts = prod_dicts,
+    next_sym = prod_next_sym
   }
-  densify(LMod { m: m, fns: fns, tests: tests, dicts: st.dicts, syms: tm.syms,
-    next_sym: st.next_sym }, tm.syms)
+  densify(LMod { m = m, fns = fns, tests = tests, dicts = st.dicts, syms = tm.syms,
+    next_sym = st.next_sym }, tm.syms)
 }
 
 # ---- densifying the module's identifiers ----
@@ -5486,7 +5486,7 @@ type Dense = { moved: Map[Int, Int], next: Int }
 fn dense_sym(d: Dense, sym: Int) -> Dense =
   match map.get(d.moved, sym) {
     Some(_) -> d
-    None -> Dense { moved: map.insert(d.moved, sym, d.next), next: d.next + 1 }
+    None -> Dense { moved = map.insert(d.moved, sym, d.next), next = d.next + 1 }
   }
 
 fn dense_all(d: Dense, es: List[CExpr]) -> Dense = {
@@ -5617,7 +5617,7 @@ fn moved_java(d: Dense, j: CJava) -> CJava = {
     let (slot, e) = pair
     evs = evs ++ [(slot, moved_expr(d, e))]
   }
-  CJava { ..j, target: moved_opt(d, j.target), args: moved_all(d, j.args), sam_evs: evs }
+  CJava { ..j, target = moved_opt(d, j.target), args = moved_all(d, j.args), sam_evs = evs }
 }
 
 fn moved_expr(d: Dense, e: CExpr) -> CExpr =
@@ -5628,7 +5628,7 @@ fn moved_expr(d: Dense, e: CExpr) -> CExpr =
     CCtor(adt, ci, args, ty) -> CCtor(adt, ci, moved_all(d, args), ty)
     CUpdate(base, adt, ci, fields, ty) -> {
       var out: List[CUpdField] = []
-      for f in fields { out = out ++ [CUpdField { ..f, value: moved_opt(d, f.value) }] }
+      for f in fields { out = out ++ [CUpdField { ..f, value = moved_opt(d, f.value) }] }
       CUpdate(moved_expr(d, base), adt, ci, out, ty)
     }
     CField(t, adt, ci, idx, ty) -> CField(moved_expr(d, t), adt, ci, idx, ty)
@@ -5682,13 +5682,13 @@ fn moved_stmt(d: Dense, s: CStmt) -> CStmt =
 
 fn moved_params(d: Dense, ps: List[CParam]) -> List[CParam] = {
   var out: List[CParam] = []
-  for p in ps { out = out ++ [CParam { ..p, sym: moved_sym(d, p.sym) }] }
+  for p in ps { out = out ++ [CParam { ..p, sym = moved_sym(d, p.sym) }] }
   out
 }
 
 fn moved_fun(d: Dense, f: CFun) -> CFun =
-  CFun { ..f, captures: moved_params(d, f.captures), params: moved_params(d, f.params),
-    dicts: moved_params(d, f.dicts), evs: moved_params(d, f.evs), body: moved_expr(d, f.body) }
+  CFun { ..f, captures = moved_params(d, f.captures), params = moved_params(d, f.params),
+    dicts = moved_params(d, f.dicts), evs = moved_params(d, f.evs), body = moved_expr(d, f.body) }
 
 fn moved_group(d: Dense, group: List[(CFun, List[CFun])]) -> List[(CFun, List[CFun])] = {
   var out: List[(CFun, List[CFun])] = []
@@ -5710,7 +5710,7 @@ fn moved_group(d: Dense, group: List[(CFun, List[CFun])]) -> List[(CFun, List[CF
 ## Core below, and carrying the rest would put the module's dead bindings in
 ## the way of the numbering `emitc` prints.
 fn densify(l: LMod, syms: Map[Int, Sym]) -> LMod = {
-  var d = Dense { moved: map.empty(), next: 0 }
+  var d = Dense { moved = map.empty(), next = 0 }
   for f in l.m.fns { d = dense_fun(d, f) }
   for pair in l.tests {
     let (cf, lifts) = pair
@@ -5727,12 +5727,12 @@ fn densify(l: LMod, syms: Map[Int, Sym]) -> LMod = {
     }
   }
   LMod {
-    m: CModule { ..l.m, fns: fns, next_sym: d.next },
-    fns: moved_group(d, l.fns),
-    tests: moved_group(d, l.tests),
-    dicts: l.dicts,
-    syms: moved_syms,
-    next_sym: d.next
+    m = CModule { ..l.m, fns = fns, next_sym = d.next },
+    fns = moved_group(d, l.fns),
+    tests = moved_group(d, l.tests),
+    dicts = l.dicts,
+    syms = moved_syms,
+    next_sym = d.next
   }
 }
 
@@ -5748,24 +5748,24 @@ test "lowering numbers a module's names in the order the Core dump reads them" {
   # first appearance in the body, which is after the parameters instead of
   # before them, and nothing downstream can tell that apart from a Core dump
   # whose names are simply wrong.
-  let p = (s: Int) => CParam { sym: s, ty: TyInt, mode: COwned }
+  let p = (s: Int) => CParam { sym = s, ty = TyInt, mode = COwned }
   let local = (s: Int) => CLocal(s, TyInt)
   let sum = (a: CExpr, b: CExpr) => CBinary(CAdd, a, b, TyInt)
-  let sym_named = (nm: String) => Sym { name: nm, ty: TyInt, mutable: false,
-    dlo: 0, dhi: 0, dict_of: None, ev_of: None, cell_of: None }
+  let sym_named = (nm: String) => Sym { name = nm, ty = TyInt, mutable = false,
+    dlo = 0, dhi = 0, dict_of = None, ev_of = None, cell_of = None }
   let lifted = CFun {
-    name: "lambda\$0", owner: "m",
-    captures: [p(4001)], params: [p(4002)], dicts: [p(4003)], evs: [p(4004)],
-    ret: TyInt,
-    body: CBlock([CSLet(4005, TyInt, sum(local(4002), local(4004)))],
+    name = "lambda\$0", owner = "m",
+    captures = [p(4001)], params = [p(4002)], dicts = [p(4003)], evs = [p(4004)],
+    ret = TyInt,
+    body = CBlock([CSLet(4005, TyInt, sum(local(4002), local(4004)))],
       Some(sum(sum(local(4001), local(4003)), local(4005))), TyInt),
-    is_test: false, impl_of: None, default_of: None, origin: ""
+    is_test = false, impl_of = None, default_of = None, origin = ""
   }
   var syms: Map[Int, Sym] = map.empty()
   syms = map.insert(syms, 4002, sym_named("x"))
   syms = map.insert(syms, 9999, sym_named("unmentioned"))
-  let l = LMod { m: CModule { owner: "m", fns: [lifted], dicts: [], next_sym: 4006 },
-    fns: [(lifted, [])], tests: [], dicts: [], syms: syms, next_sym: 4006 }
+  let l = LMod { m = CModule { owner = "m", fns = [lifted], dicts = [], next_sym = 4006 },
+    fns = [(lifted, [])], tests = [], dicts = [], syms = syms, next_sym = 4006 }
   let dense = densify(l, syms)
   let out = dense.m.fns[0]
   assert out.captures == [p(0)]
@@ -5791,14 +5791,14 @@ test "the flat module and the grouped functions are one lowering" {
   # check, because "the same value" is only true while nobody rebuilds it.
   let tt = TyTuple([TyInt, TyInt])
   let sym = (nm: String) => Sym {
-    name: nm,
-    ty: tt,
-    mutable: false,
-    dlo: 0,
-    dhi: 0,
-    dict_of: None,
-    ev_of: None,
-    cell_of: None
+    name = nm,
+    ty = tt,
+    mutable = false,
+    dlo = 0,
+    dhi = 0,
+    dict_of = None,
+    ev_of = None,
+    cell_of = None
   }
   var syms: Map[Int, Sym] = map.empty()
   syms = map.insert(syms, 1, sym("a"))
@@ -5810,39 +5810,39 @@ test "the flat module and the grouped functions are one lowering" {
     XBinary(BEq, XLocal(1, "a", 0, 0, tt), XLocal(2, "b", 0, 0, tt), no_wit,
       0, 0, 0, 0, TyBool)
   let fn_named = (nm: String) => TFun {
-    name: nm,
-    sig: Sig {
-      name: nm,
-      param_tys: [tt, tt],
-      param_names: ["a", "b"],
-      param_defaults: [],
-      caller_params: [],
-      ret: TyBool,
-      eff: EPure,
-      is_builtin: false,
-      tparams: [],
-      constraints: [],
-      eparams: [],
-      owner: None,
-      trait_id: None,
-      op_of: None,
-      inferring: false
+    name = nm,
+    sig = Sig {
+      name = nm,
+      param_tys = [tt, tt],
+      param_names = ["a", "b"],
+      param_defaults = [],
+      caller_params = [],
+      ret = TyBool,
+      eff = EPure,
+      is_builtin = false,
+      tparams = [],
+      constraints = [],
+      eparams = [],
+      owner = None,
+      trait_id = None,
+      op_of = None,
+      inferring = false
     },
-    param_syms: [1, 2],
-    dict_syms: [],
-    ev_syms: [],
-    defaults: [],
-    body: body,
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    decl: "",
-    base: -1
+    param_syms = [1, 2],
+    dict_syms = [],
+    ev_syms = [],
+    defaults = [],
+    body = body,
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    decl = "",
+    base = -1
   }
   let no_traits: Traits = map.empty()
   let no_impls: Impls = map.empty()
   let no_sigs: Map[(String, String), Sig] = map.empty()
-  let tm = TModule { fns: [fn_named("f"), fn_named("g")], consts: [], tests: [], syms: syms }
+  let tm = TModule { fns = [fn_named("f"), fn_named("g")], consts = [], tests = [], syms = syms }
   let lm = lower_module_full("m", tm, no_traits, no_impls, prelude_adts(), no_sigs, false)
 
   # the flat list is the grouped one: sources in source order, then the
@@ -5895,7 +5895,7 @@ pub fn emitted_core(l: LMod) -> CModule = {
     let (cf, lifts) = pr
     fns = fns ++ [cf] ++ lifts
   }
-  CModule { ..l.m, fns: fns, dicts: l.dicts, next_sym: l.next_sym }
+  CModule { ..l.m, fns = fns, dicts = l.dicts, next_sym = l.next_sym }
 }
 
 test "emitted_core carries the test bodies and what they hoisted" {
@@ -5907,14 +5907,14 @@ test "emitted_core carries the test bodies and what they hoisted" {
   let ti = TyTuple([TyInt, TyInt])
   let ts = TyTuple([TyString, TyString])
   let sym = (nm: String, t: Ty) => Sym {
-    name: nm,
-    ty: t,
-    mutable: false,
-    dlo: 0,
-    dhi: 0,
-    dict_of: None,
-    ev_of: None,
-    cell_of: None
+    name = nm,
+    ty = t,
+    mutable = false,
+    dlo = 0,
+    dhi = 0,
+    dict_of = None,
+    ev_of = None,
+    cell_of = None
   }
   var syms: Map[Int, Sym] = map.empty()
   syms = map.insert(syms, 1, sym("a", ti))
@@ -5925,49 +5925,49 @@ test "emitted_core carries the test bodies and what they hoisted" {
   let eq_of = (x: Int, y: Int, nx: String, ny: String, t: Ty) =>
     XBinary(BEq, XLocal(x, nx, 0, 0, t), XLocal(y, ny, 0, 0, t), no_wit, 0, 0, 0, 0, TyBool)
   let src = TFun {
-    name: "f",
-    sig: Sig {
-      name: "f",
-      param_tys: [ti, ti],
-      param_names: ["a", "b"],
-      param_defaults: [],
-      caller_params: [],
-      ret: TyBool,
-      eff: EPure,
-      is_builtin: false,
-      tparams: [],
-      constraints: [],
-      eparams: [],
-      owner: None,
-      trait_id: None,
-      op_of: None,
-      inferring: false
+    name = "f",
+    sig = Sig {
+      name = "f",
+      param_tys = [ti, ti],
+      param_names = ["a", "b"],
+      param_defaults = [],
+      caller_params = [],
+      ret = TyBool,
+      eff = EPure,
+      is_builtin = false,
+      tparams = [],
+      constraints = [],
+      eparams = [],
+      owner = None,
+      trait_id = None,
+      op_of = None,
+      inferring = false
     },
-    param_syms: [1, 2],
-    dict_syms: [],
-    ev_syms: [],
-    defaults: [],
-    body: eq_of(1, 2, "a", "b", ti),
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    decl: "",
-    base: -1
+    param_syms = [1, 2],
+    dict_syms = [],
+    ev_syms = [],
+    defaults = [],
+    body = eq_of(1, 2, "a", "b", ti),
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    decl = "",
+    base = -1
   }
   # a test takes no parameters and answers Unit; the string tuple keeps its
   # comparison distinct from the one `f` asked for, so it really is hoisted
   let tst = TFun {
     ..src,
-    name: "strings compare",
-    sig: Sig { ..src.sig, name: "strings compare", param_tys: [], param_names: [], ret: TyUnit },
-    param_syms: [],
-    body: XBlock([TSAssert(eq_of(3, 4, "s", "t", ts), None, 0, 0)], None, 0, 0, TyUnit),
-    is_test: true
+    name = "strings compare",
+    sig = Sig { ..src.sig, name = "strings compare", param_tys = [], param_names = [], ret = TyUnit },
+    param_syms = [],
+    body = XBlock([TSAssert(eq_of(3, 4, "s", "t", ts), None, 0, 0)], None, 0, 0, TyUnit),
+    is_test = true
   }
   let no_traits: Traits = map.empty()
   let no_impls: Impls = map.empty()
   let no_sigs: Map[(String, String), Sig] = map.empty()
-  let tm = TModule { fns: [src], consts: [], tests: [tst], syms: syms }
+  let tm = TModule { fns = [src], consts = [], tests = [tst], syms = syms }
   let lm = lower_module_full("m", tm, no_traits, no_impls, prelude_adts(), no_sigs, true)
 
   # `f` and the comparison it hoisted, and nothing of the test
@@ -6018,44 +6018,44 @@ pub fn lower_module(
 
 test "a written call's site is measured from its declaration, and a call nobody wrote has none" {
   let sig0 = (nm: String) => Sig {
-    name: nm,
-    param_tys: [],
-    param_names: [],
-    param_defaults: [],
-    caller_params: [],
-    ret: TyInt,
-    eff: EPure,
-    is_builtin: false,
-    tparams: [],
-    constraints: [],
-    eparams: [],
-    owner: None,
-    trait_id: None,
-    op_of: None,
-    inferring: false
+    name = nm,
+    param_tys = [],
+    param_names = [],
+    param_defaults = [],
+    caller_params = [],
+    ret = TyInt,
+    eff = EPure,
+    is_builtin = false,
+    tparams = [],
+    constraints = [],
+    eparams = [],
+    owner = None,
+    trait_id = None,
+    op_of = None,
+    inferring = false
   }
   let none_tid: Option[Int] = None
   let call = (nm: String, lo: Int, hi: Int, nlo: Int) => XCallFn(Some("m"), nm, [], [], [], none_tid, lo, hi, nlo, TyInt)
   let body = XBinary(BAdd, call("g", 118, 125, 120), call("g\$default\$0", 130, 135, NO_NAME), None, 0, 0, 0, 0, TyInt)
   let f = TFun {
-    name: "f",
-    sig: sig0("f"),
-    param_syms: [],
-    dict_syms: [],
-    ev_syms: [],
-    defaults: [],
-    body: body,
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    decl: "Nf:f",
-    base: 100
+    name = "f",
+    sig = sig0("f"),
+    param_syms = [],
+    dict_syms = [],
+    ev_syms = [],
+    defaults = [],
+    body = body,
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    decl = "Nf:f",
+    base = 100
   }
   let no_traits: Traits = map.empty()
   let no_impls: Impls = map.empty()
   let no_sigs: Map[(String, String), Sig] = map.empty()
   let sites_of = (tf: TFun) => {
-    let tm = TModule { fns: [tf], consts: [], tests: [], syms: map.empty() }
+    let tm = TModule { fns = [tf], consts = [], tests = [], syms = map.empty() }
     let cf = lower_module_full("m", tm, no_traits, no_impls, prelude_adts(), no_sigs, false).m.fns[0]
     match cf.body {
       CBinary(_, CCall(_, _, _, s1), CCall(_, _, _, s2), _) -> (cf.origin, s1, s2)
@@ -6067,6 +6067,6 @@ test "a written call's site is measured from its declaration, and a call nobody 
   assert written == CAt(18, 25, 20)
   assert omitted == CNoSite
   # a tree no scheduler filed records nothing
-  let (_, unfiled, _) = sites_of(TFun { ..f, decl: "", base: -1 })
+  let (_, unfiled, _) = sites_of(TFun { ..f, decl = "", base = -1 })
   assert unfiled == CNoSite
 }

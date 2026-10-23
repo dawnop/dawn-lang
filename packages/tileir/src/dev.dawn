@@ -242,15 +242,15 @@ pub type ViewHints = { allow_tma: Option[Bool], latency: Option[Int] }
 ## `EntryHints` with only the given keys set: `entry_hints(occupancy: Some(2))`.
 pub fn entry_hints(num_cta_in_cga: Option[Int] = None, num_worker_warps_per_cta: Option[Int] = None,
   occupancy: Option[Int] = None) -> EntryHints =
-  EntryHints { num_cta_in_cga: num_cta_in_cga, num_worker_warps_per_cta: num_worker_warps_per_cta, occupancy: occupancy }
+  EntryHints { num_cta_in_cga = num_cta_in_cga, num_worker_warps_per_cta = num_worker_warps_per_cta, occupancy = occupancy }
 
 ## `PtrHints` with only the given keys set: `ptr_hints(latency: Some(4))`.
-pub fn ptr_hints(latency: Option[Int] = None) -> PtrHints = PtrHints { latency: latency }
+pub fn ptr_hints(latency: Option[Int] = None) -> PtrHints = PtrHints { latency = latency }
 
 ## `ViewHints` with only the given keys set:
 ## `view_hints(allow_tma: Some(false), latency: Some(3))`.
 pub fn view_hints(allow_tma: Option[Bool] = None, latency: Option[Int] = None) -> ViewHints =
-  ViewHints { allow_tma: allow_tma, latency: latency }
+  ViewHints { allow_tma = allow_tma, latency = latency }
 
 fn hint_refuse(what: String) -> Never = panic("tileir: optimization hint ${what}")
 
@@ -1472,7 +1472,7 @@ pub fn atomic_rmw[D](p: Param[D], mode: String, index: Tile[I32], v: Tile[D],
 ## is what a caller forgets to use, and a function that never answers it
 ## cannot be misread as a plain store.
 pub fn atomic_add(p: Param[I32], index: Tile[I32], v: Tile[I32], mask: Option[Tile[Bool]] = None, at: Loc = caller()) -> Unit !Dev = called("atomic_add", at, () => {
-  let _old = atomic_rmw(p, "add", index, v, mask: mask)
+  let _old = atomic_rmw(p, "add", index, v, mask = mask)
   ()
 })
 
@@ -1568,7 +1568,7 @@ pub fn mul[D](a: Tile[D], b: Tile[D], rounding: Rounding = NearestEven, ftz: Boo
 ## be combined with a directed rounding mode. Use a tolerance reference.
 pub fn div[D](a: Tile[D], b: Tile[D], rounding: Rounding = NearestEven, ftz: Bool = false, approx: Bool = false, at: Loc = caller()) -> Tile[D] !Dev = called("div", at, () => {
   if approx && rounding != NearestEven {
-    panic("tileir: approximate division cannot use a directed rounding mode", at: at)
+    panic("tileir: approximate division cannot use a directed rounding mode", at = at)
   } else { () }
   let op = if approx { "divf_approx" ++ (if ftz { "_ftz" } else { "" }) } else { float_op("divf", rounding, ftz) }
   binary(op, a, b)
@@ -2759,7 +2759,7 @@ impl RangeBound[Idx] {
 ## the recording as the call's site).
 pub fn d_range[B: RangeBound](lower: B, upper: B, step: Step[B] = One, unsigned_cmp: Bool = false,
   at: Loc = caller()) -> DRange[B] =
-  DRange { lower: lower, upper: upper, step: step, unsigned: unsigned_cmp, at: at }
+  DRange { lower = lower, upper = upper, step = step, unsigned = unsigned_cmp, at = at }
 
 ## What `d_range` answers: the range, not yet recorded, and where it was written.
 pub type DRange[B] = { lower: B, upper: B, step: Step[B], unsigned: Bool, at: Loc }
@@ -5079,8 +5079,8 @@ test "the knife T19 surface hands the handler the dialect's own name of each tok
 fn t17_surface() -> Unit !Dev = {
   let x = param(F64, 0)
   let t = load(x, idx_const(0), [8])
-  let _s = t.float_to_int(I32, saturating: true)
-  let _a = t.float_to_float(F32).float_to_float(TF32, rounding: NearestAway)
+  let _s = t.float_to_int(I32, saturating = true)
+  let _a = t.float_to_float(F32).float_to_float(TF32, rounding = NearestAway)
   d_return_if(gt(f_const(F64, 1.0), f_const(F64, 0.0)))
 }
 
@@ -5100,27 +5100,27 @@ fn k2_surface() -> Unit !Dev = {
   let x = param(F32, 0)
   let t = load(x, idx_const(0), [8])
   let _r = [
-    exp2(t, ftz: true), exp2(t, ftz: false),
-    add(t, t, rounding: Down), add(t, t, rounding: Up),
-    mul(t, t, rounding: Down), mul(t, t, rounding: Up),
-    div(t, t, rounding: Down), div(t, t, rounding: Up),
-    add(t, t, ftz: true), mul(t, t, ftz: true),
-    max(t, t, propagate_nan: true), min(t, t, propagate_nan: true),
-    add(t, t, rounding: NearestEven, ftz: false), sub(t, t, rounding: TowardZero),
-    add(t, t, rounding: Down, ftz: true)
+    exp2(t, ftz = true), exp2(t, ftz = false),
+    add(t, t, rounding = Down), add(t, t, rounding = Up),
+    mul(t, t, rounding = Down), mul(t, t, rounding = Up),
+    div(t, t, rounding = Down), div(t, t, rounding = Up),
+    add(t, t, ftz = true), mul(t, t, ftz = true),
+    max(t, t, propagate_nan = true), min(t, t, propagate_nan = true),
+    add(t, t, rounding = NearestEven, ftz = false), sub(t, t, rounding = TowardZero),
+    add(t, t, rounding = Down, ftz = true)
   ]
   let i = broadcast(i_const(1), [8])
   let _n = [
-    add_i(i, i, overflow: NoSignedWrap), sub_i(i, i, overflow: NoUnsignedWrap),
-    mul_i(i, i, overflow: NoWrap), add_i(i, i, overflow: NoWrap)
+    add_i(i, i, overflow = NoSignedWrap), sub_i(i, i, overflow = NoUnsignedWrap),
+    mul_i(i, i, overflow = NoWrap), add_i(i, i, overflow = NoWrap)
   ]
   let _c = [
-    t.float_to_float(F64, rounding: TowardZero), t.float_to_float(F64, rounding: Down),
-    t.float_to_float(F64, rounding: Up), t.float_to_float(F64, rounding: NearestAway)
+    t.float_to_float(F64, rounding = TowardZero), t.float_to_float(F64, rounding = Down),
+    t.float_to_float(F64, rounding = Up), t.float_to_float(F64, rounding = NearestAway)
   ]
-  d_global("a", F64, [1.0], align: 256)
-  d_global("b", F64, [1.0], visibility: Private, constant: true)
-  let _p = alloca_ptrs(F64, 8, 8, [8], shared: true)
+  d_global("a", F64, [1.0], align = 256)
+  d_global("b", F64, [1.0], visibility = Private, constant = true)
+  let _p = alloca_ptrs(F64, 8, 8, [8], shared = true)
   ()
 }
 
@@ -5178,9 +5178,9 @@ fn indexed_surface() -> Unit !Dev = {
   let out = param(F64, 2)
   let i = load(idx, idx_const(0), [8])
   let ok = lt_i(i, i_const(8))
-  let v = gather(src, i, mask: Some(ok), pad: Some(f_const(F64, 0.0)))
+  let v = gather(src, i, mask = Some(ok), pad = Some(f_const(F64, 0.0)))
   scatter(out, i, v)
-  scatter(out, i, gather(src, i), mask: Some(ok))
+  scatter(out, i, gather(src, i), mask = Some(ok))
 }
 
 test "gather and scatter hand the handler the index tile, its shape and the parameter's own format, with no strides at all" {
@@ -5203,9 +5203,9 @@ fn atomic_surface() -> Unit !Dev = {
   let slots = param(I32, 1)
   let i = load(hist, idx_const(0), [8])
   let ok = lt_i(i, i_const(8))
-  atomic_add(hist, i, i_const(1), mask: Some(ok))
+  atomic_add(hist, i, i_const(1), mask = Some(ok))
   let _all = atomic_rmw(hist, "max", i, i_const(3))
-  let _one = atomic_cas(slots, i, i_const(0), i_const(5), mask: Some(ok))
+  let _one = atomic_cas(slots, i, i_const(0), i_const(5), mask = Some(ok))
   let _two = atomic_cas(slots, i, i_const(0), i_const(5))
   ()
 }
@@ -5233,7 +5233,7 @@ fn every_arithmetic_name() -> Unit !Dev = {
   let i = block_id(0)
   let base = tile_at(i, 8)
   let m = tail_mask(base, [8], 5)
-  let x = load(a, base, [8], mask: Some(m), pad: Some(f_const(F64, 0.0)))
+  let x = load(a, base, [8], mask = Some(m), pad = Some(f_const(F64, 0.0)))
   let y = load(a, base, [8])
   let s = add(x, y)
   let d = sub(s, y)
@@ -5246,7 +5246,7 @@ fn every_arithmetic_name() -> Unit !Dev = {
   let f1 = fma(a1, y, x)
   let c = lt(f1, y)
   let r = select(c, f1, y)
-  store(a, base, r, mask: Some(m))
+  store(a, base, r, mask = Some(m))
 }
 
 test "the typed surface spells every operation name the handler sees, and reads every shape off an operand" {
@@ -5325,8 +5325,8 @@ test "a reduction writes its identity in the operand's format, and counts its di
   let seen = logged(() => {
     let a = param(I32, 0)
     let x = load(a, idx_const(0), [4, 8])
-    let _s = d_reduce(x, 0.0 - 2000000000.0, (acc, e) => max_i(acc, e), dim: -2)
-    let _c = d_scan(x, 0.0, (acc, e) => add_i(acc, e), reverse: true)
+    let _s = d_reduce(x, 0.0 - 2000000000.0, (acc, e) => max_i(acc, e), dim = -2)
+    let _c = d_scan(x, 0.0, (acc, e) => add_i(acc, e), reverse = true)
     ()
   })
   assert list.any(seen, l => l == "reduce_begin 0 [4, 8] [IdI(\"i32\", -2000000000)] [1]")
@@ -5364,7 +5364,7 @@ test "a loop carries the carries its body sets, in the order they were made, and
     let q = carry(x)
     let r = carry(x)
     let w = carry(x)
-    for _k in d_range(z, z, step: By(z)) {
+    for _k in d_range(z, z, step = By(z)) {
       r.set(r.get())
       p.set(p.get())
       q.set(q.get())
@@ -5387,13 +5387,13 @@ test "a loop carries the carries its body sets, in the order they were made, and
 test "d_range over host bounds issues its three bounds as index constants, then the loop, as d_range over those constants does" {
   let ranged = under_counter(() => {
     let c = carry(broadcast(f_const(F64, 0.0), [8]))
-    for _k in d_range(2, 9, step: By(3)) { c.set(c.get()) }
+    for _k in d_range(2, 9, step = By(3)) { c.set(c.get()) }
     let h: Int = c.get()
     h
   })
   let spelled = under_counter(() => {
     let c = carry(broadcast(f_const(F64, 0.0), [8]))
-    for _k in d_range(idx_const(2), idx_const(9), step: By(idx_const(3))) { c.set(c.get()) }
+    for _k in d_range(idx_const(2), idx_const(9), step = By(idx_const(3))) { c.set(c.get()) }
     let h: Int = c.get()
     h
   })
@@ -5409,7 +5409,7 @@ test "d_range with no step records the constant 1 as the step, after the bounds,
   })
   let by_one = under_counter(() => {
     let c = carry(broadcast(f_const(F64, 0.0), [8]))
-    for _k in d_range(2, 9, step: By(1)) { c.set(c.get()) }
+    for _k in d_range(2, 9, step = By(1)) { c.set(c.get()) }
     let h: Int = c.get()
     h
   })
@@ -5488,7 +5488,7 @@ test "the cell writes and the escape hatch hand the handler what they are named 
     let t = load(o, idx_const(0), [4, 8])
     store_cell(o, t)
     store_sub(o, [1, 0], t)
-    let v = retile(o, [100, 64], [4, 8], pad: PadNegInf)
+    let v = retile(o, [100, 64], [4, 8], pad = PadNegInf)
     let _r = load_view(v, [idx_const(0), idx_const(1)])
     ()
   })
@@ -5510,7 +5510,7 @@ fn loop_seen() -> (Int, Int, Int, Int, Int) !Dev = {
   let up = idx_add(b, idx_mul(b, lo))
   let first = load(a, b, [8])
   let acc = carry(first)
-  for i in d_range(lo, up, step: By(lo)) { acc.set(add(acc.get(), load(a, i, [8]))) }
+  for i in d_range(lo, up, step = By(lo)) { acc.set(add(acc.get(), load(a, i, [8]))) }
   let hb: Int = b
   let hup: Int = up
   let hfirst: Int = first

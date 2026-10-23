@@ -242,7 +242,7 @@ type Dm = {
   built_acc: Set[Int]
 }
 
-fn dm_mark(d: Dm, sym: Int) -> Dm = Dm { ..d, owned: set.insert(d.owned, sym) }
+fn dm_mark(d: Dm, sym: Int) -> Dm = Dm { ..d, owned = set.insert(d.owned, sym) }
 
 ## Whether reading `adt`'s field, in a position that consumes the result,
 ## demands the container too.
@@ -295,8 +295,8 @@ fn rebuilt_adts(ms: List[CModule]) -> Map[(String, String), Set[Int]] = {
         None -> set.empty()
       }
       let d = Dm {
-        owned: set.empty(), modes: map.empty(), built: set.empty(),
-        built_acc: acc
+        owned = set.empty(), modes = map.empty(), built = set.empty(),
+        built_acc = acc
       }
       out = map.insert(out, (f.owner, f.name), dm_expr(d, f.body, true).built_acc)
     }
@@ -407,7 +407,7 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
     # stored: the structure keeps the reference. The tag is also what
     # `proj_demands` matches a projection against, so record it.
     CCtor(adt, _, args, _) ->
-      dm_list(Dm { ..d, built_acc: set.insert(d.built_acc, adt) }, args, true),
+      dm_list(Dm { ..d, built_acc = set.insert(d.built_acc, adt) }, args, true),
     # an update constructs the record whole on this backend (rc.rw), and it
     # demands what that constructor would, kept-field projections included
     CUpdate(base, adt, ci, fields, ty) -> dm_expr(d, update_as_ctor(base, adt, ci, fields, ty), k)
@@ -668,8 +668,8 @@ pub fn infer_modes_forced(
             }
             let dm = dm_expr(
               Dm {
-                owned: set.empty(), modes: table,
-                built: mine, built_acc: set.empty()
+                owned = set.empty(), modes = table,
+                built = mine, built_acc = set.empty()
               },
               f.body,
               # the body's tail is the function's result: consuming
@@ -746,35 +746,35 @@ pub fn stamp_modes(m: CModule, modes: Map[(String, String), List[CMode]]) -> CMo
             var i = 0
             for p in f.params {
               let mo = if i < len(row) { row[i] } else { COwned }
-              params = params ++ [CParam { ..p, mode: mo }]
+              params = params ++ [CParam { ..p, mode = mo }]
               i = i + 1
             }
             var evs: List[CParam] = []
             var j = len(f.params) + len(f.dicts)
             for e in f.evs {
               let mo = if j < len(row) { row[j] } else { COwned }
-              evs = evs ++ [CParam { ..e, mode: mo }]
+              evs = evs ++ [CParam { ..e, mode = mo }]
               j = j + 1
             }
-            fns = fns ++ [CFun { ..f, params: params, evs: evs }]
+            fns = fns ++ [CFun { ..f, params = params, evs = evs }]
           }
         }
     }
   }
-  CModule { ..m, fns: fns }
+  CModule { ..m, fns = fns }
 }
 
 # ---- tests ----
 
 fn t_fn(owner: String, name: String, params: List[CParam], ret: Ty, body: CExpr) -> CFun =
   CFun {
-    name: name, owner: owner, captures: [], params: params, dicts: [], evs: [],
-    ret: ret, body: body, is_test: false, impl_of: None, default_of: None,
-    origin: ""
+    name = name, owner = owner, captures = [], params = params, dicts = [], evs = [],
+    ret = ret, body = body, is_test = false, impl_of = None, default_of = None,
+    origin = ""
   }
 
 fn t_mod(owner: String, fns: List[CFun]) -> CModule =
-  CModule { owner: owner, fns: fns, dicts: [], next_sym: 100 }
+  CModule { owner = owner, fns = fns, dicts = [], next_sym = 100 }
 
 fn t_row(
   table: Map[(String, String), List[CMode]],
@@ -788,9 +788,9 @@ fn t_row(
 
 test "a parameter only read stays borrowed; a returned one flips owned" {
   let lst = TyList(TyInt)
-  let read = t_fn("m", "r", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt,
+  let read = t_fn("m", "r", [CParam { sym = 1, ty = lst, mode = COwned }], TyInt,
     CIntrinsic("len", [CLocal(1, lst)], TyInt, CNoSite))
-  let ret = t_fn("m", "g", [CParam { sym: 2, ty: lst, mode: COwned }], lst,
+  let ret = t_fn("m", "g", [CParam { sym = 2, ty = lst, mode = COwned }], lst,
     CLocal(2, lst))
   let table = infer_modes([t_mod("m", [read, ret])])
   let row = t_row(table, "m", "r")
@@ -802,16 +802,16 @@ test "a parameter only read stays borrowed; a returned one flips owned" {
 test "an owned position propagates through the fixpoint" {
   let lst = TyList(TyInt)
   # g returns its parameter (owned); f forwards its own to g's position 0
-  let g = t_fn("m", "g", [CParam { sym: 2, ty: lst, mode: COwned }], lst,
+  let g = t_fn("m", "g", [CParam { sym = 2, ty = lst, mode = COwned }], lst,
     CLocal(2, lst))
-  let f = t_fn("m", "f", [CParam { sym: 1, ty: lst, mode: COwned }], lst,
+  let f = t_fn("m", "f", [CParam { sym = 1, ty = lst, mode = COwned }], lst,
     CCall(CDirect("m", "g"), [CLocal(1, lst)], lst, CNoSite))
   let table = infer_modes([t_mod("m", [f, g])])
   assert len(t_row(table, "m", "f")) == 0
   # ...and a borrowed position does not: h only reads, k rides through it
-  let h = t_fn("m", "h", [CParam { sym: 3, ty: lst, mode: COwned }], TyInt,
+  let h = t_fn("m", "h", [CParam { sym = 3, ty = lst, mode = COwned }], TyInt,
     CIntrinsic("len", [CLocal(3, lst)], TyInt, CNoSite))
-  let k2 = t_fn("m", "k", [CParam { sym: 4, ty: lst, mode: COwned }], TyInt,
+  let k2 = t_fn("m", "k", [CParam { sym = 4, ty = lst, mode = COwned }], TyInt,
     CCall(CDirect("m", "h"), [CLocal(4, lst)], TyInt, CNoSite))
   let t2 = infer_modes([t_mod("m", [h, k2])])
   assert not mode_owned(t_row(t2, "m", "h")[0])
@@ -820,7 +820,7 @@ test "an owned position propagates through the fixpoint" {
 
 test "a branching value in a borrow position consumes its arms (#499)" {
   let lst = TyList(TyInt)
-  let ps = [CParam { sym: 1, ty: lst, mode: COwned }, CParam { sym: 2, ty: lst, mode: COwned }]
+  let ps = [CParam { sym = 1, ty = lst, mode = COwned }, CParam { sym = 2, ty = lst, mode = COwned }]
   # `xs ++ [v]` lends v to list_push's borrowed element position...
   let bare = t_fn("m", "bare", ps, lst,
     CIntrinsic("list_push", [CLocal(1, lst), CLocal(2, lst)], lst, CNoSite))
@@ -845,14 +845,14 @@ test "a branching value in a borrow position consumes its arms (#499)" {
 
 test "consuming shapes flip owned: stored, captured, aliased, reassigned" {
   let lst = TyList(TyInt)
-  let stored = t_fn("m", "s", [CParam { sym: 1, ty: lst, mode: COwned }], lst,
+  let stored = t_fn("m", "s", [CParam { sym = 1, ty = lst, mode = COwned }], lst,
     CListLit([CLocal(1, lst)], TyList(lst)))
-  let captured = t_fn("m", "c", [CParam { sym: 2, ty: lst, mode: COwned }],
+  let captured = t_fn("m", "c", [CParam { sym = 2, ty = lst, mode = COwned }],
     TyFn([], TyInt, EPure),
     CClosure("lam", "m", [CLocal(2, lst)], TyFn([], TyInt, EPure)))
-  let aliased = t_fn("m", "a", [CParam { sym: 3, ty: lst, mode: COwned }], TyInt,
+  let aliased = t_fn("m", "a", [CParam { sym = 3, ty = lst, mode = COwned }], TyInt,
     CBlock([CSLet(9, lst, CLocal(3, lst))], Some(CInt(0)), TyInt))
-  let reassigned = t_fn("m", "w", [CParam { sym: 4, ty: lst, mode: COwned }], TyInt,
+  let reassigned = t_fn("m", "w", [CParam { sym = 4, ty = lst, mode = COwned }], TyInt,
     CBlock([CSAssign(4, CListLit([], lst))], Some(CInt(0)), TyInt))
   let table = infer_modes([t_mod("m", [stored, captured, aliased, reassigned])])
   assert len(t_row(table, "m", "s")) == 0
@@ -864,14 +864,14 @@ test "consuming shapes flip owned: stored, captured, aliased, reassigned" {
 test "the rebuild shape demands its container; a plain getter does not" {
   let lst = TyList(TyInt)
   # a getter: hand back the field of a structure this function never builds
-  let get = t_fn("m", "get", [CParam { sym: 1, ty: lst, mode: COwned }], lst,
+  let get = t_fn("m", "get", [CParam { sym = 1, ty = lst, mode = COwned }], lst,
     CField(CLocal(1, lst), 7, 0, 0, lst))
   # a rebuilder: the same projection, but its result goes into a fresh adt 7,
   # so the projection demands the container it was taken out of
-  let put = t_fn("m", "put", [CParam { sym: 2, ty: lst, mode: COwned }], lst,
+  let put = t_fn("m", "put", [CParam { sym = 2, ty = lst, mode = COwned }], lst,
     CCtor(7, 0, [CField(CLocal(2, lst), 7, 0, 0, lst)], lst))
   # ...and a rebuilder of a *different* ADT is still a getter of this one
-  let other = t_fn("m", "other", [CParam { sym: 3, ty: lst, mode: COwned }], lst,
+  let other = t_fn("m", "other", [CParam { sym = 3, ty = lst, mode = COwned }], lst,
     CCtor(8, 0, [CField(CLocal(3, lst), 7, 0, 0, lst)], lst))
   let table = infer_modes([t_mod("m", [get, put, other])])
   assert not mode_owned(t_row(table, "m", "get")[0])
@@ -880,7 +880,7 @@ test "the rebuild shape demands its container; a plain getter does not" {
   # `std/hamt.assoc`'s own shape, and the reason the walk runs twice: the
   # projection is bound out first and the construction that licenses it comes
   # after, so a single pass would still be collecting adt 7 when it read it
-  let split = t_fn("m", "split", [CParam { sym: 4, ty: lst, mode: COwned }], lst,
+  let split = t_fn("m", "split", [CParam { sym = 4, ty = lst, mode = COwned }], lst,
     CBlock([CSLet(9, lst, CField(CLocal(4, lst), 7, 0, 0, lst))],
       Some(CCtor(7, 0, [CLocal(9, lst)], lst)), lst))
   assert len(t_row(infer_modes([t_mod("m", [split])]), "m", "split")) == 0
@@ -890,37 +890,37 @@ test "jurisdiction pins: closures, dictionary slots, pvec boundary, fn-typed" {
   let lst = TyList(TyInt)
   let read_body = CIntrinsic("len", [CLocal(1, lst)], TyInt, CNoSite)
   # named by a CClosure somewhere: called through CDynamic, all owned
-  let cl = t_fn("m", "cl", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt, read_body)
+  let cl = t_fn("m", "cl", [CParam { sym = 1, ty = lst, mode = COwned }], TyInt, read_body)
   let user = t_fn("m", "u", [], TyFn([], TyInt, EPure),
     CClosure("cl", "m", [], TyFn([], TyInt, EPure)))
   assert len(t_row(infer_modes([t_mod("m", [cl, user])]), "m", "cl")) == 0
   # named by a dictionary slot: read as a bare function pointer
-  let sl = t_fn("m", "sl", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt, read_body)
+  let sl = t_fn("m", "sl", [CParam { sym = 1, ty = lst, mode = COwned }], TyInt, read_body)
   let dm = CModule {
-    owner: "m",
-    fns: [sl],
-    dicts: [CDictDef { key: "k", trait_id: 1, subject: TyInt, nargs: 0,
-      slots: [CSlotFn("m", "sl")] }],
-    next_sym: 100
+    owner = "m",
+    fns = [sl],
+    dicts = [CDictDef { key = "k", trait_id = 1, subject = TyInt, nargs = 0,
+      slots = [CSlotFn("m", "sl")] }],
+    next_sym = 100
   }
   assert len(t_row(infer_modes([dm]), "m", "sl")) == 0
   # the pvec boundary spellings are written by the emitter itself (`concat`
   # dups both sides): pinned whole
-  let cc = t_fn("std/pvec", "concat", [CParam { sym: 1, ty: lst, mode: COwned },
-    CParam { sym: 2, ty: lst, mode: COwned }], TyInt, read_body)
+  let cc = t_fn("std/pvec", "concat", [CParam { sym = 1, ty = lst, mode = COwned },
+    CParam { sym = 2, ty = lst, mode = COwned }], TyInt, read_body)
   assert len(t_row(infer_modes([t_mod("std/pvec", [cc])]), "std/pvec", "concat")) == 0
   # `list_push` consumes its list: that position stays owned though the body
   # only reads it; `index` has no owned position, so its row is a real one
-  let pu = t_fn("std/pvec", "push", [CParam { sym: 1, ty: lst, mode: COwned },
-    CParam { sym: 2, ty: TyInt, mode: COwned }], TyInt, read_body)
+  let pu = t_fn("std/pvec", "push", [CParam { sym = 1, ty = lst, mode = COwned },
+    CParam { sym = 2, ty = TyInt, mode = COwned }], TyInt, read_body)
   assert len(t_row(infer_modes([t_mod("std/pvec", [pu])]), "std/pvec", "push")) == 0
-  let px = t_fn("std/pvec", "index", [CParam { sym: 1, ty: lst, mode: COwned },
-    CParam { sym: 2, ty: TyInt, mode: COwned }], TyInt, read_body)
+  let px = t_fn("std/pvec", "index", [CParam { sym = 1, ty = lst, mode = COwned },
+    CParam { sym = 2, ty = TyInt, mode = COwned }], TyInt, read_body)
   let ix = t_row(infer_modes([t_mod("std/pvec", [px])]), "std/pvec", "index")
   assert len(ix) == 2 && not mode_owned(ix[0])
   # a fn-typed parameter: higher-order is owned by consensus
   let fty = TyFn([], TyInt, EPure)
-  let ho = t_fn("m", "ho", [CParam { sym: 1, ty: fty, mode: COwned }], TyInt,
+  let ho = t_fn("m", "ho", [CParam { sym = 1, ty = fty, mode = COwned }], TyInt,
     CCall(CDynamic(CLocal(1, fty)), [], TyInt, CNoSite))
   assert len(t_row(infer_modes([t_mod("m", [ho])]), "m", "ho")) == 0
 }
@@ -931,14 +931,14 @@ test "an impl method has its own row, and a CImpl call reads it" {
   # an impl method and a plain function share the name `size`; only the impl
   # only reads its parameter, the plain one returns it
   let im = CFun {
-    ..t_fn("m", "size", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt, read),
-    impl_of: Some((7, TyInt))
+    ..t_fn("m", "size", [CParam { sym = 1, ty = lst, mode = COwned }], TyInt, read),
+    impl_of = Some((7, TyInt))
   }
-  let pl = t_fn("m", "size", [CParam { sym: 2, ty: lst, mode: COwned }], lst,
+  let pl = t_fn("m", "size", [CParam { sym = 2, ty = lst, mode = COwned }], lst,
     CLocal(2, lst))
   # a caller that only hands its parameter to the impl: borrowed through the
   # impl's row
-  let caller = t_fn("m", "c", [CParam { sym: 3, ty: lst, mode: COwned }], TyInt,
+  let caller = t_fn("m", "c", [CParam { sym = 3, ty = lst, mode = COwned }], TyInt,
     CCall(CImpl("m", 7, TyInt, "size"), [CLocal(3, lst)], TyInt, CNoSite))
   let table = infer_modes([t_mod("m", [im, pl, caller])])
   let irow = t_row(table, "m", impl_mode_name(7, TyInt, "size"))
@@ -954,7 +954,7 @@ test "an impl method has its own row, and a CImpl call reads it" {
 
 test "stamping writes the fixpoint onto the callee half" {
   let lst = TyList(TyInt)
-  let r = t_fn("m", "r", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt,
+  let r = t_fn("m", "r", [CParam { sym = 1, ty = lst, mode = COwned }], TyInt,
     CIntrinsic("len", [CLocal(1, lst)], TyInt, CNoSite))
   let m = t_mod("m", [r])
   let table = infer_modes([m])
@@ -965,15 +965,15 @@ test "stamping writes the fixpoint onto the callee half" {
 test "a forced position survives the fixpoint in both directions" {
   let lst = TyList(TyInt)
   # consuming body, forced borrowed anyway: the demand may not flip it back
-  let g = t_fn("m", "g", [CParam { sym: 1, ty: lst, mode: COwned }], lst,
+  let g = t_fn("m", "g", [CParam { sym = 1, ty = lst, mode = COwned }], lst,
     CLocal(1, lst))
   let t1 = infer_modes_forced([t_mod("m", [g])],
-    [ForcedMode { owner: "m", name: "g", arity: 1, idx: 0, mode: CBorrowed }])
+    [ForcedMode { owner = "m", name = "g", arity = 1, idx = 0, mode = CBorrowed }])
   assert not mode_owned(t_row(t1, "m", "g")[0])
   # read-only body, forced owned: the row prunes to absent, which is owned
-  let r = t_fn("m", "r", [CParam { sym: 2, ty: lst, mode: COwned }], TyInt,
+  let r = t_fn("m", "r", [CParam { sym = 2, ty = lst, mode = COwned }], TyInt,
     CIntrinsic("len", [CLocal(2, lst)], TyInt, CNoSite))
   let t2 = infer_modes_forced([t_mod("m", [r])],
-    [ForcedMode { owner: "m", name: "r", arity: 1, idx: 0, mode: COwned }])
+    [ForcedMode { owner = "m", name = "r", arity = 1, idx = 0, mode = COwned }])
   assert len(t_row(t2, "m", "r")) == 0
 }

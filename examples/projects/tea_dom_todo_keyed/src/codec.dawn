@@ -27,21 +27,21 @@ use todo.{Model, Todo, Filter, All, Active, Done, init}
 ## The model as one line of JSON.
 pub fn encode(m: Model) -> String =
   render(
-    JObj(entries: map.from([
-      ("todos", JArr(items: list.map(m.todos, t => enc_todo(t)))),
-      ("next", JInt(value: m.next_id)),
-      ("filter", JStr(value: filter_name(m.filter))),
-      ("draft", JStr(value: m.draft)),
-      ("edit", JStr(value: m.edit)),
+    JObj(entries = map.from([
+      ("todos", JArr(items = list.map(m.todos, t => enc_todo(t)))),
+      ("next", JInt(value = m.next_id)),
+      ("filter", JStr(value = filter_name(m.filter))),
+      ("draft", JStr(value = m.draft)),
+      ("edit", JStr(value = m.edit)),
       ("editing", enc_editing(m.editing)),
     ])),
   )
 
 fn enc_todo(t: Todo) -> Json =
-  JObj(entries: map.from([
-    ("id", JInt(value: t.id)),
-    ("title", JStr(value: t.title)),
-    ("done", JBool(value: t.done)),
+  JObj(entries = map.from([
+    ("id", JInt(value = t.id)),
+    ("title", JStr(value = t.title)),
+    ("done", JBool(value = t.done)),
   ]))
 
 fn filter_name(f: Filter) -> String =
@@ -56,7 +56,7 @@ fn filter_name(f: Filter) -> String =
 # value `decode` has to know about.
 fn enc_editing(e: Option[Int]) -> Json =
   match e {
-    Some(id) -> JInt(value: id)
+    Some(id) -> JInt(value = id)
     None -> JNull
   }
 
@@ -66,12 +66,12 @@ pub fn decode(s: String) -> Model =
     Err(_) -> init()
     Ok(JObj(entries)) ->
       Model {
-        todos: map.get(entries, "todos").dec_todos(),
-        next_id: map.get(entries, "next").dec_int(1),
-        filter: map.get(entries, "filter").dec_str("all").dec_filter(),
-        draft: map.get(entries, "draft").dec_str(""),
-        edit: map.get(entries, "edit").dec_str(""),
-        editing: map.get(entries, "editing").dec_editing(),
+        todos = map.get(entries, "todos").dec_todos(),
+        next_id = map.get(entries, "next").dec_int(1),
+        filter = map.get(entries, "filter").dec_str("all").dec_filter(),
+        draft = map.get(entries, "draft").dec_str(""),
+        edit = map.get(entries, "edit").dec_str(""),
+        editing = map.get(entries, "editing").dec_editing(),
       }
     Ok(_) -> init()
   }
@@ -104,11 +104,11 @@ fn dec_todo(j: Json) -> Todo =
   match j {
     JObj(entries) ->
       Todo {
-        id: map.get(entries, "id").dec_int(0),
-        title: map.get(entries, "title").dec_str(""),
-        done: map.get(entries, "done").dec_bool(false),
+        id = map.get(entries, "id").dec_int(0),
+        title = map.get(entries, "title").dec_str(""),
+        done = map.get(entries, "done").dec_bool(false),
       }
-    _ -> Todo { id: 0, title: "", done: false }
+    _ -> Todo { id = 0, title = "", done = false }
   }
 
 fn dec_filter(s: String) -> Filter =
@@ -130,15 +130,15 @@ fn dec_editing(j: Option[Json]) -> Option[Int] =
 
 fn sample() -> Model =
   Model {
-    todos: [
-      Todo { id: 1, title: "buy milk", done: true },
-      Todo { id: 2, title: "ship tea", done: false },
+    todos = [
+      Todo { id = 1, title = "buy milk", done = true },
+      Todo { id = 2, title = "ship tea", done = false },
     ],
-    next_id: 3,
-    filter: Active,
-    draft: "hal",
-    edit: "",
-    editing: Some(2),
+    next_id = 3,
+    filter = Active,
+    draft = "hal",
+    edit = "",
+    editing = Some(2),
   }
 
 test "a model round-trips through its own text" {
@@ -146,15 +146,15 @@ test "a model round-trips through its own text" {
   assert init().encode().decode() == init()
   let all_open: List[Option[Int]] = [None, Some(1), Some(7)]
   let open_check =
-    list.all(all_open, e => encode(Model { ..sample(), editing: e }).decode().editing == e)
+    list.all(all_open, e => encode(Model { ..sample(), editing = e }).decode().editing == e)
   assert open_check
   let all_filters: List[Filter] = [All, Active, Done]
   assert list.all(all_filters, f =>
-      encode(Model { ..sample(), filter: f }).decode().filter == f)
+      encode(Model { ..sample(), filter = f }).decode().filter == f)
 }
 
 test "the encoding is one line, and a quote in a title cannot end it" {
-  let tricky = Model { ..init(), todos: [Todo { id: 1, title: "a\"b\nc", done: false }] }
+  let tricky = Model { ..init(), todos = [Todo { id = 1, title = "a\"b\nc", done = false }] }
   let line = encode(tricky)
   assert not str.contains(line, "\n")
   assert decode(line) == tricky
@@ -164,8 +164,8 @@ test "decode is total: anything at all reads as a model" {
   assert decode("") == init()
   assert decode("not json") == init()
   assert decode("[1,2,3]") == init()
-  assert decode("{}") == Model { ..init(), next_id: 1 }
+  assert decode("{}") == Model { ..init(), next_id = 1 }
   # A field of the wrong type falls back rather than failing.
   assert decode("{\"todos\":7,\"next\":\"x\"}") == init()
-  assert decode("{\"todos\":[{\"id\":\"x\"}]}").todos == [Todo { id: 0, title: "", done: false }]
+  assert decode("{\"todos\":[{\"id\":\"x\"}]}").todos == [Todo { id = 0, title = "", done = false }]
 }

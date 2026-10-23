@@ -154,13 +154,13 @@ fn named_tests(m: CModule) -> CModule = {
   var i = 0
   for f in m.fns {
     if f.is_test {
-      fns = fns ++ [CFun { ..f, name: emitc.test_name(i), is_test: false }]
+      fns = fns ++ [CFun { ..f, name = emitc.test_name(i), is_test = false }]
       i = i + 1
     } else {
       fns = fns ++ [f]
     }
   }
-  CModule { ..m, fns: fns }
+  CModule { ..m, fns = fns }
 }
 
 ## One requested parameter-mode flip, from `DAWN_RC_MODE_FLIPS`. The mode
@@ -217,8 +217,8 @@ fn parse_mode_flips(spec: String) -> List[ModeFlip] = {
         }
       let (ce, cs) = sides
       out = out ++ [ModeFlip {
-        owner: parts[0], name: parts[1], arity: arity, idx: idx,
-        callee_side: ce, callsite_side: cs
+        owner = parts[0], name = parts[1], arity = arity, idx = idx,
+        callee_side = ce, callsite_side = cs
       }]
     }
   }
@@ -292,7 +292,7 @@ fn flip_callee(m: CModule, flips: List[ModeFlip]) -> CModule = {
         var i = 0
         for p in params {
           if i == fl.idx {
-            out = out ++ [CParam { ..p, mode: toggled(p.mode) }]
+            out = out ++ [CParam { ..p, mode = toggled(p.mode) }]
           } else {
             out = out ++ [p]
           }
@@ -305,7 +305,7 @@ fn flip_callee(m: CModule, flips: List[ModeFlip]) -> CModule = {
         var j = len(f.params) + len(f.dicts)
         for e in evs {
           if j == fl.idx {
-            eout = eout ++ [CParam { ..e, mode: toggled(e.mode) }]
+            eout = eout ++ [CParam { ..e, mode = toggled(e.mode) }]
           } else {
             eout = eout ++ [e]
           }
@@ -314,9 +314,9 @@ fn flip_callee(m: CModule, flips: List[ModeFlip]) -> CModule = {
         evs = eout
       }
     }
-    fns = fns ++ [CFun { ..f, params: params, evs: evs }]
+    fns = fns ++ [CFun { ..f, params = params, evs = evs }]
   }
-  CModule { ..m, fns: fns }
+  CModule { ..m, fns = fns }
 }
 
 test "mode flips parse and stamp both halves" {
@@ -410,7 +410,7 @@ fn build_units(
     if linting { found = found ++ lint.check_module(cls, tm, lm) }
     let core = if std_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [
-      EmitMod { m: core, consts: merged_consts(cx, ct, const_vals), blocks: ct.blocks }
+      EmitMod { m = core, consts = merged_consts(cx, ct, const_vals), blocks = ct.blocks }
     ]
   }
   for cm in prog.modules {
@@ -419,7 +419,7 @@ fn build_units(
     if linting { found = found ++ lint.check_module(cm.class_name, cm.tm, lm) }
     let core = if with_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [
-      EmitMod { m: core, consts: merged_consts(cm.cx, cm.ct, const_vals), blocks: cm.ct.blocks }
+      EmitMod { m = core, consts = merged_consts(cm.cx, cm.ct, const_vals), blocks = cm.ct.blocks }
     ]
     # only the entry module's `main` is the entry point (spec §10.5)
     if entry == "" && cm.cx.is_entry_module {
@@ -447,7 +447,7 @@ fn build_units(
   for u2 in pre {
     let m2 = unalias.elim_module(u2.m)
     cores = cores ++ [m2]
-    renamed = renamed ++ [EmitMod { ..u2, m: m2 }]
+    renamed = renamed ++ [EmitMod { ..u2, m = m2 }]
   }
   pre = renamed
   let inferred0 = infer.infer_modes(cores)
@@ -460,8 +460,8 @@ fn build_units(
         Some(row) -> { if fl.idx < len(row) { cur = row[fl.idx] } }
       }
       forced = forced ++ [ForcedMode {
-        owner: fl.owner, name: fl.name, arity: fl.arity, idx: fl.idx,
-        mode: toggled(cur)
+        owner = fl.owner, name = fl.name, arity = fl.arity, idx = fl.idx,
+        mode = toggled(cur)
       }]
     }
   }
@@ -480,7 +480,7 @@ fn build_units(
     units = units ++ [
       EmitMod {
         ..u2,
-        m: rc.rc_module(flip_callee(infer.stamp_modes(u2.m, inferred), singles), modes)
+        m = rc.rc_module(flip_callee(infer.stamp_modes(u2.m, inferred), singles), modes)
       }
     ]
   }

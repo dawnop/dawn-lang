@@ -42,8 +42,8 @@ use compiler_plan/envmem
 fn source(name: String, text: String) -> LoadedModule = {
   let (m, pdiags, marks) = parser.parse_module_marked(text)
   LoadedModule {
-    mod_path: name, class_name: name, path: name ++ ".dawn", site_path: name ++ ".dawn",
-    text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pdiags, marks: marks, pkg: None, entry: false
+    mod_path = name, class_name = name, path = name ++ ".dawn", site_path = name ++ ".dawn",
+    text = text, line_starts = lexer.line_starts_of(text), m = m, pdiags = pdiags, marks = marks, pkg = None, entry = false
   }
 }
 
@@ -69,7 +69,7 @@ test "module memo reuses a step whose input and what it read are unchanged" {
     let b = source("b", "pub type Other = { n: Int }\n")
     let c = source("c", "use a.{Box}\npub fn value() -> Box = Box { n: 1 }\n")
     let d = source("d", "pub fn extra() -> Int = 4\n")
-    let loaded = LoadResult { modules: [a, b, c], diags: [] }
+    let loaded = LoadResult { modules = [a, b, c], diags = [] }
     let fresh = incremental.new(std, ct_default(), jsig_refused(), 10)
     let first = incremental.analyze(fresh, loaded)
     assert first.stats.reused_modules == 0
@@ -85,24 +85,24 @@ test "module memo reuses a step whose input and what it read are unchanged" {
     let moved = source("a", "# moved\n\n" ++ a.text)
     let edits = [
       # the edited module alone
-      LoadResult { modules: [a, b, edited_c], diags: [] },
+      LoadResult { modules = [a, b, edited_c], diags = [] },
       # c enters with a carry that no longer holds b, which it never read
-      LoadResult { modules: [a, c], diags: [] },
+      LoadResult { modules = [a, c], diags = [] },
       # every module enters with a carry it has not entered with before. c
       # finds what it reads where it found it; b and a each enter with an
       # impl table whose rows are not the ones they entered with, because
       # the baseline's rows keep the spans a carry's rows drop
-      LoadResult { modules: [b, a, c], diags: [] },
-      LoadResult { modules: [a, b, c, d], diags: [] },
-      LoadResult { modules: [], diags: [] },
+      LoadResult { modules = [b, a, c], diags = [] },
+      LoadResult { modules = [a, b, c, d], diags = [] },
+      LoadResult { modules = [], diags = [] },
       # a body edit leaves a's exports as they were: b and c keep their steps
-      LoadResult { modules: [body, b, c], diags: [] },
+      LoadResult { modules = [body, b, c], diags = [] },
       # a signature edit does not, and c imports a, but lists only `Box`,
       # which is as it was: c keeps its step (§十二)
-      LoadResult { modules: [signature, b, c], diags: [] },
+      LoadResult { modules = [signature, b, c], diags = [] },
       # nor does moving every declaration of a, as far as its exports go; the
       # positions it moved are the session's to put right
-      LoadResult { modules: [moved, b, c], diags: [] }
+      LoadResult { modules = [moved, b, c], diags = [] }
     ]
     let expected_hits = [2, 2, 1, 3, 0, 2, 2, 2]
     var i = 0
@@ -114,8 +114,8 @@ test "module memo reuses a step whose input and what it read are unchanged" {
       i = i + 1
     }
     # Same raw text but a different loader-rewritten AST must invalidate.
-    let rewritten = LoadedModule { ..c, m: edited_c.m }
-    let rewrite = incremental.analyze(warm.session, LoadResult { modules: [a, b, rewritten], diags: [] })
+    let rewritten = LoadedModule { ..c, m = edited_c.m }
+    let rewrite = incremental.analyze(warm.session, LoadResult { modules = [a, b, rewritten], diags = [] })
     assert rewrite.stats.reused_modules == 2
     assert rewrite.stats.checked_modules == 1
   }))
@@ -129,14 +129,14 @@ test "module memo places a reused module's diagnostics and its predecessors' whe
     let lib_text = "pub fn ok() -> Int = 1\n\npub fn bad() -> Int = false\n"
     let lib = source("lib", lib_text)
     let app = source("app", "use lib\npub fn use_it() -> Int = lib.ok()\n\npub fn worse() -> Bool = 1\n")
-    let loaded = LoadResult { modules: [lib, app], diags: [] }
+    let loaded = LoadResult { modules = [lib, app], diags = [] }
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10), loaded)
     assert len(warm.program.diags) == 2
     # lines above lib's declarations, and no change to its signatures: lib is
     # checked again, app is not, and both diagnostics land where the text now
     # puts them
     let moved = source("lib", "# three\n# more\n# lines\n" ++ lib_text)
-    let input = LoadResult { modules: [moved, app], diags: [] }
+    let input = LoadResult { modules = [moved, app], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert result.stats.reused_modules == 1
     assert result.stats.checked_modules == 1
@@ -209,11 +209,11 @@ test "module memo compares what a module exports in order, not only as a set" {
     let lib = source("lib", "pub fn first() -> Int = 1\npub fn second() -> Int = 2\n")
     let app = source("app", "use lib\npub fn total() -> Int = lib.first() + lib.second()\n")
     let owner = incremental.new(std, ct_default(), jsig_refused(), 10)
-    let warm = incremental.analyze(owner, LoadResult { modules: [lib, app], diags: [] })
+    let warm = incremental.analyze(owner, LoadResult { modules = [lib, app], diags = [] })
     # the same two functions the other way round: equal as a set, and still a
     # different input to an importer that walks them
     let swapped = source("lib", "pub fn second() -> Int = 2\npub fn first() -> Int = 1\n")
-    let input = LoadResult { modules: [swapped, app], diags: [] }
+    let input = LoadResult { modules = [swapped, app], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert result.stats.reused_modules == 0
     assert result.stats.checked_modules == 2
@@ -224,8 +224,8 @@ test "module memo compares what a module exports in order, not only as a set" {
     let q = source("q", "pub type Q = { n: Int }\n")
     let body = "pub fn make() -> Int = 1\n"
     let user = source("user", "use lib\npub fn made() -> Int = lib.make()\n")
-    let forward = LoadResult { modules: [p, q, source("lib", "use p.{P}\nuse q.{Q}\n" ++ body), user], diags: [] }
-    let backward = LoadResult { modules: [p, q, source("lib", "use q.{Q}\nuse p.{P}\n" ++ body), user], diags: [] }
+    let forward = LoadResult { modules = [p, q, source("lib", "use p.{P}\nuse q.{Q}\n" ++ body), user], diags = [] }
+    let backward = LoadResult { modules = [p, q, source("lib", "use q.{Q}\nuse p.{P}\n" ++ body), user], diags = [] }
     let before = incremental.analyze(owner, forward)
     let after = incremental.analyze(before.session, backward)
     assert after.stats.reused_modules == 2
@@ -242,18 +242,18 @@ test "module memo keeps a module that does not import an edited surface and chec
     let user = source("user", "use lib\npub fn total() -> Int = lib.value()\n")
     let far = source("far", "use user\npub fn more() -> Int = user.total() + 1\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
-      LoadResult { modules: [lib, other, user, far], diags: [] })
+      LoadResult { modules = [lib, other, user, far], diags = [] })
     assert len(warm.program.diags) == 0
     # A defaulted parameter changes lib's surface and adds a row to the intern
     # table. other never reads lib; far reads user, whose surface comes out
     # the same.
-    let signature = LoadResult { modules: [source("lib", "pub fn value(k: Int = 0) -> Int = 1 + k\n"), other, user, far], diags: [] }
+    let signature = LoadResult { modules = [source("lib", "pub fn value(k: Int = 0) -> Int = 1 + k\n"), other, user, far], diags = [] }
     let changed = incremental.analyze(warm.session, signature)
     assert changed.stats.reused_modules == 2
     assert changed.stats.checked_modules == 2
     assert agrees_with_cold(changed.program, signature, std)
     # and an edit that breaks the importer breaks only the importer
-    let broken = LoadResult { modules: [source("lib", "pub fn renamed() -> Int = 1\n"), other, user, far], diags: [] }
+    let broken = LoadResult { modules = [source("lib", "pub fn renamed() -> Int = 1\n"), other, user, far], diags = [] }
     let result = incremental.analyze(changed.session, broken)
     assert result.stats.reused_modules == 2
     assert result.stats.checked_modules == 2
@@ -271,10 +271,10 @@ test "module memo checks an importer again when a surface changes only in what i
     let a = source("a", "use b.{Shape, shape}\npub fn make() -> Shape = shape()\n")
     let d = source("d", "use a\npub fn size() -> Int = a.make().n\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
-      LoadResult { modules: [b, a, d], diags: [] })
+      LoadResult { modules = [b, a, d], diags = [] })
     assert len(warm.program.diags) == 0
     let renamed = source("b", "pub type Shape = { m: Int }\npub fn shape() -> Shape = Shape { m: 1 }\n")
-    let input = LoadResult { modules: [renamed, a, d], diags: [] }
+    let input = LoadResult { modules = [renamed, a, d], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert result.stats.reused_modules == 0
     assert result.stats.checked_modules == 3
@@ -308,13 +308,13 @@ test "module memo checks a selective importer again only when a name it lists ch
     let whole = source("whole", "use lib\npub fn h() -> Int = lib.named()\n")
     let far = source("far", "use listed.{f}\npub fn k() -> Int = f()\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
-      LoadResult { modules: [lib, listed, other, whole, far], diags: [] })
+      LoadResult { modules = [lib, listed, other, whole, far], diags = [] })
     assert len(warm.program.diags) == 0
     # a name listed by `other` alone: `listed` keeps its step, and so does
     # `far` behind it; a whole-module `use` reads every name
-    let unnamed = LoadResult { modules: [source("lib",
+    let unnamed = LoadResult { modules = [source("lib",
       "pub fn named() -> Int = 1\npub fn unnamed(k: Int = 0) -> Int = 2 + k\n"),
-      listed, other, whole, far], diags: [] }
+      listed, other, whole, far], diags = [] }
     let kept = incremental.analyze(warm.session, unnamed)
     assert kept.stats.reused_modules == 2
     assert kept.stats.checked_modules == 3
@@ -324,9 +324,9 @@ test "module memo checks a selective importer again only when a name it lists ch
     # the name `listed` lists, changed so that its body no longer checks:
     # `listed` is checked again and reports it, `other` keeps its step, and
     # `far` reads `listed`, whose surface came out as it was
-    let named = LoadResult { modules: [source("lib",
+    let named = LoadResult { modules = [source("lib",
       "pub fn named() -> String = \"1\"\npub fn unnamed() -> Int = 2\n"),
-      listed, other, whole, far], diags: [] }
+      listed, other, whole, far], diags = [] }
     let broken = incremental.analyze(warm.session, named)
     assert broken.stats.reused_modules == 2
     assert broken.stats.checked_modules == 3
@@ -345,18 +345,18 @@ test "module memo checks an importer again when an effect it lists changes an op
     let lib = source("lib", "pub effect Ask { fn ask(k: Int) -> Int }\npub fn spare() -> Int = 0\n")
     let user = source("user", "use lib.{Ask}\npub fn get() -> Int !Ask = ask(k: 2) + 1\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
-      LoadResult { modules: [lib, user], diags: [] })
+      LoadResult { modules = [lib, user], diags = [] })
     assert len(warm.program.diags) == 0
-    let input = LoadResult { modules: [source("lib",
-      "pub effect Ask { fn ask(j: Int) -> Int }\npub fn spare() -> Int = 0\n"), user], diags: [] }
+    let input = LoadResult { modules = [source("lib",
+      "pub effect Ask { fn ask(j: Int) -> Int }\npub fn spare() -> Int = 0\n"), user], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert result.stats.reused_modules == 0
     assert result.stats.checked_modules == 2
     assert len(result.program.diags) > 0
     assert agrees_with_cold(result.program, input, std)
     # and `spare`, which it does not list, leaves it be
-    let spare = LoadResult { modules: [source("lib",
-      "pub effect Ask { fn ask(k: Int) -> Int }\npub fn spare(k: Int = 0) -> Int = k\n"), user], diags: [] }
+    let spare = LoadResult { modules = [source("lib",
+      "pub effect Ask { fn ask(k: Int) -> Int }\npub fn spare(k: Int = 0) -> Int = k\n"), user], diags = [] }
     let kept = incremental.analyze(warm.session, spare)
     assert kept.stats.reused_modules == 1
     assert agrees_with_cold(kept.program, spare, std)
@@ -366,17 +366,17 @@ test "module memo checks an importer again when an effect it lists changes an op
 test "module memo checks an importer again when a name it lists becomes package-private" {
   io.with_fs_real(() => io.with_env_real(() => {
     let std = std_ctx()
-    let web = PkgR { name: "web", root: "web", deps: map.empty(), java_deps: [], version: None, origin: FromPath }
+    let web = PkgR { name = "web", root = "web", deps = map.empty(), java_deps = [], version = None, origin = FromPath }
     let lib = LoadedModule { ..source("lib", "pub fn seam() -> Int = 1\npub fn spare() -> Int = 0\n"),
-      pkg: Some(web) }
+      pkg = Some(web) }
     let app = source("app", "use lib.{seam}\npub fn f() -> Int = seam()\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
-      LoadResult { modules: [lib, app], diags: [] })
+      LoadResult { modules = [lib, app], diags = [] })
     assert len(warm.program.diags) == 0
     # the signature is the same; the package boundary now takes the name away
     let hidden = LoadedModule { ..source("lib", "pub(pkg) fn seam() -> Int = 1\npub fn spare() -> Int = 0\n"),
-      pkg: Some(web) }
-    let input = LoadResult { modules: [hidden, app], diags: [] }
+      pkg = Some(web) }
+    let input = LoadResult { modules = [hidden, app], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert result.stats.checked_modules == 2
     assert len(result.program.diags) > 0
@@ -393,10 +393,10 @@ test "module memo checks a selective importer again when the types its names men
     let a = source("a", "use b.{Shape, shape}\npub fn make() -> Shape = shape()\n")
     let d = source("d", "use a.{make}\npub fn size() -> Int = make().n\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
-      LoadResult { modules: [b, a, d], diags: [] })
+      LoadResult { modules = [b, a, d], diags = [] })
     assert len(warm.program.diags) == 0
     let renamed = source("b", "pub type Shape = { m: Int }\npub fn shape() -> Shape = Shape { m: 1 }\n")
-    let input = LoadResult { modules: [renamed, a, d], diags: [] }
+    let input = LoadResult { modules = [renamed, a, d], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert result.stats.reused_modules == 0
     assert result.stats.checked_modules == 3
@@ -414,7 +414,7 @@ test "module memo checks an importer again when what it uses without naming chan
     let lib = source("lib", text ++ "pub fn spare() -> Int = 0\n")
     let app = source("app", "use lib.{mk}\npub fn shown() -> String = show(mk(1))\npub fn n() -> Int = mk(2).n\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
-      LoadResult { modules: [lib, app], diags: [] })
+      LoadResult { modules = [lib, app], diags = [] })
     assert len(warm.program.diags) == 0
     let edits = [
       # the derived impl goes
@@ -426,7 +426,7 @@ test "module memo checks an importer again when what it uses without naming chan
     ]
     for edit in edits {
       let (edited, checked) = edit
-      let input = LoadResult { modules: [edited, app], diags: [] }
+      let input = LoadResult { modules = [edited, app], diags = [] }
       let result = incremental.analyze(warm.session, input)
       assert result.stats.checked_modules == checked
       assert agrees_with_cold(result.program, input, std)
@@ -442,11 +442,11 @@ test "module memo judges a step with diagnostics by the whole surface it read" {
     let lib = source("lib", "pub fn named() -> Int = 1\npub fn unnamed() -> Int = 2\n")
     let app = source("app", "use lib.{named}\npub fn f() -> Int = named() + unnamed()\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
-      LoadResult { modules: [lib, app], diags: [] })
+      LoadResult { modules = [lib, app], diags = [] })
     assert len(warm.program.diags) > 0
     # the hint goes when `unnamed` stops being exported, and the declaration
     # stays, so the intern table does not change and cannot be the reason
-    let input = LoadResult { modules: [source("lib", "pub fn named() -> Int = 1\nfn unnamed() -> Int = 2\n"), app], diags: [] }
+    let input = LoadResult { modules = [source("lib", "pub fn named() -> Int = 1\nfn unnamed() -> Int = 2\n"), app], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert result.stats.checked_modules == 2
     assert agrees_with_cold(result.program, input, std)
@@ -464,9 +464,9 @@ test "module memo checks a module again when the impl table changes, whatever it
     let r = source("r", "use p.{Tag}\npub fn tag() -> Tag = Tag { n: 1 }\n")
     let q = source("q", "use r\npub fn shown() -> String = show(r.tag())\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
-      LoadResult { modules: [p, r, q], diags: [] })
+      LoadResult { modules = [p, r, q], diags = [] })
     assert len(warm.program.diags) == 0
-    let input = LoadResult { modules: [source("p", "pub type Tag = { n: Int }\n"), r, q], diags: [] }
+    let input = LoadResult { modules = [source("p", "pub type Tag = { n: Int }\n"), r, q], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert result.stats.reused_modules == 0
     assert result.stats.checked_modules == 3
@@ -500,9 +500,9 @@ test "module memo reports a digest collision with a module it does not import as
     let e = source("e", "pub fn one() -> Int = 1\n")
     let p = source("p", "pub fn a20228599() -> Int = 0\n")
     let q = source("q", "use e\npub fn b9013596() -> Int = e.one()\n")
-    let first = incremental.analyze(owner, LoadResult { modules: [e, p, q], diags: [] })
+    let first = incremental.analyze(owner, LoadResult { modules = [e, p, q], diags = [] })
     assert collides(first.program)
-    let grown = LoadResult { modules: [source("e", "pub fn one() -> Int = 1\npub fn two() -> Int = 2\n"), p, q], diags: [] }
+    let grown = LoadResult { modules = [source("e", "pub fn one() -> Int = 1\npub fn two() -> Int = 2\n"), p, q], diags = [] }
     let kept = incremental.analyze(first.session, grown)
     assert kept.stats.reused_modules == 1
     assert kept.stats.checked_modules == 2
@@ -511,10 +511,10 @@ test "module memo reports a digest collision with a module it does not import as
     # A collision that appears upstream reaches a module that imports nothing:
     # q's step would be reused by what it reads, and its rows are taken.
     let lone = source("q", "pub fn b9013596() -> Int = 1\n")
-    let clean = LoadResult { modules: [source("p", "pub fn one() -> Int = 1\n"), lone], diags: [] }
+    let clean = LoadResult { modules = [source("p", "pub fn one() -> Int = 1\n"), lone], diags = [] }
     let before = incremental.analyze(owner, clean)
     assert len(before.program.diags) == 0
-    let clash = LoadResult { modules: [source("p", "pub fn one() -> Int = 1\npub fn a20228599() -> Int = 0\n"), lone], diags: [] }
+    let clash = LoadResult { modules = [source("p", "pub fn one() -> Int = 1\npub fn a20228599() -> Int = 0\n"), lone], diags = [] }
     let appeared = incremental.analyze(before.session, clash)
     assert appeared.stats.checked_modules == 2
     assert collides(appeared.program)
@@ -537,9 +537,9 @@ test "module memo keeps an importer's step across an edit above a pub alias" {
     let app = source("app", "use lib.{Pair, Meters, two, meters}\npub fn get() -> Pair = two()\n" ++
         "pub fn far() -> Meters = meters(3)\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
-      LoadResult { modules: [lib, app], diags: [] })
+      LoadResult { modules = [lib, app], diags = [] })
     assert len(warm.program.diags) == 0
-    let input = LoadResult { modules: [source("lib", "# moved\n" ++ text), app], diags: [] }
+    let input = LoadResult { modules = [source("lib", "# moved\n" ++ text), app], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert result.stats.reused_modules == 1
     assert result.stats.checked_modules == 1
@@ -557,13 +557,13 @@ test "module memo keeps an importer's step across an edit above an impl or a der
     let app = source("app", "use lib.{Box, sizey}\npub fn size() -> Int = sizey(Box { n: 1 })\n" ++
         "pub fn same() -> Bool = Box { n: 1 } == Box { n: 2 }\n")
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
-      LoadResult { modules: [lib, app], diags: [] })
+      LoadResult { modules = [lib, app], diags = [] })
     assert len(warm.program.diags) == 0
     for moved in ["# moved\n" ++ text,
       "pub trait Sizey[T] { fn sizey(x: T) -> Int }\n# between\n" ++
         "pub type Box = { n: Int } derive Show\n# and again\n" ++
         "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\n"] {
-      let input = LoadResult { modules: [source("lib", moved), app], diags: [] }
+      let input = LoadResult { modules = [source("lib", moved), app], diags = [] }
       let result = incremental.analyze(warm.session, input)
       assert result.stats.reused_modules == 1
       assert result.stats.checked_modules == 1
@@ -577,20 +577,20 @@ test "module memo reuses modules with diagnostics and bounds what it keeps" {
     let std = std_ctx()
     let a = source("a", "pub fn answer() -> Int = 42\n")
     let b = source("b", "pub fn other() -> Int = 1\n")
-    let loaded = LoadResult { modules: [a, b], diags: [] }
+    let loaded = LoadResult { modules = [a, b], diags = [] }
     let fresh = incremental.new(std, ct_default(), jsig_refused(), 10)
     let warm = incremental.analyze(fresh, loaded)
     # a loader diagnostic is not an input of any step
     let broken = source("broken", "pub fn (\n")
-    let loader = LocDiag { path: "loader", d: broken.pdiags[0] }
-    let failed_input = LoadResult { modules: [a, b], diags: [loader] }
+    let loader = LocDiag { path = "loader", d = broken.pdiags[0] }
+    let failed_input = LoadResult { modules = [a, b], diags = [loader] }
     let failed = incremental.analyze(warm.session, failed_input)
     assert failed.stats.reused_modules == 2
     assert failed.program.diags[0] == loader
     assert agrees_with_cold(failed.program, failed_input, std)
     # nor is a module's own diagnostic a reason to check it again
     let bad = source("bad", "pub fn bad() -> Int = false\n")
-    let input = LoadResult { modules: [a, bad, b, broken], diags: [] }
+    let input = LoadResult { modules = [a, bad, b, broken], diags = [] }
     let recovered = incremental.analyze(warm.session, input)
     # a and b: b now follows a module it does not import
     assert recovered.stats.reused_modules == 2
@@ -624,7 +624,7 @@ test "module memo reuses modules that asked the Java oracle" {
       "use java \"java.util.ArrayList\"\npub fn items() -> ArrayList !io = ArrayList.new()\n")
     let consumer = source("consumer",
       "use producer\npub fn count() -> Int !io = producer.items().size()\n")
-    let loaded = LoadResult { modules: [pure, producer, consumer], diags: [] }
+    let loaded = LoadResult { modules = [pure, producer, consumer], diags = [] }
     # the oracle is the owner's for its whole life: a host rebuilds the owner
     # whenever it replaces the lease the oracle answers from
     let js = jsig_real()
@@ -643,7 +643,7 @@ test "module memo rechecks std identity and refuses a negative bound" {
   io.with_fs_real(() => io.with_env_real(() => {
     let std = std_ctx()
     let raw = source("pretend", "pub fn answer() -> Int = 42\n")
-    let input = LoadResult { modules: [LoadedModule { ..raw, path: "std/list.dawn" }], diags: [] }
+    let input = LoadResult { modules = [LoadedModule { ..raw, path = "std/list.dawn" }], diags = [] }
     let owner = incremental.new(std, ct_default(), jsig_refused(), 10)
     let first = incremental.analyze(owner, input)
     assert len(first.program.diags) == 0
@@ -684,7 +684,7 @@ test "module memo folds a const again when a module its comptime reached changes
     let b = source("b", "use c\npub fn via(x: Int) -> Int = c.plus(x) * 2\n")
     let a = source("a", "use b\npub const Q: Int = b.via(1)\n")
     let z = source("z", "use c\npub fn f() -> Int = c.plus(1)\npub const Z: Int = 5\n")
-    let loaded = LoadResult { modules: [c, b, a, z], diags: [] }
+    let loaded = LoadResult { modules = [c, b, a, z], diags = [] }
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10), loaded)
     assert len(warm.program.diags) == 0
     assert folded(warm.program, "a", "Q") == Some(VInt(202))
@@ -695,11 +695,11 @@ test "module memo folds a const again when a module its comptime reached changes
     let middle = source("b", "use c\npub fn via(x: Int) -> Int = c.plus(x) * 3\n")
     let edits = [
       # c's body, two modules away from a: c and a run again, b and z do not
-      (LoadResult { modules: [body, b, a, z], diags: [] }, 204, 2),
+      (LoadResult { modules = [body, b, a, z], diags = [] }, 204, 2),
       # c's constant, which c's body names
-      (LoadResult { modules: [value, b, a, z], diags: [] }, 402, 2),
+      (LoadResult { modules = [value, b, a, z], diags = [] }, 402, 2),
       # b's body, which a calls directly
-      (LoadResult { modules: [c, middle, a, z], diags: [] }, 303, 2)
+      (LoadResult { modules = [c, middle, a, z], diags = [] }, 303, 2)
     ]
     for edit in edits {
       let (input, q, checked) = edit
@@ -736,7 +736,7 @@ test "module memo keeps the importers of a module that fails to parse on the hea
     let user = source("user", "use base.{Tag}\nuse lib.{Box, wrap}\npub fn make() -> Box = wrap(Tag { n: 1 })\n")
     let whole = source("whole", "use lib\npub fn total() -> Int = lib.value()\n")
     let far = source("far", "pub type Far = { n: Int }\npub fn far() -> Int = 3\n")
-    let loaded = LoadResult { modules: [base, lib, user, whole, far], diags: [] }
+    let loaded = LoadResult { modules = [base, lib, user, whole, far], diags = [] }
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10), loaded)
     assert len(warm.program.diags) == 0
     # A statement the parser cannot read inside the private helper: the file
@@ -746,7 +746,7 @@ test "module memo keeps the importers of a module that fails to parse on the hea
     # broken text.
     let torn = source("lib", head ++ "fn helper() -> Int = {\n  let = 1\n  1\n}\n")
     assert len(torn.pdiags) > 0
-    let input = LoadResult { modules: [base, torn, user, whole, far], diags: [] }
+    let input = LoadResult { modules = [base, torn, user, whole, far], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert len(result.program.diags) == len(torn.pdiags)
     assert diags_in(result.program, "lib.dawn") == len(torn.pdiags)
@@ -770,7 +770,7 @@ test "module memo agrees with a cold analysis while a block is left open above a
     let user = source("user", "use lib.{value}\npub fn twice() -> Int = value() * 2\n")
     let good = "pub fn value() -> Int = 1\nfn torn() !io = {\n  let xs = [1]\n  for x in xs {\n    println(\"v\")\n  }\n}\n" ++
       "fn later() -> Int = 2\n"
-    let loaded = LoadResult { modules: [source("lib", good), user], diags: [] }
+    let loaded = LoadResult { modules = [source("lib", good), user], diags = [] }
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10), loaded)
     assert len(warm.program.diags) == 0
     # the `}` that closes the `for` goes missing, and `later` is wrong: the
@@ -780,7 +780,7 @@ test "module memo agrees with a cold analysis while a block is left open above a
       "fn later() -> Int = \"not an int\"\n"
     let torn = source("lib", open)
     assert len(torn.pdiags) > 0 && not torn.marks.lost
-    let input = LoadResult { modules: [torn, user], diags: [] }
+    let input = LoadResult { modules = [torn, user], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert diags_in(result.program, "lib.dawn") == len(torn.pdiags) + 1
     assert set.has(result.reused, "user")
@@ -806,12 +806,12 @@ test "module memo checks the importer of a declaration a parse failure dropped a
     let lib = source("lib", "pub type Pair = { a: Int, b: Int }\n" ++ tail)
     let user = source("user", "use lib.{Pair, pair}\npub fn first() -> Pair = pair()\npub fn a() -> Int = first().a\n")
     let other = source("other", "use lib.{value}\npub fn twice() -> Int = value() * 2\n")
-    let loaded = LoadResult { modules: [lib, user, other], diags: [] }
+    let loaded = LoadResult { modules = [lib, user, other], diags = [] }
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10), loaded)
     assert len(warm.program.diags) == 0
     let torn = source("lib", "pub type Pair = { a: Int, b: }\n" ++ tail)
     assert len(torn.pdiags) > 0
-    let input = LoadResult { modules: [torn, user, other], diags: [] }
+    let input = LoadResult { modules = [torn, user, other], diags = [] }
     let result = incremental.analyze(warm.session, input)
     assert diags_in(result.program, "lib.dawn") == len(torn.pdiags)
     assert diags_in(result.program, "user.dawn") > 0
@@ -876,11 +876,11 @@ test "module memo shows a watched module's diagnostics as final once its step is
     let app = source("app", "use mid\npub fn worse() -> Bool = mid.two()\n")
     # the load's own diagnostics name a watched file and one no module has
     let load = [
-      LocDiag { path: "mid.dawn", d: mk_diag("from the load", 0, 3, "") },
-      LocDiag { path: "other.dawn", d: mk_diag("elsewhere", 0, 1, "") }
+      LocDiag { path = "mid.dawn", d = mk_diag("from the load", 0, 3, "") },
+      LocDiag { path = "other.dawn", d = mk_diag("elsewhere", 0, 1, "") }
     ]
     let watch = set.from(["lib", "mid", "app"])
-    let loaded = LoadResult { modules: [lib, mid, app], diags: load }
+    let loaded = LoadResult { modules = [lib, mid, app], diags = load }
     let (first, first_ok) = placed_agree(incremental.new(std, ct_default(), jsig_refused(), 10), loaded, watch)
     assert first_ok
     assert len(own_diags(first.program, "mid.dawn")) == 2
@@ -889,9 +889,9 @@ test "module memo shows a watched module's diagnostics as final once its step is
     # again, and their views shift under the diagnostics of every module
     let moved = source("lib", "# moved\n\n" ++ lib_text ++ "pub fn more() -> Int = 2\n")
     let edits = [
-      LoadResult { modules: [moved, mid, app], diags: load },
-      LoadResult { modules: [lib, mid, app], diags: [] },
-      LoadResult { modules: [lib, mid, app], diags: load }
+      LoadResult { modules = [moved, mid, app], diags = load },
+      LoadResult { modules = [lib, mid, app], diags = [] },
+      LoadResult { modules = [lib, mid, app], diags = load }
     ]
     for input in edits {
       let (result, ok) = placed_agree(first.session, input, watch)

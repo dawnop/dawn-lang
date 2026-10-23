@@ -94,7 +94,7 @@ type Scan = { line: String, pos: Cursor, end: Cursor, base: Int }
 fn scan_of(line: String, base: Int) -> Scan = {
   let last = cursor.end(line)
   let e = if str.ends_with(line, str.from_char('\r')) { cursor.prev(line, last) } else { last }
-  Scan { line: line, pos: cursor.start(line), end: e, base: base }
+  Scan { line = line, pos = cursor.start(line), end = e, base = base }
 }
 
 fn eol(s: Scan) -> Bool = s.pos >= s.end
@@ -108,7 +108,7 @@ fn skip_space(s: Scan) -> Scan = {
   while p < s.end && (char_at(s.line, p) == " " || char_at(s.line, p) == "\t") {
     p = cursor.next(s.line, p)
   }
-  Scan { ..s, pos: p }
+  Scan { ..s, pos = p }
 }
 
 ## Only spaces and a `#` comment may follow a complete value or header.
@@ -137,7 +137,7 @@ fn parse_string_at(s0: Scan) -> Result[(String, Scan), Diag] = {
     let c = char_at(s0.line, p)
     p = cursor.next(s0.line, p)
     if c == "\"" {
-      return Ok((out, Scan { ..s0, pos: p }))
+      return Ok((out, Scan { ..s0, pos = p }))
     }
     if c != "\\" {
       out = out ++ c
@@ -199,12 +199,12 @@ fn parse_string_at(s0: Scan) -> Result[(String, Scan), Diag] = {
 
 fn parse_array(s0: Scan) -> Result[ValR, Diag] = {
   let start = s0.pos
-  var s = skip_space(Scan { ..s0, pos: cursor.next(s0.line, s0.pos) })
+  var s = skip_space(Scan { ..s0, pos = cursor.next(s0.line, s0.pos) })
   var items: List[String] = []
   if not eol(s) && peek(s) == "]" {
     return Ok(ValR {
-      val: TArr(items, abs(s, start), abs(s, s.pos) + 1),
-      s: Scan { ..s, pos: cursor.next(s.line, s.pos) }
+      val = TArr(items, abs(s, start), abs(s, s.pos) + 1),
+      s = Scan { ..s, pos = cursor.next(s.line, s.pos) }
     })
   }
   while true {
@@ -230,17 +230,17 @@ fn parse_array(s0: Scan) -> Result[ValR, Diag] = {
         "close it with `]`; arrays may not span lines in dawn.toml"))
     }
     let c = peek(s)
-    s = Scan { ..s, pos: cursor.next(s.line, s.pos) }
+    s = Scan { ..s, pos = cursor.next(s.line, s.pos) }
     if c == "," {
       s = skip_space(s)
       if not eol(s) && peek(s) == "]" {
         return Ok(ValR {
-          val: TArr(items, abs(s, start), abs(s, s.pos) + 1),
-          s: Scan { ..s, pos: cursor.next(s.line, s.pos) }
+          val = TArr(items, abs(s, start), abs(s, s.pos) + 1),
+          s = Scan { ..s, pos = cursor.next(s.line, s.pos) }
         })
       }
     } else if c == "]" {
-      return Ok(ValR { val: TArr(items, abs(s, start), abs(s, s.pos)), s: s })
+      return Ok(ValR { val = TArr(items, abs(s, start), abs(s, s.pos)), s = s })
     } else {
       return Err(diag("expected `,` or `]` in array", abs(s, s.pos) - 1, abs(s, s.pos), ""))
     }
@@ -295,7 +295,7 @@ fn parse_number(s0: Scan) -> Result[ValR, Diag] = {
   }
   let digits = str.replace(str.replace(raw, "_", ""), "+", "")
   match parse_int(digits) {
-    Some(n) -> Ok(ValR { val: TInt(n, abs(s0, start), abs(s0, p)), s: Scan { ..s0, pos: p } })
+    Some(n) -> Ok(ValR { val = TInt(n, abs(s0, start), abs(s0, p)), s = Scan { ..s0, pos = p } })
     None -> Err(diag("invalid integer `" ++ raw ++ "`", abs(s0, start), abs(s0, p), ""))
   }
 }
@@ -310,7 +310,7 @@ fn parse_value(s0: Scan) -> Result[ValR, Diag] = {
     match parse_string_at(s0) {
       Ok(pr) -> {
         let (v, s2) = pr
-        Ok(ValR { val: TStr(v, lo, abs(s2, s2.pos)), s: s2 })
+        Ok(ValR { val = TStr(v, lo, abs(s2, s2.pos)), s = s2 })
       }
       Err(e) -> Err(e)
     }
@@ -324,11 +324,11 @@ fn parse_value(s0: Scan) -> Result[ValR, Diag] = {
       lo, lo + 1, "use a `[table]` header with one key per line"))
   } else if cursor.starts_at(s0.line, s0.pos, "true") {
     Ok(ValR {
-      val: TBool(true, lo, lo + 4), s: Scan { ..s0, pos: cursor.skip(s0.line, s0.pos, "true") }
+      val = TBool(true, lo, lo + 4), s = Scan { ..s0, pos = cursor.skip(s0.line, s0.pos, "true") }
     })
   } else if cursor.starts_at(s0.line, s0.pos, "false") {
     Ok(ValR {
-      val: TBool(false, lo, lo + 5), s: Scan { ..s0, pos: cursor.skip(s0.line, s0.pos, "false") }
+      val = TBool(false, lo, lo + 5), s = Scan { ..s0, pos = cursor.skip(s0.line, s0.pos, "false") }
     })
   } else {
     parse_number(s0)
@@ -336,7 +336,7 @@ fn parse_value(s0: Scan) -> Result[ValR, Diag] = {
 }
 
 fn parse_header(raw: String, s1: Scan) -> Result[TLine, Diag] = {
-  var s = Scan { ..s1, pos: cursor.next(s1.line, s1.pos) }
+  var s = Scan { ..s1, pos = cursor.next(s1.line, s1.pos) }
   if not eol(s) && peek(s) == "[" {
     # the Kotlin span here is line-local (its one un-lifted Span) — kept as is
     let at = cursor.offset(s.line, s.pos)
@@ -365,12 +365,12 @@ fn parse_header(raw: String, s1: Scan) -> Result[TLine, Diag] = {
         "table names are bare keys: letters, digits, `_`, `-`"))
     }
   }
-  s = skip_space(Scan { ..s, pos: p })
+  s = skip_space(Scan { ..s, pos = p })
   if eol(s) || peek(s) != "]" {
     return Err(diag("expected `]` to close the table header",
       abs(s, s.pos), abs(s, s.pos) + 1, ""))
   }
-  s = Scan { ..s, pos: cursor.next(s.line, s.pos) }
+  s = Scan { ..s, pos = cursor.next(s.line, s.pos) }
   match finish_line(s) {
     Some(e) -> Err(e)
     None -> Ok(LHeader(name, nlo, nhi, raw))
@@ -400,12 +400,12 @@ fn parse_entry(raw: String, s1: Scan) -> Result[TLine, Diag] = {
     return Err(diag("invalid key `" ++ key ++ "`", klo, khi,
       "keys are bare: letters, digits, `_`, `-`"))
   }
-  var s = skip_space(Scan { ..s1, pos: p })
+  var s = skip_space(Scan { ..s1, pos = p })
   if eol(s) || peek(s) != "=" {
     return Err(diag("expected `=` after key `" ++ key ++ "`",
       abs(s, s.pos), abs(s, s.pos) + 1, ""))
   }
-  s = skip_space(Scan { ..s, pos: cursor.next(s.line, s.pos) })
+  s = skip_space(Scan { ..s, pos = cursor.next(s.line, s.pos) })
   match parse_value(s) {
     Ok(vr) ->
       match finish_line(vr.s) {
@@ -452,7 +452,7 @@ pub fn parse(text: String) -> (TomlDoc, List[Diag]) = {
     }
     offset = offset + u16_len(raw) + 1
   }
-  let doc = TomlDoc { lines: lines, ends_nl: ends_nl }
+  let doc = TomlDoc { lines = lines, ends_nl = ends_nl }
   (doc, errs ++ dup_errors(doc))
 }
 
@@ -673,7 +673,7 @@ pub fn set_string(doc: TomlDoc, tname: Option[String], key: String, value: Strin
             str.take(text, rlo) ++ quoted ++ str.drop(text, rhi)
           let nval = TStr(value, lo, lo + len(quoted))
           return TomlDoc {
-            ..doc, lines: set_line(doc.lines, i, LEntry(k, klo, khi, nval, ntext, start))
+            ..doc, lines = set_line(doc.lines, i, LEntry(k, klo, khi, nval, ntext, start))
           }
         }
         _ -> return doc
@@ -685,7 +685,7 @@ pub fn set_string(doc: TomlDoc, tname: Option[String], key: String, value: Strin
   let nline = LEntry(key, 0, 0, TStr(value, len(key) + 3, len(ntext)), ntext, 0)
   match last_index_of_table(doc, tname) {
     Some(idx) ->
-      TomlDoc { ..doc, lines: insert_line(doc.lines, idx + 1, nline) }
+      TomlDoc { ..doc, lines = insert_line(doc.lines, idx + 1, nline) }
     None -> {
       var lines = doc.lines
       match tname {
@@ -703,7 +703,7 @@ pub fn set_string(doc: TomlDoc, tname: Option[String], key: String, value: Strin
         }
         None -> ()
       }
-      TomlDoc { ..doc, lines: lines ++ [nline] }
+      TomlDoc { ..doc, lines = lines ++ [nline] }
     }
   }
 }
@@ -718,7 +718,7 @@ pub fn remove(doc: TomlDoc, tname: Option[String], key: String) -> TomlDoc =
         if j != i { out = out ++ [x] }
         j = j + 1
       }
-      TomlDoc { ..doc, lines: out }
+      TomlDoc { ..doc, lines = out }
     }
     None -> doc
   }
@@ -757,7 +757,7 @@ pub fn remove_table(doc: TomlDoc, name: String) -> TomlDoc = {
     if j < start || j >= end { out = out ++ [x] }
     j = j + 1
   }
-  TomlDoc { ..doc, lines: out }
+  TomlDoc { ..doc, lines = out }
 }
 
 test "parse and render round-trip byte-identically" {
@@ -841,6 +841,6 @@ test "escapes decode and re-quote" {
     Some(TStr(v, _, _)) -> { assert len(v) == 6 }
     _ -> { assert false }
   }
-  let d2 = set_string(TomlDoc { lines: [], ends_nl: true }, None, "k", "a\"b\\c")
+  let d2 = set_string(TomlDoc { lines = [], ends_nl = true }, None, "k", "a\"b\\c")
   assert render(d2) == "k = \"a\\\"b\\\\c\"\n"
 }

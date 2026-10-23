@@ -152,7 +152,7 @@ fn checked_end(
   if size < 0 || not in_range(b, off, size) {
     return Err("zip: the central directory runs past the end")
   }
-  Ok(End { start: off, size: size, count: total })
+  Ok(End { start = off, size = size, count = total })
 }
 
 ## The three fields a zip64 archive moves out of the fixed record.
@@ -193,7 +193,7 @@ fn zip64(b: Bytes, off: Int, elen: Int, s0: Sizes) -> Result[Sizes, String] = {
         if q + 8 > stop { return Err("zip: zip64 extra field is short") }
         local = u64(b, q)
       }
-      return Ok(Sizes { csize: csize, size: size, local: local })
+      return Ok(Sizes { csize = csize, size = size, local = local })
     }
     p = p + 4 + flen
   }
@@ -214,7 +214,7 @@ fn read_head(b: Bytes, p: Int) -> Result[(Meta, Int), String] = {
   # archives readable; the alternative, CP437, needs a table for names that in
   # practice are ASCII.
   let name = bytes.decode_utf8_lossy(bytes.slice(b, p + 46, p + 46 + nlen))
-  let fixed = Sizes { csize: u32(b, p + 20), size: u32(b, p + 24), local: u32(b, p + 42) }
+  let fixed = Sizes { csize = u32(b, p + 20), size = u32(b, p + 24), local = u32(b, p + 42) }
   let s = match zip64(b, p + 46 + nlen, elen, fixed) {
     Ok(t) -> t
     Err(e) -> return Err(e ++ " (" ++ name ++ ")")
@@ -224,14 +224,14 @@ fn read_head(b: Bytes, p: Int) -> Result[(Meta, Int), String] = {
   # attributes, which look more authoritative, are written by whatever
   # operating system made the archive and are not portable.
   let h = Meta {
-    name: name,
-    is_dir: str.ends_with(name, "/"),
-    flags: u16(b, p + 8),
-    method: u16(b, p + 10),
-    crc: u32(b, p + 16),
-    csize: s.csize,
-    size: s.size,
-    local: s.local,
+    name = name,
+    is_dir = str.ends_with(name, "/"),
+    flags = u16(b, p + 8),
+    method = u16(b, p + 10),
+    crc = u32(b, p + 16),
+    csize = s.csize,
+    size = s.size,
+    local = s.local,
   }
   Ok((h, p + 46 + nlen + elen + clen))
 }
@@ -322,7 +322,7 @@ pub fn read(src: Bytes, m: Meta, cap: Option[Int] = Some(deflate.DEFAULT_CAP)) -
   let raw = bytes.slice(src, start, start + m.csize)
   var out = raw
   if m.method == METHOD_DEFLATE {
-    match deflate.inflate_from(raw, cap: cap) {
+    match deflate.inflate_from(raw, cap = cap) {
       Ok(pr) -> {
         let (o, used) = pr
         # The directory says how long the compressed member is, so a member
@@ -385,12 +385,12 @@ pub fn entries(src: Bytes, cap: Option[Int] = Some(deflate.DEFAULT_CAP)) -> Resu
   var total = 0
   for m in ms {
     let left: Option[Int] = if lim < 0 { None } else { Some(lim - total) }
-    let data = match read(src, m, cap: left) {
+    let data = match read(src, m, cap = left) {
       Ok(d) -> d
       Err(e) -> return Err(with_default_hint(e, lim))
     }
     total = total + len(data)
-    out = out ++ [Entry { name: m.name, is_dir: m.is_dir, data: data }]
+    out = out ++ [Entry { name = m.name, is_dir = m.is_dir, data = data }]
   }
   Ok(out)
 }
@@ -408,14 +408,14 @@ test "overflowing zip64 metadata is refused instead of wrapping into range" {
   # that reversed range then produced empty bytes, so this malformed entry was
   # accepted as a valid empty file (size 0 and CRC-32 0).
   let huge_data = Meta {
-    name: "huge-data",
-    is_dir: false,
-    flags: 0,
-    method: METHOD_STORED,
-    crc: 0,
-    csize: max,
-    size: 0,
-    local: 0,
+    name = "huge-data",
+    is_dir = false,
+    flags = 0,
+    method = METHOD_STORED,
+    crc = 0,
+    csize = max,
+    size = 0,
+    local = 0,
   }
   assert read(src, huge_data) == Err("zip: entry data runs past the end: huge-data")
 
@@ -423,14 +423,14 @@ test "overflowing zip64 metadata is refused instead of wrapping into range" {
   # at Int.MAX, where a malformed archive became a bounds panic instead of an
   # ordinary parser error.
   let huge_local = Meta {
-    name: "huge-local",
-    is_dir: false,
-    flags: 0,
-    method: METHOD_STORED,
-    crc: 0,
-    csize: 0,
-    size: 0,
-    local: max,
+    name = "huge-local",
+    is_dir = false,
+    flags = 0,
+    method = METHOD_STORED,
+    crc = 0,
+    csize = 0,
+    size = 0,
+    local = max,
   }
   match catch_panic(() => read(src, huge_local)) {
     Ok(Err(e)) -> { assert e == "zip: no local header for huge-local" }
@@ -448,38 +448,38 @@ test "stored entries honor the output ceiling before their bytes are copied" {
   let src = bytes.freeze(raw)
   let payload = bytes.utf8("x")
   let stored = Meta {
-    name: "stored",
-    is_dir: false,
-    flags: 0,
-    method: METHOD_STORED,
-    crc: crc32.sum(payload),
-    csize: 1,
-    size: 1,
-    local: 0,
+    name = "stored",
+    is_dir = false,
+    flags = 0,
+    method = METHOD_STORED,
+    crc = crc32.sum(payload),
+    csize = 1,
+    size = 1,
+    local = 0,
   }
 
   assert read(src, stored) == Ok(payload)
-  assert read(src, stored, cap: None) == Ok(payload)
-  assert read(src, stored, cap: Some(1)) == Ok(payload)
-  assert read(src, stored, cap: Some(0)) ==
+  assert read(src, stored, cap = None) == Ok(payload)
+  assert read(src, stored, cap = Some(1)) == Ok(payload)
+  assert read(src, stored, cap = Some(0)) ==
     Err("zip: stored: the output exceeds the 0 byte limit (stopped at 0 bytes)")
-  assert read(src, stored, cap: Some(-1)) ==
+  assert read(src, stored, cap = Some(-1)) ==
     Err("zip: stored: a negative output limit (-1)")
 
   # This claim used to be checked only after the compressed byte had
   # already been sliced out. A stored member cannot legitimately have
   # different compressed and uncompressed sizes.
   let inconsistent = Meta {
-    name: "inconsistent",
-    is_dir: false,
-    flags: 0,
-    method: METHOD_STORED,
-    crc: 0,
-    csize: 1,
-    size: 0,
-    local: 0,
+    name = "inconsistent",
+    is_dir = false,
+    flags = 0,
+    method = METHOD_STORED,
+    crc = 0,
+    csize = 1,
+    size = 0,
+    local = 0,
   }
-  assert read(src, inconsistent, cap: Some(0)) ==
+  assert read(src, inconsistent, cap = Some(0)) ==
     Err("zip: inconsistent unpacked to 1 bytes, the directory says 0")
 }
 
@@ -545,17 +545,17 @@ fn overlapping(data: Bytes, names: List[String]) -> Bytes = {
 test "entries share one ceiling, so overlapping entries are each paid for" {
   let src = overlapping(bytes.utf8("x"), ["a", "b"])
   let both = [
-    Entry { name: "a", is_dir: false, data: bytes.utf8("x") },
-    Entry { name: "b", is_dir: false, data: bytes.utf8("x") },
+    Entry { name = "a", is_dir = false, data = bytes.utf8("x") },
+    Entry { name = "b", is_dir = false, data = bytes.utf8("x") },
   ]
   assert entries(src) == Ok(both)
-  assert entries(src, cap: None) == Ok(both)
-  assert entries(src, cap: Some(2)) == Ok(both)
+  assert entries(src, cap = None) == Ok(both)
+  assert entries(src, cap = Some(2)) == Ok(both)
   # Each entry alone fits a ceiling of 1; together they do not, and the second
   # is refused with the budget the first left it.
-  assert entries(src, cap: Some(1)) ==
+  assert entries(src, cap = Some(1)) ==
     Err("zip: b: the output exceeds the 0 byte limit (stopped at 0 bytes)")
-  assert entries(src, cap: Some(-1)) == Err("zip: a negative output limit (-1)")
+  assert entries(src, cap = Some(-1)) == Err("zip: a negative output limit (-1)")
 }
 
 test "the default ceiling refuses a large stored entry and names the default" {
@@ -564,21 +564,21 @@ test "the default ceiling refuses a large stored entry and names the default" {
   let size = deflate.DEFAULT_CAP + 1
   let src = bytes.utf8("PK\u{0003}\u{0004}" ++ str.repeat("\u{0000}", 26) ++ str.repeat("x", size))
   let big = Meta {
-    name: "big",
-    is_dir: false,
-    flags: 0,
-    method: METHOD_STORED,
-    crc: 0,
-    csize: size,
-    size: size,
-    local: 0,
+    name = "big",
+    is_dir = false,
+    flags = 0,
+    method = METHOD_STORED,
+    crc = 0,
+    csize = size,
+    size = size,
+    local = 0,
   }
   let refusal =
     "zip: big: the output exceeds the 67108864 byte limit (stopped at 0 bytes); " ++
     "the default cap is 67108864 bytes: pass cap: Some(n) for a larger limit, " ++
     "or cap: None for no limit"
   assert read(src, big) == Err(refusal)
-  assert read(src, big, cap: Some(16)) ==
+  assert read(src, big, cap = Some(16)) ==
     Err("zip: big: the output exceeds the 16 byte limit (stopped at 0 bytes)")
 }
 

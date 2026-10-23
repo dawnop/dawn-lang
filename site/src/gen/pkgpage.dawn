@@ -102,7 +102,7 @@ pub fn api_html(c: Copy, lang: Lang, pg: Pg, use_as: String, doc: Json) -> (Stri
     let path = field(m, "path")
     let id = "m-" ++ slug(path)
     let title = "${use_as}/${path}"
-    toc = toc ++ [TocEntry { level: 3, id: id, text: title }]
+    toc = toc ++ [TocEntry { level = 3, id = id, text = title }]
     html = html ++ [sub(id, title) ++ doc_prose(pg, m) ++ impls_html(lead, sep, m)
         ++ decls_html(pg, call_name(path), slug(path), m)]
     for f in jarr(jget(m, "fns")) {
@@ -136,7 +136,7 @@ pub fn readme_ids(html: String) -> String =
   str.replace(str.replace(html, ` id="s`, ` id="readme-s`), `href="#s`, `href="#readme-s`)
 
 fn readme_toc(toc: List[TocEntry]) -> List[TocEntry] =
-  map(toc, e => TocEntry { level: e.level, id: "readme-" ++ e.id, text: e.text })
+  map(toc, e => TocEntry { level = e.level, id = "readme-" ++ e.id, text = e.text })
 
 # ---- the page ----
 
@@ -152,12 +152,12 @@ fn root_of(lang: Lang) -> String =
 ## manifest name a doc link's module path starts with.
 pub fn pg_for(lang: Lang, root: String, docs: List[String], c: Copy, p: Package, all: List[Package], doc: Json) -> Pg =
   Pg {
-    docs: docs,
-    root: root,
-    anchors: set.from(map(package_rows(p.use_as, doc), r => r.anchor)),
-    examples: (plain(c, "example-one"), plain(c, "example-many")),
-    std_page: "${root}/" ++ lang_path(lang, "stdlib.html"),
-    dep_pages: map(filter(all, q => q.dir != p.dir), q =>
+    docs = docs,
+    root = root,
+    anchors = set.from(map(package_rows(p.use_as, doc), r => r.anchor)),
+    examples = (plain(c, "example-one"), plain(c, "example-many")),
+    std_page = "${root}/" ++ lang_path(lang, "stdlib.html"),
+    dep_pages = map(filter(all, q => q.dir != p.dir), q =>
         (q.name, "${root}/" ++ lang_path(lang, page_of(q.use_as)))),
   }
 
@@ -182,20 +182,20 @@ pub fn package_page(a: Assets, lang: Lang, p: Package, doc: Json, all: List[Pack
   let body = readme_ids(intro.html)
     ++ """<h2 id="api">""" ++ escape_html(api_title)
     ++ """<a class="anchor" href="#api" aria-hidden="true" tabindex="-1">#</a></h2>""" ++ "\n" ++ api
-  let toc = readme_toc(intro.toc) ++ [TocEntry { level: 2, id: "api", text: api_title }] ++ api_toc
+  let toc = readme_toc(intro.toc) ++ [TocEntry { level = 2, id = "api", text = api_title }] ++ api_toc
   let n = len(jarr(jget(doc, "modules")))
   let ver = "<code>" ++ escape_html(p.name) ++ "</code> " ++ escape_html(p.version)
   # "std only" says it alone; "depends on" is the lead of a list
   let links = deps_links(c, p, map(all, q => q.dir), d => "${root}/" ++ lang_path(lang, page_of(alias_of(d))))
   let deps = if len(p.deps) == 0 { links } else { escape_html(plain(c, "chip-deps")) ++ " " ++ links }
   let head = PageHead {
-    crumbs: [section_crumb(lang, root, "packages", true), here(escape_html(p.use_as))],
-    title: escape_html(p.use_as),
-    lede: inline_run(p.summary, mu),
-    meta: [chip(ver), chip("${n} " ++ line(c, "chip-modules", u => u)), chip(deps),
+    crumbs = [section_crumb(lang, root, "packages", true), here(escape_html(p.use_as))],
+    title = escape_html(p.use_as),
+    lede = inline_run(p.summary, mu),
+    meta = [chip(ver), chip("${n} " ++ line(c, "chip-modules", u => u)), chip(deps),
       link_chip("${repo_url()}/tree/main/packages/${p.dir}", escape_html(plain(c, "chip-repo")))],
-    extra: "",
-    cls: "toc-aligned",
+    extra = "",
+    cls = "toc-aligned",
   }
   page_with_toc(a, lang, page_of(p.use_as), p.use_as ++ " — Dawn", root, "packages", head,
     toc_rail(lang, toc), body)
@@ -241,7 +241,7 @@ fn probe_doc() -> Json =
   ]))])
 
 fn probe_pkg(dir: String, name: String) -> Package =
-  Package { dir: dir, use_as: alias_of(dir), name: name, version: "1.0.0", summary: [], deps: [] }
+  Package { dir = dir, use_as = alias_of(dir), name = name, version = "1.0.0", summary = [], deps = [] }
 
 fn probe_copy() -> Copy !Fs = load_copy(copy_file(En))
 
@@ -293,7 +293,7 @@ test "a doc link lands on the page that documents its target" {
 test "a README's heading ids make no claim about a section number" {
   let html = `<h3 id="s0-1"><span class="hn">2.0.0</span><a class="anchor" href="#s0-1" aria-hidden="true" tabindex="-1">#</a></h3>`
   assert readme_ids(html) == `<h3 id="readme-s0-1"><span class="hn">2.0.0</span><a class="anchor" href="#readme-s0-1" aria-hidden="true" tabindex="-1">#</a></h3>`
-  assert readme_toc([TocEntry { level: 3, id: "s0-1", text: "2.0.0" }]) == [TocEntry { level: 3, id: "readme-s0-1", text: "2.0.0" }]
+  assert readme_toc([TocEntry { level = 3, id = "s0-1", text = "2.0.0" }]) == [TocEntry { level = 3, id = "readme-s0-1", text = "2.0.0" }]
 }
 
 test "a function is called through the last segment of its module's path" {

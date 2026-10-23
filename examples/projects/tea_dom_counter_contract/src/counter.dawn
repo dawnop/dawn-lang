@@ -42,7 +42,7 @@ pub type Msg =
 derive Show
 
 ## The model a fresh page starts from.
-pub fn init() -> Counter = Counter { n: 0 }
+pub fn init() -> Counter = Counter { n = 0 }
 
 impl App[Counter] {
   type Msg = Msg
@@ -52,8 +52,8 @@ impl App[Counter] {
   # beyond the model it just returned.
   fn update(m: Counter, msg: Msg) -> (Counter, Cmd[Msg]) =
     match msg {
-      Inc -> (Counter { n: m.n + 1 }, NoCmd)
-      Dec -> (Counter { n: m.n - 1 }, NoCmd)
+      Inc -> (Counter { n = m.n + 1 }, NoCmd)
+      Dec -> (Counter { n = m.n - 1 }, NoCmd)
       Reset -> (init(), NoCmd)
       # Deliberate, and the only unhandled failure in this tree. `tea_dom`'s
       # `serve` catches it at the boundary and answers with an error reply;
@@ -62,18 +62,18 @@ impl App[Counter] {
     }
 
   fn view(m: Counter) -> Node[Msg] = {
-    let heading: Node[Msg] = el("h1", kids: [text("dawn counter")])
-    let count: Node[Msg] = el("p", class: "count", kids: [text(to_string(m.n))])
-    let bar: Node[Msg] = div(class: "bar", kids: ticks(m.n))
+    let heading: Node[Msg] = el("h1", kids = [text("dawn counter")])
+    let count: Node[Msg] = el("p", class = "count", kids = [text(to_string(m.n))])
+    let bar: Node[Msg] = div(class = "bar", kids = ticks(m.n))
     let controls: Node[Msg] =
-      div(class: "row", kids: [
+      div(class = "row", kids = [
         button("-", Dec),
         button("+", Inc),
         button("reset", Reset),
         button("boom", Boom),
       ])
-    div(class: if m.n < 0 { "counter below-zero" } else { "counter" },
-      kids: [heading, count, bar, controls])
+    div(class = if m.n < 0 { "counter below-zero" } else { "counter" },
+      kids = [heading, count, bar, controls])
   }
 }
 
@@ -121,7 +121,7 @@ fn ticks(n: Int) -> List[Node[Msg]] =
     }
   })
 
-fn tick() -> Node[Msg] = el("span", class: "tick")
+fn tick() -> Node[Msg] = el("span", class = "tick")
 
 ## A model as text, and back. Opaque to everything but this module: the wire
 ## carries it as a JSON string and the host hands it back untouched.
@@ -132,7 +132,7 @@ pub fn encode(m: Counter) -> String = to_string(m.n)
 ## recoverable by clicking.
 pub fn decode(s: String) -> Counter =
   match parse_int(s) {
-    Some(n) -> Counter { n: n }
+    Some(n) -> Counter { n = n }
     None -> init()
   }
 
@@ -143,28 +143,28 @@ fn turn(m: Counter, msg: Msg) -> Counter = fold_msg(m, msg, update)
 
 test "update folds messages and the model round-trips through its text" {
   let m = init().turn(Inc).turn(Inc)
-  assert m == Counter { n: 2 }
-  assert turn(m, Dec) == Counter { n: 1 }
+  assert m == Counter { n = 2 }
+  assert turn(m, Dec) == Counter { n = 1 }
   assert turn(m, Reset) == init()
   assert m.encode().decode() == m
-  assert encode(Counter { n: -17 }).decode() == Counter { n: -17 }
+  assert encode(Counter { n = -17 }).decode() == Counter { n = -17 }
   assert decode("not a number") == init()
 }
 
 test "this application commands nothing, so a turn is exactly its update" {
   let (m, c) = init().update(Inc)
-  assert m == Counter { n: 1 }
+  assert m == Counter { n = 1 }
   let nothing: Cmd[Msg] = NoCmd
   assert c == nothing
 }
 
 test "the view is a value, so a frame is one assertion" {
   let want: Node[Msg] =
-    div(class: "counter", kids: [
-      el("h1", kids: [text("dawn counter")]),
-      el("p", class: "count", kids: [text("0")]),
-      div(class: "bar"),
-      div(class: "row", kids: [
+    div(class = "counter", kids = [
+      el("h1", kids = [text("dawn counter")]),
+      el("p", class = "count", kids = [text("0")]),
+      div(class = "bar"),
+      div(class = "row", kids = [
         button("-", Dec),
         button("+", Inc),
         button("reset", Reset),
@@ -183,21 +183,21 @@ test "the bar is the only child list whose length the model decides" {
   assert ticks(-3) == none
   assert ticks(3).len() == 3
   assert ticks(3) == [tick(), tick(), tick()]
-  let two: List[Patch[Node[Msg]]] = diff(view(Counter { n: 1 }), view(Counter { n: 2 }))
+  let two: List[Patch[Node[Msg]]] = diff(view(Counter { n = 1 }), view(Counter { n = 2 }))
   assert len(two) == 2
-  assert two[0] == Patch { path: [1, 0], op: Replace(w: text("2")) }
-  assert two[1] == Patch { path: [2], op: AppendKids(ws: [tick()]) }
-  let back: List[Patch[Node[Msg]]] = diff(view(Counter { n: 2 }), view(Counter { n: 1 }))
-  assert back[1] == Patch { path: [2], op: TruncateKids(keep: 1) }
+  assert two[0] == Patch { path = [1, 0], op = Replace(w = text("2")) }
+  assert two[1] == Patch { path = [2], op = AppendKids(ws = [tick()]) }
+  let back: List[Patch[Node[Msg]]] = diff(view(Counter { n = 2 }), view(Counter { n = 1 }))
+  assert back[1] == Patch { path = [2], op = TruncateKids(keep = 1) }
 }
 
 test "the root's class is the only thing the sign of the count changes" {
-  let below = view(Counter { n: -1 })
+  let below = view(Counter { n = -1 })
   match below {
     Text(_) -> { assert false }
     Elem(_, props, ..) -> { assert props == [("class", "counter below-zero")] }
   }
-  match view(Counter { n: 0 }) {
+  match view(Counter { n = 0 }) {
     Text(_) -> { assert false }
     Elem(_, props, ..) -> { assert props == [("class", "counter")] }
   }

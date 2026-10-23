@@ -195,14 +195,14 @@ fn cors_headers(origin: Option[String], r: Response) -> Response =
 # response by web/types.error_response, through the same sanitizing
 # with_header the Ok branch goes through.
 fn cors_error_headers(origin: Option[String], e: HttpError) -> HttpError =
-  HttpError { ..e, headers: e.headers ++ cors_pairs(origin) }
+  HttpError { ..e, headers = e.headers ++ cors_pairs(origin) }
 
 # A bare request with the given method and headers; the fields these middleware
 # never read stay empty.
 fn req_of(method: String, headers: Map[String, List[String]]) -> Request =
   Request {
-    method: method, path: "/x", raw_path: "/x", params: map.empty(), query: map.empty(),
-    headers: headers, body: bytes.utf8(""), body_file: None, route: None,
+    method = method, path = "/x", raw_path = "/x", params = map.empty(), query = map.empty(),
+    headers = headers, body = bytes.utf8(""), body_file = None, route = None,
   }
 
 fn ok_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(200, "ok"))
@@ -288,7 +288,7 @@ test "CORS answers a real preflight and lets every other OPTIONS through" {
 }
 
 fn failing_handler(_req: Request) -> Result[Response, HttpError] !io =
-  Err(HttpError { ..http_error(404, "no such thing"), headers: [("X-Own", "kept")] })
+  Err(HttpError { ..http_error(404, "no such thing"), headers = [("X-Own", "kept")] })
 
 test "CORS stamps the error branch too, not just the successful one" {
   let app = with_cors("https://a.example", failing_handler)
@@ -324,7 +324,7 @@ test "CORS stamps the error branch too, not just the successful one" {
       Err(http_error(401, "unauthorized")))
   let tagged = Request {
     ..req_of("GET", map.from([("origin", ["https://a.example"])])),
-    route: Some(RouteMeta { method: "GET", pattern: "/x", tags: ["no-cors"], body_limit: None }),
+    route = Some(RouteMeta { method = "GET", pattern = "/x", tags = ["no-cors"], body_limit = None }),
   }
   match dav(tagged) {
     Ok(_) -> { assert false }
@@ -334,7 +334,7 @@ test "CORS stamps the error branch too, not just the successful one" {
 
 test "with_body_limit counts bytes, not code points" {
   let app = with_body_limit(8, ok_handler)
-  let mk = (body: String) => Request { ..req_of("POST", map.empty()), body: bytes.utf8(body) }
+  let mk = (body: String) => Request { ..req_of("POST", map.empty()), body = bytes.utf8(body) }
   # 9 ASCII bytes: over
   match app(mk("123456789")) {
     Err(e) -> { assert e.status == 413 }
@@ -364,7 +364,7 @@ test "a limit of zero or less is refused where the middleware is built" {
     Err(m) -> { assert str.contains(m.message, "got -1") }
   }
   # and a positive one still bounds
-  let mk = (body: String) => Request { ..req_of("POST", map.empty()), body: bytes.utf8(body) }
+  let mk = (body: String) => Request { ..req_of("POST", map.empty()), body = bytes.utf8(body) }
   match with_body_limit(4, ok_handler)(mk("12345")) {
     Err(e) -> { assert e.status == 413 }
     Ok(_) -> { assert false }
@@ -415,13 +415,13 @@ test "a clock that steps back logs no time, not negative time" {
 test "an encoded line break in the path stays one access-log line" {
   # what the server builds for `GET /a%0D%0AGET%20/admin`: `path` is decoded
   # by the JDK, `raw_path` is as sent
-  let req = Request { ..req_of("GET", map.empty()), path: "/a\r\nGET /admin", raw_path: "/a%0D%0AGET%20/admin" }
+  let req = Request { ..req_of("GET", map.empty()), path = "/a\r\nGET /admin", raw_path = "/a%0D%0AGET%20/admin" }
   let line = access_line(req, 404, 3)
   assert line == "GET /a%0D%0AGET%20/admin -> 404 (3ms)"
   assert not str.contains(line, "\n")
   assert not str.contains(line, "\r")
   # and a control character that reached the raw path some other way is
   # escaped rather than written
-  let odd = Request { ..req, raw_path: "/a\nb" }
+  let odd = Request { ..req, raw_path = "/a\nb" }
   assert access_line(odd, 200, 0) == "GET /a\\nb -> 200 (0ms)"
 }

@@ -79,7 +79,7 @@ fn parse_pos(s: String) -> Option[Pos] =
   match str.split_once(s, ":") {
     Some((a, b)) ->
       match (parse_int(a), parse_int(b)) {
-        (Some(l), Some(c)) -> if l > 0 && c > 0 { Some(Pos { line: l, col: c }) } else { None }
+        (Some(l), Some(c)) -> if l > 0 && c > 0 { Some(Pos { line = l, col = c }) } else { None }
         _ -> None
       }
     None -> None
@@ -116,7 +116,7 @@ pub fn before_or_at(a: Pos, b: Pos) -> Bool = a.line < b.line || (a.line == b.li
 ## record.py writes, in its order, and every call its row number in turn; a
 ## line of any other shape is an error rather than a line skipped.
 pub fn parse_map(text: String) -> Result[Recorded, String] = {
-  var rec = Recorded { name: "", first: 0, last: 0, ops: 0 - 1, head: [], calls: [], tail: (0, 0) }
+  var rec = Recorded { name = "", first = 0, last = 0, ops = 0 - 1, head = [], calls = [], tail = (0, 0) }
   var bad = ""
   var n = 0
   for raw in str.split(text, "\n") {
@@ -126,24 +126,24 @@ pub fn parse_map(text: String) -> Result[Recorded, String] = {
     let fail = (why: String) => "flash_attn.map line ${at}: ${why}"
     if bad == "" && len(ws) > 0 {
       if ws[0] == "kernel" && len(ws) == 2 && n == 1 {
-        rec = Recorded { ..rec, name: ws[1] }
+        rec = Recorded { ..rec, name = ws[1] }
       } else if rec.name == "" {
         bad = fail("the first line is not `kernel <name>`")
       } else if ws[0] == "fn" && len(ws) == 2 {
         match parse_range(ws[1]) {
           Some((a, b)) -> {
-            rec = Recorded { ..rec, first: a, last: b }
+            rec = Recorded { ..rec, first = a, last = b }
           }
           None -> {
             bad = fail("`${raw}` is not the function's lines")
           }
         }
       } else if ws[0] == "ops" && len(ws) == 2 {
-        rec = Recorded { ..rec, ops: unwrap_or(parse_int(ws[1]), 0 - 1) }
+        rec = Recorded { ..rec, ops = unwrap_or(parse_int(ws[1]), 0 - 1) }
       } else if ws[0] == "head" {
         match parse_ranges(list.drop(ws, 1)) {
           Some(rs) -> {
-            rec = Recorded { ..rec, head: rs }
+            rec = Recorded { ..rec, head = rs }
           }
           None -> {
             bad = fail("`${raw}` is not a head")
@@ -152,7 +152,7 @@ pub fn parse_map(text: String) -> Result[Recorded, String] = {
       } else if ws[0] == "tail" && len(ws) == 2 {
         match parse_range(ws[1]) {
           Some(r) -> {
-            rec = Recorded { ..rec, tail: r }
+            rec = Recorded { ..rec, tail = r }
           }
           None -> {
             bad = fail("`${raw}` is not a tail")
@@ -164,8 +164,8 @@ pub fn parse_map(text: String) -> Result[Recorded, String] = {
             if id != len(rec.calls) {
               bad = fail("call ${id} is not row ${len(rec.calls)}")
             } else {
-              let c = MCall { id: id, parent: parent, name: ws[3], from: from, to: to, name_from: nf, name_to: nt, lines: rs }
-              rec = Recorded { ..rec, calls: rec.calls ++ [c] }
+              let c = MCall { id = id, parent = parent, name = ws[3], from = from, to = to, name_from = nf, name_to = nt, lines = rs }
+              rec = Recorded { ..rec, calls = rec.calls ++ [c] }
             }
           }
           _ -> {
@@ -253,13 +253,13 @@ pub fn check(rec: Recorded, first: Int, src: List[String], ir: List[String]) -> 
           match doubled {
             Some(k) -> Err("line ${k} of its Tile IR is owned ${count(k)} times")
             None -> Ok(KernelMap {
-              name: rec.name,
-              first: first,
-              src: src,
-              ir: ir,
-              calls: rec.calls,
-              rows: rows_of(rec, first, last),
-              ops: rec.ops,
+              name = rec.name,
+              first = first,
+              src = src,
+              ir = ir,
+              calls = rec.calls,
+              rows = rows_of(rec, first, last),
+              ops = rec.ops,
             })
           }
         }
@@ -334,17 +334,17 @@ pub fn call_fault(calls: List[MCall], first: Int, last: Int, src: List[String], 
 fn rows_of(rec: Recorded, first: Int, last: Int) -> List[Row] = {
   var anchored: List[(Int, Seg)] = []
   for r in rec.head {
-    anchored = anchored ++ [(first, Seg { owner: head_owner(), ir: r })]
+    anchored = anchored ++ [(first, Seg { owner = head_owner(), ir = r })]
   }
   for c in rec.calls {
     var k = 0
     for r in c.lines {
       let at = if k == 0 { c.name_from.line } else { c.to.line }
-      anchored = anchored ++ [(at, Seg { owner: c.id, ir: r })]
+      anchored = anchored ++ [(at, Seg { owner = c.id, ir = r })]
       k = k + 1
     }
   }
-  anchored = anchored ++ [(last, Seg { owner: tail_owner(), ir: rec.tail })]
+  anchored = anchored ++ [(last, Seg { owner = tail_owner(), ir = rec.tail })]
   let all = anchored
   map(range(first, last + 1), l => {
     let here = map(filter(all, x => {
@@ -354,7 +354,7 @@ fn rows_of(rec: Recorded, first: Int, last: Int) -> List[Row] = {
       let (_at, s) = x
       s
     })
-    Row { line: l, segs: sort_by(here, (x, y) => {
+    Row { line = l, segs = sort_by(here, (x, y) => {
       let (a, _b) = x.ir
       let (c, _d) = y.ir
       a - c
@@ -421,7 +421,7 @@ pub fn row_lines(r: Row) -> Int = list.fold(r.segs, 0, (n, s) => n + len(seg_lin
 ## The rows of `calls` whose span covers `[a, b)` of line `l`, in row order:
 ## the call the text is in, and every call around it.
 pub fn covering(calls: List[MCall], l: Int, a: Int, b: Int) -> List[Int] =
-  map(filter(calls, c => before_or_at(c.from, Pos { line: l, col: a }) && before_or_at(Pos { line: l, col: b }, c.to)), c => c.id)
+  map(filter(calls, c => before_or_at(c.from, Pos { line = l, col = a }) && before_or_at(Pos { line = l, col = b }, c.to)), c => c.id)
 
 ## Where line `l` (`n` code points long) is cut for the calls on it: every
 ## call's start, end and name end that falls on it, and its two ends, in
@@ -475,7 +475,7 @@ test "a recording reads back call by call, with its tree and its spans" {
   assert (r.first, r.last, r.ops) == (10, 15, 6)
   assert map(r.calls, c => (c.name, c.parent)) == [("load", 0 - 1), ("d_for", 0 - 1), ("addf", 1), ("store", 0 - 1)]
   assert r.calls[1].lines == [(12, 13), (15, 17)]
-  assert r.calls[1].to == Pos { line: 13, col: 26 }
+  assert r.calls[1].to == Pos { line = 13, col = 26 }
 }
 
 test "the rows put a call's first run on its name's line and a region's later run where its span ends" {
@@ -608,7 +608,7 @@ test "a folded row shows the line its outermost named call wrote its result with
       assert keys_of(m) == [Some(2), Some(11), Some(12), Some(14), Some(19), Some(22)]
       assert map(m.rows, r => row_lines(r)) == [3, 8, 1, 4, 3, 3]
       assert result_line(ir, m.rows[3].segs[1]) == Some(15)
-      assert result_line(ir, Seg { owner: 1, ir: (16, 17) }) == None
+      assert result_line(ir, Seg { owner = 1, ir = (16, 17) }) == None
     }
     Err(e) -> panic(e)
   }

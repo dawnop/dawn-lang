@@ -258,7 +258,7 @@ fn walk_tree(dir: String) -> Walk !Fs = {
       }
     }
   }
-  Walk { files: sort(files), unlisted: unlisted }
+  Walk { files = sort(files), unlisted = unlisted }
 }
 
 ## The loader's diagnostic for a directory `walk_tree` could not list.
@@ -268,7 +268,7 @@ fn unlisted_diag(d: String, msg: String) -> LocDiag =
       "full; make the directory readable or remove it")
 
 fn synthetic(path: String, msg: String, hint: String) -> LocDiag =
-  LocDiag { path: path, d: mk_diag(msg, 0, 0, hint) }
+  LocDiag { path = path, d = mk_diag(msg, 0, 0, hint) }
 
 # Planner diagnostics use a package-local record to keep this frontend out of
 # compiler_plan's dependency graph. Convert only where loading adopts them, and
@@ -277,8 +277,8 @@ pub(pkg) fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
   var out: List[LocDiag] = []
   for ld in ds {
     out = out ++ [LocDiag {
-      path: ld.path,
-      d: mk_diag(ld.d.msg, ld.d.lo, ld.d.hi, ld.d.hint)
+      path = ld.path,
+      d = mk_diag(ld.d.msg, ld.d.lo, ld.d.hi, ld.d.hint)
     }]
   }
   out
@@ -320,8 +320,8 @@ pub(pkg) fn own_module_paths(loaded: LoadResult) -> Set[String] = {
 fn missing_source_root(dir: String) -> LoadResult = {
   let root = "${dir}/src"
   LoadResult {
-    modules: [],
-    diags: [synthetic(dir,
+    modules = [],
+    diags = [synthetic(dir,
       "project directory has no `src/` folder (expected " ++ root ++ ")",
       "a Dawn project keeps its modules under src/, with entry src/main.dawn")]
   }
@@ -366,7 +366,7 @@ fn load_directory_planned(dir: String, plan: ProjectPlan) -> LoadResult !Fs !Env
   # load every module under src/ (spec §10.5: unreferenced modules still check)
   let no_over: Map[String, String] = map.empty()
   let loaded = load_entries_over(plan, plan.modules.project_files, no_over)
-  LoadResult { ..loaded, diags: diags ++ loaded.diags }
+  LoadResult { ..loaded, diags = diags ++ loaded.diags }
 }
 
 ## Load exactly the target captured by `plan`, without source replanning.
@@ -406,7 +406,7 @@ pub(pkg) fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !F
   let none: Option[LoadResult] = None
   if not io.is_dir(target) { return none }
   if not is_std_dir(std, target) { return none }
-  Some(LoadResult { modules: [], diags: [synthetic(target,
+  Some(LoadResult { modules = [], diags = [synthetic(target,
     "`" ++ target ++ "` is the bundled standard library, not a Dawn project",
     "every dawn command checks the whole bundle before it starts, so there is " ++
       "nothing left to check here; name one module (`dawn check " ++ target ++
@@ -444,11 +444,11 @@ pub(pkg) fn syntax_failure_diags(loaded: LoadResult) -> Option[List[LocDiag]] = 
       let none: Option[List[LocDiag]] = None
       return none
     }
-    for d in mf.pdiags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+    for d in mf.pdiags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
     spans = map.insert(spans, mf.mod_path, identity.declaration_spans(mf.m))
   }
-  Some(rendered_diags(Program { modules: [], diags: diags, decl_spans: spans,
-    ct_world: ct_world_empty() }))
+  Some(rendered_diags(Program { modules = [], diags = diags, decl_spans = spans,
+    ct_world = ct_world_empty() }))
 }
 
 ## The std modules a loaded program names: every `use std/..` of every module
@@ -526,7 +526,7 @@ fn qualify_uses(m: Module, pkg: source.PkgR) -> Module = {
       _ -> { decls = decls ++ [d] }
     }
   }
-  Module { decls: decls }
+  Module { decls = decls }
 }
 
 ## A package's dep under its real name — what canonicalized `use` paths carry
@@ -553,7 +553,7 @@ fn apply_rewrites(m: Module, rw: Map[String, List[String]]) -> Module = {
       _ -> { decls = decls ++ [d] }
     }
   }
-  Module { decls: decls }
+  Module { decls = decls }
 }
 
 ## A source read that honors editor-buffer overrides (canon path → text) —
@@ -609,7 +609,7 @@ pub(pkg) type ParseMemo = { by_path: Map[String, Parsed], reused: Int }
 
 pub(pkg) fn no_parses() -> ParseMemo = {
   let none: Map[String, Parsed] = map.empty()
-  ParseMemo { by_path: none, reused: 0 }
+  ParseMemo { by_path = none, reused = 0 }
 }
 
 pub(pkg) type ReusingLoad = { loaded: LoadResult, parses: ParseMemo }
@@ -625,8 +625,8 @@ pub(pkg) fn load_entries_reusing(
   previous: ParseMemo
 ) -> ReusingLoad !Fs !Env !io = {
   let read = load_source_entries(plan.source, entries, over, previous)
-  let loaded = LoadResult { ..read.loaded, diags: walk_diags_of(plan) ++ read.loaded.diags }
-  ReusingLoad { ..read, loaded: loaded }
+  let loaded = LoadResult { ..read.loaded, diags = walk_diags_of(plan) ++ read.loaded.diags }
+  ReusingLoad { ..read, loaded = loaded }
 }
 
 ## What the plan's walk could not list, for a project directory. A single
@@ -679,7 +679,7 @@ fn parse_reusing(previous: ParseMemo, key: String, text: String) -> (Parsed, Boo
 
 fn fresh_parse(text: String) -> Parsed = {
   let (m, pdiags, marks) = parser.parse_module_marked(text)
-  Parsed { text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pdiags, marks: marks }
+  Parsed { text = text, line_starts = lexer.line_starts_of(text), m = m, pdiags = pdiags, marks = marks }
 }
 
 ## The file whose module is the program's entry (spec §10.1, §10.5): the one
@@ -736,17 +736,17 @@ fn resolve(
           parses = map.insert(parses, c, parsed)
           if hit { reused = reused + 1 }
           let mf = LoadedModule {
-            mod_path: mod_path,
-            class_name: mod_path,
-            path: f,
-            text: text,
-            line_starts: parsed.line_starts,
-            m: parsed.m,
-            pdiags: parsed.pdiags,
-            marks: parsed.marks,
-            pkg: None,
-            site_path: tree_site(root_abs, mod_path),
-            entry: entry == Some(c)
+            mod_path = mod_path,
+            class_name = mod_path,
+            path = f,
+            text = text,
+            line_starts = parsed.line_starts,
+            m = parsed.m,
+            pdiags = parsed.pdiags,
+            marks = parsed.marks,
+            pkg = None,
+            site_path = tree_site(root_abs, mod_path),
+            entry = entry == Some(c)
           }
           loaded_as = set.insert(loaded_as, (c, mod_path))
           by_path = map.insert(by_path, mod_path, mf)
@@ -780,7 +780,7 @@ fn resolve(
         }
         match bad {
           Some(b) -> {
-            diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+            diags = diags ++ [LocDiag { path = mf.path, d = mk_diag(
               "invalid module path segment `" ++ b ++ "`",
               u.nlo,
               u.nhi,
@@ -824,7 +824,7 @@ fn resolve(
                   Err(_) -> false
                 }
                 if local_hit {
-                  diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+                  diags = diags ++ [LocDiag { path = mf.path, d = mk_diag(
                     "`" ++ u.path ++ "` is ambiguous: `" ++ u.segs[0] ++
                       "` is both a [deps] package and a local module path",
                     u.nlo,
@@ -833,7 +833,7 @@ fn resolve(
                   ) }]
                   edge_ok = false
                 } else if len(u.segs) == 1 {
-                  diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+                  diags = diags ++ [LocDiag { path = mf.path, d = mk_diag(
                     "cannot import the package `" ++ u.segs[0] ++ "` itself",
                     u.nlo,
                     u.nhi,
@@ -891,22 +891,22 @@ fn resolve(
                 None -> m2p
               }
               let mf2 = LoadedModule {
-                mod_path: mod_path,
-                class_name: cls,
-                path: dep_file,
-                text: text,
-                line_starts: parsed.line_starts,
-                m: m2,
-                pdiags: pdiags2,
-                marks: parsed.marks,
-                pkg: dep_pkg,
+                mod_path = mod_path,
+                class_name = cls,
+                path = dep_file,
+                text = text,
+                line_starts = parsed.line_starts,
+                m = m2,
+                pdiags = pdiags2,
+                marks = parsed.marks,
+                pkg = dep_pkg,
                 # a package module's path already leads with the package's
                 # real name: `<package>/<path in package>`
-                site_path: match dep_pkg {
+                site_path = match dep_pkg {
                   Some(_) -> mod_path ++ ".dawn"
                   None -> tree_site(root_abs, mod_path)
                 },
-                entry: false
+                entry = false
               }
               loaded_as = set.insert(loaded_as, (dep_canon, mod_path))
               by_path = map.insert(by_path, mod_path, mf2)
@@ -914,7 +914,7 @@ fn resolve(
               queue = queue ++ [mod_path]
             }
             Err(_) -> {
-              diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+              diags = diags ++ [LocDiag { path = mf.path, d = mk_diag(
                 "cannot find module `" ++ u.path ++ "`",
                 u.nlo,
                 u.nhi,
@@ -926,7 +926,7 @@ fn resolve(
       }
       if len(map.keys(rewrites)) > 0 {
         by_path = map.insert(by_path, mp,
-          LoadedModule { ..mf, m: apply_rewrites(mf.m, rewrites) })
+          LoadedModule { ..mf, m = apply_rewrites(mf.m, rewrites) })
       }
     }
   }
@@ -934,7 +934,7 @@ fn resolve(
   for mp in order {
     if mp == "std" || str.starts_with(mp, "std/") {
       let mf = map.get(by_path, mp).expect("module")
-      diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+      diags = diags ++ [LocDiag { path = mf.path, d = mk_diag(
         "the module path `" ++ mp ++ "` is reserved for the bundled standard library",
         0,
         0,
@@ -961,7 +961,7 @@ fn resolve(
           None -> false
         }
         if set.has(seen, (u.path, sel)) {
-          diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+          diags = diags ++ [LocDiag { path = mf.path, d = mk_diag(
             "module `" ++ u.path ++ "` is imported more than once",
             u.nlo,
             u.nhi,
@@ -975,8 +975,8 @@ fn resolve(
   # topological order + cycle detection over the use graph
   let (ordered, diags2) = topo_sort(order, by_path, diags)
   ReusingLoad {
-    loaded: LoadResult { modules: ordered, diags: diags2 },
-    parses: ParseMemo { by_path: parses, reused: reused }
+    loaded = LoadResult { modules = ordered, diags = diags2 },
+    parses = ParseMemo { by_path = parses, reused = reused }
   }
 }
 
@@ -1038,7 +1038,7 @@ fn topo_sort(
                   uhi = u.nhi
                 }
               }
-              diags = diags ++ [LocDiag { path: head.path, d: mk_diag(
+              diags = diags ++ [LocDiag { path = head.path, d = mk_diag(
                 "circular module dependency: ${join(names, " → ")}",
                 ulo,
                 uhi,
@@ -1096,7 +1096,7 @@ pub(pkg) type Program = {
 ## declarations sit now.
 pub(pkg) fn rendered_diags(prog: Program) -> List[LocDiag] = {
   var out: List[LocDiag] = []
-  for ld in prog.diags { out = out ++ [LocDiag { ..ld, d: identity.absolute(prog.decl_spans, ld.d) }] }
+  for ld in prog.diags { out = out ++ [LocDiag { ..ld, d = identity.absolute(prog.decl_spans, ld.d) }] }
   out
 }
 
@@ -1147,8 +1147,8 @@ pub(pkg) fn initial_carry(std: StdCtx) -> AnalysisCarry = {
   # The bundled library is already checked; its own sources are given a view
   # when one of them is analyzed again as an ordinary module.
   let no_spans: Map[String, identity.DeclSpans] = map.empty()
-  AnalysisCarry { exports: std.exports, impls: std.impls,
-    identities: std.identities, decl_spans: no_spans, ct_world: std.ct_world }
+  AnalysisCarry { exports = std.exports, impls = std.impls,
+    identities = std.identities, decl_spans = no_spans, ct_world = std.ct_world }
 }
 
 fn analysis_event(
@@ -1169,13 +1169,13 @@ pub(pkg) type DocumentAnalysis = {
 
 fn empty_tmodule() -> TModule = {
   let no_syms: Map[Int, Sym] = map.empty()
-  TModule { fns: [], consts: [], tests: [], syms: no_syms }
+  TModule { fns = [], consts = [], tests = [], syms = no_syms }
 }
 
 fn empty_ctout() -> CtOut = {
   let no_c: Map[String, CValue] = map.empty()
   let no_b: Map[(Int, Int), CValue] = map.empty()
-  CtOut { diags: [], consts: no_c, blocks: no_b, reads: set.empty(), missed: false }
+  CtOut { diags = [], consts = no_c, blocks = no_b, reads = set.empty(), missed = false }
 }
 
 ## A loaded module under the identity it actually has, plus whether that
@@ -1196,7 +1196,7 @@ fn empty_ctout() -> CtOut = {
 ## recognise.
 fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !Fs !Env =
   match std_module_of(std, mf.path) {
-    Some(mod_path) -> (LoadedModule { ..mf, mod_path: mod_path, class_name: mod_path }, true)
+    Some(mod_path) -> (LoadedModule { ..mf, mod_path = mod_path, class_name = mod_path }, true)
     None -> (mf, false)
   }
 
@@ -1221,7 +1221,7 @@ pub(pkg) fn analyze_observed(
     diags = diags ++ step.diags
     out = out ++ [step.checked]
   }
-  Program { modules: out, diags: diags, decl_spans: carry.decl_spans, ct_world: carry.ct_world }
+  Program { modules = out, diags = diags, decl_spans = carry.decl_spans, ct_world = carry.ct_world }
 }
 
 ## The comptime world once `checked` has joined it. Only a module whose
@@ -1232,8 +1232,8 @@ pub(pkg) fn analyze_observed(
 ## program module is in the world already, as std.
 pub(pkg) fn world_after(w: CtWorld, checked: CheckedMod, ran: Bool, is_std: Bool) -> CtWorld =
   if ran && not is_std {
-    let scope = ConstScope { path: checked.mod_path, imported: checked.cx.imported_names,
-      renames: checked.cx.import_renames }
+    let scope = ConstScope { path = checked.mod_path, imported = checked.cx.imported_names,
+      renames = checked.cx.import_renames }
     ct_world_add(w, checked.class_name, scope, checked.tm, checked.ct.consts, true)
   } else { w }
 
@@ -1258,7 +1258,7 @@ fn check_recovered(cx: Cx, mf: LoadedModule, env: Map[String, ModExports]) -> (C
       spans = spans ++ [l.span]
     }
   }
-  let (cx1, tm) = check_module_bodies(ModuleHeaders { ..headers, recovered: true, damaged: damaged })
+  let (cx1, tm) = check_module_bodies(ModuleHeaders { ..headers, recovered = true, damaged = damaged })
   let views = map.insert(map.empty(), mf.mod_path, identity.declaration_spans(mf.m))
   var kept: List[Diag] = []
   for d in cx1.diags {
@@ -1271,7 +1271,7 @@ fn check_recovered(cx: Cx, mf: LoadedModule, env: Map[String, ModExports]) -> (C
     for sp in spans { if at >= sp.lo && at < sp.hi { inside = true } }
     if not inside { kept = kept ++ [d] }
   }
-  (Cx { ..cx1, diags: kept }, tm)
+  (Cx { ..cx1, diags = kept }, tm)
 }
 
 ## One exact transition of the original loop. Even a parse failure publishes
@@ -1296,7 +1296,7 @@ pub(pkg) fn analyze_module_step(
   # answers the same way whoever analyzed it.
   let spans = identity.declaration_spans(mf.m)
   analysis_event(observer, mf.mod_path, AnalyzeModule, true)
-  for d in mf.pdiags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+  for d in mf.pdiags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
   let parse_failed = len(mf.pdiags) > 0
   # A std source checked here is the bundle's own copy being checked a
   # second time, so its baseline is the one `load_std` gave it -- what the
@@ -1312,35 +1312,35 @@ pub(pkg) fn analyze_module_step(
   var cx = cx_new(Some(mf.class_name), Some(mf.path))
   cx = Cx {
     ..cx,
-    is_entry_module: mf.entry,
+    is_entry_module = mf.entry,
     # the module's own name got a vote in `cx_new` and does not get one
     # here: `src/std/foo.dawn` is spelled like std and is not std
-    is_std_module: is_std,
+    is_std_module = is_std,
     # the package `pub(pkg)` opens to (docs/package-visibility-design.md
     # §4.1): the `[deps]` package this file was loaded from, by its real
     # name. A std source is std's whatever directory it sits in.
-    dep_package: if is_std { None } else {
+    dep_package = if is_std { None } else {
       match mf.pkg {
         Some(p) -> Some(p.name)
         None -> None
       }
     },
-    std_fns: std.std_fns,
-    moved: std.moved,
-    line_starts: mf.line_starts,
-    source: mf.text,
+    std_fns = std.std_fns,
+    moved = std.moved,
+    line_starts = mf.line_starts,
+    source = mf.text,
     # what a position baked into this module's code names; the bundled std
     # names none, as it never has
-    site_path: if is_std { None } else { Some(mf.site_path) },
+    site_path = if is_std { None } else { Some(mf.site_path) },
     # names the span view a diagnostic raised in this module resolves against
-    mod_path: Some(mf.mod_path),
-    identities: before.identities,
+    mod_path = Some(mf.mod_path),
+    identities = before.identities,
     # std's impls are part of the baseline, not something `use` turns on --
     # and neither are the ones the modules before this got to
-    impl_table: base_impls,
+    impl_table = base_impls,
     # the host's Java signature oracle: jreflect's on the JVM driver, the
     # refusing default anywhere else (a native compiler refuses `use java`)
-    jsig: js
+    jsig = js
   }
   var tm = empty_tmodule()
   var ct = empty_ctout()
@@ -1357,7 +1357,7 @@ pub(pkg) fn analyze_module_step(
     analysis_event(observer, mf.mod_path, AnalyzeCheck, false)
     cx = cx1
     tm = tm1
-    for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+    for d in cx.diags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
   } else if not parse_failed {
     analysis_event(observer, mf.mod_path, AnalyzeCheck, true)
     let (cx1, tm1) = check_module(cx, mf.m, before.exports)
@@ -1367,15 +1367,15 @@ pub(pkg) fn analyze_module_step(
     tm = tm1
     if len(cx.diags) == 0 {
       analysis_event(observer, mf.mod_path, AnalyzeComptime, true)
-      let scope = ConstScope { path: mf.mod_path, imported: cx.imported_names,
-        renames: cx.import_renames }
+      let scope = ConstScope { path = mf.mod_path, imported = cx.imported_names,
+        renames = cx.import_renames }
       ct = eval_comptime_in(tm, before.ct_world, scope, std.fn_decls, std.by_owner,
         std.impl_fns, std.std_names, cx.adts, cx.traits, cx.impl_table, mf.class_name, opts)
       comptime_runs = 1
       analysis_event(observer, mf.mod_path, AnalyzeComptime, false)
     }
-    for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
-    for d in ct.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+    for d in cx.diags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
+    for d in ct.diags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
   } else {
     # A module that lost a declaration to the parser still publishes the
     # headers of what was recovered, so its importers see the surface they saw
@@ -1388,7 +1388,7 @@ pub(pkg) fn analyze_module_step(
     # carry, the cold path runs it too, and so a session still agrees with a
     # cold analysis; no body ran, so it counts as no check.
     let headers = check_module_headers(cx, mf.m, before.exports)
-    cx = Cx { ..headers.cx, diags: [] }
+    cx = Cx { ..headers.cx, diags = [] }
   }
   var impls = before.impls
   # registration already rejected anything that collided with a key already
@@ -1401,25 +1401,25 @@ pub(pkg) fn analyze_module_step(
   }
   let exports = map.insert(before.exports, mf.mod_path, exports_of(cx, mf.m, mf.mod_path, mf.class_name))
   let checked = CheckedMod {
-    mod_path: mf.mod_path,
-    class_name: mf.class_name,
-    path: mf.path,
-    m: mf.m,
-    cx: cx,
-    tm: tm,
-    ct: ct
+    mod_path = mf.mod_path,
+    class_name = mf.class_name,
+    path = mf.path,
+    m = mf.m,
+    cx = cx,
+    tm = tm,
+    ct = ct
   }
   analysis_event(observer, mf.mod_path, AnalyzeModule, false)
   let step = ModuleStep {
-    input: mf,
-    checked: checked,
-    diags: diags,
-    after: AnalysisCarry { exports: exports, impls: impls,
-      identities: cx.identities,
-      decl_spans: map.insert(before.decl_spans, mf.mod_path, spans),
-      ct_world: world_after(before.ct_world, checked, comptime_runs == 1, is_std) },
-    check_runs: check_runs,
-    comptime_runs: comptime_runs
+    input = mf,
+    checked = checked,
+    diags = diags,
+    after = AnalysisCarry { exports = exports, impls = impls,
+      identities = cx.identities,
+      decl_spans = map.insert(before.decl_spans, mf.mod_path, spans),
+      ct_world = world_after(before.ct_world, checked, comptime_runs == 1, is_std) },
+    check_runs = check_runs,
+    comptime_runs = comptime_runs
   }
   step
 }
@@ -1500,11 +1500,11 @@ pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !Proc !Env =
     by_use = index_files(by_use, pkg.root, "${dep_alias}/", files)
   }
   ProjectPlan {
-    source: source_plan,
-    modules: ModuleIndex {
-      project_files: project_files,
-      by_use: by_use,
-      walk_diags: walk_diags
+    source = source_plan,
+    modules = ModuleIndex {
+      project_files = project_files,
+      by_use = by_use,
+      walk_diags = walk_diags
     }
   }
 }
@@ -1588,22 +1588,22 @@ pub(pkg) fn analyze_standalone(
     None -> ()
   }
   let mf = LoadedModule {
-    mod_path: "main",
-    class_name: "main",
-    path: path,
-    text: text,
-    line_starts: lexer.line_starts_of(text),
-    m: m,
-    pdiags: pdiags,
-    marks: marks,
-    pkg: None,
+    mod_path = "main",
+    class_name = "main",
+    path = path,
+    text = text,
+    line_starts = lexer.line_starts_of(text),
+    m = m,
+    pdiags = pdiags,
+    marks = marks,
+    pkg = None,
     # a buffer with no tree around it is named by its file name, the
     # single-file rule with the buffer's own directory as the root
-    site_path: base_name(path),
+    site_path = base_name(path),
     # a single document analysed on its own is its own program's entry
-    entry: true
+    entry = true
   }
-  analyze_program(LoadResult { modules: [mf], diags: diags }, std, opts, js)
+  analyze_program(LoadResult { modules = [mf], diags = diags }, std, opts, js)
 }
 
 ## The identity `analyze_standalone` settled on for its one buffer. Callers
@@ -1627,7 +1627,7 @@ pub(pkg) fn analyze_document_planned(
 ) -> DocumentAnalysis !Fs !Proc !Env !io = {
   if not has_module_use(text) {
     let prog = analyze_standalone(path, text, std, opts, js)
-    return DocumentAnalysis { prog: prog, entry: standalone_entry(prog), plan: None }
+    return DocumentAnalysis { prog = prog, entry = standalone_entry(prog), plan = None }
   }
   let abs = canon_identity(path)
   var over: Map[String, String] = map.empty()
@@ -1640,7 +1640,7 @@ pub(pkg) fn analyze_document_planned(
   }
   if not loaded_entry {
     let prog = analyze_standalone(path, text, std, opts, js)
-    return DocumentAnalysis { prog: prog, entry: standalone_entry(prog), plan: Some(plan) }
+    return DocumentAnalysis { prog = prog, entry = standalone_entry(prog), plan = Some(plan) }
   }
   # the entry's mod_path is read off the *analysis*, not off the load: a
   # bundled std source is checked under its std module path, and the loader
@@ -1650,7 +1650,7 @@ pub(pkg) fn analyze_document_planned(
   for cm in prog.modules {
     if entry == "" && canon_identity(cm.path) == abs { entry = cm.mod_path }
   }
-  DocumentAnalysis { prog: prog, entry: entry, plan: Some(plan) }
+  DocumentAnalysis { prog = prog, entry = entry, plan = Some(plan) }
 }
 
 # ---- tests ----
@@ -2594,8 +2594,8 @@ test "module identity carry keeps exporting owners across header reorder" {
     let second = "pub type Second = { value: Int }\npub fn second_of[T](x: T) -> T = x\n"
     for text in [first ++ second, second ++ first] {
       let (syntax, pd, syntax_marks) = parser.parse_module_marked(text)
-      let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn", site_path: "library.dawn",
-        text: text, line_starts: lexer.line_starts_of(text), m: syntax, pdiags: pd, marks: syntax_marks, pkg: None, entry: false }
+      let input = LoadedModule { mod_path = "library", class_name = "library", path = "/provenance/library.dawn", site_path = "library.dawn",
+        text = text, line_starts = lexer.line_starts_of(text), m = syntax, pdiags = pd, marks = syntax_marks, pkg = None, entry = false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       assert len(step.diags) == 0
       let id = map.get(step.checked.cx.adts_by_name, "First").expect("provider ID")
@@ -2612,8 +2612,8 @@ test "module identity carry keeps exporting owners across header reorder" {
       binders = binders ++ [binder]
       let consumer_text = "use library as dep\nfn consume(x: dep.First) -> dep.First = dep.first_of(x)\n"
       let (consumer_ast, consumer_pd, consumer_marks) = parser.parse_module_marked(consumer_text)
-      let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn", site_path: "consumer.dawn",
-        text: consumer_text, line_starts: lexer.line_starts_of(consumer_text), m: consumer_ast, pdiags: consumer_pd, marks: consumer_marks, pkg: None, entry: false }
+      let consumer = LoadedModule { mod_path = "consumer", class_name = "consumer", path = "/provenance/consumer.dawn", site_path = "consumer.dawn",
+        text = consumer_text, line_starts = lexer.line_starts_of(consumer_text), m = consumer_ast, pdiags = consumer_pd, marks = consumer_marks, pkg = None, entry = false }
       let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
       assert len(consumed.diags) == 0
       assert map.get(consumed.after.identities, id) != None
@@ -2628,8 +2628,8 @@ test "module identity carry keeps exporting owners across header reorder" {
     # its key is a different integer.
     let renamed_text = "pub type First = { value: Int }\npub fn renamed_of[T](x: T) -> T = x\n" ++ second
     let (renamed_ast, renamed_pd, renamed_marks) = parser.parse_module_marked(renamed_text)
-    let renamed_input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn", site_path: "library.dawn",
-      text: renamed_text, line_starts: lexer.line_starts_of(renamed_text), m: renamed_ast, pdiags: renamed_pd, marks: renamed_marks, pkg: None, entry: false }
+    let renamed_input = LoadedModule { mod_path = "library", class_name = "library", path = "/provenance/library.dawn", site_path = "library.dawn",
+      text = renamed_text, line_starts = lexer.line_starts_of(renamed_text), m = renamed_ast, pdiags = renamed_pd, marks = renamed_marks, pkg = None, entry = false }
     let renamed_step = analyze_module_step(renamed_input, initial, std, ct_default(), jsig_refused(), None)
     assert len(renamed_step.diags) == 0
     assert match map.get(renamed_step.checked.cx.fns, "renamed_of").expect("renamed generic").tparams[0] {
@@ -2660,8 +2660,8 @@ test "a consumer names a provider's effect without minting the provider's identi
     var binders: List[Int] = []
     for text in [asks ++ generic, generic ++ asks] {
       let (syntax, pd, syntax_marks) = parser.parse_module_marked(text)
-      let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/effects.dawn", site_path: "effects.dawn",
-        text: text, line_starts: lexer.line_starts_of(text), m: syntax, pdiags: pd, marks: syntax_marks, pkg: None, entry: false }
+      let input = LoadedModule { mod_path = "library", class_name = "library", path = "/provenance/effects.dawn", site_path = "effects.dawn",
+        text = text, line_starts = lexer.line_starts_of(text), m = syntax, pdiags = pd, marks = syntax_marks, pkg = None, entry = false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       assert len(step.diags) == 0
       let effect_id = map.get(step.checked.cx.effects, "Ask").expect("provider effect")
@@ -2683,8 +2683,8 @@ test "a consumer names a provider's effect without minting the provider's identi
         "fn handled() -> Int = { with handle dep.Ask { ask() => 21 }\n consume() }\n" ++
         "fn relay[!f](g: fn() -> Int !f) -> Int !f = dep.twice(g)\n"
       let (consumer_ast, consumer_pd, consumer_marks) = parser.parse_module_marked(consumer_text)
-      let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn", site_path: "consumer.dawn",
-        text: consumer_text, line_starts: lexer.line_starts_of(consumer_text), m: consumer_ast, pdiags: consumer_pd, marks: consumer_marks, pkg: None, entry: false }
+      let consumer = LoadedModule { mod_path = "consumer", class_name = "consumer", path = "/provenance/consumer.dawn", site_path = "consumer.dawn",
+        text = consumer_text, line_starts = lexer.line_starts_of(consumer_text), m = consumer_ast, pdiags = consumer_pd, marks = consumer_marks, pkg = None, entry = false }
       let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
       # The effect the consumer resolved is the provider's declaration, by
       # value and by derivation: a second mint in the consumer's owner would
@@ -2750,7 +2750,7 @@ test "the program a render reads from carries this revision's declaration spans"
     # is silent: the offsets come back declaration-relative, still owned, and
     # point into the file's first declaration. That is why the assertion
     # above is about the program the render reads and not about `absolute`.
-    let viewless = Program { ..prog, decl_spans: map.empty() }
+    let viewless = Program { ..prog, decl_spans = map.empty() }
     let unresolved = rendered_diags(viewless)
     assert unresolved != rendered
     for ld in unresolved {
@@ -3046,9 +3046,9 @@ test "a directory the plan's walk could not list reaches the load as a diagnosti
       let plan = project_plan(source.ProjectDirectory(proj))
       let walked = ModuleIndex {
         ..plan.modules,
-        walk_diags: [unlisted_diag("${proj}/src/hidden", "denied")]
+        walk_diags = [unlisted_diag("${proj}/src/hidden", "denied")]
       }
-      load_planned(ProjectPlan { ..plan, modules: walked })
+      load_planned(ProjectPlan { ..plan, modules = walked })
     })
     var named = false
     for ld in loaded.diags {
@@ -3063,9 +3063,9 @@ test "a directory the plan's walk could not list reaches the load as a diagnosti
       let plan = project_plan(source.SourceFile("${proj}/src/main.dawn"))
       let walked = ModuleIndex {
         ..plan.modules,
-        walk_diags: [unlisted_diag("${proj}/src/hidden", "denied")]
+        walk_diags = [unlisted_diag("${proj}/src/hidden", "denied")]
       }
-      load_planned(ProjectPlan { ..plan, modules: walked })
+      load_planned(ProjectPlan { ..plan, modules = walked })
     })
     for ld in file_loaded.diags {
       assert ld.path != "${proj}/src/hidden"

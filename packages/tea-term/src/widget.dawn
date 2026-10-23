@@ -69,9 +69,9 @@ impl[M] Tree[Widget[M]] {
     match w {
       Text(_) -> w
       Button(_, _) -> w
-      Styled(s, _) -> if list.is_empty(ks) { w } else { Styled(style: s, child: ks[0]) }
-      Row(_) -> Row(kids: ks)
-      Column(_) -> Column(kids: ks)
+      Styled(s, _) -> if list.is_empty(ks) { w } else { Styled(style = s, child = ks[0]) }
+      Row(_) -> Row(kids = ks)
+      Column(_) -> Column(kids = ks)
     }
 
   fn relate(old: Widget[M], new: Widget[M]) -> Rel =
@@ -104,69 +104,69 @@ derive Show
 
 test "widget trees are plain values with structural equality" {
   let a: Widget[ProbeMsg] =
-    Column(kids: [Text(s: "hi"), Button(label: "go", on_press: Ping)])
+    Column(kids = [Text(s = "hi"), Button(label = "go", on_press = Ping)])
   let b: Widget[ProbeMsg] =
-    Column(kids: [Text(s: "hi"), Button(label: "go", on_press: Ping)])
+    Column(kids = [Text(s = "hi"), Button(label = "go", on_press = Ping)])
   assert a == b
 }
 
 test "a differing message or label is a differing tree" {
-  let a: Widget[ProbeMsg] = Button(label: "go", on_press: Ping)
-  assert a != Button(label: "go", on_press: Pong)
-  assert a != Button(label: "stop", on_press: Ping)
-  let row: Widget[ProbeMsg] = Row(kids: [Text(s: "x")])
-  assert row != Column(kids: [Text(s: "x")])
+  let a: Widget[ProbeMsg] = Button(label = "go", on_press = Ping)
+  assert a != Button(label = "go", on_press = Pong)
+  assert a != Button(label = "stop", on_press = Ping)
+  let row: Widget[ProbeMsg] = Row(kids = [Text(s = "x")])
+  assert row != Column(kids = [Text(s = "x")])
 }
 
 test "kids is the addressing scheme: index 0 of a Styled is its child" {
-  let child: Widget[ProbeMsg] = Text(s: "x")
-  let wrapped: Widget[ProbeMsg] = Styled(style: Bold, child: child)
+  let child: Widget[ProbeMsg] = Text(s = "x")
+  let wrapped: Widget[ProbeMsg] = Styled(style = Bold, child = child)
   assert kids(wrapped) == [child]
-  let leaf: Widget[ProbeMsg] = Text(s: "a")
+  let leaf: Widget[ProbeMsg] = Text(s = "a")
   assert list.is_empty(kids(leaf))
-  let b: Widget[ProbeMsg] = Button(label: "go", on_press: Ping)
+  let b: Widget[ProbeMsg] = Button(label = "go", on_press = Ping)
   assert list.is_empty(kids(b))
-  let ks: List[Widget[ProbeMsg]] = [Text(s: "a"), Text(s: "b")]
-  let r: Widget[ProbeMsg] = Row(kids: ks)
+  let ks: List[Widget[ProbeMsg]] = [Text(s = "a"), Text(s = "b")]
+  let r: Widget[ProbeMsg] = Row(kids = ks)
   assert kids(r) == ks
-  let c: Widget[ProbeMsg] = Column(kids: ks)
+  let c: Widget[ProbeMsg] = Column(kids = ks)
   assert kids(c) == ks
 }
 
 test "rekid is total: a leaf handed children returns itself" {
-  let ks: List[Widget[ProbeMsg]] = [Text(s: "a")]
+  let ks: List[Widget[ProbeMsg]] = [Text(s = "a")]
   let none: List[Widget[ProbeMsg]] = []
-  let leaf: Widget[ProbeMsg] = Text(s: "keep me")
+  let leaf: Widget[ProbeMsg] = Text(s = "keep me")
   assert rekid(leaf, ks) == leaf
-  let b: Widget[ProbeMsg] = Button(label: "go", on_press: Ping)
+  let b: Widget[ProbeMsg] = Button(label = "go", on_press = Ping)
   assert rekid(b, ks) == b
   # A Styled has exactly one child and no spelling for none, so emptying it is
   # a no-op rather than an error. That is what keeps `apply` total.
-  let s: Widget[ProbeMsg] = Styled(style: Bold, child: Text(s: "orig"))
+  let s: Widget[ProbeMsg] = Styled(style = Bold, child = Text(s = "orig"))
   assert rekid(s, none) == s
-  assert rekid(s, ks) == Styled(style: Bold, child: Text(s: "a"))
-  let r: Widget[ProbeMsg] = Row(kids: none)
-  assert rekid(r, ks) == Row(kids: ks)
+  assert rekid(s, ks) == Styled(style = Bold, child = Text(s = "a"))
+  let r: Widget[ProbeMsg] = Row(kids = none)
+  assert rekid(r, ks) == Row(kids = ks)
 }
 
 test "relate answers only about a pair core already found unequal" {
-  let a: Widget[ProbeMsg] = Row(kids: [Text(s: "a")])
-  let a2: Widget[ProbeMsg] = Row(kids: [Text(s: "b")])
+  let a: Widget[ProbeMsg] = Row(kids = [Text(s = "a")])
+  let a2: Widget[ProbeMsg] = Row(kids = [Text(s = "b")])
   assert relate(a, a2) == Same
-  let col: Widget[ProbeMsg] = Column(kids: [Text(s: "a")])
+  let col: Widget[ProbeMsg] = Column(kids = [Text(s = "a")])
   assert relate(a, col) == Unrelated
-  let s1: Widget[ProbeMsg] = Styled(style: Bold, child: Text(s: "x"))
-  let s2: Widget[ProbeMsg] = Styled(style: Bold, child: Text(s: "y"))
-  let s3: Widget[ProbeMsg] = Styled(style: Dim, child: Text(s: "x"))
+  let s1: Widget[ProbeMsg] = Styled(style = Bold, child = Text(s = "x"))
+  let s2: Widget[ProbeMsg] = Styled(style = Bold, child = Text(s = "y"))
+  let s3: Widget[ProbeMsg] = Styled(style = Dim, child = Text(s = "x"))
   assert relate(s1, s2) == Same
   assert relate(s1, s3) == SelfDiffers
   assert relate(s1, a) == Unrelated
   # Leaves hold no children, so an inequality is theirs and there is nothing
   # to descend into, matching constructors or not.
-  let t1: Widget[ProbeMsg] = Text(s: "a")
-  let t2: Widget[ProbeMsg] = Text(s: "b")
+  let t1: Widget[ProbeMsg] = Text(s = "a")
+  let t2: Widget[ProbeMsg] = Text(s = "b")
   assert relate(t1, t2) == Unrelated
-  let b1: Widget[ProbeMsg] = Button(label: "go", on_press: Ping)
-  let b2: Widget[ProbeMsg] = Button(label: "go", on_press: Pong)
+  let b1: Widget[ProbeMsg] = Button(label = "go", on_press = Ping)
+  let b2: Widget[ProbeMsg] = Button(label = "go", on_press = Pong)
   assert relate(b1, b2) == Unrelated
 }

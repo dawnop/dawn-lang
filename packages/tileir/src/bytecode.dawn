@@ -500,7 +500,7 @@ const ATTR_OPTIMIZATION_HINTS: Int = 11
 # `mlir::ArrayAttr` lands in `writeSingleAttribute`'s ArrayAttr case. The
 # reader agrees: `readLEVarSize` into a `SmallVector<int32_t>`.
 fn emit_i32_array(w: W, xs: List[Int]) -> W =
-  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 4)) }
+  W { ..w, body = list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 4)) }
 
 # `same_elements`'s values are a `DenseI64ArrayAttr`, which is the same
 # `writeLEVarSize` shape one element WIDER: the count as a varint, then each
@@ -509,17 +509,17 @@ fn emit_i32_array(w: W, xs: List[Int]) -> W =
 # written wrongly is read as the wrong number of elements rather than as a
 # wrong value (the mutant assume-same-elements-payload-four-bytes).
 fn emit_i64_array(w: W, xs: List[Int]) -> W =
-  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 8)) }
+  W { ..w, body = list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 8)) }
 
 # One RAW byte, not a varint. `div_by` and `bounded` write their
 # presence flags with `writer.writeByte` and the reader takes them with
 # `reader.readLE(uint8_t)`, so the two agree on a fixed byte and not on a
 # varint that happens to be one byte wide for every value under 128.
-fn emit_byte(w: W, x: Int) -> W = W { ..w, body: bytes.put(w.body, x) }
+fn emit_byte(w: W, x: Int) -> W = W { ..w, body = bytes.put(w.body, x) }
 
 # An optional signed payload: zigzag, as `writeSignedVarInt` writes it.
 fn emit_opt_signed(w: W, x: Option[Int]) -> W = match x {
-  Some(v) -> W { ..w, body: put_varint_u64(w.body, zigzag(v)) }
+  Some(v) -> W { ..w, body = put_varint_u64(w.body, zigzag(v)) }
   None -> w
 }
 
@@ -1156,7 +1156,7 @@ type Table = {
   index: Map[String, Int],
 }
 
-fn table() -> Table = Table { items: [], index: map.empty() }
+fn table() -> Table = Table { items = [], index = map.empty() }
 
 fn intern(t: Table, enc: Bytes) -> (Table, Int) = {
   let key = bytes.to_hex(enc)
@@ -1164,7 +1164,7 @@ fn intern(t: Table, enc: Bytes) -> (Table, Int) = {
     Some(i) -> (t, i)
     None -> {
       let i = len(t.items)
-      (Table { items: t.items ++ [enc], index: map.insert(t.index, key, i) }, i)
+      (Table { items = t.items ++ [enc], index = map.insert(t.index, key, i) }, i)
     }
   }
 }
@@ -1183,7 +1183,7 @@ type W = {
 
 fn ty_of(w: W, enc: Bytes) -> (W, Int) = {
   let (t, i) = intern(w.types, enc)
-  (W { ..w, types: t }, i)
+  (W { ..w, types = t }, i)
 }
 
 # A type tag is a varint on the wire (BytecodeTypeOpcodes.td's tags are
@@ -1335,12 +1335,12 @@ fn func_ty(w: W, ins: List[Int], outs: List[Int]) -> (W, Int) = {
 
 fn const_of(w: W, raw: Bytes) -> (W, Int) = {
   let (t, i) = intern(w.consts, bytes.freeze(bytes.put_bytes(put_varint(bytes.buf(), len(raw)), raw)))
-  (W { ..w, consts: t }, i)
+  (W { ..w, consts = t }, i)
 }
 
 fn str_of(w: W, s: String) -> (W, Int) = {
   let (t, i) = intern(w.strs, bytes.utf8(s))
-  (W { ..w, strs: t }, i)
+  (W { ..w, strs = t }, i)
 }
 
 # ---- the body
@@ -1353,7 +1353,7 @@ fn ref_index(w: W, r: Ref) -> Int = match r {
   }
 }
 
-fn emit(w: W, x: Int) -> W = W { ..w, body: put_varint(w.body, x) }
+fn emit(w: W, x: Int) -> W = W { ..w, body = put_varint(w.body, x) }
 
 fn emit_ref(w: W, r: Ref) -> W = emit(w, ref_index(w, r))
 
@@ -1371,7 +1371,7 @@ fn opt_flag(r: Option[Ref], bit: Int) -> Int = match r {
 }
 
 # The next index, given to table value `id`.
-fn number(w: W, id: Int) -> W = W { ..w, index: map.insert(w.index, id, w.nvals), nvals: w.nvals + 1 }
+fn number(w: W, id: Int) -> W = W { ..w, index = map.insert(w.index, id, w.nvals), nvals = w.nvals + 1 }
 
 fn number_all(w: W, ids: List[Int]) -> W = list.fold(ids, w, number)
 
@@ -1416,7 +1416,7 @@ fn put_hints(w0: W, out0: bytes.Buf, hints: Hints) -> (W, bytes.Buf) = {
 # clear and the reader never looks.
 fn emit_hints(w0: W, hints: Hints) -> W = if len(hints) == 0 { w0 } else {
   let (w1, b) = put_hints(w0, w0.body, hints)
-  W { ..w1, body: b }
+  W { ..w1, body = b }
 }
 
 fn hints_flag(hints: Hints, bit: Int) -> Int = if len(hints) == 0 { 0 } else { bit }
@@ -1431,7 +1431,7 @@ fn identity_attr(w0: W, id: RedId) -> W = match id {
   IdF(dtype, value) -> {
     let (w1, ti) = num_ty(w0, dtype)
     let w2 = emit(emit(w1, ATTR_FLOAT), ti)
-    W { ..w2, body: put_varint_u64(w2.body, zigzag(float_bits(dtype, value))) }
+    W { ..w2, body = put_varint_u64(w2.body, zigzag(float_bits(dtype, value))) }
   }
   IdI(dtype, value) -> {
     let (w1, ti) = num_ty(w0, dtype)
@@ -1445,7 +1445,7 @@ fn identity_attr(w0: W, id: RedId) -> W = match id {
 # `writeBlock`). This is that roll-back, and `for`, `reduce` and `if` all go
 # through it: three copies of one rule would be three places to get it
 # wrong, and the mutant that removes it would only reach one of them.
-fn roll_back(before: W, after: W) -> W = W { ..after, index: before.index, nvals: before.nvals }
+fn roll_back(before: W, after: W) -> W = W { ..after, index = before.index, nvals = before.nvals }
 
 fn emit_op(w: W, opcode: Int, result: Ty) -> W = {
   let (w1, ti) = ty(w, result)
@@ -2240,7 +2240,7 @@ fn magic() -> bytes.Buf = bytes.put(bytes.put(bytes.put(bytes.put(bytes.put(byte
 
 ## `k` as a bytecode file holding one kernel entry.
 pub fn encode_kernel(k: Kernel) -> Bytes = {
-  var w = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: len(k.params) }
+  var w = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = len(k.params) }
   var params: List[Int] = []
   for kp in k.params {
     let (w1, pi) = ty(w, kparam_ty(kp))
@@ -2408,7 +2408,7 @@ test "an i1 constant is bit-packed, one bit a lane, and an i32 one is four bytes
 }
 
 test "a tile type names its element type first, so the element's index is lower" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
   let (w1, ti) = ty(w0, Tile([128], PtrTo("f64")))
   # f64 (tag 9), ptr<f64>, tile<128xptr<f64>>: three types, the tile last.
   # The pointer is its tag, the 13.4 bitfield word (0: no `ptr_attr`) and
@@ -2420,7 +2420,7 @@ test "a tile type names its element type first, so the element's index is lower"
 
 test "f8E5M3FNU is tag 130, which is a two-byte varint, and the tile type that holds it follows it" {
   assert num_tag("f8E5M3FNU") == 130
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
   let (w1, ti) = ty(w0, Tile([128], Num("f8E5M3FNU")))
   # the element type (tag 130 = 0x82 0x01), then the tile naming it
   assert ti == 1
@@ -2431,13 +2431,13 @@ test "f8E5M3FNU is tag 130, which is a two-byte varint, and the tile type that h
 }
 
 fn vadd() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "vadd",
-  params: [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "vadd",
+  params = [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 128),
@@ -2471,13 +2471,13 @@ test "encoding the same program twice gives the same bytes" {
 }
 
 fn sum_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "sum",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "sum",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 4),
@@ -2503,7 +2503,7 @@ fn sum_prog() -> TileProg = TileProg {
 
 # The bytecode of `k.body` alone, and the writer after it.
 fn body_of(k: Kernel) -> (W, String) = {
-  var w = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: len(k.params) }
+  var w = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = len(k.params) }
   for i in k.body {
     w = instr(w, i)
   }
@@ -2545,13 +2545,13 @@ test "a for is its opcode, result count and types, the flags, the operand count 
 }
 
 fn spin_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "spin",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "spin",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 8),
@@ -2617,7 +2617,7 @@ test "zigzag is the reader's signed varint, and a pattern with its top bit set s
 }
 
 test "a reduction identity is a self-contained attribute: its tag, the index of its ELEMENT type, its payload" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
   # a float identity: tag 2, the f64 type index, the zigzagged pattern
   let w1 = identity_attr(w0, IdF("f64", 0.0))
   assert hex(bytes.freeze(w1.body)) == "0200" ++ "00"
@@ -2633,7 +2633,7 @@ test "a reduction identity is a self-contained attribute: its tag, the index of 
 }
 
 test "a hint dictionary is a count, then per architecture a string index, the Dictionary tag and its own count, then per hint a string index and a self-contained i64" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
   let (w1, out1) = put_hints(w0, bytes.buf(), [("sm_86", [("latency", 4)])])
   # one architecture, string 0; tag 10 because a dictionary VALUE is written
   # self-contained; one hint, string 1; tag 1 with the index of `i64` and the
@@ -2657,13 +2657,13 @@ test "a hint dictionary is a count, then per architecture a string index, the Di
 }
 
 fn total_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "total",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "total",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 8),
@@ -2703,13 +2703,13 @@ test "a reduce is its opcode, result count and types, dim, the identities array,
 }
 
 fn branch_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "branch",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "branch",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 8),
@@ -2946,13 +2946,13 @@ test "encoding a loop twice gives the same bytes, and the file still opens and c
 # ANSWER and not a type error), and the pointer surface.
 
 fn shapes_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "shapes",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "shapes",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     NumBlocks(2, 0),
@@ -2969,13 +2969,13 @@ fn shapes_prog() -> TileProg = TileProg {
 }
 
 fn ptrs_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "ptrs",
-  params: [ByPtr("f64"), ByPtr("i32")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "ptrs",
+  params = [ByPtr("f64"), ByPtr("i32")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     MakePtrs(2, 0, "f64", [8]),
@@ -2993,13 +2993,13 @@ fn ptrs_prog() -> TileProg = TileProg {
 }
 
 fn fork_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "fork",
-  params: [ByPtr("f64"), ByPtr("f64")],
-  globals: [],
-  ops: [
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "fork",
+  params = [ByPtr("f64"), ByPtr("f64")],
+  globals = [],
+  ops = [
     MakeToken(0),
     BlockId(1, 0),
     ConstF(2, "f64", [8], 1.0),
@@ -3011,7 +3011,7 @@ fn fork_prog() -> TileProg = TileProg {
 }
 
 test "a dense i32 array is a count and four raw bytes an element, where an ArrayAttr is a count and self-contained elements" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
   # BytecodeWriter.cpp writeLEVarSize: the size as a varint, then writeLE
   # per element. No tag, no element type index, and NOT a varint per
   # element -- which is the whole difference from `identity_attr` above.
@@ -3021,7 +3021,7 @@ test "a dense i32 array is a count and four raw bytes an element, where an Array
 }
 
 test "the three predicate attributes are a tag and then their own payload, and the two flag bytes are raw bytes" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
   let none: Option[Int] = None
   # div_by: tag 8, the divisor as a varint, then the presence byte. With
   # neither `every` nor `along` the byte is 0 and nothing follows it.
@@ -3041,7 +3041,7 @@ test "the three predicate attributes are a tag and then their own payload, and t
 }
 
 test "assert writes its message as a bare string index, assume its predicate self-contained, and print_tko a result count and a flags word" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2)]), nvals: 3 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.from([(0, 0), (1, 1), (2, 2)]), nvals = 3 }
   # assert: the opcode, the message's String section index (0, the first
   # string interned) and the condition. NO attribute tag in front of the
   # index: `message` is a StrAttr, so the ODS getter answers a StringRef
@@ -3069,7 +3069,7 @@ test "assert writes its message as a bare string index, assume its predicate sel
 fn none_int() -> Option[Int] = None
 
 test "the fence is an opcode and a token, and each gdc signal an opcode, a flags word naming the token, and the token with no count" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1)]), nvals: 2 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.from([(0, 0), (1, 1)]), nvals = 2 }
   # memory_fence_alias_tko: nothing optional and nothing variadic, so no
   # flags word and no count; the result type (token) takes index 0.
   let f = encode_instr(w0, TokenOnlyTile(5, "memory_fence_alias_tko", Val(1)))
@@ -3103,7 +3103,7 @@ test "the shape operations are the frozen table's opcodes, with the permutation 
 }
 
 test "extract writes its operand count, cat its dim inline, and neither writes a flags word" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2), (3, 3)]), nvals: 4 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.from([(0, 0), (1, 1), (2, 2), (3, 3)]), nvals = 4 }
   let ex = encode_instr(w0, ExtractTile(9, Val(0), Tile([4, 4, 8], Num("f64")), Tile([2, 4, 8], Num("f64")), [Val(1), Val(2), Val(3)]))
   # opcode, result COUNT 1, result type index (f64 is registered first,
   # the tile second), operand count 4, then %0 %1 %2 %3
@@ -3124,7 +3124,7 @@ test "extract writes its operand count, cat its dim inline, and neither writes a
 
 test "knife T17: ftoi_sat sets the saturating bit, each ftof spelling writes its mode, and xchg is 9" {
   assert ROUND_NEAREST_AWAY == 7 && FTOI_FLAG_SATURATING == 1
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0)]), nvals: 1 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.from([(0, 0)]), nvals = 1 }
   # opcode 0x2B, the result type, the FLAGS word (1, the saturating bit),
   # then signed (1) and nearest_int_to_zero (6), then the operand; the plain
   # `ftoi` is the same record with a 0 where the 1 is
@@ -3157,7 +3157,7 @@ test "knife T17: ftoi_sat sets the saturating bit, each ftof spelling writes its
 
 test "insert is extract's record with the destination after the source, and fpowi is two operands and nothing else" {
   assert OP_INSERT == 0x76 && OP_FPOWI == 0x79
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2), (3, 3)]), nvals: 4 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.from([(0, 0), (1, 1), (2, 2), (3, 3)]), nvals = 4 }
   let ins = encode_instr(w0, InsertTile(9, Val(0), Val(1), Tile([2, 4], Num("f64")), Tile([4, 8], Num("f64")), [Val(2), Val(3)]))
   # opcode, result COUNT 1 (the indices are variadic), the result type,
   # which is the WHOLE tile's (f64 first, the tile second), operand count 4
@@ -3176,7 +3176,7 @@ test "the three pointer conversions are the frozen table's opcodes, each a resul
   assert str.contains(whole, hex(varint(OP_INT_TO_PTR)))
   assert str.contains(whole, hex(varint(OP_PTR_TO_PTR)))
   assert OP_PTR_TO_INT == 0x56 && OP_INT_TO_PTR == 0x33 && OP_PTR_TO_PTR == 0x57
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1)]), nvals: 2 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.from([(0, 0), (1, 1)]), nvals = 2 }
   let pi = encode_instr(w0, PtrToIntTile(9, Val(0), Tile([8], PtrTo("f64")), Tile([8], Num("i64"))))
   assert hex(bytes.freeze(pi.body)) == "56" ++ "01" ++ "00"
   # i64 is registered before the tile that names it: tag 4, then the tile
@@ -3202,29 +3202,29 @@ test "join_tokens takes the tokens of two stores and the load after it takes the
 }
 
 fn globals_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "g",
-  params: [ByPtr("f64")],
-  globals: [
-    Global { sym: "tbl", dtype: "f64", values: [1.0, 2.0], align: 0, is_private: false, constant: false },
-    Global { sym: "pad", dtype: "f64", values: [4.0], align: 256, is_private: false, constant: false }
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "g",
+  params = [ByPtr("f64")],
+  globals = [
+    Global { sym = "tbl", dtype = "f64", values = [1.0, 2.0], align = 0, is_private = false, constant = false },
+    Global { sym = "pad", dtype = "f64", values = [4.0], align = 256, is_private = false, constant = false }
   ],
-  ops: [MakeToken(0), GetGlobal(1, "pad", "f64", [8])]
+  ops = [MakeToken(0), GetGlobal(1, "pad", "f64", [8])]
 }
 
 fn private_globals_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "g",
-  params: [ByPtr("f64")],
-  globals: [
-    Global { sym: "tbl", dtype: "f64", values: [1.0, 2.0], align: 0, is_private: true, constant: false },
-    Global { sym: "pad", dtype: "f64", values: [4.0], align: 256, is_private: false, constant: true }
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "g",
+  params = [ByPtr("f64")],
+  globals = [
+    Global { sym = "tbl", dtype = "f64", values = [1.0, 2.0], align = 0, is_private = true, constant = false },
+    Global { sym = "pad", dtype = "f64", values = [4.0], align = 256, is_private = false, constant = true }
   ],
-  ops: [MakeToken(0), GetGlobal(1, "pad", "f64", [8])]
+  ops = [MakeToken(0), GetGlobal(1, "pad", "f64", [8])]
 }
 
 test "a global's initializer is the whole buffer and not the one-element splat every other constant here is" {
@@ -3236,7 +3236,7 @@ test "a global's initializer is the whole buffer and not the one-element splat e
 # ---- knife T11: the view family's byte shapes
 
 test "a tensor view is its tag, its element type index and two arrays of eight-byte dimensions" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
   # The element type is registered first, as every dependent type is, so it
   # takes index 0 and the view takes 1. Then `writeLEVarSize` twice: the
   # count as a varint and EIGHT raw little-endian bytes an element. Not a
@@ -3253,7 +3253,7 @@ test "a tensor view is its tag, its element type index and two arrays of eight-b
 }
 
 test "a dynamic dimension is kDynamic, which is INT64_MIN and not a shifted minus one" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
   # `?` is `ShapedType::kDynamic`, whose eight little-endian bytes are seven
   # zeroes and 0x80. A minus one written through `put_le` would be `ff`
   # eight times over, which the reader would take for the extent -1 and the
@@ -3267,8 +3267,8 @@ test "a dynamic dimension is kDynamic, which is INT64_MIN and not a shifted minu
 }
 
 test "make_tensor_view fills its two operand segments, shape group first" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(),
-    index: map.from([(0, 0), (1, 1), (2, 2), (3, 3)]), nvals: 4 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(),
+    index = map.from([(0, 0), (1, 1), (2, 2), (3, 3)]), nvals = 4 }
   let tv = TensorView(Num("f64"), [DYN_DIM, DYN_DIM], [DYN_DIM, 1])
   let idx = Tile([], Num("i32"))
   # the opcode, the result count 1, the result type index, the base, then
@@ -3281,8 +3281,8 @@ test "make_tensor_view fills its two operand segments, shape group first" {
 }
 
 test "the two shape queries write one result type index per dimension and one bare operand" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(),
-    index: map.from([(0, 0)]), nvals: 1 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(),
+    index = map.from([(0, 0)]), nvals = 1 }
   let tv = TensorView(Num("f64"), [DYN_DIM, 4], [4, 1])
   let idx = Tile([], Num("i32"))
   # `writeResultTypes` walks the result types and interns each, so a rank-2
@@ -3299,7 +3299,7 @@ test "the two shape queries write one result type index per dimension and one ba
 }
 
 test "a partition view writes the 13.3 bitfield between its tag and its first parameter, and the padding value last" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
   let tv = TensorView(Num("f64"), [8, 4], [4, 1])
   # tag 15, the optional-parameter bitfield (bit 0 is `padding_value`, the
   # type's only optional parameter), the tile shape as a DenseI32ArrayAttr
@@ -3326,7 +3326,7 @@ test "a partition view writes the 13.3 bitfield between its tag and its first pa
 }
 
 test "make_tensor_view writes a result count and an empty count for each variadic segment" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0)]), nvals: 1 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.from([(0, 0)]), nvals = 1 }
   let tv = TensorView(Num("f64"), [8, 4], [4, 1])
   # The opcode, the result count 1 (`Operator::isVariadic()` is true because
   # the two dynamic arrays are variadic OPERANDS, and the generated writer
@@ -3349,7 +3349,7 @@ test "make_tensor_view writes a result count and an empty count for each variadi
 # ---- knife T13: the rest of the view family
 
 test "a strided view writes the unified bitfield with no version check, and its traversal after its tile" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
   # tag 21, the bitfield (bit 0 is `padding_value`, the type's one optional
   # parameter), then the five parameters in declaration order: the tile
   # shape, the TRAVERSAL STRIDES (a second DenseI32ArrayAttr, so the same
@@ -3378,7 +3378,7 @@ test "a strided view writes the unified bitfield with no version check, and its 
 }
 
 test "a gather/scatter view has no dim_map and writes sparse_dim as a plain varint" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
   # tag 20, the bitfield, the tile shape, the tensor view's type index, then
   # `sparse_dim`. It is a `uint32_t` parameter and not an array or an
   # attribute, so tblgen's scalar template writes ONE varint with no count
@@ -3402,8 +3402,8 @@ test "a gather/scatter view has no dim_map and writes sparse_dim as a plain vari
 }
 
 test "the two view constructors of knife T13 have make_partition_view's record exactly" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(),
-    index: map.from([(0, 0)]), nvals: 1 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(),
+    index = map.from([(0, 0)]), nvals = 1 }
   let tv = TensorView(Num("f64"), [8, 4], [4, 1])
   # f64, then the tensor view, then the view itself: the third type, so the
   # result type index is 2. No result count (nothing is variadic), no flags
@@ -3418,8 +3418,8 @@ test "the two view constructors of knife T13 have make_partition_view's record e
 }
 
 test "atomic_red_view_tko writes one result count, three inline attributes and the value after the indices" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(),
-    index: map.from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]), nvals: 5 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(),
+    index = map.from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]), nvals = 5 }
   let tile = Tile([2, 2], Num("f64"))
   let v = PartitionView([2, 2], Num("f64"), [8, 4], [4, 1], [0, 1], NoPadding)
   let idx = Tile([], Num("i32"))
@@ -3449,7 +3449,7 @@ test "atomic_red_view_tko writes one result count, three inline attributes and t
 }
 
 test "from 13.4 ftoi writes a flags word after its result type, and the other conversions do not" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0)]), nvals: 1 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.from([(0, 0)]), nvals = 1 }
   # opcode 0x2B, the result type (the i32 tile, index 1 after its element
   # type), the flags word (0: `saturating` clear), then the two inline
   # attributes, signed and nearest_int_to_zero, then the operand.
@@ -3462,7 +3462,7 @@ test "from 13.4 ftoi writes a flags word after its result type, and the other co
 }
 
 test "load_view_tko is two results and one index count, and store_view_tko puts the tile before the view" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]), nvals: 5 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]), nvals = 5 }
   let tile = Tile([2, 2], Num("f64"))
   let v = PartitionView([2, 2], Num("f64"), [8, 4], [4, 1], [0, 1], PadZero)
   # opcode, 2 results, the tile type index, the token type index, the flags
@@ -3497,7 +3497,7 @@ test "load_view_tko is two results and one index count, and store_view_tko puts 
 }
 
 test "knife P4-a: a view read's hints set bit 1 and sit between the ordering and the inbounds array, a write's the same, and allow_tma is an i1" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]), nvals: 5 }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]), nvals = 5 }
   let tile = Tile([2, 2], Num("f64"))
   let v = PartitionView([2, 2], Num("f64"), [8, 4], [4, 1], [0, 1], PadZero)
   let idx = [Tile([], Num("i32")), Tile([], Num("i32"))]
@@ -3560,13 +3560,13 @@ test "the two varints the record grew at 13.3 carry the visibility and the const
 }
 
 fn alloca_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "a",
-  params: [ByPtr("f64")],
-  globals: [],
-  ops: [MakeToken(0), Alloca(1, "f64", 192, 8, false, [8]), Alloca(2, "f64", 192, 8, true, [8])]
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "a",
+  params = [ByPtr("f64")],
+  globals = [],
+  ops = [MakeToken(0), Alloca(1, "f64", 192, 8, false, [8]), Alloca(2, "f64", 192, 8, true, [8])]
 }
 
 test "alloca writes its opcode, its result type, a flags word and its two counts, and nothing else" {
@@ -3594,17 +3594,17 @@ test "alloca writes its opcode, its result type, a flags word and its two counts
 }
 
 fn mmaf_scaled_prog() -> TileProg = TileProg {
-  producer: None,
-  debug: None,
-  hints: [],
-  name: "s",
-  params: [ByPtr("f64")],
-  globals: [],
+  producer = None,
+  debug = None,
+  hints = [],
+  name = "s",
+  params = [ByPtr("f64")],
+  globals = [],
   # the fp8 operands come from `ftof` and not from `constant`: this writer
   # has no float payload for a one-byte format (float_payload), which is
   # the same reason the fp8 kernels in scripts/tile-golden convert into the
   # format rather than spelling a literal in it.
-  ops: [
+  ops = [
     ConstF(0, "f32", [4, 8], 1.0),
     Convert(1, "ftof", "f32", "f8E4M3FN", [4, 8], 0),
     ConstF(2, "f32", [8, 4], 1.0),
@@ -3654,8 +3654,8 @@ test "get_global writes its opcode, its result type and the symbol's string inde
 }
 
 test "the Debug section is a function count, an offset, the entry count, one u64 id per entry and the attribute table" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
-  let d = DebugInfo { dir: "d", file: "f", line: 3, col: 4, locs: [(5, 6), (7, 8)] }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
+  let d = DebugInfo { dir = "d", file = "f", line = 3, col = 4, locs = [(5, 6), (7, 8)] }
   let (w, content) = debug_section(w0, d, "k", 2)
   # strings: the file is 0, the directory 1, the kernel name 2
   assert len(w.strs.items) == 3
@@ -3670,8 +3670,8 @@ test "the Debug section is a function count, an offset, the entry count, one u64
 }
 
 test "the same location is one attribute: two instructions at one place share an id" {
-  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
-  let d = DebugInfo { dir: "d", file: "f", line: 3, col: 4, locs: [(5, 6), (5, 6)] }
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
+  let d = DebugInfo { dir = "d", file = "f", line = 3, col = 4, locs = [(5, 6), (5, 6)] }
   let (_w, content) = debug_section(w0, d, "k", 2)
   assert str.contains(hex(content), "0400000000000000" ++ "0500000000000000" ++ "0500000000000000")
 }

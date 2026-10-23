@@ -145,7 +145,7 @@ pub fn disk_space(path: String) -> Result[DiskSpace, ForeignError] !Fs =
     Ok(total) ->
       match fs_disk_free(path) {
         Err(e) -> Err(e)
-        Ok(free) -> Ok(DiskSpace { total: total, available: free })
+        Ok(free) -> Ok(DiskSpace { total = total, available = free })
       }
   }
 
@@ -163,15 +163,15 @@ pub type DeleteOutcome = Deleted | NotFound
 pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !Fs =
   if path == "" {
     Err(ForeignError {
-      kind: "io.invalid_delete_path",
-      message: "io.delete: path must not be empty",
-      cause: None
+      kind = "io.invalid_delete_path",
+      message = "io.delete: path must not be empty",
+      cause = None
     })
   } else if str.ends_with(path, "/") {
     Err(ForeignError {
-      kind: "io.invalid_delete_path",
-      message: "io.delete: path must not end with '/'",
-      cause: None
+      kind = "io.invalid_delete_path",
+      message = "io.delete: path must not end with '/'",
+      cause = None
     })
   } else {
     match fs_delete(path) {
@@ -239,9 +239,9 @@ pub fn real_path(path: String) -> Result[String, ForeignError] !Fs =
     fs_real_path(path)
   } else {
     Err(ForeignError {
-      kind: "io.relative_path",
-      message: "io.real_path: not an absolute path: " ++ path,
-      cause: None
+      kind = "io.relative_path",
+      message = "io.real_path: not an absolute path: " ++ path,
+      cause = None
     })
   }
 
@@ -289,21 +289,21 @@ pub fn real_path(path: String) -> Result[String, ForeignError] !Fs =
 pub fn atomic_write_file(path: String, content: String) -> Result[Unit, ForeignError] !Fs =
   if path == "" {
     Err(ForeignError {
-      kind: "io.invalid_atomic_write_path",
-      message: "io.atomic_write_file: path must not be empty",
-      cause: None
+      kind = "io.invalid_atomic_write_path",
+      message = "io.atomic_write_file: path must not be empty",
+      cause = None
     })
   } else if str.ends_with(path, "/") {
     Err(ForeignError {
-      kind: "io.invalid_atomic_write_path",
-      message: "io.atomic_write_file: path must not end with '/'",
-      cause: None
+      kind = "io.invalid_atomic_write_path",
+      message = "io.atomic_write_file: path must not end with '/'",
+      cause = None
     })
   } else if is_symlink(path) {
     Err(ForeignError {
-      kind: "io.atomic_write_target_is_symlink",
-      message: "io.atomic_write_file: refusing to replace a symbolic link: " ++ path,
-      cause: None
+      kind = "io.atomic_write_target_is_symlink",
+      message = "io.atomic_write_file: refusing to replace a symbolic link: " ++ path,
+      cause = None
     })
   } else {
     match temp_file(parent_dir(path), ".dawn-atomic-") {
@@ -316,10 +316,10 @@ pub fn atomic_write_file(path: String, content: String) -> Result[Unit, ForeignE
       # that actually refused, and the backend's own words move to `cause`,
       # which is where the layer below belongs (spec §9.8.1).
       Err(e) -> Err(ForeignError {
-        kind: "io.atomic_write_staging_failed",
-        message: "io.atomic_write_file: cannot create a staging file in "
+        kind = "io.atomic_write_staging_failed",
+        message = "io.atomic_write_file: cannot create a staging file in "
           ++ parent_dir(path),
-        cause: Some(e.kind ++ ": " ++ e.message)
+        cause = Some(e.kind ++ ": " ++ e.message)
       })
       Ok(tmp) -> stage_replace(path, content, tmp)
     }
@@ -355,10 +355,10 @@ fn stage_replace(path: String, content: String, tmp: String) -> Result[Unit, For
           # spelled directly so this module gains no import for one call.
           if seen != bytes_utf8(content) {
             abandon(tmp, ForeignError {
-              kind: "io.atomic_write_verify_failed",
-              message: "io.atomic_write_file: the staged file did not read back " ++
+              kind = "io.atomic_write_verify_failed",
+              message = "io.atomic_write_file: the staged file did not read back " ++
                 "as it was written: " ++ path,
-              cause: None
+              cause = None
             })
           } else {
             match carry_permissions(path, tmp) {
@@ -464,9 +464,9 @@ pub fn list_dir(path: String) -> Result[List[String], ForeignError] !Fs =
     }
   } else {
     Err(ForeignError {
-      kind: "io.not_a_directory",
-      message: "not a directory: " ++ path,
-      cause: None
+      kind = "io.not_a_directory",
+      message = "not a directory: " ++ path,
+      cause = None
     })
   }
 
@@ -484,9 +484,9 @@ pub fn list_dir(path: String) -> Result[List[String], ForeignError] !Fs =
 pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !Proc =
   if len(argv) == 0 {
     Err(ForeignError {
-      kind: "io.no_program",
-      message: "io.run: argv is empty, so there is no program to run",
-      cause: None
+      kind = "io.no_program",
+      message = "io.run: argv is empty, so there is no program to run",
+      cause = None
     })
   } else {
     proc_run(argv, out_path, err_path)
@@ -1472,9 +1472,9 @@ test "real_path resolves links on the host, and refuses what it cannot resolve" 
 
 test "a handler over a table answers Fs without a host" {
   let absent = (p: String) => ForeignError {
-    kind: "test.absent",
-    message: "no such entry: " ++ p,
-    cause: None
+    kind = "test.absent",
+    message = "no such entry: " ++ p,
+    cause = None
   }
   with handle Fs {
     var writes: List[(String, String)] = []
@@ -1575,9 +1575,9 @@ test "a handler over a table answers Proc without a host" {
   # What the fake is for: a command line is a list, and the only way to hold
   # one is to compare the whole list. Nothing below starts a process.
   let refused = ForeignError {
-    kind: "test.refused",
-    message: "nothing was started",
-    cause: None
+    kind = "test.refused",
+    message = "nothing was started",
+    cause = None
   }
   with handle Proc {
     var calls: List[(List[String], String, String)] = []
@@ -2105,7 +2105,7 @@ test "a handler over a table answers the io batch of Fs without a host" {
   assert blobs == [("/virt/a", bytes_utf8("x")), ("/virt/a", bytes_utf8("y"))]
   assert read_range("/virt/a", 2, 3) == Ok(bytes_utf8("234"))
   assert file_size("/virt/a") == Ok(10)
-  assert disk_space("/virt") == Ok(DiskSpace { total: 1000, available: 250 })
+  assert disk_space("/virt") == Ok(DiskSpace { total = 1000, available = 250 })
 }
 
 test "write_stdout and flush_stdout take bytes without a sound on an empty write" {

@@ -145,7 +145,7 @@ fn mf_get(
     Ok(mv) -> (Some(mv), [], map.insert(cache0, dc, Some(mv)))
     Err(ds) -> {
       var out: List[LocDiag] = []
-      for d in ds { out = out ++ [LocDiag { path: path, d: d }] }
+      for d in ds { out = out ++ [LocDiag { path = path, d = d }] }
       (None, out, map.insert(cache0, dc, None))
     }
   }
@@ -161,9 +161,9 @@ fn append_java_coord(acc: JavaCoords, coord: MCoord, manifest: String) -> JavaCo
     acc
   } else {
     JavaCoords {
-      coords: acc.coords ++ [coord],
-      origin: map.insert(acc.origin, key, manifest),
-      seen: set.insert(acc.seen, key)
+      coords = acc.coords ++ [coord],
+      origin = map.insert(acc.origin, key, manifest),
+      seen = set.insert(acc.seen, key)
     }
   }
 }
@@ -194,7 +194,7 @@ fn collect_java_coords(
   root_coords: List[MCoord],
   pkgs: Map[String, PkgR]
 ) -> JavaCoords = {
-  var acc = JavaCoords { coords: [], origin: map.empty(), seen: set.empty() }
+  var acc = JavaCoords { coords = [], origin = map.empty(), seen = set.empty() }
   for coord in root_coords { acc = append_java_coord(acc, coord, root_manifest) }
   var seen_roots: Set[String] = set.empty()
   for key in map.keys(pkgs) {
@@ -235,13 +235,13 @@ pub fn source_plan(target: SourceTarget) -> SourcePlan !Fs !Proc !Env = {
   }
   let java = collect_java_coords("${project}/dawn.toml", root_coords, pkgs)
   SourcePlan {
-    target: target,
-    project: project,
-    source_root: source_root,
-    pkgs: pkgs,
-    java_coords: java.coords,
-    java_coord_origin: java.origin,
-    diags: sdiags ++ mdiags ++ rdiags
+    target = target,
+    project = project,
+    source_root = source_root,
+    pkgs = pkgs,
+    java_coords = java.coords,
+    java_coord_origin = java.origin,
+    diags = sdiags ++ mdiags ++ rdiags
   }
 }
 
@@ -351,8 +351,8 @@ fn collect_source_pkg_inputs(
   var seen = set.insert(seen0, root)
   let parent = fspath.parent(root).expect("package source root has a parent")
   inputs = inputs ++ [
-    SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" },
-    SourceInput { kind: InputTree, path: root }
+    SourceInput { kind = InputFile, path = parent ++ "/dawn.toml" },
+    SourceInput { kind = InputTree, path = root }
   ]
   for key in map.keys(pkg.deps) {
     let child = map.get(pkg.deps, key).expect("resolved package")
@@ -408,9 +408,9 @@ pub fn bootstrap_source_input_manifest(
 
   let project = canon(plan.project)
   var inputs: List[SourceInput] = [
-    SourceInput { kind: InputFile, path: project ++ "/dawn.toml" },
-    SourceInput { kind: InputOptional, path: project ++ "/dawn.lock" },
-    SourceInput { kind: InputTree, path: canon(plan.source_root) }
+    SourceInput { kind = InputFile, path = project ++ "/dawn.toml" },
+    SourceInput { kind = InputOptional, path = project ++ "/dawn.lock" },
+    SourceInput { kind = InputTree, path = canon(plan.source_root) }
   ]
   var seen: Set[String] = set.empty()
   for key in map.keys(plan.pkgs) {
@@ -441,8 +441,8 @@ type UrlFailures = {
 }
 
 fn url_failures_empty() -> UrlFailures = UrlFailures {
-  mirrors: set.empty(),
-  subdirs: set.empty()
+  mirrors = set.empty(),
+  subdirs = set.empty()
 }
 
 fn mirror_failure_seen(failed: UrlFailures, hash: String, url: String) -> Bool =
@@ -452,14 +452,14 @@ fn subdir_failure_seen(failed: UrlFailures, hash: String, subdir: String) -> Boo
   set.has(failed.subdirs, (hash, subdir))
 
 fn remember_mirror_failure(failed: UrlFailures, hash: String, url: String) -> UrlFailures =
-  UrlFailures { ..failed, mirrors: set.insert(failed.mirrors, (hash, url)) }
+  UrlFailures { ..failed, mirrors = set.insert(failed.mirrors, (hash, url)) }
 
 fn remember_subdir_failure(
   failed: UrlFailures,
   hash: String,
   subdir: String
 ) -> UrlFailures =
-  UrlFailures { ..failed, subdirs: set.insert(failed.subdirs, (hash, subdir)) }
+  UrlFailures { ..failed, subdirs = set.insert(failed.subdirs, (hash, subdir)) }
 
 ## A failed mirror is provisional until every requirement for the same content
 ## hash has been tried. One successful mirror makes the archive available and
@@ -515,7 +515,7 @@ fn url_pkg_root(
     match pkgfetch.check_origin(r.url, r.hash) {
       Ok(_) -> return (Some(root), [], failed0, true)
       Err(e) -> {
-        let d = [LocDiag { path: r.mf_path, d: diag(
+        let d = [LocDiag { path = r.mf_path, d = diag(
           "package `" ++ name ++ "` " ++ semv_show(r.version) ++ ": " ++ e,
           0,
           0,
@@ -528,7 +528,7 @@ fn url_pkg_root(
   match pkgfetch.ensure_cached(r.url, r.hash) {
     Ok(_) -> {
       if io.is_dir(root) { return (Some(root), [], failed0, true) }
-      let d = [LocDiag { path: r.mf_path, d: diag(
+      let d = [LocDiag { path = r.mf_path, d = diag(
         "package `" ++ name ++ "` " ++ semv_show(r.version) ++ ": subdir `" ++ r.subdir ++
           "` does not exist in the archive",
         0,
@@ -538,7 +538,7 @@ fn url_pkg_root(
       (None, d, remember_subdir_failure(failed0, r.hash, r.subdir), true)
     }
     Err(e) -> {
-      let d = [LocDiag { path: r.mf_path, d: diag(
+      let d = [LocDiag { path = r.mf_path, d = diag(
         "package `" ++ name ++ "` " ++ semv_show(r.version) ++ ": " ++ e,
         0,
         0,
@@ -578,7 +578,7 @@ fn class_conflicts(name: String, rlist: List[UrlReq], win: UrlReq) -> List[LocDi
     let key = (r.mf_path, semv_show(r.version))
     if have != want && not set.has(seen, key) {
       seen = set.insert(seen, key)
-      out = out ++ [LocDiag { path: r.mf_path, d: diag(
+      out = out ++ [LocDiag { path = r.mf_path, d = diag(
         "package `" ++ name ++ "` is required at " ++ semv_show(r.version) ++ " by " ++
           r.mf_path ++ " and at " ++ semv_show(win.version) ++ " by " ++ win.mf_path ++
           ", and " ++ have ++ " is not compatible with " ++ want,
@@ -635,8 +635,8 @@ fn select_url_deps(
             VUrl(aname, ver, url, hash, sub_opt, _, _) -> {
               let sub = sub_opt.unwrap_or("")
               let r = UrlReq {
-                url: url, version: ver, hash: hash, subdir: sub,
-                mf_path: dir ++ "/dawn.toml"
+                url = url, version = ver, hash = hash, subdir = sub,
+                mf_path = dir ++ "/dawn.toml"
               }
               let (ro, ds, f1, mirror_ok) = url_pkg_root(aname, r, failed)
               failed = f1
@@ -682,7 +682,7 @@ fn select_url_deps(
     var conflict = false
     for r in rlist { if r.version == win.version && r.hash != win.hash { conflict = true } }
     if conflict {
-      diags = diags ++ [LocDiag { path: win.mf_path, d: diag(
+      diags = diags ++ [LocDiag { path = win.mf_path, d = diag(
         "package `" ++ name ++ "` version " ++ semv_show(win.version) ++
           " is required under different hashes",
         0,
@@ -725,12 +725,12 @@ fn select_url_deps(
         }
         if len(name_problems) > 0 {
           for d in name_problems {
-            diags = diags ++ [LocDiag { path: win.mf_path, d: d }]
+            diags = diags ++ [LocDiag { path = win.mf_path, d = d }]
           }
           resolved = map.insert(resolved, name, None)
         } else if declared_differs {
           let declared_version = declared.expect("different declared version")
-          diags = diags ++ [LocDiag { path: win.mf_path, d: diag(
+          diags = diags ++ [LocDiag { path = win.mf_path, d = diag(
             "package `" ++ name ++ "` declares version " ++ semv_show(declared_version) ++
               " but " ++ semv_show(win.version) ++ " was selected",
             0,
@@ -739,7 +739,7 @@ fn select_url_deps(
           ) }]
           resolved = map.insert(resolved, name, None)
         } else {
-          let picked = UrlWin { root: rt, version: win.version, hash: win.hash, subdir: win.subdir }
+          let picked = UrlWin { root = rt, version = win.version, hash = win.hash, subdir = win.subdir }
           resolved = map.insert(resolved, name, Some(picked))
         }
       }
@@ -828,7 +828,7 @@ fn resolve_src_deps(
           continue
         }
         if set.has(visiting, dcanon) {
-          diags = diags ++ [LocDiag { path: mf_path, d: diag(
+          diags = diags ++ [LocDiag { path = mf_path, d = diag(
             "package dependency cycle through `" ++ aname ++ "`",
             0,
             0,
@@ -843,7 +843,7 @@ fn resolve_src_deps(
           Some(dm) ->
             if map.get(names, dm.name).unwrap_or(dcanon) != dcanon {
               let claimed = map.get(names, dm.name).expect("claim")
-              diags = diags ++ [LocDiag { path: mf_path, d: diag(
+              diags = diags ++ [LocDiag { path = mf_path, d = diag(
                 "package `" ++ dm.name ++ "` is linked from two different directories",
                 0,
                 0,
@@ -852,10 +852,10 @@ fn resolve_src_deps(
                   "  here:      " ++ dcanon ++ "\n  elsewhere: " ++ claimed
               ) }]
             } else if dm.native_sources != [] && io.is_symlink(ddir ++ "/src") {
-              diags = diags ++ [LocDiag { path: mf_path, d: diag(
+              diags = diags ++ [LocDiag { path = mf_path, d = diag(
                 "symbolic link in native package tree: " ++ ddir ++ "/src", 0, 0, "") }]
             } else if not io.is_dir(ddir ++ "/src") {
-              diags = diags ++ [LocDiag { path: mf_path, d: diag(
+              diags = diags ++ [LocDiag { path = mf_path, d = diag(
                 "package `" ++ dm.name ++ "` has no src/ folder (expected " ++
                   ddir_given ++ "/src)",
                 0,
@@ -877,15 +877,15 @@ fn resolve_src_deps(
               names = names1
               mfc = mfc1
               let info = PkgR {
-                name: dm.name,
-                root: canon_identity(ddir ++ "/src"),
-                deps: tdeps,
-                java_deps: dm.java_deps,
-                version: match url_win {
+                name = dm.name,
+                root = canon_identity(ddir ++ "/src"),
+                deps = tdeps,
+                java_deps = dm.java_deps,
+                version = match url_win {
                   Some(w) -> Some(w.version)
                   None -> dm.version
                 },
-                origin: match url_win {
+                origin = match url_win {
                   Some(w) -> FromUrl(w.hash, w.subdir)
                   None -> FromPath
                 }
@@ -894,7 +894,7 @@ fn resolve_src_deps(
               out = map.insert(out, aname, info)
             }
           None -> {
-            diags = diags ++ [LocDiag { path: mf_path, d: diag(
+            diags = diags ++ [LocDiag { path = mf_path, d = diag(
               "dependency `" ++ aname ++ "` has no dawn.toml (looked in " ++
                 ddir_given ++ ")",
               0,
@@ -977,13 +977,13 @@ test "bootstrap source inputs reject file plans before inspecting the base" {
     let no_pkgs: Map[String, PkgR] = map.empty()
     let no_diags: List[LocDiag] = []
     let plan = SourcePlan {
-      target: SourceFile("/tmp/dawn-planner-file/src/main.dawn"),
-      project: "/tmp/dawn-planner-file",
-      source_root: "/tmp/dawn-planner-file/src",
-      pkgs: no_pkgs,
-      java_coords: [],
-      java_coord_origin: map.empty(),
-      diags: no_diags
+      target = SourceFile("/tmp/dawn-planner-file/src/main.dawn"),
+      project = "/tmp/dawn-planner-file",
+      source_root = "/tmp/dawn-planner-file/src",
+      pkgs = no_pkgs,
+      java_coords = [],
+      java_coord_origin = map.empty(),
+      diags = no_diags
     }
     match bootstrap_source_input_manifest(plan, "") {
       Ok(_) -> { assert false }
@@ -996,42 +996,42 @@ test "bootstrap source inputs reject file plans before inspecting the base" {
 
 test "Java coordinates follow the final source graph order once" {
   let no_deps: Map[String, PkgR] = map.empty()
-  let root_1 = MCoord { group: "g", artifact: "root-1", version: "1", aname: "r1" }
-  let root_2 = MCoord { group: "g", artifact: "root-2", version: "1", aname: "r2" }
+  let root_1 = MCoord { group = "g", artifact = "root-1", version = "1", aname = "r1" }
+  let root_2 = MCoord { group = "g", artifact = "root-2", version = "1", aname = "r2" }
   let grand_a = PkgR {
-    name: "grand",
-    root: "/canonical/grand/src",
-    deps: no_deps,
-    java_deps: [MCoord { group: "g", artifact: "grandchild", version: "1", aname: "ga" }],
-    version: None,
-    origin: FromPath
+    name = "grand",
+    root = "/canonical/grand/src",
+    deps = no_deps,
+    java_deps = [MCoord { group = "g", artifact = "grandchild", version = "1", aname = "ga" }],
+    version = None,
+    origin = FromPath
   }
   let grand_b = PkgR {
-    name: "grand",
-    root: "/canonical/grand/src",
-    deps: no_deps,
-    java_deps: [MCoord { group: "g", artifact: "must-not-repeat", version: "1", aname: "gb" }],
-    version: None,
-    origin: FromPath
+    name = "grand",
+    root = "/canonical/grand/src",
+    deps = no_deps,
+    java_deps = [MCoord { group = "g", artifact = "must-not-repeat", version = "1", aname = "gb" }],
+    version = None,
+    origin = FromPath
   }
   let child_a = PkgR {
-    name: "child_a",
-    root: "/canonical/child-a/src",
-    deps: map.insert(no_deps, "grand", grand_a),
-    java_deps: [
-      MCoord { group: "g", artifact: "root-1", version: "1", aname: "duplicate-alias" },
-      MCoord { group: "g", artifact: "child-a", version: "1", aname: "ca" }
+    name = "child_a",
+    root = "/canonical/child-a/src",
+    deps = map.insert(no_deps, "grand", grand_a),
+    java_deps = [
+      MCoord { group = "g", artifact = "root-1", version = "1", aname = "duplicate-alias" },
+      MCoord { group = "g", artifact = "child-a", version = "1", aname = "ca" }
     ],
-    version: None,
-    origin: FromPath
+    version = None,
+    origin = FromPath
   }
   let child_b = PkgR {
-    name: "child_b",
-    root: "/canonical/child-b/src",
-    deps: map.insert(no_deps, "grand", grand_b),
-    java_deps: [MCoord { group: "g", artifact: "child-b", version: "1", aname: "cb" }],
-    version: None,
-    origin: FromPath
+    name = "child_b",
+    root = "/canonical/child-b/src",
+    deps = map.insert(no_deps, "grand", grand_b),
+    java_deps = [MCoord { group = "g", artifact = "child-b", version = "1", aname = "cb" }],
+    version = None,
+    origin = FromPath
   }
   var roots: Map[String, PkgR] = map.empty()
   roots = map.insert(roots, "z_first", child_a)
@@ -1066,23 +1066,23 @@ test "Java coordinates follow the final source graph order once" {
 
 test "mixed manifest declaration order reaches SourcePlan Java coordinates" {
   let hash = "d1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  let root_coord = MCoord { group: "g", artifact: "root", version: "1", aname: "root" }
+  let root_coord = MCoord { group = "g", artifact = "root", version = "1", aname = "root" }
   let no_deps: Map[String, PkgR] = map.empty()
   let url_pkg = PkgR {
-    name: "remote",
-    root: "/canonical/remote/src",
-    deps: no_deps,
-    java_deps: [MCoord { group: "g", artifact: "url", version: "1", aname: "url" }],
-    version: None,
-    origin: FromPath
+    name = "remote",
+    root = "/canonical/remote/src",
+    deps = no_deps,
+    java_deps = [MCoord { group = "g", artifact = "url", version = "1", aname = "url" }],
+    version = None,
+    origin = FromPath
   }
   let path_pkg = PkgR {
-    name: "local",
-    root: "/canonical/local/src",
-    deps: no_deps,
-    java_deps: [MCoord { group: "g", artifact: "path", version: "1", aname: "path" }],
-    version: None,
-    origin: FromPath
+    name = "local",
+    root = "/canonical/local/src",
+    deps = no_deps,
+    java_deps = [MCoord { group = "g", artifact = "path", version = "1", aname = "path" }],
+    version = None,
+    origin = FromPath
   }
 
   let url_first_text = "schema = 1\nname = \"app\"\n\n[deps.remote]\n" ++
@@ -1163,15 +1163,15 @@ test "mirror failure state retries another url but not another alias" {
 fn req_at(version: String, mf_path: String) -> UrlReq = {
   let parts = str.split(version, ".")
   UrlReq {
-    url: "file:///" ++ version ++ ".zip",
-    version: SemV {
-      major: parse_int(parts[0]).expect("major"),
-      minor: parse_int(parts[1]).expect("minor"),
-      patch: parse_int(parts[2]).expect("patch")
+    url = "file:///" ++ version ++ ".zip",
+    version = SemV {
+      major = parse_int(parts[0]).expect("major"),
+      minor = parse_int(parts[1]).expect("minor"),
+      patch = parse_int(parts[2]).expect("patch")
     },
-    hash: "h-" ++ version,
-    subdir: "",
-    mf_path: mf_path
+    hash = "h-" ++ version,
+    subdir = "",
+    mf_path = mf_path
   }
 }
 

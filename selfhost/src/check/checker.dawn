@@ -118,12 +118,12 @@ use front/token.{Diag}
 
 pub(pkg) fn push_scope(cx: Cx) -> Cx = {
   let empty: Map[String, Int] = map.empty()
-  Cx { ..cx, frame: Frame { ..cx.frame, scopes: cx.frame.scopes ++ [empty] } }
+  Cx { ..cx, frame = Frame { ..cx.frame, scopes = cx.frame.scopes ++ [empty] } }
 }
 
 pub(pkg) fn pop_scope(cx: Cx) -> Cx = {
   let outer = list.take(cx.frame.scopes, len(cx.frame.scopes) - 1)
-  Cx { ..cx, frame: Frame { ..cx.frame, scopes: outer } }
+  Cx { ..cx, frame = Frame { ..cx.frame, scopes = outer } }
 }
 
 pub(pkg) fn sym_of(cx: Cx, id: Int) -> Sym =
@@ -161,20 +161,20 @@ fn declare_sym(
   cx1 = alias_shadow(cx1, name, lo, hi)
   let (cx2, id) = fresh(cx1)
   let sym = Sym {
-    name: name,
-    ty: ty,
-    mutable: mutable,
-    dlo: owner_off(cx, lo),
-    dhi: owner_off(cx, hi),
-    dict_of: None,
-    ev_of: None,
-    cell_of: cell
+    name = name,
+    ty = ty,
+    mutable = mutable,
+    dlo = owner_off(cx, lo),
+    dhi = owner_off(cx, hi),
+    dict_of = None,
+    ev_of = None,
+    cell_of = cell
   }
   var cx3 = write_symbol(cx2, id, sym)
   if name != "_" {
     let inner2 = map.insert(cx3.frame.scopes[len(cx3.frame.scopes) - 1], name, id)
     let scopes2 = list.take(cx3.frame.scopes, len(cx3.frame.scopes) - 1) ++ [inner2]
-    cx3 = Cx { ..cx3, frame: Frame { ..cx3.frame, scopes: scopes2 } }
+    cx3 = Cx { ..cx3, frame = Frame { ..cx3.frame, scopes = scopes2 } }
   }
   (cx3, id)
 }
@@ -213,10 +213,10 @@ pub(pkg) fn record_effect(cx: Cx, e: Eff, lo: Int, hi: Int, name: String) -> Cx 
   if eff_seen(cx, e) { return cx }
   Cx {
     ..cx,
-    frame: Frame {
+    frame = Frame {
       ..cx.frame,
-      used_effects: cx.frame.used_effects ++ [e],
-      eff_witness: map.insert(cx.frame.eff_witness, e, (owner_off(cx, lo), owner_off(cx, hi), name))
+      used_effects = cx.frame.used_effects ++ [e],
+      eff_witness = map.insert(cx.frame.eff_witness, e, (owner_off(cx, lo), owner_off(cx, hi), name))
     }
   }
 }
@@ -277,7 +277,7 @@ pub(pkg) fn resolve_eff(cx: Cx, atoms: List[String]) -> (Cx, Eff) =
 fn declare_evidence(cx: Cx, name: String, ty: Ty, key: Int, lo: Int, hi: Int) -> (Cx, Int) = {
   let (cx1, sid) = declare(cx, name, ty, false, lo, hi)
   let sym = sym_of(cx1, sid)
-  (write_symbol(cx1, sid, Sym { ..sym, ev_of: Some(key) }), sid)
+  (write_symbol(cx1, sid, Sym { ..sym, ev_of = Some(key) }), sid)
 }
 
 ## Was `name` found outside the innermost closure being checked?
@@ -394,14 +394,14 @@ fn ev_expr(
 
 test "evidence reads preserve distinct origins behind the same runtime key" {
   let base = push_scope(test_cx())
-  let closure = LambdaCx { boundary: len(base.frame.scopes), expected_ret: None,
-    captures: [], sugar: false, arm: false, ctl: false, local_fn: None, handler_of: None,
-    staged_kind: OrdinaryClosure, staged: map.empty() }
+  let closure = LambdaCx { boundary = len(base.frame.scopes), expected_ret = None,
+    captures = [], sugar = false, arm = false, ctl = false, local_fn = None, handler_of = None,
+    staged_kind = OrdinaryClosure, staged = map.empty() }
   let origins: List[EvidenceRole] = [LabelSlot(71), VariableSlot(72),
     AssociatedSlot(73, 74, "E"), AssociatedSlot(75, 74, "E"), AssociatedSlot(75, 74, "F")]
   for origin in origins {
     let key = evidence_role_key(origin)
-    let isolated = Cx { ..base, frame: Frame { ..base.frame, lambda_stack: [closure] } }
+    let isolated = Cx { ..base, frame = Frame { ..base.frame, lambda_stack = [closure] } }
     let (_, absent) = ev_expr(isolated, "missing_evidence", origin, erased_ev_ty(), 10, 11)
     match absent {
       Some(XEvRead(k, saved, lo, hi, _)) -> {
@@ -412,7 +412,7 @@ test "evidence reads preserve distinct origins behind the same runtime key" {
       _ -> { assert false }
     }
     let (declared, _) = declare_evidence(base, "outer_evidence", erased_ev_ty(), key, 0, 1)
-    let nested = Cx { ..declared, frame: Frame { ..declared.frame, lambda_stack: [closure] } }
+    let nested = Cx { ..declared, frame = Frame { ..declared.frame, lambda_stack = [closure] } }
     let (_, crossed) = ev_expr(nested, "outer_evidence", origin, erased_ev_ty(), 20, 21)
     match crossed {
       Some(XEvRead(k, saved, lo, hi, _)) -> {
@@ -486,7 +486,7 @@ fn export_value_diagnostic(exp: ModExports, fname: String) -> ExportDiagnostic =
     Some(aid) -> {
       var cs: List[String] = []
       for c in adt_of(exp.adt_infos, aid).ctors { cs = cs ++ [c.name] }
-      return ExportDiagnostic { message: msg, hint: Some("`" ++ fname ++
+      return ExportDiagnostic { message = msg, hint = Some("`" ++ fname ++
           "` is a type there; a value of it comes from: " ++ join(cs, ", ")) }
     }
     None -> ()
@@ -494,7 +494,7 @@ fn export_value_diagnostic(exp: ModExports, fname: String) -> ExportDiagnostic =
   # functions are in the pool too: `5 |> m.zerox` and `let g = m.zerox` are
   # both answered here, and in either position the name most often meant is a
   # function the module exports (#427)
-  ExportDiagnostic { message: msg, hint: suggest.hint(fname,
+  ExportDiagnostic { message = msg, hint = suggest.hint(fname,
     map.keys(exp.consts) ++ map.keys(exp.ctors) ++ map.keys(exp.fns)) }
 }
 
@@ -510,8 +510,8 @@ fn export_function_diagnostic(cx: Cx, exp: ModExports, name: String) -> ExportDi
   } else if in_all {
     private_name_diagnostic(cx, exp, name)
   } else {
-    ExportDiagnostic { message: "module `" ++ exp.mod_path ++ "` has no exported function `" ++ name ++ "`",
-      hint: suggest.hint(name, map.keys(exp.fns)) }
+    ExportDiagnostic { message = "module `" ++ exp.mod_path ++ "` has no exported function `" ++ name ++ "`",
+      hint = suggest.hint(name, map.keys(exp.fns)) }
   }
 }
 
@@ -1720,7 +1720,7 @@ test "a declaration numbers its binders and locals inside itself" {
     let one = map.get(first_cx.syms, key).expect("g's symbol in the first revision")
     let two = map.get(next_cx.syms, key).expect("g's symbol in the second revision")
     # the declaring span is a position in the file and `g` did move
-    assert Sym { ..one, dlo: 0, dhi: 0 } == Sym { ..two, dlo: 0, dhi: 0 }
+    assert Sym { ..one, dlo = 0, dhi = 0 } == Sym { ..two, dlo = 0, dhi = 0 }
   }
   # and `f`'s edit did land somewhere: the two revisions are not the same
   # module, and nothing was minted outside a declaration
@@ -1740,7 +1740,7 @@ test "main cannot owe a declared effect" {
   let (m, _) = parser.parse_module(src)
   let env: Map[String, ModExports] = map.empty()
   # the entry module's `main` is the entry point (spec §10.5)
-  let (cx1, _) = check_module(Cx { ..test_cx(), is_entry_module: true }, m, env)
+  let (cx1, _) = check_module(Cx { ..test_cx(), is_entry_module = true }, m, env)
   var saw = false
   for d in cx1.diags {
     if d.msg == "main cannot declare the effect `Ask`" { saw = true }
@@ -1859,9 +1859,9 @@ fn capture_witness(cx: Cx, sym: Int) -> Cx = {
       if c == sym { have = true }
     }
     if not have { caps = caps ++ [sym] }
-    stack = stack ++ [LambdaCx { ..lc, captures: caps }]
+    stack = stack ++ [LambdaCx { ..lc, captures = caps }]
   }
-  Cx { ..cx, frame: Frame { ..cx.frame, lambda_stack: stack } }
+  Cx { ..cx, frame = Frame { ..cx.frame, lambda_stack = stack } }
 }
 
 ## Satisfy one trait requirement at a use site (the Kotlin resolveWitness,
@@ -2228,7 +2228,7 @@ pub(pkg) fn lookup_fn_sig(cx: Cx, name: String) -> Option[Sig] =
 ## whether a signature exists or how many type parameters it declares, which a
 ## header already settles.
 fn used_signature(cx: Cx, s: Sig) -> Cx =
-  if s.inferring { Cx { ..cx, unsealed_uses: set.insert(cx.unsealed_uses, s.name) } } else { cx }
+  if s.inferring { Cx { ..cx, unsealed_uses = set.insert(cx.unsealed_uses, s.name) } } else { cx }
 
 ## The candidate pool for "did you mean" on a function name. Synthesized
 ## names (`f$default$k`) are not in it: no typo can mean one.
@@ -2469,7 +2469,7 @@ pub(pkg) fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) 
       false)
   }
   let jumps = set.insert(cx.frame.loop_jumps, len(cx.frame.loop_stack) - 1)
-  (Cx { ..cx, frame: Frame { ..cx.frame, loop_jumps: jumps } }, true)
+  (Cx { ..cx, frame = Frame { ..cx.frame, loop_jumps = jumps } }, true)
 }
 
 ## What `?` is judged against, in the reader's terms.
@@ -2599,23 +2599,23 @@ pub(pkg) fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: I
 test "propagate demands matching option and result shapes" {
   var cx = test_cx()
   let ret_sig = Sig {
-    name: "f",
-    param_tys: [],
-    param_names: [],
-    param_defaults: [],
-    caller_params: [],
-    ret: opt_ty(TyInt),
-    eff: EPure,
-    is_builtin: false,
-    tparams: [],
-    constraints: [],
-    eparams: [],
-    owner: None,
-    trait_id: None,
-    op_of: None,
-    inferring: false
+    name = "f",
+    param_tys = [],
+    param_names = [],
+    param_defaults = [],
+    caller_params = [],
+    ret = opt_ty(TyInt),
+    eff = EPure,
+    is_builtin = false,
+    tparams = [],
+    constraints = [],
+    eparams = [],
+    owner = None,
+    trait_id = None,
+    op_of = None,
+    inferring = false
   }
-  cx = Cx { ..cx, frame: Frame { ..cx.frame, current_sig: Some(ret_sig) } }
+  cx = Cx { ..cx, frame = Frame { ..cx.frame, current_sig = Some(ret_sig) } }
   let (cx1, t1, _) = check_propagate_typed(cx, opt_ty(TyString), XError(0, 1), 0, 1)
   assert t1 == TyString
   assert len(cx1.diags) == 0
@@ -2630,24 +2630,24 @@ test "loop jumps respect lambda boundaries" {
   let (cx1, ok1) = check_loop_jump(cx, "break", 0, 5)
   assert not ok1
   assert cx1.diags[0].msg == "`break` can only be used inside a loop body"
-  cx = Cx { ..cx, frame: Frame { ..cx.frame, loop_stack: [0] } }
+  cx = Cx { ..cx, frame = Frame { ..cx.frame, loop_stack = [0] } }
   let (cx2, ok2) = check_loop_jump(cx, "break", 0, 5)
   assert ok2
   cx = Cx {
     ..cx,
-    frame: Frame {
+    frame = Frame {
       ..cx.frame,
-      lambda_stack: [LambdaCx {
-        boundary: 0,
-        expected_ret: None,
-        captures: [],
-        sugar: false,
-        arm: false,
-        ctl: false,
-        local_fn: None,
-        handler_of: None,
-        staged_kind: OrdinaryClosure,
-        staged: map.empty()
+      lambda_stack = [LambdaCx {
+        boundary = 0,
+        expected_ret = None,
+        captures = [],
+        sugar = false,
+        arm = false,
+        ctl = false,
+        local_fn = None,
+        handler_of = None,
+        staged_kind = OrdinaryClosure,
+        staged = map.empty()
       }]
     }
   }
@@ -2785,21 +2785,21 @@ test "field access follows record shape with substitution" {
   let (cx0, tv) = fresh_tvar(cx, "T")
   let (cx1, aid) = fresh(cx0)
   let info = AdtI {
-    id: aid,
-    name: "Box",
-    is_record: true,
-    tparams: [tv],
-    eparams: no_eparam_names(),
-    ctors: [CtorI { adt: aid, name: "Box", fields: [FieldI { name: "v", ty: tv }] }],
-    derives: [],
-    owner: None,
-    audience: AWorld,
-    bound_eparams: []
+    id = aid,
+    name = "Box",
+    is_record = true,
+    tparams = [tv],
+    eparams = no_eparam_names(),
+    ctors = [CtorI { adt = aid, name = "Box", fields = [FieldI { name = "v", ty = tv }] }],
+    derives = [],
+    owner = None,
+    audience = AWorld,
+    bound_eparams = []
   }
   cx = Cx {
     ..cx1,
-    adts: map.insert(cx1.adts, aid, info),
-    adts_by_name: map.insert(cx1.adts_by_name, "Box", aid)
+    adts = map.insert(cx1.adts, aid, info),
+    adts_by_name = map.insert(cx1.adts_by_name, "Box", aid)
   }
   let (cx2, t, x) = check_field_access_typed(cx, TyAdt(aid, [TyInt]), XError(0, 1), "v", 2, 3, 0, 3)
   assert t == TyInt
@@ -3045,9 +3045,9 @@ fn check_qual_pattern(
       match constructor {
         None -> {
           let refused = pkg_private(exp, cname)
-          let missing = ExportDiagnostic { message: "module `" ++ exp.mod_path ++
+          let missing = ExportDiagnostic { message = "module `" ++ exp.mod_path ++
               "` has no exported constructor `" ++ cname ++ "`",
-            hint: suggest.hint(cname, map.keys(exp.ctors)) }
+            hint = suggest.hint(cname, map.keys(exp.ctors)) }
           let diagnostic = if refused { pkg_private_export(exp, cname) } else { missing }
           var cx1 = if refused { pkg_private_err(cx, exp, cname, nlo, nhi) } else {
             cerr_o(cx, missing.message, nlo, nhi, missing.hint)
@@ -3074,11 +3074,11 @@ fn typed_binds(cx: Cx, p: TPat) -> List[PatBind] = {
     TPBind(sid, _) -> {
       let s = sym_of(cx, sid)
       out = [PatBind {
-        name: s.name,
-        sym: sid,
-        ty: s.ty,
-        lo: owner_at(cx, s.dlo),
-        hi: owner_at(cx, s.dhi)
+        name = s.name,
+        sym = sid,
+        ty = s.ty,
+        lo = owner_at(cx, s.dlo),
+        hi = owner_at(cx, s.dhi)
       }]
     }
     TPOr(alts) -> if len(alts) > 0 { out = typed_binds(cx, alts[0]) }
@@ -3091,11 +3091,11 @@ fn typed_binds(cx: Cx, p: TPat) -> List[PatBind] = {
         Some(sid) -> {
           let s = sym_of(cx, sid)
           out = out ++ [PatBind {
-            name: s.name,
-            sym: sid,
-            ty: s.ty,
-            lo: owner_at(cx, s.dlo),
-            hi: owner_at(cx, s.dhi)
+            name = s.name,
+            sym = sid,
+            ty = s.ty,
+            lo = owner_at(cx, s.dlo),
+            hi = owner_at(cx, s.dhi)
           }]
         }
         None -> ()
@@ -3515,7 +3515,7 @@ test "same-named effects from different providers cannot discharge each other" {
 test "patterns bind, refute, and lower" {
   var cx = seed_prelude(push_scope(test_cx()))
   # Some(x) against Option[Int] binds x: Int
-  let p = PCtor("Some", [PatArg { name: None, nlo: 5, nhi: 6, pat: PBind("x", 5, 6) }],
+  let p = PCtor("Some", [PatArg { name = None, nlo = 5, nhi = 6, pat = PBind("x", 5, 6) }],
     false, 0, 4, 0, 7)
   let (cx1, tp) = check_pattern(cx, p, opt_ty(TyInt), false)
   assert len(cx1.diags) == 0
@@ -3567,10 +3567,10 @@ test "or-patterns share the first symbol" {
 
 test "or-patterns reject binding type mismatches" {
   let canonical = [
-    PatBind { name: "x", sym: 1, ty: TyInt, lo: 1, hi: 2 }
+    PatBind { name = "x", sym = 1, ty = TyInt, lo = 1, hi = 2 }
   ]
   let actual = [
-    PatBind { name: "x", sym: 2, ty: TyString, lo: 3, hi: 4 }
+    PatBind { name = "x", sym = 2, ty = TyString, lo = 3, hi = 4 }
   ]
   let cx = check_or_bindings(test_cx(), canonical, actual, PWild(5, 6))
   assert len(cx.diags) == 1
@@ -3579,10 +3579,10 @@ test "or-patterns reject binding type mismatches" {
 
 test "or-patterns reject binding-set mismatches" {
   let canonical = [
-    PatBind { name: "missing", sym: 1, ty: TyBool, lo: 1, hi: 2 }
+    PatBind { name = "missing", sym = 1, ty = TyBool, lo = 1, hi = 2 }
   ]
   let actual = [
-    PatBind { name: "extra", sym: 2, ty: TyBool, lo: 3, hi: 4 }
+    PatBind { name = "extra", sym = 2, ty = TyBool, lo = 3, hi = 4 }
   ]
   let cx = check_or_bindings(test_cx(), canonical, actual, PWild(5, 6))
   assert len(cx.diags) == 2
@@ -3593,14 +3593,14 @@ test "or-patterns reject binding-set mismatches" {
 test "ctor pattern field discipline" {
   var cx = seed_prelude(push_scope(test_cx()))
   # Ok(v: x, ..) on Result[Int, String]; then a missing-field case
-  let good = PCtor("Ok", [PatArg { name: Some("value"), nlo: 3, nhi: 8, pat: PBind("x", 10, 11) }],
+  let good = PCtor("Ok", [PatArg { name = Some("value"), nlo = 3, nhi = 8, pat = PBind("x", 10, 11) }],
     false, 0, 2, 0, 12)
   let (cx1, _) = check_pattern(cx, good, result_ty(TyInt, TyString), false)
   assert len(cx1.diags) == 0
   let bare = PCtor("Ok", no_pargs(), false, 0, 2, 0, 2)
   let (cx2, _) = check_pattern(cx, bare, result_ty(TyInt, TyString), false)
   assert str.contains(cx2.diags[0].msg, "this pattern matches none of them")
-  let wrong = PCtor("Ok", [PatArg { name: Some("nope"), nlo: 3, nhi: 7, pat: PWild(9, 10) }],
+  let wrong = PCtor("Ok", [PatArg { name = Some("nope"), nlo = 3, nhi = 7, pat = PWild(9, 10) }],
     false, 0, 2, 0, 11)
   let (cx3, _) = check_pattern(cx, wrong, result_ty(TyInt, TyString), false)
   assert cx3.diags[0].msg == "`Ok` has no field `nope`"
@@ -3623,10 +3623,10 @@ pub type RefScope = { bound: Set[String], mods: Set[String], javas: Set[String] 
 ## The scope a function body starts in: nothing bound yet, the module's aliases
 ## and Java class names fixed for the whole walk.
 pub fn ref_scope(mods: Set[String], javas: Set[String]) -> RefScope =
-  RefScope { bound: set.empty(), mods: mods, javas: javas }
+  RefScope { bound = set.empty(), mods = mods, javas = javas }
 
 pub fn rs_bind(sc: RefScope, name: String) -> RefScope =
-  RefScope { ..sc, bound: set.insert(sc.bound, name) }
+  RefScope { ..sc, bound = set.insert(sc.bound, name) }
 
 fn rs_params(sc: RefScope, ps: List[LambdaParam]) -> RefScope = {
   var o = sc
@@ -3888,12 +3888,12 @@ test "a bound name is not an edge to the top-level function it shadows" {
   # b => { let c = 1; match d { Some(e) -> b(c, e) } } — every lowercase
   # name here is bound, so nothing but the scrutinee `d` comes out (ARC-01).
   let arm = MatchArm {
-    pat: PCtor("Some", [PatArg { name: None, nlo: 0, nhi: 0, pat: PBind("e", 0, 1) }],
+    pat = PCtor("Some", [PatArg { name = None, nlo = 0, nhi = 0, pat = PBind("e", 0, 1) }],
       false, 0, 1, 0, 1),
-    guard: None,
-    body: EApply(EVar("b", 0, 1), [pos_arg(EVar("c", 0, 1)), pos_arg(EVar("e", 0, 1))], 0, 1),
-    lo: 0,
-    hi: 1
+    guard = None,
+    body = EApply(EVar("b", 0, 1), [pos_arg(EVar("c", 0, 1)), pos_arg(EVar("e", 0, 1))], 0, 1),
+    lo = 0,
+    hi = 1
   }
   let body = EBlock(
     [SLet("c", false, None, EInt(1, 0, 1), 0, 1)],
@@ -3901,7 +3901,7 @@ test "a bound name is not an edge to the top-level function it shadows" {
     0,
     1
   )
-  let lam = ELambda([LambdaParam { name: "b", ann: None, lo: 0, hi: 1 }], body, false, 0, 1)
+  let lam = ELambda([LambdaParam { name = "b", ann = None, lo = 0, hi = 1 }], body, false, 0, 1)
   let refs = name_refs(lam, set.empty(), ref_scope(set.empty(), set.empty()))
   assert set.to_list(refs) == ["d"]
   # a for-loop variable and a local function's own name are binders too
@@ -3954,16 +3954,16 @@ test "a handler's arms and its remainder are both call positions" {
   # with handle Ask { get(n) => p(n, q) }  r()
   let no_binder: Option[String] = None
   let arm = HandlerArm {
-    name: "get",
-    params: [LambdaParam { name: "n", ann: None, lo: 0, hi: 1 }],
-    binder: no_binder,
-    body: EApply(EVar("p", 0, 1), [pos_arg(EVar("n", 0, 1)), pos_arg(EVar("q", 0, 1))], 0, 1),
-    lo: 0,
-    hi: 1,
-    nlo: 0,
-    nhi: 1,
-    blo: 0,
-    bhi: 1
+    name = "get",
+    params = [LambdaParam { name = "n", ann = None, lo = 0, hi = 1 }],
+    binder = no_binder,
+    body = EApply(EVar("p", 0, 1), [pos_arg(EVar("n", 0, 1)), pos_arg(EVar("q", 0, 1))], 0, 1),
+    lo = 0,
+    hi = 1,
+    nlo = 0,
+    nhi = 1,
+    blo = 0,
+    bhi = 1
   }
   let rest = ELambda(no_lparams(), EApply(EVar("r", 0, 1), [], 0, 1), true, 0, 1)
   let no_cells: List[HandlerCell] = []
@@ -4003,22 +4003,22 @@ pub(pkg) fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
     ..cx,
     # spelled out rather than spread, so a field added to Frame has to be
     # answered for here instead of leaking through into the isolated body
-    frame: Frame {
-      scopes: [fresh_scope],
-      used_effects: [],
-      eff_witness: empty_w,
-      current_sig: None,
-      dict_syms: empty_d,
-      lambda_stack: [],
-      loop_stack: [],
-      isolated: true,
+    frame = Frame {
+      scopes = [fresh_scope],
+      used_effects = [],
+      eff_witness = empty_w,
+      current_sig = None,
+      dict_syms = empty_d,
+      lambda_stack = [],
+      loop_stack = [],
+      isolated = true,
       # no enclosing local is in scope, so none is being initialized here:
       # carried over, `let x = comptime { x }` under an outer `x` would blame
       # the initializer for what is comptime not seeing locals (#204)
-      initializing: set.empty(),
+      initializing = set.empty(),
       # keyed by depth in `loop_stack`, which starts again at zero here, so an
       # outer loop's mark would be read as the first inner loop's (#204)
-      loop_jumps: set.empty()
+      loop_jumps = set.empty()
     }
   }, cx.frame)
 }
@@ -4038,7 +4038,7 @@ pub(pkg) fn leave_isolated(cx: Cx, frame: Frame, what: String, blo: Int, bhi: In
     cx1 = cerr_h(cx1, what ++ " must be pure, but `" ++ name ++ "` is !" ++ eff_show(used),
       wlo, whi, hint)
   }
-  Cx { ..cx1, frame: frame }
+  Cx { ..cx1, frame = frame }
 }
 
 test "an isolated context reports its own effects, then restores all ten fields" {
@@ -4058,32 +4058,32 @@ test "an isolated context reports its own effects, then restores all ten fields"
   let outer_init: Set[String] = set.insert(set.empty(), "outer_let")
   cx = Cx {
     ..cx,
-    frame: Frame {
-      scopes: [outer_scope],
+    frame = Frame {
+      scopes = [outer_scope],
       # not EIo: the body below records EIo, and an outer record that already
       # held it could not tell restoring from keeping the body's
-      used_effects: [EffVar("outer_e", 42)],
+      used_effects = [EffVar("outer_e", 42)],
       # keyed on EIo *because* the body writes that key -- restoring gives back
       # the outer witness, not restoring leaves the body's
-      eff_witness: outer_wit,
-      current_sig: Some(Sig {
-        name: "outer", param_tys: [], param_names: [], param_defaults: [], caller_params: [], ret: TyInt,
-        eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
-        owner: None, trait_id: None, op_of: None, inferring: false
+      eff_witness = outer_wit,
+      current_sig = Some(Sig {
+        name = "outer", param_tys = [], param_names = [], param_defaults = [], caller_params = [], ret = TyInt,
+        eff = EPure, is_builtin = false, tparams = [], constraints = [], eparams = [],
+        owner = None, trait_id = None, op_of = None, inferring = false
       }),
-      dict_syms: outer_dicts,
-      lambda_stack: [LambdaCx {
-        boundary: 3, expected_ret: None, captures: [], sugar: false, arm: false,
-        ctl: false, local_fn: None, handler_of: None,
-        staged_kind: OrdinaryClosure,
-        staged: map.empty()
+      dict_syms = outer_dicts,
+      lambda_stack = [LambdaCx {
+        boundary = 3, expected_ret = None, captures = [], sugar = false, arm = false,
+        ctl = false, local_fn = None, handler_of = None,
+        staged_kind = OrdinaryClosure,
+        staged = map.empty()
       }],
-      loop_stack: [7],
-      isolated: false,
+      loop_stack = [7],
+      isolated = false,
       # the outer `let` whose initializer holds the isolated body
-      initializing: outer_init,
+      initializing = outer_init,
       # a `break` already seen in the outer loop at depth 0
-      loop_jumps: set.insert(set.empty(), 0)
+      loop_jumps = set.insert(set.empty(), 0)
     }
   }
   let (cx1, frame) = enter_isolated(cx)
@@ -4495,20 +4495,20 @@ fn eta_bounded_fn_value(
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
   let ctx = LambdaCx {
-    boundary: len(cx.frame.scopes),
-    expected_ret: None,
-    captures: [],
-    sugar: false,
-    arm: false,
-    ctl: false,
-    local_fn: None,
-    handler_of: None,
-    staged_kind: OrdinaryClosure,
-    staged: map.empty()
+    boundary = len(cx.frame.scopes),
+    expected_ret = None,
+    captures = [],
+    sugar = false,
+    arm = false,
+    ctl = false,
+    local_fn = None,
+    handler_of = None,
+    staged_kind = OrdinaryClosure,
+    staged = map.empty()
   }
   var cx1 = Cx {
     ..cx,
-    frame: Frame { ..cx.frame, lambda_stack: cx.frame.lambda_stack ++ [ctx] }
+    frame = Frame { ..cx.frame, lambda_stack = cx.frame.lambda_stack ++ [ctx] }
   }
   var wits: List[WitRef] = []
   var ok = true
@@ -4555,7 +4555,7 @@ fn eta_bounded_fn_value(
   cx1 = pop_scope(cx1)
   let popped = cx1.frame.lambda_stack[len(cx1.frame.lambda_stack) - 1]
   let outer = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1)
-  cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, lambda_stack: outer } }
+  cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, lambda_stack = outer } }
   if not ok { return (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi))) }
   let body =
     if f.is_builtin {
@@ -4656,11 +4656,11 @@ test "fn values instantiate from the expected type" {
   # to std/list, so the sig is hand-built)
   let tv = TyVar("T", 0)
   let bounded = Sig {
-    name: "sortish", param_tys: [TyList(tv)], param_names: ["xs"], param_defaults: [],
-    caller_params: [],
-    ret: TyList(tv),
-    eff: EPure, is_builtin: true, tparams: [tv], constraints: [[EQ_ID]], eparams: [],
-    owner: None, trait_id: None, op_of: None, inferring: false
+    name = "sortish", param_tys = [TyList(tv)], param_names = ["xs"], param_defaults = [],
+    caller_params = [],
+    ret = TyList(tv),
+    eff = EPure, is_builtin = true, tparams = [tv], constraints = [[EQ_ID]], eparams = [],
+    owner = None, trait_id = None, op_of = None, inferring = false
   }
   let want = TyFn([TyList(TyInt)], TyList(TyInt), EPure)
   let (cx3, t3, x3) = check_fn_value(cx, "sortish", "sortish", bounded, Some(want), 0, 4)
@@ -4698,8 +4698,8 @@ test "bounded fn values read ordered evidence from the caller and expose ABI-onl
   let labels = [(73, "Alpha"), (71, "Zed")]
   for label in labels {
     let (eid, ename) = label
-    cx = Cx { ..cx, effect_infos: map.insert(cx.effect_infos, eid,
-      EffectI { id: eid, name: ename, owner: None, audience: AWorld, ops: [], ctl: false }) }
+    cx = Cx { ..cx, effect_infos = map.insert(cx.effect_infos, eid,
+      EffectI { id = eid, name = ename, owner = None, audience = AWorld, ops = [], ctl = false }) }
     let (cx1, _) = declare_evidence(cx, ev_local_name(cx, eid), TyAdt(eid, []), label_key(eid), 0, 1)
     cx = cx1
   }
@@ -4711,10 +4711,10 @@ test "bounded fn values read ordered evidence from the caller and expose ABI-onl
   # The callback's variable owns an ABI slot even though the declared row
   # omits it. Its instance must reach the value's row and eventual caller.
   let bounded = Sig {
-    name: "with_callback", param_tys: [tv, TyFn([], TyInt, ev)],
-    param_names: ["x", "callback"], param_defaults: [], caller_params: [], ret: TyInt, eff: row,
-    is_builtin: false, tparams: [tv], constraints: [[EQ_ID]], eparams: [ev],
-    owner: None, trait_id: None, op_of: None, inferring: false
+    name = "with_callback", param_tys = [tv, TyFn([], TyInt, ev)],
+    param_names = ["x", "callback"], param_defaults = [], caller_params = [], ret = TyInt, eff = row,
+    is_builtin = false, tparams = [tv], constraints = [[EQ_ID]], eparams = [ev],
+    owner = None, trait_id = None, op_of = None, inferring = false
   }
   let want = TyFn([TyInt, TyFn([], TyInt, outer)], TyInt, eff_union([row, outer]))
   let (cx2, actual, value) = check_fn_value(cx1, "with_callback", "with_callback", bounded, Some(want), 0, 1)
@@ -5283,7 +5283,7 @@ test "a subject containing a rigid variable takes its arguments' witnesses" {
   # With `[T: Eq]` in scope, the whole's witness carries the part's -- which
   # is the only way to reach a relation the caller decides.
   let dicts = map.insert(cx.frame.dict_syms, (900, EQ_ID), 77)
-  let bound = Cx { ..cx, frame: Frame { ..cx.frame, dict_syms: dicts } }
+  let bound = Cx { ..cx, frame = Frame { ..cx.frame, dict_syms = dicts } }
   let (cx2, w2) = resolve_witness(bound, EQ_ID, opt_ty(tv), 0, 4, "`f`")
   assert len(cx2.diags) == 0
   assert w2 == Some(WApply(EQ_ID, opt_ty(tv), [WForward(77)]))
@@ -5304,7 +5304,7 @@ test "a subject containing a rigid variable takes its arguments' witnesses" {
   # route (`cmp`) and the operator route have to return it, or one of the two
   # entry points loses the caller's Ord[T] dictionary.
   let ord_dicts = map.insert(cx.frame.dict_syms, (900, ORD_ID), 78)
-  let ord_bound = Cx { ..cx, frame: Frame { ..cx.frame, dict_syms: ord_dicts } }
+  let ord_bound = Cx { ..cx, frame = Frame { ..cx.frame, dict_syms = ord_dicts } }
   let pair = TyTuple([TyInt, tv])
   let applied = Some(WApply(ORD_ID, pair,
     [WConcrete(ORD_ID, TyInt), WForward(78)]))
@@ -5410,7 +5410,7 @@ fn check_list_elem(cx: Cx, x: ListElem, elem_t: Ty) -> (Cx, Ty, TListElem) !io =
         let (cx4, u) = unify_branches(cx1, t, bt, e_lo(a.body), e_hi(a.body), "the if branches")
         cx1 = cx4
         t = u
-        out = out ++ [TListIfArm { cond: cndx, body: bx }]
+        out = out ++ [TListIfArm { cond = cndx, body = bx }]
       }
       (cx1, t, TLEIf(out))
     }
@@ -6510,7 +6510,7 @@ fn left_infer_hint(cx: Cx, before: Int, after_left: Int, rt: Ty) -> Cx = {
   if not str.starts_with(d.msg, "cannot infer type parameter(s) ") { return cx }
   let hint = "an operator gives its left operand's type to the right one, not the other way " ++
     "round: swap the operands, or bind the left one with an annotated `let`"
-  Cx { ..cx, diags: list.take(cx.diags, before) ++ [Diag { ..d, hint: hint }] ++
+  Cx { ..cx, diags = list.take(cx.diags, before) ++ [Diag { ..d, hint = hint }] ++
       list.drop(cx.diags, before + 1) }
 }
 
@@ -6804,7 +6804,7 @@ fn capture_into(lc: LambdaCx, id: Int) -> LambdaCx = {
     if c == id { have = true }
   }
   if not have { caps = caps ++ [id] }
-  LambdaCx { ..lc, captures: caps }
+  LambdaCx { ..lc, captures = caps }
 }
 
 ## The installation a symbol's cell belongs to, dropping the slot type.
@@ -6941,7 +6941,7 @@ pub(pkg) fn resolve_local(
             stack = stack ++ [lc]
           }
         }
-        cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, lambda_stack: stack } }
+        cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, lambda_stack = stack } }
         return (cx1, Some(id))
       }
       None -> ()
@@ -7095,7 +7095,7 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
         Some(c) -> {
           let (_, ct) = c
           let take = cx1.take_cell == Some(id)
-          let cx2 = if take { Cx { ..cx1, take_cell: None } } else { cx1 }
+          let cx2 = if take { Cx { ..cx1, take_cell = None } } else { cx1 }
           (cx2, ct, cell_read(cx, id, name, ct, take, lo, hi))
         }
         None -> (cx1, sym.ty, XLocal(id, name, owner_off(cx, lo), owner_off(cx, hi), sym.ty))
@@ -7238,24 +7238,24 @@ fn check_lambda(
     if have_exp && is_concrete(cx1, eret) { Some(eret) } else { None }
   let ctx =
     LambdaCx {
-      boundary: len(cx1.frame.scopes),
-      expected_ret: exp_ret,
-      captures: [],
-      sugar: sugar,
-      arm: arm,
-      ctl: ctl,
-      local_fn: local_fn,
-      handler_of: handler_of,
-      staged_kind: OrdinaryClosure,
-      staged: map.empty()
+      boundary = len(cx1.frame.scopes),
+      expected_ret = exp_ret,
+      captures = [],
+      sugar = sugar,
+      arm = arm,
+      ctl = ctl,
+      local_fn = local_fn,
+      handler_of = handler_of,
+      staged_kind = OrdinaryClosure,
+      staged = map.empty()
     }
   cx1 = Cx {
     ..cx1,
-    frame: Frame {
+    frame = Frame {
       ..cx1.frame,
-      used_effects: [],
-      eff_witness: empty_w,
-      lambda_stack: cx1.frame.lambda_stack ++ [ctx]
+      used_effects = [],
+      eff_witness = empty_w,
+      lambda_stack = cx1.frame.lambda_stack ++ [ctx]
     }
   }
   cx1 = push_scope(cx1)
@@ -7273,12 +7273,12 @@ fn check_lambda(
   var cx3 = pop_scope(cx2)
   let popped = cx3.frame.lambda_stack[len(cx3.frame.lambda_stack) - 1]
   let outer_lams = list.take(cx3.frame.lambda_stack, len(cx3.frame.lambda_stack) - 1)
-  cx3 = Cx { ..cx3, frame: Frame { ..cx3.frame, lambda_stack: outer_lams } }
+  cx3 = Cx { ..cx3, frame = Frame { ..cx3.frame, lambda_stack = outer_lams } }
   # the closure's row is what its body raised, unrewritten: nothing this body
   # resolved can take a label off, because nothing this body resolved is
   # travelling with the closure
   let lam_eff = eff_union(cx3.frame.used_effects)
-  cx3 = Cx { ..cx3, frame: Frame { ..cx3.frame, used_effects: saved_used, eff_witness: saved_wit } }
+  cx3 = Cx { ..cx3, frame = Frame { ..cx3.frame, used_effects = saved_used, eff_witness = saved_wit } }
   let t = TyFn(ptys, bt, lam_eff)
   (cx3, t, XLambda(psyms, pnames, bx, popped.captures, owner_off(cx, lo), owner_off(cx, hi), t))
 }
@@ -8112,7 +8112,7 @@ fn check_control_arm(
       "the binder is the continuation, not a parameter: " ++ text)
   }
   let k_ty = TyFn([fret], answer, cont_row(reff))
-  let kp = LambdaParam { name: kname, ann: None, lo: a.blo, hi: a.bhi }
+  let kp = LambdaParam { name = kname, ann = None, lo = a.blo, hi = a.bhi }
   let (cxb, at, ax) = check_lambda(cx1, a.params ++ [kp], a.body, true, true, true,
     Some(hid), None, Some(TyFn(fptys ++ [k_ty], answer, EPure)), a.lo, a.hi)
   cx1 = cxb
@@ -8601,13 +8601,13 @@ fn check_let(
     None -> None
   }
   let outer_initializing = cx1.frame.initializing
-  cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, initializing: set.insert(outer_initializing, name) } }
+  cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, initializing = set.insert(outer_initializing, name) } }
   # A bound staged if is a value form even when its result is Unit.
   let (cxb, it, ix) = match init {
     EIf(c, t, e, a, z) -> check_if(cx1, c, t, e, ann_t, a, z, true)
     _ -> check_expr(cx1, init, ann_t)
   }
-  cx1 = Cx { ..cxb, frame: Frame { ..cxb.frame, initializing: outer_initializing } }
+  cx1 = Cx { ..cxb, frame = Frame { ..cxb.frame, initializing = outer_initializing } }
   var t = match ann_t {
     Some(a) -> a
     None -> it
@@ -8714,12 +8714,12 @@ fn check_assign(
         Some(c) -> {
           let (hid, ct) = c
           if cell_take_ok(cx1, hid, name, value) {
-            cx1 = Cx { ..cx1, take_cell: Some(sid) }
+            cx1 = Cx { ..cx1, take_cell = Some(sid) }
           }
           let (cxb, vt, vx) = check_expr(cx1, value, Some(ct))
           # cleared unconditionally: a right-hand side that never read the
           # cell must not leave the mark standing for the next assignment
-          cx1 = Cx { ..cxb, take_cell: None }
+          cx1 = Cx { ..cxb, take_cell = None }
           let compatible = assignable(cx1, vt, ct)
           if not compatible {
             let declared_text = ty_show(cx1.adts, ct)
@@ -8766,16 +8766,16 @@ fn check_while(cx: Cx, cond: Expr, body: Expr, lo: Int, hi: Int) -> (Cx, TStmt) 
   }
   let d = len(cx1.frame.loop_stack)
   let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
-  cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
+  cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, loop_stack = loops } }
   let (cxb, bt, bx) = check_expr(cx1, body, Some(TyUnit))
   cx1 = cxb
   let hj = set.has(cx1.frame.loop_jumps, d)
   cx1 = Cx {
     ..cx1,
-    frame: Frame {
+    frame = Frame {
       ..cx1.frame,
-      loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1),
-      loop_jumps: set.remove(cx1.frame.loop_jumps, d)
+      loop_stack = list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1),
+      loop_jumps = set.remove(cx1.frame.loop_jumps, d)
     }
   }
   if bt != TyUnit && not is_errorish(bt) {
@@ -8858,16 +8858,16 @@ fn check_for(
   cx1 = cxc
   let d = len(cx1.frame.loop_stack)
   let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
-  cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
+  cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, loop_stack = loops } }
   let (cxd, bt, bx) = check_expr(cx1, body, Some(TyUnit))
   cx1 = cxd
   let hj = set.has(cx1.frame.loop_jumps, d)
   cx1 = Cx {
     ..cx1,
-    frame: Frame {
+    frame = Frame {
       ..cx1.frame,
-      loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1),
-      loop_jumps: set.remove(cx1.frame.loop_jumps, d)
+      loop_stack = list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1),
+      loop_jumps = set.remove(cx1.frame.loop_jumps, d)
     }
   }
   if bt != TyUnit && not is_errorish(bt) {
@@ -8941,14 +8941,14 @@ fn has_trait_at(cx: Cx, tid: Int, t: Ty) -> Bool =
 fn hidden_local(cx: Cx, name: String, ty: Ty, lo: Int, hi: Int) -> (Cx, Int) = {
   let (cx1, id) = fresh(cx)
   (write_symbol(cx1, id, Sym {
-    name: name,
-    ty: ty,
-    mutable: false,
-    dlo: owner_off(cx, lo),
-    dhi: owner_off(cx, hi),
-    dict_of: None,
-    ev_of: None,
-    cell_of: None
+    name = name,
+    ty = ty,
+    mutable = false,
+    dlo = owner_off(cx, lo),
+    dhi = owner_off(cx, hi),
+    dict_of = None,
+    ev_of = None,
+    cell_of = None
   }), id)
 }
 
@@ -8976,7 +8976,7 @@ fn staged_cell_of(cx: Cx, id: Int) -> Option[StagedCell] = {
 ## typed tree (the language server) that follows it lands on the `var`.
 fn mint_staged_cell(cx: Cx, id: Int, sym: Sym, kind: StagedKind, lo: Int, hi: Int) -> (Cx, StagedCell) = {
   let t = sym.ty
-  let refused = StagedCell { orig: id, cell: id, ty: t, wit: None, use_lo: lo, use_hi: hi }
+  let refused = StagedCell { orig = id, cell = id, ty = t, wit = None, use_lo = lo, use_hi = hi }
   if is_errorish(t) { return (cx, refused) }
   if not has_trait_at(cx, STAGED_VAR_ID, t) {
     let ts = ty_show(cx.adts, t)
@@ -8996,16 +8996,16 @@ fn mint_staged_cell(cx: Cx, id: Int, sym: Sym, kind: StagedKind, lo: Int, hi: In
   let cell_ty = reduce_assoc(cx1, TyAssoc(t, STAGED_VAR_ID, "Cell"))
   let (cx2, cid) = fresh(cx1)
   let cx3 = write_symbol(cx2, cid, Sym {
-    name: sym.name,
-    ty: cell_ty,
-    mutable: false,
-    dlo: sym.dlo,
-    dhi: sym.dhi,
-    dict_of: None,
-    ev_of: None,
-    cell_of: None
+    name = sym.name,
+    ty = cell_ty,
+    mutable = false,
+    dlo = sym.dlo,
+    dhi = sym.dhi,
+    dict_of = None,
+    ev_of = None,
+    cell_of = None
   })
-  (cx3, StagedCell { orig: id, cell: cid, ty: t, wit: w, use_lo: lo, use_hi: hi })
+  (cx3, StagedCell { orig = id, cell = cid, ty = t, wit = w, use_lo = lo, use_hi = hi })
 }
 
 ## The outermost closure frame a `var` found at scope `i` crosses that is a
@@ -9048,7 +9048,7 @@ fn resolve_staged(cx: Cx, id: Int, sym: Sym, i: Int, from: Int, lo: Int, hi: Int
             }
         }
         entry = Some(sc)
-        let lc2 = LambdaCx { ..lc, staged: map.insert(lc.staged, id, sc) }
+        let lc2 = LambdaCx { ..lc, staged = map.insert(lc.staged, id, sc) }
         stack = stack ++ [if sc.wit == None { lc2 } else { capture_into(lc2, sc.cell) }]
       } else {
         let (msg, hint) = capture_staged_msg(lc, sym.name)
@@ -9067,7 +9067,7 @@ fn resolve_staged(cx: Cx, id: Int, sym: Sym, i: Int, from: Int, lo: Int, hi: Int
     }
     k = k + 1
   }
-  Cx { ..cx1, frame: Frame { ..cx1.frame, lambda_stack: stack } }
+  Cx { ..cx1, frame = Frame { ..cx1.frame, lambda_stack = stack } }
 }
 
 ## A carried `var` reaching a closure inside the staged body, in the words of
@@ -9213,25 +9213,25 @@ fn check_staged_body(cx: Cx, pat: Pattern, item: Ty, body: Expr, lo: Int,
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   let d = len(cx1.frame.loop_stack)
   let ctx = LambdaCx {
-    boundary: len(cx1.frame.scopes),
-    expected_ret: Some(TyUnit),
-    captures: [],
-    sugar: false,
-    arm: false,
-    ctl: false,
-    local_fn: None,
-    handler_of: None,
-    staged_kind: StagedLoop,
-    staged: map.empty()
+    boundary = len(cx1.frame.scopes),
+    expected_ret = Some(TyUnit),
+    captures = [],
+    sugar = false,
+    arm = false,
+    ctl = false,
+    local_fn = None,
+    handler_of = None,
+    staged_kind = StagedLoop,
+    staged = map.empty()
   }
   cx1 = Cx {
     ..cx1,
-    frame: Frame {
+    frame = Frame {
       ..cx1.frame,
-      used_effects: [],
-      eff_witness: empty_w,
-      loop_stack: cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)],
-      lambda_stack: cx1.frame.lambda_stack ++ [ctx]
+      used_effects = [],
+      eff_witness = empty_w,
+      loop_stack = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)],
+      lambda_stack = cx1.frame.lambda_stack ++ [ctx]
     }
   }
   cx1 = push_scope(cx1)
@@ -9266,13 +9266,13 @@ fn check_staged_body(cx: Cx, pat: Pattern, item: Ty, body: Expr, lo: Int,
   let lam_eff = eff_union(cx3.frame.used_effects)
   cx3 = Cx {
     ..cx3,
-    frame: Frame {
+    frame = Frame {
       ..cx3.frame,
-      lambda_stack: outer_lams,
-      used_effects: saved_used,
-      eff_witness: saved_wit,
-      loop_stack: list.take(cx3.frame.loop_stack, len(cx3.frame.loop_stack) - 1),
-      loop_jumps: set.remove(cx3.frame.loop_jumps, d)
+      lambda_stack = outer_lams,
+      used_effects = saved_used,
+      eff_witness = saved_wit,
+      loop_stack = list.take(cx3.frame.loop_stack, len(cx3.frame.loop_stack) - 1),
+      loop_jumps = set.remove(cx3.frame.loop_jumps, d)
     }
   }
   let bx2 = if len(pre) == 0 { bx } else { XBlock(pre, Some(bx), x_lo(bx), x_hi(bx), TyUnit) }
@@ -9398,19 +9398,19 @@ fn check_staged_arm(cx: Cx, body: Expr, cells: Map[Int, StagedCell], expected: O
   let saved_wit = cx.frame.eff_witness
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   let ctx = LambdaCx {
-    boundary: len(cx.frame.scopes), expected_ret: Some(TyUnit), captures: [],
-    sugar: false, arm: false, ctl: false, local_fn: None, handler_of: None,
-    staged_kind: StagedBranch(lo, hi), staged: cells
+    boundary = len(cx.frame.scopes), expected_ret = Some(TyUnit), captures = [],
+    sugar = false, arm = false, ctl = false, local_fn = None, handler_of = None,
+    staged_kind = StagedBranch(lo, hi), staged = cells
   }
-  let entered = Cx { ..cx, frame: Frame { ..cx.frame, used_effects: [], eff_witness: empty_w,
-    lambda_stack: cx.frame.lambda_stack ++ [ctx] } }
+  let entered = Cx { ..cx, frame = Frame { ..cx.frame, used_effects = [], eff_witness = empty_w,
+    lambda_stack = cx.frame.lambda_stack ++ [ctx] } }
   let (checked, bt, bx) = check_expr(push_scope(entered), body, expected)
   var cx1 = pop_scope(checked)
   let popped = cx1.frame.lambda_stack[len(cx1.frame.lambda_stack) - 1]
   let row = eff_union(cx1.frame.used_effects)
-  cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame,
-    lambda_stack: list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1),
-    used_effects: saved_used, eff_witness: saved_wit } }
+  cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame,
+    lambda_stack = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1),
+    used_effects = saved_used, eff_witness = saved_wit } }
   (cx1, bt, XLambda([], [], bx, popped.captures, owner_off(cx, e_lo(body)), owner_off(cx, e_hi(body)),
     TyFn([], bt, row)), row, popped.staged)
 }
@@ -9435,21 +9435,21 @@ fn staged_result_arm(cx: Cx, lam: TExpr, t: Ty, slot: Int, wit: WitRef, lo: Int,
   let saved_wit = cx.frame.eff_witness
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   let ctx = LambdaCx {
-    boundary: len(cx.frame.scopes), expected_ret: Some(TyUnit), captures: caps,
-    sugar: false, arm: false, ctl: false, local_fn: None, handler_of: None,
-    staged_kind: StagedBranch(lo, hi), staged: map.empty()
+    boundary = len(cx.frame.scopes), expected_ret = Some(TyUnit), captures = caps,
+    sugar = false, arm = false, ctl = false, local_fn = None, handler_of = None,
+    staged_kind = StagedBranch(lo, hi), staged = map.empty()
   }
-  let scoped = Cx { ..cx, frame: Frame { ..cx.frame, used_effects: [], eff_witness: empty_w,
-    lambda_stack: cx.frame.lambda_stack ++ [ctx] } }
+  let scoped = Cx { ..cx, frame = Frame { ..cx.frame, used_effects = [], eff_witness = empty_w,
+    lambda_stack = cx.frame.lambda_stack ++ [ctx] } }
   let (resolved, _) = resolve_witness(scoped, STAGED_RESULT_ID, t, lo, hi, "a staged if result")
   let sx = XLocal(slot, "\$result", owner_off(cx, lo), owner_off(cx, hi), sym_of(cx, slot).ty)
   let (charged, store) = staged_call(resolved, STAGED_RESULT_ID, "result_set", t, [sx, body], wit,
     TyUnit, lo, hi, NO_NAME)
   let row = eff_union([used] ++ charged.frame.used_effects)
   let popped = charged.frame.lambda_stack[len(charged.frame.lambda_stack) - 1]
-  let restored = Cx { ..charged, frame: Frame { ..charged.frame, used_effects: saved_used,
-    eff_witness: saved_wit,
-    lambda_stack: list.take(charged.frame.lambda_stack, len(charged.frame.lambda_stack) - 1) } }
+  let restored = Cx { ..charged, frame = Frame { ..charged.frame, used_effects = saved_used,
+    eff_witness = saved_wit,
+    lambda_stack = list.take(charged.frame.lambda_stack, len(charged.frame.lambda_stack) - 1) } }
   (restored, XLambda([], [], store, popped.captures ++ [slot], llo, lhi, TyFn([], TyUnit, row)), row)
 }
 
@@ -9893,7 +9893,7 @@ fn check_local_fn(
   cx1 = cxc
   # The declaration error is the whole refusal: a row that failed to resolve
   # would only have the body echo it, and the function will not lower.
-  let body_local_fn: Option[LocalFn] = if refused { None } else { Some(LocalFn { name: name, row: eff }) }
+  let body_local_fn: Option[LocalFn] = if refused { None } else { Some(LocalFn { name = name, row = eff }) }
   let (cxd, actual, lam) =
     check_lambda(cx1, params, body, false, false, false, None, body_local_fn, Some(ft), lo, hi)
   cx1 = cxd
@@ -10207,19 +10207,19 @@ test "dbg is the program's own: refused in a [deps] package, in std, and as a va
   let base = seed_prelude(test_cx())
   let (own, _) = check_module(base, m, env)
   assert len(own.diags) == 0
-  let (dep, _) = check_module(Cx { ..base, dep_package: Some("json") }, m, env)
+  let (dep, _) = check_module(Cx { ..base, dep_package = Some("json") }, m, env)
   assert map(dep.diags, d => d.msg) ==
     ["`dbg` cannot be used in package `json`, which is loaded through [deps]"]
   assert map(dep.diags, d => d.hint) == ["`dbg` is for debugging a program locally; remove it " ++
       "from the package, or debug the package as a project of its own"]
   # at the name, the way an undefined function is reported
   assert map(dep.diags, d => (d.lo, d.hi)) == [(22, 25)]
-  let (in_std, _) = check_module(Cx { ..base, is_std_module: true }, m, env)
+  let (in_std, _) = check_module(Cx { ..base, is_std_module = true }, m, env)
   assert map(in_std.diags, d => d.msg) == ["`dbg` cannot be used in std"]
   assert msgs_of("fn f() -> fn(Int) -> Int = dbg\n") == ["`dbg` cannot be used as a value"]
   # a user function of the name is the user's, and nothing about it is refused
   let (shadow, _) = parser.parse_module("fn dbg(n: Int) -> Int = n\nfn f(n: Int) -> Int = dbg(n)\n")
-  let (dep2, _) = check_module(Cx { ..base, dep_package: Some("json") }, shadow, env)
+  let (dep2, _) = check_module(Cx { ..base, dep_package = Some("json") }, shadow, env)
   assert len(dep2.diags) == 0
 }
 
@@ -11832,7 +11832,7 @@ test "pre-resolved constructors skip conflicting local names and constants" {
   assert pd == []
   let (base, _) = check_module(test_cx(), syntax, map.empty())
   let key = map.get(base.ctors_by_name, "Empty").expect("constructor")
-  let initial = Cx { ..base, ctors_by_name: map.empty(), consts: map.from([("Empty", TyString)]) }
+  let initial = Cx { ..base, ctors_by_name = map.empty(), consts = map.from([("Empty", TyString)]) }
   let (cold, ty, _) = check_ctor_call(initial, "Empty", [], None, CBare, None, Some(key), 0, 5, 0, 5)
   assert cold.diags == [] && ty != TyString
 }
@@ -12976,22 +12976,22 @@ fn check_java_call(
     }
     let vp: Option[Int] = if packs { Some(len(c.param_cls) - 1) } else { None }
     let call = TJavaCall {
-      fqcn: cls.fqcn,
-      decl_cls: cls.fqcn,
-      method: "new",
-      param_cls: c.param_cls,
-      ret_cls: cls.fqcn,
-      is_static: true,
-      is_ctor: true,
-      is_field: false,
-      target: None,
-      args: fin,
-      varargs_pack: vp,
-      sam_convs: convs,
-      sam_evs: sevs,
-      list_bridges: bridges,
-      nlo: owner_off(cx, nlo),
-      nhi: owner_off(cx, nhi)
+      fqcn = cls.fqcn,
+      decl_cls = cls.fqcn,
+      method = "new",
+      param_cls = c.param_cls,
+      ret_cls = cls.fqcn,
+      is_static = true,
+      is_ctor = true,
+      is_field = false,
+      target = None,
+      args = fin,
+      varargs_pack = vp,
+      sam_convs = convs,
+      sam_evs = sevs,
+      list_bridges = bridges,
+      nlo = owner_off(cx, nlo),
+      nhi = owner_off(cx, nhi)
     }
     # .new returns T — a constructor never returns null; a constructed
     # java.lang.String is an ordinary Dawn String
@@ -13076,22 +13076,22 @@ fn check_java_call(
   cx1 = cxc
   let vp: Option[Int] = if packs { Some(len(m3.param_cls) - 1) } else { None }
   let call = TJavaCall {
-    fqcn: cls.fqcn,
-    decl_cls: m3.decl_cls,
-    method: name,
-    param_cls: m3.param_cls,
-    ret_cls: m3.ret_cls,
-    is_static: is_static,
-    is_ctor: false,
-    is_field: false,
-    target: target_tx,
-    args: fin,
-    varargs_pack: vp,
-    sam_convs: convs,
-    sam_evs: sevs,
-    list_bridges: bridges,
-    nlo: owner_off(cx, nlo),
-    nhi: owner_off(cx, nhi)
+    fqcn = cls.fqcn,
+    decl_cls = m3.decl_cls,
+    method = name,
+    param_cls = m3.param_cls,
+    ret_cls = m3.ret_cls,
+    is_static = is_static,
+    is_ctor = false,
+    is_field = false,
+    target = target_tx,
+    args = fin,
+    varargs_pack = vp,
+    sam_convs = convs,
+    sam_evs = sevs,
+    list_bridges = bridges,
+    nlo = owner_off(cx, nlo),
+    nhi = owner_off(cx, nhi)
   }
   (cx1, rt, XJava(call, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, nlo), rt))
 }
@@ -13138,22 +13138,22 @@ fn check_java_static_field(
       let no_sevs: List[(Int, TExpr)] = []
       let no_bridges: List[Int] = []
       let call = TJavaCall {
-        fqcn: fq,
-        decl_cls: f.decl_cls,
-        method: fname,
-        param_cls: empty_params,
-        ret_cls: f.type_cls,
-        is_static: true,
-        is_ctor: false,
-        is_field: true,
-        target: None,
-        args: empty_args,
-        varargs_pack: None,
-        sam_convs: no_convs,
-        sam_evs: no_sevs,
-        list_bridges: no_bridges,
-        nlo: owner_off(cx, flo),
-        nhi: owner_off(cx, fhi)
+        fqcn = fq,
+        decl_cls = f.decl_cls,
+        method = fname,
+        param_cls = empty_params,
+        ret_cls = f.type_cls,
+        is_static = true,
+        is_ctor = false,
+        is_field = true,
+        target = None,
+        args = empty_args,
+        varargs_pack = None,
+        sam_convs = no_convs,
+        sam_evs = no_sevs,
+        list_bridges = no_bridges,
+        nlo = owner_off(cx, flo),
+        nhi = owner_off(cx, fhi)
       }
       (cx2, ty, XJava(call, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, ty))
     }
@@ -13531,7 +13531,7 @@ fn check_match(
     cx1 = cxc
     result = unified
     cx1 = pop_scope(cx1)
-    checked = checked ++ [TArm { pat: tpat, guard: tguard, body: bx }]
+    checked = checked ++ [TArm { pat = tpat, guard = tguard, body = bx }]
   }
   var tarms: List[TArm] = []
   var ri = 0
@@ -13671,7 +13671,7 @@ test "lambdas infer parameters from expected types and track captures" {
   cx = push_scope(cx)
   let (cxk, _) = declare(cx, "k", TyInt, false, 0, 1)
   # x => x + k against fn(Int) -> Int captures k
-  let lam = ELambda([LambdaParam { name: "x", ann: None, lo: 3, hi: 4 }],
+  let lam = ELambda([LambdaParam { name = "x", ann = None, lo = 3, hi = 4 }],
     EBinary(OpAdd, EVar("x", 9, 10), EVar("k", 13, 14), 11, 12, 9, 14), false, 0, 14)
   let (cx1, t, node) = check_expr(cxk, lam, Some(TyFn([TyInt], TyInt, EPure)))
   assert t == TyFn([TyInt], TyInt, EPure)
@@ -13685,7 +13685,7 @@ test "lambdas infer parameters from expected types and track captures" {
   assert str.contains(cx2.diags[0].msg, "cannot infer the type of `x`")
   # a var cannot be captured
   let (cxv, _) = declare(cxk, "v", TyInt, true, 0, 1)
-  let lam2 = ELambda([LambdaParam { name: "y", ann: None, lo: 3, hi: 4 }],
+  let lam2 = ELambda([LambdaParam { name = "y", ann = None, lo = 3, hi = 4 }],
     EVar("v", 9, 10), false, 0, 10)
   let (cx3, _, _) = check_expr(cxv, lam2, Some(TyFn([TyInt], TyInt, EPure)))
   assert str.contains(cx3.diags[0].msg, "lambdas cannot capture `var` bindings")
@@ -13694,7 +13694,7 @@ test "lambdas infer parameters from expected types and track captures" {
 test "apply: piping arguments into an unannotated lambda" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
-  let lam = ELambda([LambdaParam { name: "x", ann: None, lo: 1, hi: 2 }], EVar("x", 7, 8), false, 0, 8)
+  let lam = ELambda([LambdaParam { name = "x", ann = None, lo = 1, hi = 2 }], EVar("x", 7, 8), false, 0, 8)
   let ap = EApply(lam, [pos_arg(EInt(1, 10, 11))], 0, 12)
   let (cx1, t, _) = check_expr(cx, ap, no_expected())
   assert t == TyInt
@@ -13746,42 +13746,42 @@ test "argument names name a signature or a constructor; a value callee says so" 
   let bare_some = ECtor("Some", 0, 4)
   # (1) a constructor accepts them -- and validates them against its fields
   let named = EApply(bare_some,
-    [Arg { name: Some("value"), e: EInt(1, 12, 13), trailing: false, lo: 5, hi: 13 }], 0, 14)
+    [Arg { name = Some("value"), e = EInt(1, 12, 13), trailing = false, lo = 5, hi = 13 }], 0, 14)
   let (cx1, t1, _) = check_expr(cx, named, Some(opt_ty(TyInt)))
   assert t1 == opt_ty(TyInt)
   assert len(cx1.diags) == 0
   let wrong = EApply(bare_some,
-    [Arg { name: Some("nope"), e: EInt(1, 11, 12), trailing: false, lo: 5, hi: 12 }], 0, 13)
+    [Arg { name = Some("nope"), e = EInt(1, 11, 12), trailing = false, lo = 5, hi = 12 }], 0, 13)
   let (cx2, _, _) = check_expr(cx, wrong, Some(opt_ty(TyInt)))
   assert str.contains(cx2.diags[0].msg, "no field `nope`")
   # (2) a local holding a function is a function *value*: no parameter names
   let (cxf, _) = declare(cx, "f", TyFn([TyInt], TyInt, EPure), false, 0, 1)
   let on_fn = EApply(EVar("f", 0, 1),
-    [Arg { name: Some("a"), e: EInt(1, 5, 6), trailing: false, lo: 2, hi: 6 }], 0, 7)
+    [Arg { name = Some("a"), e = EInt(1, 5, 6), trailing = false, lo = 2, hi = 6 }], 0, 7)
   let (cx3, _, _) = check_expr(cxf, on_fn, no_expected())
   assert cx3.diags[0].msg ==
     "`f` is a function value, and a function type carries no parameter names"
   assert cx3.diags[0].hint == "pass the arguments by position"
   assert cx3.diags[0].lo == 2
   # (3) an applied expression is a function value too, with no name to quote
-  let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], [], 4, 7)), lo: 1, hi: 2 }],
+  let lam = ELambda([LambdaParam { name = "x", ann = Some(TNamed("Int", [], [], 4, 7)), lo = 1, hi = 2 }],
     EVar("x", 11, 12), false, 0, 12)
-  let on_value = EApply(lam, [Arg { name: Some("a"), e: EInt(1, 16, 17), trailing: false, lo: 13, hi: 17 }], 0, 18)
+  let on_value = EApply(lam, [Arg { name = Some("a"), e = EInt(1, 16, 17), trailing = false, lo = 13, hi = 17 }], 0, 18)
   let (cx4, _, _) = check_expr(cx, on_value, no_expected())
   assert cx4.diags[0].msg ==
     "this callee is a function value, and a function type carries no parameter names"
   # (4) a Java member: Java metadata has no parameter names
-  cx = Cx { ..cx, jsig: test_jsig(),
-    java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
+  cx = Cx { ..cx, jsig = test_jsig(),
+    java_classes = map.insert(cx.java_classes, "Long", "java.lang.Long") }
   let jrecv = ECtor("Long", 0, 4)
   let on_java = EApply(EFieldAcc(jrecv, "MAX_VALUE", 5, 14, 0, 14),
-    [Arg { name: Some("a"), e: EInt(1, 18, 19), trailing: false, lo: 15, hi: 19 }], 0, 20)
+    [Arg { name = Some("a"), e = EInt(1, 18, 19), trailing = false, lo = 15, hi = 19 }], 0, 20)
   let (cx5, _, _) = check_expr(cx, on_java, no_expected())
   assert cx5.diags[0].msg == "`Long.MAX_VALUE` is a Java member; " ++
     "Java methods carry no parameter names"
   # (5) a dot call on an undefined method reports the name, not the arguments
   let on_dot = EMethod(EVar("f", 0, 1), "g",
-    [Arg { name: Some("a"), e: EInt(1, 6, 7), trailing: false, lo: 3, hi: 7 }], 2, 3, 0, 8)
+    [Arg { name = Some("a"), e = EInt(1, 6, 7), trailing = false, lo = 3, hi = 7 }], 2, 3, 0, 8)
   let (cx6, _, _) = check_expr(cxf, on_dot, no_expected())
   assert cx6.diags[0].msg == "undefined function: g"
 }
@@ -13790,24 +13790,24 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
   let sg = Sig {
-    name: "move2",
-    param_tys: [TyInt, TyBool],
-    param_names: ["dx", "wrap"],
-    param_defaults: [],
-    caller_params: [],
-    ret: TyUnit,
-    eff: EPure,
-    is_builtin: false,
-    tparams: [],
-    constraints: [],
-    eparams: [],
-    owner: Some("m"),
-    trait_id: None,
-    op_of: None,
-    inferring: false
+    name = "move2",
+    param_tys = [TyInt, TyBool],
+    param_names = ["dx", "wrap"],
+    param_defaults = [],
+    caller_params = [],
+    ret = TyUnit,
+    eff = EPure,
+    is_builtin = false,
+    tparams = [],
+    constraints = [],
+    eparams = [],
+    owner = Some("m"),
+    trait_id = None,
+    op_of = None,
+    inferring = false
   }
-  cx = Cx { ..cx, fns: map.insert(cx.fns, "move2", sg) }
-  let named_arg = (n: String, e: Expr) => Arg { name: Some(n), e: e, trailing: false, lo: e_lo(e), hi: e_hi(e) }
+  cx = Cx { ..cx, fns = map.insert(cx.fns, "move2", sg) }
+  let named_arg = (n: String, e: Expr) => Arg { name = Some(n), e = e, trailing = false, lo = e_lo(e), hi = e_hi(e) }
   # written in declaration order: a plain call node, no wrapper
   let ok = EApply(EVar("move2", 0, 5),
     [named_arg("dx", EInt(1, 6, 7)), named_arg("wrap", EBool(true, 8, 12))], 0, 13)
@@ -13876,8 +13876,8 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   # That function takes the parameter before it (spec §3.1), so the written
   # argument is bound once, the default is bound reading it, and the call
   # reads both locals
-  let sg2 = Sig { ..sg, param_defaults: [None, Some("false")] }
-  var cxd = Cx { ..cx, fns: map.insert(cx.fns, "move2", sg2) }
+  let sg2 = Sig { ..sg, param_defaults = [None, Some("false")] }
+  var cxd = Cx { ..cx, fns = map.insert(cx.fns, "move2", sg2) }
   let omitted = EApply(EVar("move2", 0, 5), [pos_arg(EInt(1, 6, 7))], 0, 8)
   let (cx8, t8, n8) = check_expr(cxd, omitted, no_expected())
   assert t8 == TyUnit
@@ -13915,14 +13915,14 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   # witnesses in this call's order (#207 §4.3)
   let tv = TyVar("T", 0)
   let gsig = Sig {
-    name: "hold", param_tys: [TyList(tv), tv], param_names: ["xs", "probe"],
-    param_defaults: [Some("[]"), None],
-    caller_params: [],
-    ret: TyInt,
-    eff: EPure, is_builtin: false, tparams: [tv], constraints: [[EQ_ID]], eparams: [],
-    owner: Some("m"), trait_id: None, op_of: None, inferring: false
+    name = "hold", param_tys = [TyList(tv), tv], param_names = ["xs", "probe"],
+    param_defaults = [Some("[]"), None],
+    caller_params = [],
+    ret = TyInt,
+    eff = EPure, is_builtin = false, tparams = [tv], constraints = [[EQ_ID]], eparams = [],
+    owner = Some("m"), trait_id = None, op_of = None, inferring = false
   }
-  let cxg = Cx { ..cx, fns: map.insert(cx.fns, "hold", gsig) }
+  let cxg = Cx { ..cx, fns = map.insert(cx.fns, "hold", gsig) }
   let gcall = EApply(EVar("hold", 0, 4), [named_arg("probe", EInt(1, 5, 6))], 0, 7)
   let (cx10, t10, n10) = check_expr(cxg, gcall, no_expected())
   assert len(cx10.diags) == 0
@@ -13968,24 +13968,24 @@ test "omitted defaults run after the written arguments, in declaration order" {
   # f(a: Int, b: Int = a, c: Bool, d: Int = b): two defaults that read
   # parameters, one of them an earlier default
   let sg = Sig {
-    name: "f",
-    param_tys: [TyInt, TyInt, TyBool, TyInt],
-    param_names: ["a", "b", "c", "d"],
-    param_defaults: [None, Some("a"), None, Some("b")],
-    caller_params: [],
-    ret: TyInt,
-    eff: EPure,
-    is_builtin: false,
-    tparams: [],
-    constraints: [],
-    eparams: [],
-    owner: Some("m"),
-    trait_id: None,
-    op_of: None,
-    inferring: false
+    name = "f",
+    param_tys = [TyInt, TyInt, TyBool, TyInt],
+    param_names = ["a", "b", "c", "d"],
+    param_defaults = [None, Some("a"), None, Some("b")],
+    caller_params = [],
+    ret = TyInt,
+    eff = EPure,
+    is_builtin = false,
+    tparams = [],
+    constraints = [],
+    eparams = [],
+    owner = Some("m"),
+    trait_id = None,
+    op_of = None,
+    inferring = false
   }
-  cx = Cx { ..cx, fns: map.insert(cx.fns, "f", sg) }
-  let named_arg = (n: String, e: Expr) => Arg { name: Some(n), e: e, trailing: false, lo: e_lo(e), hi: e_hi(e) }
+  cx = Cx { ..cx, fns = map.insert(cx.fns, "f", sg) }
+  let named_arg = (n: String, e: Expr) => Arg { name = Some(n), e = e, trailing = false, lo = e_lo(e), hi = e_hi(e) }
   # written as `f(c: true, a: 1)`: the written arguments first, in written
   # order, then each omitted default in declaration order
   let call = EApply(EVar("f", 0, 1), [named_arg("c", EBool(true, 2, 6)), named_arg("a", EInt(1, 7, 8))], 0, 9)
@@ -14031,8 +14031,8 @@ test "omitted defaults run after the written arguments, in declaration order" {
   assert lets2 == []
   # an omitted *first* parameter reads nothing, so nothing is bound for it:
   # the call is what it was before defaults could read parameters
-  let sg0 = Sig { ..sg, name: "g", param_defaults: [Some("1"), None, None, None] }
-  let cx0 = Cx { ..cx, fns: map.insert(cx.fns, "g", sg0) }
+  let sg0 = Sig { ..sg, name = "g", param_defaults = [Some("1"), None, None, None] }
+  let cx0 = Cx { ..cx, fns = map.insert(cx.fns, "g", sg0) }
   let first = EApply(EVar("g", 0, 1),
     [named_arg("b", EInt(2, 2, 3)), named_arg("c", EBool(true, 4, 8)), named_arg("d", EInt(3, 9, 10))], 0, 11)
   let (cx3, _, n3) = check_expr(cx0, first, no_expected())
@@ -14138,7 +14138,7 @@ test "the same call, four callees, four kinds of typed node" {
     _ -> { assert false }
   }
   # anything else applies a function value
-  let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], [], 4, 7)), lo: 1, hi: 2 }],
+  let lam = ELambda([LambdaParam { name = "x", ann = Some(TNamed("Int", [], [], 4, 7)), lo = 1, hi = 2 }],
     EVar("x", 11, 12), false, 0, 12)
   let (_, _, n4) = check_expr(cx, EApply(lam, [pos_arg(EInt(1, 13, 14))], 0, 15), no_expected())
   match n4 {
@@ -14163,7 +14163,7 @@ test "ctor calls infer type arguments; constants land as refs" {
   assert t3 == opt_ty(TyString)
   assert len(cx3.diags) == 0
   # a SCREAMING const reference
-  cx = Cx { ..cx, consts: map.insert(cx.consts, "LIMIT", TyInt) }
+  cx = Cx { ..cx, consts = map.insert(cx.consts, "LIMIT", TyInt) }
   let (cx4, t4, node4) = check_expr(cx, ECtor("LIMIT", 0, 5), no_expected())
   assert t4 == TyInt
   match node4 {
@@ -14177,30 +14177,30 @@ test "match checks arms, unifies results and demands exhaustiveness" {
   cx = push_scope(cx)
   let (cxo, _) = declare(cx, "o", opt_ty(TyInt), false, 0, 1)
   let arm = MatchArm {
-    pat: PCtor("Some", [PatArg { name: None, nlo: 10, nhi: 11, pat: PBind("v", 10, 11) }],
+    pat = PCtor("Some", [PatArg { name = None, nlo = 10, nhi = 11, pat = PBind("v", 10, 11) }],
       false, 5, 9, 5, 12),
-    guard: None,
-    body: EVar("v", 16, 17),
-    lo: 5,
-    hi: 17
+    guard = None,
+    body = EVar("v", 16, 17),
+    lo = 5,
+    hi = 17
   }
   let m1 = EMatch(EVar("o", 0, 1), [arm], 0, 18)
   let (cx1, t, _) = check_expr(cxo, m1, no_expected())
   assert t == TyInt
   assert cx1.diags[0].msg == "non-exhaustive match, missing: None"
   # a wildcard arm completes it
-  let arm2 = MatchArm { pat: PWild(20, 21), guard: None, body: EInt(0, 25, 26), lo: 20, hi: 26 }
+  let arm2 = MatchArm { pat = PWild(20, 21), guard = None, body = EInt(0, 25, 26), lo = 20, hi = 26 }
   let m2 = EMatch(EVar("o", 0, 1), [arm, arm2], 0, 27)
   let (cx2, t2, _) = check_expr(cxo, m2, no_expected())
   assert t2 == TyInt
   assert len(cx2.diags) == 0
   # a guarded arm does not count toward exhaustiveness
   let arm3 = MatchArm {
-    pat: PWild(20, 21),
-    guard: Some(EBool(true, 22, 26)),
-    body: EInt(0, 30, 31),
-    lo: 20,
-    hi: 31
+    pat = PWild(20, 21),
+    guard = Some(EBool(true, 22, 26)),
+    body = EInt(0, 30, 31),
+    lo = 20,
+    hi = 31
   }
   let m3 = EMatch(EVar("o", 0, 1), [arm, arm3], 0, 32)
   let (cx3, _, _) = check_expr(cxo, m3, no_expected())
@@ -14250,25 +14250,25 @@ test "statements: assignment rules and loop jump tracking" {
 
 fn tj_class(fqcn: String, simple: String) -> JClass =
   JClass {
-    fqcn: fqcn,
-    simple: simple,
-    display: simple,
-    is_interface: false,
-    is_primitive: false,
-    is_array: false
+    fqcn = fqcn,
+    simple = simple,
+    display = simple,
+    is_interface = false,
+    is_primitive = false,
+    is_array = false
   }
 
 fn tj_static(name: String, params: List[String], ret: String, owner: String) -> JMethod =
   JMethod {
-    name: name,
-    param_cls: params,
-    ret_cls: ret,
-    is_static: true,
-    is_varargs: false,
-    is_abstract: false,
-    desc: "public static " ++ ret ++ " " ++ owner ++ "." ++ name ++
+    name = name,
+    param_cls = params,
+    ret_cls = ret,
+    is_static = true,
+    is_varargs = false,
+    is_abstract = false,
+    desc = "public static " ++ ret ++ " " ++ owner ++ "." ++ name ++
       "(" ++ join(params, ",") ++ ")",
-    decl_cls: owner
+    decl_cls = owner
   }
 
 fn tj_find_class(fqcn: String) -> Option[JClass] !io =
@@ -14301,9 +14301,9 @@ fn tj_methods_of(fqcn: String) -> List[JMethod] !io =
 
 fn tj_fields_of(fqcn: String) -> List[JField] !io =
   if fqcn == "java.lang.Math" {
-    [JField { name: "PI", type_cls: "double", decl_cls: "java.lang.Math" }]
+    [JField { name = "PI", type_cls = "double", decl_cls = "java.lang.Math" }]
   } else if fqcn == "java.lang.Integer" {
-    [JField { name: "MAX_VALUE", type_cls: "int", decl_cls: "java.lang.Integer" }]
+    [JField { name = "MAX_VALUE", type_cls = "int", decl_cls = "java.lang.Integer" }]
   } else {
     []
   }
@@ -14315,12 +14315,12 @@ fn test_jsig() -> Jsig = {
   let base = jsig_refused()
   Jsig {
     ..base,
-    on: true,
-    find_class: tj_find_class,
-    class_info: tj_class_info,
-    methods_of: tj_methods_of,
-    static_fields_of: tj_fields_of,
-    is_assignable: tj_is_assignable
+    on = true,
+    find_class = tj_find_class,
+    class_info = tj_class_info,
+    methods_of = tj_methods_of,
+    static_fields_of = tj_fields_of,
+    is_assignable = tj_is_assignable
   }
 }
 
@@ -14343,7 +14343,7 @@ test "Never fits every SAM return representation" {
 }
 
 test "Java Object arguments require checked narrowing" {
-  let cx = Cx { ..test_cx(), jsig: test_jsig() }
+  let cx = Cx { ..test_cx(), jsig = test_jsig() }
   let obj = TyJava("java.lang.Object", "Object")
   let string_ref = TyJava("java.lang.String", "String")
   let object_score = param_score(cx, "java.lang.String", Some(obj), 0)
@@ -14369,9 +14369,9 @@ test "a Java char return explains the incompatible character models" {
 
 test "java calls resolve overloads, wrap references and reject unknowns" {
   var cx = seed_prelude(test_cx())
-  cx = Cx { ..cx, jsig: test_jsig(),
-    java_classes: map.insert(cx.java_classes, "Math", "java.lang.Math") }
-  cx = Cx { ..cx, java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
+  cx = Cx { ..cx, jsig = test_jsig(),
+    java_classes = map.insert(cx.java_classes, "Math", "java.lang.Math") }
+  cx = Cx { ..cx, java_classes = map.insert(cx.java_classes, "Long", "java.lang.Long") }
   cx = push_scope(cx)
   # Math.abs(1): the long overload beats int; primitive return is Int
   let recv = ECtor("Math", 0, 4)
@@ -14401,9 +14401,9 @@ test "java calls resolve overloads, wrap references and reject unknowns" {
 
 test "static field access reads Class.FIELD, maps types, rejects unknowns" {
   var cx = seed_prelude(test_cx())
-  cx = Cx { ..cx, jsig: test_jsig(),
-    java_classes: map.insert(cx.java_classes, "Math", "java.lang.Math") }
-  cx = Cx { ..cx, java_classes: map.insert(cx.java_classes, "Integer", "java.lang.Integer") }
+  cx = Cx { ..cx, jsig = test_jsig(),
+    java_classes = map.insert(cx.java_classes, "Math", "java.lang.Math") }
+  cx = Cx { ..cx, java_classes = map.insert(cx.java_classes, "Integer", "java.lang.Integer") }
   cx = push_scope(cx)
   # Math.PI is a double -> Float; the node is a field read
   let recv = ECtor("Math", 0, 4)
@@ -14457,9 +14457,9 @@ test "ufcs rewrites x.f(a) into f(x, a) with the receiver pre-typed" {
 fn bind_dicts(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
   let empty_d: Map[(Int, Int), Int] = map.empty()
   if not list.any(s.constraints, bs => len(bs) > 0) {
-    return Cx { ..cx, frame: Frame { ..cx.frame, dict_syms: empty_d } }
+    return Cx { ..cx, frame = Frame { ..cx.frame, dict_syms = empty_d } }
   }
-  var cx1 = Cx { ..cx, frame: Frame { ..cx.frame, dict_syms: empty_d } }
+  var cx1 = Cx { ..cx, frame = Frame { ..cx.frame, dict_syms = empty_d } }
   var i = 0
   for tp in s.tparams {
     for tr_id in bounds_of(s, i) {
@@ -14468,20 +14468,20 @@ fn bind_dicts(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
           let tr_name = trait_of(cx1.traits, tr_id).name
           let (cx2, sid) = fresh(cx1)
           let sym = Sym {
-            name: tr_name ++ "$" ++ tn,
-            ty: tp,
-            mutable: false,
-            dlo: owner_off(cx, nlo),
-            dhi: owner_off(cx, nhi),
-            dict_of: Some((tr_id, vid)),
-            ev_of: None,
-            cell_of: None
+            name = tr_name ++ "$" ++ tn,
+            ty = tp,
+            mutable = false,
+            dlo = owner_off(cx, nlo),
+            dhi = owner_off(cx, nhi),
+            dict_of = Some((tr_id, vid)),
+            ev_of = None,
+            cell_of = None
           }
           cx1 = write_symbol(Cx {
             ..cx2,
-            frame: Frame {
+            frame = Frame {
               ..cx2.frame,
-              dict_syms: map.insert(cx2.frame.dict_syms, (vid, tr_id), sid)
+              dict_syms = map.insert(cx2.frame.dict_syms, (vid, tr_id), sid)
             }
           }, sid, sym)
         }
@@ -14548,21 +14548,21 @@ fn enter_fn(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
   }
   var cx1 = Cx {
     ..entry,
-    current_tparams: tp,
-    current_eff_vars: ev,
-    frame: Frame { ..cx.frame, current_sig: Some(s) }
+    current_tparams = tp,
+    current_eff_vars = ev,
+    frame = Frame { ..cx.frame, current_sig = Some(s) }
   }
   cx1 = bind_dicts(cx1, s, nlo, nhi)
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   cx1 = Cx {
     ..cx1,
-    frame: Frame {
+    frame = Frame {
       ..cx1.frame,
-      used_effects: [],
-      eff_witness: empty_w,
-      lambda_stack: [],
-      loop_stack: [],
-      scopes: []
+      used_effects = [],
+      eff_witness = empty_w,
+      lambda_stack = [],
+      loop_stack = [],
+      scopes = []
     }
   }
   bind_evidence(push_scope(cx1), s, nlo, nhi)
@@ -14806,21 +14806,21 @@ fn verify_effects(
 ## `eparams` stays empty because a default is refused any effect.
 pub fn default_sig(parent: Sig, fname: String, k: Int, pty: Ty) -> Sig =
   Sig {
-    name: fname ++ "\$default\$" ++ to_string(k),
-    param_tys: list.take(parent.param_tys, k),
-    param_names: list.take(parent.param_names, k),
-    param_defaults: [],
-    caller_params: [],
-    ret: pty,
-    eff: EPure,
-    is_builtin: false,
-    tparams: parent.tparams,
-    constraints: parent.constraints,
-    eparams: [],
-    owner: parent.owner,
-    trait_id: None,
-    op_of: None,
-    inferring: false
+    name = fname ++ "\$default\$" ++ to_string(k),
+    param_tys = list.take(parent.param_tys, k),
+    param_names = list.take(parent.param_names, k),
+    param_defaults = [],
+    caller_params = [],
+    ret = pty,
+    eff = EPure,
+    is_builtin = false,
+    tparams = parent.tparams,
+    constraints = parent.constraints,
+    eparams = [],
+    owner = parent.owner,
+    trait_id = None,
+    op_of = None,
+    inferring = false
   }
 
 ## Strip parameter defaults off a declaration whose position refuses them
@@ -14837,7 +14837,7 @@ pub fn strip_param_defaults(d: FnDecl) -> FnDecl = {
   if not any { return d }
   let none_e: Option[Expr] = None
   let none_s: Option[String] = None
-  FnDecl { ..d, params: map(d.params, p => Param { ..p, default: none_e, default_src: none_s }) }
+  FnDecl { ..d, params = map(d.params, p => Param { ..p, default = none_e, default_src = none_s }) }
 }
 
 fn no_tdefault() -> Option[TDefault] = None
@@ -14896,7 +14896,7 @@ pub(pkg) fn check_param_default(cx: Cx, d: FnDecl, s: Sig, k: Int) -> (Cx, TDefa
     }
   }
   let dsyms = dict_sym_list(cxd, dsig)
-  (pop_scope(cxd), TDefault { body: dx, param_syms: psyms, dict_syms: dsyms })
+  (pop_scope(cxd), TDefault { body = dx, param_syms = psyms, dict_syms = dsyms })
 }
 
 ## Re-word the diagnostics a default raised (from index `before` on) that are
@@ -14920,21 +14920,21 @@ fn explain_param_refs(cx: Cx, before: Int, d: FnDecl, k: Int) -> Cx = {
     let name = unresolved_name(dg.msg)
     if name == own {
       out = out ++ [Diag { ..dg,
-        msg: "the default of parameter `" ++ own ++ "` refers to `" ++ own ++ "` itself",
-        hint: "a default is the value `" ++ own ++ "` takes when the argument is omitted, " ++
+        msg = "the default of parameter `" ++ own ++ "` refers to `" ++ own ++ "` itself",
+        hint = "a default is the value `" ++ own ++ "` takes when the argument is omitted, " ++
           "so `" ++ own ++ "` has no value yet; a default sees only the parameters declared before it" }]
     } else if name != "" && set.has(later, name) {
       out = out ++ [Diag { ..dg,
-        msg: "the default of parameter `" ++ own ++ "` refers to `" ++ name ++
+        msg = "the default of parameter `" ++ own ++ "` refers to `" ++ name ++
           "`, which is declared after it",
-        hint: "defaults are evaluated in declaration order and see only the parameters " ++
+        hint = "defaults are evaluated in declaration order and see only the parameters " ++
           "declared before them; declare `" ++ name ++ "` before `" ++ own ++ "`, or pass `" ++
           own ++ "` explicitly" }]
     } else {
       out = out ++ [dg]
     }
   }
-  Cx { ..cx, diags: out }
+  Cx { ..cx, diags = out }
 }
 
 ## The name an unresolved-name diagnostic is about, or "" for any other
@@ -15143,7 +15143,7 @@ pub(pkg) fn function_entry(cx: Cx, d: FnDecl, s: Sig) -> FunctionEntry = {
     psyms = psyms ++ [sid]
     i = i + 1
   }
-  FunctionEntry { cx: cx1, parameters: psyms }
+  FunctionEntry { cx = cx1, parameters = psyms }
 }
 
 ## Defaults have already been checked in declaration order. Keeping this
@@ -15168,18 +15168,18 @@ pub(pkg) fn check_fn_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]
   let esyms = ev_sym_list(cx1, s)
   cx1 = pop_scope(cx1)
   (cx1, TFun {
-    name: d.name,
-    sig: s,
-    param_syms: psyms,
-    dict_syms: dsyms,
-    ev_syms: esyms,
-    defaults: dtxs,
-    body: bx,
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    decl: "",
-    base: -1
+    name = d.name,
+    sig = s,
+    param_syms = psyms,
+    dict_syms = dsyms,
+    ev_syms = esyms,
+    defaults = dtxs,
+    body = bx,
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    decl = "",
+    base = -1
   })
 }
 
@@ -15220,7 +15220,7 @@ pub(pkg) fn check_fn_inferred_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[
       "the end of the signature", d.nlo, d.nhi)
     final_eff = s.eff
   }
-  let sealed = Sig { ..s, ret: bt, eff: final_eff, inferring: false }
+  let sealed = Sig { ..s, ret = bt, eff = final_eff, inferring = false }
   let dsyms = dict_sym_list(cx1, s)
   let esyms = ev_sym_list(cx1, s)
   var cx3 = pop_scope(cx1)
@@ -15232,18 +15232,18 @@ pub(pkg) fn check_fn_inferred_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[
   }
   (cx3, sealed,
     TFun {
-      name: d.name,
-      sig: sealed,
-      param_syms: psyms,
-      dict_syms: dsyms,
-      ev_syms: esyms,
-      defaults: dtxs,
-      body: bx,
-      is_test: false,
-      impl_of: None,
-      default_of: None,
-      decl: "",
-      base: -1
+      name = d.name,
+      sig = sealed,
+      param_syms = psyms,
+      dict_syms = dsyms,
+      ev_syms = esyms,
+      defaults = dtxs,
+      body = bx,
+      is_test = false,
+      impl_of = None,
+      default_of = None,
+      decl = "",
+      base = -1
     })
 }
 
@@ -15273,38 +15273,38 @@ pub(pkg) fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> 
   let esyms = ev_sym_list(cx1, s)
   cx1 = pop_scope(cx1)
   (cx1, TFun {
-    name: m2.name,
-    sig: s,
-    param_syms: psyms,
-    dict_syms: dsyms,
-    ev_syms: esyms,
-    defaults: [],
-    body: bx,
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    decl: "",
-    base: -1
+    name = m2.name,
+    sig = s,
+    param_syms = psyms,
+    dict_syms = dsyms,
+    ev_syms = esyms,
+    defaults = [],
+    body = bx,
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    decl = "",
+    base = -1
   })
 }
 
 fn test_sig(name: String) -> Sig =
   Sig {
-    name: name,
-    param_tys: [],
-    param_names: [],
-    param_defaults: [],
-    caller_params: [],
-    ret: TyUnit,
-    eff: EIo,
-    is_builtin: false,
-    tparams: [],
-    constraints: [],
-    eparams: [],
-    owner: None,
-    trait_id: None,
-    op_of: None,
-    inferring: false
+    name = name,
+    param_tys = [],
+    param_names = [],
+    param_defaults = [],
+    caller_params = [],
+    ret = TyUnit,
+    eff = EIo,
+    is_builtin = false,
+    tparams = [],
+    constraints = [],
+    eparams = [],
+    owner = None,
+    trait_id = None,
+    op_of = None,
+    inferring = false
   }
 
 ## Check one test block: fresh frame, assert allowed, io implicit (spec §3.4).
@@ -15315,19 +15315,19 @@ pub(pkg) fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   var cx1 = Cx {
     ..cx,
-    current_tparams: empty_tp,
-    current_eff_vars: empty_ev,
-    frame: Frame {
+    current_tparams = empty_tp,
+    current_eff_vars = empty_ev,
+    frame = Frame {
       ..cx.frame,
-      current_sig: None,
-      dict_syms: empty_d,
-      used_effects: [],
-      eff_witness: empty_w,
-      lambda_stack: [],
-      loop_stack: [],
-      scopes: []
+      current_sig = None,
+      dict_syms = empty_d,
+      used_effects = [],
+      eff_witness = empty_w,
+      lambda_stack = [],
+      loop_stack = [],
+      scopes = []
     },
-    in_test: true
+    in_test = true
   }
   cx1 = push_scope(cx1)
   let (cx2, bt, bx) = check_expr(cx1, body, Some(TyUnit))
@@ -15339,20 +15339,20 @@ pub(pkg) fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
       "assert on it instead of leaving it as the last expression")
   }
   cx1 = pop_scope(cx1)
-  cx1 = Cx { ..cx1, in_test: false }
+  cx1 = Cx { ..cx1, in_test = false }
   (cx1, TFun {
-    name: name,
-    sig: test_sig(name),
-    param_syms: [],
-    dict_syms: [],
-    ev_syms: [],
-    defaults: [],
-    body: bx,
-    is_test: true,
-    impl_of: None,
-    default_of: None,
-    decl: "",
-    base: -1
+    name = name,
+    sig = test_sig(name),
+    param_syms = [],
+    dict_syms = [],
+    ev_syms = [],
+    defaults = [],
+    body = bx,
+    is_test = true,
+    impl_of = None,
+    default_of = None,
+    decl = "",
+    base = -1
   })
 }
 
@@ -15368,9 +15368,9 @@ pub(pkg) fn check_const_init(
   let empty_ev: Map[String, Eff] = map.empty()
   var cx1 = Cx {
     ..cx,
-    current_tparams: empty_tp,
-    current_eff_vars: empty_ev,
-    const_cutoff: Some(visible)
+    current_tparams = empty_tp,
+    current_eff_vars = empty_ev,
+    const_cutoff = Some(visible)
   }
   let (cx2, frame) = enter_isolated(cx1)
   let (cx3, bt, bx) = check_expr(cx2, d.init, Some(declared))
@@ -15381,9 +15381,9 @@ pub(pkg) fn check_const_init(
     cx1 = cerr(cx1, "`" ++ d.name ++ "` declares type " ++ declared_text ++
         " but its initializer is " ++ body_text, e_lo(d.init), e_hi(d.init))
   }
-  cx1 = Cx { ..cx1, const_cutoff: None }
-  (cx1, TConst { name: d.name, ty: declared, init: bx,
-    lo: owner_off(cx, d.lo), hi: owner_off(cx, d.hi), decl: "" })
+  cx1 = Cx { ..cx1, const_cutoff = None }
+  (cx1, TConst { name = d.name, ty = declared, init = bx,
+    lo = owner_off(cx, d.lo), hi = owner_off(cx, d.hi), decl = "" })
 }
 
 fn no_tfun() -> Option[TFun] = None
@@ -15424,7 +15424,7 @@ pub(pkg) fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]
   # the header passes below record where each written type reference sat, so
   # the public surface validator can blame the innermost token the author
   # wrote rather than the declaration's name (docs/public-surface-design.md §八)
-  cx1 = Cx { ..cx1, record_ty_spans: true }
+  cx1 = Cx { ..cx1, record_ty_spans = true }
   cx1 = pass_java_uses(cx1, m)
   cx1 = pass_imports(cx1, m, env)
   let (cxa, shells) = pass_type_shells(cx1, m)
@@ -15460,9 +15460,9 @@ pub(pkg) fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]
   # is walking so that what it mints is numbered inside it; the boundary they
   # add up to is not inside any of them, which is what lets a header product
   # be captured across the whole of it.
-  cx1 = leave_decl_owner(Cx { ..cx1, record_ty_spans: false, ty_spans: no_spans })
-  ModuleHeaders { syntax: m, cx: cx1, sigs: sigs, impl_sigs: impl_sigs, const_tys: const_tys,
-    recovered: false, damaged: set.empty() }
+  cx1 = leave_decl_owner(Cx { ..cx1, record_ty_spans = false, ty_spans = no_spans })
+  ModuleHeaders { syntax = m, cx = cx1, sigs = sigs, impl_sigs = impl_sigs, const_tys = const_tys,
+    recovered = false, damaged = set.empty() }
 }
 
 ## Keep checking order separate from emission order: bodies are checked in
@@ -15505,27 +15505,27 @@ pub(pkg) type BodyExecutor[S] = {
 }
 
 pub(pkg) fn cold_body_executor[S]() -> BodyExecutor[S] = BodyExecutor {
-  function: (state, cx, d, sig) => {
+  function = (state, cx, d, sig) => {
     let (next, tree) = check_fn(cx, d, sig)
     (state, next, tree)
   },
-  inferred_body: (state, cx, d, sig) => {
+  inferred_body = (state, cx, d, sig) => {
     let (next, _, tree) = check_fn_inferred(cx, d, sig)
     (state, next, tree)
   },
-  constant: (state, cx, d, ty, visible) => {
+  constant = (state, cx, d, ty, visible) => {
     let (next, tree) = check_const_init(cx, d, ty, visible)
     (state, next, tree)
   },
-  method: (state, cx, trait_name, subject, d, sig) => {
+  method = (state, cx, trait_name, subject, d, sig) => {
     let (next, tree) = check_fn(cx, d, sig)
     (state, next, tree)
   },
-  default_body: (state, cx, trait_id, d, sig, body) => {
+  default_body = (state, cx, trait_id, d, sig, body) => {
     let (next, tree) = check_trait_default(cx, d, sig, body)
     (state, next, tree)
   },
-  test_body: (state, cx, name, body) => {
+  test_body = (state, cx, name, body) => {
     let (next, tree) = check_test(cx, name, body)
     (state, next, tree)
   }
@@ -15554,8 +15554,8 @@ type Entered = { cx: Cx, resolver: tast_positions.Resolver, decl: String }
 fn enter_decl(cx: Cx, view: identity.DeclSpans, path: List[identity.Part]) -> Entered = {
   let decl = identity.path_text(path)
   match identity.span_at(view, decl) {
-    None -> Entered { cx: unowned(cx),
-      resolver: tast_positions.unowned(cx.site_path, cx.line_starts, cx.source), decl: decl }
+    None -> Entered { cx = unowned(cx),
+      resolver = tast_positions.unowned(cx.site_path, cx.line_starts, cx.source), decl = decl }
     Some(sp) -> {
       # A diagnostic names the view it resolves against by module path, which
       # only the driver can supply. The typed tree names nothing: it is
@@ -15568,8 +15568,8 @@ fn enter_decl(cx: Cx, view: identity.DeclSpans, path: List[identity.Part]) -> En
       # The same declaration the header passes entered, so what its body binds
       # continues its slots instead of reissuing them. A body whose header was
       # never entered starts at zero, which is still its own numbering.
-      Entered { cx: enter_decl_owner(entered, path, sp.lo, sp.hi),
-        resolver: tast_positions.owned(sp.lo, sp.hi, cx.site_path, cx.line_starts, cx.source), decl: decl }
+      Entered { cx = enter_decl_owner(entered, path, sp.lo, sp.hi),
+        resolver = tast_positions.owned(sp.lo, sp.hi, cx.site_path, cx.line_starts, cx.source), decl = decl }
     }
   }
 }
@@ -15581,7 +15581,7 @@ fn enter_decl(cx: Cx, view: identity.DeclSpans, path: List[identity.Part]) -> En
 ## symbol minted before it keeps the positions that symbol already had.
 fn left(entered: Entered, after: Cx) -> Cx =
   unowned(Cx { ..after,
-    syms: tast_positions.symbols(entered.resolver, after.syms, mint_cursor(entered.cx), mint_cursor(after)) })
+    syms = tast_positions.symbols(entered.resolver, after.syms, mint_cursor(entered.cx), mint_cursor(after)) })
 
 ## The syntactic call graph over the inferred functions: for each pending
 ## name, the pending names its body mentions. It is the one step of the
@@ -15876,8 +15876,8 @@ fn attempt_inferred_group[S](entry: S, cx: Cx, done: Map[Int, TFun], settled: Se
       # -- and such a module is already refused for the duplicate.
       if ordered || not used_unsealed {
         state = next_state
-        cx1 = left(owner, Cx { ..cxe, unsealed_uses: set.empty() })
-        inferred = map.insert(inferred, idx, TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl })
+        cx1 = left(owner, Cx { ..cxe, unsealed_uses = set.empty() })
+        inferred = map.insert(inferred, idx, TFun { ..tast_positions.function(owner.resolver, tf), decl = owner.decl })
         sealed_some = true
       } else {
         blocked = blocked ++ [idx]
@@ -15949,7 +15949,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
         # would make every pure caller report an effect it cannot see. A
         # declared effect row is the author's and stays.
         if len(d.effs) == 0 {
-          cx1 = write_signature(cx1, d.name, Sig { ..sigs[i], eff: EPure })
+          cx1 = write_signature(cx1, d.name, Sig { ..sigs[i], eff = EPure })
         }
       } else {
         pending = pending ++ [i]
@@ -15997,7 +15997,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
         let (next_state, cxe, tc) = executor.constant(state, owner.cx, d, declared, visible)
         state = next_state
         cx1 = left(owner, cxe)
-        tconsts = tconsts ++ [TConst { ..tast_positions.constant(owner.resolver, tc), decl: owner.decl }]
+        tconsts = tconsts ++ [TConst { ..tast_positions.constant(owner.resolver, tc), decl = owner.decl }]
       } else { () }
       _ -> ()
     }
@@ -16017,7 +16017,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
       let (next_state, cxe, tf) = executor.function(state, owner.cx, d, sigs[i])
       state = next_state
       cx1 = left(owner, cxe)
-      tfuns = tfuns ++ [Some(TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl })]
+      tfuns = tfuns ++ [Some(TFun { ..tast_positions.function(owner.resolver, tf), decl = owner.decl })]
     } else {
       match map.get(inferred, i) {
         Some(tf) -> { tfuns = tfuns ++ [Some(tf)] }
@@ -16049,7 +16049,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
           state = next_state
           cx1 = left(owner, cxe)
           impl_tfuns = impl_tfuns ++
-            [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, impl_of: imp_key }]
+            [TFun { ..tast_positions.function(owner.resolver, tf), decl = owner.decl, impl_of = imp_key }]
         } else { () }
         _ -> ()
       }
@@ -16078,7 +16078,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
                   state = next_state
                   cx1 = left(owner, cxe)
                   default_tfuns = default_tfuns ++
-                    [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, default_of: Some(t) }]
+                    [TFun { ..tast_positions.function(owner.resolver, tf), decl = owner.decl, default_of = Some(t) }]
                 }
                 None -> ()
               }
@@ -16100,7 +16100,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
       let (next_state, cxe, tf) = executor.test_body(state, owner.cx, t.name, t.body)
       state = next_state
       cx1 = left(owner, cxe)
-      ttests = ttests ++ [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl }]
+      ttests = ttests ++ [TFun { ..tast_positions.function(owner.resolver, tf), decl = owner.decl }]
     }
   }
   var fns_out: List[TFun] = []
@@ -16119,8 +16119,8 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
     cx1 = selfrec.report_self_recursion(cx1, fns_out, impl_tfuns)
     cx1 = import_use.report_unused_imports(cx1, m)
   }
-  (state, ModuleBodies { cx: cx1, functions: fns_out, constants: tconsts,
-    impl_methods: impl_tfuns, trait_defaults: default_tfuns, tests: ttests })
+  (state, ModuleBodies { cx = cx1, functions = fns_out, constants = tconsts,
+    impl_methods = impl_tfuns, trait_defaults = default_tfuns, tests = ttests })
 }
 
 test "a typed span cuts the source the declaration actually holds" {
@@ -16164,27 +16164,27 @@ pub(pkg) fn assemble_module_bodies(products: ModuleBodies) -> (Cx, TModule) = {
         Some(dd) -> {
           let ds = default_sig(tf.sig, tf.name, k, tf.sig.param_tys[k])
           synth = synth ++ [TFun {
-            name: ds.name,
-            sig: ds,
-            param_syms: dd.param_syms,
+            name = ds.name,
+            sig = ds,
+            param_syms = dd.param_syms,
             # the signature repeats the parent's bounds, so the body binds one
             # dictionary per bound -- the same symbols `check_param_defaults`
             # checked it against. Leaving these empty while the signature
             # carries constraints is a descriptor/body disagreement, which is
             # a verification error at run time rather than a diagnostic.
-            dict_syms: dd.dict_syms,
-            ev_syms: [],
-            defaults: [],
-            body: dd.body,
-            is_test: false,
-            impl_of: None,
-            default_of: None,
+            dict_syms = dd.dict_syms,
+            ev_syms = [],
+            defaults = [],
+            body = dd.body,
+            is_test = false,
+            impl_of = None,
+            default_of = None,
             # the parameter default's own path under its parent's, the key
             # `identity.located` gives the default expression
-            decl: tf.decl ++ identity.path_text([identity.Named(identity.ParameterDefault, tf.sig.param_names[k])]),
+            decl = tf.decl ++ identity.path_text([identity.Named(identity.ParameterDefault, tf.sig.param_names[k])]),
             # its body was resolved with the parent's resolver
             # (`tast_positions.function`), so it is measured from the parent too
-            base: tf.base
+            base = tf.base
           }]
           cx1 = write_signature(cx1, ds.name, ds)
         }
@@ -16194,7 +16194,7 @@ pub(pkg) fn assemble_module_bodies(products: ModuleBodies) -> (Cx, TModule) = {
     }
   }
   fns_out = fns_out ++ synth ++ products.impl_methods ++ products.trait_defaults
-  (cx1, TModule { fns: fns_out, consts: products.constants, tests: products.tests, syms: cx1.syms })
+  (cx1, TModule { fns = fns_out, consts = products.constants, tests = products.tests, syms = cx1.syms })
 }
 
 ## The diagnostics of one source, in order.
@@ -16545,15 +16545,15 @@ test "check_module: a whole module checks end to end" {
 
 test "impl body tags read the entry scope without publishing lookup diagnostics" {
   let subject = TNamed("List", [TNamed("T", [], [], 1, 2)], [], 0, 3)
-  let initial = Cx { ..test_cx(), traits_by_name: map.from([("Read", 77)]),
-    current_tparams: map.from([("T", TyInt)]) }
+  let initial = Cx { ..test_cx(), traits_by_name = map.from([("Read", 77)]),
+    current_tparams = map.from([("T", TyInt)]) }
   assert impl_body_key(initial, "Read", subject) == Some((77, TyList(TyInt)))
-  let changed = Cx { ..initial, current_tparams: map.from([("T", TyString)]) }
+  let changed = Cx { ..initial, current_tparams = map.from([("T", TyString)]) }
   assert impl_body_key(changed, "Read", subject) == Some((77, TyList(TyString)))
   assert impl_body_key(initial, "Missing", subject) == None
   # Keep the existing whole-subject TyError test: a nested unresolved type
   # is not silently converted to a new refusal policy by this extraction.
-  let absent = Cx { ..initial, current_tparams: map.empty() }
+  let absent = Cx { ..initial, current_tparams = map.empty() }
   assert impl_body_key(absent, "Read", subject) == Some((77, TyList(TyError)))
   assert absent.diags == []
 }
@@ -16572,12 +16572,12 @@ test "body executor threads current state through every scheduled role" {
   let cold = check_module_body_products(headers)
   assert cold.cx.diags == []
   let executor: BodyExecutor[List[String]] = BodyExecutor {
-    function: (state, cx, d, sig) => {
+    function = (state, cx, d, sig) => {
       assert state == ["infer leaf", "infer caller", "const A", "const B"]
       let (next, tree) = check_fn(cx, d, sig)
       (state ++ ["fn " ++ d.name], next, tree)
     },
-    inferred_body: (state, cx, d, sig) => {
+    inferred_body = (state, cx, d, sig) => {
       if d.name == "caller" {
         let leaf = map.get(cx.fns, "leaf").expect("current inferred callee")
         assert not leaf.inferring && leaf.ret == TyInt
@@ -16586,25 +16586,25 @@ test "body executor threads current state through every scheduled role" {
       let (next, _, tree) = check_fn_inferred(cx, d, sig)
       (state ++ ["infer " ++ d.name], next, tree)
     },
-    constant: (state, cx, d, ty, visible) => {
+    constant = (state, cx, d, ty, visible) => {
       assert not map.get(cx.fns, "caller").expect("sealed caller").inferring
       if d.name == "A" { assert visible == set.empty() }
       else { assert visible == set.from(["A"]) }
       let (next, tree) = check_const_init(cx, d, ty, visible)
       (state ++ ["const " ++ d.name], next, tree)
     },
-    method: (state, cx, trait_name, subject, d, sig) => {
+    method = (state, cx, trait_name, subject, d, sig) => {
       assert trait_name == "Waxy" && impl_body_key(cx, trait_name, subject) != None
       let (next, tree) = check_fn(cx, d, sig)
       assert tree.impl_of == None
       (state ++ ["method " ++ d.name], next, tree)
     },
-    default_body: (state, cx, tid, d, sig, body) => {
+    default_body = (state, cx, tid, d, sig, body) => {
       assert sig.trait_id == Some(tid)
       let (next, tree) = check_trait_default(cx, d, sig, body)
       (state ++ ["default " ++ d.name], next, tree)
     },
-    test_body: (state, cx, name, body) => {
+    test_body = (state, cx, name, body) => {
       let (next, tree) = check_test(cx, name, body)
       (state ++ ["test " ++ name], next, tree)
     }
@@ -16634,11 +16634,11 @@ test "body executor preserves cycle refusal and diagnostic recovery" {
   # unsealed signature. Nothing the attempt did survives it, the executor
   # state it returned included, so the trace holds only the annotated bodies.
   let executor = BodyExecutor { ..base,
-    inferred_body: (state, cx, d, sig) => {
+    inferred_body = (state, cx, d, sig) => {
       let (next, _, tree) = check_fn_inferred(cx, d, sig)
       (state ++ ["tried " ++ d.name], next, tree)
     },
-    function: (state, cx, d, sig) => {
+    function = (state, cx, d, sig) => {
       assert len(cx.diags) > 0
       let (next, tree) = check_fn(cx, d, sig)
       (state ++ [d.name], next, tree)
@@ -17911,19 +17911,19 @@ fn arm_cx() -> Cx =
     let cx = cx_new(None, None)
     Cx {
       ..cx,
-      frame: Frame {
+      frame = Frame {
         ..cx.frame,
-        lambda_stack: [LambdaCx {
-          boundary: 0,
-          expected_ret: None,
-          captures: [],
-          sugar: true,
-          arm: true,
-          ctl: false,
-          local_fn: None,
-          handler_of: None,
-          staged_kind: OrdinaryClosure,
-          staged: map.empty()
+        lambda_stack = [LambdaCx {
+          boundary = 0,
+          expected_ret = None,
+          captures = [],
+          sugar = true,
+          arm = true,
+          ctl = false,
+          local_fn = None,
+          handler_of = None,
+          staged_kind = OrdinaryClosure,
+          staged = map.empty()
         }]
       }
     }
@@ -18131,7 +18131,7 @@ test "a declared effect crosses a module boundary with its operations" {
 ## raised in the declaring module, from that module's own table.
 fn exported_alias(al: AliasE) -> AliasE = {
   let no_target: Option[TypeRef] = None
-  AliasE { ..al, target: no_target, nlo: 0, nhi: 0 }
+  AliasE { ..al, target = no_target, nlo = 0, nhi = 0 }
 }
 
 fn exported_impls(ims: List[ImplI]) -> List[ImplI] = {
@@ -18150,7 +18150,7 @@ fn exported_impls(ims: List[ImplI]) -> List[ImplI] = {
 ## list keeps its coordinates; an importer finds an impl by its key and names
 ## a duplicate by `src_path`, never by a span.
 pub(pkg) fn exported_impl(im: ImplI) -> ImplI =
-  if im.lo == 0 && im.hi == 0 { im } else { ImplI { ..im, lo: 0, hi: 0 } }
+  if im.lo == 0 && im.hi == 0 { im } else { ImplI { ..im, lo = 0, hi = 0 } }
 
 ## The pub surface of a checked module for importers (the Kotlin exportsOf).
 ## The whole ADT/trait tables ride along — extra entries graft harmlessly.
@@ -18268,24 +18268,24 @@ pub(pkg) fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) 
     }
   }
   ModExports {
-    mod_path: mod_path,
-    class_name: class_name,
-    fns: fns2,
-    types_by_name: types2,
-    aliases: aliases2,
-    alias_resolved: ares2,
-    ctors: ctors2,
-    consts: consts2,
-    all_names: all,
-    src_path: cx.src_path,
-    traits_by_name: traits2,
-    effects: effects2,
-    effect_infos: cx.effect_infos,
-    impls: exported_impls(cx.local_impls),
-    adt_infos: cx.adts,
-    trait_infos: cx.traits,
-    package: package_of(cx),
-    pkg_only: pkg_only
+    mod_path = mod_path,
+    class_name = class_name,
+    fns = fns2,
+    types_by_name = types2,
+    aliases = aliases2,
+    alias_resolved = ares2,
+    ctors = ctors2,
+    consts = consts2,
+    all_names = all,
+    src_path = cx.src_path,
+    traits_by_name = traits2,
+    effects = effects2,
+    effect_infos = cx.effect_infos,
+    impls = exported_impls(cx.local_impls),
+    adt_infos = cx.adts,
+    trait_infos = cx.traits,
+    package = package_of(cx),
+    pkg_only = pkg_only
   }
 }
 
@@ -18328,7 +18328,7 @@ test "pub(pkg) names reach their own package and stop at its boundary" {
   let (m, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
   let env0: Map[String, ModExports] = map.empty()
-  let lib = Cx { ..cx_new(Some("lib/core"), None), dep_package: Some("lib") }
+  let lib = Cx { ..cx_new(Some("lib/core"), None), dep_package = Some("lib") }
   let (cx1, _) = check_module(lib, m, env0)
   assert len(cx1.diags) == 0
   let exp = exports_of(cx1, m, "lib/core", "lib/core")
@@ -18339,7 +18339,7 @@ test "pub(pkg) names reach their own package and stop at its boundary" {
     "pub fn go() -> Int = core.seam(1).n + core.api(2)\n"
   let (m2, _) = parser.parse_module(use_src)
   # a sibling module of the same package names it like a `pub` one
-  let sibling = Cx { ..cx_new(Some("lib/user"), None), dep_package: Some("lib") }
+  let sibling = Cx { ..cx_new(Some("lib/user"), None), dep_package = Some("lib") }
   let (cx2, _) = check_module(sibling, m2, env)
   assert len(cx2.diags) == 0
   # the project that depends on the package does not
@@ -18347,7 +18347,7 @@ test "pub(pkg) names reach their own package and stop at its boundary" {
   assert len(cx3.diags) == 1
   assert cx3.diags[0].msg == "`seam` is package-private to package `lib`"
   # nor does another package, and the answer is the same whichever it is
-  let other = Cx { ..cx_new(Some("web/x"), None), dep_package: Some("web") }
+  let other = Cx { ..cx_new(Some("web/x"), None), dep_package = Some("web") }
   let (cx4, _) = check_module(other, m2, env)
   assert len(cx4.diags) == 1 && cx4.diags[0].msg == cx3.diags[0].msg
 }

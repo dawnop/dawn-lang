@@ -115,25 +115,25 @@ type RSt = {
   toks: Map[Int, Int]
 }
 
-fn fresh(st: RSt) -> (RSt, Int) = (RSt { ..st, next_sym: st.next_sym + 1 }, st.next_sym)
+fn fresh(st: RSt) -> (RSt, Int) = (RSt { ..st, next_sym = st.next_sym + 1 }, st.next_sym)
 
 fn no_syms() -> Set[Int] = set.empty()
 
 fn push(st: RSt, loop_id: Int, open: Bool) -> RSt =
-  RSt { ..st, scopes: st.scopes ++ [Sc { syms: [], loop_id: loop_id, open: open }] }
+  RSt { ..st, scopes = st.scopes ++ [Sc { syms = [], loop_id = loop_id, open = open }] }
 
 ## Pop the innermost scope, handing back the bindings it still owns.
 fn pop(st: RSt) -> (RSt, List[Int]) = {
   let n = len(st.scopes)
   let top = st.scopes[n - 1]
-  (RSt { ..st, scopes: list.take(st.scopes, n - 1) }, top.syms)
+  (RSt { ..st, scopes = list.take(st.scopes, n - 1) }, top.syms)
 }
 
 fn bind(st: RSt, sym: Int) -> RSt = {
   let n = len(st.scopes)
   let top = st.scopes[n - 1]
-  let top2 = Sc { ..top, syms: top.syms ++ [sym] }
-  RSt { ..st, scopes: list.take(st.scopes, n - 1) ++ [top2] }
+  let top2 = Sc { ..top, syms = top.syms ++ [sym] }
+  RSt { ..st, scopes = list.take(st.scopes, n - 1) ++ [top2] }
 }
 
 ## Everything a non-local exit has to release, innermost scope first. `to_loop`
@@ -168,9 +168,9 @@ fn strip_syms(st: RSt, syms: List[Int]) -> RSt = {
   if len(syms) == 0 { return st }
   var out: List[Sc] = []
   for sc in st.scopes {
-    out = out ++ [Sc { ..sc, syms: list.filter(sc.syms, (y: Int) => not list.contains(syms, y)) }]
+    out = out ++ [Sc { ..sc, syms = list.filter(sc.syms, (y: Int) => not list.contains(syms, y)) }]
   }
-  RSt { ..st, scopes: out }
+  RSt { ..st, scopes = out }
 }
 
 ## Whether a release of `sym` here may be trusted -- a transfer at its last
@@ -206,7 +206,7 @@ fn note_adt(st: RSt, sym: Int, ty: Ty, init: CExpr) -> RSt = {
     CIntrinsic(name, _, _, _) -> name == "null_ref"
     _ -> false
   }
-  if adt_id(ty) >= 0 && not placeholder { RSt { ..st, adt_tys: map.insert(st.adt_tys, sym, ty) } } else { st }
+  if adt_id(ty) >= 0 && not placeholder { RSt { ..st, adt_tys = map.insert(st.adt_tys, sym, ty) } } else { st }
 }
 
 ## Which scope holds `sym`, outermost first; -1 when none does.
@@ -223,8 +223,8 @@ fn scope_index_of(st: RSt, sym: Int) -> Int = {
 ## where a binding briefly left its scope and returns holding a new value.
 fn bind_at(st: RSt, at: Int, sym: Int) -> RSt = {
   let sc = st.scopes[at]
-  let sc2 = Sc { ..sc, syms: sc.syms ++ [sym] }
-  RSt { ..st, scopes: list.take(st.scopes, at) ++ [sc2] ++ list.drop(st.scopes, at + 1) }
+  let sc2 = Sc { ..sc, syms = sc.syms ++ [sym] }
+  RSt { ..st, scopes = list.take(st.scopes, at) ++ [sc2] ++ list.drop(st.scopes, at + 1) }
 }
 
 ## The pin of a loop: a pseudo-binding meaning "a `continue` of this loop is
@@ -1058,8 +1058,8 @@ fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RS
       # shape that carries `consume` down to the root). Such a chain embeds
       # no other expression, so the flag cannot reach an unrelated context.
       let hoist = not own && borrows(st2, e)
-      let (s2, e1) = rw(RSt { ..st2, hoisting: st2.hoisting || hoist }, e, true, a)
-      let (s3, t) = fresh(RSt { ..s2, hoisting: st2.hoisting })
+      let (s2, e1) = rw(RSt { ..st2, hoisting = st2.hoisting || hoist }, e, true, a)
+      let (s3, t) = fresh(RSt { ..s2, hoisting = st2.hoisting })
       st2 = s3
       lets = lets ++ [CSLet(t, ty, e1)]
       outs = outs ++ [CLocal(t, ty)]
@@ -1174,17 +1174,17 @@ fn consume_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], 
 ## (next_sym) forward.
 fn reconcile(entry: RSt, st_thn: RSt, st_els: RSt, t1: CExpr, e1: CExpr, ty: Ty) -> (RSt, CExpr, CExpr) = {
   if not falls_through(t1) && not falls_through(e1) {
-    return (RSt { ..st_els, scopes: entry.scopes }, t1, e1)
+    return (RSt { ..st_els, scopes = entry.scopes }, t1, e1)
   }
   if not falls_through(t1) { return (st_els, t1, e1) }
-  if not falls_through(e1) { return (RSt { ..st_els, scopes: st_thn.scopes }, t1, e1) }
+  if not falls_through(e1) { return (RSt { ..st_els, scopes = st_thn.scopes }, t1, e1) }
   let thn_gone = diff(scope_syms(entry), scope_syms(st_thn))
   let els_gone = diff(scope_syms(entry), scope_syms(st_els))
   let need_t = diff(els_gone, thn_gone)
   let need_e = diff(thn_gone, els_gone)
   let (st4, t2) = if len(need_t) == 0 { (st_els, t1) } else { seal(st_els, t1, ty, need_t) }
   let (st5, e2) = if len(need_e) == 0 { (st4, e1) } else { seal(st4, e1, ty, need_e) }
-  let st6 = strip_syms(RSt { ..st5, scopes: entry.scopes }, thn_gone ++ els_gone)
+  let st6 = strip_syms(RSt { ..st5, scopes = entry.scopes }, thn_gone ++ els_gone)
   (st6, t2, e2)
 }
 
@@ -1197,8 +1197,8 @@ fn reconcile(entry: RSt, st_thn: RSt, st_els: RSt, t1: CExpr, e1: CExpr, ty: Ty)
 fn rw_scircuit(st: RSt, op: CBinOp, l: CExpr, r: CExpr, bty: Ty, after: Set[Int]) -> (RSt, CExpr) = {
   let (st1, l1) = rw(st, l, false, fv_expr(r, after))
   let was = st1.pinned
-  let (st2, r1) = rw(RSt { ..st1, pinned: true }, r, false, after)
-  (RSt { ..st2, pinned: was }, CBinary(op, l1, r1, bty))
+  let (st2, r1) = rw(RSt { ..st1, pinned = true }, r, false, after)
+  (RSt { ..st2, pinned = was }, CBinary(op, l1, r1, bty))
 }
 
 # A record update reaches Core as one synthetic binding for its spread base,
@@ -1355,7 +1355,7 @@ fn lift_spread_expr(st: SpreadLift, e: CExpr) -> (SpreadLift, CExpr) =
           Some(v) -> {
             let (st3, v1) = lift_spread_expr(st2, v)
             st2 = st3
-            out = out ++ [CUpdField { ..f, value: Some(v1) }]
+            out = out ++ [CUpdField { ..f, value = Some(v1) }]
           }
           None -> { out = out ++ [f] }
         }
@@ -1377,9 +1377,9 @@ fn lift_spread_expr(st: SpreadLift, e: CExpr) -> (SpreadLift, CExpr) =
                 let init = CField(CLocal(st.base, rty), adt, ci, idx, fty)
                 let st1 = SpreadLift {
                   ..st,
-                  next_sym: tmp + 1,
-                  fields: map.insert(st.fields, idx, tmp),
-                  lets: st.lets ++ [CSLet(tmp, fty, init)]
+                  next_sym = tmp + 1,
+                  fields = map.insert(st.fields, idx, tmp),
+                  lets = st.lets ++ [CSLet(tmp, fty, init)]
                 }
                 return (st1, CLocal(tmp, fty))
               }
@@ -1612,14 +1612,14 @@ fn schedule_record_update(st: RSt, stmts: List[CStmt], tail: Option[CExpr]) ->
                       (assigned_after(stmts, at, source) || assigns_spread_expr(t, source)))
                 if not changed {
                   let seed = SpreadLift {
-                    base: base, source: source, adt: adt, ci: ci, next_sym: st.next_sym,
-                    fields: map.empty(), lets: []
+                    base = base, source = source, adt = adt, ci = ci, next_sym = st.next_sym,
+                    fields = map.empty(), lets = []
                   }
                   let (lifted, t1) = lift_spread_expr(seed, t)
                   if len(lifted.lets) > 0 {
                     let after = at + 1
                     return (
-                      RSt { ..st, next_sym: lifted.next_sym },
+                      RSt { ..st, next_sym = lifted.next_sym },
                       list.take(stmts, after) ++ lifted.lets ++ list.drop(stmts, after),
                       Some(t1)
                     )
@@ -1868,7 +1868,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
           # the untaken path holding more, so the arm's removals materialise
           # an else that releases the same bindings
           if not falls_through(t1) {
-            let (st4, cond2) = wrap(RSt { ..st2, scopes: st1.scopes }, lets, c1, cex_ty(cond), temps)
+            let (st4, cond2) = wrap(RSt { ..st2, scopes = st1.scopes }, lets, c1, cex_ty(cond), temps)
             return (st4, CIf(cond2, t1, None, ity))
           }
           let escaped = diff(scope_syms(st1), scope_syms(st2))
@@ -1880,7 +1880,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
           }
         }
         Some(x) -> {
-          let (st3, e1) = rw(RSt { ..st2, scopes: st1.scopes }, x, consume, after)
+          let (st3, e1) = rw(RSt { ..st2, scopes = st1.scopes }, x, consume, after)
           let (st4, t2, e2) = reconcile(st1, st2, st3, t1, e1, ity)
           # the condition's temporary dies before the arms run, not after
           let (st5, cond2) = wrap(st4, lets, c1, cex_ty(cond), temps)
@@ -2038,7 +2038,7 @@ fn sweep(st: RSt, after: Set[Int], ctors: Map[Int, Int]) -> (RSt, List[CStmt]) =
       Some(ty) -> {
         let aid = adt_id(ty)
         let (st2, tok) = fresh(st1)
-        st1 = bind(RSt { ..st2, toks: map.insert(st2.toks, tok, aid) }, tok)
+        st1 = bind(RSt { ..st2, toks = map.insert(st2.toks, tok, aid) }, tok)
         want = map.insert(want, aid, map.get(want, aid).unwrap_or(0) - 1)
         out = out ++ [CSLet(tok, ty, CReset(CLocal(sym, ty), [], ty))]
       }
@@ -2429,7 +2429,7 @@ fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
       match els {
         None -> {
           if not falls_through(t1) {
-            let (st4, cond2) = wrap(RSt { ..st2, scopes: st1.scopes }, lets, c1, cex_ty(cond), temps)
+            let (st4, cond2) = wrap(RSt { ..st2, scopes = st1.scopes }, lets, c1, cex_ty(cond), temps)
             return (st4, [CSIf(cond2, t1, None)])
           }
           let escaped = diff(scope_syms(st1), scope_syms(st2))
@@ -2442,7 +2442,7 @@ fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
           }
         }
         Some(x) -> {
-          let (st3, e1) = rw_effect(RSt { ..st2, scopes: st1.scopes }, x, after)
+          let (st3, e1) = rw_effect(RSt { ..st2, scopes = st1.scopes }, x, after)
           let (st4, t2, e2) = reconcile(st1, st2, st3, t1, e1, TyUnit)
           let (st5, cond2) = wrap(st4, lets, c1, cex_ty(cond), temps)
           (st5, [CSIf(cond2, t2, Some(e2))])
@@ -2479,10 +2479,10 @@ fn rc_fn(
     if not mode_owned(p.mode) { bsyms = set.insert(bsyms, p.sym) }
   }
   var st = RSt {
-    scopes: [], dict_syms: dicts, modes: modes, borrowed_syms: bsyms,
-    views: views.view_syms(dicts, f),
-    hoisting: false, fname: f.owner ++ "." ++ f.name, next_sym: next_sym, pinned: false,
-    adt_tys: map.empty(), toks: map.empty()
+    scopes = [], dict_syms = dicts, modes = modes, borrowed_syms = bsyms,
+    views = views.view_syms(dicts, f),
+    hoisting = false, fname = f.owner ++ "." ++ f.name, next_sym = next_sym, pinned = false,
+    adt_tys = map.empty(), toks = map.empty()
   }
   st = push(st, -1, true)
   # owned captures and parameters are the body's to release, so they enter
@@ -2502,7 +2502,7 @@ fn rc_fn(
   let (st1, body1) = rw(st, f.body, true, no_syms())
   let (st2, owned) = pop(st1)
   let (st3, body2) = seal(st2, body1, f.ret, list.reverse(owned))
-  (st3.next_sym, CFun { ..f, body: body2 })
+  (st3.next_sym, CFun { ..f, body = body2 })
 }
 
 ## The mode table with no rows: every function takes every parameter owned.
@@ -2544,7 +2544,7 @@ pub fn rc_module(m: CModule, modes: Map[(String, String), List[CMode]]) -> CModu
     next = n
     fns = fns ++ [f1]
   }
-  let out = CModule { ..m, fns: fns, next_sym: next }
+  let out = CModule { ..m, fns = fns, next_sym = next }
   let bad = rc_check(out, modes)
   if len(bad) > 0 {
     panic("rc: unbalanced in " ++ m.owner ++ ": " ++ join(list.take(bad, 3), "; "))
@@ -2619,7 +2619,7 @@ type Chk = {
   views: Set[Int]
 }
 
-fn chk_err(c: Chk, msg: String) -> Chk = Chk { ..c, errs: c.errs ++ [msg] }
+fn chk_err(c: Chk, msg: String) -> Chk = Chk { ..c, errs = c.errs ++ [msg] }
 
 ## The half of `immortal` a walk with no state can recognise.
 ## The checker's mirror of `dictish` (minus the local dictionary syms, which
@@ -2643,7 +2643,7 @@ fn chk_dictish(e: CExpr) -> Bool =
 ## reference moves out and no drop will follow.
 fn chk_expr(c: Chk, e: CExpr, k: Bool) -> Chk = {
   let c1 = chk_walk(c, e, k)
-  if cex_ty(e) == TyNever { Chk { ..c1, gone: true } } else { c1 }
+  if cex_ty(e) == TyNever { Chk { ..c1, gone = true } } else { c1 }
 }
 
 ## The invariant field stealing leans on, checked on the output of the pass
@@ -2710,7 +2710,7 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
   match e {
     CLocal(sym, _) ->
       if k && set.has(c.live, sym) {
-        Chk { ..c, live: set.remove(c.live, sym) }
+        Chk { ..c, live = set.remove(c.live, sym) }
       } else {
         c
       },
@@ -2733,28 +2733,28 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
 
     CIf(cond, thn, els, _) -> {
       let c1 = chk_expr(c, cond, false)
-      let ct = chk_expr(Chk { ..c1, gone: false }, thn, k)
+      let ct = chk_expr(Chk { ..c1, gone = false }, thn, k)
       match els {
         None ->
           if ct.gone {
-            Chk { ..c1, errs: ct.errs }
+            Chk { ..c1, errs = ct.errs }
           } else if len(ct.live) != len(c1.live) {
-            chk_err(Chk { ..c1, errs: ct.errs }, "a one-armed if released a binding")
+            chk_err(Chk { ..c1, errs = ct.errs }, "a one-armed if released a binding")
           } else {
-            Chk { ..c1, errs: ct.errs }
+            Chk { ..c1, errs = ct.errs }
           }
         Some(x) -> {
-          let ce = chk_expr(Chk { ..c1, live: c1.live, gone: false, errs: ct.errs }, x, k)
+          let ce = chk_expr(Chk { ..c1, live = c1.live, gone = false, errs = ct.errs }, x, k)
           if ct.gone && ce.gone {
-            Chk { ..ce, gone: true }
+            Chk { ..ce, gone = true }
           } else if ct.gone {
             ce
           } else if ce.gone {
-            Chk { ..ce, live: ct.live, gone: false }
+            Chk { ..ce, live = ct.live, gone = false }
           } else if len(ct.live) != len(ce.live) {
             chk_err(ce, "the arms of an if disagree on what they released")
           } else {
-            Chk { ..ce, live: ct.live, gone: false }
+            Chk { ..ce, live = ct.live, gone = false }
           }
         }
       }
@@ -2770,18 +2770,18 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
       # shape wraps the whole body in `return <Never block>`, and what was
       # still held at the panic inside it is the panic's dead code, already
       # forgiven where it diverged
-      if c1.gone { return Chk { ..c1, gone: true } }
+      if c1.gone { return Chk { ..c1, gone = true } }
       let c2 = if len(c1.live) > 0 {
         chk_err(c1, "a return left a binding behind: " ++
             join(list.map(set.to_list(c1.live), x => to_string(x)), ","))
       } else {
         c1
       }
-      Chk { ..c2, gone: true }
+      Chk { ..c2, gone = true }
     }
 
-    CBreak(_) -> Chk { ..c, gone: true }
-    CContinue(_) -> Chk { ..c, gone: true }
+    CBreak(_) -> Chk { ..c, gone = true }
+    CContinue(_) -> Chk { ..c, gone = true }
     CDup(inner, _) | CSteal(inner, _) -> chk_expr(c, inner, false)
     # a reset consumes its binding; a reuse builds the constructor as usual
     # and consumes its token last. That is the order the emitter runs in
@@ -2868,7 +2868,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
       let c1 = chk_expr(c, init, true)
       if is_ref_ty(ty) && not chk_dictish(init) && not set.has(c1.live, sym) &&
         not set.has(c.views, sym) {
-        Chk { ..c1, live: set.insert(c1.live, sym) }
+        Chk { ..c1, live = set.insert(c1.live, sym) }
       } else {
         c1
       }
@@ -2876,7 +2876,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
     CSAssign(sym, value) -> {
       let c1 = chk_expr(c, value, true)
       if is_ref_ty(cex_ty(value)) && not chk_dictish(value) && not set.has(c.views, sym) {
-        Chk { ..c1, live: set.insert(c1.live, sym) }
+        Chk { ..c1, live = set.insert(c1.live, sym) }
       } else {
         c1
       }
@@ -2884,42 +2884,42 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
     CSDiscard(x) -> chk_expr(c, x, false)
     CSDrop(sym) ->
       if set.has(c.live, sym) {
-        Chk { ..c, live: set.remove(c.live, sym) }
+        Chk { ..c, live = set.remove(c.live, sym) }
       } else {
         chk_err(c, "released a binding that was not held: ${to_string(sym)}")
       }
     CSIf(cond, thn, els) -> {
       let c1 = chk_expr(c, cond, false)
-      let ct = chk_expr(Chk { ..c1, gone: false }, thn, false)
+      let ct = chk_expr(Chk { ..c1, gone = false }, thn, false)
       match els {
         None ->
           if ct.gone {
-            Chk { ..c1, errs: ct.errs }
+            Chk { ..c1, errs = ct.errs }
           } else if len(ct.live) != len(c1.live) {
-            chk_err(Chk { ..c1, errs: ct.errs }, "a one-armed if released a binding")
+            chk_err(Chk { ..c1, errs = ct.errs }, "a one-armed if released a binding")
           } else {
-            Chk { ..c1, errs: ct.errs }
+            Chk { ..c1, errs = ct.errs }
           }
         Some(x) -> {
-          let ce = chk_expr(Chk { ..c1, gone: false, errs: ct.errs }, x, false)
-          if ct.gone { ce } else if ce.gone { Chk { ..ce, live: ct.live, gone: false } } else {
+          let ce = chk_expr(Chk { ..c1, gone = false, errs = ct.errs }, x, false)
+          if ct.gone { ce } else if ce.gone { Chk { ..ce, live = ct.live, gone = false } } else {
             if len(ct.live) != len(ce.live) {
               chk_err(ce, "the arms of an if disagree on what they released")
             } else {
-              Chk { ..ce, live: ct.live, gone: false }
+              Chk { ..ce, live = ct.live, gone = false }
             }
           }
         }
       }
     }
     CSLoop(lid, body, step) -> {
-      let cb = chk_expr(Chk { ..c, gone: false }, body, false)
+      let cb = chk_expr(Chk { ..c, gone = false }, body, false)
       let c1 = if cb.gone {
-        Chk { ..cb, live: c.live, gone: false }
+        Chk { ..cb, live = c.live, gone = false }
       } else if len(cb.live) != len(c.live) {
         chk_err(cb, "a loop body did not end where it started")
       } else {
-        Chk { ..cb, live: c.live, gone: false }
+        Chk { ..cb, live = c.live, gone = false }
       }
       let c2 = match step {
         None -> c1
@@ -2928,7 +2928,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
       # a loop nothing breaks out of is never left: what follows it is
       # unreachable, and an open loop's paths released their own accounts at
       # their returns -- the restored live set must not be charged again
-      if jumps(body, lid, true, false) { c2 } else { Chk { ..c2, gone: true } }
+      if jumps(body, lid, true, false) { c2 } else { Chk { ..c2, gone = true } }
     }
   }
 
@@ -2956,7 +2956,7 @@ pub fn rc_check(m: CModule, modes: Map[(String, String), List[CMode]]) -> List[S
       }
     }
     let c = chk_expr(
-      Chk { live: live, gone: false, errs: [], modes: modes, views: views.view_syms(base, f) },
+      Chk { live = live, gone = false, errs = [], modes = modes, views = views.view_syms(base, f) },
       f.body,
       true
     )
@@ -2971,14 +2971,14 @@ pub fn rc_check(m: CModule, modes: Map[(String, String), List[CMode]]) -> List[S
 
 fn one_fn(params: List[CParam], ret: Ty, body: CExpr) -> CModule =
   CModule {
-    owner: "m",
-    fns: [CFun {
-      name: "f", owner: "m", captures: [], params: params, dicts: [], evs: [],
-      ret: ret, body: body, is_test: false, impl_of: None, default_of: None,
-      origin: ""
+    owner = "m",
+    fns = [CFun {
+      name = "f", owner = "m", captures = [], params = params, dicts = [], evs = [],
+      ret = ret, body = body, is_test = false, impl_of = None, default_of = None,
+      origin = ""
     }],
-    dicts: [],
-    next_sym: 100
+    dicts = [],
+    next_sym = 100
   }
 
 test "a scalar body needs no counting at all" {
@@ -3015,7 +3015,7 @@ test "operand snapshots follow later nested assignments, not reads" {
 }
 
 test "a scalar argument is named before a later argument rewrites it" {
-  let p = CParam { sym: 1, ty: TyInt, mode: COwned }
+  let p = CParam { sym = 1, ty = TyInt, mode = COwned }
   let later = CBlock([CSAssign(1, CInt(9))], Some(CInt(1)), TyInt)
   let body = CCall(CDirect("m", "g"), [CLocal(1, TyInt), later], TyInt, CNoSite)
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
@@ -3034,7 +3034,7 @@ test "a scalar argument is named before a later argument rewrites it" {
 
 test "borrowed and owned argument snapshots retain a reassigned reference" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   let later = CBlock([CSAssign(1, CListLit([CInt(9)], lst))], Some(CInt(0)), TyInt)
   let body = CCall(CDirect("m", "g"), [CLocal(1, lst), later], TyInt, CNoSite)
   for mode in [COwned, CBorrowed] {
@@ -3053,7 +3053,7 @@ test "borrowed and owned argument snapshots retain a reassigned reference" {
 
 test "a dynamic target snapshot remains owned across argument return" {
   let fn_ty = TyFn([TyInt], TyInt, EPure)
-  let p = CParam { sym: 1, ty: fn_ty, mode: COwned }
+  let p = CParam { sym = 1, ty = fn_ty, mode = COwned }
   let later = CBlock(
     [CSAssign(1, CFnRef("m", "replacement", fn_ty))],
     Some(CIf(CBool(true), CReturn(Some(CInt(7))), Some(CInt(1)), TyInt)),
@@ -3073,7 +3073,7 @@ test "a dynamic target snapshot remains owned across argument return" {
 
 test "a reference parameter the body never touches is still released" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   # the oracle sees the gap before the pass fills it...
   assert len(rc_check(one_fn([p], TyInt, CInt(1)), owned_modes())) == 1
   # ...and does not see one after
@@ -3082,7 +3082,7 @@ test "a reference parameter the body never touches is still released" {
 
 test "handing a parameter back is a move, not a copy" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   let m = rc_module(one_fn([p], lst, CLocal(1, lst)), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
   # the last (only) use takes the value: no dup, no drop, nothing to balance
@@ -3094,7 +3094,7 @@ test "handing a parameter back is a move, not a copy" {
 
 test "an earlier use copies, the last one takes" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   let g = CDirect("m", "g")
   let body = CBlock(
     [CSDiscard(CCall(g, [CLocal(1, lst)], TyInt, CNoSite))],
@@ -3131,7 +3131,7 @@ test "two uses in one operand list both copy" {
   # between sequenced positions -- inside one operand list the transfer is
   # refused on both sides and the binding is released at the end
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   let pair = TyTuple([lst, lst])
   let m = rc_module(one_fn([p], pair, CTuple([CLocal(1, lst), CLocal(1, lst)], pair)), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
@@ -3161,7 +3161,7 @@ test "two uses in one operand list both copy" {
 
 test "a use inside a loop copies every trip round" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   let call = CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt, CNoSite)
   let body = CBlock(
     [CSLoop(7, CBlock([CSDiscard(call)], None, TyUnit), None)],
@@ -3196,7 +3196,7 @@ test "a use inside a loop copies every trip round" {
 
 test "the arm that keeps a binding drops what the other arm took" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   let body = CIf(
     CBool(true),
     CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt, CNoSite),
@@ -3235,7 +3235,7 @@ test "the arm that keeps a binding drops what the other arm took" {
 
 test "the right side of a short circuit refuses to take" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   let body = CBinary(
     CAnd,
     CBool(true),
@@ -3272,8 +3272,8 @@ test "the right side of a short circuit refuses to take" {
 test "array_with takes its owned operands bare at their last use" {
   let arr = TyArray(TyInt)
   let lst = TyList(TyInt)
-  let p1 = CParam { sym: 1, ty: arr, mode: COwned }
-  let p2 = CParam { sym: 2, ty: lst, mode: COwned }
+  let p1 = CParam { sym = 1, ty = arr, mode = COwned }
+  let p2 = CParam { sym = 2, ty = lst, mode = COwned }
   let body = CIntrinsic("array_with", [CLocal(1, arr), CInt(0), CLocal(2, lst)], arr, CNoSite)
   let m = rc_module(one_fn([p1, p2], arr, body), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
@@ -3295,7 +3295,7 @@ test "array_with takes its owned operands bare at their last use" {
 
 test "a binding is released at the statement that stops touching it" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   # the parameter is only ever borrowed, so no transfer can release it; the
   # sweep must, and right after its last touch rather than at scope end
   let body = CBlock(
@@ -3322,16 +3322,16 @@ test "a binding is released at the statement that stops touching it" {
 test "a record update releases its spread owner before an updated field runs" {
   let rec = TyAdt(7, [])
   let ref = TyList(TyInt)
-  let p = CParam { sym: 1, ty: rec, mode: COwned }
+  let p = CParam { sym = 1, ty = rec, mode = COwned }
   # Lowering's exact shape for `R { ..r, a: g(r.a) }`: the update's base is
   # the synthetic spread binding, while the written expression still names
   # the source symbol. The kept field and that projection must both be lifted
   # and canonicalised before `g`, or either record owner keeps the updated
   # reference shared.
   let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [
-    CUpdField { ty: ref, value: None },
-    CUpdField { ty: ref,
-      value: Some(CCall(CDirect("m", "g"), [CField(CLocal(1, rec), 7, 0, 1, ref)], ref, CNoSite)) }
+    CUpdField { ty = ref, value = None },
+    CUpdField { ty = ref,
+      value = Some(CCall(CDirect("m", "g"), [CField(CLocal(1, rec), 7, 0, 1, ref)], ref, CNoSite)) }
   ], rec)
   let body = CBlock([CSLet(2, rec, CLocal(1, rec))], Some(rebuilt), rec)
   let m = rc_module(one_fn([p], rec, body), owned_modes())
@@ -3373,9 +3373,9 @@ test "a record bound after an earlier statement is released before its update" {
   let rec = TyAdt(7, [])
   let ref = TyList(TyInt)
   let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [
-    CUpdField { ty: ref, value: None },
-    CUpdField { ty: ref,
-      value: Some(CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref, CNoSite)) }
+    CUpdField { ty = ref, value = None },
+    CUpdField { ty = ref,
+      value = Some(CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref, CNoSite)) }
   ], rec)
   let body = CBlock(
     [
@@ -3422,7 +3422,7 @@ test "a record bound after an earlier statement is released before its update" {
 test "a reassigned record is not lifted ahead of the assignment" {
   let rec = TyAdt(7, [])
   let ref = TyList(TyInt)
-  let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [CUpdField { ty: ref, value: None }], rec)
+  let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [CUpdField { ty = ref, value = None }], rec)
   let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec, CNoSite))]
   # spread_rebuild follows tail blocks, so an assignment in one is just as
   # much "between" the binding and constructor as an outer statement is.
@@ -3440,15 +3440,15 @@ test "a reassigned record is not lifted ahead of the assignment" {
     rec
   )
   let st = RSt {
-    scopes: [], dict_syms: set.empty(), modes: owned_modes(),
-    borrowed_syms: set.empty(), views: set.empty(), hoisting: false, fname: "m.f",
-    next_sym: 100, pinned: false, adt_tys: map.empty(), toks: map.empty()
+    scopes = [], dict_syms = set.empty(), modes = owned_modes(),
+    borrowed_syms = set.empty(), views = set.empty(), hoisting = false, fname = "m.f",
+    next_sym = 100, pinned = false, adt_tys = map.empty(), toks = map.empty()
   }
   let (st1, ss1, tail1) = schedule_record_update(st, stmts, Some(tail))
   assert st1.next_sym == 100
   assert len(ss1) == 1
   match tail1 {
-    Some(CBlock(_, Some(CUpdate(CLocal(2, _), _, _, [CUpdField { ty: _, value: None }], _)), _)) -> ()
+    Some(CBlock(_, Some(CUpdate(CLocal(2, _), _, _, [CUpdField { ty = _, value = None }], _)), _)) -> ()
     _ -> panic("expected the update to remain after the assignment")
   }
 }
@@ -3464,9 +3464,9 @@ test "a constructor written out whole is not taken for an update" {
     CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref, CNoSite)
   ], rec)
   let st = RSt {
-    scopes: [], dict_syms: set.empty(), modes: owned_modes(),
-    borrowed_syms: set.empty(), views: set.empty(), hoisting: false, fname: "m.f",
-    next_sym: 100, pinned: false, adt_tys: map.empty(), toks: map.empty()
+    scopes = [], dict_syms = set.empty(), modes = owned_modes(),
+    borrowed_syms = set.empty(), views = set.empty(), hoisting = false, fname = "m.f",
+    next_sym = 100, pinned = false, adt_tys = map.empty(), toks = map.empty()
   }
   let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec, CNoSite))]
   let (st1, ss1, tail1) = schedule_record_update(st, stmts, Some(rebuilt))
@@ -3480,17 +3480,17 @@ test "an update nested in a written field keeps its node until its own block" {
   let rec = TyAdt(7, [])
   let ref = TyList(TyInt)
   let inner = CBlock([CSLet(3, rec, CLocal(1, rec))], Some(CUpdate(CLocal(3, rec), 7, 0, [
-    CUpdField { ty: ref, value: None },
-    CUpdField { ty: ref, value: Some(CListLit([], ref)) }
+    CUpdField { ty = ref, value = None },
+    CUpdField { ty = ref, value = Some(CListLit([], ref)) }
   ], rec)), rec)
   let outer = CUpdate(CLocal(2, rec), 7, 0, [
-    CUpdField { ty: ref, value: Some(CField(CCall(CDirect("m", "g"), [inner], rec, CNoSite), 7, 0, 0, ref)) },
-    CUpdField { ty: ref, value: None }
+    CUpdField { ty = ref, value = Some(CField(CCall(CDirect("m", "g"), [inner], rec, CNoSite), 7, 0, 0, ref)) },
+    CUpdField { ty = ref, value = None }
   ], rec)
   let st = RSt {
-    scopes: [], dict_syms: set.empty(), modes: owned_modes(),
-    borrowed_syms: set.empty(), views: set.empty(), hoisting: false, fname: "m.f",
-    next_sym: 100, pinned: false, adt_tys: map.empty(), toks: map.empty()
+    scopes = [], dict_syms = set.empty(), modes = owned_modes(),
+    borrowed_syms = set.empty(), views = set.empty(), hoisting = false, fname = "m.f",
+    next_sym = 100, pinned = false, adt_tys = map.empty(), toks = map.empty()
   }
   let (_st1, ss1, tail1) = schedule_record_update(st, [CSLet(2, rec, CLocal(1, rec))], Some(outer))
   # the outer kept field was lifted, and the outer update became a constructor
@@ -3504,7 +3504,7 @@ test "an update nested in a written field keeps its node until its own block" {
 
 test "the match once-loop is unlooped and its arm takes the binding" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   # lower_match's shape: `if (test) { arm; break }` rows over an unreachable
   # tail; inside the loop the transfer would be refused, unlooped it happens
   let arm = CBlock(
@@ -3577,7 +3577,7 @@ test "a source loop ending in continue keeps its jump target" {
 
 test "a borrowed table row passes the argument bare and keeps the release" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   let modes = map.insert(owned_modes(), ("m", "g"), [CBorrowed])
   let body = CBlock(
     [CSDiscard(CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt, CNoSite))],
@@ -3614,7 +3614,7 @@ test "the checker under the same table judges the borrowed rewrite balanced" {
   # all-owned table sees the bare argument as a transfer and the drop after
   # it as a second release
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   let modes = map.insert(owned_modes(), ("m", "g"), [CBorrowed])
   let body = CBlock(
     [CSDiscard(CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt, CNoSite))],
@@ -3629,11 +3629,11 @@ test "the checker under the same table judges the borrowed rewrite balanced" {
 test "the contract assertion names a one-sided mode" {
   let lst = TyList(TyInt)
   # table says borrowed, callee still owned: the callsite half-flip
-  let own = one_fn([CParam { sym: 1, ty: lst, mode: COwned }], TyInt, CInt(1))
+  let own = one_fn([CParam { sym = 1, ty = lst, mode = COwned }], TyInt, CInt(1))
   let row = map.insert(owned_modes(), ("m", "f"), [CBorrowed])
   assert len(mode_mismatch(own, row)) == 1
   # callee says borrowed, no table row: the callee half-flip
-  let bor = one_fn([CParam { sym: 1, ty: lst, mode: CBorrowed }], TyInt, CInt(1))
+  let bor = one_fn([CParam { sym = 1, ty = lst, mode = CBorrowed }], TyInt, CInt(1))
   assert len(mode_mismatch(bor, owned_modes())) == 1
   # the coherent stamp is silent, and so is the all-owned base
   assert len(mode_mismatch(bor, row)) == 0
@@ -3642,7 +3642,7 @@ test "the contract assertion names a one-sided mode" {
 
 test "a later operand return releases a hoisted assignment value" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   # The second list can return before the call reads its hoisted first
   # operand. Its ordinary path also crosses a sweep that must keep it held.
   let later = CBlock(
@@ -3661,7 +3661,7 @@ test "a later operand return releases a hoisted assignment value" {
 
 test "an arm whose list element returns leaves the other arm alone" {
   let lst = TyList(TyInt)
-  let ps = [CParam { sym: 1, ty: lst, mode: COwned }, CParam { sym: 2, ty: TyBool, mode: COwned }]
+  let ps = [CParam { sym = 1, ty = lst, mode = COwned }, CParam { sym = 2, ty = TyBool, mode = COwned }]
   # #505: the returned value builds a list, whose block drops binding 1 on
   # the return path. The arm is Unit-typed and its tail says nothing, so only
   # the operand shows it never ends; the untaken arm must not copy the drop
@@ -3680,7 +3680,7 @@ test "an arm whose list element returns leaves the other arm alone" {
 
 test "a directly applied closure is held in scope across a returning argument" {
   let fn_ty = TyFn([TyInt], TyInt, EPure)
-  let p = CParam { sym: 1, ty: TyBool, mode: COwned }
+  let p = CParam { sym = 1, ty = TyBool, mode = COwned }
   # #506: `borrow` used to name the fresh closure outside the scope the
   # argument's return unwinds, and rc_module refused the result
   let arg = CIf(CLocal(1, TyBool), CReturn(Some(CInt(7))), Some(CInt(1)), TyInt)
@@ -3698,7 +3698,7 @@ test "a directly applied closure is held in scope across a returning argument" {
 
 test "an owned operand ahead of a leaving one is named, and only then" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: TyBool, mode: COwned }
+  let p = CParam { sym = 1, ty = TyBool, mode = COwned }
   let fresh_list = CCall(CDirect("m", "h"), [], lst, CNoSite)
   let cont = CIf(CLocal(1, TyBool), CContinue(0), Some(CInt(1)), TyInt)
   # #507: inline, the fresh list is a C argument the continue never sees
@@ -3712,9 +3712,9 @@ test "an owned operand ahead of a leaving one is named, and only then" {
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
   let st0 = RSt {
-    scopes: [], dict_syms: set.empty(), modes: owned_modes(), borrowed_syms: set.empty(),
-    views: set.empty(), hoisting: false, fname: "m.f", next_sym: 100, pinned: false,
-    adt_tys: map.empty(), toks: map.empty()
+    scopes = [], dict_syms = set.empty(), modes = owned_modes(), borrowed_syms = set.empty(),
+    views = set.empty(), hoisting = false, fname = "m.f", next_sym = 100, pinned = false,
+    adt_tys = map.empty(), toks = map.empty()
   }
   assert held_before_exit(st0, [fresh_list, cont], [0, 1])
   # the same row with the jump inside a loop of its own leaves nothing, and
@@ -3728,7 +3728,7 @@ test "an owned operand ahead of a leaving one is named, and only then" {
 
 test "reassignment from the old value is a hand-over, not copy and drop" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   # `m = g(m)`: the call consumes the old value, so the expansion has no
   # drop of its own -- this is what lets the callee see rc == 1
   let body = CBlock(
@@ -3759,7 +3759,7 @@ test "reassignment from the old value is a hand-over, not copy and drop" {
 
 test "a read after the assignment sees the new value, so the old one is handed over" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   # `m = g(m); h(m)`: the later read is of the NEW m. Pinning the old one
   # for it dup'd the argument and left the callee a shared value.
   let body = CBlock(
@@ -3828,7 +3828,7 @@ test "a self tail call's argument temporary fuses into the assignment unless it 
 
 test "a fused self tail call hands its parameter over with no dup" {
   let lst = TyList(TyInt)
-  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let p = CParam { sym = 1, ty = lst, mode = COwned }
   let call = CCall(CDirect("m", "g"), [CLocal(1, lst)], lst, CNoSite)
   let body = CBlock(
     [CSLet(3, lst, call), CSAssign(1, CLocal(3, lst))],
@@ -3853,7 +3853,7 @@ test "a fused self tail call hands its parameter over with no dup" {
 
 # ---- views ----
 
-fn t_borrowed(sym: Int, ty: Ty) -> CParam = CParam { sym: sym, ty: ty, mode: CBorrowed }
+fn t_borrowed(sym: Int, ty: Ty) -> CParam = CParam { sym = sym, ty = ty, mode = CBorrowed }
 
 fn t_row1(name: String) -> Map[(String, String), List[CMode]] =
   map.insert(owned_modes(), ("m", name), [CBorrowed])
@@ -3944,7 +3944,7 @@ test "one value that is not a view makes the whole variable counted" {
 
 test "an owned parameter has no views: its projections are copied as before" {
   let node = TyList(TyInt)
-  let p = CParam { sym: 1, ty: node, mode: COwned }
+  let p = CParam { sym = 1, ty = node, mode = COwned }
   let body = CBlock([CSLet(2, node, t_child(1))], Some(t_len(CLocal(2, node))), TyInt)
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
@@ -3981,16 +3981,16 @@ type Reuses = { resets: Int, reuses: Int }
 
 fn t_reuse_counts(m: CModule) -> Reuses = {
   let count = (a: Reuses, e: CExpr) => match e {
-    CReset(_, _, _) -> Reuses { ..a, resets: a.resets + 1 }
-    CReuse(_, _, _) -> Reuses { ..a, reuses: a.reuses + 1 }
+    CReset(_, _, _) -> Reuses { ..a, resets = a.resets + 1 }
+    CReuse(_, _, _) -> Reuses { ..a, reuses = a.reuses + 1 }
     _ -> a
   }
-  cwalk.fold_expr(m.fns[0].body, Reuses { resets: 0, reuses: 0 }, count, (a: Reuses, s: CStmt) => a)
+  cwalk.fold_expr(m.fns[0].body, Reuses { resets = 0, reuses = 0 }, count, (a: Reuses, s: CStmt) => a)
 }
 
 fn t_rec_fn(tail: CExpr, extra: List[CStmt]) -> CModule = {
   let rec = TyAdt(7, [])
-  let p = CParam { sym: 1, ty: rec, mode: COwned }
+  let p = CParam { sym = 1, ty = rec, mode = COwned }
   # the field read is the last touch of the parameter
   let read = CSLet(2, TyInt, CField(CLocal(1, rec), 7, 0, 0, TyInt))
   rc_module(one_fn([p], rec, CBlock([read] ++ extra, Some(tail), rec)), owned_modes())
@@ -4057,7 +4057,7 @@ test "a read of another node's field is not stolen" {
 
 test "the checker refuses a steal with no reset and a reset that names a field nobody stole" {
   let bare = CSLet(10, TyList(TyInt), CSteal(CField(CLocal(2, steal_rec()), 7, 0, 0, TyList(TyInt)), TyList(TyInt)))
-  let c0 = Chk { live: set.empty(), gone: false, errs: [], modes: map.empty(), views: set.empty() }
+  let c0 = Chk { live = set.empty(), gone = false, errs = [], modes = map.empty(), views = set.empty() }
   assert len(steal_check(c0, [bare]).errs) == 1
   let lying = CSLet(13, steal_rec(), CReset(CLocal(2, steal_rec()), [1], steal_rec()))
   assert len(steal_check(c0, [lying]).errs) == 1
@@ -4068,7 +4068,7 @@ test "a node released before a constructor of its type is reset and handed on" {
   let rec = TyAdt(7, [])
   let m = t_rec_fn(CCtor(7, 0, [CLocal(2, TyInt)], rec), [CSDiscard(CInt(0))])
   assert len(rc_check(m, owned_modes())) == 0
-  assert t_reuse_counts(m) == Reuses { resets: 1, reuses: 1 }
+  assert t_reuse_counts(m) == Reuses { resets = 1, reuses = 1 }
   # the reset sits where the drop would have, right after the read
   match t_stmts(m)[1] {
     CSLet(_, _, CReset(CLocal(1, _), _, _)) -> ()
@@ -4081,14 +4081,14 @@ test "a constructor field that returns releases the token it would have spent" {
   # runs before the token is spent, so the return drops a token still held
   let rec = TyAdt(7, [])
   let cond = CCall(CDirect("m", "c"), [], TyBool, CNoSite)
-  let v = CParam { sym: 1, ty: rec, mode: COwned }
-  let w = CParam { sym: 5, ty: rec, mode: COwned }
+  let v = CParam { sym = 1, ty = rec, mode = COwned }
+  let w = CParam { sym = 5, ty = rec, mode = COwned }
   let read = CSLet(2, TyInt, CField(CLocal(1, rec), 7, 0, 0, TyInt))
   let field = CIf(cond, CReturn(Some(CLocal(5, rec))), Some(CInt(2)), TyInt)
   let body = CBlock([read], Some(CCtor(7, 0, [field, CLocal(2, TyInt)], rec)), rec)
   let m = rc_module(one_fn([v, w], rec, body), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
-  assert t_reuse_counts(m) == Reuses { resets: 1, reuses: 1 }
+  assert t_reuse_counts(m) == Reuses { resets = 1, reuses = 1 }
 }
 
 test "a node of another type, or a constructor with no fields, is just dropped" {
@@ -4096,10 +4096,10 @@ test "a node of another type, or a constructor with no fields, is just dropped" 
   let other = TyAdt(8, [])
   let a = t_rec_fn(CCtor(8, 0, [CInt(1)], other), [])
   assert len(rc_check(a, owned_modes())) == 0
-  assert t_reuse_counts(a) == Reuses { resets: 0, reuses: 0 }
+  assert t_reuse_counts(a) == Reuses { resets = 0, reuses = 0 }
   let b = t_rec_fn(CCtor(7, 0, [], rec), [])
   assert len(rc_check(b, owned_modes())) == 0
-  assert t_reuse_counts(b) == Reuses { resets: 0, reuses: 0 }
+  assert t_reuse_counts(b) == Reuses { resets = 0, reuses = 0 }
 }
 
 test "a token an arm does not spend is released on that arm" {
@@ -4109,7 +4109,7 @@ test "a token an arm does not spend is released on that arm" {
   let other = CCall(CDirect("m", "other"), [], rec, CNoSite)
   let m = t_rec_fn(CIf(cond, build, Some(other), rec), [])
   assert len(rc_check(m, owned_modes())) == 0
-  assert t_reuse_counts(m) == Reuses { resets: 1, reuses: 1 }
+  assert t_reuse_counts(m) == Reuses { resets = 1, reuses = 1 }
 }
 
 test "a token made outside a loop is not spent inside it" {
@@ -4121,13 +4121,13 @@ test "a token made outside a loop is not spent inside it" {
   ), None)
   let m = t_rec_fn(CCtor(8, 0, [CInt(0)], TyAdt(8, [])), [looped])
   assert len(rc_check(m, owned_modes())) == 0
-  assert t_reuse_counts(m) == Reuses { resets: 1, reuses: 0 }
+  assert t_reuse_counts(m) == Reuses { resets = 1, reuses = 0 }
 }
 
 test "two dead nodes get a token each only when two constructors follow" {
   let rec = TyAdt(7, [])
-  let p = CParam { sym: 1, ty: rec, mode: COwned }
-  let q = CParam { sym: 2, ty: rec, mode: COwned }
+  let p = CParam { sym = 1, ty = rec, mode = COwned }
+  let q = CParam { sym = 2, ty = rec, mode = COwned }
   let reads = [
     CSLet(3, TyInt, CField(CLocal(1, rec), 7, 0, 0, TyInt)),
     CSLet(4, TyInt, CField(CLocal(2, rec), 7, 0, 0, TyInt))
@@ -4135,9 +4135,9 @@ test "two dead nodes get a token each only when two constructors follow" {
   let one = CCtor(7, 0, [CBinary(CAdd, CLocal(3, TyInt), CLocal(4, TyInt), TyInt)], rec)
   let m1 = rc_module(one_fn([p, q], rec, CBlock(reads, Some(one), rec)), owned_modes())
   assert len(rc_check(m1, owned_modes())) == 0
-  assert t_reuse_counts(m1) == Reuses { resets: 1, reuses: 1 }
+  assert t_reuse_counts(m1) == Reuses { resets = 1, reuses = 1 }
   let two = CTuple([one, CCtor(7, 0, [CLocal(3, TyInt)], rec)], TyTuple([rec, rec]))
   let m2 = rc_module(one_fn([p, q], TyTuple([rec, rec]), CBlock(reads, Some(two), TyTuple([rec, rec]))), owned_modes())
   assert len(rc_check(m2, owned_modes())) == 0
-  assert t_reuse_counts(m2) == Reuses { resets: 2, reuses: 2 }
+  assert t_reuse_counts(m2) == Reuses { resets = 2, reuses = 2 }
 }

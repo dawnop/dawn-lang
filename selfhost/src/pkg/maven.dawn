@@ -189,7 +189,7 @@ pub fn artifacts(jars: List[String]) -> Result[List[Artifact], String] !Fs = {
     let key = nm ++ " " ++ hashes[i]
     if not set.has(seen, key) {
       seen = set.insert(seen, key)
-      out = out ++ [Artifact { path: jars[i], name: nm, hash: hashes[i] }]
+      out = out ++ [Artifact { path = jars[i], name = nm, hash = hashes[i] }]
     }
     i = i + 1
   }
@@ -249,7 +249,7 @@ pub fn parse_lock(text: String) -> Result[Lock, String] = {
   if not saw_schema {
     return Err("dawn.lock has no `schema 1` line -- regenerate it with `dawn lock`")
   }
-  Ok(Lock { coords: coords, arts: arts })
+  Ok(Lock { coords = coords, arts = arts })
 }
 
 ## Hash the jars a resolution produced into a Lock, next to the coordinates
@@ -263,7 +263,7 @@ pub fn lock_of(coords: List[MCoord], jars: List[String]) -> Result[Lock, String]
   }
   var arts: List[(String, String)] = []
   for a in found { arts = arts ++ [(a.name, a.hash)] }
-  Ok(Lock { coords: cs, arts: arts })
+  Ok(Lock { coords = cs, arts = arts })
 }
 
 ## Does what a resolution produced match the lock? The message names the first
@@ -341,21 +341,21 @@ fn fetch_checked_from(
   let text = match io.read_file(path) {
     Ok(found) -> found
     Err(e) -> return Err(FetchCheckedError {
-      path: path,
-      message: "cannot read " ++ path ++ ": " ++ e.message
+      path = path,
+      message = "cannot read " ++ path ++ ": " ++ e.message
     })
   }
   let locked = match parse_lock(text) {
     Ok(found) -> found
-    Err(e) -> return Err(FetchCheckedError { path: path, message: path ++ ": " ++ e })
+    Err(e) -> return Err(FetchCheckedError { path = path, message = path ++ ": " ++ e })
   }
   let fresh = match lock_of(coords, jars) {
     Ok(found) -> found
-    Err(e) -> return Err(FetchCheckedError { path: path, message: e })
+    Err(e) -> return Err(FetchCheckedError { path = path, message = e })
   }
   match check_lock(locked, fresh) {
     Ok(_) -> Ok(jars)
-    Err(e) -> Err(FetchCheckedError { path: path, message: e })
+    Err(e) -> Err(FetchCheckedError { path = path, message = e })
   }
 }
 
@@ -380,13 +380,13 @@ fn fetch_failure(
   for c in coords {
     if coord_origin(origin, c, root) != root { elsewhere = true }
   }
-  if not elsewhere { return FetchCheckedError { path: root, message: message } }
+  if not elsewhere { return FetchCheckedError { path = root, message = message } }
   for c in coords {
     match resolve([c]) {
       Err(alone) -> {
         let path = coord_origin(origin, c, root)
         let declared = if path == root { "" } else { "\n  declared in " ++ path }
-        return FetchCheckedError { path: path, message: alone ++ declared }
+        return FetchCheckedError { path = path, message = alone ++ declared }
       }
       Ok(_) -> ()
     }
@@ -395,7 +395,7 @@ fn fetch_failure(
   for c in coords {
     requested = requested ++ "\n    " ++ mcoord_show(c) ++ " (" ++ coord_origin(origin, c, root) ++ ")"
   }
-  FetchCheckedError { path: root, message: message ++ "\n  requested by:" ++ requested }
+  FetchCheckedError { path = root, message = message ++ "\n  requested by:" ++ requested }
 }
 
 fn coord_origin(origin: Map[String, String], c: MCoord, root: String) -> String =
@@ -450,7 +450,7 @@ test "one jar file name, two artifacts: both survive, distinctly named" {
     assert str.ends_with(got[1].name, "-util-1.0.jar")
     # ...and a lock built from that set can verify itself, which is the thing a
     # name-keyed lock could not do
-    let l = match lock_of([MCoord { group: "g", artifact: "a", version: "1", aname: "a" }],
+    let l = match lock_of([MCoord { group = "g", artifact = "a", version = "1", aname = "a" }],
       ["${r}/a/util-1.0.jar", "${r}/b/util-1.0.jar", "${r}/c/asm-9.jar"]) {
       Ok(x) -> x
       Err(e) -> panic(e)
@@ -481,8 +481,8 @@ test "a lock that lists a name twice is refused rather than half-read" {
 
 test "a lock round-trips through its text form" {
   let l = Lock {
-    coords: ["org.ow2.asm:asm:9.7.1", "a:b:1"],
-    arts: [("asm-9.7.1.jar", "beef"), ("b-1.jar", "cafe")]
+    coords = ["org.ow2.asm:asm:9.7.1", "a:b:1"],
+    arts = [("asm-9.7.1.jar", "beef"), ("b-1.jar", "cafe")]
   }
   let text = render_lock(l)
   assert str.contains(text, "schema 1")
@@ -508,34 +508,34 @@ test "a lock round-trips through its text form" {
 }
 
 test "check_lock names the first disagreement" {
-  let base = Lock { coords: ["a:b:1"], arts: [("b-1.jar", "beef"), ("t-2.jar", "cafe")] }
+  let base = Lock { coords = ["a:b:1"], arts = [("b-1.jar", "beef"), ("t-2.jar", "cafe")] }
   match check_lock(base, base) {
     Ok(_) -> { assert true }
     Err(_) -> { assert false }
   }
   # changed bytes
-  let moved = Lock { coords: ["a:b:1"], arts: [("b-1.jar", "beef"), ("t-2.jar", "f00d")] }
+  let moved = Lock { coords = ["a:b:1"], arts = [("b-1.jar", "beef"), ("t-2.jar", "f00d")] }
   match check_lock(base, moved) {
     Err(e) -> { assert str.contains(e, "disagrees about t-2.jar") }
     Ok(_) -> { assert false }
   }
   # a transitive version moved: new artifact
   let added = Lock {
-    coords: ["a:b:1"],
-    arts: [("b-1.jar", "beef"), ("t-2.jar", "cafe"), ("t-3.jar", "1234")]
+    coords = ["a:b:1"],
+    arts = [("b-1.jar", "beef"), ("t-2.jar", "cafe"), ("t-3.jar", "1234")]
   }
   match check_lock(base, added) {
     Err(e) -> { assert str.contains(e, "which dawn.lock does not list") }
     Ok(_) -> { assert false }
   }
   # ...and one that vanished
-  let dropped = Lock { coords: ["a:b:1"], arts: [("b-1.jar", "beef")] }
+  let dropped = Lock { coords = ["a:b:1"], arts = [("b-1.jar", "beef")] }
   match check_lock(base, dropped) {
     Err(e) -> { assert str.contains(e, "did not produce") }
     Ok(_) -> { assert false }
   }
   # direct coordinates drifting from dawn.toml
-  let other = Lock { coords: ["a:b:2"], arts: [("b-1.jar", "beef"), ("t-2.jar", "cafe")] }
+  let other = Lock { coords = ["a:b:2"], arts = [("b-1.jar", "beef"), ("t-2.jar", "cafe")] }
   match check_lock(base, other) {
     Err(e) -> { assert str.contains(e, "do not match dawn.toml") }
     Ok(_) -> { assert false }
@@ -543,7 +543,7 @@ test "check_lock names the first disagreement" {
 }
 
 test "explain names the single coordinate and the mirror" {
-  let c = MCoord { group: "g", artifact: "a", version: "1", aname: "a" }
+  let c = MCoord { group = "g", artifact = "a", version = "1", aname = "a" }
   let m = explain("boom", [c], Some("https://mirror"))
   assert str.contains(m, "could not resolve dependency g:a:1 from https://mirror")
   assert str.contains(m, "the mirror in \$DAWN_MAVEN_MIRROR may not carry it")

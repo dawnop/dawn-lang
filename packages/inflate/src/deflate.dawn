@@ -52,7 +52,7 @@ use std/str
 type Bits = { src: Bytes, pos: Int, bit: Int, over: Bool }
 
 fn bits_from(src: Bytes, from: Int) -> Bits =
-  Bits { src: src, pos: from, bit: 0, over: false }
+  Bits { src = src, pos = from, bit = 0, over = false }
 
 ## `n` bits as an integer, low bit first.
 fn take(b: Bits, n: Int) -> (Int, Bits) = {
@@ -64,13 +64,13 @@ fn take(b: Bits, n: Int) -> (Int, Bits) = {
     if st.pos < len(st.src) {
       byte = bytes.at(st.src, st.pos)
     } else {
-      st = Bits { ..st, over: true }
+      st = Bits { ..st, over = true }
     }
     v = v | ((byte >>> st.bit) & 1) << i
     if st.bit == 7 {
-      st = Bits { ..st, pos: st.pos + 1, bit: 0 }
+      st = Bits { ..st, pos = st.pos + 1, bit = 0 }
     } else {
-      st = Bits { ..st, bit: st.bit + 1 }
+      st = Bits { ..st, bit = st.bit + 1 }
     }
     i = i + 1
   }
@@ -78,7 +78,7 @@ fn take(b: Bits, n: Int) -> (Int, Bits) = {
 }
 
 ## Discard the rest of the current byte (a stored block starts byte-aligned).
-fn align(b: Bits) -> Bits = if b.bit == 0 { b } else { Bits { ..b, pos: b.pos + 1, bit: 0 } }
+fn align(b: Bits) -> Bits = if b.bit == 0 { b } else { Bits { ..b, pos = b.pos + 1, bit = 0 } }
 
 fn past_end(b: Bits) -> Bool = b.pos >= len(b.src)
 
@@ -113,7 +113,7 @@ fn huff_of(lengths: List[Int]) -> Huff = {
     counts = counts ++ [n]
     bl = bl + 1
   }
-  Huff { counts: counts, symbols: symbols }
+  Huff { counts = counts, symbols = symbols }
 }
 
 ## Only for the 19 code-length code lengths, where a copy is bounded.
@@ -174,7 +174,7 @@ fn fixed_dist() -> Huff = {
 type Codes = { lbase: List[Int], lextra: List[Int], dbase: List[Int], dextra: List[Int] }
 
 fn codes() -> Codes =
-  Codes { lbase: length_base(), lextra: length_extra(), dbase: dist_base(), dextra: dist_extra() }
+  Codes { lbase = length_base(), lextra = length_extra(), dbase = dist_base(), dextra = dist_extra() }
 
 fn length_base() -> List[Int] = [
   3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
@@ -258,7 +258,7 @@ fn consumed(b: Bits) -> Int = if b.bit == 0 { b.pos } else { b.pos + 1 }
 ## ceiling on the uncompressed size, `DEFAULT_CAP` unless given; `None` is no
 ## ceiling.
 pub fn inflate(src: Bytes, cap: Option[Int] = Some(DEFAULT_CAP)) -> Result[Bytes, String] =
-  match inflate_from(src, cap: cap) {
+  match inflate_from(src, cap = cap) {
     Ok(p) -> {
       let (out, _) = p
       Ok(out)
@@ -369,7 +369,7 @@ fn stored(out0: Buf, b: Bits, lim: Int) -> Result[(Buf, Bits), String] = {
   while i < n {
     if st.pos >= len(st.src) { return Err("deflate: stored block runs past the end") }
     out = bytes.put(out, bytes.at(st.src, st.pos))
-    st = Bits { ..st, pos: st.pos + 1 }
+    st = Bits { ..st, pos = st.pos + 1 }
     i = i + 1
   }
   Ok((out, st))
@@ -517,18 +517,18 @@ fn stored_hi() -> Bytes = raw([0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105])
 
 test "the defaults decode from byte zero under the default ceiling" {
   assert inflate(stored_hi()) == Ok(bytes.utf8("hi"))
-  assert inflate(stored_hi(), cap: None) == Ok(bytes.utf8("hi"))
-  assert inflate_from(stored_hi(), cap: None) == Ok((bytes.utf8("hi"), 7))
+  assert inflate(stored_hi(), cap = None) == Ok(bytes.utf8("hi"))
+  assert inflate_from(stored_hi(), cap = None) == Ok((bytes.utf8("hi"), 7))
   let suffixed = raw([0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105, 0xCC])
   assert inflate_from(suffixed) == Ok((bytes.utf8("hi"), 7))
-  assert inflate_from(suffixed, cap: Some(2)) == Ok((bytes.utf8("hi"), 7))
+  assert inflate_from(suffixed, cap = Some(2)) == Ok((bytes.utf8("hi"), 7))
 }
 
 test "the cursor starts at a prefix and returns an absolute end offset" {
   let prefixed = raw([0xAA, 0xBB, 0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105, 0xCC])
   assert inflate_from(prefixed, 2) == Ok((bytes.utf8("hi"), 9))
-  assert inflate_from(prefixed, 2, cap: Some(2)) == Ok((bytes.utf8("hi"), 9))
-  match inflate_from(prefixed, 2, cap: Some(1)) {
+  assert inflate_from(prefixed, 2, cap = Some(2)) == Ok((bytes.utf8("hi"), 9))
+  match inflate_from(prefixed, 2, cap = Some(1)) {
     Err(e) -> { assert str.contains(e, "1 byte limit") }
     Ok(_) -> { assert false }
   }
@@ -560,21 +560,21 @@ test "a truncated fixed block is not finished off with bits that are not there" 
 }
 
 test "the output ceiling is checked before the buffer grows, not after" {
-  assert inflate(stored_hi(), cap: Some(2)) == Ok(bytes.utf8("hi"))
+  assert inflate(stored_hi(), cap = Some(2)) == Ok(bytes.utf8("hi"))
   # "stopped at 0" is the assertion that matters: the two bytes of this block
   # never landed. A ceiling applied to the finished output refuses the same
   # stream and says "stopped at 2", having built it first.
-  match inflate(stored_hi(), cap: Some(1)) {
+  match inflate(stored_hi(), cap = Some(1)) {
     Err(e) -> { assert e == "deflate: the output exceeds the 1 byte limit (stopped at 0 bytes)" }
     Ok(_) -> { assert false }
   }
   # A ceiling of zero is a ceiling, not "unlimited" -- the two body-limit
   # spellings that disagreed about 0 and -1 are what this avoids.
-  match inflate(stored_hi(), cap: Some(0)) {
+  match inflate(stored_hi(), cap = Some(0)) {
     Err(e) -> { assert e == "deflate: the output exceeds the 0 byte limit (stopped at 0 bytes)" }
     Ok(_) -> { assert false }
   }
-  match inflate(stored_hi(), cap: Some(-1)) {
+  match inflate(stored_hi(), cap = Some(-1)) {
     Err(e) -> { assert str.contains(e, "negative output limit") }
     Ok(_) -> { assert false }
   }
@@ -586,7 +586,7 @@ test "the output ceiling is checked before the buffer grows, not after" {
 ## allows at most, so 260 200 of them are about 423 KB that decode to just
 ## over 64 MiB.
 fn bomb(copies: Int) -> Bytes = {
-  var w = BitW { out: bytes.buf(), acc: 0, n: 0 }
+  var w = BitW { out = bytes.buf(), acc = 0, n = 0 }
   w = bits_lsb(w, 1, 1)
   w = bits_lsb(w, 1, 2)
   # literal 97: fixed code 0x30 + 97, 8 bits
@@ -631,9 +631,9 @@ fn code_msb(w0: BitW, v: Int, count: Int) -> BitW = {
 fn bit(w: BitW, b: Int) -> BitW = {
   let acc = w.acc | (b << w.n)
   if w.n == 7 {
-    BitW { out: bytes.put(w.out, acc), acc: 0, n: 0 }
+    BitW { out = bytes.put(w.out, acc), acc = 0, n = 0 }
   } else {
-    BitW { ..w, acc: acc, n: w.n + 1 }
+    BitW { ..w, acc = acc, n = w.n + 1 }
   }
 }
 
@@ -655,7 +655,7 @@ test "the default ceiling refuses a bomb and names the default and the ways out"
     Ok(_) -> { assert false }
   }
   # An explicit ceiling that is not the default says only what it is.
-  match inflate(bomb(260200), cap: Some(1000)) {
+  match inflate(bomb(260200), cap = Some(1000)) {
     Err(e) -> { assert e == "deflate: the output exceeds the 1000 byte limit (stopped at 775 bytes)" }
     Ok(_) -> { assert false }
   }
@@ -666,7 +666,7 @@ test "the default ceiling refuses a bomb and names the default and the ways out"
 ## end-of-block). Neither writes a byte, so no output ceiling ever sees them;
 ## what they cost is whatever the decoder does per block.
 fn empty_blocks(n: Int, dynamic: Bool) -> Bytes = {
-  var w = BitW { out: bytes.buf(), acc: 0, n: 0 }
+  var w = BitW { out = bytes.buf(), acc = 0, n = 0 }
   var i = 0
   while i < n {
     w = bits_lsb(w, if i == n - 1 { 1 } else { 0 }, 1)

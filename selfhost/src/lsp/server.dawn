@@ -450,7 +450,7 @@ pub type LspAnalysisMode = Legacy | Cold
 pub type LspAnalysisConfig = { mode: LspAnalysisMode, max_modules: Int }
 
 pub fn legacy_analysis_config() -> LspAnalysisConfig =
-  LspAnalysisConfig { mode: Legacy, max_modules: 128 }
+  LspAnalysisConfig { mode = Legacy, max_modules = 128 }
 
 fn validate_analysis_config(config: LspAnalysisConfig) -> Unit = {
   if config.max_modules < 0 {
@@ -475,8 +475,8 @@ fn workspace_identity(plan: ProjectPlan) -> WorkspaceIdentity !Fs !Env = {
   let project = canon_identity(plan.source.project)
   let source_root = canon_identity(plan.source.source_root)
   WorkspaceIdentity {
-    source_root: source_root,
-    lookup_key: workspace_key_part(project) ++ workspace_key_part(source_root)
+    source_root = source_root,
+    lookup_key = workspace_key_part(project) ++ workspace_key_part(source_root)
   }
 }
 
@@ -583,11 +583,11 @@ fn workspace_modules(ws: Workspace, current_uri: String) -> Map[String, String] 
 fn analysis_of(st: LspState, d: Doc) -> Option[Analysis] =
   match d.analysis {
     Standalone(prog, entry, modules) -> Some(Analysis {
-      prog: prog,
-      entry: entry,
-      modules: modules,
-      workspace_key: None,
-      definition_root: None
+      prog = prog,
+      entry = entry,
+      modules = modules,
+      workspace_key = None,
+      definition_root = None
     })
     WorkspaceMember(identity) ->
       match map.get(st.workspaces, identity.lookup_key) {
@@ -596,11 +596,11 @@ fn analysis_of(st: LspState, d: Doc) -> Option[Analysis] =
             Some(prog) ->
               match map.get(ws.entry_by_uri, d.uri) {
                 Some(entry) -> Some(Analysis {
-                  prog: prog,
-                  entry: entry,
-                  modules: Some(workspace_modules(ws, d.uri)),
-                  workspace_key: Some(identity.lookup_key),
-                  definition_root: Some(identity.source_root)
+                  prog = prog,
+                  entry = entry,
+                  modules = Some(workspace_modules(ws, d.uri)),
+                  workspace_key = Some(identity.lookup_key),
+                  definition_root = Some(identity.source_root)
                 })
                 None -> None
               }
@@ -641,13 +641,13 @@ fn module_qcx(st: LspState, prog: Program, env: Map[String, ModExports], e: Chec
     seen = map.insert(seen, path, exports_seen_by(exp, viewer))
   }
   QCx {
-    entry: with_import_tables(e, seen),
-    prog: prog,
-    std: st.std,
-    exports_env: seen,
-    bins: visible_bins(st.bins, e.cx),
-    typed: typed_trees(e.tm),
-    cps: cps
+    entry = with_import_tables(e, seen),
+    prog = prog,
+    std = st.std,
+    exports_env = seen,
+    bins = visible_bins(st.bins, e.cx),
+    typed = typed_trees(e.tm),
+    cps = cps
   }
 }
 
@@ -699,7 +699,7 @@ fn with_import_tables(e: CheckedMod, env: Map[String, ModExports]) -> CheckedMod
     }
   }
   if added {
-    CheckedMod { ..e, cx: Cx { ..e.cx, adts: adts, traits: traits, effect_infos: effs } }
+    CheckedMod { ..e, cx = Cx { ..e.cx, adts = adts, traits = traits, effect_infos = effs } }
   } else {
     e
   }
@@ -763,7 +763,7 @@ fn doc_src_memo(st: LspState, key: String, text: String) -> (DocSrc, LspState) =
   let src = doc_src_of(text)
   let none: Map[String, DocMemo] = map.empty()
   let kept = if len(map.keys(st.doc_memo)) >= DOC_MEMO_FILES { none } else { st.doc_memo }
-  (src, LspState { ..st, doc_memo: map.insert(kept, key, DocMemo { text: text, src: src }) })
+  (src, LspState { ..st, doc_memo = map.insert(kept, key, DocMemo { text = text, src = src }) })
 }
 
 fn analysis_session(st: LspState, js: Jsig) -> incremental.Session = {
@@ -799,7 +799,7 @@ fn close_all_leases(st0: LspState) -> LspState !Console !io = {
   let none: Option[JsigLease] = None
   let no_workspaces: Map[String, WorkspaceSlot] = map.empty()
   let no_docs: Map[String, Doc] = map.empty()
-  let st = LspState { ..st0, docs: no_docs, workspaces: no_workspaces, standalone: none }
+  let st = LspState { ..st0, docs = no_docs, workspaces = no_workspaces, standalone = none }
   for workspace_key in sort(map.keys(st0.workspaces)) {
     match map.get(st0.workspaces, workspace_key).expect("workspace") {
       Ready(ws) -> close_lease(ws.lease)
@@ -918,19 +918,19 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
   }
   let standalone = host.standalone()
   var st = LspState {
-    std: std,
-    bins: builtins(),
-    docs: map.empty(),
-    workspaces: map.empty(),
-    standalone: Some(standalone),
-    host: host,
-    analysis_config: config,
-    lifecycle: PreInit,
-    watch_manifests: false,
-    related_information: false,
-    doc_memo: map.empty(),
-    inlay: default_inlay_opts(),
-    default_item_data: false
+    std = std,
+    bins = builtins(),
+    docs = map.empty(),
+    workspaces = map.empty(),
+    standalone = Some(standalone),
+    host = host,
+    analysis_config = config,
+    lifecycle = PreInit,
+    watch_manifests = false,
+    related_information = false,
+    doc_memo = map.empty(),
+    inlay = default_inlay_opts(),
+    default_item_data = false
   }
   # The newest text of the one document whose analysis has not run yet.
   #
@@ -999,7 +999,7 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
               let gate = lifecycle_gate(st.lifecycle, msg)
               match gate {
                 LgActivate -> {
-                  st = LspState { ..st, lifecycle: Running }
+                  st = LspState { ..st, lifecycle = Running }
                   st = handle(st, msg)
                 }
                 LgDispatch -> {
@@ -1057,7 +1057,7 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
                 }
                 LgBeginShutdown -> {
                   pending = None
-                  st = LspState { ..st, lifecycle: Shutdown }
+                  st = LspState { ..st, lifecycle = Shutdown }
                   st = handle(st, msg)
                   st = close_all_leases(st)
                 }
@@ -1592,10 +1592,10 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
   if method == "initialize" {
     st = LspState {
       ..st,
-      watch_manifests: client_watches_files(params),
-      related_information: client_relates_diagnostics(params),
-      inlay: inlay_opts_of(params),
-      default_item_data: client_defaults_item_data(params)
+      watch_manifests = client_watches_files(params),
+      related_information = client_relates_diagnostics(params),
+      inlay = inlay_opts_of(params),
+      default_item_data = client_defaults_item_data(params)
     }
     respond(id, jobj([("capabilities", jobj([
       ("textDocumentSync", JInt(1)),
@@ -1875,13 +1875,13 @@ fn refs_world(st: LspState, ws: Workspace, verify: Bool) -> Option[RefsWorld] !F
   let w0 = match ws.world {
     Some(w) -> {
       if w.current && not (verify && world_stale(ws, w)) { return Some(w) }
-      RefsWorld { ..w, seeds: project_seeds(ws.plan) }
+      RefsWorld { ..w, seeds = project_seeds(ws.plan) }
     }
     None -> {
       let no_prog: Option[Program] = None
       RefsWorld {
-        seeds: project_seeds(ws.plan), cache: analysis_session(st, ws.lease.jsig),
-        parses: ws.parses, prog: no_prog, texts: map.empty(), refs: map.empty(), current: false
+        seeds = project_seeds(ws.plan), cache = analysis_session(st, ws.lease.jsig),
+        parses = ws.parses, prog = no_prog, texts = map.empty(), refs = map.empty(), current = false
       }
     }
   }
@@ -1902,12 +1902,12 @@ fn refs_world(st: LspState, ws: Workspace, verify: Bool) -> Option[RefsWorld] !F
       }
       Some(RefsWorld {
         ..w0,
-        cache: checked.session,
-        parses: retained_parses(st, read.parses),
-        prog: Some(checked.program),
-        texts: texts,
-        refs: refs,
-        current: true
+        cache = checked.session,
+        parses = retained_parses(st, read.parses),
+        prog = Some(checked.program),
+        texts = texts,
+        refs = refs,
+        current = true
       })
     }
   }
@@ -1970,8 +1970,8 @@ fn sources_changed(st: LspState, params: Json) -> LspState !Fs !Env = {
           Some(w) -> {
             let root = canon_identity(ws.plan.source.source_root)
             if list.any(paths, p => path_in_root(p, root)) {
-              let next = Workspace { ..ws, world: Some(RefsWorld { ..w, current: false }) }
-              out = LspState { ..out, workspaces: map.insert(out.workspaces, key, Ready(next)) }
+              let next = Workspace { ..ws, world = Some(RefsWorld { ..w, current = false }) }
+              out = LspState { ..out, workspaces = map.insert(out.workspaces, key, Ready(next)) }
             }
           }
           None -> ()
@@ -2068,7 +2068,7 @@ fn rebuild_workspace_early(
   match ws.refresh_problem {
     Some(problem) -> (Workspace {
       ..ws,
-      diag_by_uri: merge_diagnostics(ws.diag_by_uri,
+      diag_by_uri = merge_diagnostics(ws.diag_by_uri,
         diagnostics_of_problem(st, ws.path_by_uri, problem))
     }, sent)
     None -> (ws, sent)
@@ -2118,7 +2118,7 @@ fn publish_placed(
   let own = add_loc_diags(st, ws0.path_by_uri, map.empty(), lds)
   let tmp = LspState {
     ..st,
-    workspaces: map.insert(st.workspaces, slot_key, Ready(Workspace { ..ws0, diag_by_uri: own }))
+    workspaces = map.insert(st.workspaces, slot_key, Ready(Workspace { ..ws0, diag_by_uri = own }))
   }
   for uri in uris {
     let ds = diagnostics_for_uri(tmp, uri)
@@ -2156,12 +2156,12 @@ fn rebuild_snapshot(
       let no_world: Option[RefsWorld] = None
       (Workspace {
         ..ws0,
-        prog: no_prog,
-        cache: incremental.evict(ws0.cache),
-        analysis_stats: None,
-        entry_by_uri: no_entries,
-        diag_by_uri: conflict_diagnostics(st, ws0.path_by_uri, paths),
-        world: no_world
+        prog = no_prog,
+        cache = incremental.evict(ws0.cache),
+        analysis_stats = None,
+        entry_by_uri = no_entries,
+        diag_by_uri = conflict_diagnostics(st, ws0.path_by_uri, paths),
+        world = no_world
       }, none_sent)
     }
     InputsReady(overlay, entries, entry_by_uri) -> {
@@ -2180,16 +2180,16 @@ fn rebuild_snapshot(
       let prog = update.program
       (Workspace {
         ..ws0,
-        prog: Some(prog),
-        cache: update.session,
-        analysis_stats: Some(update.stats),
-        parses: retained_parses(st, reusing.parses),
-        entry_by_uri: entry_by_uri,
-        diag_by_uri: with_walk_diags(st, ws0, diagnostics_of_program(st, ws0.path_by_uri, prog)),
+        prog = Some(prog),
+        cache = update.session,
+        analysis_stats = Some(update.stats),
+        parses = retained_parses(st, reusing.parses),
+        entry_by_uri = entry_by_uri,
+        diag_by_uri = with_walk_diags(st, ws0, diagnostics_of_program(st, ws0.path_by_uri, prog)),
         # the references program is brought up to date by the next request
         # that reads it, not here: this is the path every keystroke takes
-        world: match ws0.world {
-          Some(w) -> Some(RefsWorld { ..w, current: false })
+        world = match ws0.world {
+          Some(w) -> Some(RefsWorld { ..w, current = false })
           None -> None
         }
       }, sent)
@@ -2204,10 +2204,10 @@ fn unavailable_workspace(
   problem: LocDiag
 ) -> UnavailableWorkspace !Fs !Env =
   UnavailableWorkspace {
-    plan: plan,
-    path_by_uri: path_by_uri,
-    problem: problem,
-    diag_by_uri: diagnostics_of_problem(st, path_by_uri, problem)
+    plan = plan,
+    path_by_uri = path_by_uri,
+    problem = problem,
+    diag_by_uri = diagnostics_of_problem(st, path_by_uri, problem)
   }
 
 ## Construct the lease before installing a ready workspace. Failure installs
@@ -2223,17 +2223,17 @@ fn activate_workspace(
       let no_entries: Map[String, String] = map.empty()
       let no_diags: Map[String, List[Json]] = map.empty()
       let candidate = Workspace {
-        plan: plan,
-        path_by_uri: path_by_uri,
-        prog: no_prog,
-        entry_by_uri: no_entries,
-        lease: lease,
-        cache: analysis_session(st, lease.jsig),
-        analysis_stats: None,
-        parses: no_parses(),
-        diag_by_uri: no_diags,
-        refresh_problem: None,
-        world: None
+        plan = plan,
+        path_by_uri = path_by_uri,
+        prog = no_prog,
+        entry_by_uri = no_entries,
+        lease = lease,
+        cache = analysis_session(st, lease.jsig),
+        analysis_stats = None,
+        parses = no_parses(),
+        diag_by_uri = no_diags,
+        refresh_problem = None,
+        world = None
       }
       match catch_panic(() => rebuild_workspace(st, candidate)) {
         Ok(workspace) -> Ready(workspace)
@@ -2346,7 +2346,7 @@ fn install_workspace_after(
   var affected = add_uris(affected0, set.to_list(slot_uris(slot)))
   let st = LspState {
     ..st0,
-    workspaces: map.insert(st0.workspaces, identity.lookup_key, slot)
+    workspaces = map.insert(st0.workspaces, identity.lookup_key, slot)
   }
   for uri in sort(set.to_list(affected)) {
     let ds = diagnostics_for_uri(st, uri)
@@ -2377,14 +2377,14 @@ fn standalone_doc(
   }
   let prog = standalone_analysis(st, source_path, text)
   Doc {
-    uri: uri,
-    version: version,
-    path: path,
-    canonical_path: canonical_path,
-    text: text,
-    view: view_of(text),
-    ls: line_starts_of(text),
-    analysis: Standalone(prog, standalone_entry(prog), modules)
+    uri = uri,
+    version = version,
+    path = path,
+    canonical_path = canonical_path,
+    text = text,
+    view = view_of(text),
+    ls = line_starts_of(text),
+    analysis = Standalone(prog, standalone_entry(prog), modules)
   }
 }
 
@@ -2394,7 +2394,7 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
       let no_path: Option[String] = None
       let no_modules: Option[Map[String, String]] = None
       let d = standalone_doc(st0, uri, no_path, no_path, text, version, no_modules)
-      let st = LspState { ..st0, docs: map.insert(st0.docs, uri, d) }
+      let st = LspState { ..st0, docs = map.insert(st0.docs, uri, d) }
       publish_uris(st, set.from([uri]))
       st
     }
@@ -2406,23 +2406,23 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
           let modules: Option[Map[String, String]] = Some(plan.modules.by_use)
           let d = standalone_doc(
             st0, uri, Some(path), Some(canonical_path), text, version, modules)
-          let st = LspState { ..st0, docs: map.insert(st0.docs, uri, d) }
+          let st = LspState { ..st0, docs = map.insert(st0.docs, uri, d) }
           publish_uris(st, set.from([uri]))
           st
         }
         Some(_) -> {
           let identity = workspace_identity(plan)
           let d = Doc {
-            uri: uri,
-            version: version,
-            path: Some(path),
-            canonical_path: Some(canonical_path),
-            text: text,
-            view: view_of(text),
-            ls: line_starts_of(text),
-            analysis: WorkspaceMember(identity)
+            uri = uri,
+            version = version,
+            path = Some(path),
+            canonical_path = Some(canonical_path),
+            text = text,
+            view = view_of(text),
+            ls = line_starts_of(text),
+            analysis = WorkspaceMember(identity)
           }
-          var st = LspState { ..st0, docs: map.insert(st0.docs, uri, d) }
+          var st = LspState { ..st0, docs = map.insert(st0.docs, uri, d) }
           let old = map.get(st0.workspaces, identity.lookup_key)
           var affected: Set[String] = set.empty()
           let captured = match old {
@@ -2446,7 +2446,7 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
           let none_sent: Map[String, String] = map.empty()
           let (slot, sent) = match old {
             Some(Ready(ws)) -> {
-              let (next, early) = rebuild_workspace_early(st, Workspace { ..ws, path_by_uri: paths },
+              let (next, early) = rebuild_workspace_early(st, Workspace { ..ws, path_by_uri = paths },
                 Some(identity.lookup_key))
               (Ready(next), early)
             }
@@ -2471,25 +2471,25 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
       # analysis, and an edit re-runs the analysis
       let d = Doc {
         ..old,
-        version: version,
-        text: text,
-        view: view_of(text),
-        ls: line_starts_of(text),
-        analysis: Standalone(prog, standalone_entry(prog), modules)
+        version = version,
+        text = text,
+        view = view_of(text),
+        ls = line_starts_of(text),
+        analysis = Standalone(prog, standalone_entry(prog), modules)
       }
-      let st = LspState { ..st0, docs: map.insert(st0.docs, old.uri, d) }
+      let st = LspState { ..st0, docs = map.insert(st0.docs, old.uri, d) }
       publish_uris(st, set.from([old.uri]))
       st
     }
     WorkspaceMember(identity) -> {
       let d = Doc {
         ..old,
-        version: version,
-        text: text,
-        view: view_of(text),
-        ls: line_starts_of(text)
+        version = version,
+        text = text,
+        view = view_of(text),
+        ls = line_starts_of(text)
       }
-      var st = LspState { ..st0, docs: map.insert(st0.docs, old.uri, d) }
+      var st = LspState { ..st0, docs = map.insert(st0.docs, old.uri, d) }
       let before = map.get(st.workspaces, identity.lookup_key).expect("workspace member identity")
       let affected = slot_uris(before)
       let none_sent: Map[String, String] = map.empty()
@@ -2573,7 +2573,7 @@ test "a diagnostic's notes are related locations only for a client that reads th
   let ls = line_starts_of(text)
   let d = Diag {
     ..mk_diag("unclosed `{`", 9, 10, "add the missing `}`"),
-    notes: [Note { msg: "the file ends here", lo: 17, hi: 17 }]
+    notes = [Note { msg = "the file ends here", lo = 17, hi = 17 }]
   }
   let uri = "file:///w/a.dawn"
   let related = render(diagnostic_json(v, ls, uri, true, d))
@@ -2641,15 +2641,15 @@ fn inlay_opts_of(params: Json) -> InlayOpts = {
   let j = get_or_null(get_or_null(params, "initializationOptions"), "inlayHints")
   let d = default_inlay_opts()
   InlayOpts {
-    let_types: json_flag(j, "letTypes", d.let_types),
-    lambda_param_types: json_flag(j, "lambdaParamTypes", d.lambda_param_types),
-    call_effects: json_flag(j, "callEffects", d.call_effects),
-    decl_effects: json_flag(j, "declarationEffects", d.decl_effects),
-    pattern_types: json_flag(j, "patternTypes", d.pattern_types),
-    param_names: json_flag(j, "parameterNames", d.param_names),
-    default_args: json_flag(j, "defaultArguments", d.default_args),
-    default_values: json_flag(j, "defaultArgumentValues", d.default_values),
-    propagated_errors: json_flag(j, "propagatedErrors", d.propagated_errors)
+    let_types = json_flag(j, "letTypes", d.let_types),
+    lambda_param_types = json_flag(j, "lambdaParamTypes", d.lambda_param_types),
+    call_effects = json_flag(j, "callEffects", d.call_effects),
+    decl_effects = json_flag(j, "declarationEffects", d.decl_effects),
+    pattern_types = json_flag(j, "patternTypes", d.pattern_types),
+    param_names = json_flag(j, "parameterNames", d.param_names),
+    default_args = json_flag(j, "defaultArguments", d.default_args),
+    default_values = json_flag(j, "defaultArgumentValues", d.default_values),
+    propagated_errors = json_flag(j, "propagatedErrors", d.propagated_errors)
   }
 }
 
@@ -2786,7 +2786,7 @@ fn refresh_workspace(
   # under `key` when they were opened, so the slot stays there rather than
   # leaving them pointing at nothing; a document opened afterwards gets the
   # new answer. `install_workspace` reads the key alone.
-  let identity = WorkspaceIdentity { ..planned, lookup_key: key }
+  let identity = WorkspaceIdentity { ..planned, lookup_key = key }
   let affected = slot_uris(slot)
   match activate_workspace(st, fresh, slot_paths(slot)) {
     Ready(ws) -> {
@@ -2800,7 +2800,7 @@ fn refresh_workspace(
     Unavailable(failed) ->
       match slot {
         Ready(old) -> {
-          let kept = Workspace { ..old, refresh_problem: Some(failed.problem) }
+          let kept = Workspace { ..old, refresh_problem = Some(failed.problem) }
           install_workspace(st, identity, Ready(rebuild_workspace(st, kept)), affected)
         }
         Unavailable(_) -> install_workspace(st, identity, Unavailable(failed), affected)
@@ -2817,7 +2817,7 @@ fn close_doc(st0: LspState, uri: String) -> LspState !Fs !Env !Console !io =
     Some(d) ->
       match d.analysis {
         Standalone(_, _, _) -> {
-          let st = LspState { ..st0, docs: map.remove(st0.docs, uri) }
+          let st = LspState { ..st0, docs = map.remove(st0.docs, uri) }
           publish_uris(st, set.from([uri]))
           st
         }
@@ -2827,11 +2827,11 @@ fn close_doc(st0: LspState, uri: String) -> LspState !Fs !Env !Console !io =
           var affected = slot_uris(before)
           affected = set.insert(affected, uri)
           let paths = map.remove(slot_paths(before), uri)
-          var st = LspState { ..st0, docs: map.remove(st0.docs, uri) }
+          var st = LspState { ..st0, docs = map.remove(st0.docs, uri) }
           if len(map.keys(paths)) == 0 {
             st = LspState {
               ..st,
-              workspaces: map.remove(st.workspaces, identity.lookup_key)
+              workspaces = map.remove(st.workspaces, identity.lookup_key)
             }
             publish_uris(st, affected)
             match before {
@@ -2841,7 +2841,7 @@ fn close_doc(st0: LspState, uri: String) -> LspState !Fs !Env !Console !io =
             st
           } else {
             let slot = match before {
-              Ready(ws) -> Ready(rebuild_workspace(st, Workspace { ..ws, path_by_uri: paths }))
+              Ready(ws) -> Ready(rebuild_workspace(st, Workspace { ..ws, path_by_uri = paths }))
               Unavailable(ws) -> Unavailable(unavailable_workspace(
                 st, ws.plan, paths, ws.problem))
             }
@@ -2871,7 +2871,7 @@ fn dot_items_of(st: LspState, d: Doc, cut: (Int, Int)) -> List[CItem] !Fs !Proc 
   let (lo, hi) = cut
   let cps = d.view.cps
   let text2 = from_code_points(list.take(cps, lo)) ++ from_code_points(list.drop(cps, hi))
-  let d2 = Doc { ..d, text: text2, view: view_of(text2), ls: line_starts_of(text2) }
+  let d2 = Doc { ..d, text = text2, view = view_of(text2), ls = line_starts_of(text2) }
   let no_items: List[CItem] = []
   let st2 = match d.analysis {
     Standalone(_, _, modules) -> {
@@ -2880,14 +2880,14 @@ fn dot_items_of(st: LspState, d: Doc, cut: (Int, Int)) -> List[CItem] !Fs !Proc 
         None -> "<lsp>"
       }
       let prog = standalone_analysis(st, source_path, text2)
-      let d3 = Doc { ..d2, analysis: Standalone(prog, standalone_entry(prog), modules) }
-      Some(LspState { ..st, docs: map.insert(st.docs, d.uri, d3) })
+      let d3 = Doc { ..d2, analysis = Standalone(prog, standalone_entry(prog), modules) }
+      Some(LspState { ..st, docs = map.insert(st.docs, d.uri, d3) })
     }
     WorkspaceMember(identity) -> {
-      let st1 = LspState { ..st, docs: map.insert(st.docs, d.uri, d2) }
+      let st1 = LspState { ..st, docs = map.insert(st.docs, d.uri, d2) }
       match map.get(st1.workspaces, identity.lookup_key) {
         Some(Ready(ws)) ->
-          Some(LspState { ..st1, workspaces: map.insert(st1.workspaces, identity.lookup_key, Ready(rebuild_workspace(st1, ws))) })
+          Some(LspState { ..st1, workspaces = map.insert(st1.workspaces, identity.lookup_key, Ready(rebuild_workspace(st1, ws))) })
         _ -> None
       }
     }
@@ -2920,7 +2920,7 @@ fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !Env !io = {
               var items: List[Json] = []
               let found0 = completions_at(qc, analysis.modules, d.text, pos_offset(d, params))
               let found = match found0.dot {
-                Some(cut) -> Completions { ..found0, items: dot_items_of(st, d, cut) }
+                Some(cut) -> Completions { ..found0, items = dot_items_of(st, d, cut) }
                 None -> found0
               }
               for it in found.items {
@@ -3317,7 +3317,7 @@ fn workspace_references(
   var found: List[Found] = []
   for o in occurrences(qc, offset, with_decl) {
     let loc = jobj([("uri", JStr(d.uri)), ("range", jrange(d.view, d.ls, o.lo, o.hi))])
-    found = found ++ [Found { path: own, lo: o.lo, loc: loc }]
+    found = found ++ [Found { path = own, lo = o.lo, loc = loc }]
   }
   var uri_of: Map[String, String] = map.empty()
   for uri in sort(map.keys(ws.path_by_uri)) {
@@ -3353,14 +3353,14 @@ fn workspace_references(
       let uri = map.get(uri_of, id).unwrap_or(path_to_uri(id))
       for r in hits {
         let loc = jobj([("uri", JStr(uri)), ("range", jrange(view, ls, r.lo, r.hi))])
-        found = found ++ [Found { path: id, lo: r.lo, loc: loc }]
+        found = found ++ [Found { path = id, lo = r.lo, loc = loc }]
       }
     }
   }
   let ordered = sort_by(found, (a, b) =>
       if a.path == b.path { a.lo - b.lo } else if a.path < b.path { -1 } else { 1 })
-  let next = Workspace { ..ws, world: Some(RefsWorld { ..world, refs: index }) }
-  (JArr(map(ordered, f => f.loc)), LspState { ..st, workspaces: map.insert(st.workspaces, key, Ready(next)) })
+  let next = Workspace { ..ws, world = Some(RefsWorld { ..world, refs = index }) }
+  (JArr(map(ordered, f => f.loc)), LspState { ..st, workspaces = map.insert(st.workspaces, key, Ready(next)) })
 }
 
 ## `textDocument/documentHighlight`: the same occurrences, the declaration's
@@ -3535,16 +3535,16 @@ fn rename_start(st: LspState, d: Doc, offset: Int) -> (Result[RenameStart, Strin
     None -> ()
   }
   (Ok(RenameStart {
-    ws: ws, lookup: lookup, root: root, world: world, prog: prog, entry: entry, ident: ident, texts: texts,
-    target: Key { path: tpath, def: def }, old: old, lo: here.lo, hi: here.hi, as_name: as_name
+    ws = ws, lookup = lookup, root = root, world = world, prog = prog, entry = entry, ident = ident, texts = texts,
+    target = Key { path = tpath, def = def }, old = old, lo = here.lo, hi = here.hi, as_name = as_name
   }), kept)
 }
 
 ## `st` keeping `world` as the references program of the workspace `ws`,
 ## filed under `lookup`.
 fn keep_world_of(st: LspState, lookup: String, ws: Workspace, world: RefsWorld) -> LspState = {
-  let next = Workspace { ..ws, world: Some(world) }
-  LspState { ..st, workspaces: map.insert(st.workspaces, lookup, Ready(next)) }
+  let next = Workspace { ..ws, world = Some(world) }
+  LspState { ..st, workspaces = map.insert(st.workspaces, lookup, Ready(next)) }
 }
 
 ## `st` keeping the references program (and index) a rename read.
@@ -3612,8 +3612,8 @@ fn local_rename_start(st: LspState, d: Doc, analysis: Analysis, offset: Int) -> 
   }
   let tpath = if own_decl { d.uri } else { t.def_path.expect("a declaration path") }
   Ok(LocalRename {
-    analysis: analysis, entry: entry, qc: qc, target: Key { path: tpath, def: def },
-    old: old, lo: here.lo, hi: here.hi, as_name: as_name
+    analysis = analysis, entry = entry, qc = qc, target = Key { path = tpath, def = def },
+    old = old, lo = here.lo, hi = here.hi, as_name = as_name
   })
 }
 
@@ -3725,7 +3725,7 @@ fn link_name_edits(
 ) -> List[Edit] = {
   var edits: List[Edit] = []
   if str.contains(text, "[`") && str.contains(text, old) {
-    let sc = LinkScope { path: cm.mod_path, m: cm.m, cx: cm.cx }
+    let sc = LinkScope { path = cm.mod_path, m = cm.m, cx = cm.cx }
     for sp in doc_link_spans(text) {
       let (lo, _, ltext) = sp
       for seg in link_segments(lo, ltext) {
@@ -3817,7 +3817,7 @@ fn handle_rename(st: LspState, params: Json) -> (Result[Json, String], LspState)
     }
     edits = edits ++ link_name_edits(prog, mods, cm, id, text, cs, rs.old, new, rs.ident, rs.target.path, tlo)
   }
-  let world = RefsWorld { ..rs.world, refs: index }
+  let world = RefsWorld { ..rs.world, refs = index }
   let st1 = keep_world(st, rs, world)
   # the edits by file, and the files as they would read
   var by_path: Map[String, List[Edit]] = map.empty()
@@ -4137,10 +4137,10 @@ fn linked_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, home: DocHome, 
 ## against: the analyzed document, another program file, or a std module.
 fn scope_of(qc: QCx, home: DocHome) -> Option[LinkScope] =
   match home {
-    DocHere -> Some(LinkScope { path: qc.entry.mod_path, m: qc.entry.m, cx: qc.entry.cx })
+    DocHere -> Some(LinkScope { path = qc.entry.mod_path, m = qc.entry.m, cx = qc.entry.cx })
     DocFile(path) -> {
       for cm in qc.prog.modules {
-        if cm.path == path { return Some(LinkScope { path: cm.mod_path, m: cm.m, cx: cm.cx }) }
+        if cm.path == path { return Some(LinkScope { path = cm.mod_path, m = cm.m, cx = cm.cx }) }
       }
       None
     }
@@ -4148,7 +4148,7 @@ fn scope_of(qc: QCx, home: DocHome) -> Option[LinkScope] =
       for i in range(0, len(qc.std.mods)) {
         let (smp, cx, _, _) = qc.std.mods[i]
         let (_, _, m) = qc.std.srcs[i]
-        if smp == mp { return Some(LinkScope { path: mp, m: m, cx: cx }) }
+        if smp == mp { return Some(LinkScope { path = mp, m = m, cx = cx }) }
       }
       None
     }
@@ -4268,12 +4268,12 @@ fn text_now(st: LspState, pending: Option[(String, String, Int)], uri: String) -
   match pending {
     Some(p) -> {
       let (puri, text, _) = p
-      if puri == uri { return Some(DocText { text: text, view: view_of(text), ls: line_starts_of(text) }) }
+      if puri == uri { return Some(DocText { text = text, view = view_of(text), ls = line_starts_of(text) }) }
     }
     None -> ()
   }
   match map.get(st.docs, uri) {
-    Some(d) -> Some(DocText { text: d.text, view: d.view, ls: d.ls })
+    Some(d) -> Some(DocText { text = d.text, view = d.view, ls = d.ls })
     None -> None
   }
 }
@@ -4469,23 +4469,23 @@ test "a bundled std buffer keeps its std identity through the document seam" {
     let no_docs: Map[String, Doc] = map.empty()
     let no_ws: Map[String, WorkspaceSlot] = map.empty()
     let st = LspState {
-      std: std,
-      bins: builtins(),
-      docs: no_docs,
-      workspaces: no_ws,
-      standalone: Some(jsig_refused_lease()),
-      host: LspLeaseHost {
-        standalone: () => jsig_refused_lease(),
-        project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease()),
-        ct: ct_default()
+      std = std,
+      bins = builtins(),
+      docs = no_docs,
+      workspaces = no_ws,
+      standalone = Some(jsig_refused_lease()),
+      host = LspLeaseHost {
+        standalone = () => jsig_refused_lease(),
+        project = (_plan: source.SourcePlan) => Ok(jsig_refused_lease()),
+        ct = ct_default()
       },
-      analysis_config: legacy_analysis_config(),
-      lifecycle: Running,
-      watch_manifests: false,
-      related_information: false,
-      doc_memo: map.empty(),
-      inlay: default_inlay_opts(),
-      default_item_data: false
+      analysis_config = legacy_analysis_config(),
+      lifecycle = Running,
+      watch_manifests = false,
+      related_information = false,
+      doc_memo = map.empty(),
+      inlay = default_inlay_opts(),
+      default_item_data = false
     }
     let path = "std/cursor.dawn"
     let text = match io.read_file(path) {
@@ -4501,11 +4501,11 @@ test "a bundled std buffer keeps its std identity through the document seam" {
         assert entry == "std/cursor"
         # the identity is not decoration: this is the lookup every query makes
         match doc_qcx(st, d, Analysis {
-          prog: prog,
-          entry: entry,
-          modules: no_modules,
-          workspace_key: None,
-          definition_root: None
+          prog = prog,
+          entry = entry,
+          modules = no_modules,
+          workspace_key = None,
+          definition_root = None
         }) {
           Some(qc) -> { assert qc.entry.cx.is_std_module }
           None -> panic("the std buffer's entry module was not found by mod_path")
@@ -4570,30 +4570,30 @@ fn def_probe_state(std: StdCtx) -> LspState = {
   let no_docs: Map[String, Doc] = map.empty()
   let no_ws: Map[String, WorkspaceSlot] = map.empty()
   LspState {
-    std: std,
-    bins: builtins(),
-    docs: no_docs,
-    workspaces: no_ws,
-    standalone: Some(jsig_refused_lease()),
-    host: LspLeaseHost {
-      standalone: () => jsig_refused_lease(),
-      project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease()),
-      ct: ct_default()
+    std = std,
+    bins = builtins(),
+    docs = no_docs,
+    workspaces = no_ws,
+    standalone = Some(jsig_refused_lease()),
+    host = LspLeaseHost {
+      standalone = () => jsig_refused_lease(),
+      project = (_plan: source.SourcePlan) => Ok(jsig_refused_lease()),
+      ct = ct_default()
     },
-    analysis_config: legacy_analysis_config(),
-    lifecycle: Running,
-    watch_manifests: false,
-    related_information: false,
-    doc_memo: map.empty(),
-    inlay: default_inlay_opts(),
-    default_item_data: false
+    analysis_config = legacy_analysis_config(),
+    lifecycle = Running,
+    watch_manifests = false,
+    related_information = false,
+    doc_memo = map.empty(),
+    inlay = default_inlay_opts(),
+    default_item_data = false
   }
 }
 
 test "LSP analysis configuration keeps legacy defaults and rejects negative limits" {
   let legacy = legacy_analysis_config()
   assert legacy.mode == Legacy && legacy.max_modules == 128
-  let negative = LspAnalysisConfig { ..legacy, max_modules: -1 }
+  let negative = LspAnalysisConfig { ..legacy, max_modules = -1 }
   assert match catch_panic(() => validate_analysis_config(negative)) { Err(_) -> true, Ok(_) -> false }
 }
 
@@ -4620,22 +4620,22 @@ test "a dot in a workspace member whose imported type it uses completes instead 
         let plan = project_plan(source.SourceFile(path))
         let identity = workspace_identity(plan)
         let doc = Doc {
-          uri: uri, version: 1, path: Some(path), canonical_path: Some(path),
-          text: text, view: view_of(text), ls: line_starts_of(text),
-          analysis: WorkspaceMember(identity)
+          uri = uri, version = 1, path = Some(path), canonical_path = Some(path),
+          text = text, view = view_of(text), ls = line_starts_of(text),
+          analysis = WorkspaceMember(identity)
         }
         let base = def_probe_state(std)
-        let st0 = LspState { ..base, docs: map.insert(base.docs, uri, doc) }
+        let st0 = LspState { ..base, docs = map.insert(base.docs, uri, doc) }
         let lease = jsig_refused_lease()
         let empty = Workspace {
-          plan: plan, path_by_uri: map.insert(map.empty(), uri, path),
-          prog: None, entry_by_uri: map.empty(), lease: lease,
-          cache: incremental.new(std, ct_default(), lease.jsig, 128),
-          analysis_stats: None, parses: no_parses(), diag_by_uri: map.empty(),
-          refresh_problem: None, world: None
+          plan = plan, path_by_uri = map.insert(map.empty(), uri, path),
+          prog = None, entry_by_uri = map.empty(), lease = lease,
+          cache = incremental.new(std, ct_default(), lease.jsig, 128),
+          analysis_stats = None, parses = no_parses(), diag_by_uri = map.empty(),
+          refresh_problem = None, world = None
         }
         let ws = rebuild_workspace(st0, empty)
-        let st = LspState { ..st0, workspaces: map.insert(st0.workspaces, identity.lookup_key, Ready(ws)) }
+        let st = LspState { ..st0, workspaces = map.insert(st0.workspaces, identity.lookup_key, Ready(ws)) }
         let items = ai_items(handle_completion(st, d7_params(doc, "  p.", 4)))
         assert len(items) >= 0
       })))
@@ -4664,25 +4664,25 @@ test "a query context grafts the tables an unchecked entry's imports name" {
         let plan = project_plan(source.SourceFile(path))
         let identity = workspace_identity(plan)
         let doc = Doc {
-          uri: uri, version: 1, path: Some(path), canonical_path: Some(path),
-          text: text, view: view_of(text), ls: line_starts_of(text),
-          analysis: WorkspaceMember(identity)
+          uri = uri, version = 1, path = Some(path), canonical_path = Some(path),
+          text = text, view = view_of(text), ls = line_starts_of(text),
+          analysis = WorkspaceMember(identity)
         }
         let base = def_probe_state(std)
-        let st = LspState { ..base, docs: map.insert(base.docs, uri, doc) }
+        let st = LspState { ..base, docs = map.insert(base.docs, uri, doc) }
         let lease = jsig_refused_lease()
         let empty = Workspace {
-          plan: plan, path_by_uri: map.insert(map.empty(), uri, path),
-          prog: None, entry_by_uri: map.empty(), lease: lease,
-          cache: incremental.new(std, ct_default(), lease.jsig, 128),
-          analysis_stats: None, parses: no_parses(), diag_by_uri: map.empty(),
-          refresh_problem: None, world: None
+          plan = plan, path_by_uri = map.insert(map.empty(), uri, path),
+          prog = None, entry_by_uri = map.empty(), lease = lease,
+          cache = incremental.new(std, ct_default(), lease.jsig, 128),
+          analysis_stats = None, parses = no_parses(), diag_by_uri = map.empty(),
+          refresh_problem = None, world = None
         }
         let ws = rebuild_workspace(st, empty)
         let prog = ws.prog.expect("the project analyses")
         let e = list.find(prog.modules, cm => str.ends_with(cm.path, "/src/main.dawn"))
           .expect("main is in the program")
-        let unchecked = CheckedMod { ..e, cx: cx_new(Some(e.class_name), Some(e.path)) }
+        let unchecked = CheckedMod { ..e, cx = cx_new(Some(e.class_name), Some(e.path)) }
         let qc = module_qcx(st, prog, program_exports(st, prog), unchecked, doc.view.cps)
         let at = probe_offset(text, "Pt}", 0)
         let rs = resolutions(qc, 0, len(text))
@@ -4710,19 +4710,19 @@ test "workspace commits its module memo with its Program and drops it on conflic
         let plan = project_plan(source.SourceFile(path))
         let identity = workspace_identity(plan)
         let doc = Doc {
-          uri: uri, version: 1, path: Some(path), canonical_path: Some(path),
-          text: text, view: view_of(text), ls: line_starts_of(text),
-          analysis: WorkspaceMember(identity)
+          uri = uri, version = 1, path = Some(path), canonical_path = Some(path),
+          text = text, view = view_of(text), ls = line_starts_of(text),
+          analysis = WorkspaceMember(identity)
         }
         let base = def_probe_state(std)
-        let st = LspState { ..base, docs: map.insert(base.docs, uri, doc) }
+        let st = LspState { ..base, docs = map.insert(base.docs, uri, doc) }
         let lease = jsig_refused_lease()
         let empty = Workspace {
-          plan: plan, path_by_uri: map.insert(map.empty(), uri, path),
-          prog: None, entry_by_uri: map.empty(), lease: lease,
-          cache: incremental.new(std, ct_default(), lease.jsig, 128),
-          analysis_stats: None, parses: no_parses(), diag_by_uri: map.empty(),
-          refresh_problem: None, world: None
+          plan = plan, path_by_uri = map.insert(map.empty(), uri, path),
+          prog = None, entry_by_uri = map.empty(), lease = lease,
+          cache = incremental.new(std, ct_default(), lease.jsig, 128),
+          analysis_stats = None, parses = no_parses(), diag_by_uri = map.empty(),
+          refresh_problem = None, world = None
         }
         let first = rebuild_workspace(st, empty)
         assert len(first.prog.expect("first Program").diags) == 0
@@ -4733,8 +4733,8 @@ test "workspace commits its module memo with its Program and drops it on conflic
         assert warm.analysis_stats.expect("warm counts").checked_modules == 0
         assert warm.parses.reused == 2
         let changed = text ++ "# edit\n"
-        let edited = Doc { ..doc, text: changed, view: view_of(changed), ls: line_starts_of(changed), version: 2 }
-        let next = LspState { ..st, docs: map.insert(st.docs, uri, edited) }
+        let edited = Doc { ..doc, text = changed, view = view_of(changed), ls = line_starts_of(changed), version = 2 }
+        let next = LspState { ..st, docs = map.insert(st.docs, uri, edited) }
         let updated = rebuild_workspace(next, warm)
         assert len(updated.prog.expect("updated Program").diags) == 0
         assert updated.analysis_stats.expect("edited counts").reused_modules == 1
@@ -4743,10 +4743,10 @@ test "workspace commits its module memo with its Program and drops it on conflic
         assert updated.parses.reused == 1
         assert map.get(updated.entry_by_uri, uri) == Some("main")
         let duplicate_uri = "file://" ++ root ++ "/src/./main.dawn"
-        let duplicate = Doc { ..doc, uri: duplicate_uri }
-        let conflicted = LspState { ..next, docs: map.insert(next.docs, duplicate_uri, duplicate) }
+        let duplicate = Doc { ..doc, uri = duplicate_uri }
+        let conflicted = LspState { ..next, docs = map.insert(next.docs, duplicate_uri, duplicate) }
         let conflict = rebuild_workspace(conflicted,
-          Workspace { ..updated, path_by_uri: map.insert(updated.path_by_uri, duplicate_uri, path) })
+          Workspace { ..updated, path_by_uri = map.insert(updated.path_by_uri, duplicate_uri, path) })
         match conflict.prog {
           None -> ()
           Some(_) -> { assert false }
@@ -4754,7 +4754,7 @@ test "workspace commits its module memo with its Program and drops it on conflic
         assert conflict.analysis_stats == None
         assert len(map.keys(conflict.entry_by_uri)) == 0
         let restored = rebuild_workspace(next,
-          Workspace { ..conflict, path_by_uri: updated.path_by_uri })
+          Workspace { ..conflict, path_by_uri = updated.path_by_uri })
         assert len(restored.prog.expect("restored Program").diags) == 0
         assert restored.analysis_stats.expect("restored counts").reused_modules == 0
         assert restored.analysis_stats.expect("restored counts").checked_modules == 2
@@ -6278,7 +6278,7 @@ test "completion resolve adds the doc hover shows, and only where there is one" 
   io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
     let st0 = def_probe_state(d7_probe_std())
     let d = def_probe_doc_named(st0, "d7user.dawn", d7_probe_text())
-    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    let st = LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }
     let at = "probe(local"
     # the list itself carries no doc: that is resolve's to fetch
     let local = d7_item(st, d, at, 2, "local_fn")
@@ -6313,7 +6313,7 @@ test "a client that applies itemDefaults.data is told the document once" {
     ]))]))]))])
     assert client_defaults_item_data(caps)
     assert not client_defaults_item_data(jobj([]))
-    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d), default_item_data: true }
+    let st = LspState { ..st0, docs = map.insert(st0.docs, d.uri, d), default_item_data = true }
     let reply = handle_completion(st, d7_params(d, "probe(local", 2))
     assert ostr(get_or_null(get_or_null(reply, "itemDefaults"), "data"), "uri") == d.uri
     let items = match get_or_null(reply, "items") {
@@ -6347,7 +6347,7 @@ test "dbg is a builtin the editor offers and explains, and its argument hovers a
     let st0 = def_probe_state(std)
     let text = "pub fn main() -> Unit !io = println(to_string(dbg(40 + 2)))\n"
     let d = def_probe_doc_named(st0, "dbgprobe.dawn", text)
-    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    let st = LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }
     assert def_probe_at(st, d, text, "dbg(", 0).hover == "fn dbg[T: Show](x: T) -> T"
     # the head the declaration's exit appends is taken back off before the
     # written arguments are paired with the typed ones (`split_site`)
@@ -6370,7 +6370,7 @@ fn dot_reply(st0: LspState, params: String, stmt: String) -> Json !Fs !Proc !Env
     ""
   ], "\n")
   let d = def_probe_doc_named(st0, "dotprobe.dawn", text)
-  let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+  let st = LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }
   handle_completion(st, d7_params(d, "\n  ${stmt}", len(stmt) + 3))
 }
 
@@ -6458,7 +6458,7 @@ test "dot completion offers the std functions the buffer has not imported, with 
     let st0 = def_probe_state(std)
     let doc = (name: String, text: String) => {
       let d = def_probe_doc_named(st0, name, text)
-      (LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }, d)
+      (LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }, d)
     }
     let reply = (name: String, text: String) => {
       let (st, d) = doc(name, text)
@@ -6538,7 +6538,7 @@ test "a std name the buffer has not imported is offered with the use it needs" {
     let st0 = def_probe_state(std)
     let doc = (name: String, text: String) => {
       let d = def_probe_doc_named(st0, name, text)
-      (LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }, d)
+      (LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }, d)
     }
     # bare word: `tri` offers `str.trim`, with `use std/str` above the code
     let (st, d) = doc("aibare.dawn", "# Head.\n\npub fn main() -> Unit !io = {\n  let a = tri\n}\n")
@@ -6577,7 +6577,7 @@ test "after alias dot, the module's members, with the use when it is missing" {
     let st0 = def_probe_state(std)
     let doc = (name: String, text: String) => {
       let d = def_probe_doc_named(st0, name, text)
-      (LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }, d)
+      (LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }, d)
     }
     let (st, d) = doc("aidot.dawn", "pub fn main() -> Unit !io = {\n  let a = str.\n}\n")
     let trim = d7_item_in(handle_completion(st, d7_params(d, "str.", 4)), "trim")
@@ -6612,7 +6612,7 @@ test "a failing builtin shows its `at`, and its written argument still hovers" {
     let st0 = def_probe_state(std)
     let text = "fn f(n: Int) -> Int = if n > 0 { n } else { panic(\"bad \${to_string(n + 40)}\") }\n"
     let d = def_probe_doc_named(st0, "atprobe.dawn", text)
-    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    let st = LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }
     assert def_probe_at(st, d, text, "panic(", 0).hover == "fn panic(msg: String, at: Loc = caller()) -> Never"
     # the `at` the checker filled in spans the whole call, and is not taken
     # for the written message when the two are paired by span
@@ -6624,7 +6624,7 @@ test "completion resolve on a use line: the module's doc, and its members'" {
   io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
     let st0 = def_probe_state(d7_probe_std())
     let d = def_probe_doc_named(st0, "d7use.dawn", d7_probe_text())
-    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    let st = LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }
     let file = path_to_uri(canon_identity("/tmp/dawn-selfhost-lsp-def/d7std/docprobe.dawn"))
     # a module path, offered one segment at a time, carries the module it names
     let m = d7_item(st, d, "docprobe\n", 3, "docprobe")
@@ -6657,7 +6657,7 @@ test "completion resolve reads a module the use line has not loaded from its fil
     ], "\n"))
     let st0 = def_probe_state(d7_probe_std())
     let d = def_probe_doc_named(st0, "d7sib/user.dawn", "fn main() -> Int = 0\n")
-    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    let st = LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }
     let item = (label: String, kind: Int) => jobj([("label", JStr(label)), ("kind", JInt(kind)),
       ("data", jobj([("uri", JStr(d.uri)), ("module", JStr("sib"))]))])
     assert d7_resolved(st, item("sib", 9)) == "A sibling."
@@ -6670,7 +6670,7 @@ test "signature help carries the function's doc, whole, and nothing without one"
   io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
     let st0 = def_probe_state(d7_probe_std())
     let d = def_probe_doc_named(st0, "d7sig.dawn", d7_probe_text())
-    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    let st = LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }
     let sig_doc = (needle: String, skip: Int) => {
       let (reply, _) = handle_signature_help(st, d7_params(d, needle, skip))
       let sigs = match get_or_null(reply, "signatures") {
@@ -6697,7 +6697,7 @@ test "both value separators retain named signature help and argument completion"
         "fn probe() -> Int = {\n  let answer = 1\n  pick(b" ++ separator ++
         " 2, a" ++ separator ++ " answer)\n}\n"
       let d = def_probe_doc_named(st0, "separators.dawn", text)
-      let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+      let st = LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }
       let (reply, _) = handle_signature_help(st, d7_params(d, "b" ++ separator ++ " 2", 3))
       assert get_or_null(reply, "activeParameter") == JInt(1)
       let item = d7_item_in(handle_completion(st, d7_params(d, "a" ++ separator ++ " answer", 3)), "answer")
@@ -6774,7 +6774,7 @@ fn inlay_probe(st: LspState, d: Doc, l0: Int, c0: Int, l1: Int, c1: Int) -> List
     ("textDocument", jobj([("uri", JStr(d.uri))])),
     ("range", jobj([("start", jpos(l0, c0)), ("end", jpos(l1, c1))]))
   ])
-  let st1 = LspState { ..st, docs: map.insert(st.docs, d.uri, d) }
+  let st1 = LspState { ..st, docs = map.insert(st.docs, d.uri, d) }
   let hints = match handle_inlay_hint(st1, params) {
     JArr(xs) -> xs
     other -> panic("inlayHint replied ${render(other)}")
@@ -6842,11 +6842,11 @@ test "inlay hints: an inferred io row is shown after the parameters, only where 
       "fn shout(s: String)« !io» = io.println(s)",
       "fn none()« !io» = io.println(\"-\")"
     ]
-    let off = LspState { ..st0, inlay: InlayOpts { ..st0.inlay, decl_effects: false } }
+    let off = LspState { ..st0, inlay = InlayOpts { ..st0.inlay, decl_effects = false } }
     assert inlay_probe(off, d, 0, 0, 14, 0) == []
     let viaopt = LspState {
       ..st0,
-      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+      inlay = inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
         ("declarationEffects", JBool(false))
       ]))]))]))
     }
@@ -6887,7 +6887,7 @@ test "inlay hints: for variables and match arm bindings, nested patterns include
   io.with_fs_real(() => io.with_env_real(() => {
     let st0 = def_probe_state(std_for_probe())
     let d = def_probe_doc_named(st0, "patterns.dawn", pattern_probe_text())
-    let quiet = LspState { ..st0, inlay: InlayOpts { ..st0.inlay, let_types: false } }
+    let quiet = LspState { ..st0, inlay = InlayOpts { ..st0.inlay, let_types = false } }
     assert inlay_probe(quiet, d, 0, 0, 25, 0) == [
       "for x«: Int» in xs { acc = acc + x }",
       "for i«: Int» in 0..3 { acc = acc + i }",
@@ -6902,12 +6902,12 @@ test "inlay hints: for variables and match arm bindings, nested patterns include
     let with_lets = inlay_probe(st0, d, 0, 0, 25, 0)
     assert list.contains(with_lets, "let a«: Int» = match s {")
     assert len(with_lets) == 13
-    let off = LspState { ..st0, inlay: InlayOpts { ..st0.inlay, let_types: false, pattern_types: false } }
+    let off = LspState { ..st0, inlay = InlayOpts { ..st0.inlay, let_types = false, pattern_types = false } }
     assert inlay_probe(off, d, 0, 0, 25, 0) == []
     # the option key switches the kind off the way the client sends it
     let viaopt = LspState {
       ..st0,
-      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+      inlay = inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
         ("patternTypes", JBool(false)),
         ("letTypes", JBool(false))
       ]))]))]))
@@ -6975,7 +6975,7 @@ test "inlay hints: only inside the requested range, by position, kind by LSP's n
       ("textDocument", jobj([("uri", JStr(d.uri))])),
       ("range", jobj([("start", jpos(13, 0)), ("end", jpos(13, 99))]))
     ])
-    match handle_inlay_hint(LspState { ..st, docs: map.insert(st.docs, d.uri, d) }, params) {
+    match handle_inlay_hint(LspState { ..st, docs = map.insert(st.docs, d.uri, d) }, params) {
       JArr(hs) -> {
         assert len(hs) == 1
         assert get_or_null(hs[0], "kind") == JInt(1)
@@ -6994,7 +6994,7 @@ test "inlay hints: parameter names are off unless asked for, and hide what the c
     assert inlay_probe(st0, d, 21, 0, 21, 99) == ["let cut«: String» = pad(p, width, b)"]
     let st = LspState {
       ..st0,
-      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+      inlay = inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
         ("parameterNames", JBool(true)),
         ("letTypes", JBool(false)),
         # not a boolean: the default stands
@@ -7081,7 +7081,7 @@ fn defaults_probe_text() -> String =
 fn defaults_probe(st: LspState, d: Doc) -> List[String] !io = {
   let st1 = LspState {
     ..st,
-    inlay: InlayOpts { ..st.inlay, let_types: false, lambda_param_types: false, call_effects: false, decl_effects: false, pattern_types: false }
+    inlay = InlayOpts { ..st.inlay, let_types = false, lambda_param_types = false, call_effects = false, decl_effects = false, pattern_types = false }
   }
   inlay_probe(st1, d, 0, 0, 40, 0)
 }
@@ -7130,8 +7130,8 @@ test "inlay hints: a left-out default is a parameter hint with no padding, and c
     ])
     let st1 = LspState {
       ..st0,
-      docs: map.insert(st0.docs, d.uri, d),
-      inlay: InlayOpts { ..st0.inlay, let_types: false }
+      docs = map.insert(st0.docs, d.uri, d),
+      inlay = InlayOpts { ..st0.inlay, let_types = false }
     }
     match handle_inlay_hint(st1, params) {
       JArr(hs) -> {
@@ -7145,7 +7145,7 @@ test "inlay hints: a left-out default is a parameter hint with no padding, and c
     }
     let off = LspState {
       ..st0,
-      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+      inlay = inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
         ("defaultArguments", JBool(false))
       ]))]))]))
     }
@@ -7176,11 +7176,11 @@ test "inlay hints: the error a ? hands up is off unless asked for, and only on a
   io.with_fs_real(() => io.with_env_real(() => {
     let st0 = def_probe_state(std_for_probe())
     let d = def_probe_doc_named(st0, "propagate.dawn", propagate_probe_text())
-    let quiet = LspState { ..st0, inlay: InlayOpts { ..st0.inlay, let_types: false } }
+    let quiet = LspState { ..st0, inlay = InlayOpts { ..st0.inlay, let_types = false } }
     assert inlay_probe(quiet, d, 0, 0, 14, 0) == []
     let st = LspState {
       ..st0,
-      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+      inlay = inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
         ("propagatedErrors", JBool(true)),
         ("letTypes", JBool(false))
       ]))]))]))
@@ -7250,7 +7250,7 @@ test "inlay hints: left-out default values can be turned off, leaving the text" 
     let d = def_probe_doc_named(st0, "values.dawn", "use std/str\n" ++ values_probe_text())
     let off = LspState {
       ..st0,
-      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+      inlay = inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
         ("defaultArgumentValues", JBool(false))
       ]))]))]))
     }
@@ -7313,7 +7313,7 @@ fn untitled_state(std: StdCtx, uri: String, text: String) -> (LspState, Doc) !Fs
   let no_modules: Option[Map[String, String]] = None
   let no_path: Option[String] = None
   let d = standalone_doc(st0, uri, no_path, no_path, text, 0, no_modules)
-  (LspState { ..st0, docs: map.insert(st0.docs, uri, d) }, d)
+  (LspState { ..st0, docs = map.insert(st0.docs, uri, d) }, d)
 }
 
 fn rename_params(d: Doc, needle: String, skip: Int, new: String) -> Json = {
@@ -7395,7 +7395,7 @@ test "rename is refused in a document with no analysis (§R3.1)" {
     let (st, d) = untitled_state(std, "untitled:rename-none", def_probe_text())
     # a document the server never opened has nothing to rename in
     let p = rename_params(d, "helper(xs", 1, "bump")
-    let st2 = LspState { ..st, docs: map.empty() }
+    let st2 = LspState { ..st, docs = map.empty() }
     match handle_rename(st2, p) {
       (Err(why), _) -> { assert why == "this document is not open" }
       (Ok(_), _) -> panic("an unopened document was renamed")
@@ -7403,7 +7403,7 @@ test "rename is refused in a document with no analysis (§R3.1)" {
     # a file buffer outside any project keeps the project-only refusal
     let no_modules: Option[Map[String, String]] = None
     let f = standalone_doc(st, "file:///tmp/x/loose.dawn", Some("/tmp/x/loose.dawn"), Some("/tmp/x/loose.dawn"), d.text, 0, no_modules)
-    let st3 = LspState { ..st, docs: map.insert(st.docs, f.uri, f) }
+    let st3 = LspState { ..st, docs = map.insert(st.docs, f.uri, f) }
     match handle_rename(st3, rename_params(f, "helper(xs", 1, "bump")) {
       (Err(why), _) -> { assert str.contains(why, "rename works in the files of a project") }
       (Ok(_), _) -> panic("a loose file was renamed")

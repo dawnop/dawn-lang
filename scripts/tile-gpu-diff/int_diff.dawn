@@ -129,7 +129,7 @@ fn message[T](r: Result[T, ForeignError]) -> String = match r {
 }
 
 fn blank() -> Trace =
-  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+  Trace { alloc= "-", upload= "-", launch= "-", sync= "-", download= "-", result= None, note= "" }
 
 fn release(ts: List[DeviceBuffer[I32]]) -> Unit !Gpu = {
   for t in ts {
@@ -163,20 +163,20 @@ fn upload_all(ts: List[DeviceBuffer[I32]], data: List[List[Float]], i: Int) -> R
 fn stages(kernel: String, gx: Int, gy: Int, gz: Int, data: List[List[Float]]) -> Trace !Gpu = {
   let sizes = list.map(data, d => len(d))
   match alloc_all(sizes, 0, []) {
-    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Err(e) -> Trace { ..blank(), alloc= e.kind, note= e.message }
     Ok(ts) -> {
-      let t0 = Trace { ..blank(), alloc: "ok" }
+      let t0 = Trace { ..blank(), alloc= "ok" }
       match upload_all(ts, data, 0) {
         Err(e) -> {
           release(ts)
-          Trace { ..t0, upload: e.kind, note: e.message }
+          Trace { ..t0, upload= e.kind, note= e.message }
         }
         Ok(_) -> {
-          let t1 = Trace { ..t0, upload: "ok" }
-          match launch(kernel, gx, list.map(ts, t => erase(buffer_arg(t))), gy: gy, gz: gz) {
+          let t1 = Trace { ..t0, upload= "ok" }
+          match launch(kernel, gx, list.map(ts, t => erase(buffer_arg(t))), gy= gy, gz= gz) {
             Err(e) -> {
               release(ts)
-              Trace { ..t1, launch: e.kind, note: e.message }
+              Trace { ..t1, launch= e.kind, note= e.message }
             }
             Ok(_) -> {
               let s = sync()
@@ -191,11 +191,11 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, data: List[List[Float]]) ->
               }
               Trace {
                 ..t1,
-                launch: "ok",
-                sync: kind(s),
-                download: kind(r),
-                result: value,
-                note: message(s) ++ message(r)
+                launch= "ok",
+                sync= kind(s),
+                download= kind(r),
+                result= value,
+                note= message(s) ++ message(r)
               }
             }
           }

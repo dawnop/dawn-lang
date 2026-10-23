@@ -157,7 +157,7 @@ type Texts = {
 
 fn no_texts() -> Texts = {
   let ids: Map[String, Int] = map.empty()
-  Texts { ids: ids, strs: [], cps: [], last: -1 }
+  Texts { ids = ids, strs = [], cps = [], last = -1 }
 }
 
 alias Env = Map[Int, CValue]
@@ -183,11 +183,11 @@ pub const DEFAULT_FUEL: Int = 100000000
 
 ## Defaults: all the fuel and all the depth a real compile gets, on either
 ## compiler.
-pub fn ct_default() -> CtOpts = CtOpts { fuel: DEFAULT_FUEL, depth: MAX_CALL_DEPTH }
+pub fn ct_default() -> CtOpts = CtOpts { fuel = DEFAULT_FUEL, depth = MAX_CALL_DEPTH }
 
 ## Defaults with the fuel dialled down (the fuel tests, and callers that want
 ## a comptime run bounded well below a real compile's).
-pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { ..ct_default(), fuel: n }
+pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { ..ct_default(), fuel = n }
 
 ## The value of `--comptime-fuel`: a step count, so a number and not a
 ## negative one. A negative budget used to be taken as given, and every
@@ -255,7 +255,7 @@ pub(pkg) const HOVER_DEPTH: Int = 1500
 ## The editor budget on a given host. The depth also stays under the host's
 ## own, should a host ever pass a smaller one.
 pub(pkg) fn ct_hover(host: CtOpts) -> CtOpts =
-  CtOpts { fuel: HOVER_FUEL, depth: if host.depth < HOVER_DEPTH { host.depth } else { HOVER_DEPTH } }
+  CtOpts { fuel = HOVER_FUEL, depth = if host.depth < HOVER_DEPTH { host.depth } else { HOVER_DEPTH } }
 
 ## 5,000 nested calls: what a language server's own analysis (the comptime
 ## behind its diagnostics) may reach, below MAX_CALL_DEPTH because a
@@ -272,7 +272,7 @@ pub(pkg) const LSP_DEPTH: Int = 5000
 ## build's fuel, the smaller depth. Both servers take it, so VS Code and the
 ## Playground refuse the same program; between 5,000 and MAX_CALL_DEPTH that
 ## is a program `check` folds.
-pub(pkg) fn ct_lsp() -> CtOpts = CtOpts { ..ct_default(), depth: LSP_DEPTH }
+pub(pkg) fn ct_lsp() -> CtOpts = CtOpts { ..ct_default(), depth = LSP_DEPTH }
 
 ## The interpreter's static context: how to find a function body, the tables
 ## lowering needs, and the results already folded.
@@ -367,8 +367,8 @@ pub fn ct_world_empty() -> CtWorld = {
   let no_scopes: Map[String, ConstScope] = map.empty()
   let no_consts: Map[String, Map[String, CValue]] = map.empty()
   let no_sigs: Map[(String, String), Sig] = map.empty()
-  CtWorld { owners: no_owners, impl_fns: no_impls(), sigs: no_sigs, syms: no_syms,
-    scopes: no_scopes, consts: no_consts }
+  CtWorld { owners = no_owners, impl_fns = no_impls(), sigs = no_sigs, syms = no_syms,
+    scopes = no_scopes, consts = no_consts }
 }
 
 ## A module joins the world once it has folded. `bodies` is false for a std
@@ -386,9 +386,9 @@ pub fn ct_world_add(
     if is_direct_fn(f) { sigs = map.insert(sigs, (owner, f.name), f.sig) }
   }
   var out = CtWorld { ..w,
-    sigs: sigs,
-    scopes: map.insert(w.scopes, owner, scope),
-    consts: map.insert(w.consts, scope.path, consts) }
+    sigs = sigs,
+    scopes = map.insert(w.scopes, owner, scope),
+    consts = map.insert(w.consts, scope.path, consts) }
   if bodies {
     var own: Map[String, TFun] = map.empty()
     var impl_fns = w.impl_fns
@@ -397,9 +397,9 @@ pub fn ct_world_add(
       impl_fns = note_trait_fn(impl_fns, owner, f)
     }
     out = CtWorld { ..out,
-      owners: map.insert(w.owners, owner, own),
-      impl_fns: impl_fns,
-      syms: map.insert(w.syms, owner, tm.syms) }
+      owners = map.insert(w.owners, owner, own),
+      impl_fns = impl_fns,
+      syms = map.insert(w.syms, owner, tm.syms) }
   }
   out
 }
@@ -435,7 +435,7 @@ const MAX_FAILURE_FRAMES: Int = 16
 fn no_impls() -> Map[(Int, String, String), (String, TFun)] = map.empty()
 
 fn ct_failure(msg: String, hint: String) -> CtFailure =
-  CtFailure { msg: msg, hint: hint, frames: [], truncated: false, origin: None }
+  CtFailure { msg = msg, hint = hint, frames = [], truncated = false, origin = None }
 
 fn cerr(st: ESt, env: Env, msg: String) -> ER =
   Err((st, env, KErr(ct_failure(msg, ""))))
@@ -445,9 +445,9 @@ fn cerrh(st: ESt, env: Env, msg: String, hint: String) -> ER =
 
 fn push_failure_frame(failure: CtFailure, frame: CtFrame) -> CtFailure =
   if len(failure.frames) < MAX_FAILURE_FRAMES {
-    CtFailure { ..failure, frames: failure.frames ++ [frame] }
+    CtFailure { ..failure, frames = failure.frames ++ [frame] }
   } else {
-    CtFailure { ..failure, truncated: true }
+    CtFailure { ..failure, truncated = true }
   }
 
 fn frame_error(
@@ -497,7 +497,7 @@ fn failure_diag(failure0: CtFailure, lo: Int, hi: Int) -> Diag = {
   let failure =
     match failure0.origin {
       Some(_) -> failure0
-      None -> CtFailure { ..failure0, origin: Some(CtOrigin { lo: lo, hi: hi }) }
+      None -> CtFailure { ..failure0, origin = Some(CtOrigin { lo = lo, hi = hi }) }
     }
   let origin = failure.origin.expect("comptime failure origin")
   let chain = render_call_chain(failure)
@@ -513,7 +513,7 @@ fn burn(st: ESt, env: Env) -> ER =
     cerrh(st, env, "fuel exhausted — evaluation did not finish within the step budget",
       "raise it with --comptime-fuel, or simplify the computation")
   } else {
-    Ok((ESt { ..st, fuel: st.fuel - 1 }, env, VUnit))
+    Ok((ESt { ..st, fuel = st.fuel - 1 }, env, VUnit))
   }
 
 ## Charge `n` steps at once: what a primitive that produces `n` elements or
@@ -542,7 +542,7 @@ fn burn_n(st: ESt, env: Env, n: Int) -> ER = {
     cerrh(st, env, "fuel exhausted — evaluation did not finish within the step budget",
       "raise it with --comptime-fuel, or simplify the computation")
   } else {
-    Ok((ESt { ..st, fuel: left }, env, VUnit))
+    Ok((ESt { ..st, fuel = left }, env, VUnit))
   }
 }
 
@@ -551,17 +551,17 @@ fn text_id(st: ESt, env: Env, s: String) -> Result[(ESt, Int), (ESt, Env, Ctl)] 
   let t = st.texts
   if t.last >= 0 && t.strs[t.last] == s { return Ok((st, t.last)) }
   match map.get(t.ids, s) {
-    Some(id) -> Ok((ESt { ..st, texts: Texts { ..t, last: id } }, id))
+    Some(id) -> Ok((ESt { ..st, texts = Texts { ..t, last = id } }, id))
     None -> {
       let (st1, _, _) = burn_n(st, env, len(s))?
       let id = len(t.strs)
       let texts = Texts {
-        ids: map.insert(t.ids, s, id),
-        strs: t.strs ++ [s],
-        cps: t.cps ++ [code_points(s)],
-        last: id
+        ids = map.insert(t.ids, s, id),
+        strs = t.strs ++ [s],
+        cps = t.cps ++ [code_points(s)],
+        last = id
       }
-      Ok((ESt { ..st1, texts: texts }, id))
+      Ok((ESt { ..st1, texts = texts }, id))
     }
   }
 }
@@ -806,7 +806,7 @@ fn lower_into(
   for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
   var dts = st.cache.dicts
   for d in dicts { dts = map.insert(dts, d.key, d) }
-  let st1 = ESt { ..st, cache: LowerCache { ..st.cache, fns: tbl, dicts: dts, next_lam: next } }
+  let st1 = ESt { ..st, cache = LowerCache { ..st.cache, fns = tbl, dicts = dts, next_lam = next } }
   Ok((note_read(icx, st1, owner_path(icx, owner)), cf))
 }
 
@@ -822,13 +822,13 @@ fn owner_path(icx: ICx, owner: String) -> String =
 ## a step always depends on its own input.
 fn note_read(icx: ICx, st: ESt, path: String) -> ESt =
   if path == icx.scope.path || set.has(st.cache.reads, path) { st } else {
-    ESt { ..st, cache: LowerCache { ..st.cache, reads: set.insert(st.cache.reads, path) } }
+    ESt { ..st, cache = LowerCache { ..st.cache, reads = set.insert(st.cache.reads, path) } }
   }
 
 ## Record that a lookup found nothing. What it would have found depends on
 ## modules this run cannot name, so the read set no longer bounds the result.
 fn note_miss(st: ESt) -> ESt =
-  if st.cache.missed { st } else { ESt { ..st, cache: LowerCache { ..st.cache, missed: true } } }
+  if st.cache.missed { st } else { ESt { ..st, cache = LowerCache { ..st.cache, missed = true } } }
 
 ## The subject half of that identity: its *head*, because an impl method's
 ## `impl_of` names the declared subject (`List[T]`) while a `CImpl` node names
@@ -1074,17 +1074,17 @@ fn call_cfun(
     i = i + 1
   }
   # a body names constants in its own module's terms
-  let bicx = if cf.owner == icx.body { icx } else { ICx { ..icx, body: cf.owner } }
-  match ceval(bicx, ESt { ..st, depth: st.depth + 1 }, fenv, cf.body) {
+  let bicx = if cf.owner == icx.body { icx } else { ICx { ..icx, body = cf.owner } }
+  match ceval(bicx, ESt { ..st, depth = st.depth + 1 }, fenv, cf.body) {
     Ok(t) -> {
       let (st1, _, v) = t
-      Ok((ESt { ..st1, depth: st1.depth - 1 }, env, v))
+      Ok((ESt { ..st1, depth = st1.depth - 1 }, env, v))
     }
     Err(t) -> {
       let (st1, _, ctl) = t
       match ctl {
-        KReturn(v) -> Ok((ESt { ..st1, depth: st1.depth - 1 }, env, v))
-        _ -> Err(frame_error((ESt { ..st1, depth: st1.depth - 1 }, env, ctl), frame))
+        KReturn(v) -> Ok((ESt { ..st1, depth = st1.depth - 1 }, env, v))
+        _ -> Err(frame_error((ESt { ..st1, depth = st1.depth - 1 }, env, ctl), frame))
       }
     }
   }
@@ -2561,15 +2561,15 @@ fn empty_cache() -> LowerCache = {
   let no_fns: Map[String, CFun] = map.empty()
   let no_dicts: Map[String, CDictDef] = map.empty()
   let no_lits: Map[String, CValue] = map.empty()
-  LowerCache { fns: no_fns, dicts: no_dicts, next_lam: 0, reads: set.empty(), missed: false,
-    lits: no_lits }
+  LowerCache { fns = no_fns, dicts = no_dicts, next_lam = 0, reads = set.empty(), missed = false,
+    lits = no_lits }
 }
 
 ## An evaluation seeded from what the module has lowered so far. Fuel and
 ## depth start over here and nowhere else, which is what keeps one const's
 ## budget from being spent by the one before it.
 fn st_from(fuel: Int, cache: LowerCache) -> ESt =
-  ESt { fuel: fuel, depth: 0, cache: cache, texts: no_texts() }
+  ESt { fuel = fuel, depth = 0, cache = cache, texts = no_texts() }
 
 fn fresh_st(fuel: Int) -> ESt = st_from(fuel, empty_cache())
 
@@ -2594,7 +2594,7 @@ fn fold_expr(
   for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
   var dts = cache.dicts
   for d in dicts { dts = map.insert(dts, d.key, d) }
-  let st = st_from(fuel, LowerCache { ..cache, fns: tbl, dicts: dts, next_lam: next })
+  let st = st_from(fuel, LowerCache { ..cache, fns = tbl, dicts = dts, next_lam = next })
   match ceval(icx, st, env, ce) {
     Ok(r) -> {
       let (st1, _, v) = r
@@ -2638,7 +2638,7 @@ fn eval_block(icx: ICx, fuel: Int, body: TExpr, run: CtRun, lo: Int, hi: Int) ->
   match key {
     Some(k) ->
       match map.get(run.cache.lits, k) {
-        Some(v) -> return CtRun { ..run, out: CtOut { ..run.out, blocks: map.insert(run.out.blocks, (lo, hi), v) } }
+        Some(v) -> return CtRun { ..run, out = CtOut { ..run.out, blocks = map.insert(run.out.blocks, (lo, hi), v) } }
         None -> ()
       }
     None -> ()
@@ -2647,7 +2647,7 @@ fn eval_block(icx: ICx, fuel: Int, body: TExpr, run: CtRun, lo: Int, hi: Int) ->
   match key {
     Some(k) ->
       match map.get(r0.out.blocks, (lo, hi)) {
-        Some(v) -> CtRun { ..r0, cache: LowerCache { ..r0.cache, lits: map.insert(r0.cache.lits, k, v) } }
+        Some(v) -> CtRun { ..r0, cache = LowerCache { ..r0.cache, lits = map.insert(r0.cache.lits, k, v) } }
         None -> r0
       }
     None -> r0
@@ -2658,17 +2658,17 @@ fn fold_block(icx: ICx, fuel: Int, body: TExpr, run: CtRun, lo: Int, hi: Int) ->
   # a block nested inside this one folds first, so lowering's reference to it
   # resolves
   let run1 = walk_expr(icx, fuel, body, run)
-  let icx1 = ICx { ..icx, blocks: run1.out.blocks }
+  let icx1 = ICx { ..icx, blocks = run1.out.blocks }
   let (cache, r) = fold_expr(icx1, fuel, run1.cache, body, lo, hi)
   match r {
     Ok(v) ->
       CtRun {
-        out: CtOut { ..run1.out, blocks: map.insert(run1.out.blocks, (lo, hi), v) },
-        cache: cache
+        out = CtOut { ..run1.out, blocks = map.insert(run1.out.blocks, (lo, hi), v) },
+        cache = cache
       }
     Err(d) ->
-      CtRun { out: CtOut { ..run1.out, diags: run1.out.diags ++ [lit_fold_diag(icx, body, d)] },
-        cache: cache }
+      CtRun { out = CtOut { ..run1.out, diags = run1.out.diags ++ [lit_fold_diag(icx, body, d)] },
+        cache = cache }
   }
 }
 
@@ -2689,8 +2689,8 @@ fn lit_fold_diag(icx: ICx, body: TExpr, d: Diag) -> Diag =
           _ -> "?"
         }
         let why = if str.starts_with(d.msg, "comptime: panicked: ") { str.drop(d.msg, 20) } else { d.msg }
-        Diag { ..d, msg: "the literal `" ++ text ++ "` cannot be a `" ++ ty_show(icx.adts, ty) ++ "`: " ++ why,
-          hint: "" }
+        Diag { ..d, msg = "the literal `" ++ text ++ "` cannot be a `" ++ ty_show(icx.adts, ty) ++ "`: " ++ why,
+          hint = "" }
       }
     _ -> d
   }
@@ -2881,7 +2881,7 @@ pub fn eval_comptime(
 ## The scope of a module that imports no constants, filed under its owner.
 fn alone(owner: String) -> ConstScope = {
   let none: Map[String, String] = map.empty()
-  ConstScope { path: owner, imported: none, renames: none }
+  ConstScope { path = owner, imported = none, renames = none }
 }
 
 ## The same, for a module in a program: `world` holds the modules analyzed
@@ -2983,26 +2983,26 @@ fn module_icx(
   let no_consts: Map[String, CValue] = map.empty()
   let no_blocks: Map[(Int, Int), CValue] = map.empty()
   ICx {
-    fns: fns,
-    by_owner: std_owners,
-    owner_of: owner_of,
-    std_names: std_names,
-    adts: adts,
-    consts: no_consts,
-    blocks: no_blocks,
-    owner: owner,
-    traits: traits,
-    impls: impls,
-    prog_fns: prog_fns,
-    impl_fns: impl_fns,
-    syms: tm.syms,
-    world: world,
-    scope: scope,
-    body: owner,
-    max_depth: depth,
-    pending: set.empty(),
-    folding: "",
-    intrs: intrinsics()
+    fns = fns,
+    by_owner = std_owners,
+    owner_of = owner_of,
+    std_names = std_names,
+    adts = adts,
+    consts = no_consts,
+    blocks = no_blocks,
+    owner = owner,
+    traits = traits,
+    impls = impls,
+    prog_fns = prog_fns,
+    impl_fns = impl_fns,
+    syms = tm.syms,
+    world = world,
+    scope = scope,
+    body = owner,
+    max_depth = depth,
+    pending = set.empty(),
+    folding = "",
+    intrs = intrinsics()
   }
 }
 
@@ -3024,8 +3024,8 @@ fn eval_module_in(
   let empty_c: Map[String, CValue] = map.empty()
   let empty_b: Map[(Int, Int), CValue] = map.empty()
   var run = CtRun {
-    out: CtOut { diags: [], consts: empty_c, blocks: empty_b, reads: set.empty(), missed: false },
-    cache: empty_cache()
+    out = CtOut { diags = [], consts = empty_c, blocks = empty_b, reads = set.empty(), missed = false },
+    cache = empty_cache()
   }
   let base = module_icx(tm, world, scope, std_fns, std_owners, std_impl_fns, std_names, adts,
     traits, impls, owner, opts.depth)
@@ -3033,33 +3033,33 @@ fn eval_module_in(
   for c in tm.consts { pending = set.insert(pending, c.name) }
   for c in tm.consts {
     pending = set.remove(pending, c.name)
-    let base_c = ICx { ..base, pending: pending, folding: c.name }
+    let base_c = ICx { ..base, pending = pending, folding = c.name }
     # a comptime block inside the initializer folds first
-    run = walk_expr(ICx { ..base_c, consts: run.out.consts, blocks: run.out.blocks },
+    run = walk_expr(ICx { ..base_c, consts = run.out.consts, blocks = run.out.blocks },
       fuel, c.init, run)
-    let icx = ICx { ..base_c, consts: run.out.consts, blocks: run.out.blocks }
+    let icx = ICx { ..base_c, consts = run.out.consts, blocks = run.out.blocks }
     let (cache, r) = fold_expr(icx, fuel, run.cache, c.init, c.lo, c.hi)
     match r {
       Ok(v) -> {
         run = CtRun {
-          out: CtOut { ..run.out, consts: map.insert(run.out.consts, c.name, v) },
-          cache: cache
+          out = CtOut { ..run.out, consts = map.insert(run.out.consts, c.name, v) },
+          cache = cache
         }
       }
       Err(d) -> {
-        run = CtRun { out: CtOut { ..run.out, diags: run.out.diags ++ [d] }, cache: cache }
+        run = CtRun { out = CtOut { ..run.out, diags = run.out.diags ++ [d] }, cache = cache }
       }
     }
   }
   for f in tm.fns {
-    run = walk_expr(ICx { ..base, consts: run.out.consts, blocks: run.out.blocks },
+    run = walk_expr(ICx { ..base, consts = run.out.consts, blocks = run.out.blocks },
       fuel, f.body, run)
   }
   for t in tm.tests {
-    run = walk_expr(ICx { ..base, consts: run.out.consts, blocks: run.out.blocks },
+    run = walk_expr(ICx { ..base, consts = run.out.consts, blocks = run.out.blocks },
       fuel, t.body, run)
   }
-  CtRun { ..run, out: CtOut { ..run.out, reads: run.cache.reads, missed: run.cache.missed } }
+  CtRun { ..run, out = CtOut { ..run.out, reads = run.cache.reads, missed = run.cache.missed } }
 }
 
 ## Fold one closed expression of a checked module, outside any `comptime`
@@ -3126,7 +3126,7 @@ pub(pkg) fn closed_icx(
 ) -> ICx = {
   let base = module_icx(tm, world, scope, std_fns, std_owners, std_impl_fns, std_names, adts,
     traits, impls, owner, opts.depth)
-  ICx { ..base, consts: ct.consts, blocks: ct.blocks }
+  ICx { ..base, consts = ct.consts, blocks = ct.blocks }
 }
 
 ## `eval_closed` in a context `closed_icx` built: the fold and its barrier.
@@ -3178,26 +3178,26 @@ fn probe_icx() -> ICx = {
   let no_blocks: Map[(Int, Int), CValue] = map.empty()
   let no_syms: Map[Int, Sym] = map.empty()
   ICx {
-    fns: no_fns,
-    by_owner: no_owner,
-    owner_of: no_owner_of,
-    std_names: set.empty(),
-    adts: cx.adts,
-    consts: no_consts,
-    blocks: no_blocks,
-    owner: "probe",
-    traits: cx.traits,
-    impls: cx.impl_table,
-    prog_fns: map.empty(),
-    impl_fns: no_impls(),
-    syms: no_syms,
-    world: ct_world_empty(),
-    scope: alone("probe"),
-    body: "probe",
-    max_depth: MAX_CALL_DEPTH,
-    pending: set.empty(),
-    folding: "",
-    intrs: intrinsics()
+    fns = no_fns,
+    by_owner = no_owner,
+    owner_of = no_owner_of,
+    std_names = set.empty(),
+    adts = cx.adts,
+    consts = no_consts,
+    blocks = no_blocks,
+    owner = "probe",
+    traits = cx.traits,
+    impls = cx.impl_table,
+    prog_fns = map.empty(),
+    impl_fns = no_impls(),
+    syms = no_syms,
+    world = ct_world_empty(),
+    scope = alone("probe"),
+    body = "probe",
+    max_depth = MAX_CALL_DEPTH,
+    pending = set.empty(),
+    folding = "",
+    intrs = intrinsics()
   }
 }
 
@@ -3338,37 +3338,37 @@ test "the comptime interpreter covers every intrinsic, removes it in lowering, o
 
 fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =
   Sig {
-    name: name,
-    param_tys: params,
-    param_names: [],
-    param_defaults: [],
-    caller_params: [],
-    ret: ret,
-    eff: EPure,
-    is_builtin: false,
-    tparams: [],
-    constraints: [],
-    eparams: [],
-    owner: None,
-    trait_id: None,
-    op_of: None,
-    inferring: false
+    name = name,
+    param_tys = params,
+    param_names = [],
+    param_defaults = [],
+    caller_params = [],
+    ret = ret,
+    eff = EPure,
+    is_builtin = false,
+    tparams = [],
+    constraints = [],
+    eparams = [],
+    owner = None,
+    trait_id = None,
+    op_of = None,
+    inferring = false
   }
 
 fn test_tfun(name: String, params: List[Ty], ret: Ty, body: TExpr) -> TFun =
   TFun {
-    name: name,
-    sig: test_sig(name, params, ret),
-    param_syms: [],
-    dict_syms: [],
-    ev_syms: [],
-    defaults: [],
-    body: body,
-    is_test: false,
-    impl_of: None,
-    default_of: None,
-    decl: "",
-    base: -1
+    name = name,
+    sig = test_sig(name, params, ret),
+    param_syms = [],
+    dict_syms = [],
+    ev_syms = [],
+    defaults = [],
+    body = body,
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    decl = "",
+    base = -1
   }
 
 test "lowering invariant panics cross both comptime lowering boundaries" {
@@ -3383,7 +3383,7 @@ test "lowering invariant panics cross both comptime lowering boundaries" {
   let fns = map.insert(icx0.fns, "bad", bad)
   let owner_of = map.insert(icx0.owner_of, "bad", "probe")
   let sigs = map.insert(icx0.prog_fns, ("probe", "bad"), bad.sig)
-  let icx = ICx { ..icx0, fns: fns, owner_of: owner_of, prog_fns: sigs }
+  let icx = ICx { ..icx0, fns = fns, owner_of = owner_of, prog_fns = sigs }
   let env: Env = map.empty()
   match catch_panic(() => call_named(icx, fresh_st(1000), env, "probe", "bad", [])) {
     Ok(_) -> { assert false }

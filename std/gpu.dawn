@@ -451,7 +451,7 @@ pub effect Gpu {
 # std's own refusals. Minted above the operations, so they read the same under
 # every handler; a device's own refusals arrive as whatever it called them.
 fn refuse(kind: String, message: String) -> ForeignError =
-  ForeignError { kind: kind, message: message, cause: None }
+  ForeignError { kind = kind, message = message, cause = None }
 
 ## A buffer of `len` elements of format `d`. `Err(kind: "gpu.bad_length")`
 ## for a `len` below one, before any handler is asked.
@@ -880,7 +880,7 @@ fn launch_args(kernel: String, args: List[EntryArg], launches: List[(LaunchArg, 
       let (kind, message) = e
       Err(refuse(kind, "gpu.launch_entry: kernel `${kernel}`: ${message}"))
     }
-    Ok(g) -> launch(kernel, g[0], list.map(launches, l => erase_pair(l)), gy: g[1], gz: g[2])
+    Ok(g) -> launch(kernel, g[0], list.map(launches, l => erase_pair(l)), gy = g[1], gz = g[2])
   }
 
 fn pair[A](l: Launch[A]) -> (LaunchArg, Int) = {
@@ -2010,12 +2010,12 @@ fn launch_grids() -> List[String] !Gpu =
   list.map([
     # one-dimensional: `gy` and `gz` stay 1
     launch("k", 4, []),
-    launch("k", 4, [], gy: 2),
-    launch("k", 4, [], gy: 2, gz: 3),
-    launch("k", 4, [], gz: 3),
+    launch("k", 4, [], gy = 2),
+    launch("k", 4, [], gy = 2, gz = 3),
+    launch("k", 4, [], gz = 3),
     launch("k", 4, [], 5, 6),
     # every axis is checked, the defaulted ones included
-    launch("k", 4, [], gy: 0)
+    launch("k", 4, [], gy = 0)
   ], r => match r {
     Ok(_) -> "ok"
     Err(e) -> "${e.kind}: ${e.message}"
@@ -2051,10 +2051,10 @@ fn limit_launches() -> List[String] !Gpu =
   list.map([
     launch("nope", 2147483647, []),
     launch("nope", 2147483648, []),
-    launch("nope", 1, [], gy: 65535),
-    launch("nope", 1, [], gy: 65536),
-    launch("nope", 1, [], gz: 65535),
-    launch("nope", 1, [], gz: 65536)
+    launch("nope", 1, [], gy = 65535),
+    launch("nope", 1, [], gy = 65536),
+    launch("nope", 1, [], gz = 65535),
+    launch("nope", 1, [], gz = 65536)
   ], r => match r {
     Ok(_) -> "ok"
     Err(e) -> "${e.kind}: ${e.message}"
@@ -2160,7 +2160,7 @@ fn global_lookups() -> List[String] !Gpu =
   ]
 
 test "the fake device answers a lookup for the globals its module declares, and refuses the rest" {
-  assert with_gpu_fake(syms_kernels(), global_lookups, globals: syms_globals())
+  assert with_gpu_fake(syms_kernels(), global_lookups, globals = syms_globals())
     == ["ok:4", "ok:4", "gpu.no_module_symbol", "gpu.no_module_symbol"]
   # left out, `globals` is a device whose modules declare none, so every
   # lookup under it is refused
@@ -2183,7 +2183,7 @@ fn global_is_storage() -> Result[(List[Float], List[Float], List[Float]), Foreig
 
 test "a module global is one storage under every lookup of its name, and free leaves it there" {
   let want = syms_tables()[2]
-  assert with_gpu_fake(syms_kernels(), global_is_storage, globals: syms_globals())
+  assert with_gpu_fake(syms_kernels(), global_is_storage, globals = syms_globals())
     == Ok((want, [9.0, 8.0, 7.0, 6.0], [9.0, 8.0, 7.0, 6.0]))
 }
 
@@ -2205,7 +2205,7 @@ test "the fake device's reference is handed the tables the caller installed it w
   # sym_diff uses to ask a REAL device whether a host write reached it.
   let ts = syms_tables()
   let want = list.map(range(0, 12), k => ts[k / 4][k % 4] + 1.0)
-  assert with_gpu_fake(syms_kernels(), global_launch_reads_the_write, globals: syms_globals()) == Ok(want)
+  assert with_gpu_fake(syms_kernels(), global_launch_reads_the_write, globals = syms_globals()) == Ok(want)
 }
 
 fn global_as_bf16() -> String !Gpu = match module_global(BF16, "k", "shown") {
@@ -2219,8 +2219,8 @@ test "the fake device's globals are held to the format their declaration used" {
   # bf16 where the declaration said f64: the fake device's store holds values
   # and not bytes, so it cannot reinterpret one format's storage as another's
   # and says so rather than answering something a real device would not.
-  assert with_gpu_fake(syms_kernels(), global_as_bf16, globals: syms_globals()) == "gpu.bad_global_dtype"
-  assert with_gpu_fake(syms_kernels(), global_as_declared, globals: syms_globals()) == "ok:4"
+  assert with_gpu_fake(syms_kernels(), global_as_bf16, globals = syms_globals()) == "gpu.bad_global_dtype"
+  assert with_gpu_fake(syms_kernels(), global_as_declared, globals = syms_globals()) == "ok:4"
 }
 
 fn real_refusals() -> List[String] !Gpu = {
@@ -2564,17 +2564,17 @@ fn dynamic_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
   let f: Entry2[Float, Float] = entry2("fixed", arg_in([512], [128], [0]), arg_out([0 - 1], [128]))
   match (alloc(F64, 512), alloc(F64, 512), alloc(F64, 500), alloc(I32, 4)) {
     (Ok(a), Ok(b), Ok(short), Ok(h)) -> [
-      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(a), grid: [4]),
-      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(b), grid: [4]),
-      launch_entry3(e, buffer_arg(a), buffer_arg(a), buffer_arg(b), grid: [4]),
-      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(short), grid: [4]),
-      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(short), grid: [3]),
+      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(a), grid = [4]),
+      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(b), grid = [4]),
+      launch_entry3(e, buffer_arg(a), buffer_arg(a), buffer_arg(b), grid = [4]),
+      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(short), grid = [4]),
+      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(short), grid = [3]),
       launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(short)),
-      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(short), grid: [3, 2]),
-      launch_entry2(s, buffer_arg(a), buffer_arg(h), grid: [8, 2]),
+      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(short), grid = [3, 2]),
+      launch_entry2(s, buffer_arg(a), buffer_arg(h), grid = [8, 2]),
       launch_entry2(s, buffer_arg(a), buffer_arg(h)),
-      launch_entry2(f, buffer_arg(a), buffer_arg(b), grid: [4]),
-      launch_entry2(f, buffer_arg(a), buffer_arg(b), grid: [2])
+      launch_entry2(f, buffer_arg(a), buffer_arg(b), grid = [4]),
+      launch_entry2(f, buffer_arg(a), buffer_arg(b), grid = [2])
     ]
     _ -> []
   }
@@ -2659,7 +2659,7 @@ fn scalar_kinds() -> List[Result[Unit, ForeignError]] !Gpu = {
       launch_entry4(e, buffer_arg(a), buffer_arg(b), buffer_arg(b), buffer_arg(out)),
       launch_entry4(e, buffer_arg(a), scalar_arg(1.0), scalar_arg(2.0), buffer_arg(out)),
       # a scalar is no buffer: passing the same value twice aliases nothing
-      launch_entry4(e, buffer_arg(a), buffer_arg(b), scalar_arg(0.0), buffer_arg(out), grid: [1])
+      launch_entry4(e, buffer_arg(a), buffer_arg(b), scalar_arg(0.0), buffer_arg(out), grid = [1])
     ]
     _ -> []
   }

@@ -136,13 +136,13 @@ pub fn path_text(path: List[Part]) -> String = {
 ## parameters, and a body read against its twin's would index past them.
 pub type PathTable[V] = { paths: List[String], first: Map[String, V], repeats: Map[String, List[V]] }
 
-pub fn path_table[V]() -> PathTable[V] = PathTable { paths: [], first: map.empty(), repeats: map.empty() }
+pub fn path_table[V]() -> PathTable[V] = PathTable { paths = [], first = map.empty(), repeats = map.empty() }
 
 pub fn path_table_add[V](t: PathTable[V], path: String, v: V) -> PathTable[V] =
   match map.get(t.first, path) {
-    None -> PathTable { ..t, paths: t.paths ++ [path], first: map.insert(t.first, path, v) }
-    Some(_) -> PathTable { ..t, paths: t.paths ++ [path],
-      repeats: map.insert(t.repeats, path, map.get(t.repeats, path).unwrap_or([]) ++ [v]) }
+    None -> PathTable { ..t, paths = t.paths ++ [path], first = map.insert(t.first, path, v) }
+    Some(_) -> PathTable { ..t, paths = t.paths ++ [path],
+      repeats = map.insert(t.repeats, path, map.get(t.repeats, path).unwrap_or([]) ++ [v]) }
   }
 
 ## The header of the declaration a path names. Absent is an answer: a caller
@@ -238,12 +238,12 @@ fn shape_text(t: TypeShape) -> String =
 pub type Minted = { owner: String, path: List[Part] }
 
 pub fn minted(owner: String, kind: Kind, name: String) -> Minted =
-  Minted { owner: owner, path: [Named(kind, name)] }
+  Minted { owner = owner, path = [Named(kind, name)] }
 
 ## The same declaration named by a whole path: an impl method, a trait
 ## default body, anything below the top level of a module.
 pub fn minted_path(owner: String, path: List[Part]) -> Minted =
-  Minted { owner: owner, path: path }
+  Minted { owner = owner, path = path }
 
 ## The spelling a derived id hashes. Injective for the same reason
 ## `path_text` is: the owner carries its own length, and the part that
@@ -403,11 +403,11 @@ pub fn free_pool(owner: String) -> Int = derive_text(atom(owner) ++ "P")
 pub fn temporary_floor() -> Int = (derived_floor() + derived_width() + 1) * slot_span()
 
 fn entry(path: List[Part], declaration: Int, member: Option[Int]) -> Entry =
-  Entry { key: DeclKey { path: path }, declaration: declaration, member: member }
+  Entry { key = DeclKey { path = path }, declaration = declaration, member = member }
 
 fn located_entry(path: List[Part], declaration: Int, member: Option[Int],
   lo: Int, hi: Int) -> Located =
-  Located { entry: entry(path, declaration, member), span: Span { lo: lo, hi: hi } }
+  Located { entry = entry(path, declaration, member), span = Span { lo = lo, hi = hi } }
 
 ## Imports are environment inputs rather than independently checked bodies.
 ## Reordering an unambiguous declaration changes only its syntax locator.
@@ -538,7 +538,7 @@ pub fn declarations(m: Module) -> List[Entry] =
 pub fn spans_of(ls: List[Located]) -> DeclSpans = {
   var out: Map[String, Span] = map.empty()
   for l in ls { out = map.insert(out, path_text(l.entry.key.path), l.span) }
-  DeclSpans { by_path: out }
+  DeclSpans { by_path = out }
 }
 
 ## The same walk the key enumeration uses, which is what makes the two agree
@@ -565,10 +565,10 @@ pub fn absolute(views: Map[String, DeclSpans], d: Diag) -> Diag =
         None -> d
         Some(sp) -> Diag {
           ..d,
-          lo: sp.lo + d.lo,
-          hi: sp.lo + d.hi,
-          owner: None,
-          notes: shift_notes(d.notes, sp.lo)
+          lo = sp.lo + d.lo,
+          hi = sp.lo + d.hi,
+          owner = None,
+          notes = shift_notes(d.notes, sp.lo)
         }
       }
     }
@@ -576,7 +576,7 @@ pub fn absolute(views: Map[String, DeclSpans], d: Diag) -> Diag =
 
 fn shift_notes(ns: List[Note], base: Int) -> List[Note] = {
   var out: List[Note] = []
-  for n in ns { out = out ++ [Note { ..n, lo: base + n.lo, hi: base + n.hi }] }
+  for n in ns { out = out ++ [Note { ..n, lo = base + n.lo, hi = base + n.hi }] }
   out
 }
 
@@ -636,8 +636,8 @@ test "identity normalizes associated effect subjects without merging module spel
   assert type_shape(a, ["T"]) != type_shape(TFn([], ret, ["T.F", "io"], 0, 10), ["T"])
   assert effect_atom("m.Ask", ["T"]) == NamedEffect("m.Ask")
   assert effect_atom("T.E", ["X", "T"]) == ProjectedEffect(1, "E")
-  let arg = EffArg { atoms: ["T.E"], lo: 0, hi: 3 }
-  let renamed = EffArg { atoms: ["U.E"], lo: 100, hi: 103 }
+  let arg = EffArg { atoms = ["T.E"], lo = 0, hi = 3 }
+  let renamed = EffArg { atoms = ["U.E"], lo = 100, hi = 103 }
   assert type_shape(TNamed("Box", [], [arg], 0, 8), ["T"]) ==
     type_shape(TNamed("Box", [], [renamed], 90, 110), ["U"])
   assert type_shape(TQual("m", "Box", [], [arg], 0, 8), ["T"]) ==
@@ -661,7 +661,7 @@ test "identity indexes associated declarations and bindings under their own pare
 
 fn fixture_spans(source: String) -> DeclSpans = declaration_spans(fixture_module(source))
 
-fn fixture_key(path: List[Part]) -> DeclKey = DeclKey { path: path }
+fn fixture_key(path: List[Part]) -> DeclKey = DeclKey { path = path }
 
 fn span_text(source: String, view: DeclSpans, path: List[Part]) -> Option[String] =
   match span_of(view, fixture_key(path)) {
@@ -777,19 +777,19 @@ test "the view answers by path text, and not for a duplicate" {
 test "a diagnostic resolves against the revision being rendered" {
   let source = "fn f() -> Int = 1\nfn g() -> Int = true\n"
   let moved = "# a comment above everything else\n" ++ source
-  let owner = DiagOwner { module: "pkg/m", decl: path_text([Named(FunctionDecl, "g")]) }
-  let raised = Diag { ..mk_diag("type mismatch", 16, 20, ""), owner: Some(owner) }
-  let noted = Diag { ..raised, notes: [Note { msg: "declared here", lo: 10, hi: 13 }] }
+  let owner = DiagOwner { module = "pkg/m", decl = path_text([Named(FunctionDecl, "g")]) }
+  let raised = Diag { ..mk_diag("type mismatch", 16, 20, ""), owner = Some(owner) }
+  let noted = Diag { ..raised, notes = [Note { msg = "declared here", lo = 10, hi = 13 }] }
   let here = absolute(map.from([("pkg/m", fixture_spans(source))]), raised)
   let there = absolute(map.from([("pkg/m", fixture_spans(moved))]), raised)
   let g_here = str.index_of(source, "fn g").expect("g is in the source")
   let g_there = str.index_of(moved, "fn g").expect("g is in the moved source")
   assert g_here != g_there
   assert here == mk_diag("type mismatch", g_here + 16, g_here + 20, "")
-  assert there == Diag { ..here, lo: g_there + 16, hi: g_there + 20 }
+  assert there == Diag { ..here, lo = g_there + 16, hi = g_there + 20 }
   # a note is in the diagnostic's frame and moves with it, by the same base
   let noted_there = absolute(map.from([("pkg/m", fixture_spans(moved))]), noted)
-  assert noted_there.notes == [Note { msg: "declared here", lo: g_there + 10, hi: g_there + 13 }]
+  assert noted_there.notes == [Note { msg = "declared here", lo = g_there + 10, hi = g_there + 13 }]
   assert noted_there.lo == g_there + 16
   # an owner this revision cannot place keeps the positions it came with
   # rather than inventing a base for them, and so does a diagnostic that
@@ -797,7 +797,7 @@ test "a diagnostic resolves against the revision being rendered" {
   let no_views: Map[String, DeclSpans] = map.empty()
   assert absolute(no_views, raised) == raised
   assert absolute(map.from([("other", fixture_spans(source))]), raised) == raised
-  let already = Diag { ..raised, owner: None }
+  let already = Diag { ..raised, owner = None }
   assert absolute(map.from([("pkg/m", fixture_spans(source))]), already) == already
 }
 

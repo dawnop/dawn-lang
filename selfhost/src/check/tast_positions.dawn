@@ -70,12 +70,12 @@ pub type Resolver = {
 
 ## The resolver for a declaration the span view names.
 pub fn owned(lo: Int, hi: Int, path: Option[String], line_starts: List[Int], source: String) -> Resolver =
-  Resolver { base: lo, span: Some(hi - lo), path: path, line_starts: line_starts, source: source }
+  Resolver { base = lo, span = Some(hi - lo), path = path, line_starts = line_starts, source = source }
 
 ## The resolver for a declaration it does not: a duplicate, or one under a
 ## duplicated parent. Its tree is already in file coordinates.
 pub fn unowned(path: Option[String], line_starts: List[Int], source: String) -> Resolver =
-  Resolver { base: 0, span: None, path: path, line_starts: line_starts, source: source }
+  Resolver { base = 0, span = None, path = path, line_starts = line_starts, source = source }
 
 fn at(r: Resolver, off: Int) -> Int =
   match r.span {
@@ -279,22 +279,22 @@ fn list_elem(r: Resolver, e: TListElem) -> TListElem =
     TLEExpr(x) -> TLEExpr(expr(r, x))
     TLESpread(x) -> TLESpread(expr(r, x))
     TLEIf(arms) -> TLEIf(map(arms, a =>
-        TListIfArm { cond: expr(r, a.cond), body: expr(r, a.body) }))
+        TListIfArm { cond = expr(r, a.cond), body = expr(r, a.body) }))
   }
 
 fn arm(r: Resolver, a: TArm) -> TArm =
-  TArm { pat: a.pat, guard: opt_expr(r, a.guard), body: expr(r, a.body) }
+  TArm { pat = a.pat, guard = opt_expr(r, a.guard), body = expr(r, a.body) }
 
 fn java_call(r: Resolver, c: TJavaCall) -> TJavaCall =
   TJavaCall { ..c,
-    target: opt_expr(r, c.target),
-    args: exprs(r, c.args),
-    sam_evs: map(c.sam_evs, pair => {
+    target = opt_expr(r, c.target),
+    args = exprs(r, c.args),
+    sam_evs = map(c.sam_evs, pair => {
       let (idx, e) = pair
       (idx, expr(r, e))
     }),
-    nlo: at(r, c.nlo),
-    nhi: at(r, c.nhi) }
+    nlo = at(r, c.nlo),
+    nhi = at(r, c.nhi) }
 
 pub fn expr(r: Resolver, e: TExpr) -> TExpr =
   match e {
@@ -392,15 +392,15 @@ pub fn stmt(r: Resolver, s: TStmt) -> TStmt =
 ## place that knows it, so a scheduler that files the tree need not.
 pub fn function(r: Resolver, f: TFun) -> TFun =
   TFun { ..f,
-    base: r.base,
-    defaults: map(f.defaults, d => match d {
+    base = r.base,
+    defaults = map(f.defaults, d => match d {
       None -> None
-      Some(dd) -> Some(TDefault { ..dd, body: expr(r, dd.body) })
+      Some(dd) -> Some(TDefault { ..dd, body = expr(r, dd.body) })
     }),
-    body: expr(r, f.body) }
+    body = expr(r, f.body) }
 
 pub fn constant(r: Resolver, c: TConst) -> TConst =
-  TConst { ..c, init: expr(r, c.init), lo: at(r, c.lo), hi: at(r, c.hi) }
+  TConst { ..c, init = expr(r, c.init), lo = at(r, c.lo), hi = at(r, c.hi) }
 
 ## The declaration's own symbols, named by the identifier interval the
 ## scheduler minted them in. A symbol's declaring span is measured from the
@@ -411,7 +411,7 @@ pub fn symbols(r: Resolver, syms: Map[Int, Sym], first: Int, limit: Int) -> Map[
   var id = first
   while id < limit {
     match map.get(out, id) {
-      Some(s) -> { out = map.insert(out, id, Sym { ..s, dlo: at(r, s.dlo), dhi: at(r, s.dhi) }) }
+      Some(s) -> { out = map.insert(out, id, Sym { ..s, dlo = at(r, s.dlo), dhi = at(r, s.dhi) }) }
       None -> ()
     }
     id = id + 1
@@ -559,8 +559,8 @@ test "an assertion's text carries its site" {
 
 test "symbols move with the tree that reads them" {
   let sym = (dlo: Int, dhi: Int) =>
-    Sym { name: "x", ty: TyInt, mutable: false, dlo: dlo, dhi: dhi,
-      dict_of: None, ev_of: None, cell_of: None }
+    Sym { name = "x", ty = TyInt, mutable = false, dlo = dlo, dhi = dhi,
+      dict_of = None, ev_of = None, cell_of = None }
   let before = map.from([(7, sym(0, 1)), (9, sym(4, 5)), (11, sym(60, 61))])
   let after = symbols(owned(100, 130, None, [], ""), before, 7, 11)
   assert map.get(after, 7) == Some(sym(100, 101))

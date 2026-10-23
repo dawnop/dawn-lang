@@ -80,11 +80,11 @@ impl App[Counter] {
   type View = String
   fn update(m: Counter, msg: CounterMsg) -> (Counter, Cmd[CounterMsg]) =
     match msg {
-      Inc -> (Counter { n: m.n + 1 }, NoCmd)
-      Dec -> (Counter { n: m.n - 1 }, NoCmd)
+      Inc -> (Counter { n = m.n + 1 }, NoCmd)
+      Dec -> (Counter { n = m.n - 1 }, NoCmd)
       # Two steps in one message, said as a command rather than by calling
       # `update` from inside itself: the fold is what runs the second one.
-      Twice -> (m, BatchCmd(cmds: [SendMsg(msg: Inc), SendMsg(msg: Inc)]))
+      Twice -> (m, BatchCmd(cmds = [SendMsg(msg = Inc), SendMsg(msg = Inc)]))
     }
   fn view(m: Counter) -> String = "n=" ++ to_string(m.n)
 }
@@ -93,21 +93,21 @@ impl App[Counter] {
 fn turn(m: Counter, msg: CounterMsg) -> Counter = fold_msg(m, msg, update)
 
 test "update folds messages, view snapshots as a value" {
-  let m = turn(turn(Counter { n: 0 }, Inc), Inc)
-  assert m == Counter { n: 2 }
+  let m = turn(turn(Counter { n = 0 }, Inc), Inc)
+  assert m == Counter { n = 2 }
   assert view(turn(m, Dec)) == "n=1"
 }
 
 test "a turn is the update and every message its command asked for" {
   # `Twice` moves no field itself; the model that comes back is the fold's.
-  assert turn(Counter { n: 0 }, Twice) == Counter { n: 2 }
+  assert turn(Counter { n = 0 }, Twice) == Counter { n = 2 }
   # And the raw pair still says what was commanded, which is what a driver
   # other than this one reads.
-  let (kept, c) = update(Counter { n: 0 }, Twice)
-  assert kept == Counter { n: 0 }
-  assert c == BatchCmd(cmds: [SendMsg(msg: Inc), SendMsg(msg: Inc)])
+  let (kept, c) = update(Counter { n = 0 }, Twice)
+  assert kept == Counter { n = 0 }
+  assert c == BatchCmd(cmds = [SendMsg(msg = Inc), SendMsg(msg = Inc)])
 }
 
 test "the view type is whatever the impl says, core never assumes a tree" {
-  assert view(Counter { n: 7 }) == "n=7"
+  assert view(Counter { n = 7 }) == "n=7"
 }

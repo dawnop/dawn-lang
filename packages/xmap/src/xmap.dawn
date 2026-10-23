@@ -105,8 +105,8 @@ pub fn parse_spec(name: String, text: String) -> Result[(Spec, Files), String] =
   } else if kernel != map.has(rows, "tile-golden") {
     Err("the spec of ${name} has one of tile-map and tile-golden, not both")
   } else {
-    let files = Files { source: get_or("source", ""), tile_map: get_or("tile-map", ""), golden: get_or("tile-golden", "") }
-    Ok((Spec { name: name, path: files.source, fn_name: get_or("fn", ""), module: get_or("module", ""), kernel: kernel }, files))
+    let files = Files { source = get_or("source", ""), tile_map = get_or("tile-map", ""), golden = get_or("tile-golden", "") }
+    Ok((Spec { name = name, path = files.source, fn_name = get_or("fn", ""), module = get_or("module", ""), kernel = kernel }, files))
   }
 }
 
@@ -129,15 +129,15 @@ pub fn parse_raw(spec: Spec, raw: Raw) -> Result[Inputs, String] =
 
 fn inputs(raw: Raw, c: CMap, j: JMap, tile: Option[TileMap]) -> Inputs =
   Inputs {
-    src: src_of(raw.source),
-    ctext: str.split(raw.ctext, "\n"),
-    c_total: line_count(raw.ctext),
-    cmap: c,
-    jmap: j,
-    listing: parse_listing(raw.javap),
-    j_total: line_count(raw.javap),
-    tile: tile,
-    tile_text: raw.golden,
+    src = src_of(raw.source),
+    ctext = str.split(raw.ctext, "\n"),
+    c_total = line_count(raw.ctext),
+    cmap = c,
+    jmap = j,
+    listing = parse_listing(raw.javap),
+    j_total = line_count(raw.javap),
+    tile = tile,
+    tile_text = raw.golden,
   }
 
 # The calls the C map has in the function that the table has no row for.
@@ -151,7 +151,7 @@ fn host_only(src: Src, spec: Spec, first: Int, last: Int, c: CMap, table: List[C
 }
 
 fn pane_of(kind: String, spec: Spec, total: Int, b: PaneBuild) -> Pane =
-  Pane { kind: kind, file: "${spec.name}.${kind}.txt", total: total, text: b.text, outs: b.outs }
+  Pane { kind = kind, file = "${spec.name}.${kind}.txt", total = total, text = b.text, outs = b.outs }
 
 ## The program `spec` names, mapped from parsed inputs.
 pub fn map_program(spec: Spec, inp: Inputs) -> Built = {
@@ -178,15 +178,15 @@ pub fn map_program(spec: Spec, inp: Inputs) -> Built = {
     None -> []
   }
   Built {
-    name: spec.name,
-    path: spec.path,
-    src: src,
-    first: first,
-    last: last,
-    calls: table,
-    panes: panes,
-    gaps: faults ++ tile_gaps ++ c.gaps ++ j.gaps,
-    skipped: host_only(src, spec, first, last, inp.cmap, table),
+    name = spec.name,
+    path = spec.path,
+    src = src,
+    first = first,
+    last = last,
+    calls = table,
+    panes = panes,
+    gaps = faults ++ tile_gaps ++ c.gaps ++ j.gaps,
+    skipped = host_only(src, spec, first, last, inp.cmap, table),
   }
 }
 
@@ -247,7 +247,7 @@ test "a spec says what a program's raw material is" {
   match parse_spec("demo", fixture_spec()) {
     Ok((s, f)) -> {
       assert (s.name, s.path, s.fn_name, s.module, s.kernel) == ("demo", "demo.dawn", "f", "demo", false)
-      assert f == Files { source: "demo.dawn", tile_map: "", golden: "" }
+      assert f == Files { source = "demo.dawn", tile_map = "", golden = "" }
     }
     Err(e) -> { assert e == "" }
   }
@@ -279,27 +279,27 @@ fn is_err[A](r: Result[A, String]) -> Bool =
 # other, on one line of C and a handful of instructions. Every number below is
 # what a compiler would say for it, written out so that a test can break one.
 
-fn demo_spec() -> Spec = Spec { name: "demo", path: "demo.dawn", fn_name: "main", module: "demo", kernel: false }
+fn demo_spec() -> Spec = Spec { name = "demo", path = "demo.dawn", fn_name = "main", module = "demo", kernel = false }
 
 fn demo_raw() -> Raw =
   Raw {
-    source: "fn main() -> Unit !io = {\n  println(show(1))\n}\n",
-    ctext: "// header\nvoid main(void) {\n  dawn_println(dawn_show(1));\n}\n",
-    cmap: "dawnmap\t1\tc\ntext\t4\nsrc\tdemo\tdemo.dawn\n"
+    source = "fn main() -> Unit !io = {\n  println(show(1))\n}\n",
+    ctext = "// header\nvoid main(void) {\n  dawn_println(dawn_show(1));\n}\n",
+    cmap = "dawnmap\t1\tc\ntext\t4\nsrc\tdemo\tdemo.dawn\n"
       ++ "fn\t2\t4\tdemo\tNf4:main\tdawn_main\n"
       ++ "call\t3\t3\t2\t28\tdemo\t28\t44\t28\tdirect println\n"
       ++ "call\t3\t3\t15\t27\tdemo\t36\t43\t36\tdirect show\n",
-    jmap: "dawnmap\t1\tjvm\nsrc\tdemo\tdemo.dawn\n"
+    jmap = "dawnmap\t1\tjvm\nsrc\tdemo\tdemo.dawn\n"
       ++ "fn\t0\t8\tdemo\tNf4:main\tdemo.main:()Ldawn/rt/Unit;\n"
       ++ "call\t0\t0\t7\t4\tdemo\t28\t44\t28\tdirect println\n"
       ++ "call\t0\t0\t4\t1\tdemo\t36\t43\t36\tdirect show\n",
-    javap: "public final class demo {\n  public static dawn.rt.Unit main();\n    descriptor: ()Ldawn/rt/Unit;\n    Code:\n"
+    javap = "public final class demo {\n  public static dawn.rt.Unit main();\n    descriptor: ()Ldawn/rt/Unit;\n    Code:\n"
       ++ "       0: iconst_1\n"
       ++ "       1: invokestatic  #2   // Method show:(I)Ljava/lang/String;\n"
       ++ "       4: invokestatic  #3   // Method println:(Ljava/lang/String;)Ldawn/rt/Unit;\n"
       ++ "       7: areturn\n}\n",
-    tile_map: "",
-    golden: "",
+    tile_map = "",
+    golden = "",
   }
 
 fn demo() -> Inputs =
@@ -310,10 +310,10 @@ fn demo() -> Inputs =
 
 # `i` with its first C call (`f`) changed, and the same for the JVM map.
 fn c_first(i: Inputs, f: fn(CCall) -> CCall) -> Inputs =
-  Inputs { ..i, cmap: CMap { ..i.cmap, calls: map(range(0, len(i.cmap.calls)), n => if n == 0 { f(i.cmap.calls[n]) } else { i.cmap.calls[n] }) } }
+  Inputs { ..i, cmap = CMap { ..i.cmap, calls = map(range(0, len(i.cmap.calls)), n => if n == 0 { f(i.cmap.calls[n]) } else { i.cmap.calls[n] }) } }
 
 fn j_first(i: Inputs, f: fn(JCall) -> JCall) -> Inputs =
-  Inputs { ..i, jmap: JMap { ..i.jmap, calls: map(range(0, len(i.jmap.calls)), n => if n == 0 { f(i.jmap.calls[n]) } else { i.jmap.calls[n] }) } }
+  Inputs { ..i, jmap = JMap { ..i.jmap, calls = map(range(0, len(i.jmap.calls)), n => if n == 0 { f(i.jmap.calls[n]) } else { i.jmap.calls[n] }) } }
 
 # What a strict mapping of `i` says, "" for none.
 fn refused(i: Inputs) -> String =
@@ -348,25 +348,25 @@ test "the same raw material is mapped from text, and strictly it is the same ans
 ## The negative controls: each way a side table can disagree with the text it
 ## is held to is a gap that names the call, and the strict entry refuses it.
 test "a call one map has no row for is a gap" {
-  assert str.contains(refused(c_first(demo(), r => CCall { ..r, lo: Some(-5), hi: Some(-4) })), "and not in the other")
-  assert str.contains(refused(j_first(demo(), r => JCall { ..r, lo: Some(-5), hi: Some(-4) })), "and not in the other")
+  assert str.contains(refused(c_first(demo(), r => CCall { ..r, lo = Some(-5), hi = Some(-4) })), "and not in the other")
+  assert str.contains(refused(j_first(demo(), r => JCall { ..r, lo = Some(-5), hi = Some(-4) })), "and not in the other")
 }
 
 test "a pc range that is past its method or between instructions is a gap" {
-  assert str.contains(refused(j_first(demo(), r => JCall { ..r, pchi: Some(100000) })), "are outside its method's code")
-  let far = j_first(demo(), r => JCall { ..r, pclo: Some(99999), pchi: Some(100000) })
-  let long = Inputs { ..far, jmap: JMap { ..far.jmap, fns: map(far.jmap.fns, f => JFn { ..f, len: 100001 }) } }
+  assert str.contains(refused(j_first(demo(), r => JCall { ..r, pchi = Some(100000) })), "are outside its method's code")
+  let far = j_first(demo(), r => JCall { ..r, pclo = Some(99999), pchi = Some(100000) })
+  let long = Inputs { ..far, jmap = JMap { ..far.jmap, fns = map(far.jmap.fns, f => JFn { ..f, len = 100001 }) } }
   assert str.contains(refused(long), "no instruction in pcs")
 }
 
 test "a C row that did not land, lands outside the function or has columns past its line is a gap" {
-  assert str.contains(refused(c_first(demo(), r => CCall { ..r, first: None })), "did not land in the C text")
-  assert str.contains(refused(c_first(demo(), r => CCall { ..r, first: Some(1), line: Some(1) })), "outside the function's")
-  assert str.contains(refused(c_first(demo(), r => CCall { ..r, clo: Some(0), chi: Some(100000) })), "are outside C line")
+  assert str.contains(refused(c_first(demo(), r => CCall { ..r, first = None })), "did not land in the C text")
+  assert str.contains(refused(c_first(demo(), r => CCall { ..r, first = Some(1), line = Some(1) })), "outside the function's")
+  assert str.contains(refused(c_first(demo(), r => CCall { ..r, clo = Some(0), chi = Some(100000) })), "are outside C line")
 }
 
 test "a method javap does not list is a gap" {
-  let raw = Raw { ..demo_raw(), javap: str.replace(demo_raw().javap, "main();", "mainx();") }
+  let raw = Raw { ..demo_raw(), javap = str.replace(demo_raw().javap, "main();", "mainx();") }
   match parse_raw(demo_spec(), raw) {
     Ok(i) -> { assert str.contains(refused(i), "javap lists no method main") }
     Err(e) -> { assert e == "" }
@@ -374,20 +374,20 @@ test "a method javap does not list is a gap" {
 }
 
 test "a name that is not at its span is a gap" {
-  let c = c_first(demo(), r => CCall { ..r, nlo: Some(24) })
-  let both = j_first(c, r => JCall { ..r, nlo: Some(24) })
+  let c = c_first(demo(), r => CCall { ..r, nlo = Some(24) })
+  let both = j_first(c, r => JCall { ..r, nlo = Some(24) })
   assert str.contains(refused(both), "which is no identifier")
 }
 
 test "a function the maps do not have, and a program with no calls, are gaps, not panics" {
-  let b = map_program(Spec { ..demo_spec(), fn_name: "other" }, demo())
+  let b = map_program(Spec { ..demo_spec(), fn_name = "other" }, demo())
   assert str.contains(b.gaps[0], "the C map has no function of `other`")
   assert len(b.panes[0].text) == 0
-  let none = Inputs { ..demo(), cmap: CMap { ..demo().cmap, calls: [] }, jmap: JMap { ..demo().jmap, calls: [] } }
+  let none = Inputs { ..demo(), cmap = CMap { ..demo().cmap, calls = [] }, jmap = JMap { ..demo().jmap, calls = [] } }
   assert str.contains(refused(none), "no calls to show")
 }
 
 test "a map that is not one is an error at the door" {
-  assert is_err(explore(demo_spec(), Raw { ..demo_raw(), cmap: demo_raw().jmap }))
-  assert is_err(explore(demo_spec(), Raw { ..demo_raw(), jmap: "" }))
+  assert is_err(explore(demo_spec(), Raw { ..demo_raw(), cmap = demo_raw().jmap }))
+  assert is_err(explore(demo_spec(), Raw { ..demo_raw(), jmap = "" }))
 }

@@ -317,10 +317,10 @@ fn slot_of(g: Gen, id: Int) -> Int =
   }
 
 fn bind_slot(g: Gen, id: Int, slot: Int) -> Gen !io =
-  Gen { ..g, slots: map.insert(g.slots, id, slot) }
+  Gen { ..g, slots = map.insert(g.slots, id, slot) }
 
 fn alloc(g: Gen, n: Int) -> (Gen, Int) =
-  (Gen { ..g, next_slot: g.next_slot + n }, g.next_slot)
+  (Gen { ..g, next_slot = g.next_slot + n }, g.next_slot)
 
 fn load_var(g: Gen, id: Int) -> Unit !io =
   load_slot(g.mv, sym_of(g, id).ty, slot_of(g, id))
@@ -398,7 +398,7 @@ fn open_mark(g: Gen) -> Label !io = {
 fn close_mark(g: Gen, site: CSite, what: String, lo: Label, inv: Option[Label]) -> Gen !io = {
   let hi = Label.new()
   g.mv.visitLabel(hi)
-  Gen { ..g, marks: g.marks ++ [JMark { site: site, what: what, lo: lo, inv: inv, hi: hi }] }
+  Gen { ..g, marks = g.marks ++ [JMark { site = site, what = what, lo = lo, inv = inv, hi = hi }] }
 }
 
 ## A label's pc, or -1 for one never placed: the call instruction of a call
@@ -418,15 +418,15 @@ fn mark_rows(cf: CFun, owner: String, name: String, desc: String, marks: List[JM
       None -> -1
     }
     out = out ++ [JRow {
-      owner: owner,
-      origin: cf.origin,
-      method: name,
-      desc: desc,
-      site: mk.site,
-      what: mk.what,
-      pclo: label_pc(mk.lo),
-      pchi: label_pc(mk.hi),
-      ipc: ipc
+      owner = owner,
+      origin = cf.origin,
+      method = name,
+      desc = desc,
+      site = mk.site,
+      what = mk.what,
+      pclo = label_pc(mk.lo),
+      pchi = label_pc(mk.hi),
+      ipc = ipc
     }]
   }
   out
@@ -709,8 +709,8 @@ fn gen_load_const(gx: GenCtx, g: Gen, v: CValue, t: Ty, key: String) -> Gen !io 
           let f = "dawn\$const\$${to_string(len(g.const_fields))}"
           (Gen {
             ..g,
-            const_fields: g.const_fields ++ [ConstF { fname: f, v: v, ty: t }],
-            const_by_key: map.insert(g.const_by_key, key, f)
+            const_fields = g.const_fields ++ [ConstF { fname = f, v = v, ty = t }],
+            const_by_key = map.insert(g.const_by_key, key, f)
           }, f)
         }
       }
@@ -940,14 +940,14 @@ fn emit_sam_conversion(
   let bridge = "dawn\$sam\$${to_string(g.sam_ctr)}"
   let g1 = Gen {
     ..g,
-    sam_ctr: g.sam_ctr + 1,
-    pending_sam: g.pending_sam ++ [SamB {
-      name: bridge,
-      iface: iface,
-      sam_name: sam_name,
-      sam_params: sam_params,
-      sam_ret: sam_ret,
-      bottom: is_bottom(fret)
+    sam_ctr = g.sam_ctr + 1,
+    pending_sam = g.pending_sam ++ [SamB {
+      name = bridge,
+      iface = iface,
+      sam_name = sam_name,
+      sam_params = sam_params,
+      sam_ret = sam_ret,
+      bottom = is_bottom(fret)
     }]
   }
   var pdescs = ""
@@ -956,17 +956,17 @@ fn emit_sam_conversion(
   let cls = sam_class(gx.class_name, g.sam_ctr)
   let g2 = Gen {
     ..g1,
-    sam_classes: g1.sam_classes ++ [SamC {
-      cls: cls,
-      iface: internal_of(iface),
-      sam_name: sam_name,
-      sam_params: sam_params,
-      sam_ret: sam_ret,
-      arity: n,
-      bridge_owner: gx.class_name,
-      bridge: bridge,
-      bridge_desc: bridge_desc,
-      bottom: is_bottom(fret)
+    sam_classes = g1.sam_classes ++ [SamC {
+      cls = cls,
+      iface = internal_of(iface),
+      sam_name = sam_name,
+      sam_params = sam_params,
+      sam_ret = sam_ret,
+      arity = n,
+      bridge_owner = gx.class_name,
+      bridge = bridge,
+      bridge_desc = bridge_desc,
+      bottom = is_bottom(fret)
     }]
   }
   # the `FnN` this wraps is already on the stack, put there by the argument
@@ -1539,7 +1539,7 @@ fn note_lifts(gx: GenCtx, g: Gen, lifts: List[CFun]) -> Gen = {
       } else {
         impl_desc_of(gx, ptys, lf.ret)
       }
-    g1 = Gen { ..g1, lift_descs: map.insert(g1.lift_descs, (gx.class_name, lf.name), d) }
+    g1 = Gen { ..g1, lift_descs = map.insert(g1.lift_descs, (gx.class_name, lf.name), d) }
   }
   g1
 }
@@ -1590,15 +1590,15 @@ fn gen_cbody(
   m.visitCode()
   var g1 = Gen {
     ..g,
-    mv: m,
-    next_slot: 0,
-    method_ret: cf.ret,
+    mv = m,
+    next_slot = 0,
+    method_ret = cf.ret,
     # a lifted body sits behind the erased `apply`, so a zero-slot return
     # type still has to hand back a reference. A dictionary slot body does
     # not: it is called against the trait's own descriptor.
-    rets_null: lifted && not slot_body,
-    cloops: [],
-    marks: []
+    rets_null = lifted && not slot_body,
+    cloops = [],
+    marks = []
   }
   for p in cf.captures {
     let (g2, slot) = alloc(g1, slots_of(p.ty))
@@ -1628,9 +1628,9 @@ fn gen_cbody(
   close_mv(m)
   Gen {
     ..g3,
-    marks: [],
-    jrows: g3.jrows ++ mark_rows(cf, gx.class_name, name, desc, g3.marks),
-    jfns: g3.jfns ++ [JFn { owner: gx.class_name, origin: cf.origin, method: name, desc: desc, end: label_pc(end) }]
+    marks = [],
+    jrows = g3.jrows ++ mark_rows(cf, gx.class_name, name, desc, g3.marks),
+    jfns = g3.jfns ++ [JFn { owner = gx.class_name, origin = cf.origin, method = name, desc = desc, end = label_pc(end) }]
   }
 }
 
@@ -1640,7 +1640,7 @@ fn drain_lambdas(g: Gen, cw: ClassWriter) -> Gen !io = {
   var g1 = g
   while len(g1.pending_sam) > 0 {
     let b = g1.pending_sam[0]
-    g1 = Gen { ..g1, pending_sam: list.drop(g1.pending_sam, 1) }
+    g1 = Gen { ..g1, pending_sam = list.drop(g1.pending_sam, 1) }
     g1 = gen_sam_bridge(g1, cw, b)
   }
   g1
@@ -1761,7 +1761,7 @@ fn eq_override(
       None -> none
     }
   }
-  EqOverride { eq_owner: owner_of(EQ_ID), hash_owner: owner_of(HASH_ID) }
+  EqOverride { eq_owner = owner_of(EQ_ID), hash_owner = owner_of(HASH_ID) }
 }
 
 fn owner_or_default(o: Option[String], fallback: String) -> String =
@@ -1784,7 +1784,7 @@ fn subject_head(t: TypeRef) -> Option[String] =
   }
 
 fn site_at(src: String, nlo: Int, nhi: Int) -> MethodSite =
-  MethodSite { path: src, nlo: nlo, nhi: nhi, lifted: false }
+  MethodSite { path = src, nlo = nlo, nhi = nhi, lifted = false }
 
 ## Where this module's methods were declared, keyed by the name each is
 ## emitted under.
@@ -1883,7 +1883,7 @@ fn note_lift_sites(
   match map.get(sites, owner) {
     Some(st) -> {
       var out = sites
-      for lf in lifts { out = map.insert(out, lf.name, MethodSite { ..st, lifted: true }) }
+      for lf in lifts { out = map.insert(out, lf.name, MethodSite { ..st, lifted = true }) }
       out
     }
     None -> sites
@@ -1892,31 +1892,31 @@ fn note_lift_sites(
 test "the site table is keyed by the name a method is emitted under" {
   let body = EUnit(0, 0)
   let f = FnDecl {
-    vis: VisPub,
-    name: "big",
-    tparams: [],
-    eparams: [],
-    params: [],
-    ret: None,
-    effs: [],
-    body: body,
-    lo: 0,
-    hi: 20,
-    nlo: 3,
-    nhi: 6
+    vis = VisPub,
+    name = "big",
+    tparams = [],
+    eparams = [],
+    params = [],
+    ret = None,
+    effs = [],
+    body = body,
+    lo = 0,
+    hi = 20,
+    nlo = 3,
+    nhi = 6
   }
   let sub = TNamed("Foo", [], [], 0, 3)
-  let impl_m = FnDecl { ..f, name: "fmt", nlo: 40, nhi: 43 }
+  let impl_m = FnDecl { ..f, name = "fmt", nlo = 40, nhi = 43 }
   let tm = TraitMethod {
-    name: "fmt",
-    params: [],
-    ret: TNamed("String", [], [], 0, 6),
-    effs: [],
-    body: Some(body),
-    lo: 60,
-    hi: 70,
-    nlo: 62,
-    nhi: 65
+    name = "fmt",
+    params = [],
+    ret = TNamed("String", [], [], 0, 6),
+    effs = [],
+    body = Some(body),
+    lo = 60,
+    hi = 70,
+    nlo = 62,
+    nhi = 65
   }
   let decls: List[Decl] = [
     DFn(f),
@@ -2063,7 +2063,7 @@ pub fn emit_module_mapped(
     own_trait_ids, own_adt_ids, tm, lm, live, ct, all_consts, src, decls, true)
   let plain = class_of(written, class_name)
   let same = plain == class_of(labelled, class_name)
-  (written, JModMap { owner: class_name, rows: rows, fns: fns, same: same, class_bytes: plain })
+  (written, JModMap { owner = class_name, rows = rows, fns = fns, same = same, class_bytes = plain })
 }
 
 ## The bytes `emit_module` wrote for one class; the module class is always
@@ -2139,44 +2139,44 @@ fn emit_module_with(
   let no_slots: Map[Int, Int] = map.empty()
   let no_ckey: Map[String, String] = map.empty()
   let gx = GenCtx {
-    next_sym: lm.next_sym,
-    class_name: class_name,
-    args_owner: args_owner,
-    adts: adts,
-    traits: traits,
-    impl_table: impl_table,
-    prog_fns: prog_fns,
-    intrs: intrinsics(),
+    next_sym = lm.next_sym,
+    class_name = class_name,
+    args_owner = args_owner,
+    adts = adts,
+    traits = traits,
+    impl_table = impl_table,
+    prog_fns = prog_fns,
+    intrs = intrinsics(),
     # every dictionary the module asked for, tests included, in the order
     # lowering asked for them. Known up front so `is_slot_target` answers the
     # same for a hoisted body wherever in the class it is written.
-    dicts: lm.dicts,
-    live: live,
-    consts: all_consts,
-    blocks: ct.blocks,
-    mapping: mapping
+    dicts = lm.dicts,
+    live = live,
+    consts = all_consts,
+    blocks = ct.blocks,
+    mapping = mapping
   }
   var g = Gen {
-    mv: scratch_mv(),
-    lift_descs: map.empty(),
+    mv = scratch_mv(),
+    lift_descs = map.empty(),
     # the table lowering renumbered, not the checker's: the Core below names
     # its bindings with the integers `densify` gave them
-    syms: lm.syms,
-    slots: no_slots,
-    next_slot: 0,
-    method_ret: TyUnit,
-    rets_null: false,
-    cloops: [],
-    sam_ctr: 0,
-    pending_sam: [],
-    clos_ctr: 0,
-    closures: [],
-    sam_classes: [],
-    const_fields: [],
-    const_by_key: no_ckey,
-    marks: [],
-    jrows: [],
-    jfns: []
+    syms = lm.syms,
+    slots = no_slots,
+    next_slot = 0,
+    method_ret = TyUnit,
+    rets_null = false,
+    cloops = [],
+    sam_ctr = 0,
+    pending_sam = [],
+    clos_ctr = 0,
+    closures = [],
+    sam_classes = [],
+    const_fields = [],
+    const_by_key = no_ckey,
+    marks = [],
+    jrows = [],
+    jfns = []
   }
   for pr in lm.fns {
     let (_cf, lifts) = pr
@@ -2357,9 +2357,9 @@ fn sig_of_call(gx: GenCtx, owner: String, name: String) -> Sig =
 fn cbind(g: Gen, sym: Int, ty: Ty, slot: Int) -> Gen !io = {
   let g1 = Gen {
     ..g,
-    syms: map.insert(g.syms, sym,
-      Sym { name: "", ty: ty, mutable: true, dlo: 0, dhi: 0, dict_of: None, ev_of: None,
-        cell_of: None })
+    syms = map.insert(g.syms, sym,
+      Sym { name = "", ty = ty, mutable = true, dlo = 0, dhi = 0, dict_of = None, ev_of = None,
+        cell_of = None })
   }
   bind_slot(g1, sym, slot)
 }
@@ -2527,20 +2527,20 @@ fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExp
   let cls = closure_class(gx.class_name, g.clos_ctr)
   let g0 = Gen {
     ..g,
-    clos_ctr: g.clos_ctr + 1,
-    closures: g.closures ++ [ClosB {
-      cls: cls,
-      iface: iface,
-      arity: arity,
-      cap_tys: cap_tys,
-      fps: fps,
-      fret: fret,
-      owner: owner,
-      target: name,
-      nev: nev_ty,
+    clos_ctr = g.clos_ctr + 1,
+    closures = g.closures ++ [ClosB {
+      cls = cls,
+      iface = iface,
+      arity = arity,
+      cap_tys = cap_tys,
+      fps = fps,
+      fret = fret,
+      owner = owner,
+      target = name,
+      nev = nev_ty,
       # lowering already hoisted the body to a top-level static, so this
       # names a method that exists rather than one to be emitted
-      impl_desc: impl_desc_of(gx, cap_tys ++ fps ++ ev_tys(nev_ty), fret)
+      impl_desc = impl_desc_of(gx, cap_tys ++ fps ++ ev_tys(nev_ty), fret)
     }]
   }
   if len(caps) == 0 {
@@ -2617,7 +2617,7 @@ fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (Str
   # the erased apply takes Objects, so every parameter is one word and sits
   # at 1 + its index whatever the Dawn type underneath is
   var p = 0
-  let mg = Gen { ..g, mv: m }
+  let mg = Gen { ..g, mv = m }
   for pt in b.fps {
     m.visitVarInsn(OP_ALOAD, p + 1)
     unerase(gx, mg, pt)
@@ -3211,7 +3211,7 @@ fn gen_cstmt(gx: GenCtx, g: Gen, s: CStmt) -> (Gen, Bool) !io =
       let cont = Label.new()
       let brk = Label.new()
       g.mv.visitLabel(top)
-      var g1 = Gen { ..g, cloops: g.cloops ++ [(id, cont, brk)] }
+      var g1 = Gen { ..g, cloops = g.cloops ++ [(id, cont, brk)] }
       let (g2, body_falls) = gen_cexpr(gx, g1, body, false)
       g1 = g2
       # the body is an expression in statement position, exactly like
@@ -3232,7 +3232,7 @@ fn gen_cstmt(gx: GenCtx, g: Gen, s: CStmt) -> (Gen, Bool) !io =
       g1.mv.visitLabel(brk)
       # A non-falling body can reach either loop label via break/continue.
       # Keep the step and conservatively allow the path after the break label.
-      (Gen { ..g1, cloops: list.take(g1.cloops, len(g1.cloops) - 1) }, true)
+      (Gen { ..g1, cloops = list.take(g1.cloops, len(g1.cloops) - 1) }, true)
     }
     # reference counting: Perceus emits these, the JVM has a collector
     CSDrop(_) -> (g, true)
@@ -3855,7 +3855,7 @@ fn rt_intrinsic_ref(adts: Adts, intrs: Map[String, Intr], name: String) -> Optio
       var ps = ""
       for p in sig.param_tys { ps = ps ++ desc_of(adts, p) }
       ps = ps ++ erased_ev_slots(nev(sig_abi_eff(sig)))
-      Some(RtMethod { cls: cls, name: name, desc: "(" ++ ps ++ ")" ++ desc_of(adts, sig.ret) })
+      Some(RtMethod { cls = cls, name = name, desc = "(" ++ ps ++ ")" ++ desc_of(adts, sig.ret) })
     }
     None -> None
   }
@@ -3946,34 +3946,34 @@ test "a signature's descriptor carries one evidence slot per row atom" {
   # every other test here stays green.
   let adts = prelude_adts()
   let base = Sig {
-    name: "f",
-    param_tys: [TyInt],
-    param_names: ["x"],
-    param_defaults: [None],
-    caller_params: [],
-    ret: TyBool,
-    eff: EPure,
-    is_builtin: false,
-    tparams: [],
-    constraints: [],
-    eparams: [],
-    owner: None,
-    trait_id: None,
-    op_of: None,
-    inferring: false
+    name = "f",
+    param_tys = [TyInt],
+    param_names = ["x"],
+    param_defaults = [None],
+    caller_params = [],
+    ret = TyBool,
+    eff = EPure,
+    is_builtin = false,
+    tparams = [],
+    constraints = [],
+    eparams = [],
+    owner = None,
+    trait_id = None,
+    op_of = None,
+    inferring = false
   }
   assert sig_desc_with_dicts(adts, base) == "(J)Z"
   # a variable adds one erased slot, whether the row mentions it or only the
   # binder list does (`types.sig_abi_eff`)
   let ev = EffVar("e", 1)
-  assert sig_desc_with_dicts(adts, Sig { ..base, eff: ev, eparams: [ev] }) ==
+  assert sig_desc_with_dicts(adts, Sig { ..base, eff = ev, eparams = [ev] }) ==
     "(JLjava/lang/Object;)Z"
-  assert sig_desc_with_dicts(adts, Sig { ..base, eff: EPure, eparams: [ev] }) ==
+  assert sig_desc_with_dicts(adts, Sig { ..base, eff = EPure, eparams = [ev] }) ==
     "(JLjava/lang/Object;)Z"
   # io is an answer, not a question
-  assert sig_desc_with_dicts(adts, Sig { ..base, eff: EIo }) == "(J)Z"
+  assert sig_desc_with_dicts(adts, Sig { ..base, eff = EIo }) == "(J)Z"
   # the trait-interface spelling is the same layout without the dictionary
-  assert trait_iface_desc(adts, Sig { ..base, eff: ev, eparams: [ev] }) ==
+  assert trait_iface_desc(adts, Sig { ..base, eff = ev, eparams = [ev] }) ==
     "(JLjava/lang/Object;)Z"
 }
 
@@ -3990,26 +3990,26 @@ test "call result width reads the return descriptor, not its last character" {
 ## written by `gen_cbody` with `mapping` as given: its bytes and the Gen.
 fn mapped_fixture(mapping: Bool) -> (Bytes, Gen) !io = {
   let base = Sig {
-    name: "g", param_tys: [TyInt], param_names: ["x"], param_defaults: [None], caller_params: [],
-    ret: TyInt, eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
-    owner: None, trait_id: None, op_of: None, inferring: false
+    name = "g", param_tys = [TyInt], param_names = ["x"], param_defaults = [None], caller_params = [],
+    ret = TyInt, eff = EPure, is_builtin = false, tparams = [], constraints = [], eparams = [],
+    owner = None, trait_id = None, op_of = None, inferring = false
   }
   let gx = GenCtx {
-    next_sym: 10, class_name: "m", args_owner: "", adts: prelude_adts(), traits: map.empty(),
-    impl_table: map.empty(), prog_fns: map.insert(map.empty(), ("m", "g"), base), intrs: intrinsics(),
-    dicts: [], live: None, consts: map.empty(), blocks: map.empty(), mapping: mapping
+    next_sym = 10, class_name = "m", args_owner = "", adts = prelude_adts(), traits = map.empty(),
+    impl_table = map.empty(), prog_fns = map.insert(map.empty(), ("m", "g"), base), intrs = intrinsics(),
+    dicts = [], live = None, consts = map.empty(), blocks = map.empty(), mapping = mapping
   }
   let g = Gen {
-    mv: scratch_mv(), lift_descs: map.empty(), syms: map.empty(), slots: map.empty(), next_slot: 0,
-    method_ret: TyUnit, rets_null: false, cloops: [], sam_ctr: 0, pending_sam: [], clos_ctr: 0,
-    closures: [], sam_classes: [], const_fields: [], const_by_key: map.empty(), marks: [], jrows: [],
-    jfns: []
+    mv = scratch_mv(), lift_descs = map.empty(), syms = map.empty(), slots = map.empty(), next_slot = 0,
+    method_ret = TyUnit, rets_null = false, cloops = [], sam_ctr = 0, pending_sam = [], clos_ctr = 0,
+    closures = [], sam_classes = [], const_fields = [], const_by_key = map.empty(), marks = [], jrows = [],
+    jfns = []
   }
   let inner = CCall(CDirect("m", "g"), [CLocal(1, TyInt)], TyInt, CAt(9, 13, 9))
   let body = CCall(CDirect("m", "g"), [inner], TyInt, CAt(4, 14, 4))
   let cf = CFun {
-    name: "f", owner: "m", captures: [], params: [CParam { sym: 1, ty: TyInt, mode: COwned }], dicts: [],
-    evs: [], ret: TyInt, body: body, is_test: false, impl_of: None, default_of: None, origin: "f"
+    name = "f", owner = "m", captures = [], params = [CParam { sym = 1, ty = TyInt, mode = COwned }], dicts = [],
+    evs = [], ret = TyInt, body = body, is_test = false, impl_of = None, default_of = None, origin = "f"
   }
   let no_supers: List[String] = []
   let cw = AsmWriter.of(COMPUTE_FRAMES, no_supers).expect("writer")

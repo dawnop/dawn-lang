@@ -85,7 +85,7 @@ pub fn run[A: App](
 # and are still to be handed on.
 type Mark = { at: Instant, carry_ns: Int }
 
-fn mark_at(t: Instant) -> Mark = Mark { at: t, carry_ns: 0 }
+fn mark_at(t: Instant) -> Mark = Mark { at = t, carry_ns = 0 }
 
 # Bring the timers up to `now`: whole milliseconds go to `elapse`, the rest
 # is carried. Answers the advanced timers, the due indices and the new mark.
@@ -93,7 +93,7 @@ fn account(ps: List[Pending], mk: Mark, now: Instant) -> (List[Pending], List[In
   let ns = io.elapsed_ns(mk.at, now) + mk.carry_ns
   let ms = ns / 1_000_000
   let (p2, due) = elapse(ps, ms)
-  (p2, due, Mark { at: now, carry_ns: ns - ms * 1_000_000 })
+  (p2, due, Mark { at = now, carry_ns = ns - ms * 1_000_000 })
 }
 
 # What one bounded poll of stdin came to.
@@ -241,12 +241,12 @@ test "account hands whole milliseconds to the timers and carries the rest" {
   # 2.5 ms in: 2 ms accounted, 0.5 ms carried, nothing due
   let (p1, due1, mk1) = account(arm([3]), start, io.instant_at_ns(2_500_000))
   assert list.is_empty(due1)
-  assert p1 == [Pending { every_ms: 3, waited_ms: 2 }]
+  assert p1 == [Pending { every_ms = 3, waited_ms = 2 }]
   assert mk1.carry_ns == 500_000
   # 0.6 ms later the carried half makes the third millisecond: due
   let (p2, due2, mk2) = account(p1, mk1, io.instant_at_ns(3_100_000))
   assert due2 == [0]
-  assert p2 == [Pending { every_ms: 3, waited_ms: 0 }]
+  assert p2 == [Pending { every_ms = 3, waited_ms = 0 }]
   assert mk2.carry_ns == 100_000
   # a reading from before the mark is no time at all, not negative time
   let (p3, due3, _) = account(p2, mk2, io.instant_at_ns(1_000_000))

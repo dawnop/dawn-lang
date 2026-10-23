@@ -83,7 +83,7 @@ fn sum(x: Param[Float], out: Param[Float], chunks: Int) -> Unit !Dev = {
   let lo = base + one
   let up = base + n
   var total = first
-  for k in d_range(lo, up, step: By(one)) { total = total + load_at(x, [k]) }
+  for k in d_range(lo, up, step= By(one)) { total = total + load_at(x, [k]) }
   store_cell(out, total)
 }
 
@@ -337,7 +337,7 @@ fn foldif(x: Param[Float], out: Param[Float], chunks: Int) -> Unit !Dev = {
   let total = carry(first)
   let hi = carry(first)
   let lo = carry(first)
-  for k in d_range(base + one, base + n, step: By(one)) {
+  for k in d_range(base + one, base + n, step= By(one)) {
     let t = load_at(x, [k])
     total.set(total.get() + t)
     hi.set(max(hi.get(), t))
@@ -391,10 +391,10 @@ type MmCfg = { tm: Int, tn: Int, tk: Int, occ: Int, cga: Int, evidence: String, 
 
 type MmShape = { m: Int, n: Int, k: Int }
 
-fn mm_shape() -> MmShape = MmShape { m: MM_M, n: MM_N, k: MM_K }
+fn mm_shape() -> MmShape = MmShape { m= MM_M, n= MM_N, k= MM_K }
 
 fn mm_config(tm: Int, tn: Int, tk: Int, occ: Int, cga: Int, evidence: String, median: Float, baseline: Float) -> MmCfg =
-  MmCfg { tm: tm, tn: tn, tk: tk, occ: occ, cga: cga, evidence: evidence, median: median, baseline: baseline }
+  MmCfg { tm= tm, tn= tn, tk= tk, occ= occ, cga= cga, evidence= evidence, median= median, baseline= baseline }
 
 fn mm_cfg(arch: String, dtype: String) -> MmCfg = match (arch, dtype) {
   ("sm_90", "f64") -> mm_config(16, 64, 16, 2, 0, "mmf6490", 6.287264, 14.983552)
@@ -411,7 +411,7 @@ fn mm_cfg(arch: String, dtype: String) -> MmCfg = match (arch, dtype) {
 
 fn mm_opt(n: Int) -> Option[Int] = if n == 0 { None } else { Some(n) }
 
-fn mm_entry(c: MmCfg) -> EntryHints = entry_hints(occupancy: mm_opt(c.occ), num_cta_in_cga: mm_opt(c.cga))
+fn mm_entry(c: MmCfg) -> EntryHints = entry_hints(occupancy= mm_opt(c.occ), num_cta_in_cga= mm_opt(c.cga))
 
 # A's rows follow grid axis 0 and B's columns follow axis 1. Their K
 # cells follow the loop; the accumulator is its carried value.
@@ -429,38 +429,38 @@ fn mm_kernel(c: MmCfg, shape: MmShape) -> fn(Param[Float], Param[Float], Param[F
   (a, b, o) => mm_body(a, b, o, c, shape)
 
 fn mm_record(arch: String, dtype: String, shape: MmShape, cfg: Option[MmCfg] = None, at: Loc = caller()) -> TileProg = {
-  if dtype != "f64" && dtype != "f16" && dtype != "i8" { panic("matmul: available dtypes are f64, f16 and i8", at: at) } else { () }
+  if dtype != "f64" && dtype != "f16" && dtype != "i8" { panic("matmul: available dtypes are f64, f16 and i8", at= at) } else { () }
   let c = match cfg { Some(c) -> c
     None -> mm_cfg(arch, dtype) }
   let e = mm_entry(c)
-  check_config(arch, c.tm, e, at: at)
-  if c.tn <= 0 || c.tk <= 0 { panic("matmul: tile dimensions must be positive", at: at) } else { () }
+  check_config(arch, c.tm, e, at= at)
+  if c.tn <= 0 || c.tk <= 0 { panic("matmul: tile dimensions must be positive", at= at) } else { () }
   if shape.m <= 0 || shape.n <= 0 || shape.k <= 0 || shape.m % c.tm != 0 || shape.n % c.tn != 0 || shape.k % c.tk != 0 {
-    panic("matmul: dimensions must be positive multiples of the configured tiles", at: at)
+    panic("matmul: dimensions must be positive multiples of the configured tiles", at= at)
   } else { () }
   let hints: ByArch[EntryHints] = if c.occ == 0 && c.cga == 0 { [] } else { [for_arch(arch, e)] }
   if dtype == "f64" {
     let (p, _e) = trace3("matmul",
-      In(F64, cells([shape.m, shape.k], [c.tm, c.tk], along: [0, FREE_AXIS])),
-      In(F64, cells([shape.k, shape.n], [c.tk, c.tn], along: [FREE_AXIS, 1])),
-      Out(F64, cells([shape.m, shape.n], [c.tm, c.tn])), mm_kernel(c, shape), hints: hints)
+      In(F64, cells([shape.m, shape.k], [c.tm, c.tk], along= [0, FREE_AXIS])),
+      In(F64, cells([shape.k, shape.n], [c.tk, c.tn], along= [FREE_AXIS, 1])),
+      Out(F64, cells([shape.m, shape.n], [c.tm, c.tn])), mm_kernel(c, shape), hints= hints)
     p
   } else if dtype == "f16" {
     let (p, _e) = trace3("matmul_f16",
-      In(F16, cells([shape.m, shape.k], [c.tm, c.tk], along: [0, FREE_AXIS])),
-      In(F16, cells([shape.k, shape.n], [c.tk, c.tn], along: [FREE_AXIS, 1])),
-      Out(F16, cells([shape.m, shape.n], [c.tm, c.tn])), mm_f16_kernel(c, shape), hints: hints)
+      In(F16, cells([shape.m, shape.k], [c.tm, c.tk], along= [0, FREE_AXIS])),
+      In(F16, cells([shape.k, shape.n], [c.tk, c.tn], along= [FREE_AXIS, 1])),
+      Out(F16, cells([shape.m, shape.n], [c.tm, c.tn])), mm_f16_kernel(c, shape), hints= hints)
     p
   } else {
     let (p, _e) = trace3("matmul_i8",
-      In(I8, cells([shape.m, shape.k], [c.tm, c.tk], along: [0, FREE_AXIS])),
-      In(I8, cells([shape.k, shape.n], [c.tk, c.tn], along: [FREE_AXIS, 1])),
-      Out(I32, cells([shape.m, shape.n], [c.tm, c.tn])), mm_i8_kernel(c, shape), hints: hints)
+      In(I8, cells([shape.m, shape.k], [c.tm, c.tk], along= [0, FREE_AXIS])),
+      In(I8, cells([shape.k, shape.n], [c.tk, c.tn], along= [FREE_AXIS, 1])),
+      Out(I32, cells([shape.m, shape.n], [c.tm, c.tn])), mm_i8_kernel(c, shape), hints= hints)
     p
   }
 }
 
-fn mm_named(name: String, arch: String, dtype: String = "f64") -> TileProg = TileProg { ..mm_record(arch, dtype, mm_shape()), name: name }
+fn mm_named(name: String, arch: String, dtype: String = "f64") -> TileProg = TileProg { ..mm_record(arch, dtype, mm_shape()), name= name }
 
 # The golden harness runs this through both backends with the default
 # matmul item. Bypassing the factory's filter must make these checks red.
@@ -472,25 +472,25 @@ fn mm_expect(ok: Bool) -> Unit = if ok { () } else { panic("matmul configuration
 fn mm_config_check() -> Unit = {
   let file = loc.path(loc.here())
   let line = loc.line(loc.here())
-  let a = mm_refusal(() => mm_record("sm_100", "f64", mm_shape(), cfg: Some(mm_config(64, 64, 32, 0, 2, "bad", 0.0, 0.0))))
+  let a = mm_refusal(() => mm_record("sm_100", "f64", mm_shape(), cfg= Some(mm_config(64, 64, 32, 0, 2, "bad", 0.0, 0.0))))
   mm_expect(str.contains(a, "cga=2 requires bq >= 128"))
   mm_expect(str.contains(a, " at ${file}:${line + 1}:"))
   let line2 = loc.line(loc.here())
-  let b = mm_refusal(() => mm_record("sm_90", "f64", mm_shape(), cfg: Some(mm_config(256, 64, 32, 0, 0, "bad", 0.0, 0.0))))
+  let b = mm_refusal(() => mm_record("sm_90", "f64", mm_shape(), cfg= Some(mm_config(256, 64, 32, 0, 0, "bad", 0.0, 0.0))))
   mm_expect(str.contains(b, "sm_90 bq=256 requires cga=2"))
   mm_expect(str.contains(b, " at ${file}:${line2 + 1}:"))
-  let _a = mm_record("sm_100", "f64", mm_shape(), cfg: Some(mm_config(128, 64, 32, 0, 2, "edge", 0.0, 0.0)))
-  let _b = mm_record("sm_90", "f64", mm_shape(), cfg: Some(mm_config(256, 64, 32, 0, 2, "edge", 0.0, 0.0)))
+  let _a = mm_record("sm_100", "f64", mm_shape(), cfg= Some(mm_config(128, 64, 32, 0, 2, "edge", 0.0, 0.0)))
+  let _b = mm_record("sm_90", "f64", mm_shape(), cfg= Some(mm_config(256, 64, 32, 0, 2, "edge", 0.0, 0.0)))
   let _c = mm_record("sm_90", "f64", mm_shape())
   mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", "f32", mm_shape())), "available dtypes are f64, f16 and i8"))
-  mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", "f64", MmShape { m: 256, n: 256, k: 255 })), "positive multiples"))
+  mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", "f64", MmShape { m= 256, n= 256, k= 255 })), "positive multiples"))
   for dtype in ["f16", "i8"] {
-    mm_expect(str.contains(mm_refusal(() => mm_record("sm_100", dtype, mm_shape(), cfg: Some(mm_config(64, 64, 32, 0, 2, "bad", 0.0, 0.0)))), "cga=2 requires bq >= 128"))
-    mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", dtype, mm_shape(), cfg: Some(mm_config(256, 64, 32, 0, 0, "bad", 0.0, 0.0)))), "sm_90 bq=256 requires cga=2"))
-    let _d = mm_record("sm_100", dtype, mm_shape(), cfg: Some(mm_config(128, 64, 32, 0, 2, "edge", 0.0, 0.0)))
-    let _e = mm_record("sm_90", dtype, mm_shape(), cfg: Some(mm_config(256, 64, 32, 0, 2, "edge", 0.0, 0.0)))
+    mm_expect(str.contains(mm_refusal(() => mm_record("sm_100", dtype, mm_shape(), cfg= Some(mm_config(64, 64, 32, 0, 2, "bad", 0.0, 0.0)))), "cga=2 requires bq >= 128"))
+    mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", dtype, mm_shape(), cfg= Some(mm_config(256, 64, 32, 0, 0, "bad", 0.0, 0.0)))), "sm_90 bq=256 requires cga=2"))
+    let _d = mm_record("sm_100", dtype, mm_shape(), cfg= Some(mm_config(128, 64, 32, 0, 2, "edge", 0.0, 0.0)))
+    let _e = mm_record("sm_90", dtype, mm_shape(), cfg= Some(mm_config(256, 64, 32, 0, 2, "edge", 0.0, 0.0)))
     let _f = mm_record("sm_90", dtype, mm_shape())
-    mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", dtype, MmShape { m: 256, n: 256, k: 255 })), "positive multiples"))
+    mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", dtype, MmShape { m= 256, n= 256, k= 255 })), "positive multiples"))
   }
 }
 
@@ -520,8 +520,8 @@ fn batched_matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !De
   let zero = broadcast(f_const(F64, 0.0), [BMM_T, BMM_T])
   var acc = zero
   for k in d_range(0, BMM_K / BMM_T) {
-    let ta = load(a, a_row + k * idx_const(BMM_T), [BMM_T, BMM_T], strides: Some([BMM_K, 1]))
-    let tb = load(b, b_col + k * idx_const(BMM_T * BMM_N), [BMM_T, BMM_T], strides: Some([BMM_N, 1]))
+    let ta = load(a, a_row + k * idx_const(BMM_T), [BMM_T, BMM_T], strides= Some([BMM_K, 1]))
+    let tb = load(b, b_col + k * idx_const(BMM_T * BMM_N), [BMM_T, BMM_T], strides= Some([BMM_N, 1]))
     acc = mma(ta, tb, acc)
   }
   store_cell(c, reshape(acc, [1, BMM_T, BMM_T]))
@@ -550,7 +550,7 @@ fn transpose_matrix(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let bj = block_id(1)
   let t = load_cell(x)
   let base_out = bj * idx_const(TR_TILE * TR_ROWS) + bi * idx_const(TR_TILE)
-  store(out, base_out, t, strides: Some([1, TR_ROWS]))
+  store(out, base_out, t, strides= Some([1, TR_ROWS]))
 }
 
 # Layer normalisation over the last dimension of a LN_ROWS by LN_D matrix,
@@ -593,11 +593,11 @@ const BN_EPS: Float = 1.0e-5
 # pointer path, `out` as a Shared.
 fn batch_norm(x: Param[Float], gamma: Param[Float], beta: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let col = block_id(0)
-  let t = load(x, col, [BN_ROWS], strides: Some([BN_CHANNELS]))
-  let g = load(gamma, col, [BN_ROWS], strides: Some([0]))
-  let b = load(beta, col, [BN_ROWS], strides: Some([0]))
+  let t = load(x, col, [BN_ROWS], strides= Some([BN_CHANNELS]))
+  let g = load(gamma, col, [BN_ROWS], strides= Some([0]))
+  let b = load(beta, col, [BN_ROWS], strides= Some([0]))
   let r = normalise(BN_ROWS, BN_EPS, t)
-  store(out, col, r * g + b, strides: Some([BN_CHANNELS]))
+  store(out, col, r * g + b, strides= Some([BN_CHANNELS]))
 }
 
 # Group normalisation over a (GN_N, GN_C, GN_HW) tensor with GN_GROUPS
@@ -620,7 +620,7 @@ fn gn_per_group() -> Int = GN_C / GN_GROUPS
 # then the length-1 dimension 0, which folds the same values in the same
 # groups as before. The scale is a [1, per, 1] cell of the (1, GN_C, 1)
 # view of `gamma`, widened along the spatial dimension by `broadcast`.
-fn sum3(t: Tile[Float]) -> Tile[Float] !Dev = reduce_sum(reduce_sum(reduce_sum(t, dim: 2), dim: 1))
+fn sum3(t: Tile[Float]) -> Tile[Float] !Dev = reduce_sum(reduce_sum(reduce_sum(t, dim= 2), dim= 1))
 
 fn group_norm(x: Param[Float], gamma: Param[Float], beta: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let shape = [1, gn_per_group(), GN_HW]
@@ -699,9 +699,9 @@ fn transpose_tail(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let m = (axis_mask(r0, shape, 0, TT_ROWS) & axis_mask(c0, shape, 1, TT_COLS))
   let pad = f_const(F64, 0.0)
   let base_in = bi * idx_const(TT_TILE * TT_COLS) + c0
-  let t = load(x, base_in, shape, strides: Some(row_major([TT_ROWS, TT_COLS])), mask: Some(m), pad: Some(pad))
+  let t = load(x, base_in, shape, strides= Some(row_major([TT_ROWS, TT_COLS])), mask= Some(m), pad= Some(pad))
   let base_out = bj * idx_const(TT_TILE * TT_ROWS) + r0
-  store(out, base_out, t, strides: Some(permute(row_major([TT_COLS, TT_ROWS]), [1, 0])), mask: Some(m))
+  store(out, base_out, t, strides= Some(permute(row_major([TT_COLS, TT_ROWS]), [1, 0])), mask= Some(m))
 }
 
 # leetgpu 9 (1D Convolution), valid mode: `out[i] = sum(x[i + t] * w[t])`
@@ -722,8 +722,8 @@ fn conv1d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let zero = f_const(F64, 0.0)
   var acc = zero
   for t in range(0, C1_K) {
-    let xt = load(x, blk + idx_const(t), shape, mask: Some(m), pad: Some(zero))
-    let wt = load(w, idx_const(t), shape, strides: Some([0]))
+    let xt = load(x, blk + idx_const(t), shape, mask= Some(m), pad= Some(zero))
+    let wt = load(w, idx_const(t), shape, strides= Some([0]))
     acc = acc + xt * wt
   }
   store_cell(out, acc)
@@ -753,8 +753,8 @@ fn conv2d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = zero
   for p in range(0, C2_K) {
     for q in range(0, C2_K) {
-      let xt = load(x, corner + idx_const(p * C2_W + q), shape, strides: Some([C2_W, 1]), mask: Some(m), pad: Some(zero))
-      let wt = load(w, idx_const(p * C2_K + q), shape, strides: Some([0, 0]))
+      let xt = load(x, corner + idx_const(p * C2_W + q), shape, strides= Some([C2_W, 1]), mask= Some(m), pad= Some(zero))
+      let wt = load(w, idx_const(p * C2_K + q), shape, strides= Some([0, 0]))
       acc = acc + xt * wt
     }
   }
@@ -788,7 +788,7 @@ fn max_pool(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = ninf
   for p in range(0, MP_K) {
     for q in range(0, MP_K) {
-      let t = load(x, corner + idx_const(p * MP_W + q), shape, strides: Some(window), mask: Some(m), pad: Some(ninf))
+      let t = load(x, corner + idx_const(p * MP_W + q), shape, strides= Some(window), mask= Some(m), pad= Some(ninf))
       acc = max(acc, t)
     }
   }
@@ -807,11 +807,11 @@ fn interleave(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev 
   let blk = tile_at(block_id(0), IL_TILE)
   let m = tail_mask(blk, shape, IL_N)
   let zero = f_const(F64, 0.0)
-  let ta = load(a, blk, shape, mask: Some(m), pad: Some(zero))
-  let tb = load(b, blk, shape, mask: Some(m), pad: Some(zero))
+  let ta = load(a, blk, shape, mask= Some(m), pad= Some(zero))
+  let tb = load(b, blk, shape, mask= Some(m), pad= Some(zero))
   let even = blk * 2
-  store(out, even, ta, strides: Some([2]), mask: Some(m))
-  store(out, even + 1, tb, strides: Some([2]), mask: Some(m))
+  store(out, even, ta, strides= Some([2]), mask= Some(m))
+  store(out, even + 1, tb, strides= Some([2]), mask= Some(m))
 }
 
 # leetgpu 66 (RGB to Grayscale) over RG_N interleaved pixels: the three
@@ -830,9 +830,9 @@ fn rgb_gray(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let m = tail_mask(blk, shape, RG_N)
   let zero = f_const(F64, 0.0)
   let base = blk * 3
-  let r = load(x, base, shape, strides: Some([3]), mask: Some(m), pad: Some(zero))
-  let g = load(x, base + 1, shape, strides: Some([3]), mask: Some(m), pad: Some(zero))
-  let b = load(x, base + 2, shape, strides: Some([3]), mask: Some(m), pad: Some(zero))
+  let r = load(x, base, shape, strides= Some([3]), mask= Some(m), pad= Some(zero))
+  let g = load(x, base + 1, shape, strides= Some([3]), mask= Some(m), pad= Some(zero))
+  let b = load(x, base + 2, shape, strides= Some([3]), mask= Some(m), pad= Some(zero))
   let gray = r * f_const(F64, RG_R) + g * f_const(F64, RG_G) + b * f_const(F64, RG_B)
   store_cell(out, gray)
 }
@@ -859,11 +859,11 @@ fn jacobi(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let zero = f_const(F64, 0.0)
   let lay = row_major([JC_H, JC_W])
   let base = bi * idx_const(JC_TILE * JC_W) + bj * idx_const(JC_TILE)
-  let centre = load(x, base, shape, strides: Some(lay), mask: Some(inside), pad: Some(zero))
-  let up = load(x, base + idx_const(0 - JC_W), shape, strides: Some(lay), mask: Some(interior), pad: Some(zero))
-  let down = load(x, base + idx_const(JC_W), shape, strides: Some(lay), mask: Some(interior), pad: Some(zero))
-  let left = load(x, base + idx_const(0 - 1), shape, strides: Some(lay), mask: Some(interior), pad: Some(zero))
-  let right = load(x, base + 1, shape, strides: Some(lay), mask: Some(interior), pad: Some(zero))
+  let centre = load(x, base, shape, strides= Some(lay), mask= Some(inside), pad= Some(zero))
+  let up = load(x, base + idx_const(0 - JC_W), shape, strides= Some(lay), mask= Some(interior), pad= Some(zero))
+  let down = load(x, base + idx_const(JC_W), shape, strides= Some(lay), mask= Some(interior), pad= Some(zero))
+  let left = load(x, base + idx_const(0 - 1), shape, strides= Some(lay), mask= Some(interior), pad= Some(zero))
+  let right = load(x, base + 1, shape, strides= Some(lay), mask= Some(interior), pad= Some(zero))
   let s = up + down + left + right
   let avg = s * f_const(F64, 0.25)
   store_cell(out, select(interior, avg, centre))
@@ -895,8 +895,8 @@ fn depthwise_conv1d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit
   let wcorner = bc * idx_const(DW_TC * DW_K)
   var acc = zero
   for t in range(0, DW_K) {
-    let xt = load(x, corner + idx_const(t), shape, strides: Some([DW_L, 1]), mask: Some(m), pad: Some(zero))
-    let wt = load(w, wcorner + idx_const(t), shape, strides: Some([DW_K, 0]), mask: Some(m), pad: Some(zero))
+    let xt = load(x, corner + idx_const(t), shape, strides= Some([DW_L, 1]), mask= Some(m), pad= Some(zero))
+    let wt = load(w, wcorner + idx_const(t), shape, strides= Some([DW_K, 0]), mask= Some(m), pad= Some(zero))
     acc = acc + xt * wt
   }
   store_cell(out, acc)
@@ -939,8 +939,8 @@ fn gaussian_blur(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !D
     for q in range(0, GB_K) {
       let tap = (in_range(rows, gb_lo(p), gb_hi(GB_H, p)) & in_range(cols, gb_lo(q), gb_hi(GB_W, q)))
       let shift = (p - gb_half()) * GB_W + (q - gb_half())
-      let xt = load(x, corner + idx_const(shift), shape, strides: Some(lay), mask: Some(tap), pad: Some(zero))
-      let wt = load(w, idx_const(p * GB_K + q), shape, strides: Some([0, 0]))
+      let xt = load(x, corner + idx_const(shift), shape, strides= Some(lay), mask= Some(tap), pad= Some(zero))
+      let wt = load(w, idx_const(p * GB_K + q), shape, strides= Some([0, 0]))
       acc = acc + xt * wt
     }
   }
@@ -1017,7 +1017,7 @@ fn subarray_sum(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let c = lanes(blk, [CNT_TILE])
   let inside = in_range(c, SUB_LO, SUB_HI)
   let zero = i_const(0)
-  let t = load(x, blk, [CNT_TILE], mask: Some(inside), pad: Some(zero))
+  let t = load(x, blk, [CNT_TILE], mask= Some(inside), pad= Some(zero))
   store_cell(out, reduce_sum(t))
 }
 
@@ -1180,11 +1180,11 @@ fn reverse(x: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), REV_TILE)
   let m = tail_mask(blk, s, REV_N / 2)
   let z = f_const(F64, 0.0)
-  let fwd = load(x, blk, s, mask: Some(m), pad: Some(z))
+  let fwd = load(x, blk, s, mask= Some(m), pad= Some(z))
   let back = idx_const(REV_N - 1) + blk * idx_const(0 - 1)
-  let rev = load(x, back, s, strides: Some([0 - 1]), mask: Some(m), pad: Some(z))
-  store(x, back, fwd, strides: Some([0 - 1]), mask: Some(m))
-  store(x, blk, rev, mask: Some(m))
+  let rev = load(x, back, s, strides= Some([0 - 1]), mask= Some(m), pad= Some(z))
+  store(x, back, fwd, strides= Some([0 - 1]), mask= Some(m))
+  store(x, blk, rev, mask= Some(m))
 }
 
 # In-place colour inversion of a u8 image: leetgpu 7 (Color Inversion). ONE
@@ -1263,7 +1263,7 @@ fn mm_f16_body(a: Param[F16], b: Param[F16], c: Param[F16], cfg: MmCfg, shape: M
 
 # Preserve the small default entry while architecture recordings close over a configuration.
 fn matmul_f16(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev =
-  mm_f16_body(a, b, c, mm_cfg("default", "f16"), MmShape { m: MMF_M, n: MMF_N, k: MMF_K })
+  mm_f16_body(a, b, c, mm_cfg("default", "f16"), MmShape { m= MMF_M, n= MMF_N, k= MMF_K })
 
 fn mm_f16_kernel(c: MmCfg, shape: MmShape) -> fn(Param[F16], Param[F16], Param[F16]) -> Unit !Dev =
   (a, b, o) => mm_f16_body(a, b, o, c, shape)
@@ -1287,8 +1287,8 @@ fn batched_matmul_f16(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev 
   let zero = broadcast(f_const(F16, 0.0), [BMF_T, BMF_T])
   var acc = zero
   for k in d_range(0, BMF_K / BMF_T) {
-    let ta = load(a, a_row + k * idx_const(BMF_T), [BMF_T, BMF_T], strides: Some([BMF_K, 1]))
-    let tb = load(b, b_col + k * idx_const(BMF_T * BMF_N), [BMF_T, BMF_T], strides: Some([BMF_N, 1]))
+    let ta = load(a, a_row + k * idx_const(BMF_T), [BMF_T, BMF_T], strides= Some([BMF_K, 1]))
+    let tb = load(b, b_col + k * idx_const(BMF_T * BMF_N), [BMF_T, BMF_T], strides= Some([BMF_N, 1]))
     acc = mma(ta, tb, acc)
   }
   store_cell(c, reshape(acc, [1, BMF_T, BMF_T]))
@@ -1316,7 +1316,7 @@ fn mm_i8_body(a: Param[I8], b: Param[I8], c: Param[I32], cfg: MmCfg, shape: MmSh
 
 # Preserve the small default entry while architecture recordings close over a configuration.
 fn matmul_i8(a: Param[I8], b: Param[I8], c: Param[I32]) -> Unit !Dev =
-  mm_i8_body(a, b, c, mm_cfg("default", "i8"), MmShape { m: MMI_M, n: MMI_N, k: MMI_K })
+  mm_i8_body(a, b, c, mm_cfg("default", "i8"), MmShape { m= MMI_M, n= MMI_N, k= MMI_K })
 
 fn mm_i8_kernel(c: MmCfg, shape: MmShape) -> fn(Param[I8], Param[I8], Param[I32]) -> Unit !Dev =
   (a, b, o) => mm_i8_body(a, b, o, c, shape)
@@ -1382,11 +1382,11 @@ const EMB_MISS: Float = 0.0 - 777.0
 # rows, exactly as the unmasked store wrote them.
 fn token_embed(ids: Param[I32], table: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [TOK_TILE, EMB_DIM]
-  let id = load(ids, tile_at(block_id(0), TOK_TILE), s, strides: Some(axis_strides(2, 0, 1)))
+  let id = load(ids, tile_at(block_id(0), TOK_TILE), s, strides= Some(axis_strides(2, 0, 1)))
   let ok = in_range(id, 0, EMB_ROWS)
   let row = (id & i_const(EMB_ROWS - 1))
   let off = add_i(mul_i(row, i_const(EMB_DIM)), coord(idx_const(0), s, 1, 1))
-  store_cell(out, gather(table, off, mask: Some(ok), pad: Some(f_const(F64, EMB_MISS))))
+  store_cell(out, gather(table, off, mask= Some(ok), pad= Some(f_const(F64, EMB_MISS))))
 }
 
 # The rank sort's shape: one block, SORT_N values, a SORT_N by SORT_N
@@ -1411,12 +1411,12 @@ fn sort_rank(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s2 = [SORT_N, SORT_N]
   let s1 = [SORT_N]
   let zero = idx_const(0)
-  let row = load(x, zero, s2, strides: Some([1, 0]))
-  let col = load(x, zero, s2, strides: Some([0, 1]))
+  let row = load(x, zero, s2, strides= Some([1, 0]))
+  let col = load(x, zero, s2, strides= Some([0, 1]))
   let tie = (eq(col, row) & lt_i(coord(zero, s2, 1, 1), coord(zero, s2, 0, 1)))
   let before = (lt(col, row) | tie)
   let hit = select(before, f_const(F64, 1.0), f_const(F64, 0.0))
-  let rank = reduce_sum(hit, dim: 1)
+  let rank = reduce_sum(hit, dim= 1)
   scatter(out, float_to_int(rank, I32), load(x, zero, s1))
 }
 
@@ -1436,12 +1436,12 @@ fn merge_rank(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev 
   let zero = idx_const(0)
   let one = f_const(F64, 1.0)
   let nought = f_const(F64, 0.0)
-  let arow = load(a, zero, s2, strides: Some([1, 0]))
-  let bcol = load(b, zero, s2, strides: Some([0, 1]))
+  let arow = load(a, zero, s2, strides= Some([1, 0]))
+  let bcol = load(b, zero, s2, strides= Some([0, 1]))
   let below = select(lt(bcol, arow), one, nought)
   let atmost = select(le(arow, bcol), one, nought)
-  let ca = reduce_sum(below, dim: 1)
-  let cb = reduce_sum(atmost, dim: 0)
+  let ca = reduce_sum(below, dim= 1)
+  let cb = reduce_sum(atmost, dim= 0)
   let lane = lanes(zero, s1)
   scatter(out, add_i(lane, float_to_int(ca, I32)), load(a, zero, s1))
   scatter(out, add_i(lane, float_to_int(cb, I32)), load(b, zero, s1))
@@ -1460,7 +1460,7 @@ const SC_TILE: Int = 128
 fn scatter_perm(perm: Param[I32], x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let p = load_cell(perm)
   let dst = (p & i_const(SC_N - 1))
-  scatter(out, dst, load_cell(x), mask: Some(in_range(p, 0, SC_N)))
+  scatter(out, dst, load_cell(x), mask= Some(in_range(p, 0, SC_N)))
 }
 
 # ---- the scan kernels (knife 13) ----
@@ -1542,7 +1542,7 @@ fn max_subarray(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   # masked, so a blocked lane still names an element of the buffer
   let late = in_range(lane, MSA_W, MSA_W + MSA_N)
   let back = max_i(sub_i(lane, i_const(MSA_W)), zero)
-  let q = d_scan(gather(x, back, mask: Some(late), pad: Some(zero)), 0.0, (acc, e) => add_i(acc, e))
+  let q = d_scan(gather(x, back, mask= Some(late), pad= Some(zero)), 0.0, (acc, e) => add_i(acc, e))
   let ends = in_range(lane, MSA_W - 1, MSA_N)
   let win = select(ends, sub_i(p, q), i_const(MSA_FLOOR))
   store_cell(out, d_reduce(win, to_float(MSA_FLOOR), (acc, e) => max_i(acc, e)))
@@ -1596,7 +1596,7 @@ fn compact(a: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let keep = gt(t, f_const(F64, 0.0))
   let ones = select(keep, i_const(1), i_const(0))
   let incl = d_scan(ones, 0.0, (acc, e) => add_i(acc, e))
-  scatter(out, sub_i(incl, ones), t, mask: Some(keep))
+  scatter(out, sub_i(incl, ones), t, mask= Some(keep))
 }
 
 # The recurrence family's shape: LR_B rows of LR_L, one block a row.
@@ -1653,10 +1653,10 @@ fn gae(rewards: Param[Float], values: Param[Float], adv: Param[Float]) -> Unit !
   let blk = tile_at(block_id(0), GAE_S)
   let nxt = (add_i(lanes(blk, s), i_const(1)) & i_const(GAE_B * GAE_S - 1))
   let ok = in_range(lanes(idx_const(0), s), 0, GAE_S - 1)
-  let nv = gather(values, nxt, mask: Some(ok), pad: Some(f_const(F64, 0.0)))
+  let nv = gather(values, nxt, mask= Some(ok), pad= Some(f_const(F64, 0.0)))
   let delta = load_cell(rewards) + f_const(F64, gae_gamma()) * nv - load_cell(values)
   let dec = broadcast(f_const(F64, gae_gamma() * gae_lam()), s)
-  let (_c, ad) = d_scan2(dec, delta, 1.0, 0.0, (ac, av, ec, ev) => (ec * ac, fma(ec, av, ev)), reverse: true)
+  let (_c, ad) = d_scan2(dec, delta, 1.0, 0.0, (ac, av, ec, ev) => (ec * ac, fma(ec, av, ev)), reverse= true)
   store_cell(adv, ad)
 }
 
@@ -1694,15 +1694,15 @@ fn ssm_scan(u: Param[Float], delta: Param[Float], amat: Param[Float], bmat: Para
   let ud = b * idx_const(SSM_T * SSM_D) + d
   let bc = b * idx_const(SSM_T * SSM_N)
   let ad = d * idx_const(SSM_N)
-  let dt = load(delta, ud, s2, strides: Some([SSM_D, 0]))
-  let uu = load(u, ud, s2, strides: Some([SSM_D, 0]))
-  let abar = exp(dt * load(amat, ad, s2, strides: Some([0, 1])))
-  let bbar = dt * load(bmat, bc, s2, strides: Some([SSM_N, 1])) * uu
-  let (_c, h) = d_scan2(abar, bbar, 1.0, 0.0, (ac, av, ec, ev) => (ec * ac, fma(ec, av, ev)), dim: 0)
-  let cy = load(cmat, bc, s2, strides: Some([SSM_N, 1])) * h
-  let yt = reduce_sum(cy, dim: 1)
-  let side = load(skip, d, s1, strides: Some([0])) * load(u, ud, s1, strides: Some([SSM_D]))
-  store(y, ud, yt + side, strides: Some([SSM_D]))
+  let dt = load(delta, ud, s2, strides= Some([SSM_D, 0]))
+  let uu = load(u, ud, s2, strides= Some([SSM_D, 0]))
+  let abar = exp(dt * load(amat, ad, s2, strides= Some([0, 1])))
+  let bbar = dt * load(bmat, bc, s2, strides= Some([SSM_N, 1])) * uu
+  let (_c, h) = d_scan2(abar, bbar, 1.0, 0.0, (ac, av, ec, ev) => (ec * ac, fma(ec, av, ev)), dim= 0)
+  let cy = load(cmat, bc, s2, strides= Some([SSM_N, 1])) * h
+  let yt = reduce_sum(cy, dim= 1)
+  let side = load(skip, d, s1, strides= Some([0])) * load(u, ud, s1, strides= Some([SSM_D]))
+  store(y, ud, yt + side, strides= Some([SSM_D]))
 }
 
 # ---- the atomic kernels (knife 14) ----
@@ -1756,7 +1756,7 @@ fn histogram(input: Param[I32], hist: Param[I32]) -> Unit !Dev = {
   let x = load_cell(input)
   let live = tail_mask(tile_at(block_id(0), HIST_TILE), [HIST_TILE], HIST_N)
   let ok = (live & in_range(x, 0, HIST_BINS))
-  atomic_add(hist, (x & i_const(HIST_BINS - 1)), i_const(1), mask: Some(ok))
+  atomic_add(hist, (x & i_const(HIST_BINS - 1)), i_const(1), mask= Some(ok))
 }
 
 # The compare-and-swap's shape: CAS_SLOTS slots, CAS_TILE lanes a block,
@@ -1782,7 +1782,7 @@ const CAS_TILE: Int = 32
 fn cas_swap(state: Param[I32], cmp: Param[I32], val: Param[I32], old: Param[I32]) -> Unit !Dev = {
   let c = load_cell(cmp)
   let active = ge_i(c, i_const(0))
-  let prev = atomic_cas(state, lanes(tile_at(block_id(0), CAS_TILE), [CAS_TILE]), c, load_cell(val), mask: Some(active))
+  let prev = atomic_cas(state, lanes(tile_at(block_id(0), CAS_TILE), [CAS_TILE]), c, load_cell(val), mask= Some(active))
   store_cell(old, select(active, prev, load_cell(old)))
 }
 
@@ -1858,8 +1858,8 @@ fn geglu(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), GEGLU_TILE)
   let m = tail_mask(blk, s, GEGLU_HALF)
   let zero = f_const(F64, 0.0)
-  let a = load(x, blk, s, mask: Some(m), pad: Some(zero))
-  let b = load(x, blk + idx_const(GEGLU_HALF), s, mask: Some(m), pad: Some(zero))
+  let a = load(x, blk, s, mask= Some(m), pad= Some(zero))
+  let b = load(x, blk + idx_const(GEGLU_HALF), s, mask= Some(m), pad= Some(zero))
   let g = erf(b * f_const(F64, GEGLU_INV_SQRT2))
   let gate = f_const(F64, 0.5) * b * (f_const(F64, 1.0) + g)
   store_cell(out, a * gate)
@@ -1907,9 +1907,9 @@ fn trig_sweep(x: Param[Float], y: Param[Float], z: Param[Float], out: Param[Floa
   let m = tail_mask(blk, s, TRIG_N)
   let zero = f_const(F64, 0.0)
   let one = f_const(F64, 1.0)
-  let a = load(x, blk, s, mask: Some(m), pad: Some(zero))
-  let b = load(y, blk, s, mask: Some(m), pad: Some(one))
-  let c = load(z, blk, s, mask: Some(m), pad: Some(one))
+  let a = load(x, blk, s, mask= Some(m), pad= Some(zero))
+  let b = load(y, blk, s, mask= Some(m), pad= Some(one))
+  let c = load(z, blk, s, mask= Some(m), pad= Some(one))
   let seg = (j: Int, t: Tile[Float]) => store_sub(out, [j, 0], reshape(t, [1, TRIG_TILE]))
   seg(0, sin(a))
   seg(1, cos(a))
@@ -2320,12 +2320,12 @@ const FA_BK: Int = 16
 # are the P4-b selection measurements, before approximate division.
 type FaShape = { n: Int, d: Int, bh: Int }
 
-fn fa_shape() -> FaShape = FaShape { n: ATT_N, d: ATT_D, bh: 1 }
+fn fa_shape() -> FaShape = FaShape { n= ATT_N, d= ATT_D, bh= 1 }
 
 type FaCfg = { bq: Int, bk: Int, occ: Int, cga: Int, evidence: String, median: Float, baseline: Float }
 
 fn fa_config(bq: Int, bk: Int, occ: Int, cga: Int, evidence: String, median: Float, baseline: Float) -> FaCfg =
-  FaCfg { bq: bq, bk: bk, occ: occ, cga: cga, evidence: evidence, median: median, baseline: baseline }
+  FaCfg { bq= bq, bk= bk, occ= occ, cga= cga, evidence= evidence, median= median, baseline= baseline }
 
 fn fa_cfg(arch: String, d: Int) -> FaCfg = match (arch, d) {
   ("sm_90", 64) -> fa_config(64, 128, 2, 0, "bf90d64", 0.1520, 0.2534)
@@ -2343,7 +2343,7 @@ fn fa64_cfg(arch: String, _d: Int) -> FaCfg = match (arch, _d) {
 
 fn fa_opt(n: Int) -> Option[Int] = if n == 0 { None } else { Some(n) }
 
-fn fa_entry(c: FaCfg) -> EntryHints = entry_hints(occupancy: fa_opt(c.occ), num_cta_in_cga: fa_opt(c.cga))
+fn fa_entry(c: FaCfg) -> EntryHints = entry_hints(occupancy= fa_opt(c.occ), num_cta_in_cga= fa_opt(c.cga))
 
 fn fa_hints(arch: String, c: FaCfg) -> ByArch[EntryHints] =
   if c.occ == 0 && c.cga == 0 { [] } else { [for_arch(arch, fa_entry(c))] }
@@ -2360,10 +2360,10 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
   var acc = zeros(o)
   for j in d_range(0, shape.n / cfg.bk) {
     let s: Tile[Float] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
-    let m_new = max(m, reduce_max(s, keepdims: true))
+    let m_new = max(m, reduce_max(s, keepdims= true))
     let p = exp(s - m_new)
     let alpha = exp(m - m_new)
-    l = l * alpha + reduce_sum(p, keepdims: true)
+    l = l * alpha + reduce_sum(p, keepdims= true)
     acc = mma(p, load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
     m = m_new
   }
@@ -2404,41 +2404,41 @@ fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Floa
   var acc: Tile[F32] = full([cfg.bq, shape.d], 0.0)
   for j in d_range(0, shape.n / cfg.bk) {
     let s: Tile[F32] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
-    let m_new = max(m, reduce_max(s, keepdims: true))
-    let p = exp2(s - m_new, ftz: true)
-    let alpha = exp2(m - m_new, ftz: true)
-    l = l * alpha + reduce_sum(p, keepdims: true)
+    let m_new = max(m, reduce_max(s, keepdims= true))
+    let p = exp2(s - m_new, ftz= true)
+    let alpha = exp2(m - m_new, ftz= true)
+    l = l * alpha + reduce_sum(p, keepdims= true)
     acc = mma(p.to(BF16), load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
     m = m_new
   }
-  store_cell(o, div(acc, l, approx: true, ftz: true).to(F64))
+  store_cell(o, div(acc, l, approx= true, ftz= true).to(F64))
 }
 
 # Config -> kernel. Every captured value is fixed before recording.
 fn fa_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[Float], Param[Float], Param[Float], Param[Float], Param[Float]) -> Unit !Dev =
-  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, c, FaShape { n: n, d: d, bh: bh })
+  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, c, FaShape { n= n, d= d, bh= bh })
 
 fn fa_bf16_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[BF16], Param[BF16], Param[BF16], Param[Float], Param[F32]) -> Unit !Dev =
-  (q, k, v, o, scale) => flash_attn_bf16(q, k, v, o, scale, c, FaShape { n: n, d: d, bh: bh })
+  (q, k, v, o, scale) => flash_attn_bf16(q, k, v, o, scale, c, FaShape { n= n, d= d, bh= bh })
 
 fn fa_record(arch: String, d: Int, n: Int, bh: Int, bf16: Bool, cfg: Option[FaCfg] = None, at: Loc = caller()) -> TileProg = {
   let c = match cfg { Some(c) -> c
     None -> if bf16 { fa_cfg(arch, d) } else { fa64_cfg(arch, d) } }
-  check_config(arch, c.bq, fa_entry(c), at: at)
+  check_config(arch, c.bq, fa_entry(c), at= at)
   let q = cells([bh * n, d], [c.bq, d])
-  let kv = cells([bh * n, d], [c.bk, d], along: [FREE_AXIS, 1])
+  let kv = cells([bh * n, d], [c.bk, d], along= [FREE_AXIS, 1])
   if bf16 {
     let (p, _e) = trace5("flash_attn_bf16", In(BF16, q), In(BF16, kv), In(BF16, kv), Out(F64, q), Scalar(F32),
-      fa_bf16_kernel(c, n, d, bh), hints: fa_hints(arch, c))
+      fa_bf16_kernel(c, n, d, bh), hints= fa_hints(arch, c))
     p
   } else {
     let (p, _e) = trace5("flash_attn", In(F64, q), In(F64, kv), In(F64, kv), Out(F64, q), Scalar(F64),
-      fa_kernel(c, n, d, bh), hints: fa_hints(arch, c))
+      fa_kernel(c, n, d, bh), hints= fa_hints(arch, c))
     p
   }
 }
 
-fn fa_named(name: String, arch: String, d: Int) -> TileProg = TileProg { ..fa_record(arch, d, 256, 1, true), name: name }
+fn fa_named(name: String, arch: String, d: Int) -> TileProg = TileProg { ..fa_record(arch, d, 256, 1, true), name= name }
 
 # ---- tileir 0.8.2: index division, same-rank broadcasting, `lit` ----
 
@@ -2460,8 +2460,8 @@ fn idx_softmax(x: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let j = (b + n / 2) % n
   let i = n - b - 1
   let t = load_at(x, [j]) + load_at(x, [i])
-  let e = exp(t - reduce_max(t, keepdims: true))
-  store_cell(o, e / reduce_sum(e, keepdims: true) * lit(2.0))
+  let e = exp(t - reduce_max(t, keepdims= true))
+  store_cell(o, e / reduce_sum(e, keepdims= true) * lit(2.0))
 }
 
 # ---- tileir 0.9.0: carries, extent_of and blocks_of ----
@@ -2481,10 +2481,10 @@ const CE_T: Int = 64
 # DYN_DIM dimension, so the grid's blocks times the tile).
 fn carry_extent(x: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let zero = idx_const(0)
-  var best = reduce_max(load_at(x, [zero, zero]), dim: 0)
+  var best = reduce_max(load_at(x, [zero, zero]), dim= 0)
   var total = zeros(o)
-  for j in d_range(idx_const(1), blocks_of(x, 0), step: By(1)) {
-    let m = reduce_max(load_at(x, [j, zero]), dim: 0)
+  for j in d_range(idx_const(1), blocks_of(x, 0), step= By(1)) {
+    let m = reduce_max(load_at(x, [j, zero]), dim= 0)
     if idx_lt(j, idx_const(2)) { best = max(best, m) }
     total = total + m
   }
@@ -2711,7 +2711,7 @@ const MV_M: Int = 64
 const MV_N: Int = 64
 
 fn matvec(a: Param[Float], x: Param[Float], y: Param[Float]) -> Unit !Dev = {
-  let tx = load(x, idx_const(0), [MV_M, MV_N], strides: Some(axis_strides(2, 1, 1)))
+  let tx = load(x, idx_const(0), [MV_M, MV_N], strides= Some(axis_strides(2, 1, 1)))
   store_cell(y, reduce_sum(load_cell(a) * tx))
 }
 
@@ -2745,7 +2745,7 @@ fn subarray_sum2d(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let flat = lanes(zero, sh)
   let cols = i_const(S2_COLS)
   let inside = (in_range(div_i(flat, cols), S2_R0, S2_R1 + 1) & in_range(rem_i(flat, cols), S2_C0, S2_C1 + 1))
-  let t = load(x, zero, sh, mask: Some(inside), pad: Some(i_const(0)))
+  let t = load(x, zero, sh, mask= Some(inside), pad= Some(i_const(0)))
   store_cell(out, d_reduce(t, 0.0, (acc, e) => add_i(acc, e)))
 }
 
@@ -2773,7 +2773,7 @@ fn subarray_sum3d(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let depth = in_range(div_i(flat, plane), S3_D0, S3_D1 + 1)
   let rows = in_range(rem_i(div_i(flat, cols), i_const(S3_ROWS)), S3_R0, S3_R1 + 1)
   let inside = ((depth & rows) & in_range(rem_i(flat, cols), S3_C0, S3_C1 + 1))
-  let t = load(x, zero, sh, mask: Some(inside), pad: Some(i_const(0)))
+  let t = load(x, zero, sh, mask= Some(inside), pad= Some(i_const(0)))
   store_cell(out, d_reduce(t, 0.0, (acc, e) => add_i(acc, e)))
 }
 
@@ -2791,8 +2791,8 @@ fn swiglu_half(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), SWH_TILE)
   let m = tail_mask(blk, sh, SWH_HALF)
   let zero = f_const(F64, 0.0)
-  let a = load(x, blk, sh, mask: Some(m), pad: Some(zero))
-  let b = load(x, blk + idx_const(SWH_HALF), sh, mask: Some(m), pad: Some(zero))
+  let a = load(x, blk, sh, mask= Some(m), pad= Some(zero))
+  let b = load(x, blk + idx_const(SWH_HALF), sh, mask= Some(m), pad= Some(zero))
   let d = f_const(F64, 1.0) + exp(-a)
   store_cell(out, a / d * b)
 }
@@ -2849,8 +2849,8 @@ fn conv3d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   for p in range(0, C3_KD) {
     for q in range(0, C3_KH) {
       for r in range(0, C3_KW) {
-        let xt = load(x, corner + idx_const(p * C3_H * C3_W + q * C3_W + r), sh, strides: Some([C3_W, 1]), mask: Some(m), pad: Some(pad))
-        let wt = load(w, idx_const((p * C3_KH + q) * C3_KW + r), sh, strides: Some([0, 0]))
+        let xt = load(x, corner + idx_const(p * C3_H * C3_W + q * C3_W + r), sh, strides= Some([C3_W, 1]), mask= Some(m), pad= Some(pad))
+        let wt = load(w, idx_const((p * C3_KH + q) * C3_KW + r), sh, strides= Some([0, 0]))
         acc = acc + xt * wt
       }
     }
@@ -2896,7 +2896,7 @@ fn mha_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev =
   let rows = block_id(2) * idx_const(MHA_N * MHA_N) + block_id(0) * idx_const(MHA_T * MHA_N)
   var acc = zeros(o)
   for kk in d_range(0, MHA_N / MHA_T) {
-    let tp = load(p, rows + kk * idx_const(MHA_T), [MHA_T, MHA_T], strides: Some([MHA_N, 1]))
+    let tp = load(p, rows + kk * idx_const(MHA_T), [MHA_T, MHA_T], strides= Some([MHA_N, 1]))
     acc = mma(tp, load_at(v, [kk]), acc)
   }
   store_cell(o, acc)
@@ -2930,12 +2930,12 @@ fn agent_step(a: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let sh = [AG_N]
   let one = [1]
   let base = i * 4
-  let px = load(a, idx_const(0), sh, strides: Some([4]))
-  let py = load(a, idx_const(1), sh, strides: Some([4]))
-  let vx = load(a, idx_const(2), sh, strides: Some([4]))
-  let vy = load(a, idx_const(3), sh, strides: Some([4]))
-  let mx = load(a, base, sh, strides: Some([0]))
-  let my = load(a, base + 1, sh, strides: Some([0]))
+  let px = load(a, idx_const(0), sh, strides= Some([4]))
+  let py = load(a, idx_const(1), sh, strides= Some([4]))
+  let vx = load(a, idx_const(2), sh, strides= Some([4]))
+  let vy = load(a, idx_const(3), sh, strides= Some([4]))
+  let mx = load(a, base, sh, strides= Some([0]))
+  let my = load(a, base + 1, sh, strides= Some([0]))
   let ex = mx - px
   let ey = my - py
   let d2 = ex * ex + ey * ey
@@ -2948,10 +2948,10 @@ fn agent_step(a: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let n = reduce_sum(select(near, f_const(F64, 1.0), nil))
   let has = gt(n, f_const(F64, 0.0))
   let den = select(has, n, f_const(F64, 1.0))
-  let ox = load(a, base, one, strides: Some([0]))
-  let oy = load(a, base + 1, one, strides: Some([0]))
-  let ovx = load(a, base + 2, one, strides: Some([0]))
-  let ovy = load(a, base + 3, one, strides: Some([0]))
+  let ox = load(a, base, one, strides= Some([0]))
+  let oy = load(a, base + 1, one, strides= Some([0]))
+  let ovx = load(a, base + 2, one, strides= Some([0]))
+  let ovy = load(a, base + 3, one, strides= Some([0]))
   let avx = select(has, sx / den, ovx)
   let avy = select(has, sy / den, ovy)
   let alpha = f_const(F64, AG_ALPHA)
@@ -2979,12 +2979,12 @@ fn nearest_idx(p: Param[Float], out: Param[I32]) -> Unit !Dev = {
   let i = block_id(0)
   let sh = [NN_N]
   let base = i * 3
-  let jx = load(p, idx_const(0), sh, strides: Some([3]))
-  let jy = load(p, idx_const(1), sh, strides: Some([3]))
-  let jz = load(p, idx_const(2), sh, strides: Some([3]))
-  let ix = load(p, base, sh, strides: Some([0]))
-  let iy = load(p, base + 1, sh, strides: Some([0]))
-  let iz = load(p, base + 2, sh, strides: Some([0]))
+  let jx = load(p, idx_const(0), sh, strides= Some([3]))
+  let jy = load(p, idx_const(1), sh, strides= Some([3]))
+  let jz = load(p, idx_const(2), sh, strides= Some([3]))
+  let ix = load(p, base, sh, strides= Some([0]))
+  let iy = load(p, base + 1, sh, strides= Some([0]))
+  let iz = load(p, base + 2, sh, strides= Some([0]))
   let ex = ix - jx
   let ey = iy - jy
   let ez = iz - jz
@@ -3025,7 +3025,7 @@ fn xattn_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev
   let rows = block_id(2) * idx_const(XA_M * XA_N) + block_id(0) * idx_const(XA_T * XA_N)
   var acc = zeros(o)
   for kk in d_range(0, XA_N / XA_T) {
-    let tp = load(p, rows + kk * idx_const(XA_T), [XA_T, XA_T], strides: Some([XA_N, 1]))
+    let tp = load(p, rows + kk * idx_const(XA_T), [XA_T, XA_T], strides= Some([XA_N, 1]))
     acc = mma(tp, load_at(v, [kk]), acc)
   }
   store_cell(o, acc)
@@ -3071,7 +3071,7 @@ fn gqa_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev =
   let rows = qh * idx_const(GQ_S * GQ_S)
   var acc = broadcast(f_const(F64, 0.0), [GQ_S, GQ_D])
   for kk in d_range(0, GQ_S / GQ_T) {
-    let tp = load(p, rows + kk * idx_const(GQ_T), [GQ_S, GQ_T], strides: Some([GQ_S, 1]))
+    let tp = load(p, rows + kk * idx_const(GQ_T), [GQ_S, GQ_T], strides= Some([GQ_S, 1]))
     let tv = load(v, bkv * idx_const(GQ_S * GQ_D) + kk * idx_const(GQ_T * GQ_D),
       [GQ_T, GQ_D])
     acc = mma(tp, tv, acc)
@@ -3136,8 +3136,8 @@ fn kmeans_assign(dx: Param[Float], dy: Param[Float], cx: Param[Float], cy: Param
   let i = block_id(0)
   let sh = [KM_K]
   let at = [idx_const(0)]
-  let ex = load(dx, i, sh, strides: Some([0])) - load_at(cx, at)
-  let ey = load(dy, i, sh, strides: Some([0])) - load_at(cy, at)
+  let ex = load(dx, i, sh, strides= Some([0])) - load_at(cx, at)
+  let ey = load(dy, i, sh, strides= Some([0])) - load_at(cy, at)
   let d2 = ex * ex + ey * ey
   let lane = coord(idx_const(0), sh, 0, 1)
   let (_best, which) = d_reduce2(d2, lane, INFINITY, 0 - 1, (av, ai, ev, ei) => {
@@ -3203,7 +3203,7 @@ fn i8_signed(t: Tile[I8]) -> Tile[I32] !Dev =
 ## an f64 tile of KV_S rows by KV_D columns, the scale broadcast along the
 ## row with a stride of zero.
 fn kv_dequant(c: Param[I8], scale: Param[Float], h: Idx) -> Tile[Float] !Dev = {
-  let ts = load(scale, h * idx_const(KV_S), [KV_S, KV_D], strides: Some(axis_strides(2, 0, 1)))
+  let ts = load(scale, h * idx_const(KV_S), [KV_S, KV_D], strides= Some(axis_strides(2, 0, 1)))
   int_to_float(i8_signed(load_cell(c)), F64) * ts
 }
 
@@ -3212,7 +3212,7 @@ fn kv_dequant(c: Param[I8], scale: Param[Float], h: Idx) -> Tile[Float] !Dev = {
 # key axis so that one row of Q serves all KV_S keys.
 fn kv_scores(q: Param[Float], k: Param[I8], ks: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let h = block_id(0)
-  let tq = load(q, h * idx_const(KV_D), [KV_S, KV_D], strides: Some(axis_strides(2, 1, 1)))
+  let tq = load(q, h * idx_const(KV_D), [KV_S, KV_D], strides= Some(axis_strides(2, 1, 1)))
   let dot = reduce_sum(tq * kv_dequant(k, ks, h))
   store_cell(s, dot * f_const(F64, KV_INV_SQRT_D))
 }
@@ -3222,8 +3222,8 @@ fn kv_scores(q: Param[Float], k: Param[I8], ks: Param[Float], s: Param[Float]) -
 # and the fold is along the key axis rather than across it.
 fn kv_context(p: Param[Float], v: Param[I8], vs: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let h = block_id(0)
-  let tw = load(p, h * idx_const(KV_S), [KV_S, KV_D], strides: Some(axis_strides(2, 0, 1)))
-  store_cell(o, reduce_sum(tw * kv_dequant(v, vs, h), dim: 0))
+  let tw = load(p, h * idx_const(KV_S), [KV_S, KV_D], strides= Some(axis_strides(2, 0, 1)))
+  store_cell(o, reduce_sum(tw * kv_dequant(v, vs, h), dim= 0))
 }
 
 # leetgpu 111 (Softmax Attention Backward): dQ, dK and dV of the attention
@@ -3302,7 +3302,7 @@ fn lin_attn_s(k: Param[Float], v: Param[Float], s: Param[Float]) -> Unit !Dev = 
 fn lin_attn_out(q: Param[Float], s: Param[Float], z: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let zero = f_const(F64, 0.0)
   let tq = la_phi(load_cell(q))
-  let tz = load(z, idx_const(0), [LA_D, LA_D], strides: Some(axis_strides(2, 0, LA_D)))
+  let tz = load(z, idx_const(0), [LA_D, LA_D], strides= Some(axis_strides(2, 0, LA_D)))
   store_cell(out, mma(tq, load_at(s, [idx_const(0), idx_const(0)]), zero) / mma(tq, tz, zero))
 }
 
@@ -3341,9 +3341,9 @@ fn ols_gram(x: Param[Float], y: Param[Float], a: Param[Float]) -> Unit !Dev = {
   var acc = zeros(a)
   for i in d_range(0, OLS_N) {
     let base = i * idx_const(OLS_F)
-    let xr = load(x, base, sh, strides: Some(axis_strides(2, 0, 1)))
-    let xc = load(x, base, sh, strides: Some(axis_strides(2, 1, 1)), mask: Some(inside), pad: Some(zero))
-    let ty = load(y, i, sh, strides: Some([0, 0]))
+    let xr = load(x, base, sh, strides= Some(axis_strides(2, 0, 1)))
+    let xc = load(x, base, sh, strides= Some(axis_strides(2, 1, 1)), mask= Some(inside), pad= Some(zero))
+    let ty = load(y, i, sh, strides= Some([0, 0]))
     acc = acc + xr * select(is_rhs, ty, xc)
   }
   store_cell(a, acc)
@@ -3376,7 +3376,7 @@ fn ols_elim(a: Param[Float], kb: Param[I32]) -> Unit !Dev = {
 # sequence has one at all: what the caller asked for is F numbers and what
 # the elimination leaves is an F by W matrix.
 fn ols_beta(a: Param[Float], beta: Param[Float]) -> Unit !Dev =
-  store_cell(beta, load(a, idx_const(OLS_F), [OLS_F], strides: Some([OLS_W])))
+  store_cell(beta, load(a, idx_const(OLS_F), [OLS_F], strides= Some([OLS_W])))
 
 # ---- knife 21: the two transformer blocks ----
 #
@@ -3449,7 +3449,7 @@ fn gpt_ln(x: Param[Float], gamma: Param[Float], beta: Param[Float], out: Param[F
 ## The `[GP_S, GP_T]` block of `bias` this block's columns add: a stride of
 ## zero down the rows, which is a pointer read (a cell is never a broadcast).
 fn gpt_bias(bias: Param[Float]) -> Tile[Float] !Dev =
-  load(bias, block_id(1) * idx_const(GP_T), [GP_S, GP_T], strides: Some([0, 1]))
+  load(bias, block_id(1) * idx_const(GP_T), [GP_S, GP_T], strides= Some([0, 1]))
 
 fn gpt_qkv(x: Param[Float], w: Param[Float], bias: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = zeros(out)
@@ -3975,12 +3975,12 @@ fn attr_round(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev 
   let seg = (j: Int, t: Tile[F32]) => store_sub(out, [0, j, 0], reshape(float_to_float(t, F64), [1, 1, ATTR_TILE]))
   let a = float_to_float(load_cell(x), F32)
   let c = float_to_float(load_cell(y), F32)
-  seg(0, add(a, c, rounding: Down))
-  seg(1, add(a, c, rounding: Up))
-  seg(2, mul(a, c, rounding: Down))
-  seg(3, mul(a, c, rounding: Up))
-  seg(4, div(a, c, rounding: Down))
-  seg(5, div(a, c, rounding: Up))
+  seg(0, add(a, c, rounding= Down))
+  seg(1, add(a, c, rounding= Up))
+  seg(2, mul(a, c, rounding= Down))
+  seg(3, mul(a, c, rounding= Up))
+  seg(4, div(a, c, rounding= Down))
+  seg(5, div(a, c, rounding= Up))
 }
 
 # The two comparison orderings and the two NaN policies, on a corpus with
@@ -4008,9 +4008,9 @@ fn attr_nan(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev = 
   store_sub(out, [10], as_float(gt_u(a, c)))
   store_sub(out, [11], as_float(ge_u(a, c)))
   store_sub(out, [12], max(a, c))
-  store_sub(out, [13], max(a, c, propagate_nan: true))
+  store_sub(out, [13], max(a, c, propagate_nan= true))
   store_sub(out, [14], min(a, c))
-  store_sub(out, [15], min(a, c, propagate_nan: true))
+  store_sub(out, [15], min(a, c, propagate_nan= true))
 }
 
 # A mask as 1.0 and 0.0, which is how attr_nan stores a comparison.
@@ -4025,9 +4025,9 @@ fn attr_ftz(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev = 
   let a = float_to_float(load_cell(x), F32)
   let c = float_to_float(load_cell(y), F32)
   store_sub(out, [0], float_to_float(a + c, F64))
-  store_sub(out, [1], float_to_float(add(a, c, ftz: true), F64))
+  store_sub(out, [1], float_to_float(add(a, c, ftz= true), F64))
   store_sub(out, [2], float_to_float(a * c, F64))
-  store_sub(out, [3], float_to_float(mul(a, c, ftz: true), F64))
+  store_sub(out, [3], float_to_float(mul(a, c, ftz= true), F64))
 }
 
 # The approximate square root beside the correctly rounded one. Both
@@ -4054,7 +4054,7 @@ fn attr_approx(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 fn attr_exp2(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let a = float_to_float(load_cell(x), F32)
   store_sub(out, [0], float_to_float(exp2(a), F64))
-  store_sub(out, [1], float_to_float(exp2(a, ftz: true), F64))
+  store_sub(out, [1], float_to_float(exp2(a, ftz= true), F64))
 }
 
 # The three integer overflow assumptions, one per segment. The corpus does
@@ -4070,9 +4070,9 @@ fn attr_overflow(x: Param[I32], y: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let seg = (j: Int, t: Tile[I32]) => store_sub(out, [0, j, 0], reshape(t, [1, 1, ATTR_TILE]))
   let a = load_cell(x)
   let c = load_cell(y)
-  seg(0, add_i(a, c, overflow: NoSignedWrap))
-  seg(1, sub_i(a, c, overflow: NoUnsignedWrap))
-  seg(2, mul_i(a, c, overflow: NoWrap))
+  seg(0, add_i(a, c, overflow= NoSignedWrap))
+  seg(1, sub_i(a, c, overflow= NoUnsignedWrap))
+  seg(2, mul_i(a, c, overflow= NoWrap))
 }
 
 # The three memory orderings and the two scopes an atomic can carry beside
@@ -4128,7 +4128,7 @@ fn attr_ucmp(out: Param[I32]) -> Unit !Dev = {
     signed = add_i(signed, i_const(1))
   }
   var unsigned = zero
-  for _i in d_range(ATTR_UCMP_LO, ATTR_UCMP_HI, unsigned_cmp: true) {
+  for _i in d_range(ATTR_UCMP_LO, ATTR_UCMP_HI, unsigned_cmp= true) {
     unsigned = add_i(unsigned, i_const(1))
   }
   store_sub(out, [0], broadcast(signed, [ATTR_TILE]))
@@ -4160,8 +4160,8 @@ fn attr_sat(x: Param[Float], out: Param[I32]) -> Unit !Dev = {
   let obase = tile_at(b, ATTR_SAT_SEGS * ATTR_TILE)
   let a = load_cell(x)
   let fits = (gt(a, f_const(F64, 0.0 - 2147483649.0)) & lt(a, f_const(F64, 2147483648.0)))
-  store(out, obase, float_to_int(a, I32, saturating: true))
-  store(out, obase + idx_const(ATTR_TILE), float_to_int(a, I32), mask: Some(fits))
+  store(out, obase, float_to_int(a, I32, saturating= true))
+  store(out, obase + idx_const(ATTR_TILE), float_to_int(a, I32), mask= Some(fits))
 }
 
 # `ftof` under every rounding mode bytecode 13.4 newly allows on the pairs
@@ -4187,16 +4187,16 @@ fn attr_ftof(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let a = load_cell(x)
   let f = float_to_float(a, F32)
   seg(0, float_to_float(f, F64))
-  seg(1, float_to_float(float_to_float(a, F32, rounding: TowardZero), F64))
-  seg(2, float_to_float(float_to_float(a, F32, rounding: Down), F64))
-  seg(3, float_to_float(float_to_float(a, F32, rounding: Up), F64))
+  seg(1, float_to_float(float_to_float(a, F32, rounding= TowardZero), F64))
+  seg(2, float_to_float(float_to_float(a, F32, rounding= Down), F64))
+  seg(3, float_to_float(float_to_float(a, F32, rounding= Up), F64))
   seg(4, float_to_float(float_to_float(f, TF32), F64))
-  seg(5, float_to_float(float_to_float(f, TF32, rounding: TowardZero), F64))
-  seg(6, float_to_float(float_to_float(f, TF32, rounding: NearestAway), F64, rounding: NearestAway))
+  seg(5, float_to_float(float_to_float(f, TF32, rounding= TowardZero), F64))
+  seg(6, float_to_float(float_to_float(f, TF32, rounding= NearestAway), F64, rounding= NearestAway))
   seg(7, float_to_float(float_to_float(f, F16), F64))
-  seg(8, float_to_float(float_to_float(f, F16, rounding: TowardZero), F64, rounding: TowardZero))
+  seg(8, float_to_float(float_to_float(f, F16, rounding= TowardZero), F64, rounding= TowardZero))
   seg(9, float_to_float(float_to_float(f, BF16), F64))
-  seg(10, float_to_float(float_to_float(f, BF16, rounding: TowardZero), F64, rounding: Up))
+  seg(10, float_to_float(float_to_float(f, BF16, rounding= TowardZero), F64, rounding= Up))
 }
 
 # The atomic EXCHANGE, the one read-modify-write mode no kernel had asked
@@ -4337,7 +4337,7 @@ const GLOBAL_ALIGN: Int = 256
 fn global_table(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [GLOBAL_TILE]
   d_global("tbl_a", F64, global_table_a(GLOBAL_TILE))
-  d_global("tbl_b", F64, global_table_b(GLOBAL_TILE), align: GLOBAL_ALIGN)
+  d_global("tbl_b", F64, global_table_b(GLOBAL_TILE), align= GLOBAL_ALIGN)
   let blk = tile_at(block_id(0), GLOBAL_TILE)
   let off = lanes(blk, s)
   let pa = ptr_offset(global_ptrs("tbl_a", F64, s), off)
@@ -4361,8 +4361,8 @@ fn global_ctl(a: Param[Float], b: Param[Float], x: Param[Float], out: Param[Floa
 # second one requires and the dialect does not enforce.
 fn global_flags(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [GLOBAL_TILE]
-  d_global("hidden", F64, global_table_a(GLOBAL_TILE), visibility: Private)
-  d_global("frozen", F64, global_table_b(GLOBAL_TILE), constant: true)
+  d_global("hidden", F64, global_table_a(GLOBAL_TILE), visibility= Private)
+  d_global("frozen", F64, global_table_b(GLOBAL_TILE), constant= true)
   let blk = tile_at(block_id(0), GLOBAL_TILE)
   let off = lanes(blk, s)
   let pa = ptr_offset(global_ptrs("hidden", F64, s), off)
@@ -4387,8 +4387,8 @@ fn global_flags(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 fn global_syms(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [GLOBAL_TILE]
   d_global("shown", F64, global_table_a(GLOBAL_TILE))
-  d_global("hidden", F64, global_table_b(GLOBAL_TILE), visibility: Private)
-  d_global("frozen", F64, global_syms_c(GLOBAL_TILE), constant: true)
+  d_global("hidden", F64, global_table_b(GLOBAL_TILE), visibility= Private)
+  d_global("frozen", F64, global_syms_c(GLOBAL_TILE), constant= true)
   let blk = tile_at(block_id(0), GLOBAL_TILE)
   let off = lanes(blk, s)
   let ps = ptr_offset(global_ptrs("shown", F64, s), off)
@@ -4439,8 +4439,8 @@ fn zeros_tile(n: Int) -> List[Float] = list.map(range(0, n), _i => 0.0)
 # machine's sm_86 and one `default`, the fallback the dialect reads when the
 # compilation target has no entry of its own.
 fn hint_entry_hints() -> ByArch[EntryHints] = [
-  for_arch("default", entry_hints(occupancy: Some(4))),
-  for_arch("sm_86", entry_hints(num_cta_in_cga: Some(1), num_worker_warps_per_cta: Some(8), occupancy: Some(2)))]
+  for_arch("default", entry_hints(occupancy= Some(4))),
+  for_arch("sm_86", entry_hints(num_cta_in_cga= Some(1), num_worker_warps_per_cta= Some(8), occupancy= Some(2)))]
 
 fn hint_entry(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, load_cell(a) + load_cell(b))
@@ -4450,9 +4450,9 @@ fn hint_entry(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev 
 # one key `load_ptr_tko` and `store_ptr_tko` accept.
 fn hint_memory(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), 128)
-  let ta = load(a, blk, [128], hints: [for_arch("sm_86", ptr_hints(latency: Some(4)))])
+  let ta = load(a, blk, [128], hints= [for_arch("sm_86", ptr_hints(latency= Some(4)))])
   let tb = load(b, blk, [128])
-  store(out, blk, ta + tb, hints: [for_arch("sm_86", ptr_hints(latency: Some(7)))])
+  store(out, blk, ta + tb, hints= [for_arch("sm_86", ptr_hints(latency= Some(7)))])
 }
 
 # `vadd` with hints on a VIEW read and a VIEW write (knife P4-a): the same
@@ -4466,11 +4466,11 @@ fn hint_memory(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev
 # values are the dialect's legal ones, and they are CHECKED when the kernel is
 # recorded now (`wire_view`), which `hint_memory`'s never were.
 fn hint_view(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
-  let ta = load_cell(a, hints: [
-    for_arch("default", view_hints(latency: Some(9))),
-    for_arch("sm_86", view_hints(allow_tma: Some(true), latency: Some(3)))])
+  let ta = load_cell(a, hints= [
+    for_arch("default", view_hints(latency= Some(9))),
+    for_arch("sm_86", view_hints(allow_tma= Some(true), latency= Some(3)))])
   let tb = load_cell(b)
-  store_cell(out, ta + tb, hints: [for_arch("sm_90", view_hints(allow_tma: Some(false)))])
+  store_cell(out, ta + tb, hints= [for_arch("sm_90", view_hints(allow_tma= Some(false)))])
 }
 
 # ---- knife T10: `alloca` (0x71) ----
@@ -4522,7 +4522,7 @@ fn alloca_two(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), ALLOCA_TILE)
   let off = lanes(idx_const(0), s)
   let pa = ptr_offset(alloca_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s), off)
-  let pb = ptr_offset(alloca_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s, shared: true), off)
+  let pb = ptr_offset(alloca_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s, shared= true), off)
   let tx = load(x, blk, s)
   store_ptrs(pa, tx)
   store_ptrs(pb, -tx - f_const(F64, 1.0))
@@ -4709,7 +4709,7 @@ fn view_conv2d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev
       # the tap's weight, and the one read here that is NOT a view: every
       # lane wants the same `w[p * k + q]`, which is a stride of zero along
       # both axes, and a tensor view's strides are strictly positive
-      let wt = load(w, idx_const(p * VC_K + q), tile, strides: Some([0, 0]))
+      let wt = load(w, idx_const(p * VC_K + q), tile, strides= Some([0, 0]))
       acc = acc + load_view(v, at) * wt
     }
   }
@@ -4787,7 +4787,7 @@ fn view_inbounds_copy(x: Param[Float], out: Param[Float], rows: Int, promise: Li
   let src = partition_view(tensor_view(x, zero, [rows, VI_COLS], [VI_COLS, 1]), tile, dm, NoPadding)
   let dst = partition_view(tensor_view(out, zero, [rows, VI_COLS], [VI_COLS, 1]), tile, dm, NoPadding)
   let at = [block_id(0), block_id(1)]
-  store_view(dst, at, load_view(src, at, inbounds: promise), inbounds: promise)
+  store_view(dst, at, load_view(src, at, inbounds= promise), inbounds= promise)
 }
 
 fn view_inbounds(x: Param[Float], out: Param[Float]) -> Unit !Dev =
@@ -4886,8 +4886,8 @@ fn view_tensor_shape(dims: Param[I32], x: Param[Float], out: Param[Float],
   # keeps whatever the host put there.
   let base = tile_at(block_id(0), VD_LANES)
   let live = lt_i(lanes(base, lane), broadcast(idx_as_tile(c), lane))
-  let v = load(x, base, lane, mask: Some(live), pad: Some(f_const(F64, 0.0)))
-  store(out, base, v + v, mask: Some(live))
+  let v = load(x, base, lane, mask= Some(live), pad= Some(f_const(F64, 0.0)))
+  store(out, base, v + v, mask= Some(live))
   # and the answers themselves, so the host reads what the device said
   # rather than only what the mask did with it
   store(shape_out, zero, broadcast(idx_as_tile(r), [1]))
@@ -4908,8 +4908,8 @@ fn view_index_space(dims: Param[I32], x: Param[Float], out: Param[Float],
   let gi = index_space_dim(pv, 0)
   let gj = index_space_dim(pv, 1)
   var acc = zeros(out)
-  for i in d_range(zero, gi, step: By(one)) {
-    for j in d_range(zero, gj, step: By(one)) { acc = acc + load_view(pv, [i, j]) }
+  for i in d_range(zero, gi, step= By(one)) {
+    for j in d_range(zero, gj, step= By(one)) { acc = acc + load_view(pv, [i, j]) }
   }
   store_cell(out, acc)
   store_sub(shape_out, [0], broadcast(idx_as_tile(gi), [1]))
@@ -5008,9 +5008,9 @@ fn va_local(x: Param[I32], b: Idx) -> Tile[I32] !Dev = {
   let s2 = [VA_BINS, VA_TILE]
   let blk = tile_at(b, VA_TILE)
   let live = axis_mask(blk, s2, 1, VA_N)
-  let vals = load(x, blk, s2, strides: Some(axis_strides(2, 1, 1)), mask: Some(live), pad: Some(i_const(0 - 1)))
+  let vals = load(x, blk, s2, strides= Some(axis_strides(2, 1, 1)), mask= Some(live), pad= Some(i_const(0 - 1)))
   let hit = mask_to_int(eq_i(vals, coord(idx_const(0), s2, 0, 1)))
-  d_reduce(hit, 0.0, (acc, e) => add_i(acc, e), dim: 1)
+  d_reduce(hit, 0.0, (acc, e) => add_i(acc, e), dim= 1)
 }
 
 fn va_reduce(p: Param[I32], mode: String, t: Tile[I32]) -> Unit !Dev = {
@@ -5197,7 +5197,7 @@ fn attr_segs(segs: Int, rows: Int) -> Cells = cells([DYN_DIM, segs, ATTR_TILE], 
 ## `segs` outside the extent and never written), and a segment is the piece
 ## `[j, 0]`. The columns follow grid axis 0, where the blocks are, and the
 ## rows axis 1, which has one block.
-fn seg_out(segs: Int, rows: Int, n: Int, tile: Int) -> Cells = cells([segs, n], [rows, tile], along: [1, 0])
+fn seg_out(segs: Int, rows: Int, n: Int, tile: Int) -> Cells = cells([segs, n], [rows, tile], along= [1, 0])
 
 ## `n` elements in `tile`-wide cells, the last one short: the boundary
 ## kernels' tail.
@@ -5205,7 +5205,7 @@ fn tail_of(n: Int, tile: Int) -> Cells = cells([n], [tile])
 
 ## The one-block reductions' input: RED_N values in one cell of RED_TILE, the
 ## lanes past the end reading `pad`.
-fn red_in(pad: Padding) -> Cells = cells([RED_N], [RED_TILE], pad: pad)
+fn red_in(pad: Padding) -> Cells = cells([RED_N], [RED_TILE], pad= pad)
 
 ## A single answer: one cell of one element, so the rest of the output
 ## buffer keeps what the host put there.
@@ -5213,30 +5213,30 @@ fn one_out() -> Cells = cells([1], [1])
 
 ## A vector every block reads whole (a scale, a bias): one cell that follows
 ## no grid axis, read with `load_at(p, [idx_const(0)])`.
-fn vec(n: Int) -> Cells = cells([n], [n], along: [FREE_AXIS])
+fn vec(n: Int) -> Cells = cells([n], [n], along= [FREE_AXIS])
 
 ## `vec` for a tensor of any rank.
-fn fixed(shape: List[Int]) -> Cells = cells(shape, shape, along: list.map(shape, _d => FREE_AXIS))
+fn fixed(shape: List[Int]) -> Cells = cells(shape, shape, along= list.map(shape, _d => FREE_AXIS))
 
 ## A head-major Llama projection, one LM_S by LM_HD head a block on grid
 ## axis 1, as many heads as the grid has blocks there.
-fn llama_heads() -> Cells = cells([DYN_DIM, LM_HD], [LM_S, LM_HD], along: [1, 0])
+fn llama_heads() -> Cells = cells([DYN_DIM, LM_HD], [LM_S, LM_HD], along= [1, 0])
 
 ## The score kernels of the attention family: queries by row block along
 ## grid axis 0, keys by row block along axis 1, each read as its one cell
 ## along the head dimension, and the scores' ATT_T by ATT_T block.
 fn att_qk(name: String, body: fn(Param[Float], Param[Float], Param[Float]) -> Unit !Dev) -> TileProg = {
-  let (p, _e) = trace3(name, In(F64, cells([ATT_M, ATT_D], [ATT_T, ATT_D], along: [0, FREE_AXIS])),
-    In(F64, cells([ATT_N, ATT_D], [ATT_T, ATT_D], along: [1, FREE_AXIS])),
+  let (p, _e) = trace3(name, In(F64, cells([ATT_M, ATT_D], [ATT_T, ATT_D], along= [0, FREE_AXIS])),
+    In(F64, cells([ATT_N, ATT_D], [ATT_T, ATT_D], along= [1, FREE_AXIS])),
     Out(F64, cells([ATT_M, ATT_N], [ATT_T, ATT_T])), body)
   p
 }
 
 ## FlashAttention's keys and values: FA_BK rows a cell, picked by the loop.
-fn fa_kv() -> Cells = cells([ATT_N, ATT_D], [FA_BK, ATT_D], along: [FREE_AXIS, 1])
+fn fa_kv() -> Cells = cells([ATT_N, ATT_D], [FA_BK, ATT_D], along= [FREE_AXIS, 1])
 
 ## LoRA's activations: every row, LORA_T columns a cell picked by the loop.
-fn lora_x() -> Cells = cells([LORA_M, LORA_DIN], [LORA_M, LORA_T], along: [0, FREE_AXIS])
+fn lora_x() -> Cells = cells([LORA_M, LORA_DIN], [LORA_M, LORA_T], along= [0, FREE_AXIS])
 
 ## The SwiGLU activation's run over the whole M by DFFN block.
 fn sw_act() -> Cells = cells([SW_M * SW_DFFN], [SW_ACT_TILE])
@@ -5251,8 +5251,8 @@ fn kv_cache() -> Cells = cells([KV_H * KV_S, KV_D], [KV_S, KV_D])
 ## block, the bias read by the pointer path (a stride of zero is no cell).
 fn gpt_mm(name: String, k: Int, n: Int,
   body: fn(Param[Float], Param[Float], Param[Float], Param[Float]) -> Unit !Dev) -> TileProg = {
-  let (p, _e) = trace4(name, In(F64, cells([GP_S, k], [GP_S, GP_T], along: [0, FREE_AXIS])),
-    In(F64, cells([k, n], [GP_T, GP_T], along: [FREE_AXIS, 1])), In(F64, Whole),
+  let (p, _e) = trace4(name, In(F64, cells([GP_S, k], [GP_S, GP_T], along= [0, FREE_AXIS])),
+    In(F64, cells([k, n], [GP_T, GP_T], along= [FREE_AXIS, 1])), In(F64, Whole),
     Out(F64, cells([GP_S, n], [GP_S, GP_T])), body)
   p
 }
@@ -5262,11 +5262,11 @@ fn gpt_mm(name: String, k: Int, n: Int,
 ## per-channel scale.
 fn gn_cells() -> Cells = cells([GN_N, GN_C, GN_HW], [1, gn_per_group(), GN_HW])
 
-fn gn_scale() -> Cells = cells([1, GN_C, 1], [1, gn_per_group(), 1], along: [FREE_AXIS, 1, FREE_AXIS])
+fn gn_scale() -> Cells = cells([1, GN_C, 1], [1, gn_per_group(), 1], along= [FREE_AXIS, 1, FREE_AXIS])
 
 ## The rotary embedding's halves: a row block's first or second ROPE_HALF
 ## columns, picked by `load_at`.
-fn rope_half() -> Cells = cells([ROPE_M, ROPE_D], [ROPE_ROWS, ROPE_HALF], along: [0, FREE_AXIS])
+fn rope_half() -> Cells = cells([ROPE_M, ROPE_D], [ROPE_ROWS, ROPE_HALF], along= [0, FREE_AXIS])
 
 ## The dtype kernels' inputs, DT_TILE lanes a block.
 fn dt_cells() -> Cells = cells([DT_N], [DT_TILE])
@@ -5398,17 +5398,17 @@ fn trace(name: String) -> TileProg = match name {
   }
   "vadd_producer" -> {
     let (p, _e) = trace3("vadd_producer", In(F64, run_of(128)), In(F64, run_of(128)), Out(F64, run_of(128)), vadd)
-    TileProg { ..p, producer: Some(PRODUCER) }
+    TileProg { ..p, producer= Some(PRODUCER) }
   }
   "vadd_debug" -> {
     let (p, _e) = trace3("vadd_debug", In(F64, run_of(128)), In(F64, run_of(128)), Out(F64, run_of(128)), vadd)
-    TileProg { ..p, debug: Some(text_debug(p, DEBUG_DIR, "vadd_debug.mlir")) }
+    TileProg { ..p, debug= Some(text_debug(p, DEBUG_DIR, "vadd_debug.mlir")) }
   }
   "foldif_debug" -> {
     let (p, _e) = trace2("foldif_debug",
-      In(F64, cells([FOLD_CHUNKS * FOLD_BLOCKS * FOLD_TILE], [FOLD_TILE], along: [FREE_AXIS])),
+      In(F64, cells([FOLD_CHUNKS * FOLD_BLOCKS * FOLD_TILE], [FOLD_TILE], along= [FREE_AXIS])),
       Out(F64, run_of(FOLD_TILE)), (x, o) => foldif(x, o, FOLD_CHUNKS))
-    TileProg { ..p, debug: Some(text_debug(p, DEBUG_DIR, "foldif_debug.mlir")) }
+    TileProg { ..p, debug= Some(text_debug(p, DEBUG_DIR, "foldif_debug.mlir")) }
   }
   "vadd_f32" -> {
     let (p, _e) = trace3("vadd_f32", In(F32, run_of(64)), In(F32, run_of(64)), Out(F32, run_of(64)), vadd_f32)
@@ -5421,7 +5421,7 @@ fn trace(name: String) -> TileProg = match name {
   }
   "sum" -> {
     let (p, _e) = trace2("sum",
-      In(F64, cells([1024], [128], along: [FREE_AXIS])), Out(F64, run_of(128)), (x, o) => sum(x, o, 4))
+      In(F64, cells([1024], [128], along= [FREE_AXIS])), Out(F64, run_of(128)), (x, o) => sum(x, o, 4))
     p
   }
   "vadd_tail" -> {
@@ -5548,7 +5548,7 @@ fn trace(name: String) -> TileProg = match name {
   }
   "foldif" -> {
     let (p, _e) = trace2("foldif",
-      In(F64, cells([FOLD_CHUNKS * FOLD_BLOCKS * FOLD_TILE], [FOLD_TILE], along: [FREE_AXIS])),
+      In(F64, cells([FOLD_CHUNKS * FOLD_BLOCKS * FOLD_TILE], [FOLD_TILE], along= [FREE_AXIS])),
       Out(F64, run_of(FOLD_TILE)), (x, o) => foldif(x, o, FOLD_CHUNKS))
     p
   }
@@ -5558,8 +5558,8 @@ fn trace(name: String) -> TileProg = match name {
   }
   "matmul" -> {
     let (p, _e) = trace3("matmul",
-      In(F64, cells([MM_M, MM_K], [MM_TM, MM_TK], along: [0, FREE_AXIS])),
-      In(F64, cells([MM_K, MM_N], [MM_TK, MM_TN], along: [FREE_AXIS, 1])),
+      In(F64, cells([MM_M, MM_K], [MM_TM, MM_TK], along= [0, FREE_AXIS])),
+      In(F64, cells([MM_K, MM_N], [MM_TK, MM_TN], along= [FREE_AXIS, 1])),
       Out(F64, cells([MM_M, MM_N], [MM_TM, MM_TN])), matmul)
     p
   }
@@ -5571,7 +5571,7 @@ fn trace(name: String) -> TileProg = match name {
   "matmul_i8_sm100" -> mm_named("matmul_i8_sm100", "sm_100", "i8")
   "batched_matmul" -> {
     let (p, _e) = trace3("batched_matmul", In(F64, Whole), In(F64, Whole),
-      Out(F64, cells([BMM_B, BMM_M, BMM_N], [1, BMM_T, BMM_T], along: [2, 0, 1])), batched_matmul)
+      Out(F64, cells([BMM_B, BMM_M, BMM_N], [1, BMM_T, BMM_T], along= [2, 0, 1])), batched_matmul)
     p
   }
   "transpose" -> {
@@ -5733,21 +5733,21 @@ fn trace(name: String) -> TileProg = match name {
   }
   "matmul_f16" -> {
     let (p, _e) = trace3("matmul_f16",
-      In(F16, cells([MMF_M, MMF_K], [MMF_T, MMF_T], along: [0, FREE_AXIS])),
-      In(F16, cells([MMF_K, MMF_N], [MMF_T, MMF_T], along: [FREE_AXIS, 1])),
+      In(F16, cells([MMF_M, MMF_K], [MMF_T, MMF_T], along= [0, FREE_AXIS])),
+      In(F16, cells([MMF_K, MMF_N], [MMF_T, MMF_T], along= [FREE_AXIS, 1])),
       Out(F16, cells([MMF_M, MMF_N], [MMF_T, MMF_T])), matmul_f16)
     p
   }
   "batched_matmul_f16" -> {
     let (p, _e) = trace3("batched_matmul_f16",
-      In(F16, Whole), In(F16, Whole), Out(F16, cells([BMF_B, BMF_M, BMF_N], [1, BMF_T, BMF_T], along: [2, 0, 1])),
+      In(F16, Whole), In(F16, Whole), Out(F16, cells([BMF_B, BMF_M, BMF_N], [1, BMF_T, BMF_T], along= [2, 0, 1])),
       batched_matmul_f16)
     p
   }
   "matmul_i8" -> {
     let (p, _e) = trace3("matmul_i8",
-      In(I8, cells([MMI_M, MMI_K], [MMI_T, MMI_T], along: [0, FREE_AXIS])),
-      In(I8, cells([MMI_K, MMI_N], [MMI_T, MMI_T], along: [FREE_AXIS, 1])),
+      In(I8, cells([MMI_M, MMI_K], [MMI_T, MMI_T], along= [0, FREE_AXIS])),
+      In(I8, cells([MMI_K, MMI_N], [MMI_T, MMI_T], along= [FREE_AXIS, 1])),
       Out(I32, cells([MMI_M, MMI_N], [MMI_T, MMI_T])), matmul_i8)
     p
   }
@@ -5826,21 +5826,21 @@ fn trace(name: String) -> TileProg = match name {
   }
   "lora_base" -> {
     let (p, _e) = trace3("lora_base",
-      In(F64, lora_x()), In(F64, cells([LORA_DOUT, LORA_DIN], [LORA_T, LORA_T], along: [1, FREE_AXIS])),
+      In(F64, lora_x()), In(F64, cells([LORA_DOUT, LORA_DIN], [LORA_T, LORA_T], along= [1, FREE_AXIS])),
       Out(F64, cells([LORA_M, LORA_DOUT], [LORA_M, LORA_T])), lora_base)
     p
   }
   "lora_hidden" -> {
     let (p, _e) = trace3("lora_hidden",
-      In(F64, lora_x()), In(F64, cells([LORA_RANK, LORA_DIN], [LORA_RANK, LORA_T], along: [0, FREE_AXIS])),
+      In(F64, lora_x()), In(F64, cells([LORA_RANK, LORA_DIN], [LORA_RANK, LORA_T], along= [0, FREE_AXIS])),
       Out(F64, one_cell([LORA_M, LORA_RANK])), lora_hidden)
     p
   }
   "lora_out" -> {
     let (p, _e) = trace4("lora_out",
       In(F64, cells([LORA_M, LORA_DOUT], [LORA_M, LORA_T])),
-      In(F64, cells([LORA_M, LORA_RANK], [LORA_M, LORA_RANK], along: [0, FREE_AXIS])),
-      In(F64, cells([LORA_DOUT, LORA_RANK], [LORA_T, LORA_RANK], along: [1, FREE_AXIS])),
+      In(F64, cells([LORA_M, LORA_RANK], [LORA_M, LORA_RANK], along= [0, FREE_AXIS])),
+      In(F64, cells([LORA_DOUT, LORA_RANK], [LORA_T, LORA_RANK], along= [1, FREE_AXIS])),
       Out(F64, cells([LORA_M, LORA_DOUT], [LORA_M, LORA_T])), lora_out)
     p
   }
@@ -5852,8 +5852,8 @@ fn trace(name: String) -> TileProg = match name {
   }
   "attn_context" -> {
     let (p, _e) = trace3("attn_context",
-      In(F64, cells([ATT_M, ATT_N], [ATT_T, ATT_T], along: [0, FREE_AXIS])),
-      In(F64, cells([ATT_N, ATT_D], [ATT_T, ATT_D], along: [FREE_AXIS, 1])),
+      In(F64, cells([ATT_M, ATT_N], [ATT_T, ATT_T], along= [0, FREE_AXIS])),
+      In(F64, cells([ATT_N, ATT_D], [ATT_T, ATT_D], along= [FREE_AXIS, 1])),
       Out(F64, cells([ATT_M, ATT_D], [ATT_T, ATT_D])), attn_context)
     p
   }
@@ -5870,14 +5870,14 @@ fn trace(name: String) -> TileProg = match name {
   "flash_attn_bf16" -> {
     let (p, _e) = trace5("flash_attn_bf16",
       In(BF16, cells([ATT_M, ATT_D], [64, ATT_D])),
-      In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along: [FREE_AXIS, 1])),
-      In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along: [FREE_AXIS, 1])),
+      In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along= [FREE_AXIS, 1])),
+      In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along= [FREE_AXIS, 1])),
       Out(F64, cells([ATT_M, ATT_D], [64, ATT_D])), Scalar(F32), fa_bf16_kernel(fa_cfg("default", ATT_D), ATT_N, ATT_D, 1))
     p
   }
   "idx_softmax" -> {
     let (p, _e) = trace2("idx_softmax",
-      In(F64, cells([IS_N, IS_D], [IS_T, IS_D], along: [FREE_AXIS, 1])),
+      In(F64, cells([IS_N, IS_D], [IS_T, IS_D], along= [FREE_AXIS, 1])),
       Out(F64, cells([IS_N / 2, IS_D], [IS_T, IS_D])), idx_softmax)
     p
   }
@@ -5892,7 +5892,7 @@ fn trace(name: String) -> TileProg = match name {
     () => scalar_wide(param(F64, 0), param(I64, 1), param(F64, 2), param(I64, 3), param(F64, 4), param(I64, 5)))
   "carry_extent" -> {
     let (p, _e) = trace2("carry_extent",
-      In(F64, cells([CE_N, 128], [CE_T, 128], along: [FREE_AXIS, FREE_AXIS])),
+      In(F64, cells([CE_N, 128], [CE_T, 128], along= [FREE_AXIS, FREE_AXIS])),
       Out(F64, cells([DYN_DIM], [128])), carry_extent)
     p
   }
@@ -5904,8 +5904,8 @@ fn trace(name: String) -> TileProg = match name {
   }
   "swiglu_proj" -> {
     let (p, _e) = trace3("swiglu_proj",
-      In(F64, cells([SW_M, SW_DMODEL], [SW_M, SW_T], along: [0, FREE_AXIS])),
-      In(F64, cells([SW_DMODEL, SW_DFFN], [SW_T, SW_T], along: [FREE_AXIS, 1])),
+      In(F64, cells([SW_M, SW_DMODEL], [SW_M, SW_T], along= [0, FREE_AXIS])),
+      In(F64, cells([SW_DMODEL, SW_DFFN], [SW_T, SW_T], along= [FREE_AXIS, 1])),
       Out(F64, cells([SW_M, SW_DFFN], [SW_M, SW_T])), swiglu_proj)
     p
   }
@@ -5915,8 +5915,8 @@ fn trace(name: String) -> TileProg = match name {
   }
   "swiglu_down" -> {
     let (p, _e) = trace3("swiglu_down",
-      In(F64, cells([SW_M, SW_DFFN], [SW_M, SW_T], along: [0, FREE_AXIS])),
-      In(F64, cells([SW_DFFN, SW_DMODEL], [SW_T, SW_T], along: [FREE_AXIS, 1])),
+      In(F64, cells([SW_M, SW_DFFN], [SW_M, SW_T], along= [0, FREE_AXIS])),
+      In(F64, cells([SW_DFFN, SW_DMODEL], [SW_T, SW_T], along= [FREE_AXIS, 1])),
       Out(F64, cells([SW_M, SW_DMODEL], [SW_M, SW_T])), swiglu_down)
     p
   }
@@ -5971,15 +5971,15 @@ fn trace(name: String) -> TileProg = match name {
   }
   "mha_scores" -> {
     let (p, _e) = trace3("mha_scores",
-      In(F64, cells([MHA_N, MHA_DMODEL], [MHA_T, MHA_DK], along: [0, 2])),
-      In(F64, cells([MHA_N, MHA_DMODEL], [MHA_T, MHA_DK], along: [1, 2])),
-      Out(F64, cells([MHA_H, MHA_N, MHA_N], [1, MHA_T, MHA_T], along: [2, 0, 1])), mha_scores)
+      In(F64, cells([MHA_N, MHA_DMODEL], [MHA_T, MHA_DK], along= [0, 2])),
+      In(F64, cells([MHA_N, MHA_DMODEL], [MHA_T, MHA_DK], along= [1, 2])),
+      Out(F64, cells([MHA_H, MHA_N, MHA_N], [1, MHA_T, MHA_T], along= [2, 0, 1])), mha_scores)
     p
   }
   "mha_context" -> {
     let (p, _e) = trace3("mha_context",
-      In(F64, Whole), In(F64, cells([MHA_N, MHA_DMODEL], [MHA_T, MHA_DK], along: [FREE_AXIS, 2])),
-      Out(F64, cells([MHA_N, MHA_DMODEL], [MHA_T, MHA_DK], along: [0, 2])), mha_context)
+      In(F64, Whole), In(F64, cells([MHA_N, MHA_DMODEL], [MHA_T, MHA_DK], along= [FREE_AXIS, 2])),
+      Out(F64, cells([MHA_N, MHA_DMODEL], [MHA_T, MHA_DK], along= [0, 2])), mha_context)
     p
   }
   "agent_step" -> {
@@ -5992,26 +5992,26 @@ fn trace(name: String) -> TileProg = match name {
   }
   "xattn_scores" -> {
     let (p, _e) = trace3("xattn_scores",
-      In(F64, cells([XA_M, XA_DMODEL], [XA_T, XA_D], along: [0, 2])),
-      In(F64, cells([XA_N, XA_DMODEL], [XA_T, XA_D], along: [1, 2])),
-      Out(F64, cells([XA_H, XA_M, XA_N], [1, XA_T, XA_T], along: [2, 0, 1])), xattn_scores)
+      In(F64, cells([XA_M, XA_DMODEL], [XA_T, XA_D], along= [0, 2])),
+      In(F64, cells([XA_N, XA_DMODEL], [XA_T, XA_D], along= [1, 2])),
+      Out(F64, cells([XA_H, XA_M, XA_N], [1, XA_T, XA_T], along= [2, 0, 1])), xattn_scores)
     p
   }
   "xattn_context" -> {
     let (p, _e) = trace3("xattn_context",
-      In(F64, Whole), In(F64, cells([XA_N, XA_DMODEL], [XA_T, XA_D], along: [FREE_AXIS, 2])),
-      Out(F64, cells([XA_M, XA_DMODEL], [XA_T, XA_D], along: [0, 2])), xattn_context)
+      In(F64, Whole), In(F64, cells([XA_N, XA_DMODEL], [XA_T, XA_D], along= [FREE_AXIS, 2])),
+      Out(F64, cells([XA_M, XA_DMODEL], [XA_T, XA_D], along= [0, 2])), xattn_context)
     p
   }
   "gqa_scores" -> {
     let (p, _e) = trace3("gqa_scores",
-      In(F64, Whole), In(F64, cells([GQ_HKV * GQ_S, GQ_D], [GQ_S, GQ_D], along: [2, 1])),
-      Out(F64, cells([GQ_HKV, GQ_GROUPS * GQ_S, GQ_S], [1, GQ_S, GQ_S], along: [2, 0, 1])), gqa_scores)
+      In(F64, Whole), In(F64, cells([GQ_HKV * GQ_S, GQ_D], [GQ_S, GQ_D], along= [2, 1])),
+      Out(F64, cells([GQ_HKV, GQ_GROUPS * GQ_S, GQ_S], [1, GQ_S, GQ_S], along= [2, 0, 1])), gqa_scores)
     p
   }
   "gqa_context" -> {
     let (p, _e) = trace3("gqa_context", In(F64, Whole), In(F64, Whole),
-      Out(F64, cells([GQ_HKV, GQ_GROUPS * GQ_S, GQ_D], [1, GQ_S, GQ_D], along: [2, 0, 1])), gqa_context)
+      Out(F64, cells([GQ_HKV, GQ_GROUPS * GQ_S, GQ_D], [1, GQ_S, GQ_D], along= [2, 0, 1])), gqa_context)
     p
   }
   "grpo_adv" -> {
@@ -6049,8 +6049,8 @@ fn trace(name: String) -> TileProg = match name {
   }
   "attn_bwd_mmt" -> {
     let (p, _e) = trace3("attn_bwd_mmt",
-      In(F64, cells([ATT_M, ATT_N], [ATT_T, ATT_T], along: [FREE_AXIS, 0])),
-      In(F64, cells([ATT_M, ATT_D], [ATT_T, ATT_D], along: [FREE_AXIS, 1])),
+      In(F64, cells([ATT_M, ATT_N], [ATT_T, ATT_T], along= [FREE_AXIS, 0])),
+      In(F64, cells([ATT_M, ATT_D], [ATT_T, ATT_D], along= [FREE_AXIS, 1])),
       Out(F64, cells([ATT_N, ATT_D], [ATT_T, ATT_D])), attn_bwd_mmt)
     p
   }
@@ -6061,8 +6061,8 @@ fn trace(name: String) -> TileProg = match name {
   }
   "lin_attn_s" -> {
     let (p, _e) = trace3("lin_attn_s",
-      In(F64, cells([LA_M, LA_D], [LA_T, LA_D], along: [FREE_AXIS, 0])),
-      In(F64, cells([LA_M, LA_D], [LA_T, LA_D], along: [FREE_AXIS, 1])), Out(F64, one_cell([LA_D, LA_D])),
+      In(F64, cells([LA_M, LA_D], [LA_T, LA_D], along= [FREE_AXIS, 0])),
+      In(F64, cells([LA_M, LA_D], [LA_T, LA_D], along= [FREE_AXIS, 1])), Out(F64, one_cell([LA_D, LA_D])),
       lin_attn_s)
     p
   }
@@ -6094,15 +6094,15 @@ fn trace(name: String) -> TileProg = match name {
     gpt_mm("gpt_qkv", GP_D, 3 * GP_D, gpt_qkv)
   "gpt_scores" -> {
     let (p, _e) = trace2("gpt_scores",
-      In(F64, cells([GP_S, 3 * GP_D], [GP_S, GP_DH], along: [0, FREE_AXIS])),
-      Out(F64, cells([GP_H * GP_S, GP_S], [GP_S, GP_S], along: [2, 0])), gpt_scores)
+      In(F64, cells([GP_S, 3 * GP_D], [GP_S, GP_DH], along= [0, FREE_AXIS])),
+      Out(F64, cells([GP_H * GP_S, GP_S], [GP_S, GP_S], along= [2, 0])), gpt_scores)
     p
   }
   "gpt_context" -> {
     let (p, _e) = trace3("gpt_context",
-      In(F64, cells([GP_H * GP_S, GP_S], [GP_S, GP_T], along: [2, FREE_AXIS])),
-      In(F64, cells([GP_S, 3 * GP_D], [GP_T, GP_DH], along: [FREE_AXIS, FREE_AXIS])),
-      Out(F64, cells([GP_S, GP_D], [GP_S, GP_DH], along: [0, 2])), gpt_context)
+      In(F64, cells([GP_H * GP_S, GP_S], [GP_S, GP_T], along= [2, FREE_AXIS])),
+      In(F64, cells([GP_S, 3 * GP_D], [GP_T, GP_DH], along= [FREE_AXIS, FREE_AXIS])),
+      Out(F64, cells([GP_S, GP_D], [GP_S, GP_DH], along= [0, 2])), gpt_context)
     p
   }
   "gpt_dense" ->
@@ -6123,41 +6123,41 @@ fn trace(name: String) -> TileProg = match name {
   }
   "llama_qkv" -> {
     let (p, _e) = trace3("llama_qkv",
-      In(F64, cells([LM_S, LM_D], [LM_S, LM_T], along: [0, FREE_AXIS])),
-      In(F64, cells([DYN_DIM, LM_D], [LM_HD, LM_T], along: [1, FREE_AXIS])),
+      In(F64, cells([LM_S, LM_D], [LM_S, LM_T], along= [0, FREE_AXIS])),
+      In(F64, cells([DYN_DIM, LM_D], [LM_HD, LM_T], along= [1, FREE_AXIS])),
       Out(F64, llama_heads()), llama_qkv)
     p
   }
   "llama_rope" -> {
     let (p, _e) = trace4("llama_rope",
-      In(F64, cells([DYN_DIM, LM_HD], [LM_S, LM_HALF], along: [1, FREE_AXIS])),
+      In(F64, cells([DYN_DIM, LM_HD], [LM_S, LM_HALF], along= [1, FREE_AXIS])),
       In(F64, fixed([LM_S, LM_HALF])), In(F64, fixed([LM_S, LM_HALF])), Out(F64, llama_heads()), llama_rope)
     p
   }
   "llama_scores" -> {
     let (p, _e) = trace3("llama_scores",
-      In(F64, Whole), In(F64, cells([LM_HKV * LM_S, LM_HD], [LM_S, LM_HD], along: [2, 1])),
-      Out(F64, cells([LM_HKV, LM_HQ / LM_HKV * LM_S, LM_S], [1, LM_S, LM_S], along: [2, 0, 1])), llama_scores)
+      In(F64, Whole), In(F64, cells([LM_HKV * LM_S, LM_HD], [LM_S, LM_HD], along= [2, 1])),
+      Out(F64, cells([LM_HKV, LM_HQ / LM_HKV * LM_S, LM_S], [1, LM_S, LM_S], along= [2, 0, 1])), llama_scores)
     p
   }
   "llama_out" -> {
     let (p, _e) = trace3("llama_out",
-      In(F64, cells([LM_HQ * LM_S, LM_HD], [LM_S, LM_HD], along: [FREE_AXIS, 0])),
-      In(F64, cells([LM_D, LM_D], [LM_T, LM_HD], along: [1, FREE_AXIS])),
+      In(F64, cells([LM_HQ * LM_S, LM_HD], [LM_S, LM_HD], along= [FREE_AXIS, 0])),
+      In(F64, cells([LM_D, LM_D], [LM_T, LM_HD], along= [1, FREE_AXIS])),
       Out(F64, cells([LM_S, LM_D], [LM_S, LM_T])), llama_out)
     p
   }
   "llama_ffn" -> {
     let (p, _e) = trace3("llama_ffn",
-      In(F64, cells([LM_S, LM_D], [LM_S, LM_T], along: [0, FREE_AXIS])),
-      In(F64, cells([LM_F, LM_D], [LM_T, LM_T], along: [1, FREE_AXIS])),
+      In(F64, cells([LM_S, LM_D], [LM_S, LM_T], along= [0, FREE_AXIS])),
+      In(F64, cells([LM_F, LM_D], [LM_T, LM_T], along= [1, FREE_AXIS])),
       Out(F64, cells([LM_S, LM_F], [LM_S, LM_T])), llama_ffn)
     p
   }
   "llama_down" -> {
     let (p, _e) = trace3("llama_down",
-      In(F64, cells([LM_S, LM_F], [LM_S, LM_T], along: [0, FREE_AXIS])),
-      In(F64, cells([LM_D, LM_F], [LM_T, LM_T], along: [1, FREE_AXIS])),
+      In(F64, cells([LM_S, LM_F], [LM_S, LM_T], along= [0, FREE_AXIS])),
+      In(F64, cells([LM_D, LM_F], [LM_T, LM_T], along= [1, FREE_AXIS])),
       Out(F64, cells([LM_S, LM_D], [LM_S, LM_T])), llama_down)
     p
   }
@@ -6416,7 +6416,7 @@ fn trace(name: String) -> TileProg = match name {
   "hint_entry" -> {
     let (p, _e) = trace3("hint_entry",
       In(F64, run_of(128)), In(F64, run_of(128)), Out(F64, run_of(128)), hint_entry,
-      hints: hint_entry_hints())
+      hints= hint_entry_hints())
     p
   }
   "view_transpose" -> {
@@ -6541,8 +6541,8 @@ fn scalar_scale(x: Param[Float], s: Param[F32], out: Param[Float]) -> Unit !Dev 
 fn scalar_len(x: Param[Float], n: Param[I32], out: Param[Float]) -> Unit !Dev = {
   let base = tile_at(block_id(0), SK_TILE)
   let live = lt_i(lanes(base, [SK_TILE]), broadcast(idx_as_tile(idx_of(scalar(n))), [SK_TILE]))
-  let v = load(x, base, [SK_TILE], mask: Some(live), pad: Some(f_const(F64, 0.0)))
-  store(out, base, v, mask: Some(live))
+  let v = load(x, base, [SK_TILE], mask= Some(live), pad= Some(f_const(F64, 0.0)))
+  store(out, base, v, mask= Some(live))
 }
 
 # The same i32 as the UPPER BOUND of a loop: one block sums the first `n`
@@ -6579,7 +6579,7 @@ fn trace_twice(name: String) -> TileProg = {
 # run.sh's out-along-twice-accepted mutant records, an Out cut along one
 # grid axis twice, which the clean recording refuses by name.
 fn out_along_twice() -> TileProg = {
-  let (p, _e) = trace1("out_along_twice", Out(F64, cells([64, 64], [8, 8], along: [0, 0])), o => store_cell(o, zeros(o)))
+  let (p, _e) = trace1("out_along_twice", Out(F64, cells([64, 64], [8, 8], along= [0, 0])), o => store_cell(o, zeros(o)))
   p
 }
 
@@ -6707,7 +6707,7 @@ pub fn main() -> Unit !io = match args() {
     # The same program without its Producer and Debug sections: what the
     # cubin of a program with them is held against (run.sh, knife T14a and
     # T14b).
-    let bytes = encode(TileProg { ..trace_twice(name), producer: None, debug: None })
+    let bytes = encode(TileProg { ..trace_twice(name), producer= None, debug= None })
     match with_fs_real(() => write_bytes(path, bytes)) {
       Ok(_) -> ()
       Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")

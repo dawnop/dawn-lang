@@ -75,7 +75,7 @@ pub fn to_html[M](w: Node[M], at: Loc = caller()) -> String = node_html(w, "", a
 ## wrapped around the tree. A root that is not `html` is still a document, the
 ## parser supplies `html`, `head` and `body` itself, and a page that wants them
 ## spelled says `el("html", kids: [..])`.
-pub fn to_document[M](w: Node[M], at: Loc = caller()) -> String = "<!DOCTYPE html>" ++ to_html(w, at: at)
+pub fn to_document[M](w: Node[M], at: Loc = caller()) -> String = "<!DOCTYPE html>" ++ to_html(w, at = at)
 
 # `parent` is the enclosing element's lower-cased tag, which is all a text node
 # needs to know: whether it sits in raw text.
@@ -182,14 +182,14 @@ fn esc_attr(s: String) -> String = {
 
 fn raw_text(s: String, tag: String, at: Loc) -> String =
   if str.contains(str.to_lower(s), "</" ++ tag) {
-    panic("tea_dom/render: a <" ++ tag ++ "> holds text containing its own end tag", at: at)
+    panic("tea_dom/render: a <" ++ tag ++ "> holds text containing its own end tag", at = at)
   } else {
     s
   }
 
 fn check_name(what: String, name: String, at: Loc) -> Unit =
   if name == "" || list.any(code_points(name), bad_name_char) {
-    panic("tea_dom/render: not a valid " ++ what ++ " name: \"" ++ name ++ "\"", at: at)
+    panic("tea_dom/render: not a valid " ++ what ++ " name: \"" ++ name ++ "\"", at = at)
   } else {
     ()
   }
@@ -238,7 +238,7 @@ test "text escapes the three characters that can open markup" {
   let w: Node[ProbeMsg] = text("<b> & </b>")
   assert to_html(w) == "&lt;b&gt; &amp; &lt;/b&gt;"
   # A quote in text is just a quote.
-  let q: Node[ProbeMsg] = el("p", kids: [text("say \"hi\" & 'bye'")])
+  let q: Node[ProbeMsg] = el("p", kids = [text("say \"hi\" & 'bye'")])
   assert to_html(q) == "<p>say \"hi\" &amp; 'bye'</p>"
 }
 
@@ -253,11 +253,11 @@ test "an attribute value is double-quoted and escapes the quote as well" {
 test "a void element has no end tag, no slash, and prints no kids" {
   let br: Node[ProbeMsg] = el("br")
   assert to_html(br) == "<br>"
-  let field: Node[ProbeMsg] = input(value: "x")
+  let field: Node[ProbeMsg] = input(value = "x")
   assert to_html(field) == "<input value=\"x\">"
   # A kid given to a void element is a legal tree with the wrong tag; it is
   # dropped rather than printed inside an element that cannot hold it.
-  let stuffed: Node[ProbeMsg] = el("hr", [("id", "h")], kids: [text("lost"), el("b")])
+  let stuffed: Node[ProbeMsg] = el("hr", [("id", "h")], kids = [text("lost"), el("b")])
   assert to_html(stuffed) == "<hr id=\"h\">"
   # An ordinary empty element keeps its end tag.
   let empty: Node[ProbeMsg] = div()
@@ -266,9 +266,9 @@ test "a void element has no end tag, no slash, and prints no kids" {
 
 test "props and kids print in tree order, the class sugar first" {
   let w: Node[ProbeMsg] =
-    el("ul", [("id", "list"), ("data-n", "2")], class: "rows", kids: [
-      el("li", kids: [text("a")]),
-      el("li", [("title", "b")], kids: [text("b"), el("i", kids: [text("!")])]),
+    el("ul", [("id", "list"), ("data-n", "2")], class = "rows", kids = [
+      el("li", kids = [text("a")]),
+      el("li", [("title", "b")], kids = [text("b"), el("i", kids = [text("!")])]),
     ])
   assert to_html(w)
     == "<ul class=\"rows\" id=\"list\" data-n=\"2\"><li>a</li><li title=\"b\">b<i>!</i></li></ul>"
@@ -282,7 +282,7 @@ test "a foreign element prints its props and an end tag, nothing inside" {
 test "listeners and keys never reach the string" {
   let live: Node[ProbeMsg] =
     with_key(el("li", [("class", "row")], [on_click(Inc), on_value("input", Said)], [text("go")]), "k1")
-  let bare: Node[ProbeMsg] = el("li", [("class", "row")], kids: [text("go")])
+  let bare: Node[ProbeMsg] = el("li", [("class", "row")], kids = [text("go")])
   assert to_html(live) == to_html(bare)
   assert to_html(live) == "<li class=\"row\">go</li>"
 }
@@ -299,21 +299,21 @@ test "checked on a control follows the bridge, and so does value on a textarea" 
   let custom: Node[ProbeMsg] = foreign("x-toggle", [("checked", "false")])
   assert to_html(custom) == "<x-toggle checked=\"false\"></x-toggle>"
   # A textarea's value is its escaped content and replaces the kids.
-  let area: Node[ProbeMsg] = el("textarea", [("rows", "2"), ("value", "a < b")], kids: [text("old")])
+  let area: Node[ProbeMsg] = el("textarea", [("rows", "2"), ("value", "a < b")], kids = [text("old")])
   assert to_html(area) == "<textarea rows=\"2\">a &lt; b</textarea>"
 }
 
 test "a repeated prop prints once, where it first was, with its last value" {
-  let w: Node[ProbeMsg] = el("p", [("class", "b"), ("id", "x")], class: "a")
+  let w: Node[ProbeMsg] = el("p", [("class", "b"), ("id", "x")], class = "a")
   assert to_html(w) == "<p class=\"b\" id=\"x\"></p>"
 }
 
 test "script and style hold raw text, and refuse their own end tag" {
-  let css: Node[ProbeMsg] = el("style", kids: [text("a > b { color: red }")])
+  let css: Node[ProbeMsg] = el("style", kids = [text("a > b { color: red }")])
   assert to_html(css) == "<style>a > b { color: red }</style>"
-  let js: Node[ProbeMsg] = el("script", kids: [text("if (a < b && c) {}")])
+  let js: Node[ProbeMsg] = el("script", kids = [text("if (a < b && c) {}")])
   assert to_html(js) == "<script>if (a < b && c) {}</script>"
-  let bad: Node[ProbeMsg] = el("script", kids: [text("x = '</SCRIPT>'")])
+  let bad: Node[ProbeMsg] = el("script", kids = [text("x = '</SCRIPT>'")])
   match catch_panic(() => to_html(bad)) {
     Ok(_) -> { assert false }
     Err(e) -> {
@@ -322,7 +322,7 @@ test "script and style hold raw text, and refuse their own end tag" {
         "tea_dom/render: a <script> holds text containing its own end tag at ")
     }
   }
-  let bad_css: Node[ProbeMsg] = el("style", kids: [text("</style")])
+  let bad_css: Node[ProbeMsg] = el("style", kids = [text("</style")])
   match catch_panic(() => to_html(bad_css)) {
     Ok(_) -> { assert false }
     Err(_) -> { }
@@ -363,7 +363,7 @@ test "a refused tree reports the line that called to_html" {
 }
 
 test "to_document reports its caller too, and a forwarded at wins" {
-  let bad: Node[ProbeMsg] = el("style", kids: [text("</style>")])
+  let bad: Node[ProbeMsg] = el("style", kids = [text("</style>")])
   let site = loc.here()
   let got = catch_panic(() => to_document(bad))
   match got {
@@ -373,7 +373,7 @@ test "to_document reports its caller too, and a forwarded at wins" {
       assert str.ends_with(e.message, want)
     }
   }
-  match catch_panic(() => to_html(bad, at: site)) {
+  match catch_panic(() => to_html(bad, at = site)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.ends_with(e.message, " at ${site}") }
   }
@@ -386,17 +386,17 @@ const CALL_COL: Int = 31
 # The counter example's view, restated so this package does not depend on an
 # example: the frame `view(init())` prints is the bytes below.
 fn counter_view(n: Int) -> Node[ProbeMsg] = {
-  let heading: Node[ProbeMsg] = el("h1", kids: [text("dawn counter")])
-  let count: Node[ProbeMsg] = el("p", class: "count", kids: [text(to_string(n))])
-  let bar: Node[ProbeMsg] = div(class: "bar")
+  let heading: Node[ProbeMsg] = el("h1", kids = [text("dawn counter")])
+  let count: Node[ProbeMsg] = el("p", class = "count", kids = [text(to_string(n))])
+  let bar: Node[ProbeMsg] = div(class = "bar")
   let controls: Node[ProbeMsg] =
-    div(class: "row", kids: [
+    div(class = "row", kids = [
       button("-", Dec),
       button("+", Inc),
       button("reset", Reset),
       button("boom", Boom),
     ])
-  div(class: "counter", kids: [heading, count, bar, controls])
+  div(class = "counter", kids = [heading, count, bar, controls])
 }
 
 test "a whole frame is one string" {
@@ -404,7 +404,7 @@ test "a whole frame is one string" {
     == "<div class=\"counter\"><h1>dawn counter</h1><p class=\"count\">0</p><div class=\"bar\"></div><div class=\"row\"><button>-</button><button>+</button><button>reset</button><button>boom</button></div></div>"
   assert to_document(counter_view(0)) == "<!DOCTYPE html>" ++ to_html(counter_view(0))
   let page: Node[ProbeMsg] =
-    el("a", [("href", "x?a=1&b=\"q\"<")], kids: [text("<b> & </b>"), input(value: "v\"")])
+    el("a", [("href", "x?a=1&b=\"q\"<")], kids = [text("<b> & </b>"), input(value = "v\"")])
   assert to_html(page)
     == "<a href=\"x?a=1&amp;b=&quot;q&quot;&lt;\">&lt;b&gt; &amp; &lt;/b&gt;<input value=\"v&quot;\"></a>"
 }

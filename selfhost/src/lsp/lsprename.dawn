@@ -89,11 +89,11 @@ pub(pkg) fn name_edit(path: String, lo: Int, hi: Int, pun: PunSide, old: String,
   let n = cps_len(new)
   let o = cps_len(old)
   match pun {
-    NotPun -> Edit { path: path, lo: lo, hi: hi, text: new, name: (0, n), rest: None }
+    NotPun -> Edit { path = path, lo = lo, hi = hi, text = new, name = (0, n), rest = None }
     # the field is renamed; the local keeps its name: `Point { x2 = x }`
-    PunField -> Edit { path: path, lo: lo, hi: hi, text: "${new} = ${old}", name: (0, n), rest: Some((n + 3, n + 3 + o)) }
+    PunField -> Edit { path = path, lo = lo, hi = hi, text = "${new} = ${old}", name = (0, n), rest = Some((n + 3, n + 3 + o)) }
     # the local is renamed; the field keeps its name: `Point { x = x2 }`
-    PunLocal -> Edit { path: path, lo: lo, hi: hi, text: "${old} = ${new}", name: (o + 3, o + 3 + n), rest: Some((0, o)) }
+    PunLocal -> Edit { path = path, lo = lo, hi = hi, text = "${old} = ${new}", name = (o + 3, o + 3 + n), rest = Some((0, o)) }
   }
 }
 
@@ -146,12 +146,12 @@ pub(pkg) fn edit_index(by_path: Map[String, List[Edit]]) -> Map[String, EditIx] 
       his = his ++ [e.hi]
       gained = gained ++ [g]
     }
-    out = map.insert(out, p, EditIx { by_lo: by_lo, his: his, gained: gained })
+    out = map.insert(out, p, EditIx { by_lo = by_lo, his = his, gained = gained })
   }
   out
 }
 
-fn no_edits() -> EditIx = EditIx { by_lo: map.empty(), his: [], gained: [] }
+fn no_edits() -> EditIx = EditIx { by_lo = map.empty(), his = [], gained = [] }
 
 ## Where offset `p` of a file's old text is in its new text. An offset at an
 ## edit's start stays at its start; one at an edit's end moves with it. The
@@ -194,11 +194,11 @@ pub(pkg) fn forward_key(ixs: Map[String, EditIx], k: Key, renamed: Bool) -> Key 
       if e.hi == hi {
         let (a, b) = if renamed { e.name } else { e.rest.unwrap_or(e.name) }
         let at = forward(ix, e.lo)
-        return Key { ..k, def: (at + a, at + b) }
+        return Key { ..k, def = (at + a, at + b) }
       }
     None -> ()
   }
-  Key { ..k, def: (forward(ix, lo), forward(ix, hi)) }
+  Key { ..k, def = (forward(ix, lo), forward(ix, hi)) }
 }
 
 ## One name as `changed_name` compares them, filed with where it starts.
@@ -223,7 +223,7 @@ pub(pkg) fn changed_name(
   var moved: Map[String, Key] = map.empty()
   var want: Map[String, Int] = map.empty()
   for r in before {
-    let k = Key { path: r.path, def: r.def }
+    let k = Key { path = r.path, def = r.def }
     let renamed = k == target
     let (dlo, dhi) = k.def
     let mk = "${renamed}|${dlo}|${dhi}|${k.path}"
@@ -240,7 +240,7 @@ pub(pkg) fn changed_name(
   }
   var got: Map[String, Int] = map.empty()
   for r in after {
-    let (s, lo) = named(r.lo, Key { path: r.path, def: r.def })
+    let (s, lo) = named(r.lo, Key { path = r.path, def = r.def })
     got = map.insert(got, s, lo)
   }
   var first = -1
@@ -311,8 +311,8 @@ test "a pun spelled out keeps the half that is not renamed" {
   assert apply_edits(text, [l]) == "fn f() = Point {x = v}"
   # the local's site was the pun; it is now the half the local kept
   let ixs = edit_index(map.insert(map.empty(), "a", [e]))
-  assert forward_key(ixs, Key { path: "a", def: (16, 17) }, false) == Key { path: "a", def: (22, 23) }
-  assert forward_key(ixs, Key { path: "a", def: (16, 17) }, true) == Key { path: "a", def: (16, 19) }
+  assert forward_key(ixs, Key { path = "a", def = (16, 17) }, false) == Key { path = "a", def = (22, 23) }
+  assert forward_key(ixs, Key { path = "a", def = (16, 17) }, true) == Key { path = "a", def = (16, 19) }
 }
 
 test "a spelled out pun measures both halves in code points" {
@@ -321,7 +321,7 @@ test "a spelled out pun measures both halves in code points" {
   assert e.rest == Some((6, 8))
   assert apply_edits("P {x𐐨}", [e]) == "P {xx𐐨 = x𐐨}"
   let ix = edit_index(map.insert(map.empty(), "a", [e]))
-  assert forward_key(ix, Key { path: "a", def: (3, 5) }, false) == Key { path: "a", def: (9, 11) }
+  assert forward_key(ix, Key { path = "a", def = (3, 5) }, false) == Key { path = "a", def = (9, 11) }
 }
 
 test "positions move with the edits before them" {

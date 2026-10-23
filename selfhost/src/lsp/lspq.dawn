@@ -96,7 +96,7 @@ pub(pkg) fn typed_trees(tm: TModule) -> TypedTrees = {
   for tc in tm.consts {
     if tc.decl != "" && not map.has(consts, tc.decl) { consts = map.insert(consts, tc.decl, tc) }
   }
-  TypedTrees { fns: fns, consts: consts }
+  TypedTrees { fns = fns, consts = consts }
 }
 
 ## What sits under the cursor: hover text plus an optional definition site.
@@ -168,7 +168,7 @@ type Q = {
 type TpBinder = { name: String, lo: Int, hi: Int }
 
 fn new_q(offset: Int) -> Q =
-  Q { offset: offset, best: None, in_for_pattern: false, inlay: None, found: None, tps: [], span: None, span_ty: None }
+  Q { offset = offset, best = None, in_for_pattern = false, inlay = None, found = None, tps = [], span = None, span_ty = None }
 
 fn query(qc: QCx, offset: Int) -> Q = {
   var q = new_q(offset)
@@ -186,7 +186,7 @@ pub(pkg) fn in_for_pattern(qc: QCx, offset: Int) -> Bool = query(qc, offset).in_
 ## is not one expression). The same typed nodes hover reads, found by span
 ## instead of by cursor.
 pub(pkg) fn type_of_span(qc: QCx, lo: Int, hi: Int) -> Option[Ty] = {
-  var q = Q { ..new_q(lo), span: Some((lo, hi)) }
+  var q = Q { ..new_q(lo), span = Some((lo, hi)) }
   for d in qc.entry.m.decls {
     # a top-level function that does not hold the span cannot hold its node
     let holds = match d {
@@ -254,7 +254,7 @@ pub(pkg) fn resolutions(qc: QCx, lo: Int, hi: Int) -> List[Resolution] = {
 ## it, in the same declaration, and the declaration's role is read from here.
 pub(pkg) fn walked_resolutions(qc: QCx, lo: Int, hi: Int) -> List[Resolution] = {
   let none: List[Resolution] = []
-  var q = Q { ..new_q(-1), found: Some(none) }
+  var q = Q { ..new_q(-1), found = Some(none) }
   for d in qc.entry.m.decls {
     let (dlo, dhi) = decl_span(d)
     if dhi >= lo && dlo <= hi { q = visit_decl(qc, q, d) }
@@ -294,9 +294,9 @@ type InlayRun = { lo: Int, hi: Int, opts: InlayOpts, hints: List[Hint] }
 ## at all, so a request for the visible part of a file costs what that part
 ## holds rather than what the file holds.
 pub(pkg) fn inlay_hints(qc: QCx, lo: Int, hi: Int, opts: InlayOpts) -> List[Hint] = {
-  let run = InlayRun { lo: lo, hi: hi, opts: opts, hints: [] }
+  let run = InlayRun { lo = lo, hi = hi, opts = opts, hints = [] }
   # an offset no span contains: every hover offer is refused at its first test
-  var q = Q { ..new_q(-1), inlay: Some(run) }
+  var q = Q { ..new_q(-1), inlay = Some(run) }
   for d in qc.entry.m.decls {
     let walk = match decl_bounds(d) {
       Some(b) -> {
@@ -338,7 +338,7 @@ fn add_hint(q: Q, h: Option[Hint]) -> Q =
       match h {
         Some(x) ->
           if x.at >= r.lo && x.at <= r.hi {
-            Q { ..q, inlay: Some(InlayRun { ..r, hints: r.hints ++ [x] }) }
+            Q { ..q, inlay = Some(InlayRun { ..r, hints = r.hints ++ [x] }) }
           } else {
             q
           }
@@ -620,7 +620,7 @@ fn hint_default_args(qc: QCx, q: Q, s: Sig, args: List[Arg], first: Int, name_hi
     # `.expect` (docs/caller-location-design.md 5)
     if not map.has(filled, pi) && not list.contains(s.caller_params, pi) {
       match get(s.param_defaults, pi) {
-        Some(Some(text)) -> { omitted = omitted ++ [DefaultArg { name: pn, text: text, fill: default_fill(s, te, pi) }] }
+        Some(Some(text)) -> { omitted = omitted ++ [DefaultArg { name = pn, text = text, fill = default_fill(s, te, pi) }] }
         _ -> return q
       }
     }
@@ -870,7 +870,7 @@ fn hint_method_call(
 # ---- the offer rule: innermost span containing the offset, later ties win ----
 
 fn offer(q: Q, lo: Int, hi: Int, hover: String, def: Option[(Int, Int)], dp: Option[String]) -> Q =
-  offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: def, def_path: dp, sig: None, doc: None, expr: None })
+  offer_target(q, Target { lo = lo, hi = hi, hover = hover, def = def, def_path = dp, sig = None, doc = None, expr = None })
 
 ## Can an offer at `lo..hi` become the answer? Only when it holds the offset,
 ## which no span does in a collection or an inlay run. A rendering that is
@@ -881,8 +881,8 @@ fn live(q: Q, lo: Int, hi: Int) -> Bool = q.offset >= lo && q.offset < hi
 ## A callable's signature, rendered for hover and kept whole for signature help.
 fn offer_sig(qc: QCx, q: Q, lo: Int, hi: Int, s: Sig, def: Option[(Int, Int)], dp: Option[String]) -> Q =
   offer_target(q, Target {
-    lo: lo, hi: hi, hover: if live(q, lo, hi) { render_sig(qc, s) } else { "" }, def: def, def_path: dp,
-    sig: Some(s), doc: None, expr: None
+    lo = lo, hi = hi, hover = if live(q, lo, hi) { render_sig(qc, s) } else { "" }, def = def, def_path = dp,
+    sig = Some(s), doc = None, expr = None
   })
 
 ## A declaration resolved to where it is: the jump target and the doc's home.
@@ -890,26 +890,26 @@ fn offer_sig(qc: QCx, q: Q, lo: Int, hi: Int, s: Sig, def: Option[(Int, Int)], d
 ## its declarations offer no jump and still carry their doc.
 type Site = { def: Option[(Int, Int)], dp: Option[String], doc: Option[DocSite] }
 
-fn no_site() -> Site = Site { def: None, dp: None, doc: None }
+fn no_site() -> Site = Site { def = None, dp = None, doc = None }
 
 ## A declaration of the entry document, at its own name.
 fn here(nlo: Int, nhi: Int, lo: Int) -> Site =
-  Site { def: Some((nlo, nhi)), dp: None, doc: Some(DocSite { home: DocHere, at: DeclAt(lo) }) }
+  Site { def = Some((nlo, nhi)), dp = None, doc = Some(DocSite { home = DocHere, at = DeclAt(lo) }) }
 
 fn offer_at(q: Q, lo: Int, hi: Int, hover: String, s: Site) -> Q =
-  offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: s.def, def_path: s.dp, sig: None, doc: s.doc, expr: None })
+  offer_target(q, Target { lo = lo, hi = hi, hover = hover, def = s.def, def_path = s.dp, sig = None, doc = s.doc, expr = None })
 
 fn offer_sig_at(qc: QCx, q: Q, lo: Int, hi: Int, sg: Sig, s: Site) -> Q =
   offer_target(q, Target {
-    lo: lo, hi: hi, hover: if live(q, lo, hi) { render_sig(qc, sg) } else { "" }, def: s.def,
-    def_path: s.dp, sig: Some(sg), doc: s.doc, expr: None
+    lo = lo, hi = hi, hover = if live(q, lo, hi) { render_sig(qc, sg) } else { "" }, def = s.def,
+    def_path = s.dp, sig = Some(sg), doc = s.doc, expr = None
   })
 
 fn offer_target(q: Q, t: Target) -> Q = {
   match q.found {
     Some(rs) ->
       return match t.def {
-        Some(d) -> Q { ..q, found: Some(rs ++ [Resolution { lo: t.lo, hi: t.hi, def: d, def_path: t.def_path, role: NoRole, use_kind: PlainUse }]) }
+        Some(d) -> Q { ..q, found = Some(rs ++ [Resolution { lo = t.lo, hi = t.hi, def = d, def_path = t.def_path, role = NoRole, use_kind = PlainUse }]) }
         None -> q
       }
     None -> ()
@@ -918,8 +918,8 @@ fn offer_target(q: Q, t: Target) -> Q = {
   let hi = t.hi
   if q.offset < lo || q.offset >= hi { return q }
   match q.best {
-    None -> Q { ..q, best: Some(t) }
-    Some(b) -> if hi - lo <= b.hi - b.lo { Q { ..q, best: Some(t) } } else { q }
+    None -> Q { ..q, best = Some(t) }
+    Some(b) -> if hi - lo <= b.hi - b.lo { Q { ..q, best = Some(t) } } else { q }
   }
 }
 
@@ -943,7 +943,7 @@ fn offer_local_use(qc: QCx, q: Q, sid: Int, lo: Int, hi: Int) -> Q =
 ## `offer` would, and collected with its role.
 fn offer_local(q: Q, role: LocalRole, lo: Int, hi: Int, hover: String, def: (Int, Int)) -> Q =
   match q.found {
-    Some(rs) -> Q { ..q, found: Some(rs ++ [Resolution { lo: lo, hi: hi, def: def, def_path: None, role: role, use_kind: PlainUse }]) }
+    Some(rs) -> Q { ..q, found = Some(rs ++ [Resolution { lo = lo, hi = hi, def = def, def_path = None, role = role, use_kind = PlainUse }]) }
     None -> offer(q, lo, hi, hover, Some(def), None)
   }
 
@@ -951,7 +951,7 @@ fn offer_local(q: Q, role: LocalRole, lo: Int, hi: Int, hover: String, def: (Int
 ## offered as `offer` would, and collected as a write.
 fn offer_assigned(q: Q, lo: Int, hi: Int, hover: String, def: (Int, Int)) -> Q =
   match q.found {
-    Some(rs) -> Q { ..q, found: Some(rs ++ [Resolution { lo: lo, hi: hi, def: def, def_path: None, role: NoRole, use_kind: AssignUse }]) }
+    Some(rs) -> Q { ..q, found = Some(rs ++ [Resolution { lo = lo, hi = hi, def = def, def_path = None, role = NoRole, use_kind = AssignUse }]) }
     None -> offer(q, lo, hi, hover, Some(def), None)
   }
 
@@ -961,7 +961,7 @@ fn collect_also(q: Q, lo: Int, hi: Int, s: Site, k: UseKind) -> Q =
   match q.found {
     Some(rs) ->
       match s.def {
-        Some(d) -> Q { ..q, found: Some(rs ++ [Resolution { lo: lo, hi: hi, def: d, def_path: s.dp, role: NoRole, use_kind: k }]) }
+        Some(d) -> Q { ..q, found = Some(rs ++ [Resolution { lo = lo, hi = hi, def = d, def_path = s.dp, role = NoRole, use_kind = k }]) }
         None -> q
       }
     None -> q
@@ -1058,11 +1058,11 @@ type Holder = { m: Module, def_path: Option[String], jump: Bool, home: DocHome }
 
 fn holder_by_class(qc: QCx, owner: String) -> Option[Holder] = {
   if owner == qc.entry.class_name {
-    return Some(Holder { m: qc.entry.m, def_path: None, jump: true, home: DocHere })
+    return Some(Holder { m = qc.entry.m, def_path = None, jump = true, home = DocHere })
   }
   for cm in qc.prog.modules {
     if cm.class_name == owner {
-      return Some(Holder { m: cm.m, def_path: Some(cm.path), jump: true, home: DocFile(cm.path) })
+      return Some(Holder { m = cm.m, def_path = Some(cm.path), jump = true, home = DocFile(cm.path) })
     }
   }
   for tr in qc.std.srcs {
@@ -1074,14 +1074,14 @@ fn holder_by_class(qc: QCx, owner: String) -> Option[Holder] = {
 
 fn std_holder(qc: QCx, mp: String, m: Module) -> Holder =
   match std_file_of(qc.std, mp) {
-    Some(f) -> Holder { m: m, def_path: Some(f), jump: true, home: DocStd(mp) }
-    None -> Holder { m: m, def_path: None, jump: false, home: DocStd(mp) }
+    Some(f) -> Holder { m = m, def_path = Some(f), jump = true, home = DocStd(mp) }
+    None -> Holder { m = m, def_path = None, jump = false, home = DocStd(mp) }
   }
 
 ## A declaration found in `h`: named at `nlo..nhi`, starting on the line of `lo`.
 fn site_in(h: Holder, nlo: Int, nhi: Int, lo: Int) -> Site = {
-  let doc = Some(DocSite { home: h.home, at: DeclAt(lo) })
-  if h.jump { Site { def: Some((nlo, nhi)), dp: h.def_path, doc: doc } } else { Site { ..no_site(), doc: doc } }
+  let doc = Some(DocSite { home = h.home, at = DeclAt(lo) })
+  if h.jump { Site { def = Some((nlo, nhi)), dp = h.def_path, doc = doc } } else { Site { ..no_site(), doc = doc } }
 }
 
 ## Definition site of a signature (the Kotlin sig.nameSpan / sig.srcPath).
@@ -1245,7 +1245,7 @@ fn site_of_const_in(qc: QCx, mod_path: String, name: String) -> Site = {
 fn holder_by_path(qc: QCx, mod_path: String) -> Option[Holder] = {
   for cm in qc.prog.modules {
     if cm.mod_path == mod_path {
-      return Some(Holder { m: cm.m, def_path: Some(cm.path), jump: true, home: DocFile(cm.path) })
+      return Some(Holder { m = cm.m, def_path = Some(cm.path), jump = true, home = DocFile(cm.path) })
     }
   }
   for tr in qc.std.srcs {
@@ -1259,7 +1259,7 @@ fn holder_by_path(qc: QCx, mod_path: String) -> Option[Holder] = {
 ## it: what a module path on a `use` line hovers with.
 fn module_doc_site(qc: QCx, mod_path: String) -> Option[DocSite] =
   match holder_by_path(qc, mod_path) {
-    Some(h) -> Some(DocSite { home: h.home, at: ModuleDoc })
+    Some(h) -> Some(DocSite { home = h.home, at = ModuleDoc })
     None -> None
   }
 
@@ -1300,7 +1300,7 @@ fn member_doc_site(qc: QCx, mod_path: String, name: String) -> Option[DocSite] =
     None -> return None
   }
   match decl_lo_named(h.m, name) {
-    Some(lo) -> Some(DocSite { home: h.home, at: DeclAt(lo) })
+    Some(lo) -> Some(DocSite { home = h.home, at = DeclAt(lo) })
     None -> None
   }
 }
@@ -1363,7 +1363,7 @@ fn scope_doc_site(qc: QCx, label: String, kind: Int) -> Option[DocSite] = {
   if kind != 7 && kind != 8 && kind != 20 && kind != 23 { return None }
   # a trait, an effect, an alias: declared here, or brought in by name
   match decl_lo_named(qc.entry.m, label) {
-    Some(lo) -> return Some(DocSite { home: DocHere, at: DeclAt(lo) })
+    Some(lo) -> return Some(DocSite { home = DocHere, at = DeclAt(lo) })
     None -> ()
   }
   match map.get(qc.entry.cx.imported_names, label) {
@@ -1639,7 +1639,7 @@ fn visit_tparams(qc: QCx, q0: Q, tparams: List[TypeParamDecl]) -> (Q, List[TpBin
   var q = q0
   var out: List[TpBinder] = []
   for tp in tparams {
-    let b = TpBinder { name: tp.name, lo: tp.lo, hi: tp.lo + len(tp.name) }
+    let b = TpBinder { name = tp.name, lo = tp.lo, hi = tp.lo + len(tp.name) }
     if spelled(qc, b.lo, b.hi, b.name) {
       out = out ++ [b]
       q = offer(q, b.lo, b.hi, "type parameter " ++ b.name, Some((b.lo, b.hi)), None)
@@ -1676,7 +1676,7 @@ fn bracket_binders(qc: QCx, q0: Q, from: Int, names: List[String]) -> (Q, List[T
       if not after_bang {
         let word = slice_cps(cps, s0, i)
         if word == names[k] {
-          let b = TpBinder { name: word, lo: s0, hi: i }
+          let b = TpBinder { name = word, lo = s0, hi = i }
           out = out ++ [b]
           q = offer(q, s0, i, "type parameter " ++ word, Some((s0, i)), None)
           k = k + 1
@@ -1732,8 +1732,8 @@ fn module_target(qc: QCx, path: String, lo: Int, hi: Int) -> Target = {
     None -> no_def()
   }
   Target {
-    lo: lo, hi: hi, hover: "use ${path}", def: udef, def_path: upath, sig: None,
-    doc: module_doc_site(qc, path), expr: None
+    lo = lo, hi = hi, hover = "use ${path}", def = udef, def_path = upath, sig = None,
+    doc = module_doc_site(qc, path), expr = None
   }
 }
 
@@ -1924,7 +1924,7 @@ fn site_of_param(qc: QCx, s: Sig, i: Int) -> Site = {
               return match get(f.params, i) {
                 Some(p) -> {
                   let st = site_in(h, p.lo, p.hi, p.lo)
-                  Site { ..st, doc: None }
+                  Site { ..st, doc = None }
                 }
                 None -> no_site()
               }
@@ -2040,7 +2040,7 @@ fn offer_arm_names(qc: QCx, q0: Q, eff_name: String, arms: List[HandlerArm]) -> 
 
 fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
   # a declaration's type parameters are its own: none is in scope at the next
-  var q = Q { ..q0, tps: [] }
+  var q = Q { ..q0, tps = [] }
   match d {
     DFn(f) -> {
       q = visit_fn_decl(qc, q, f, [identity.Named(identity.FunctionDecl, f.name)])
@@ -2084,7 +2084,7 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
     DTrait(name, tp, _, _, methods, _, _, _, lo, _, nlo, nhi) -> {
       q = offer_at(q, nlo, nhi, "trait " ++ name ++ "[" ++ tp ++ "]", here(nlo, nhi, lo))
       let (qb, bs) = bracket_binders(qc, q, nhi, [tp])
-      q = Q { ..qb, tps: bs }
+      q = Q { ..qb, tps = bs }
       let tid = map.get(qc.entry.cx.traits_by_name, name)
       for m in methods {
         q = visit_param_types(qc, q, m.params)
@@ -2131,7 +2131,7 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
     DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, eff_binds, _, _) -> {
       q = offer(q, tlo, thi, "impl " ++ trait_name ++ "[...]", Some((tlo, thi)), None)
       let (qb, bs) = visit_tparams(qc, q, tparams)
-      q = Q { ..qb, tps: bs }
+      q = Q { ..qb, tps = bs }
       q = visit_written_type(qc, q, subject, WtStorage)
       for binding in assoc { q = visit_written_type(qc, q, binding.tref, WtStorage) }
       # `effect E = !Ask`: the row's atoms name effects like any other row
@@ -2143,7 +2143,7 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
     }
     DType(t) -> {
       let (qb, bs) = bracket_binders(qc, q, t.nhi, t.tparams)
-      q = Q { ..qb, tps: bs }
+      q = Q { ..qb, tps = bs }
       match t.alias_target {
         Some(target) -> { q = visit_written_type(qc, q, target, WtStorage) }
         None -> ()
@@ -2224,13 +2224,13 @@ fn const_owner(qc: QCx, owner: String, name: String) -> String =
 
 fn value_home(qc: QCx, mod_path: String) -> Option[ValueHome] = {
   let e = qc.entry
-  if mod_path == e.mod_path { return Some(ValueHome { cx: e.cx, tm: e.tm, ct: e.ct, own: true }) }
+  if mod_path == e.mod_path { return Some(ValueHome { cx = e.cx, tm = e.tm, ct = e.ct, own = true }) }
   for cm in qc.prog.modules {
-    if cm.mod_path == mod_path { return Some(ValueHome { cx: cm.cx, tm: cm.tm, ct: cm.ct, own: false }) }
+    if cm.mod_path == mod_path { return Some(ValueHome { cx = cm.cx, tm = cm.tm, ct = cm.ct, own = false }) }
   }
   for sm in qc.std.mods {
     let (mp, cx, tm, ct) = sm
-    if mp == mod_path { return Some(ValueHome { cx: cx, tm: tm, ct: ct, own: false }) }
+    if mp == mod_path { return Some(ValueHome { cx = cx, tm = tm, ct = ct, own = false }) }
   }
   None
 }
@@ -2271,7 +2271,7 @@ fn comptime_text(qc: QCx, lo: Int, hi: Int, t: Ty) -> String = {
       }
     None ->
       head ++ "\n" ++
-      not_evaluated(ValueHome { cx: e.cx, tm: e.tm, ct: e.ct, own: true }, e.mod_path, Some((lo, hi)))
+      not_evaluated(ValueHome { cx = e.cx, tm = e.tm, ct = e.ct, own = true }, e.mod_path, Some((lo, hi)))
   }
 }
 
@@ -2329,7 +2329,7 @@ fn tconst_init(qc: QCx, name: String) -> Option[TExpr] =
 fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
   # an impl method sees its impl's parameters as well as its own
   let (qb, bs) = visit_tparams(qc, q0, f.tparams)
-  var q = Q { ..qb, tps: q0.tps ++ bs }
+  var q = Q { ..qb, tps = q0.tps ++ bs }
   q = visit_param_types(qc, q, f.params)
   match f.ret {
     Some(ret) -> { q = visit_written_type(qc, q, ret, WtReturn) }
@@ -2355,7 +2355,7 @@ fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
     }
     k = k + 1
   }
-  Q { ..walk_e(qc, q, f.body, tf_body(tf)), tps: q0.tps }
+  Q { ..walk_e(qc, q, f.body, tf_body(tf)), tps = q0.tps }
 }
 
 ## Each parameter of `params` at its declaration, typed by `tf`'s symbols.
@@ -2469,7 +2469,7 @@ fn tdefault_body(tf: Option[TFun], k: Int) -> Option[TExpr] =
 fn visit_selective(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
   let q1 = visit_selective_at(qc, q0, exp, imp)
   match imp.local {
-    Some(r) -> visit_selective_at(qc, q1, exp, ImportName { ..imp, lo: r.lo, hi: r.hi })
+    Some(r) -> visit_selective_at(qc, q1, exp, ImportName { ..imp, lo = r.lo, hi = r.hi })
     None -> q1
   }
 }
@@ -2895,8 +2895,8 @@ fn offer_lit_atom(qc: QCx, q: Q, pe: Expr, te: Option[TExpr]) -> Q = {
     None -> first
   }
   if line == None && first == ty && not lit_via_trait_node(t) { return q }
-  let target = Target { lo: lo, hi: hi, hover: hover, def: None, def_path: None, sig: None, doc: None,
-    expr: if lit_via_trait_node(t) { Some(t) } else { None } }
+  let target = Target { lo = lo, hi = hi, hover = hover, def = None, def_path = None, sig = None, doc = None,
+    expr = if lit_via_trait_node(t) { Some(t) } else { None } }
   offer_target(q, target)
 }
 
@@ -3080,8 +3080,8 @@ fn offer_operator(qc: QCx, q: Q, t: TExpr, olo: Int, ohi: Int) -> Q = {
   let ty = show_ty(qc, tex_ty(t))
   let sg = "fn(" ++ join(map(args, a => show_ty(qc, tex_ty(a))), ", ") ++ ") -> " ++ ty
   offer_target(q, Target {
-    lo: olo, hi: ohi, hover: ty ++ "\n" ++ op ++ " " ++ via ++ ": " ++ sg, def: site.def, def_path: site.dp,
-    sig: None, doc: site.doc, expr: Some(t)
+    lo = olo, hi = ohi, hover = ty ++ "\n" ++ op ++ " " ++ via ++ ": " ++ sg, def = site.def, def_path = site.dp,
+    sig = None, doc = site.doc, expr = Some(t)
   })
 }
 
@@ -3149,7 +3149,7 @@ fn bound_site(lists: List[List[TypeParamDecl]], tname: String, tr: String) -> Si
     for tp in tps {
       if tp.name == tname {
         for b in tp.bounds {
-          if b.name == tr { return Site { ..no_site(), def: Some((b.lo, b.hi)) } }
+          if b.name == tr { return Site { ..no_site(), def = Some((b.lo, b.hi)) } }
         }
       }
     }
@@ -3192,7 +3192,7 @@ fn note_span(q: Q, pe: Expr, te: Option[TExpr]) -> Q =
     Some((slo, shi)) ->
       if q.span_ty == None && e_lo(pe) == slo && e_hi(pe) == shi {
         match te {
-          Some(t) -> Q { ..q, span_ty: Some(tex_ty(t)) }
+          Some(t) -> Q { ..q, span_ty = Some(tex_ty(t)) }
           None -> q
         }
       } else {
@@ -3234,8 +3234,8 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
     Some(t) ->
       if live(q, e_lo(pe), e_hi(pe)) {
         q = offer_target(q, Target {
-          lo: e_lo(pe), hi: e_hi(pe), hover: show_ty(qc, tex_ty(t)), def: None, def_path: None,
-          sig: None, doc: None, expr: Some(t)
+          lo = e_lo(pe), hi = e_hi(pe), hover = show_ty(qc, tex_ty(t)), def = None, def_path = None,
+          sig = None, doc = None, expr = Some(t)
         })
       }
     None -> ()
@@ -4316,7 +4316,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
       }
     SFor(pat, from, to, body, _, _) -> {
       if pat_lo(pat) <= q.offset && q.offset <= pat_hi(pat) {
-        q = Q { ..q, in_for_pattern: true }
+        q = Q { ..q, in_for_pattern = true }
       }
       match ts {
         Some(TSFor(tpat, _, tfrom, tto, _, tbody, _, _, _)) -> {

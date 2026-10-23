@@ -19,8 +19,8 @@ impl StagedCond[Pure] {
 impl StagedVar[Val] {
   type Cell = Slot
   effect StagedVar = !Rec
-  fn var_open(v: Val) -> Slot !Rec = Slot { n: v.n }
-  fn var_get(c: Slot) -> Val !Rec = Val { n: c.n }
+  fn var_open(v: Val) -> Slot !Rec = Slot { n= v.n }
+  fn var_get(c: Slot) -> Val !Rec = Val { n= c.n }
   fn var_set(c: Slot, v: Val) -> Unit !Rec = emit("set")
 }
 
@@ -33,7 +33,7 @@ pub fn host_read(c: Cond) -> Unit !Rec = {
   var n = 0
   if c { emit(to_string(n)) }
 }
-pub fn values(c: Cond) -> Val !Rec = if c { Val { n: 1 } } else { Val { n: 2 } }
+pub fn values(c: Cond) -> Val !Rec = if c { Val { n= 1 } } else { Val { n= 2 } }
 pub fn let_value(c: Cond) -> Unit !Rec = {
   let x = if c { 1 } else { 2 }
 }
@@ -51,20 +51,20 @@ pub fn outer_loop(c: Cond) -> Unit !Rec = {
   for i in 0..2 { if c { break } else { continue } }
 }
 pub fn captured(c: Cond) -> Unit !Rec = {
-  var v = Val { n: 1 }
+  var v = Val { n= 1 }
   if c {
     let f = () => v
     let g = (x: Val) => { v = x }
   }
 }
 pub fn with_capture(c: Cond) -> Unit !Rec = {
-  var v = Val { n: 1 }
+  var v = Val { n= 1 }
   if c { with ignored <- wrap()
     let snapshot = v }
 }
 fn wrap(f: fn(Unit) -> Unit !Rec) -> Unit !Rec = f(())
 pub fn handler_capture(c: Cond) -> Unit !Rec = {
-  var v = Val { n: 1 }
+  var v = Val { n= 1 }
   if c { with handle Rec { emit(s) => { let snapshot = v } }
     emit("x") }
 }
@@ -72,11 +72,11 @@ pub fn pure_arms(c: Pure) -> Unit !io = { if c { println("no") } }
 pub fn excess_effect(c: Cond) -> Unit !(Rec | io) = { if c { println("no") } }
 pub fn missing_effect(c: Cond) -> Unit = { if c { emit("missing") } }
 pub fn missing_cell_effect(c: Pure) -> Unit !Rec = {
-  var v = Val { n: 1 }
+  var v = Val { n= 1 }
   if c { v = v }
 }
 pub fn ordinary_lambda(c: Cond) -> Unit !Rec = {
-  var v = Val { n: 1 }
+  var v = Val { n= 1 }
   let f = () => { if c { v = v } }
 }
 pub fn local_jumps(c: Cond) -> Unit !Rec = {
@@ -104,7 +104,7 @@ pub type ResultSlot = { value: Option[Val] }
 impl StagedResult[Val] {
   type Slot = ResultSlot
   effect StagedResult = !Rec
-  fn result_open() -> ResultSlot !Rec = ResultSlot { value: None }
+  fn result_open() -> ResultSlot !Rec = ResultSlot { value= None }
   fn result_set(s: ResultSlot, v: Val) -> Unit !Rec = emit("result")
   fn result_get(s: ResultSlot) -> Val !Rec = s.value!
 }
@@ -115,7 +115,7 @@ pub fn host_result(c: Cond, host: Int) -> Int !Rec = if c { host } else { host }
 pub fn one_result(c: Cond, v: Val) -> Val !Rec = if c { v } else { () }
 pub fn no_result_else(c: Cond, v: Val) -> Val !Rec = if c { v }
 pub fn escaped_result(c: Cond) -> Val !Rec = {
-  let answer = if c { answer } else { Val { n: 2 } }
+  let answer = if c { answer } else { Val { n= 2 } }
   answer
 }
 pub fn slot_effect(c: Pure, v: Val) -> Val !Rec = if c { v } else { v }

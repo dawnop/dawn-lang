@@ -84,12 +84,12 @@ fn diff_at[W: Tree + Eq](old: W, new: W, path: List[Int]) -> List[Patch[W]] =
     # a vocabulary's leaves need no field comparison of their own.
     match relate(old, new) {
       Unrelated -> {
-        let rp: Patch[W] = Patch { path: path, op: Replace(w: new) }
+        let rp: Patch[W] = Patch { path = path, op = Replace(w = new) }
         [rp]
       }
       Same -> diff_kids(kids(old), kids(new), path, 0, [])
       SelfDiffers -> {
-        let sp: Patch[W] = Patch { path: path, op: SetSelf(w: new) }
+        let sp: Patch[W] = Patch { path = path, op = SetSelf(w = new) }
         [sp] ++ diff_kids(kids(old), kids(new), path, 0, [])
       }
     }
@@ -123,10 +123,10 @@ fn diff_indexed[W: Tree + Eq](
   if i < common {
     diff_indexed(old, new, path, i + 1, acc ++ diff_at(old[i], new[i], path ++ [i]))
   } else if len(new) > common {
-    let ap: Patch[W] = Patch { path: path, op: AppendKids(ws: list.drop(new, common)) }
+    let ap: Patch[W] = Patch { path = path, op = AppendKids(ws = list.drop(new, common)) }
     acc ++ [ap]
   } else if len(old) > common {
-    let tp: Patch[W] = Patch { path: path, op: TruncateKids(keep: common) }
+    let tp: Patch[W] = Patch { path = path, op = TruncateKids(keep = common) }
     acc ++ [tp]
   } else {
     acc
@@ -168,7 +168,7 @@ fn diff_keyed[W: Tree + Eq](
   let gone: List[Op[W]] = drops(ok, nk, len(ok) - 1, [])
   let survivors = list.filter(ok, k => list.contains(nk, k))
   let placed: List[Op[W]] = place(new, nk, survivors, 0, [])
-  let structural = list.map(gone ++ placed, o => Patch { path: path, op: o })
+  let structural = list.map(gone ++ placed, o => Patch { path = path, op = o })
   structural ++ descend(old, ok, new, nk, 0, [], path)
 }
 
@@ -181,7 +181,7 @@ fn drops[W](ok: List[String], nk: List[String], j: Int, acc: List[Op[W]]) -> Lis
     drops(ok, nk, j - 1, acc)
   } else {
     {
-      let rm: Op[W] = RemoveKid(at: j)
+      let rm: Op[W] = RemoveKid(at = j)
       drops(ok, nk, j - 1, acc ++ [rm])
     }
   }
@@ -203,7 +203,7 @@ fn place[W](
     let k = nk[t]
     match list.index_of(cur, k) {
       None -> {
-        let ins: Op[W] = InsertKid(at: t, w: new[t])
+        let ins: Op[W] = InsertKid(at = t, w = new[t])
         place(new, nk, list.take(cur, t) ++ [k] ++ list.drop(cur, t), t + 1, acc ++ [ins])
       }
       Some(p) ->
@@ -211,7 +211,7 @@ fn place[W](
           place(new, nk, cur, t + 1, acc)
         } else {
           let without = list.take(cur, p) ++ list.drop(cur, p + 1)
-          let mv: Op[W] = MoveKid(from: p, to: t)
+          let mv: Op[W] = MoveKid(from = p, to = t)
           place(new, nk, list.take(without, t) ++ [k] ++ list.drop(without, t), t + 1, acc ++ [mv])
         }
     }
@@ -312,8 +312,8 @@ impl Tree[Cell] {
   fn rekid(w: Cell, ks: List[Cell]) -> Cell =
     match w {
       Atom(_) -> w
-      Tagged(t, _) -> if list.is_empty(ks) { w } else { Tagged(tag: t, kid: ks[0]) }
-      Group(_) -> Group(ks: ks)
+      Tagged(t, _) -> if list.is_empty(ks) { w } else { Tagged(tag = t, kid = ks[0]) }
+      Group(_) -> Group(ks = ks)
     }
 
   fn relate(old: Cell, new: Cell) -> Rel =
@@ -339,26 +339,26 @@ impl Tree[Cell] {
 ## every other in-place update here is followed only by `Replace` patches and
 ## replacing an already-correct child with itself is idempotent.
 fn corpus() -> List[Cell] = {
-  let deep: Cell = Group(ks: [Atom(v: "deep"), Atom(v: "b")])
+  let deep: Cell = Group(ks = [Atom(v = "deep"), Atom(v = "b")])
   [
-    Atom(v: "a"),
-    Atom(v: "b"),
-    Tagged(tag: 1, kid: Atom(v: "x")),
-    Tagged(tag: 2, kid: Atom(v: "x")),
-    Tagged(tag: 3, kid: Atom(v: "y")),
-    Tagged(tag: 0, kid: deep),
-    Tagged(tag: 1, kid: deep),
-    Tagged(tag: 2, kid: deep),
-    Group(ks: []),
-    Group(ks: [Atom(v: "a")]),
-    Group(ks: [Atom(v: "a"), Atom(v: "b"), Atom(v: "c")]),
-    Group(ks: [Atom(v: "a"), Atom(v: "c")]),
-    Group(ks: [Atom(v: "one"), Atom(v: "two"), Atom(v: "three")]),
-    Group(ks: [Atom(v: "one"), Atom(v: "TWO"), Atom(v: "three")]),
-    Group(ks: [Atom(v: "same"), Group(ks: [Atom(v: "old"), Atom(v: "keep")])]),
-    Group(ks: [Atom(v: "k"), Tagged(tag: 1, kid: Atom(v: "old")), Group(ks: [Atom(v: "x")])]),
-    Tagged(tag: 1, kid: Group(ks: [Atom(v: "g")])),
-    Tagged(tag: 2, kid: Group(ks: [Atom(v: "g"), Atom(v: "h")])),
+    Atom(v = "a"),
+    Atom(v = "b"),
+    Tagged(tag = 1, kid = Atom(v = "x")),
+    Tagged(tag = 2, kid = Atom(v = "x")),
+    Tagged(tag = 3, kid = Atom(v = "y")),
+    Tagged(tag = 0, kid = deep),
+    Tagged(tag = 1, kid = deep),
+    Tagged(tag = 2, kid = deep),
+    Group(ks = []),
+    Group(ks = [Atom(v = "a")]),
+    Group(ks = [Atom(v = "a"), Atom(v = "b"), Atom(v = "c")]),
+    Group(ks = [Atom(v = "a"), Atom(v = "c")]),
+    Group(ks = [Atom(v = "one"), Atom(v = "two"), Atom(v = "three")]),
+    Group(ks = [Atom(v = "one"), Atom(v = "TWO"), Atom(v = "three")]),
+    Group(ks = [Atom(v = "same"), Group(ks = [Atom(v = "old"), Atom(v = "keep")])]),
+    Group(ks = [Atom(v = "k"), Tagged(tag = 1, kid = Atom(v = "old")), Group(ks = [Atom(v = "x")])]),
+    Tagged(tag = 1, kid = Group(ks = [Atom(v = "g")])),
+    Tagged(tag = 2, kid = Group(ks = [Atom(v = "g"), Atom(v = "h")])),
   ]
 }
 
@@ -383,24 +383,24 @@ test "apply replays diff back to the new tree, over every ordered pair" {
 
 test "diff of a tree with itself is empty" {
   let w: Cell =
-    Group(ks: [Tagged(tag: 1, kid: Atom(v: "t")), Group(ks: [Atom(v: "b"), Atom(v: "x")])])
+    Group(ks = [Tagged(tag = 1, kid = Atom(v = "t")), Group(ks = [Atom(v = "b"), Atom(v = "x")])])
   assert list.is_empty(diff(w, w))
-  let leaf: Cell = Atom(v: "a")
+  let leaf: Cell = Atom(v = "a")
   assert list.is_empty(diff(leaf, leaf))
 }
 
 test "an unchanged sibling is never mentioned" {
-  let a: Cell = Group(ks: [Atom(v: "one"), Atom(v: "two"), Atom(v: "three")])
-  let b: Cell = Group(ks: [Atom(v: "one"), Atom(v: "TWO"), Atom(v: "three")])
-  let want: List[Patch[Cell]] = [Patch { path: [1], op: Replace(w: Atom(v: "TWO")) }]
+  let a: Cell = Group(ks = [Atom(v = "one"), Atom(v = "two"), Atom(v = "three")])
+  let b: Cell = Group(ks = [Atom(v = "one"), Atom(v = "TWO"), Atom(v = "three")])
+  let want: List[Patch[Cell]] = [Patch { path = [1], op = Replace(w = Atom(v = "TWO")) }]
   assert diff(a, b) == want
 }
 
 test "a self-only change is one SetSelf, the child is untouched" {
-  let child: Cell = Group(ks: [Atom(v: "deep"), Atom(v: "b")])
-  let a: Cell = Tagged(tag: 1, kid: child)
-  let b: Cell = Tagged(tag: 2, kid: child)
-  let want: List[Patch[Cell]] = [Patch { path: [], op: SetSelf(w: b) }]
+  let child: Cell = Group(ks = [Atom(v = "deep"), Atom(v = "b")])
+  let a: Cell = Tagged(tag = 1, kid = child)
+  let b: Cell = Tagged(tag = 2, kid = child)
+  let want: List[Patch[Cell]] = [Patch { path = [], op = SetSelf(w = b) }]
   assert diff(a, b) == want
   assert apply(a, diff(a, b)) == b
 }
@@ -410,47 +410,47 @@ test "a self-only change is one SetSelf, the child is untouched" {
 ## and is applied to the *old* children; the append that follows then lands on
 ## a list of length one, not on the donor's list of length two.
 test "an in-place update grafts onto the children already in place" {
-  let a: Cell = Tagged(tag: 1, kid: Group(ks: [Atom(v: "g")]))
-  let b: Cell = Tagged(tag: 2, kid: Group(ks: [Atom(v: "g"), Atom(v: "h")]))
+  let a: Cell = Tagged(tag = 1, kid = Group(ks = [Atom(v = "g")]))
+  let b: Cell = Tagged(tag = 2, kid = Group(ks = [Atom(v = "g"), Atom(v = "h")]))
   let want: List[Patch[Cell]] = [
-    Patch { path: [], op: SetSelf(w: b) },
-    Patch { path: [0], op: AppendKids(ws: [Atom(v: "h")]) },
+    Patch { path = [], op = SetSelf(w = b) },
+    Patch { path = [0], op = AppendKids(ws = [Atom(v = "h")]) },
   ]
   assert diff(a, b) == want
   assert apply(a, diff(a, b)) == b
 }
 
 test "tail growth is one append, tail shrink is one truncate" {
-  let a: Cell = Group(ks: [Atom(v: "a")])
-  let b: Cell = Group(ks: [Atom(v: "a"), Atom(v: "b"), Atom(v: "c")])
+  let a: Cell = Group(ks = [Atom(v = "a")])
+  let b: Cell = Group(ks = [Atom(v = "a"), Atom(v = "b"), Atom(v = "c")])
   let grow: List[Patch[Cell]] =
-    [Patch { path: [], op: AppendKids(ws: [Atom(v: "b"), Atom(v: "c")]) }]
+    [Patch { path = [], op = AppendKids(ws = [Atom(v = "b"), Atom(v = "c")]) }]
   assert diff(a, b) == grow
-  let shrink: List[Patch[Cell]] = [Patch { path: [], op: TruncateKids(keep: 1) }]
+  let shrink: List[Patch[Cell]] = [Patch { path = [], op = TruncateKids(keep = 1) }]
   assert diff(b, a) == shrink
 }
 
 test "paths descend through a one-child wrapper at index 0" {
-  let a: Cell = Group(ks: [Atom(v: "k"), Tagged(tag: 1, kid: Atom(v: "old"))])
-  let b: Cell = Group(ks: [Atom(v: "k"), Tagged(tag: 1, kid: Atom(v: "new"))])
-  let want: List[Patch[Cell]] = [Patch { path: [1, 0], op: Replace(w: Atom(v: "new")) }]
+  let a: Cell = Group(ks = [Atom(v = "k"), Tagged(tag = 1, kid = Atom(v = "old"))])
+  let b: Cell = Group(ks = [Atom(v = "k"), Tagged(tag = 1, kid = Atom(v = "new"))])
+  let want: List[Patch[Cell]] = [Patch { path = [1, 0], op = Replace(w = Atom(v = "new")) }]
   assert diff(a, b) == want
   assert apply(a, diff(a, b)) == b
 }
 
 test "middle deletion rewrites the tail pairwise, cost pinned not hidden" {
-  let a: Cell = Group(ks: [Atom(v: "one"), Atom(v: "two"), Atom(v: "three")])
-  let b: Cell = Group(ks: [Atom(v: "one"), Atom(v: "three")])
+  let a: Cell = Group(ks = [Atom(v = "one"), Atom(v = "two"), Atom(v = "three")])
+  let b: Cell = Group(ks = [Atom(v = "one"), Atom(v = "three")])
   assert len(diff(a, b)) == 2
   assert apply(a, diff(a, b)) == b
 }
 
 test "apply is total against an address that does not exist" {
-  let leaf: Cell = Atom(v: "a")
-  let nowhere: List[Patch[Cell]] = [Patch { path: [3, 1], op: Replace(w: Atom(v: "z")) }]
+  let leaf: Cell = Atom(v = "a")
+  let nowhere: List[Patch[Cell]] = [Patch { path = [3, 1], op = Replace(w = Atom(v = "z")) }]
   assert apply(leaf, nowhere) == leaf
-  let g: Cell = Group(ks: [Atom(v: "a")])
-  let negative: List[Patch[Cell]] = [Patch { path: [-1], op: Replace(w: Atom(v: "z")) }]
+  let g: Cell = Group(ks = [Atom(v = "a")])
+  let negative: List[Patch[Cell]] = [Patch { path = [-1], op = Replace(w = Atom(v = "z")) }]
   assert apply(g, negative) == g
 }
 
@@ -481,7 +481,7 @@ impl Tree[KCell] {
     match w {
       KLeaf(_, _) -> w
       KBare(_) -> w
-      KBox(k, _) -> KBox(k: k, ks: ks)
+      KBox(k, _) -> KBox(k = k, ks = ks)
     }
 
   # A key change is `Unrelated` here for the same reason it is in the DOM
@@ -505,12 +505,12 @@ impl Tree[KCell] {
     }
 }
 
-fn kbox(ks: List[KCell]) -> KCell = KBox(k: "root", ks: ks)
+fn kbox(ks: List[KCell]) -> KCell = KBox(k = "root", ks = ks)
 
-fn ka() -> KCell = KLeaf(k: "a", v: "A")
-fn kb() -> KCell = KLeaf(k: "b", v: "B")
-fn kc() -> KCell = KLeaf(k: "c", v: "C")
-fn kd() -> KCell = KLeaf(k: "d", v: "D")
+fn ka() -> KCell = KLeaf(k = "a", v = "A")
+fn kb() -> KCell = KLeaf(k = "b", v = "B")
+fn kc() -> KCell = KLeaf(k = "c", v = "C")
+fn kd() -> KCell = KLeaf(k = "d", v = "D")
 
 ## Every shape the keyed path distinguishes: the empty list, lists that grow,
 ## shrink, rotate and reverse, a child whose own data changed under an
@@ -528,14 +528,14 @@ fn kcorpus() -> List[KCell] = [
   kbox([ka(), kb(), kc(), kd()]),
   kbox([kd(), ka(), kb(), kc()]),
   kbox([ka(), kc(), kb(), kd()]),
-  kbox([KLeaf(k: "a", v: "CHANGED"), kb(), kc()]),
-  kbox([KBox(k: "a", ks: [kb()]), kc()]),
-  kbox([KBox(k: "a", ks: [kb(), kc()]), kc()]),
+  kbox([KLeaf(k = "a", v = "CHANGED"), kb(), kc()]),
+  kbox([KBox(k = "a", ks = [kb()]), kc()]),
+  kbox([KBox(k = "a", ks = [kb(), kc()]), kc()]),
   kbox([ka(), ka()]),
   kbox([ka(), ka(), kb()]),
-  kbox([ka(), KBare(v: "x")]),
-  kbox([KBare(v: "x"), ka()]),
-  kbox([KBare(v: "y")]),
+  kbox([ka(), KBare(v = "x")]),
+  kbox([KBare(v = "x"), ka()]),
+  kbox([KBare(v = "y")]),
 ]
 
 fn kroundtrips(x: KCell, y: KCell) -> Bool = apply(x, diff(x, y)) == y
@@ -560,7 +560,7 @@ test "keyed: apply replays diff back to the new tree, over every ordered pair" {
 test "keyed: a removal in the middle is one op, whatever the length" {
   let src = kbox([ka(), kb(), kc(), kd()])
   let gone = kbox([ka(), kc(), kd()])
-  let want: List[Patch[KCell]] = [Patch { path: [], op: RemoveKid(at: 1) }]
+  let want: List[Patch[KCell]] = [Patch { path = [], op = RemoveKid(at = 1) }]
   assert diff(src, gone) == want
   assert apply(src, diff(src, gone)) == gone
 }
@@ -568,7 +568,7 @@ test "keyed: a removal in the middle is one op, whatever the length" {
 test "keyed: an insertion in the middle is one op and never mentions a neighbour" {
   let src = kbox([ka(), kc()])
   let ins = kbox([ka(), kb(), kc()])
-  let want: List[Patch[KCell]] = [Patch { path: [], op: InsertKid(at: 1, w: kb()) }]
+  let want: List[Patch[KCell]] = [Patch { path = [], op = InsertKid(at = 1, w = kb()) }]
   assert diff(src, ins) == want
   assert apply(src, diff(src, ins)) == ins
 }
@@ -576,7 +576,7 @@ test "keyed: an insertion in the middle is one op and never mentions a neighbour
 test "keyed: a rotation is one move, and a reversal is n-1 of them" {
   let src = kbox([ka(), kb(), kc(), kd()])
   let rot = kbox([kd(), ka(), kb(), kc()])
-  assert diff(src, rot) == [Patch { path: [], op: MoveKid(from: 3, to: 0) }]
+  assert diff(src, rot) == [Patch { path = [], op = MoveKid(from = 3, to = 0) }]
   # n-1 is the lower bound a minimum-move algorithm would also pay here, so
   # this pins that the simple placement is not paying more than one for it.
   assert len(diff(src, kbox([kd(), kc(), kb(), ka()]))) == 3
@@ -585,11 +585,11 @@ test "keyed: a rotation is one move, and a reversal is n-1 of them" {
 test "keyed: a moved child still gets its own subtree diffed, at its new address" {
   # The two phases in one assertion: the move is addressed at the parent and
   # the descent is addressed at index 1, which is where the move just put it.
-  let src = kbox([KBox(k: "x", ks: [ka()]), KLeaf(k: "y", v: "Y")])
-  let dst = kbox([KLeaf(k: "y", v: "Y"), KBox(k: "x", ks: [ka(), kb()])])
+  let src = kbox([KBox(k = "x", ks = [ka()]), KLeaf(k = "y", v = "Y")])
+  let dst = kbox([KLeaf(k = "y", v = "Y"), KBox(k = "x", ks = [ka(), kb()])])
   let want: List[Patch[KCell]] = [
-    Patch { path: [], op: MoveKid(from: 1, to: 0) },
-    Patch { path: [1], op: InsertKid(at: 1, w: kb()) },
+    Patch { path = [], op = MoveKid(from = 1, to = 0) },
+    Patch { path = [1], op = InsertKid(at = 1, w = kb()) },
   ]
   assert diff(src, dst) == want
   assert apply(src, diff(src, dst)) == dst
@@ -601,8 +601,8 @@ test "keyed: removals are emitted highest index first" {
   let src = kbox([ka(), kb(), kc(), kd()])
   let dst = kbox([ka(), kc()])
   let want: List[Patch[KCell]] = [
-    Patch { path: [], op: RemoveKid(at: 3) },
-    Patch { path: [], op: RemoveKid(at: 1) },
+    Patch { path = [], op = RemoveKid(at = 3) },
+    Patch { path = [], op = RemoveKid(at = 1) },
   ]
   assert diff(src, dst) == want
   assert apply(src, diff(src, dst)) == dst
@@ -623,17 +623,17 @@ test "keyed: a repeated key falls back to index pairing" {
   # gives, which the ordered pairs above have already proven correct.
   let dup = kbox([ka(), ka()])
   let one = kbox([ka()])
-  assert diff(dup, one) == [Patch { path: [], op: TruncateKids(keep: 1) }]
+  assert diff(dup, one) == [Patch { path = [], op = TruncateKids(keep = 1) }]
   assert apply(dup, diff(dup, one)) == one
 }
 
 test "keyed: one unkeyable sibling puts the whole list back on indices" {
-  let mixed = kbox([ka(), KBare(v: "x"), kc()])
+  let mixed = kbox([ka(), KBare(v = "x"), kc()])
   let shorter = kbox([ka(), kc()])
   # Index pairing: KBare at 1 is replaced by kc, then the tail is truncated.
   let want: List[Patch[KCell]] = [
-    Patch { path: [1], op: Replace(w: kc()) },
-    Patch { path: [], op: TruncateKids(keep: 2) },
+    Patch { path = [1], op = Replace(w = kc()) },
+    Patch { path = [], op = TruncateKids(keep = 2) },
   ]
   assert diff(mixed, shorter) == want
   assert apply(mixed, diff(mixed, shorter)) == shorter
@@ -641,17 +641,17 @@ test "keyed: one unkeyable sibling puts the whole list back on indices" {
 
 test "keyed: apply is total against keyed ops that address nothing" {
   let g = kbox([ka(), kb()])
-  let far: List[Patch[KCell]] = [Patch { path: [], op: RemoveKid(at: 9) }]
+  let far: List[Patch[KCell]] = [Patch { path = [], op = RemoveKid(at = 9) }]
   assert apply(g, far) == g
-  let back: List[Patch[KCell]] = [Patch { path: [], op: MoveKid(from: 0, to: 5) }]
+  let back: List[Patch[KCell]] = [Patch { path = [], op = MoveKid(from = 0, to = 5) }]
   assert apply(g, back) == g
-  let neg: List[Patch[KCell]] = [Patch { path: [], op: MoveKid(from: -1, to: 0) }]
+  let neg: List[Patch[KCell]] = [Patch { path = [], op = MoveKid(from = -1, to = 0) }]
   assert apply(g, neg) == g
   # An insert clamps rather than declining, since a list has a position past
   # its end and that is the position an out-of-range insert means.
-  let past: List[Patch[KCell]] = [Patch { path: [], op: InsertKid(at: 9, w: kc()) }]
+  let past: List[Patch[KCell]] = [Patch { path = [], op = InsertKid(at = 9, w = kc()) }]
   assert apply(g, past) == kbox([ka(), kb(), kc()])
-  let before: List[Patch[KCell]] = [Patch { path: [], op: InsertKid(at: -3, w: kc()) }]
+  let before: List[Patch[KCell]] = [Patch { path = [], op = InsertKid(at = -3, w = kc()) }]
   assert apply(g, before) == kbox([kc(), ka(), kb()])
 }
 
@@ -666,7 +666,7 @@ fn lcg(seed: Int) -> Int = (seed * 1103515245 + 12345) % 2147483648
 
 fn pick(seed: Int, n: Int) -> KCell = {
   let i = (seed / 7) % n
-  KLeaf(k: to_string(i), v: to_string(seed % 3))
+  KLeaf(k = to_string(i), v = to_string(seed % 3))
 }
 
 # A list of distinct keys drawn from 0..n, in whatever order the generator

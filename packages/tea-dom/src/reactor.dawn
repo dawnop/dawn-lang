@@ -137,7 +137,7 @@ pub fn turn_with_flags[Mo, M](
     Bad(reason) -> reply_err("bad-request", reason)
     Init(flags) -> {
       let m0 = init(flags)
-      let root: Patch[Node[M]] = Patch { path: [], op: Replace(w: view(m0)) }
+      let root: Patch[Node[M]] = Patch { path = [], op = Replace(w = view(m0)) }
       reply_ok(encode(m0), [root])
     }
     Supply(_, tag, _) -> reply_err("bad-request", no_supply(tag))
@@ -274,9 +274,9 @@ pub fn turn_shown[S, Mo, M](
     Init(flags) -> {
       let (kept, m0) = init(flags)
       let tree = view(kept, m0)
-      let root: Patch[Node[M]] = Patch { path: [], op: Replace(w: tree) }
+      let root: Patch[Node[M]] = Patch { path = [], op = Replace(w = tree) }
       let text = encode(m0)
-      (Some(kept), Some(Shown { model: text, tree: tree }), reply_ok(text, [root]))
+      (Some(kept), Some(Shown { model = text, tree = tree }), reply_ok(text, [root]))
     }
     Event(model, path, event, payload) ->
       match state {
@@ -361,7 +361,7 @@ fn folded[S, Mo, M](
   let (m1, asked) = fold_cmds(m0, msg, (acc, x) => update(kept, acc, x))
   let text = encode(m1)
   let new = view(kept, m1)
-  (None, Some(Shown { model: text, tree: new }), reply_ok_asking(text, diff(old, new), asked))
+  (None, Some(Shown { model = text, tree = new }), reply_ok_asking(text, diff(old, new), asked))
 }
 
 fn no_supply(tag: String) -> String =
@@ -505,10 +505,10 @@ fn relive[S, M](
   shown: Option[Shown[M]],
 ) -> Option[Live[S, M]] =
   match replacement {
-    Some(kept) -> Some(Live { kept: kept, shown: shown })
+    Some(kept) -> Some(Live { kept = kept, shown = shown })
     None ->
       match (live, shown) {
-        (Some(l), Some(_)) -> Some(Live { kept: l.kept, shown: shown })
+        (Some(l), Some(_)) -> Some(Live { kept = l.kept, shown = shown })
         _ -> None
       }
   }
@@ -535,53 +535,53 @@ fn enc(m: Counter) -> String = to_string(m.n)
 
 fn dec(s: String) -> Counter =
   match parse_int(s) {
-    Some(n) -> Counter { n: n }
-    None -> Counter { n: 0 }
+    Some(n) -> Counter { n = n }
+    None -> Counter { n = 0 }
   }
 
 fn upd(m: Counter, msg: Msg) -> (Counter, Cmd[Msg]) =
   match msg {
-    Inc -> (Counter { n: m.n + 1 }, NoCmd)
-    Dec -> (Counter { n: m.n - 1 }, NoCmd)
+    Inc -> (Counter { n = m.n + 1 }, NoCmd)
+    Dec -> (Counter { n = m.n - 1 }, NoCmd)
     Set(text) ->
       match parse_int(text) {
-        Some(n) -> (Counter { n: n }, NoCmd)
+        Some(n) -> (Counter { n = n }, NoCmd)
         None -> (m, NoCmd)
       }
-    Twice -> (m, SendMsg(msg: Inc))
+    Twice -> (m, SendMsg(msg = Inc))
   }
 
 fn vw(m: Counter) -> Node[Msg] =
-  Elem(tag: "div", props: [], on: [], kids: [
+  Elem(tag = "div", props = [], on = [], kids = [
     Elem(
-      tag: "button",
-      props: [],
-      on: [On { event: "click", payload: NoData, to_msg: _p => Dec }],
-      kids: [Text(s: "-")],
-      key: None,
+      tag = "button",
+      props = [],
+      on = [On { event = "click", payload = NoData, to_msg = _p => Dec }],
+      kids = [Text(s = "-")],
+      key = None,
     ),
-    Elem(tag: "span", props: [], on: [], kids: [Text(s: to_string(m.n))], key: None),
+    Elem(tag = "span", props = [], on = [], kids = [Text(s = to_string(m.n))], key = None),
     Elem(
-      tag: "button",
-      props: [],
-      on: [On { event: "click", payload: NoData, to_msg: _p => Inc }],
-      kids: [Text(s: "+")],
-      key: None,
+      tag = "button",
+      props = [],
+      on = [On { event = "click", payload = NoData, to_msg = _p => Inc }],
+      kids = [Text(s = "+")],
+      key = None,
     ),
     # Carries no `value` prop on purpose: the assertions below are about one
     # region of the tree changing per turn, and a field that renders the model
     # would put a second patch in every one of them.
     Elem(
-      tag: "input",
-      props: [],
-      on: [On { event: "input", payload: Value, to_msg: Set }],
-      kids: [],
-      key: None,
+      tag = "input",
+      props = [],
+      on = [On { event = "input", payload = Value, to_msg = Set }],
+      kids = [],
+      key = None,
     ),
-  ], key: None)
+  ], key = None)
 
 fn ask(line: String) -> String =
-  turn(line, Counter { n: 0 }, enc, dec, upd, vw)
+  turn(line, Counter { n = 0 }, enc, dec, upd, vw)
 
 test "init answers the initial model and one replace at the root" {
   let out = ask("{\"op\":\"init\"}")
@@ -598,7 +598,7 @@ test "init answers the initial model and one replace at the root" {
 fn from_flags(flags: Option[String]) -> Counter =
   match flags {
     Some(text) -> dec(text)
-    None -> Counter { n: 0 }
+    None -> Counter { n = 0 }
   }
 
 fn ask_flagged(line: String) -> String =
@@ -608,22 +608,22 @@ type Kept = { label: String, by: Int }
 
 fn split_state(flags: Option[String]) -> (Kept, Counter) =
   match flags {
-    Some("blue") -> (Kept { label: "blue", by: 3 }, Counter { n: 0 })
-    _ -> (Kept { label: "plain", by: 1 }, Counter { n: 0 })
+    Some("blue") -> (Kept { label = "blue", by = 3 }, Counter { n = 0 })
+    _ -> (Kept { label = "plain", by = 1 }, Counter { n = 0 })
   }
 
 fn state_upd(state: Kept, m: Counter, msg: Msg) -> (Counter, Cmd[Msg]) =
   match msg {
-    Inc -> (Counter { n: m.n + state.by }, NoCmd)
-    Dec -> (Counter { n: m.n - state.by }, NoCmd)
-    Set(text) -> upd(m, Set(text: text))
-    Twice -> (m, SendMsg(msg: Inc))
+    Inc -> (Counter { n = m.n + state.by }, NoCmd)
+    Dec -> (Counter { n = m.n - state.by }, NoCmd)
+    Set(text) -> upd(m, Set(text = text))
+    Twice -> (m, SendMsg(msg = Inc))
   }
 
 fn state_vw(state: Kept, m: Counter) -> Node[Msg] =
-  Elem(tag: "button", props: [("data-state", state.label)], on: [
-    On { event: "click", payload: NoData, to_msg: _p => Inc },
-  ], kids: [Text(s: to_string(m.n))], key: None)
+  Elem(tag = "button", props = [("data-state", state.label)], on = [
+    On { event = "click", payload = NoData, to_msg = _p => Inc },
+  ], kids = [Text(s = to_string(m.n))], key = None)
 
 fn ask_state(line: String, state: Option[Kept]) -> (Option[Kept], String) =
   turn_with_state(line, state, split_state, enc, dec, state_upd, state_vw)
@@ -639,13 +639,13 @@ test "flags reach init, and the model they build is the one that goes out" {
 
 test "retained state is installed only by init and never enters the model text" {
   let (replacement, out) = ask_state("{\"op\":\"init\",\"flags\":\"blue\"}", None)
-  assert replacement == Some(Kept { label: "blue", by: 3 })
+  assert replacement == Some(Kept { label = "blue", by = 3 })
   # The retained label is visible to the view, while the model field is exactly
   # the mutable counter codec's answer and contains no retained envelope.
   assert str.starts_with(out, "{\"ok\":true,\"model\":\"0\",\"patches\":[")
   assert str.contains(out, "[\"data-state\",\"blue\"]")
 
-  let installed = Kept { label: "blue", by: 3 }
+  let installed = Kept { label = "blue", by = 3 }
   let event = "{\"op\":\"event\",\"model\":\"1\",\"path\":[],\"event\":\"click\"}"
   let (event_replacement, event_out) = ask_state(event, Some(installed))
   # Event can read the state (the step is +3), but it has no API with which to
@@ -663,9 +663,9 @@ test "a retained event needs init, and a later init replaces the state" {
     "{\"ok\":false,\"kind\":\"bad-request\"," ++
     "\"error\":\"an `event` needs a successful `init` first\"}"
 
-  let old = Kept { label: "old", by: 99 }
+  let old = Kept { label = "old", by = 99 }
   let (replacement, out) = ask_state("{\"op\":\"init\"}", Some(old))
-  assert replacement == Some(Kept { label: "plain", by: 1 })
+  assert replacement == Some(Kept { label = "plain", by = 1 })
   assert str.contains(out, "[\"data-state\",\"plain\"]")
 
   # A decoder refusal is not an init and therefore proposes no replacement.
@@ -677,12 +677,12 @@ test "a retained event needs init, and a later init replaces the state" {
 # button hears `dblclick` and nothing else. A turn that routed through a tree
 # rendered from some other model would answer the wrong one of the two.
 fn gated_vw(state: Kept, m: Counter) -> Node[Msg] =
-  Elem(tag: "button", props: [("data-state", state.label)], on: [
-    On { event: if m.n >= 100 { "dblclick" } else { "click" }, payload: NoData, to_msg: _p => Inc },
-  ], kids: [Text(s: to_string(m.n))], key: None)
+  Elem(tag = "button", props = [("data-state", state.label)], on = [
+    On { event = if m.n >= 100 { "dblclick" } else { "click" }, payload = NoData, to_msg = _p => Inc },
+  ], kids = [Text(s = to_string(m.n))], key = None)
 
 fn ask_shown(line: String, shown: Option[Shown[Msg]]) -> (Option[Shown[Msg]], String) = {
-  let kept = Kept { label: "plain", by: 1 }
+  let kept = Kept { label = "plain", by = 1 }
   let (_, next, out) =
     turn_shown(line, Some(kept), shown, split_state, enc, dec, state_upd, gated_vw)
   (next, out)
@@ -695,13 +695,13 @@ test "a kept tree routes the event when the host hands back the model it rendere
   # The kept tree is the one consulted, not a decoration: this one is a lie
   # about model 1 (it hears `dblclick`, which model 1's own tree does not), and
   # the turn believes it because the text matches.
-  let liar = Shown { model: "1", tree: gated_vw(Kept { label: "plain", by: 1 }, Counter { n: 100 }) }
+  let liar = Shown { model = "1", tree = gated_vw(Kept { label = "plain", by = 1 }, Counter { n = 100 }) }
   let (_, out) = ask_shown(click_at("1", "dblclick"), Some(liar))
   assert str.contains(out, "\"model\":\"2\"")
   # And the turn hands back the tree it left the host holding, keyed by the
   # text it sent.
   let (next, _) = ask_shown(click_at("1", "click"), None)
-  assert next == Some(Shown { model: "2", tree: gated_vw(Kept { label: "plain", by: 1 }, Counter { n: 2 }) })
+  assert next == Some(Shown { model = "2", tree = gated_vw(Kept { label = "plain", by = 1 }, Counter { n = 2 }) })
 }
 
 test "a host that hands back a different model is routed through that model's tree" {
@@ -709,7 +709,7 @@ test "a host that hands back a different model is routed through that model's tr
   # comes back holding 100 instead (edited, restored, another tab's), whose
   # tree hears only `dblclick`: the kept tree must not answer for it.
   let (kept, _) = ask_shown(click_at("0", "click"), None)
-  assert kept == Some(Shown { model: "1", tree: gated_vw(Kept { label: "plain", by: 1 }, Counter { n: 1 }) })
+  assert kept == Some(Shown { model = "1", tree = gated_vw(Kept { label = "plain", by = 1 }, Counter { n = 1 }) })
   let (_, stale) = ask_shown(click_at("100", "click"), kept)
   assert stale ==
     "{\"ok\":false,\"kind\":\"no-handler\"," ++
@@ -724,10 +724,10 @@ test "a host that hands back a different model is routed through that model's tr
 }
 
 test "init keeps its tree, and a refusal keeps nothing new" {
-  let kept = Kept { label: "plain", by: 1 }
+  let kept = Kept { label = "plain", by = 1 }
   let (_, shown, _) =
     turn_shown("{\"op\":\"init\"}", None, None, split_state, enc, dec, state_upd, gated_vw)
-  assert shown == Some(Shown { model: "0", tree: gated_vw(kept, Counter { n: 0 }) })
+  assert shown == Some(Shown { model = "0", tree = gated_vw(kept, Counter { n = 0 }) })
   let (refused, _) = ask_shown(click_at("0", "dblclick"), shown)
   assert refused == None
   let (bad, _) = ask_shown("{\"op\":\"event\"}", shown)
@@ -828,14 +828,14 @@ test "what an event means at an address is a question with an answer" {
   # read the message out of the listener". `route.at` says which listener the
   # host's pair resolves to, `node.deliver` says what it makes of a payload,
   # and together they are what `settle` does minus the refusals.
-  let tree = vw(Counter { n: 7 })
+  let tree = vw(Counter { n = 7 })
   match route.at(tree, [3], "input") {
     None -> { assert false }
     Some(l) -> {
-      assert deliver(l, "12") == Set(text: "12")
+      assert deliver(l, "12") == Set(text = "12")
       # Verbatim: the boundary hands over the string it was given and the
       # application decides what it is worth.
-      assert deliver(l, "twelve") == Set(text: "twelve")
+      assert deliver(l, "twelve") == Set(text = "twelve")
     }
   }
   match route.at(tree, [2], "click") {
@@ -874,7 +874,7 @@ test "a command is folded into the same turn, and the reply is still one line" {
   # turn rather than on the wire: `Twice` moves nothing and commands one
   # `Inc`, so a reply of 42 is the fold's answer and 41 would be `update`'s.
   let out = turn("{\"op\":\"event\",\"model\":\"41\",\"path\":[2],\"event\":\"click\"}",
-    Counter { n: 0 }, enc, dec, upd, vw_twice)
+    Counter { n = 0 }, enc, dec, upd, vw_twice)
   assert out ==
     "{\"ok\":true,\"model\":\"42\",\"patches\":" ++
     "[{\"path\":[1,0],\"op\":\"replace\",\"node\":{\"t\":\"text\",\"s\":\"42\"}}]}"
@@ -886,30 +886,30 @@ test "a command is folded into the same turn, and the reply is still one line" {
 # `vw` with the `+` button commanding rather than incrementing. Same shape, so
 # the addresses in the line above are the ones every other test uses.
 fn vw_twice(m: Counter) -> Node[Msg] =
-  Elem(tag: "div", props: [], on: [], kids: [
+  Elem(tag = "div", props = [], on = [], kids = [
     Elem(
-      tag: "button",
-      props: [],
-      on: [On { event: "click", payload: NoData, to_msg: _p => Dec }],
-      kids: [Text(s: "-")],
-      key: None,
+      tag = "button",
+      props = [],
+      on = [On { event = "click", payload = NoData, to_msg = _p => Dec }],
+      kids = [Text(s = "-")],
+      key = None,
     ),
-    Elem(tag: "span", props: [], on: [], kids: [Text(s: to_string(m.n))], key: None),
+    Elem(tag = "span", props = [], on = [], kids = [Text(s = to_string(m.n))], key = None),
     Elem(
-      tag: "button",
-      props: [],
-      on: [On { event: "click", payload: NoData, to_msg: _p => Twice }],
-      kids: [Text(s: "+")],
-      key: None,
+      tag = "button",
+      props = [],
+      on = [On { event = "click", payload = NoData, to_msg = _p => Twice }],
+      kids = [Text(s = "+")],
+      key = None,
     ),
     Elem(
-      tag: "input",
-      props: [],
-      on: [On { event: "input", payload: Value, to_msg: Set }],
-      kids: [],
-      key: None,
+      tag = "input",
+      props = [],
+      on = [On { event = "input", payload = Value, to_msg = Set }],
+      kids = [],
+      key = None,
     ),
-  ], key: None)
+  ], key = None)
 
 # ---- fetch ----------------------------------------------------------------
 #
@@ -930,31 +930,31 @@ derive Show
 
 fn load_enc(m: Loader) -> String = m.status
 
-fn load_dec(s: String) -> Loader = Loader { status: s }
+fn load_dec(s: String) -> Loader = Loader { status = s }
 
-fn load_init(_flags: Option[String]) -> (Int, Loader) = (0, Loader { status: "idle" })
+fn load_init(_flags: Option[String]) -> (Int, Loader) = (0, Loader { status = "idle" })
 
 fn load_upd(_k: Int, m: Loader, msg: LoaderMsg) -> (Loader, Cmd[LoaderMsg]) =
   match msg {
-    Load -> (Loader { status: "loading" }, Fetch(url: "/data.json", tag: "data"))
-    Got(text) -> (Loader { status: "got:" ++ text }, NoCmd)
-    Failed(why) -> (Loader { status: "failed:" ++ why }, NoCmd)
-    Chain -> (m, BatchCmd(cmds: [
-      Fetch(url: "/one", tag: "one"),
-      Fetch(url: "/two", tag: "two"),
+    Load -> (Loader { status = "loading" }, Fetch(url = "/data.json", tag = "data"))
+    Got(text) -> (Loader { status = "got:" ++ text }, NoCmd)
+    Failed(why) -> (Loader { status = "failed:" ++ why }, NoCmd)
+    Chain -> (m, BatchCmd(cmds = [
+      Fetch(url = "/one", tag = "one"),
+      Fetch(url = "/two", tag = "two"),
     ]))
   }
 
 fn load_vw(_k: Int, m: Loader) -> Node[LoaderMsg] =
-  Elem(tag: "div", props: [], on: [
-    On { event: "click", payload: NoData, to_msg: _p => Load },
-    On { event: "dblclick", payload: NoData, to_msg: _p => Chain },
-  ], kids: [Text(s: m.status)], key: None)
+  Elem(tag = "div", props = [], on = [
+    On { event = "click", payload = NoData, to_msg = _p => Load },
+    On { event = "dblclick", payload = NoData, to_msg = _p => Chain },
+  ], kids = [Text(s = m.status)], key = None)
 
 fn load_supplied(tag: String, outcome: Result[String, String]) -> LoaderMsg =
   match outcome {
-    Ok(body) -> Got(text: tag ++ "=" ++ body)
-    Err(why) -> Failed(why: tag ++ "=" ++ why)
+    Ok(body) -> Got(text = tag ++ "=" ++ body)
+    Err(why) -> Failed(why = tag ++ "=" ++ why)
   }
 
 fn load_ask(line: String) -> String = {
@@ -1008,11 +1008,11 @@ test "a supply before init is refused, and so is one on the stateless entry poin
 
 test "the stateless entry point panics on a Fetch it could never answer" {
   match catch_panic(() => turn("{\"op\":\"event\",\"model\":\"0\",\"path\":[2],\"event\":\"click\"}",
-    Counter { n: 0 }, enc, dec, upd_fetching, vw)) {
+    Counter { n = 0 }, enc, dec, upd_fetching, vw)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "this driver cannot run `Fetch`") }
   }
 }
 
 fn upd_fetching(_m: Counter, _msg: Msg) -> (Counter, Cmd[Msg]) =
-  (Counter { n: 1 }, Fetch(url: "/x", tag: "x"))
+  (Counter { n = 1 }, Fetch(url = "/x", tag = "x"))

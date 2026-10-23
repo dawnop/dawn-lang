@@ -95,9 +95,9 @@ pub fn render(
         Some(x) -> x
         None -> panic("jmap: a row of " ++ row_symbol(r) ++ " has no method")
       }
-      let p = Placed { k: rk, pclo: -1, pchi: -1, ipc: -1, row: r, at: abs_of(r, bases) }
+      let p = Placed { k = rk, pclo = -1, pchi = -1, ipc = -1, row = r, at = abs_of(r, bases) }
       placed = placed ++ [if lands(r, map.get(sound, row_symbol(r)) == Some(true)) {
-        Placed { ..p, pclo: r.pclo, pchi: r.pchi, ipc: r.ipc }
+        Placed { ..p, pclo = r.pclo, pchi = r.pchi, ipc = r.ipc }
       } else {
         p
       }]
@@ -190,16 +190,16 @@ fn tiny_class() -> Bytes !io = {
 test "rows sort by method and pc, and an unsound method keeps its rows without pcs" {
   let bs = tiny_class()
   let r = JRow {
-    owner: "m", origin: "f", method: "f", desc: "(J)J", site: CAt(0, 3, 0), what: "direct m.g",
-    pclo: 0, pchi: 2, ipc: 1
+    owner = "m", origin = "f", method = "f", desc = "(J)J", site = CAt(0, 3, 0), what = "direct m.g",
+    pclo = 0, pchi = 2, ipc = 1
   }
-  let outer = JRow { ..r, site: CAt(0, 9, 0), pchi: 3, ipc: 2, what: "direct m.h" }
-  let cast = JRow { ..r, site: CAt(5, 8, 5), pclo: 2, pchi: 3, ipc: -1, what: "intrinsic x" }
-  let lost = JRow { ..r, site: CAt(20, 23, 20), ipc: -1 }
-  let f = JFn { owner: "m", origin: "f", method: "f", desc: "(J)J", end: 2 }
+  let outer = JRow { ..r, site = CAt(0, 9, 0), pchi = 3, ipc = 2, what = "direct m.h" }
+  let cast = JRow { ..r, site = CAt(5, 8, 5), pclo = 2, pchi = 3, ipc = -1, what = "intrinsic x" }
+  let lost = JRow { ..r, site = CAt(20, 23, 20), ipc = -1 }
+  let f = JFn { owner = "m", origin = "f", method = "f", desc = "(J)J", end = 2 }
   let bases = map.insert(map.empty(), "m", map.insert(map.empty(), "f", 100))
   let srcs = map.insert(map.empty(), "m", "m.dawn")
-  let mm = JModMap { owner: "m", rows: [cast, lost, r, outer], fns: [f], same: true, class_bytes: bs }
+  let mm = JModMap { owner = "m", rows = [cast, lost, r, outer], fns = [f], same = true, class_bytes = bs }
   assert render([mm], srcs, bases) == join([
     "dawnmap\t1\tjvm\n",
     "src\tm\tm.dawn\n",
@@ -211,13 +211,13 @@ test "rows sort by method and pc, and an unsound method keeps its rows without p
   ], "")
   # a class the labelled emission changed, or a method a widened jump moved,
   # keeps every row and loses every pc
-  for bad in [JModMap { ..mm, same: false }, JModMap { ..mm, fns: [JFn { ..f, end: 1 }] }] {
+  for bad in [JModMap { ..mm, same = false }, JModMap { ..mm, fns = [JFn { ..f, end = 1 }] }] {
     let text = render([bad], srcs, bases)
     assert str.contains(text, "call\t0\t-\t-\t-\tm\t100\t109\t100\tdirect m.h\n")
     assert not str.contains(text, "call\t0\t0\t")
   }
   # a declaration with no base is printed so that a checker refuses it
-  let unknown = render([JModMap { ..mm, rows: [JRow { ..r, origin: "nope" }] }], srcs, bases)
+  let unknown = render([JModMap { ..mm, rows = [JRow { ..r, origin = "nope" }] }], srcs, bases)
   assert str.contains(unknown, "\tm\t?\t?\t?\tdirect m.g\n")
-  assert abs_of(JRow { ..r, site: CNoSite }, bases) == (-1, -1, -1)
+  assert abs_of(JRow { ..r, site = CNoSite }, bases) == (-1, -1, -1)
 }

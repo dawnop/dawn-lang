@@ -197,7 +197,7 @@ fn pad(n: Int) -> String = {
 
 fn line(st: CSt, text: String) -> CSt = {
   let l = pad(st.ind) ++ text ++ "\n"
-  let st1 = CSt { ..st, out: st.out ++ [l] }
+  let st1 = CSt { ..st, out = st.out ++ [l] }
   if len(st.pend) == 0 { st1 } else { claim(st1, l, len(st.out)) }
 }
 
@@ -223,13 +223,13 @@ fn claim(st: CSt, l: String, at: Int) -> CSt = {
         cursor = map.insert(cursor, p.text, hi)
         if p.sited {
           let first = if p.row.first < 0 { at } else { p.row.first }
-          rows = rows ++ [MapRow { ..p.row, first: first, last: at, clo: lo, chi: hi }]
+          rows = rows ++ [MapRow { ..p.row, first = first, last = at, clo = lo, chi = hi }]
         }
       }
       None -> { left = left ++ [p] }
     }
   }
-  CSt { ..st, pend: left, rows: rows }
+  CSt { ..st, pend = left, rows = rows }
 }
 
 ## A call has just been emitted: `a` is the transcript length before it, `v`
@@ -250,26 +250,26 @@ fn noted(st: CSt, a: Int, what: String, s: CSite, v: String) -> CSt = {
   }
   let n = len(st.out)
   let row = MapRow {
-    owner: "", origin: "", what: what, site: s,
-    first: if n > a { a } else { -1 }, last: -1, clo: -1, chi: -1
+    owner = "", origin = "", what = what, site = s,
+    first = if n > a { a } else { -1 }, last = -1, clo = -1, chi = -1
   }
   if str.contains(v, "(") {
-    CSt { ..st, pend: st.pend ++ [Pend { text: v, row: row, sited: sited }] }
+    CSt { ..st, pend = st.pend ++ [Pend { text = v, row = row, sited = sited }] }
   } else if not sited {
     st
   } else if n > a {
-    CSt { ..st, rows: st.rows ++ [MapRow { ..row, last: n - 1 }] }
+    CSt { ..st, rows = st.rows ++ [MapRow { ..row, last = n - 1 }] }
   } else {
-    CSt { ..st, rows: st.rows ++ [row] }
+    CSt { ..st, rows = st.rows ++ [row] }
   }
 }
 
 fn fresh(st: CSt) -> (CSt, String) =
-  (CSt { ..st, tmp: st.tmp + 1 }, "t${to_string(st.tmp)}")
+  (CSt { ..st, tmp = st.tmp + 1 }, "t${to_string(st.tmp)}")
 
-fn push(st: CSt) -> CSt = CSt { ..st, ind: st.ind + 1 }
+fn push(st: CSt) -> CSt = CSt { ..st, ind = st.ind + 1 }
 
-fn pop(st: CSt) -> CSt = CSt { ..st, ind: st.ind - 1 }
+fn pop(st: CSt) -> CSt = CSt { ..st, ind = st.ind - 1 }
 
 ## Drop a value while keeping its effects. Core marks these explicitly with
 ## CSDiscard, which is the fix for the bug the Phase -1 spike hit: a C
@@ -831,7 +831,7 @@ fn const_builder(st: CSt, cache_key: String, v: CValue, ty: Ty) -> (CSt, String)
     None -> ()
   }
   let sym = const_symbol(len(st.cdefs))
-  var b = line(CSt { ..st, out: [], ind: 1, pend: [], rows: [] }, "static void* c = NULL;")
+  var b = line(CSt { ..st, out = [], ind = 1, pend = [], rows = [] }, "static void* c = NULL;")
   b = push(line(b, "if (c == NULL) {"))
   let (b1, expr) = emit_const_value(b, v)
   var b2 = line(b1, "c = (void*)(" ++ expr ++ ");")
@@ -844,9 +844,9 @@ fn const_builder(st: CSt, cache_key: String, v: CValue, ty: Ty) -> (CSt, String)
   let body = "void* " ++ sym ++ "(void) {\n" ++ join(b2.out, "") ++ "}\n\n"
   (CSt {
     ..st,
-    tmp: b2.tmp,
-    cdefs: st.cdefs ++ [body],
-    cmap: map.insert(st.cmap, full, sym)
+    tmp = b2.tmp,
+    cdefs = st.cdefs ++ [body],
+    cmap = map.insert(st.cmap, full, sym)
   }, "((" ++ c_type(ty) ++ ")" ++ sym ++ "())")
 }
 
@@ -1380,25 +1380,25 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
 ## the honest value everywhere else.
 fn bin_test_st() -> CSt =
   CSt {
-    out: [],
-    tmp: 0,
-    ind: 0,
-    consts: map.empty(),
-    blocks: map.empty(),
-    dict_syms: set.empty(),
-    adts: map.empty(),
-    intrs: intrinsics(),
-    cur_owner: "t",
-    cdefs: [],
-    cmap: map.empty(),
-    slots: map.empty(),
-    nslots: 0,
-    quiet: set.empty(),
-    views: set.empty(),
-    modes: map.empty(),
-    mapping: false,
-    pend: [],
-    rows: []
+    out = [],
+    tmp = 0,
+    ind = 0,
+    consts = map.empty(),
+    blocks = map.empty(),
+    dict_syms = set.empty(),
+    adts = map.empty(),
+    intrs = intrinsics(),
+    cur_owner = "t",
+    cdefs = [],
+    cmap = map.empty(),
+    slots = map.empty(),
+    nslots = 0,
+    quiet = set.empty(),
+    views = set.empty(),
+    modes = map.empty(),
+    mapping = false,
+    pend = [],
+    rows = []
   }
 
 ## A non-atomic Int operand: a call runs code, so the ordered row has to name
@@ -1438,9 +1438,9 @@ test "a view is a plain C local, not a slot of the frame's cleanup array" {
     TyInt
   )
   let f = CFun {
-    name: "f", owner: "t", captures: [],
-    params: [CParam { sym: 1, ty: node, mode: CBorrowed }], dicts: [], evs: [],
-    ret: TyInt, body: body, is_test: false, impl_of: None, default_of: None, origin: ""
+    name = "f", owner = "t", captures = [],
+    params = [CParam { sym = 1, ty = node, mode = CBorrowed }], dicts = [], evs = [],
+    ret = TyInt, body = body, is_test = false, impl_of = None, default_of = None, origin = ""
   }
   let text = join(emit_fn(bin_test_st(), f).out, "")
   assert not str.contains(text, "dawn_own")
@@ -1730,7 +1730,7 @@ fn emit_row(st: CSt, es: List[CExpr], ks: List[Bool], alloc: Bool) -> (CSt, List
       out = out ++ [v]
     } else if ks[i] && i < last_run && is_ref_ty(cex_ty(e)) && not emit_dictish(e) {
       let n = st1.nslots + 1
-      st1 = line(CSt { ..st1, nslots: n }, slot_lv(n) ++ " = " ++ v ++ ";")
+      st1 = line(CSt { ..st1, nslots = n }, slot_lv(n) ++ " = " ++ v ++ ";")
       out = out ++ [take_expr(n, cex_ty(e))]
     } else {
       let (st3, t) = fresh(st1)
@@ -2343,7 +2343,7 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
           Some(i) -> (st1, i)
           None -> {
             let n = st1.nslots + 1
-            (CSt { ..st1, slots: map.insert(st1.slots, sym, n), nslots: n }, n)
+            (CSt { ..st1, slots = map.insert(st1.slots, sym, n), nslots = n }, n)
           }
         }
         if no_value(init) {
@@ -2585,8 +2585,8 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
   # labels, and jumping past a cleanup variable's initializer is undefined.
   let st1 = CSt {
     ..st,
-    tmp: 0, slots: slots, nslots: n, views: views.view_syms(st.dict_syms, f),
-    out: [], ind: 1, pend: [], rows: []
+    tmp = 0, slots = slots, nslots = n, views = views.view_syms(st.dict_syms, f),
+    out = [], ind = 1, pend = [], rows = []
   }
   let (st2, v) = emit_expr(st1, f.body, true)
   let st3 =
@@ -2624,13 +2624,13 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
   }
   CSt {
     ..st3,
-    out: st.out ++ head ++ st3.out ++ ["}\n"],
-    ind: st.ind,
-    slots: map.empty(),
-    nslots: 0,
-    views: set.empty(),
-    pend: [],
-    rows: if st3.mapping { st.rows ++ placed_rows(st3, f, len(st.out) + len(head)) } else { st.rows }
+    out = st.out ++ head ++ st3.out ++ ["}\n"],
+    ind = st.ind,
+    slots = map.empty(),
+    nslots = 0,
+    views = set.empty(),
+    pend = [],
+    rows = if st3.mapping { st.rows ++ placed_rows(st3, f, len(st.out) + len(head)) } else { st.rows }
   }
 }
 
@@ -2641,16 +2641,16 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
 fn placed_rows(st: CSt, f: CFun, shift: Int) -> List[MapRow] = {
   var out: List[MapRow] = []
   for r in st.rows {
-    out = out ++ [MapRow { ..shifted(r, shift), owner: f.owner, origin: f.origin }]
+    out = out ++ [MapRow { ..shifted(r, shift), owner = f.owner, origin = f.origin }]
   }
   for p in st.pend {
-    if p.sited { out = out ++ [MapRow { ..p.row, owner: f.owner, origin: f.origin, first: -1 }] }
+    if p.sited { out = out ++ [MapRow { ..p.row, owner = f.owner, origin = f.origin, first = -1 }] }
   }
   out
 }
 
 fn shifted(r: MapRow, by: Int) -> MapRow =
-  if r.last < 0 { r } else { MapRow { ..r, first: r.first + by, last: r.last + by } }
+  if r.last < 0 { r } else { MapRow { ..r, first = r.first + by, last = r.last + by } }
 
 const C_HEX: String = "0123456789ABCDEF"
 
@@ -2817,25 +2817,25 @@ fn emit_units(
   mapping: Bool
 ) -> (CSt, List[FnRow]) = {
   var st = CSt {
-    out: [],
-    tmp: 0,
-    ind: 0,
-    consts: map.empty(),
-    blocks: map.empty(),
-    dict_syms: set.empty(),
-    adts: adts,
-    intrs: intrinsics(),
-    cur_owner: "",
-    cdefs: [],
-    cmap: map.empty(),
-    slots: map.empty(),
-    nslots: 0,
-    quiet: qset,
-    views: set.empty(),
-    modes: modes,
-    mapping: mapping,
-    pend: [],
-    rows: []
+    out = [],
+    tmp = 0,
+    ind = 0,
+    consts = map.empty(),
+    blocks = map.empty(),
+    dict_syms = set.empty(),
+    adts = adts,
+    intrs = intrinsics(),
+    cur_owner = "",
+    cdefs = [],
+    cmap = map.empty(),
+    slots = map.empty(),
+    nslots = 0,
+    quiet = qset,
+    views = set.empty(),
+    modes = modes,
+    mapping = mapping,
+    pend = [],
+    rows = []
   }
   st = line(st, "/* generated by dawn __emitc -- Core IR -> C */")
   st = line(st, "#include \"dawn_rt.h\"")
@@ -2844,7 +2844,7 @@ fn emit_units(
   st = line(st, "#include <math.h>")
   st = line(st, "")
   let preamble = st.out
-  st = CSt { ..st, out: [] }
+  st = CSt { ..st, out = [] }
   # Which tables carry rows is `u`'s answer (reach.dawn). Unlike the JVM,
   # `parse` funds the space set here: the C parsers strip leading and
   # trailing whitespace with it (dawn_str_trim_span), where the JVM answers
@@ -2865,7 +2865,7 @@ fn emit_units(
     st = line(st, "")
   }
   let tables = st.out
-  st = CSt { ..st, out: [] }
+  st = CSt { ..st, out = [] }
 
   # The public macro is shared with stubs through dawn_rt.h; including the
   # FFI header here would poison the RC operations generated code requires.
@@ -2905,7 +2905,7 @@ fn emit_units(
   }
   st = line(st, "")
   let protos = st.out
-  st = CSt { ..st, out: [] }
+  st = CSt { ..st, out = [] }
 
   # One program, so a dictionary two modules both need would be defined twice
   # under the same symbol. The JVM dedupes by the same key (emit.dawn skips one
@@ -2990,19 +2990,19 @@ fn emit_units(
     }
     st = CSt {
       ..st,
-      consts: u.consts,
-      blocks: u.blocks,
-      dict_syms: udicts,
-      cur_owner: u.m.owner
+      consts = u.consts,
+      blocks = u.blocks,
+      dict_syms = udicts,
+      cur_owner = u.m.owner
     }
     for f in u.m.fns {
       if not f.is_test && fn_kept(live, f) {
-        st = CSt { ..st, out: [], rows: [] }
+        st = CSt { ..st, out = [], rows = [] }
         st = emit_fn(st, f)
         if mapping {
           body_fns = body_fns ++ [FnRow {
-            owner: f.owner, origin: f.origin, symbol: mangle(f.owner, f.name),
-            first: 0, last: len(st.out) - 1
+            owner = f.owner, origin = f.origin, symbol = mangle(f.owner, f.name),
+            first = 0, last = len(st.out) - 1
           }]
           body_rows = body_rows ++ [st.rows]
         }
@@ -3046,7 +3046,7 @@ fn emit_units(
       let at = len(out)
       for r in body_rows[j] { rows = rows ++ [shifted(r, at)] }
       let fr = body_fns[j]
-      fns = fns ++ [FnRow { ..fr, first: fr.first + at, last: fr.last + at }]
+      fns = fns ++ [FnRow { ..fr, first = fr.first + at, last = fr.last + at }]
     }
     out = out ++ bodies[j]
     acc = acc + sizes[j]
@@ -3056,7 +3056,7 @@ fn emit_units(
     seg = seg + 1
     out = out ++ [tu_marker(seg, nunits) ++ "\n"]
   }
-  (CSt { ..st, out: out, rows: rows }, fns)
+  (CSt { ..st, out = out, rows = rows }, fns)
 }
 
 pub fn emit_program(
@@ -3089,7 +3089,7 @@ pub fn emit_program_mapped(
   var rows: List[MapRow] = []
   for r in st.rows { rows = rows ++ [row_lines(st.out, starts, r)] }
   var fls: List[FnRow] = []
-  for fr in fns { fls = fls ++ [FnRow { ..fr, first: starts[fr.first], last: starts[fr.last] }] }
+  for fr in fns { fls = fls ++ [FnRow { ..fr, first = starts[fr.first], last = starts[fr.last] }] }
   (join(st.out, ""), rows, fls)
 }
 
@@ -3111,7 +3111,7 @@ fn row_lines(out: List[String], starts: List[Int], r: MapRow) -> MapRow = {
   if r.clo >= 0 && len(str.split(out[r.last], "\n")) != 2 {
     panic("emitc --map: a call was claimed in a chunk that is not one line")
   }
-  MapRow { ..r, first: starts[r.first], last: starts[r.last] }
+  MapRow { ..r, first = starts[r.first], last = starts[r.last] }
 }
 
 fn program_st(
@@ -3461,7 +3461,7 @@ test "Int minimum uses the C standard boundary macro" {
 # ---- --map: where a call's C landed (docs/source-span-map-design.md section 12) ----
 
 fn map_test_row(lo: Int, hi: Int) -> MapRow =
-  MapRow { owner: "", origin: "", what: "direct t.h", site: CAt(lo, hi, lo), first: -1, last: -1, clo: -1, chi: -1 }
+  MapRow { owner = "", origin = "", what = "direct t.h", site = CAt(lo, hi, lo), first = -1, last = -1, clo = -1, chi = -1 }
 
 fn map_test_lo(s: CSite) -> Int =
   match s {
@@ -3479,10 +3479,10 @@ fn map_test_claims(st: CSt) -> List[(Int, Int, Int)] = {
 test "two identical call texts on one line are claimed left to right" {
   let st = CSt {
     ..bin_test_st(),
-    mapping: true,
-    pend: [
-      Pend { text: "h(v)", row: map_test_row(5, 9), sited: true },
-      Pend { text: "h(v)", row: map_test_row(11, 15), sited: true }
+    mapping = true,
+    pend = [
+      Pend { text = "h(v)", row = map_test_row(5, 9), sited = true },
+      Pend { text = "h(v)", row = map_test_row(11, 15), sited = true }
     ]
   }
   let st1 = line(st, "return pair(h(v), h(v));")
@@ -3492,9 +3492,9 @@ test "two identical call texts on one line are claimed left to right" {
   # after it takes the next
   let ghost = CSt {
     ..st,
-    pend: [
-      Pend { text: "h(v)", row: map_test_row(0, 0), sited: false },
-      Pend { text: "h(v)", row: map_test_row(11, 15), sited: true }
+    pend = [
+      Pend { text = "h(v)", row = map_test_row(0, 0), sited = false },
+      Pend { text = "h(v)", row = map_test_row(11, 15), sited = true }
     ]
   }
   assert map_test_claims(line(ghost, "return pair(h(v), h(v));")) == [(11, 18, 22)]
@@ -3505,11 +3505,11 @@ test "a call whose text starts its enclosing call's text is found where it is" {
   # looked for from the start of the line, not after the inner one
   let st = CSt {
     ..bin_test_st(),
-    mapping: true,
-    ind: 1,
-    pend: [
-      Pend { text: "f(v)", row: map_test_row(0, 4), sited: true },
-      Pend { text: "f(v)(w)", row: map_test_row(0, 7), sited: true }
+    mapping = true,
+    ind = 1,
+    pend = [
+      Pend { text = "f(v)", row = map_test_row(0, 4), sited = true },
+      Pend { text = "f(v)(w)", row = map_test_row(0, 7), sited = true }
     ]
   }
   let st1 = line(st, "return f(v)(w);")
@@ -3527,7 +3527,7 @@ test "emitting with --map writes the same C, and without it records nothing" {
   let outer = CCall(CDirect("t", "h"), [inner], TyInt, CAt(0, 7, 0))
   let (sp, vp) = emit_expr(bin_test_st(), outer, true)
   let plain = line(sp, "return " ++ vp ++ ";")
-  let (sm, vm) = emit_expr(CSt { ..bin_test_st(), mapping: true }, outer, true)
+  let (sm, vm) = emit_expr(CSt { ..bin_test_st(), mapping = true }, outer, true)
   let mapped = line(sm, "return " ++ vm ++ ";")
   assert join(plain.out, "") == join(mapped.out, "")
   assert join(plain.out, "") == "return dawn_t__h(dawn_t__h(INT64_C(1)));\n"

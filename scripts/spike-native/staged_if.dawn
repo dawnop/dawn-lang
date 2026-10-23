@@ -60,7 +60,7 @@ impl StagedResult[Value] {
 # Literals use an explicit result-type implementation when a sibling or an
 # annotation provides the type. A named host Int still cannot substitute for it.
 impl FromInt[Value] {
-  fn from_int(n: Int) -> Value = Value { name: "literal", n: n }
+  fn from_int(n: Int) -> Value = Value { name= "literal", n= n }
 }
 
 impl StagedIter[Once] {
@@ -75,7 +75,7 @@ impl StagedIter[Once] {
 
 fn condition(name: String, choose: Bool) -> Cond !Record = {
   note("condition ${name}")
-  Cond { name: name, choose: choose }
+  Cond { name= name, choose= choose }
 }
 
 # A generic call forwards the conditional dictionary and associated row.
@@ -85,17 +85,17 @@ fn generic[C: StagedCond](c: C, yes: fn() -> Unit !C.StagedCond,
 }
 
 fn program() -> Unit !Record = {
-  var a = Value { name: "a", n: 10 }
-  var b = Value { name: "b", n: 20 }
-  var ro = Value { name: "ro", n: 3 }
+  var a = Value { name= "a", n= 10 }
+  var b = Value { name= "b", n= 20 }
+  var ro = Value { name= "ro", n= 3 }
   if condition("both", true) {
-    b = Value { name: "b", n: a.n + ro.n }
-    a = Value { name: "a", n: a.n + 1 }
-    let b = Value { name: "shadow", n: 99 }
+    b = Value { name= "b", n= a.n + ro.n }
+    a = Value { name= "a", n= a.n + 1 }
+    let b = Value { name= "shadow", n= 99 }
     note("local ${b.n}")
   } else {
-    a = Value { name: "a", n: b.n + ro.n }
-    b = Value { name: "b", n: b.n + 2 }
+    a = Value { name= "a", n= b.n + ro.n }
+    b = Value { name= "b", n= b.n + 2 }
   }
   note("after ${a.n} ${b.n} ${ro.n}")
   # Only the false arm writes; then reads the original b and yields a unchanged.
@@ -107,18 +107,18 @@ fn program() -> Unit !Record = {
   let unit = if condition("unit", true) { () } else { () }
   note("unit ${unit}")
   if condition("outer", false) {
-    a = Value { name: "a", n: 100 }
+    a = Value { name= "a", n= 100 }
   } else if condition("inner", true) {
-    a = Value { name: "a", n: a.n + 1 }
+    a = Value { name= "a", n= a.n + 1 }
   } else {
-    a = Value { name: "a", n: 200 }
+    a = Value { name= "a", n= 200 }
   }
   note("chain ${a.n}")
-  for i in (Once { n: 2 }) {
-    if condition("in-loop", true) { a = Value { name: "a", n: a.n + i } }
+  for i in (Once { n= 2 }) {
+    if condition("in-loop", true) { a = Value { name= "a", n= a.n + i } }
   }
   if condition("with-loop", true) {
-    for i in (Once { n: 3 }) { a = Value { name: "a", n: a.n + i } }
+    for i in (Once { n= 3 }) { a = Value { name= "a", n= a.n + i } }
   }
   note("nested ${a.n}")
   generic(condition("generic", false), () => note("generic true"), () => note("generic false"))
@@ -130,28 +130,28 @@ fn program() -> Unit !Record = {
 fn value_forms() -> Unit !Record = {
   let a = if condition("value-true", true) {
     note("value true body")
-    Value { name: "yes", n: 41 }
+    Value { name= "yes", n= 41 }
   } else {
     note("value false body")
-    Value { name: "no", n: 9 }
+    Value { name= "no", n= 9 }
   }
   note("value answer ${a.n}")
   let b: Value = if condition("value-false", false) { 3 } else { 7 }
   note("literal answer ${b.n}")
-  let c = if condition("infer-right", true) { 5 } else { Value { name: "right", n: 8 } }
-  let d = if condition("infer-left", false) { Value { name: "left", n: 6 } } else { 12 }
+  let c = if condition("infer-right", true) { 5 } else { Value { name= "right", n= 8 } }
+  let d = if condition("infer-left", false) { Value { name= "left", n= 6 } } else { 12 }
   note("inferred ${c.n} ${d.n}")
   let nested = if condition("result-outer", true) {
-    if condition("result-inner", false) { Value { name: "inner", n: 2 } }
-    else { Value { name: "inner", n: 4 } }
-  } else { Value { name: "outer", n: 10 } }
+    if condition("result-inner", false) { Value { name= "inner", n= 2 } }
+    else { Value { name= "inner", n= 4 } }
+  } else { Value { name= "outer", n= 10 } }
   note("nested result ${nested.n}")
-  var carried = Value { name: "carried", n: 20 }
+  var carried = Value { name= "carried", n= 20 }
   let e = if condition("value-carry", false) {
-    carried = Value { name: "carried", n: carried.n + 1 }
+    carried = Value { name= "carried", n= carried.n + 1 }
     carried
   } else {
-    carried = Value { name: "carried", n: carried.n + 3 }
+    carried = Value { name= "carried", n= carried.n + 3 }
     carried
   }
   note("carried result ${e.n}/${carried.n}")
@@ -159,13 +159,13 @@ fn value_forms() -> Unit !Record = {
 
 pub fn main() -> Unit !io = {
   with handle Record {
-    var state: Image = Image { values: map.empty(), written: set.empty(), results: map.empty(), ready: set.empty(), result_written: set.empty() }
+    var state: Image = Image { values= map.empty(), written= set.empty(), results= map.empty(), ready= set.empty(), result_written= set.empty() }
     note(s) => println(s)
     open(v) => {
       let i = len(state.values)
-      state = Image { ..state, values: map.insert(state.values, i, v) }
+      state = Image { ..state, values= map.insert(state.values, i, v) }
       println("open ${i} ${v.name}=${v.n}")
-      Cell { id: i }
+      Cell { id= i }
     }
     read(c) => {
       let v = state.values[c.id]
@@ -174,17 +174,17 @@ pub fn main() -> Unit !io = {
     }
     write(c, v) => {
       println("set ${c.id} ${v.name}=${v.n}")
-      state = Image { ..state, values: map.insert(state.values, c.id, v), written: set.insert(state.written, c.id) }
+      state = Image { ..state, values= map.insert(state.values, c.id, v), written= set.insert(state.written, c.id) }
     }
     empty_result() => {
       let i = len(state.results)
       println("result-open ${i} empty")
-      state = Image { ..state, results: map.insert(state.results, i, None) }
-      ResultCell { id: i }
+      state = Image { ..state, results= map.insert(state.results, i, None) }
+      ResultCell { id= i }
     }
     put_result(s, v) => {
       println("result-set ${s.id} ${v.n}")
-      state = Image { ..state, results: map.insert(state.results, s.id, Some(v)), result_written: set.insert(state.result_written, s.id) }
+      state = Image { ..state, results= map.insert(state.results, s.id, Some(v)), result_written= set.insert(state.result_written, s.id) }
     }
     get_result(s) => {
       if not set.has(state.ready, s.id) { panic("result slot escaped before merge") }
@@ -193,7 +193,7 @@ pub fn main() -> Unit !io = {
       v
     }
     save() => state
-    restore(s) => { state = Image { ..s, written: set.empty(), result_written: set.empty() } }
+    restore(s) => { state = Image { ..s, written= set.empty(), result_written= set.empty() } }
     merge(c, entry, t, f) => {
       var values = entry.values
       var written = entry.written
@@ -223,7 +223,7 @@ pub fn main() -> Unit !io = {
           result_written = set.insert(result_written, i)
         }
       }
-      state = Image { values: values, written: written, results: results, ready: ready, result_written: result_written }
+      state = Image { values= values, written= written, results= results, ready= ready, result_written= result_written }
       println("end ${c.name}")
     }
   }

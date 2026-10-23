@@ -18,14 +18,14 @@ type Val = { name: String }
 type Slot = { tag: String }
 type Span = { n: Int }
 
-fn span(n: Int) -> Span = Span { n: n }
+fn span(n: Int) -> Span = Span { n= n }
 
 impl StagedIter[Span] {
   type Item = Val
   effect StagedIter = !io
   fn staged_for(r: Span, body: fn(Val) -> Unit !io) -> Unit !io = {
     println("for %i < ${r.n} {")
-    body(Val { name: "%i" })
+    body(Val { name= "%i" })
     println("}")
   }
 }
@@ -35,13 +35,13 @@ impl StagedVar[Val] {
   effect StagedVar = !io
   fn var_open(v: Val) -> Slot !io = {
     println("  carry ${v.name}")
-    Slot { tag: v.name }
+    Slot { tag= v.name }
   }
-  fn var_get(c: Slot) -> Val !io = Val { name: "%" ++ c.tag }
+  fn var_get(c: Slot) -> Val !io = Val { name= "%" ++ c.tag }
   fn var_set(c: Slot, v: Val) -> Unit !io = println("  yield %${c.tag} <- ${v.name}")
 }
 
-fn add(a: Val, b: Val) -> Val = Val { name: "(${a.name}+${b.name})" }
+fn add(a: Val, b: Val) -> Val = Val { name= "(${a.name}+${b.name})" }
 
 effect Mem {
   fn alloc(v: Int) -> Int
@@ -68,8 +68,8 @@ impl StagedIter[Times] {
 impl StagedVar[Num] {
   type Cell = Ref
   effect StagedVar = !Mem
-  fn var_open(v: Num) -> Ref !Mem = Ref { i: alloc(v.v) }
-  fn var_get(c: Ref) -> Num !Mem = Num { v: load(c.i) }
+  fn var_open(v: Num) -> Ref !Mem = Ref { i= alloc(v.v) }
+  fn var_get(c: Ref) -> Num !Mem = Num { v= load(c.i) }
   fn var_set(c: Ref, v: Num) -> Unit !Mem = store(c.i, v.v)
 }
 
@@ -78,15 +78,15 @@ impl StagedVar[Num] {
 # carried too; the `let` scale is captured as any closure captures it, and
 # the `l` the inner block shadows is not a mention of the outer one.
 fn recorded() -> Unit !io = {
-  var m = Val { name: "m" }
-  var l = Val { name: "l" }
-  let scale = Val { name: "scale" }
-  var acc = Val { name: "acc" }
-  var bias = Val { name: "bias" }
+  var m = Val { name= "m" }
+  var l = Val { name= "l" }
+  let scale = Val { name= "scale" }
+  var acc = Val { name= "acc" }
+  var bias = Val { name= "bias" }
   for j in span(4) {
     acc = add(acc, add(j, scale))
     {
-      let l = Val { name: "shadow" }
+      let l = Val { name= "shadow" }
       println("  note ${l.name}")
     }
     l = add(l, m)
@@ -100,9 +100,9 @@ fn recorded() -> Unit !io = {
 # the outer body. A host loop sits inside the staged body, and a staged loop
 # inside a host loop.
 fn nested() -> Unit !io = {
-  var s = Val { name: "s" }
+  var s = Val { name= "s" }
   for i in span(2) {
-    var t = Val { name: "t" }
+    var t = Val { name= "t" }
     for k in span(3) {
       s = add(s, k)
       t = add(t, i)
@@ -111,7 +111,7 @@ fn nested() -> Unit !io = {
     s = add(s, t)
   }
   for round in 0..2 {
-    var u = Val { name: "u${round}" }
+    var u = Val { name= "u${round}" }
     for q in span(1) { u = add(u, q) }
     println("round ${round}: ${u.name}")
   }
@@ -131,15 +131,15 @@ fn fib(n: Int) -> (Int, Int) = {
     load(i) => mem[i]
     store(i, v) => { mem = map.insert(mem, i, v) }
   }
-  var a = Num { v: 0 }
-  var b = Num { v: 1 }
-  let step = Num { v: 1 }
-  var count = Num { v: 0 }
-  for _ in (Times { n: n }) {
-    let next = Num { v: a.v + b.v }
+  var a = Num { v= 0 }
+  var b = Num { v= 1 }
+  let step = Num { v= 1 }
+  var count = Num { v= 0 }
+  for _ in (Times { n= n }) {
+    let next = Num { v= a.v + b.v }
     a = b
     b = next
-    count = Num { v: count.v + step.v }
+    count = Num { v= count.v + step.v }
   }
   (a.v, count.v)
 }
@@ -176,7 +176,7 @@ fn both() -> Int = {
     load(i) => mem[i]
     store(i, v) => { mem = map.insert(mem, i, v) }
   }
-  doubled(Num { v: 4 }, (a, i) => Num { v: a.v * 2 + i }).v
+  doubled(Num { v= 4 }, (a, i) => Num { v= a.v * 2 + i }).v
 }
 
 # A loop generic over its iterator: the projections stay rigid and the

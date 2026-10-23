@@ -81,9 +81,9 @@ fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
 ## states of the flag bit in one kernel.
 fn vadd_hinted(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), WIDTH)
-  let ta = load(a, blk, [WIDTH], hints: [for_arch("sm_86", ptr_hints(latency: Some(4)))])
+  let ta = load(a, blk, [WIDTH], hints = [for_arch("sm_86", ptr_hints(latency = Some(4)))])
   let tb = load(b, blk, [WIDTH])
-  store(out, blk, add(ta, tb), hints: [for_arch("sm_86", ptr_hints(latency: Some(7)))])
+  store(out, blk, add(ta, tb), hints = [for_arch("sm_86", ptr_hints(latency = Some(7)))])
 }
 
 ## `vadd` over binary32 buffers: the same body, a different format in the
@@ -160,7 +160,7 @@ fn table_b() -> List[Float] = [-0.25, -1.25, -4.25, -9.25, -16.25, -25.25, -36.2
 fn table(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [N]
   d_global("tbl_a", F64, table_a())
-  d_global("tbl_b", F64, table_b(), align: 256)
+  d_global("tbl_b", F64, table_b(), align = 256)
   let blk = tile_at(block_id(0), N)
   let off = lanes(blk, s)
   let tx = load(x, blk, s)
@@ -192,8 +192,8 @@ fn interval(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev = 
   let blk = tile_at(block_id(0), N)
   let a = float_to_float(load(x, blk, s), F32)
   let b = float_to_float(load(y, blk, s), F32)
-  store(out, blk, float_to_float(add(a, b, rounding: narrow.Down), F64))
-  store(out, idx_add(blk, idx_const(N)), float_to_float(add(a, b, rounding: narrow.Up), F64))
+  store(out, blk, float_to_float(add(a, b, rounding = narrow.Down), F64))
+  store(out, idx_add(blk, idx_const(N)), float_to_float(add(a, b, rounding = narrow.Up), F64))
 }
 
 ## Knife T10: `alloca`, memory that belongs to the block and to nothing else.
@@ -377,7 +377,7 @@ fn interval_ref(_dtypes: List[String], ins: List[List[Float]]) -> List[Float] = 
   list.map(range(0, len(ins[2])), k => {
     let i = k % N
     let exact = narrow.round_f32(x[i]) + narrow.round_f32(y[i])
-    narrow.round_f32(exact, mode: if k < N { narrow.Down } else { narrow.Up })
+    narrow.round_f32(exact, mode = if k < N { narrow.Down } else { narrow.Up })
   })
 }
 
@@ -515,7 +515,7 @@ fn symbols() -> Result[(List[Float], String), ForeignError] !Gpu = {
 }
 
 fn symbols_answer() -> Result[(List[Float], String), ForeignError] =
-  with_gpu_fake(devices(), symbols, globals: module_globals())
+  with_gpu_fake(devices(), symbols, globals = module_globals())
 
 fn symbols_line() -> String = match symbols_answer() {
   Ok(p) -> {

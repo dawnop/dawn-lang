@@ -40,7 +40,7 @@ derive Show
 ## no flags gets `world`, and `world` is what the view then shows. That is
 ## what makes "the flags were dropped" a visible fact instead of an empty
 ## field somebody has to notice.
-pub fn init(flags: Option[String]) -> Model = Model { name: named(flags), hellos: 0 }
+pub fn init(flags: Option[String]) -> Model = Model { name = named(flags), hellos = 0 }
 
 fn named(flags: Option[String]) -> String =
   match flags {
@@ -71,13 +71,13 @@ impl App[Model] {
   # `NoCmd`: a greeting has nothing to ask the driver for.
   fn update(m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
     match msg {
-      Hello -> (Model { name: m.name, hellos: m.hellos + 1 }, NoCmd)
+      Hello -> (Model { name = m.name, hellos = m.hellos + 1 }, NoCmd)
     }
 
   fn view(m: Model) -> Node[Msg] = {
-    let greeting: Node[Msg] = el("p", class: "greeting", kids: [text("hello, " ++ m.name)])
-    let tally: Node[Msg] = el("p", class: "tally", kids: [text(to_string(m.hellos))])
-    div(class: "flags", kids: [greeting, tally, button("hello", Hello, class: "again")])
+    let greeting: Node[Msg] = el("p", class = "greeting", kids = [text("hello, " ++ m.name)])
+    let tally: Node[Msg] = el("p", class = "tally", kids = [text(to_string(m.hellos))])
+    div(class = "flags", kids = [greeting, tally, button("hello", Hello, class = "again")])
   }
 }
 
@@ -85,9 +85,9 @@ impl App[Model] {
 ## every turn after the first is answered without the flags being sent again.
 pub fn encode(m: Model) -> String =
   render(
-    JObj(entries: map.from([
-      ("name", JStr(value: m.name)),
-      ("hellos", JInt(value: m.hellos)),
+    JObj(entries = map.from([
+      ("name", JStr(value = m.name)),
+      ("hellos", JInt(value = m.hellos)),
     ])),
   )
 
@@ -95,14 +95,14 @@ pub fn encode(m: Model) -> String =
 pub fn decode(s: String) -> Model =
   match parse(s) {
     Ok(JObj(entries)) ->
-      Model { name: name_in(entries, "world"), hellos: hellos_in(entries) }
+      Model { name = name_in(entries, "world"), hellos = hellos_in(entries) }
     _ -> init(None)
   }
 
 test "flags decide the model, and every way of not having them is the default" {
-  assert init(Some("{\"name\":\"dawn\"}")) == Model { name: "dawn", hellos: 0 }
+  assert init(Some("{\"name\":\"dawn\"}")) == Model { name = "dawn", hellos = 0 }
   let none: Option[String] = None
-  assert init(none) == Model { name: "world", hellos: 0 }
+  assert init(none) == Model { name = "world", hellos = 0 }
   assert init(Some("")) == init(none)
   assert init(Some("not json at all")) == init(none)
   assert init(Some("[1,2]")) == init(none)
@@ -115,17 +115,17 @@ fn turn(m: Model, msg: Msg) -> Model = fold_msg(m, msg, update)
 
 test "the name is in the model text, so later turns need no second flags line" {
   let m = init(Some("{\"name\":\"dawn\"}")).turn(Hello)
-  assert m == Model { name: "dawn", hellos: 1 }
+  assert m == Model { name = "dawn", hellos = 1 }
   assert m.encode().decode() == m
   assert decode("not json at all") == init(None)
 }
 
 test "the view says the name, which is what makes a dropped flag visible" {
   let want: Node[Msg] =
-    div(class: "flags", kids: [
-      el("p", class: "greeting", kids: [text("hello, dawn")]),
-      el("p", class: "tally", kids: [text("0")]),
-      button("hello", Hello, class: "again"),
+    div(class = "flags", kids = [
+      el("p", class = "greeting", kids = [text("hello, dawn")]),
+      el("p", class = "tally", kids = [text("0")]),
+      button("hello", Hello, class = "again"),
     ])
   assert init(Some("{\"name\":\"dawn\"}")).view() == want
   assert init(None).view() != want
