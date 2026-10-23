@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ a04af5aff556862d -->
+<!-- doc-check: translation-of docs/spec.md @ ed90f3281c1a5b9f -->
 
 # Dawn Language Specification
 
@@ -1853,7 +1853,13 @@ let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
   not advance yields the entry token, and pure branches add no token result. Write sets
   conservatively include both arms. Parallel fork chains with possibly overlapping or unknown
   writes are rejected; mutually exclusive arms may write the same address. Memory operations
-  and loops remain forbidden under reduce or scan ancestors.
+  and loops remain forbidden under reduce or scan ancestors. A singleton shape `[1]` is also
+  not rank-0; lane selection uses explicit select or memory masks, with no implicit any/all.
+  Read-only In loads do not advance the token. Explicit region metadata identifies token
+  results rather than guessing from the last data result. `while` still requires a host Bool;
+  StagedCond does not rewrite it. Recording refusals point to the user's call or trace
+  boundary. Trait methods have no independent caller parameter, so the precise if keyword
+  location is not promised.
   break/continue/return/`?` cannot leave a staged conditional arm and name staged if in their
   diagnostics. Local jumps in a host loop inside an arm and a local function's own return
   remain legal. The language specifies no device type or rank; libraries validate conditions.

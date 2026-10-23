@@ -1,11 +1,11 @@
 # staged if：条件协议与共享格子
 
-> 状态：**current**。S0 设计已冻结（`15d5662d`）；S1 实现检查器协议与双后端记录语料；补裁纳入有类型结果槽的值形式。
-> S2 已接入纯分支与 Tile 值结果；S3 已接通条件访存、原子与臂内循环，经 if 结果合流 token，旧消费者保持逐字节不变，权威条文见 [spec.md](spec.md)。
+> 状态：**current**。S0–S4 已落地：StagedCond/StagedResult、共享格子、Tile 值结果、条件访存与循环、token 合流及最终验收。
+> 权威条文见 [spec.md](spec.md) §4.6；逐项承诺与覆盖见第 8 节，最终不做清单见文末。
 
-本文记录 2026-10-22 裁决的 S0/S1 协议与 S2/S3 包实现。`if` 和 `for` 一样由检查器调用普通库协议，
-不在 TAST、Core 或宿主后端引入设备节点。S1 只交付语言协议；tileir 接入、旧消费者迁移和
-token 分支分别属于 S2/S3；本刀验收包含三架构设备对拍，完整里程碑收尾属于 S4。本文不作性能断言。
+本文记录 2026-10-22 裁决及值形式补裁的最终实现。`if` 和 `for` 一样由检查器调用普通库协议，
+不在 TAST、Core 或宿主后端引入设备节点。S1 交付语言协议，S2 接入 Tile 与迁移旧消费者，
+S3 接通 token 分支，S4 以最终输入重跑负控、三架构设备台账与完整门禁。本文不作性能断言。
 
 ## 1. 表面与条件边界
 
@@ -36,7 +36,7 @@ id 从既有表尾追加为 25，不重编号；`injects: false`，方法名不�
 泛型 `[C: StagedCond]` 使用现有 witness、字典及关联效果证据。两臂实际效果（包括生成的
 get/set）必须包含在 `C.StagedCond` 内；open/writeback 在外层按普通规则计效果。
 
-S2 不得为此放开具体泛型头特化。`impl StagedCond[Tile[Bool]]` 不合法，应由包级
+包实现没有为此放开具体泛型头特化。`impl StagedCond[Tile[Bool]]` 不合法，应由包级
 `TileCondDtype[D]` 的非空纯见证方法限定 Bool，再写条件 impl；记录器仍核实 i1 与 rank-0。
 
 ## 3. 格子与合流
@@ -135,8 +135,7 @@ S2 增加只给 Bool 的 `TileCondDtype` 资格，让条件 impl 与显式 `d_if
 
 新增 staged_unit、staged_value（含嵌套结果）、staged_nested、staged_one，分别覆盖双臂 Unit、
 值、循环共享格子、单臂写；独立参考使用闭式结果，不复制 recorder 的状态算法。每例四个 block
-覆盖不同选择，额外输出尾部保持哨兵。S2 不开放 token 区域；访存、token 或臂内循环的拒绝
-显式提示 S3 尚未交付。
+覆盖不同选择，额外输出尾部保持哨兵。S2 阶段曾拒绝 token 区域；S3 已撤销这项阶段限制，最终边界如下。
 
 S3 已按以下规则落地：
 
@@ -187,13 +186,43 @@ lower_if 除数量外还比较两个完整 yield 类型列表，覆盖 token/til
 4. 循环内 best/total 顺序不变，未写臂 yield 入口值；foldif 两个 grid block 覆盖两臂。
 5. 通过后才能进入 S3；新增带效果 if 可添 token 槽，旧纯 if 仍须零差异。
 
-## 8. 验证与交付边界
+## 8. 最终承诺与覆盖
 
-S1 用不依赖 tileir 的普通记录库实现三个协议，固定双臂入口、读写、开放、合流及写回记录，
-JVM/native/ASan 对拍。checker 逐条钉住缺 impl、只读 var、缺 else、不同型结果、跳转、捕获和效果诊断。
-负控须先证明红：Bool 强走 trait、两臂独建或交换 cell、重复条件、删只读检查、漏报或超出效果；追加缺臂赋值、提前执行、合流前逃逸、不同型结果和宿主值冒充结果。另以宿主 Bool 的 TAST/Core/emit 基线比较守住原路径。
-所有改动逐文件问 gatemap，跑锚点预检、完整门禁、文档与格式检查。S2–S4 的包/设备验收
-不记为本刀已通过；种子发布推进之后才允许在 selfhost/std 或包消费者里使用新语法。
+下表按最终实现列出正控与负控。`kernels.dawn` 均指 `scripts/tile-golden/kernels.dawn`；
+设备对拍由 `scripts/tile-gpu-diff/run.sh` 驱动，参考在 `packages/tileref`，解释器比较在
+`scripts/tileinterp-diff/run.sh`。断言失败或解释器拒绝不能记作设备数值通过。
+
+| 承诺 | 覆盖位置与判据 |
+|---|---|
+| 宿主 Bool 原路径、条件只求值一次 | checker 的 `host Bool if retains XIf`；`scripts/spike-native/staged_if` 手写记录；`bool-trait`、`double-condition` 负控 |
+| Bool 格式资格、严格 rank-0 | `staged-if-rejected.dawn` 的 Unit/值条件；`kernels.dawn` 的 `staged_if_checks` 同时拒绝两种形式的 `[1]`，核对用户记录边界；`staged-rank-accepted` |
+| 两臂共享身份、声明序、单臂原值、嵌套复用 | checker 的 canonical cells 测试；`staged_unit/value/nested/one` golden、设备与解释器；`separate-cells`、`swap-cells` |
+| 无初值结果、两臂赋值、不得提前执行或逃逸 | checker 的 hidden slot 测试与诊断 corpus；`staged_if_checks`；`result-one-arm/eager/escape`、`staged-one-arm-accepted/eager-arm` |
+| 同类型、双向期望、同 dtype/shape、拒宿主冒充 | checker corpus、spike 的两种字面量推断；`s2_result_case`；`result-mismatch/host`、`staged-dtype-accepted` |
+| 效果、只读 var 资格、闭包边界和非局部跳转 | `scripts/checker-corpus/cases/staged_if` 的有序文案、span、hint；`readonly-capture`、`excess-effect`、`missing-effect`；局部跳转正控 |
+| LSP 对回用户条件和两臂、隐藏槽不泄漏 | `selfhost/src/lsp/server.dawn` 的 navigation/references/rename/tokens staged if 测试 |
+| 旧纯分支与 debug 零差异、不无条件增 token | `foldif`、`foldif_debug`、`carry_extent` 原 MLIR/tilebc/disasm/lines；`staged-invariance`；prog 的只读分支测试 |
+| 两臂从入口起链，经结果合流，不用 JoinToks | prog 的 `both conditional store arms`；`staged-token-checks`；`staged-token-unmerged/join` |
+| 条件访存、原子、if 内 for、嵌套与单臂效果 | `staged_load/store/for/atomic/asym/effect_nested` 六对 golden；同一 cubin 的 true/false 上传数据在三架构与独立参考逐位比较 |
+| fork 写集合保守并集、未知目标冲突、分离正控 | prog 的 conditional fork 与 unknown target 测试；`staged-fork-accepted`；`staged-write-leaks` 的 golden 与 false 输入参考 |
+| 区域 token 显式元数据、trial 全恢复、缓存可见性 | prog 的 `data-only and zero-result regions`、`branch views stay scoped`；嵌套 golden；重复 trace 与三架构对拍 |
+| lower 完整 yield 类型、祖先纯区域禁令 | lower 的 `identical complete types`；prog 的 reduction 内条件访存拒绝；既有 reduce/scan 边界测试 |
+| 不支持的控制流明确拒绝 | checker corpus 的非 StagedCond 条件与 staged while；Tile fixture 的格式资格与 staged while；rank 检查提示实际类型 |
+
+S1 的十二项有效负控在最终源码上同时取得 JVM/native 判词；原“全部非 Unit 必须拒绝”控制
+已被值形式补裁撤销，不再是有效承诺。S2 五项持久变异与宿主值控制、S3 四项持久变异均重跑；
+必须先成功构建，再按各自指定断言、文案或产物差异证红，不能以构建失败代替。
+完整 tile golden 同时保留旧产物不变性和变异覆盖汇总。
+
+最终验收包括 sm_100 → sm_90 → 本机的整轮串行台账，三本 `inputs=` 相同；
+原子由真实设备与 tileref 对拍，tileinterp 明确拒绝 atomic，不列入解释器数值通过。
+站点调用图用 `site/gpu-map/record.py` 重新核对，导入列表的缺失、重复及 TileOp 顺序仍受既有自测约束。
+
+S4 只补验收覆盖与文档，不新增 Dev 操作、API 或方言编码，tileir 保持 0.25.1。
+0.25.0 的七个 Dev 结果槽操作属于破坏性 minor；0.25.1 已承载 S3 的能力扩展，
+本次没有另升 patch 的功能变更。发版与证据发布交由维护者执行。
+完整门禁的精确提交、bundle、CI 与全部负控原始输出记录在维护者验收报告；
+里程碑 PR 与已合入哈希见 [M7 后续核账](history/m7-progress.md)。
 
 ## 不做的（理由）
 

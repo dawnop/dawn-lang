@@ -6611,6 +6611,17 @@ fn staged_if_checks() -> Unit = {
   if not str.contains(rank, "condition is tile<1xi1>, and it must be the rank-0 tile<i1>") {
     panic("S2 rank-0 guard is missing: ${rank}")
   }
+  let value_rank = s2_message(() => trace_kernel("s4_value_rank", [], () => {
+    let _value = if lt(full([1], 1.0), full([1], 0.0)) { full([], 1.0) } else { full([], 2.0) }
+  }))
+  if not str.contains(value_rank, "condition is tile<1xi1>, and it must be the rank-0 tile<i1>") {
+    panic("S4 value rank-0 guard is missing: ${value_rank}")
+  }
+  for message in [rank, value_rank] {
+    if not str.contains(message, "at src/main.dawn:") {
+      panic("S4 condition refusal lost the user recording boundary: ${message}")
+    }
+  }
   if s2_message(() => s2_result_case(0)) != "accepted" { panic("S2 valid result was refused") }
   let missing = s2_message(() => s2_result_case(1))
   if not str.contains(missing, "both staged if arms must assign the result slot") {

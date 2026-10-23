@@ -2,8 +2,8 @@
 
 > 状态：**current**。编译器刀 S1（2026-10-06）落地：两个 prelude trait `StagedIter`/`StagedVar`、检查器改写、诊断、LSP 配对、
 > spec 条文。权威条文在 [spec.md](spec.md) §3.5、§4.5、§4.7、§4.10。
-> 未做：S2（tileir 提供 `StagedIter[DRange]`/`StagedIter[DSpan]` 与 `StagedVar[Tile[D]]`，`kernels.dawn` 迁移，golden 零变化），
-> S3（设备条件 `if`，`StagedCond[C]`，另起设计）。见 §8。
+> S2 已随 tileir 0.11.0 落地：泛型 `DRange` 的 StagedIter、Tile 的 StagedVar 与 kernel 迁移，见 [tileir-011-design.md](tileir-011-design.md)。
+> 原 S3 设备条件 `if` 已由独立的 [staged-if-design.md](staged-if-design.md) 完成，包含 Unit 与值形式、token 分支及最终验收。见 §8。
 > 裁决记录在维护者工作区（ruling-staged-for-20261006，调研 research-staged-for-report-20261006）。
 
 ## 1. 目标与非目标
@@ -132,7 +132,7 @@ prelude 内部移动，不改任何程序的 id）。两者 `injects: false`，�
 
 ### D7 范围：第一刀只做 `for`
 
-`if`/`while`/`match` 不做；设备条件 `if` 以并列 trait `StagedCond[C]` 另起设计（S3）。
+本设计不改写 `if`/`while`/`match`；设备条件 `if` 已以并列 trait `StagedCond[C]` 在独立设计中落地（原 S3），`while`/`match` 仍不作 staged 改写。
 
 ## 3. 实现中对设计稿的偏离（已获批准）
 
@@ -202,9 +202,9 @@ lowering 读的是它。体内的名字照 D4 解析到原 `var`；格子符号�
 
 | 刀 | 内容 | 状态 |
 |---|---|---|
-| S1 | 编译器：两个 prelude trait、改写、诊断、LSP、spec、spike 对拍 | 本刀 |
-| S2 | tileir：描述符 + 三条 impl + `kernels.dawn` 迁移，golden 零变化（负控：按赋值位置排序使 flash_attn 变红） | 待 S1 合入 |
-| S3 | staged `if`（`StagedCond[C]`），另起设计 | 之后 |
+| S1 | 编译器：两个 prelude trait、改写、诊断、LSP、spec、spike 对拍 | 已完成 |
+| S2 | tileir：DRange 与 Tile 格子协议、`kernels.dawn` 迁移，golden 零变化（负控：按赋值位置排序使 flash_attn 变红） | 已随 0.11.0 完成 |
+| S3 | staged `if`（`StagedCond[C]`），独立设计 | 已完成，见 staged if 的 S0–S4 覆盖表 |
 | 重开项 | `continue` 映射为体内 `return ()` | 有真实 kernel 需要时 |
 
 ## 9. 不做的（理由）

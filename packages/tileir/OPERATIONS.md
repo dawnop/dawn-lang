@@ -301,6 +301,10 @@ A mask is a `Tile[Bool]`; combining two is a `select`, since the dialect has no 
 
 A rank-0 device `if` supports memory operations, atomics and nested staged loops in both Unit and Tile value forms. Both arms start from the same entry token. If either advances it, a private token result selects the executed arm's end; pure branches add no token slot. The recorder restores carries and result slots between arms and keeps cached views scoped to their region. Conditional write sets include both arms, so unordered fork chains with overlapping or unknown writes are refused. Mutually exclusive arms may write the same address. Reductions and scans remain pure, including an `if` nested inside them.
 
+Conditions require `Tile[Bool]` with shape `[]`; even `[1]` is refused. Lane predicates use `select` or a memory mask. A value form requires `else` and identical result dtype and shape, with no broadcasting, promotion or implicit host result. Each arm initializes its own result before the merge. Read-only In loads keep the entry token without adding a token result; explicit region metadata distinguishes token results from data.
+
+A refusal points to the user's call or recording boundary. Trait methods have no independent `caller()` argument, so an operator or staged condition may use the enclosing trace location. `while` still requires a host Bool. Nonlocal `break`, `continue`, `return` and `?` cannot cross a staged arm. Device atomic results are checked against tileref; tileinterp explicitly refuses atomics and that refusal is not a numerical pass.
+
 A region function records a region operation; carry and result discovery trials run its closures before the final recording. `carry`, `get` and `set` are the loop-carried values of a region and are no instruction of their own.
 
 | Function | Operation | Also |
