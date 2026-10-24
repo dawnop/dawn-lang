@@ -21,7 +21,7 @@ HERE = ROOT / "scripts/ffi-extern-contract"
 DAWN = str(ROOT / "bin/dawn")
 CC = os.environ.get("CC", "cc")
 WCC = os.environ.get("DAWN_WASM_CC", "clang-20")
-FLAGS = ["-std=c11", "-O1", "-g", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread",
+FLAGS = ["-std=c11", "-O1", "-g", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-ffp-contract=off", "-pthread",
          "-Wno-parentheses-equality", "-I", str(ROOT / "runtime/c")]
 SAN = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-sanitize-recover=undefined"]
 ENV = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1", UBSAN_OPTIONS="halt_on_error=1")
@@ -189,7 +189,7 @@ def main():
         for suffix, lang in [("eh.cc", ["-x", "c++", "-std=c++14", "-fno-rtti", "-fwasm-exceptions"]), ("tag.c", ["-std=c11"])]:
             run([WCC, "--target=" + triple, "-O1", *lang, "-c", ROOT / ("runtime/c/dawn_rt_wasi_" + suffix), "-o", work / (suffix + ".o")])
         wasm = work / "roundtrip.wasm"
-        run([WCC, "--target=" + triple, "-std=c11", "-O1", "-fwrapv", "-fwasm-exceptions", "-fno-strict-aliasing",
+        run([WCC, "--target=" + triple, "-std=c11", "-O1", "-fwrapv", "-fwasm-exceptions", "-fno-strict-aliasing", "-ffp-contract=off",
              "-Wno-parentheses-equality", "-I", ROOT / "runtime/c", source, HERE / "stub.c", ROOT / "runtime/c/dawn_rt.c",
              work / "eh.cc.o", work / "tag.c.o", "-lm", "-o", wasm])
         r = run(["node", "--no-warnings", ROOT / "scripts/wasm-contract/runwasi.mjs", wasm])

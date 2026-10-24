@@ -307,7 +307,7 @@ run_corpus() {
   # flags cover noise a code generator legitimately produces; the last,
   # clang's warning on `if ((x == 0))`, matters since CI's CC is clang
   # (scripts/pinned-cc.sh) and gcc ignores it.
-  if "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  if "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -Wall -Wextra -Werror \
     -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
@@ -329,7 +329,7 @@ run_corpus() {
   # inlined into; the answer is not being checked here, only the memory.
   if [ "$asan_ok" -eq 1 ]; then
     if "$cc_bin" -std=c11 -g -O0 -fno-omit-frame-pointer -fwrapv -fexceptions \
-      -fno-strict-aliasing -fsanitize=address -pthread \
+      -fno-strict-aliasing -ffp-contract=off -fsanitize=address -pthread \
       -I "$root/runtime/c" \
       -o "$work/$name.asan" "$work/$name.c" "$root/runtime/c/dawn_rt.c" -lm \
       >"$work/$name.asan.cc" 2>&1; then

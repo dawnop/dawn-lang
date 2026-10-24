@@ -849,7 +849,7 @@ fn cc_build_packages(
   if wasm {
     let shim = [
       cc, "--target=${triple}", "-x", "c++", "-std=c++14", opt,
-      "-fno-rtti", "-fwasm-exceptions",
+      "-ffp-contract=off", "-fno-rtti", "-fwasm-exceptions",
       "-c", "${work}/dawn_rt_wasi_eh.cc", "-o", "${work}/dawn_rt_wasi_eh.o"
     ]
     match io.run(shim, "", "") {
@@ -866,7 +866,7 @@ fn cc_build_packages(
       }
     }
     let tag = [
-      cc, "--target=${triple}", "-std=c11", opt,
+      cc, "--target=${triple}", "-std=c11", opt, "-ffp-contract=off",
       "-c", "${work}/dawn_rt_wasi_tag.c", "-o", "${work}/dawn_rt_wasi_tag.o"
     ]
     match io.run(tag, "", "") {
@@ -897,9 +897,11 @@ fn cc_build_packages(
   # and the only way in is the export `reactor_shim` declares. That is the
   # whole difference in the link, and it is one flag.
   let model: List[String] = if reactor { ["-mexec-model=reactor"] } else { [] }
+  # Float operations round separately on every backend. In particular, clang
+  # may otherwise fuse a multiply and add on aarch64 even in C11 mode.
   let argv = if wasm {
     [
-      cc, "--target=${triple}", "-std=c11", opt, "-fwrapv", "-fwasm-exceptions",
+      cc, "--target=${triple}", "-std=c11", opt, "-ffp-contract=off", "-fwrapv", "-fwasm-exceptions",
       "-fno-strict-aliasing", "-Wno-parentheses-equality"
     ] ++ model ++ [
       "-I", work,
@@ -912,7 +914,7 @@ fn cc_build_packages(
     # code only, and the module's size is what a wasm build is read for.
     let rc: List[String] = if inline_rc { ["-DDAWN_RT_INLINE_RC"] } else { [] }
     [
-      cc, "-std=c11", opt, "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread"
+      cc, "-std=c11", opt, "-ffp-contract=off", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread"
     ] ++ rc ++ [
       "-Wno-parentheses-equality", "-I", work,
       "-o", out
@@ -1745,24 +1747,25 @@ test "the native build is one command line, and this is every flag in it" {
     # no probe: nothing here is cross-compiled, so nothing is asked
     assert len(log) == 1
     let argv = procmem.call_argv(log, 0)
-    assert len(argv) == 15
+    assert len(argv) == 16
     assert argv[0] == "fake-cc"
     assert argv[1] == "-std=c11"
     assert argv[2] == "-O2"
-    assert argv[3] == "-fwrapv"
-    assert argv[4] == "-fexceptions"
-    assert argv[5] == "-fno-strict-aliasing"
-    assert argv[6] == "-pthread"
+    assert argv[3] == "-ffp-contract=off"
+    assert argv[4] == "-fwrapv"
+    assert argv[5] == "-fexceptions"
+    assert argv[6] == "-fno-strict-aliasing"
+    assert argv[7] == "-pthread"
     # clang's warning on the emitter's `if ((x == 0))`, the one flag the two
     # rows share beyond the C ones (see cc_build_with)
-    assert argv[7] == "-Wno-parentheses-equality"
-    assert argv[8] == "-I"
-    let work = argv[9]
-    assert argv[10] == "-o"
-    assert argv[11] == out
-    assert argv[12] == "${work}/main.c"
-    assert argv[13] == "${work}/dawn_rt.c"
-    assert argv[14] == "-lm"
+    assert argv[8] == "-Wno-parentheses-equality"
+    assert argv[9] == "-I"
+    let work = argv[10]
+    assert argv[11] == "-o"
+    assert argv[12] == out
+    assert argv[13] == "${work}/main.c"
+    assert argv[14] == "${work}/dawn_rt.c"
+    assert argv[15] == "-lm"
     # the include path is the staging directory itself: dawn_rt.h is beside
     # the C that includes it
     assert work != ""
@@ -1798,11 +1801,11 @@ test "an inline-RC native build adds exactly one define, right after -pthread" {
     )
     let argv = procmem.call_argv(log, 0)
     # the plain native row, one longer
-    assert len(argv) == 16
-    assert argv[6] == "-pthread"
-    assert argv[7] == "-DDAWN_RT_INLINE_RC"
-    assert argv[8] == "-Wno-parentheses-equality"
-    assert argv[9] == "-I"
+    assert len(argv) == 17
+    assert argv[7] == "-pthread"
+    assert argv[8] == "-DDAWN_RT_INLINE_RC"
+    assert argv[9] == "-Wno-parentheses-equality"
+    assert argv[10] == "-I"
   })
 }
 
@@ -1823,10 +1826,11 @@ test "a native build at another level differs in exactly that one flag" {
     )
     let argv = procmem.call_argv(log, 0)
     # the plain native row, same length, -O0 where -O2 was
-    assert len(argv) == 15
+    assert len(argv) == 16
     assert argv[1] == "-std=c11"
     assert argv[2] == "-O0"
-    assert argv[3] == "-fwrapv"
+    assert argv[3] == "-ffp-contract=off"
+    assert argv[4] == "-fwrapv"
     assert not str.contains(join(argv, " "), "-O2")
   })
 }
@@ -1858,6 +1862,7 @@ test "a wasm build at another level carries it in all three compiles" {
     assert procmem.call_argv(log, 2)[3] == "-O1"
     assert procmem.call_argv(log, 3)[3] == "-O1"
     for k in [1, 2, 3] {
+      assert str.contains(join(procmem.call_argv(log, k), " "), "-ffp-contract=off")
       assert not str.contains(join(procmem.call_argv(log, k), " "), "-O2")
     }
   })
@@ -1898,12 +1903,12 @@ test "a build with a manifest links one more C file, after the runtime" {
       }
     )
     let argv = procmem.call_argv(log, 0)
-    let work = argv[9]
+    let work = argv[10]
     # the native row of the test above, with the unit between the runtime and -lm
-    assert len(argv) == 16
-    assert argv[13] == "${work}/dawn_rt.c"
-    assert argv[14] == "${work}/dawn_build_info.c"
-    assert argv[15] == "-lm"
+    assert len(argv) == 17
+    assert argv[14] == "${work}/dawn_rt.c"
+    assert argv[15] == "${work}/dawn_build_info.c"
+    assert argv[16] == "-lm"
   })
 }
 
@@ -1928,15 +1933,15 @@ test "a text cut into units compiles every unit in the one command, in order" {
     # second invocation
     assert len(log) == 1
     let argv = procmem.call_argv(log, 0)
-    let work = argv[9]
+    let work = argv[10]
     # the native row of the test above, with the units where main.c was and
     # the shared head beside them, reached through -I
-    assert len(argv) == 16
-    assert argv[11] == out
-    assert argv[12] == "${work}/tu00.c"
-    assert argv[13] == "${work}/tu01.c"
-    assert argv[14] == "${work}/dawn_rt.c"
-    assert argv[15] == "-lm"
+    assert len(argv) == 17
+    assert argv[12] == out
+    assert argv[13] == "${work}/tu00.c"
+    assert argv[14] == "${work}/tu01.c"
+    assert argv[15] == "${work}/dawn_rt.c"
+    assert argv[16] == "-lm"
     assert not str.contains(join(argv, " "), "dawn_prog.h")
   })
 }
@@ -1984,32 +1989,34 @@ test "the wasm build is four command lines, and these are every flag in them" {
     # the shim is its own compile because it is C++ and carries spellings the
     # C rows must not have; it produces the object the link picks up
     let shim = procmem.call_argv(log, 1)
-    assert len(shim) == 12
+    assert len(shim) == 13
     assert shim[0] == "fake-clang"
     assert shim[1] == "--target=wasm32-wasip1"
     assert shim[2] == "-x"
     assert shim[3] == "c++"
     assert shim[4] == "-std=c++14"
     assert shim[5] == "-O2"
-    assert shim[6] == "-fno-rtti"
-    assert shim[7] == "-fwasm-exceptions"
-    assert shim[8] == "-c"
-    assert shim[9] == "${work}/dawn_rt_wasi_eh.cc"
-    assert shim[10] == "-o"
-    assert shim[11] == "${work}/dawn_rt_wasi_eh.o"
+    assert shim[6] == "-ffp-contract=off"
+    assert shim[7] == "-fno-rtti"
+    assert shim[8] == "-fwasm-exceptions"
+    assert shim[9] == "-c"
+    assert shim[10] == "${work}/dawn_rt_wasi_eh.cc"
+    assert shim[11] == "-o"
+    assert shim[12] == "${work}/dawn_rt_wasi_eh.o"
 
     # the tag is a third compile, in C and with no exception flag at all: a
     # unit that neither throws nor catches is where the definition can sit
     let tag = procmem.call_argv(log, 2)
-    assert len(tag) == 8
+    assert len(tag) == 9
     assert tag[0] == "fake-clang"
     assert tag[1] == "--target=wasm32-wasip1"
     assert tag[2] == "-std=c11"
     assert tag[3] == "-O2"
-    assert tag[4] == "-c"
-    assert tag[5] == "${work}/dawn_rt_wasi_tag.c"
-    assert tag[6] == "-o"
-    assert tag[7] == "${work}/dawn_rt_wasi_tag.o"
+    assert tag[4] == "-ffp-contract=off"
+    assert tag[5] == "-c"
+    assert tag[6] == "${work}/dawn_rt_wasi_tag.c"
+    assert tag[7] == "-o"
+    assert tag[8] == "${work}/dawn_rt_wasi_tag.o"
     assert not str.contains(join(tag, " "), "-fwasm-exceptions")
     assert not str.contains(join(tag, " "), "-x")
 
@@ -2017,31 +2024,32 @@ test "the wasm build is four command lines, and these are every flag in them" {
     # -fwasm-exceptions for -fexceptions, no -pthread, and the clang-only
     # warning the emitted C trips silenced
     let main = procmem.call_argv(log, 3)
-    assert len(main) == 17
+    assert len(main) == 18
     assert main[0] == "fake-clang"
     assert main[1] == "--target=wasm32-wasip1"
     assert main[2] == "-std=c11"
     assert main[3] == "-O2"
-    assert main[4] == "-fwrapv"
-    assert main[5] == "-fwasm-exceptions"
-    assert main[6] == "-fno-strict-aliasing"
-    assert main[7] == "-Wno-parentheses-equality"
-    assert main[8] == "-I"
-    assert main[9] == work
-    assert main[10] == "-o"
-    assert main[11] == out
-    assert main[12] == "${work}/main.c"
-    assert main[13] == "${work}/dawn_rt.c"
-    assert main[14] == "${work}/dawn_rt_wasi_eh.o"
-    assert main[15] == "${work}/dawn_rt_wasi_tag.o"
-    assert main[16] == "-lm"
+    assert main[4] == "-ffp-contract=off"
+    assert main[5] == "-fwrapv"
+    assert main[6] == "-fwasm-exceptions"
+    assert main[7] == "-fno-strict-aliasing"
+    assert main[8] == "-Wno-parentheses-equality"
+    assert main[9] == "-I"
+    assert main[10] == work
+    assert main[11] == "-o"
+    assert main[12] == out
+    assert main[13] == "${work}/main.c"
+    assert main[14] == "${work}/dawn_rt.c"
+    assert main[15] == "${work}/dawn_rt_wasi_eh.o"
+    assert main[16] == "${work}/dawn_rt_wasi_tag.o"
+    assert main[17] == "-lm"
     assert not str.contains(join(main, " "), "-pthread")
     assert not str.contains(join(main, " "), "-fexceptions")
     # a command build has no reactor flag anywhere
     assert not str.contains(join(main, " "), "-mexec-model")
     # the two objects the link consumes are the two the compiles above wrote
-    assert main[14] == shim[11]
-    assert main[15] == tag[7]
+    assert main[15] == shim[12]
+    assert main[16] == tag[8]
     # every invocation staged out of one directory, and it is gone afterwards
     assert log[3].out_path == ""
     assert log[3].err_path == ""
@@ -2078,13 +2086,13 @@ test "a reactor build is the same link plus one flag" {
     assert not str.contains(join(procmem.call_argv(log, 1), " "), "-mexec-model")
     assert not str.contains(join(procmem.call_argv(log, 2), " "), "-mexec-model")
     let main = procmem.call_argv(log, 3)
-    assert len(main) == 18
-    assert main[7] == "-Wno-parentheses-equality"
-    assert main[8] == "-mexec-model=reactor"
-    assert main[9] == "-I"
-    assert main[10] == work
-    assert main[11] == "-o"
-    assert main[12] == out
+    assert len(main) == 19
+    assert main[8] == "-Wno-parentheses-equality"
+    assert main[9] == "-mexec-model=reactor"
+    assert main[10] == "-I"
+    assert main[11] == work
+    assert main[12] == "-o"
+    assert main[13] == out
   })
 }
 

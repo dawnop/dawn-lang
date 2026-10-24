@@ -74,7 +74,7 @@ run_leg() { # label flips compiler [std-dir]
   mkdir -p "$dir"
   DAWN_RC_MODE_FLIPS="$flips" "$compiler" __emitc "${std_args[@]}" "$here/insert_native.dawn" \
     -o "$dir/insert.c"
-  "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -Wall -Wextra -Werror \
     -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
@@ -142,7 +142,7 @@ run_record_leg() { # label flips compiler [std-dir]
   mkdir -p "$dir"
   DAWN_RC_MODE_FLIPS="$flips" "$compiler" __emitc "${std_args[@]}" "$here/record_update_native.dawn" \
     -o "$dir/record.c"
-  "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -Wall -Wextra -Werror \
     -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \

@@ -22,7 +22,7 @@ import time
 from cold import DAWN, HERE, ROOT, edit, owned
 from lsp_stats import FIELDS
 
-NATIVE_FLAGS = ("-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread")
+NATIVE_FLAGS = ("-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-ffp-contract=off", "-pthread")
 
 
 def hashes(directory):

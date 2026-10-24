@@ -73,5 +73,8 @@ if [ -z "${GITHUB_ENV:-}" ]; then
   echo "FAIL: a pinned compiler was found but GITHUB_ENV is not set" >&2
   exit 1
 fi
+# Float semantics require this on every target, including aarch64. Fail here
+# if the pinned compiler ever stops accepting the flag used by the driver.
+"$path" -ffp-contract=off -x c -fsyntax-only /dev/null
 echo "CC=$path" >>"$GITHUB_ENV"
 echo "pinned-cc: CC=$path ($("$path" --version | sed -n 1p))"

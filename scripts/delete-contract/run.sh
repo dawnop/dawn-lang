@@ -116,7 +116,7 @@ if ! "$root/bin/dawn" __emitc --std "$root/std" "$here/probe.dawn" \
   cat "$work/emitc.out" >&2
   fail "native delete probe did not emit C"
 fi
-if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$root/runtime/c" \
     -o "$work/probe" "$work/probe.c" "$root/runtime/c/dawn_rt.c" -lm \
@@ -138,7 +138,7 @@ cmp -s "$work/jvm.out" "$work/native.out" || fail "JVM and native delete outputs
 mkdir -p "$work/cpath-mutant/runtime/c"
 cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/cpath-mutant/runtime/c/"
 python3 "$here/mutate.py" c-cpath-nul "$work/cpath-mutant"
-if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$work/cpath-mutant/runtime/c" \
     -o "$work/cpath-mutant/probe" "$work/probe.c" "$work/cpath-mutant/runtime/c/dawn_rt.c" -lm \
@@ -166,7 +166,7 @@ for query_case in \
   mkdir -p "$query_dir/runtime/c"
   cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$query_dir/runtime/c/"
   python3 "$here/mutate.py" "c-query-$query_name" "$query_dir"
-  if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
       -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
       -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$query_dir/runtime/c" \
       -o "$query_dir/probe" "$work/probe.c" "$query_dir/runtime/c/dawn_rt.c" -lm \
@@ -189,7 +189,7 @@ done
 mkdir -p "$work/c-getenv-mutant/runtime/c"
 cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/c-getenv-mutant/runtime/c/"
 python3 "$here/mutate.py" c-getenv-nul "$work/c-getenv-mutant"
-if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$work/c-getenv-mutant/runtime/c" \
     -o "$work/c-getenv-mutant/probe" "$work/probe.c" \
@@ -212,7 +212,7 @@ expect_getenv_mutant_red "C getenv NUL-query" "$work/c-getenv-mutant/out"
 mkdir -p "$work/c-mutant/runtime/c"
 cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/c-mutant/runtime/c/"
 python3 "$here/mutate.py" c-delete-collapse "$work/c-mutant"
-if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$work/c-mutant/runtime/c" \
     -o "$work/c-mutant/probe" "$work/probe.c" "$work/c-mutant/runtime/c/dawn_rt.c" -lm \
@@ -300,7 +300,7 @@ if ! "$root/bin/dawn" __emitc --std "$work/preflight-mutant/std" "$here/probe.da
   cat "$work/preflight-mutant/emitc.out" >&2
   fail "native delete-preflight mutant did not emit C"
 fi
-if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$root/runtime/c" \
     -o "$work/preflight-mutant/probe" "$work/preflight-mutant/probe.c" \

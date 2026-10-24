@@ -75,9 +75,9 @@ for v in param buffer const; do
 done
 
 echo "-- launch time"
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -I "$root/runtime/c" -c -o "$work/rt.o" "$root/runtime/c/dawn_rt.c"
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread -I "$root/runtime/c" -c -o "$work/rt.o" "$root/runtime/c/dawn_rt.c"
 "$root/bin/dawn" __emitc --std "$root/std" "$work/b" -o "$work/b.c" > /dev/null
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -I "$root/runtime/c" -o "$work/b.bin" "$work/b.c" "$work/rt.o" -lm
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread -I "$root/runtime/c" -o "$work/b.bin" "$work/b.c" "$work/rt.o" -lm
 "$work/b.bin" "$work/bench_param.cubin" "$work/bench_buffer.cubin" "$work/bench_const.cubin" "$launches" "$reps" | tee "$work/bench.out"
 echo "-- launch time (ns per launch): median min max"
 sed -n 's/^bench \([a-z_]*\) grid=\([0-9]*\) launches=[0-9]* ns_per_launch=\[\(.*\)\]$/\1 \2 \3/p' "$work/bench.out" |

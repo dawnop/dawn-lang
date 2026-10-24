@@ -189,7 +189,7 @@ echo "OK   mutant source-seam-call goes red"
 # The root's native ownership is tested at the ABI itself: set takes its own
 # reference, get answers an owned reference, replace drops the old root once,
 # alias replacement is safe, and atexit clears the last root before observers.
-"$cc_bin" -std=c11 -O1 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O1 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -Wall -Wextra -Werror -I "$root/runtime/c" \
   -o "$work/retained-rc" "$here/retained-rc.c" "$root/runtime/c/dawn_rt.c" -lm
 if ! "$work/retained-rc" >"$work/retained-rc.txt"; then

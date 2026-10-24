@@ -48,7 +48,7 @@ if ! diff -u "$here/expected.txt" "$work/jvm.out"; then
 fi
 
 "$root/bin/dawn" __emitc --std "$work" "$here/probe.dawn" -o "$work/probe.c"
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -Wall -Wextra -Werror \
   -Wno-unused-variable -Wno-unused-but-set-variable \
   -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \

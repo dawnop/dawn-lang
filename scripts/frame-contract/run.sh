@@ -80,7 +80,7 @@ build() {
   local c="$1" bin="$2" rt="$3"
   shift 3
   "$cc_bin" -std=c11 -g -O0 -fno-omit-frame-pointer -fwrapv -fexceptions \
-    -fno-strict-aliasing -fsanitize=address -pthread "$@" \
+    -fno-strict-aliasing -ffp-contract=off -fsanitize=address -pthread "$@" \
     -I "$rt" -o "$bin" "$c" "$rt/dawn_rt.c" -lm >"$bin.cc" 2>&1
 }
 

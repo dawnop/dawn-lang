@@ -90,6 +90,10 @@ fi
 # a relative one would resolve against the wrong place if that ever changes
 case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac
 
+# Reuse the release binary for the aarch64 Float rounding contract
+# (9.53s locally with an existing driver; no second bootstrap).
+DAWNC_BIN="$DAWNC" python3 scripts/fp-contract-contract/run.py
+
 # Both drivers on the same std. Neither reads the working directory's `std`
 # any more (#291): with no `--std` a command takes DAWN_STD, then the copy
 # compiled in. ./bin/dawn exports DAWN_STD=$ROOT/std for the JVM side; dawnc

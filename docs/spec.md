@@ -308,6 +308,9 @@ v0.80.0 起只报错，见 [`syntax-window-design.md`](syntax-window-design.md) 
 scalar value）、`Loc`（调用点位置，§8.4）、`Float`（double）、`Bool`、`String`、`Bytes`（不可变字节序列）与 `Unit`。
 这八个名字与下节三个公开泛型名字构成完整的 public builtin type surface。
 
+`Float` 的每个算术运算分别舍入到 binary64（就近偶数）；后端不得把乘法与加减法融合成一次舍入。
+native 与 wasm 在编译发射的 C 时传 `-ffp-contract=off`，保持与 JVM 相同的舍入边界。
+
 `Unit` 是一等值（唯一值 `()`），**可出现在任何值能出现的位置**：形参、局部变量、
 闭包捕获、元组元素、返回值，以及实例化类型参数（`Result[Unit, E]`、`List[Unit]`、
 `catch_fault(() => <void 调用>)`）。运行期它有真实表示——一个单例对象

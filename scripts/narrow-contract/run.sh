@@ -86,7 +86,7 @@ python3 "$here/gen.py" --check || fail "the corpus is not what gen.py generates"
 
 # The runtime is compiled once; every native build below links this object.
 rt_obj="$work/dawn_rt.o"
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -I "$root/runtime/c" -c -o "$rt_obj" "$root/runtime/c/dawn_rt.c" ||
   fail "the C runtime does not compile"
 
@@ -104,7 +104,7 @@ run_native() { # stddir, out
   local stddir="$1" out="$2"
   "$root/bin/dawn" __emitc --std "$stddir" "$program" -o "$out.c" > "$out.emit" 2>&1 ||
     { cat "$out.emit" >&2; fail "native emit failed"; }
-  "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -I "$root/runtime/c" -o "$out.bin" "$out.c" "$rt_obj" -lm > "$out.cc" 2>&1 ||
     { cat "$out.cc" >&2; fail "native compile failed"; }
   "$out.bin" > "$out" 2> "$out.err"

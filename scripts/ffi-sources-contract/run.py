@@ -215,7 +215,7 @@ def compiled_sources(env, *, inline, wasm=False):
     assert len(paths) == len(set(paths)), paths
     assert [Path(p).relative_to(Path(p).parents[2]).as_posix() for p in paths if "/a/" in p or "/b/" in p] == ["src/a/stub.c", "src/b/stub.c"]
     for row in stubs:
-        for flag in ["-std=c11", "-fwrapv", "-fno-strict-aliasing", "-O2"]:
+        for flag in ["-std=c11", "-fwrapv", "-fno-strict-aliasing", "-ffp-contract=off", "-O2"]:
             assert flag in row, row
         assert ("-DDAWN_RT_INLINE_RC" in row) == inline, row
         assert any(a.startswith("--target=wasm") for a in row) == wasm, row

@@ -103,7 +103,7 @@ echo "PASS  values, bounds; 200k linear ${linear_ms}ms vs 20k forked ${forked_ms
 steal_bin="$work/steal_native"
 "$root/bin/dawn" __emitc "$here/steal_native.dawn" -o "$work/steal_native.c"
 cc_bin="${CC:-cc}"
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -Wall -Wextra -Werror \
   -Wno-unused-variable -Wno-unused-but-set-variable \
   -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
@@ -158,7 +158,7 @@ echo "PASS  steal rate: with ${with_in}/$((with_in + with_cp)) in place, steal $
 # is its clock: milliseconds with the in-place claim, tens of minutes without.
 nat_bin="$work/probe_native"
 java -XX:-UsePerfData -Xss512m -jar "$jar" __emitc --std "$work" "$here/native_probe.dawn" -o "$work/probe_native.c"
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -Wall -Wextra -Werror \
   -Wno-unused-variable -Wno-unused-but-set-variable \
   -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
