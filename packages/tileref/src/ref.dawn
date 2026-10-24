@@ -5480,3 +5480,26 @@ pub fn staged_if_ref(name: String, _dtypes: List[String], ins: List[List[Float]]
     }
   })
 }
+
+## Independent scalar-loop reference for the fixed-six-argument consumers.
+## Every input and both scalar positions affect the answer; capacity tails
+## retain the output sentinel supplied by the caller.
+pub fn entry6_ref(name: String, ins: List[List[Float]], scalars: List[Float]) -> List[Float] = {
+  let scale = scalars[0]
+  let n = to_int(scalars[1])
+  var out: List[Float] = []
+  let rows = if name == "entry6_dynamic" { 4 } else { len(ins[0]) }
+  for r in range(0, rows) {
+    var acc = 0.0
+    if name == "entry6_dynamic" {
+      for j in range(0, n) {
+        let i = r * 32 + j
+        acc = acc + ins[0][i] + 2.0 * ins[1][i] + 4.0 * ins[2][i]
+      }
+      out = out ++ [scale * acc]
+    } else {
+      out = out ++ [scale * (ins[0][r] + 2.0 * ins[1][r] + 4.0 * ins[2][r]) + to_float(n)]
+    }
+  }
+  out ++ list.drop(ins[3], rows)
+}

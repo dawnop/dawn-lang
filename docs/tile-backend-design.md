@@ -6659,3 +6659,13 @@ store_sub 的 piece 按值维度，在删轴插 shape=1、piece=0。全投影可
 完整 tile 与 squeeze，全部 handler/mock 必须回答。tileir 因 Grid/Dev 公开面破坏性变化
 升至 0.27.0；没有新 opcode，MMA/transpose 仍要求二维。完整契约与验证边界见
 [几何瘦身设计](flash-attn-slim-s2-design.md)。
+
+
+### 6.50 固定六参入口（K3-0）
+
+当前固定族支持 `trace1` 至 `trace6`，对应 `Entry1` 至 `Entry6` 与类型化启动。
+六参追加复用原 marker、entry_args、record_sigs 和 launch_args；完整 Cells 的
+squeeze、storage 几何、角色、hints 与 caller 均透传。`Scalar` 没有缓冲身份，
+不参与别名比较。第六位类型由 `Launch[G]` 固定，kind、容量、grid 和 alias
+仍在 handler 前校验。Playground 的普通位置调用支持 tap6，仍拒绝具名 hints
+与未知 source 控制流。实现与验证契约见 [固定六参设计](gpu-k3-entry6-design.md)。

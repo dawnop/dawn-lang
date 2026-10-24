@@ -1,5 +1,9 @@
 # tileref changelog
 
+## 0.1.5 (2026-10-24)
+
+- Add the independent scalar-loop reference for fixed six-argument dynamic-prefix and projected-cell consumers.
+
 ## 0.1.4 (2026-10-23)
 
 - Add independent exact references for conditional memory, nested loops, atomics and asymmetric branch writes with both uploaded predicate signs.
