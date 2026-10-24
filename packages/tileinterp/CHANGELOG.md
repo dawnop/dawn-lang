@@ -3,6 +3,20 @@
 Newest first. A 0.x minor is its own compatibility class
 (`docs/package-design.md` §6.3).
 
+## Unreleased
+
+Use std/math for binary64 host arithmetic and std/float for classification
+and adjacent values. Remove the old public host helpers in tileinterp/math;
+callers import std/math directly. GPU directed rounding, flush to zero,
+round-to-odd and narrow-format adapters remain local. tileref keeps its
+independent transcendental algorithms.
+
+The saved K1 exp witness improves from 45356 representable steps to one
+step from the MPFR-rounded answer (0.559826 ulp true error). Binary64 fused
+operations now round once even across intermediate overflow and subnormal
+ties. Flash attention's printed last digits change with the more accurate
+exp; its existing 1e-12 comparison remains green.
+
 ## 0.3.0 (2026-10-22)
 
 - Normalize every integer shift count to its low width bits and remove out-of-range shift UB handling. This changes the raw interpreter entry as well as tile surface results.

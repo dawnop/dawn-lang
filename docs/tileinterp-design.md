@@ -105,16 +105,12 @@ block 间写入不相交时，任何执行顺序答案相同；相交就是竞�
 
 - 加减乘除、比较、`maxf`/`minf`（含 `propagate_nan` 两路与 ±0）、`remf`、`ceil`/`floor`、`negf`/`absf`、
   `fpowi`（设计 T16 节量出的「右到左二进制幂，负指数取倒数」）在 f64 上**逐位**。
-- 定向舍入（`addf_neg_inf` 等）用 TwoSum / Dekker 乘积求出精确误差再向一侧挪一个 ulp；`divf`
-  用 Dekker 乘积求余数的符号。`flush_to_zero` 把次正规输入与结果冲成同号零。
-- `sqrt` 正确舍入：牛顿迭代后用 Dekker 乘积判定 ±1 ulp。`sqrt_approx` 走同一个函数（设备差 1 ulp，
-  容差档）。
-- 超越函数（`exp exp2 log log2 rsqrt tanh fpowf sin cos tan sinh cosh atan2`）**不复用 tileref**
-  （裁决第 4 条），本包只用宿主的加减乘除另写一套，走与 tileref 不同的路：`exp` 先除以 2^10、
-  Taylor 求和、再平方十次（tileref 是按 `k·ln2` 约化）；`log` 在这个 `exp` 上做 Halley 迭代
-  （tileref 是 atanh 级数）；三角用三段 π/2 的 Cody–Waite 约化；`atan` 两次半角化简再级数。
-  相对误差约 1e-13，只承诺容差档（`atol = rtol = 1e-5`，设计 §6.6），与设备、与 tileref 都是
-  不同的意见。小整数次幂的 `fpowf` 走二进制幂，其余 `exp(y·log x)`。
+- 定向舍入（`addf_neg_inf` 等）保留包内 GPU 适配；加法用 TwoSum，乘除先 frexp 正规化再用 std/math.fma 求可表示的残差，按其符号向一侧挪一个 ulp。`flush_to_zero` 把次正规输入与结果冲成同号零。
+- `sqrt` 使用 std/math.sqrt 正确舍入；`sqrt_approx` 走同一个函数，仍属设备容差模型。
+- std/math K5 后，超越函数（`exp exp2 log log2 tanh pow sin cos tan sinh cosh atan2`）直接调用
+  std/math 的 binary64 实现，误差不超过 1 ulp；rsqrt 在包内组合 `1 / sqrt(x)`。
+  GPU 比较仍采用既有容差档（`atol = rtol = 1e-5`，设计 §6.6），不把宿主契约冒充设备近似语义。
+  tileref 保留自己的独立级数，leetgpu 源依赖检查拒绝共享超越函数路径；详见 std-math-design 第七节。
 - 归约与扫描按**左折叠**（与 tileref 的 `sum_ref` 同序）。设备的折叠树不指定（§6.6 第 2 条），
   逐位档 kernel 的语料本来就让折叠顺序不可见。
 

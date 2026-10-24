@@ -202,7 +202,7 @@ for m in exp-misrouted mulf-adds bounds-unchecked unsupported-skipped mma-drops-
       # oracle, so a timeout in an unrelated family cannot kill this control.
       grep -q '^FAIL  covered but not in covered.txt: token_fences$' "$d/judge.out" ||
         { cat "$d/judge.out" >&2; fail "$m: the newly accepted fence was not named"; }
-      echo "PASS  $m: the refusal test and the comparison went red (first: $(grep -m1 '^FAIL ' "$d/judge.out" | cut -c1-160))"
+      echo "PASS  $m: the refusal test went red and the comparison named the incorrectly accepted token_fences"
       ;;
     mma-drops-term | narrow-unrounded)
       if ./bin/dawn test "$pkg" > "$d/test.out" 2>&1; then fail "$m: the package tests stayed green"; fi
