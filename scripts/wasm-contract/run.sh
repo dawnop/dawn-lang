@@ -271,3 +271,7 @@ fi
 
 if [ "$fail" != 0 ]; then exit 1; fi
 echo "wasm contract ok (hello, stress, failure, imm, std_math, failure_uncaught, 5 negative controls)"
+
+# K4 uses this gate's existing native driver and pinned SDK for both real
+# compiler constant artifacts, including linked software fma on wasm.
+python3 "$root/scripts/math-contract/run.py" --wasm --driver "$DAWNC"

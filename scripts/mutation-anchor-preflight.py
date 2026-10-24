@@ -58,6 +58,7 @@ ADAPTERS = {
     "lsp-semantic-tokens": (".",),
     "map-reuse-contract": (".",),
     "narrow-contract": (".",),
+    "math-contract": (".",),
     "lsp-workspace-contract": ("selfhost",),
     "pattern-or-contract": ("selfhost",),
     "pipe-contract": (".",),
