@@ -89,8 +89,8 @@ kind, tool = ''' + repr((kind, str(tool))) + '''
 entry = {'tool': kind, 'command': a[0]}
 if a[0] == 'build':
     root = pathlib.Path(a[1])
-    entry['main'] = (root / 'src/main.dawn').read_text()
-    entry['probe'] = (root / 'src/explore_probe.dawn').exists()
+    entry['main'] = (root / 'src/main.dawn' if root.is_dir() else root).read_text()
+    entry['probe'] = root.is_dir() and (root / 'src/explore_probe.dawn').exists()
     if entry['probe']:
         entry['probe_source'] = (root / 'src/explore_probe.dawn').read_text()
 with open(str(p) + '.calls', 'a') as f:
