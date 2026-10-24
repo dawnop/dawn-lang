@@ -503,7 +503,7 @@ def main():
                if args.manifest else manifest(KERNELS.read_text()))
     ledger = json.loads(LEDGER.read_text())
     data = json.loads(LEDGER.with_name("measurements.json").read_text())
-    display = (ROOT / "site/gpu-map/flash-perf.tsv").read_text()
+    display = (ROOT / "scripts/flash-config/p4c-display.tsv").read_text()
     output = json.loads(LEDGER.with_name("a2-output.json").read_text())
     problems = (check(records, ledger) + check_measurements(data, ledger, display) +
                 check_matmul(records, ledger['matmul'], data['matmul']) +
@@ -526,14 +526,14 @@ def main():
         matmul_self_test(records, ledger['matmul'], data['matmul'])
         for dtype in ['f16', 'i8']:
             matmul_self_test(records, ledger['matmul'], data['matmul_' + dtype], dtype)
-        assert check_measurements(data, ledger, display + "changed"), "changed page timings stayed green"
+        assert check_measurements(data, ledger, display + "changed"), "changed archived timings stayed green"
         changed = copy.deepcopy(data)
         next(r for r in changed['alignment_adopted'] if r['name'] == 'kt_approx')['median_ms'] *= 1.2
         assert any('neutral range' in p for p in check_measurements(changed, ledger, display)), "a changed alignment measurement stayed green"
         wrong_compiler = copy.deepcopy(data)
         wrong_compiler['cutile_tileiras'] = '13.3.36'
         assert any('toolchain' in p for p in check_measurements(wrong_compiler, ledger, display)), "a mismatched comparator compiler stayed green"
-        print("PASS flash timings: page values and configurations match all 12 same-round cases")
+        print("PASS flash timings: archived display values and configurations match all 12 same-round cases")
     print("PASS A2 output migration: eight paired cases, host byte contracts, equality and independent reference")
     if records is None:
         print("PASS flash history: archived P4-b, P4-c and A2 evidence; executable plan checks run in tile-golden")

@@ -145,7 +145,11 @@ One kernel, line by line
 
 ## kernel-body
 
-A fused attention, the source of the row statistics above, beside the Tile IR its calls wrote. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table; the colour on a call's name and on the lines it wrote is the same. In the Playground the same function can also be read beside the C and the JVM bytecode it compiles to. The shared `[D, A]` body is recorded here as Float/Float: natural exponentials and exact f64 division. Its BF16/F32 instance keeps base-2 exponentials with FTZ, bf16 probability rounding, and approximate f32 division. Three-dimensional cells place heads on grid axis 2 and project singleton tile axes into matrix values. The algorithm queries tile_shape and blocks_of; its factory captures only the dtype witness and numeric policy. Architecture choices and entry hints stay in the host plan; measurement records stay in the audit ledger. The f64 recording uses one 32×16 plan with no entry hints.
+A fused attention with BF16 inputs and F32 accumulation, scale and output. The shared `[D,A]` body keeps the online softmax, sums unrounded probabilities, and rounds to BF16 nearest-even before the second MMA. Numerical helpers select exp2 with FTZ and approximate F32 division; the launch scale changes base once. Three-dimensional cells put heads on grid axis 2 and squeeze to matrix values. This small 32×16 recording has no entry hints. The generic algorithm, numerical policy, host plan and measurement audit keep separate roles. In the Playground, run this instance with the CPU interpreter and inspect its C, JVM and Tile IR views.
+
+## kernel-support
+
+Numerical policy and factory support
 
 ## kernel-open
 
@@ -319,40 +323,8 @@ GPUs on record
 
 ## perf-title
 
-Flash attention timings
+BF16 implementation and launch plans
 
 ## perf-body
 
-Historical P4-c measurements of the old flattened layout, before the A2 output migration and S2 three-axis layout. These timings do not measure S2, which reuses the launch plans. The current bf16 kernel stores f32; the timings below measured f64 output and have not been relabelled as f32 measurements. Offline configurations selected by `(arch, d)`, measured with CUDA events in one process and stream over five interleaved rounds. Times are median / p90 in milliseconds. The baseline is 64×64 with no entry hints; bf16 uses f32 accumulation and f64 output, and f64 uses 32×16 after tuning. cuTile uses its upstream bf16 attention sample with the fastest of four measured configurations; SDPA uses the row's bf16 or f64 format. cuTile outputs bf16; Dawn outputs f64. The f64 rows have no equivalent cuTile sample. The [configuration ledger](https://github.com/dawnop/dawn-lang/blob/main/scripts/flash-config/ledger.json) retains the selection evidence, including the unselected sm_100 d64 single head candidate. Configurations are fixed before recording; there is no runtime search.
-
-## perf-format
-
-Format
-
-## perf-workload
-
-Workload
-
-## perf-tools
-
-Tileiras / optimization
-
-## perf-config
-
-Configuration
-
-## perf-before
-
-Before
-
-## perf-after
-
-After
-
-## perf-cutile
-
-cuTile 1.7.0
-
-## perf-sdpa
-
-torch SDPA
+The current implementation uses BF16 inputs and F32 output. The host plan selects architecture-specific tiles and hints before recording, with no runtime search. This page's small layout demonstrates online updates over four key blocks; production launch plans use their own layouts. Historical measurements remain in the internal audit directory and do not measure this three-axis layout or this sample.

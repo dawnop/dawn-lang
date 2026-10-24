@@ -6,6 +6,11 @@
 > `site/gpu-map/flash_attn.map`）、M2（Core 调用节点的 site）、M3（`__emitc --map`，第十二节）、
 > M4（`__emit --map`，第十三节）。不依赖 M5、M6。
 
+当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](flash-attn-bf16-front-design.md)与[实际样例](../site/play-ui/samples/flash_attn.dawn)。
+本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
+当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
+
 > **K1 之后的分工（2026-10-07）。** 下文把「取原料、换算坐标、建调用表、严查、写 `.xmap`」都记在
 > `site/explorer/record.py` 名下，那是本页最初的实现。在线编译视图（`docs/playground-compile-design.md`）
 > 要在请求路径上做同一件事，而 runner 是 Dawn 程序、不起 Python，所以这一半搬进了 `packages/xmap`

@@ -2,6 +2,11 @@
 
 > 状态：**current**。2026-10-05 落地于 `site/src/gen/gpu.dawn` 的「写一个 kernel」一节（id `api`）；卡 D 按协调者 10-05 的意见由 `batched_matmul` 换成 `histogram`。
 
+当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](flash-attn-bf16-front-design.md)与[实际样例](../site/play-ui/samples/flash_attn.dawn)。
+本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
+当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
+
 任务单 `gpu-page-newapi-20261005.md`（agent-handoff）。基点是 cuTile 批 PR-3 的分支（`feat/tile-batch-migrate-r1`，
 `74ea0cf3`）：`tileir` 0.8.0，`kernels.dawn` 全迁，flash_attn 调用图已重录。PR-3 只改了页面两句文案，页面仍然只讲
 「flash_attn 的逐调用对照 + 覆盖率 + 三道门 + 台账」，**没有一处告诉读者 0.8.0 的 kernel 怎么写**。本文定这一刀

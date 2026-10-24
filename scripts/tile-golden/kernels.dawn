@@ -37,7 +37,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, FloatDtype
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
   blocks_of, tile_shape, t_call_enter, t_call_exit, t_body_enter, t_body_exit }
 use tileir/prog.{TileOp, TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
-  Whole, FREE_AXIS, Scalar }
+  Whole, FREE_AXIS, Scalar, trace_calls, erase }
 use tileir/render.{render, text_debug}
 use tileir/bytecode.{encode, bytecode_version}
 use tileir/asm.{tileiras_args}
@@ -2357,8 +2357,27 @@ fn fa_plan(arch: String, d: Int) -> FaPlan = match (arch, d) {
 
 fn fa64_plan() -> FaPlan = FaPlan { tiles = FaTiles { bq = 32, bk = 16 }, hints = [] }
 
-type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool }
 fn fa64_math() -> FaNumerics[Float] = FaNumerics { zero = 0.0, neg_inf = -INFINITY, base2 = false, exp_ftz = false, approx_div = false, div_ftz = false }
+
+fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[D], v: Param[D], o: Param[A], scale: Param[A], dt: Dtype[D], math: FaNumerics[A]) -> Unit !Dev = {
+  let tq = load_cell(q)
+  let rows = tile_shape(tq)[0]
+  var m: Tile[A] = full([rows, 1], math.neg_inf)
+  var l: Tile[A] = full([rows, 1], math.zero)
+  var acc = zeros(o)
+  for j in d_range(idx_const(0), blocks_of(k, 1)) {
+    let s: Tile[A] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
+    let m_new = max(m, reduce_max(s, keepdims = true))
+    let p = fa_exp(math, s - m_new)
+    let alpha = fa_exp(math, m - m_new)
+    l = l * alpha + reduce_sum(p, keepdims = true)
+    acc = mma(p.to(dt), load_at(v, [j]), acc * alpha)
+    m = m_new
+  }
+  store_cell(o, fa_divide(math, acc, l))
+}
+
+type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool }
 fn fa_bf16_math() -> FaNumerics[F32] = FaNumerics { zero = f32(0.0), neg_inf = f32(-INFINITY), base2 = true, exp_ftz = true, approx_div = true, div_ftz = true }
 
 # Explicit call and body marks keep private numerical helpers in the source
@@ -2381,27 +2400,18 @@ fn fa_divide[A: FloatDtype](math: FaNumerics[A], x: Tile[A], y: Tile[A], at: Loc
   result
 }
 
-fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[D], v: Param[D], o: Param[A], scale: Param[A], dt: Dtype[D], math: FaNumerics[A]) -> Unit !Dev = {
-  let tq = load_cell(q)
-  let rows = tile_shape(tq)[0]
-  var m: Tile[A] = full([rows, 1], math.neg_inf)
-  var l: Tile[A] = full([rows, 1], math.zero)
-  var acc = zeros(o)
-  for j in d_range(idx_const(0), blocks_of(k, 1)) {
-    let s: Tile[A] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
-    let m_new = max(m, reduce_max(s, keepdims = true))
-    let p = fa_exp(math, s - m_new)
-    let alpha = fa_exp(math, m - m_new)
-    l = l * alpha + reduce_sum(p, keepdims = true)
-    acc = mma(p.to(dt), load_at(v, [j]), acc * alpha)
-    m = m_new
-  }
-  store_cell(o, fa_divide(math, acc, l))
-}
-
 # The two supported instances capture their policy before recording.
 fn fa_kernel[D: FloatDtype, A: FloatDtype + ScalarDtype](dt: Dtype[D], math: FaNumerics[A]) -> fn(Param[D], Param[D], Param[D], Param[A], Param[A]) -> Unit !Dev =
   (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, dt, math)
+
+fn flash_attn_bf16_demo() -> TileProg = {
+  let (p, _e) = trace5("flash_attn_bf16_demo",
+    In(BF16, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [2, 0, 1], squeeze = [0])),
+    In(BF16, cells([1, ATT_N, ATT_D], [1, FA_BK, ATT_D], along = [2, FREE_AXIS, 1], squeeze = [0])),
+    In(BF16, cells([1, ATT_N, ATT_D], [1, FA_BK, ATT_D], along = [2, FREE_AXIS, 1], squeeze = [0])),
+    Out(F32, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [2, 0, 1], squeeze = [0])), Scalar(F32), fa_kernel(BF16, fa_bf16_math()))
+  p
+}
 
 # Refuse unsupported tails before cells can silently pad or cross a head.
 # Division guards element products before multiplication.
@@ -5876,6 +5886,7 @@ fn trace(name: String) -> TileProg = match name {
       Out(F64, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [2, 0, 1], squeeze = [0])), Scalar(F64), fa_kernel(F64, fa64_math()))
     p
   }
+  "flash_attn_bf16_demo" -> flash_attn_bf16_demo()
   "flash_bf16_sm90_d64" -> fa_named("flash_bf16_sm90_d64", "sm_90", 64)
   "flash_bf16_sm90_d128" -> fa_named("flash_bf16_sm90_d128", "sm_90", 128)
   "flash_bf16_sm100_d64" -> fa_named("flash_bf16_sm100_d64", "sm_100", 64)
@@ -6584,17 +6595,33 @@ fn scalar_wide(xf: Param[Float], xi: Param[Int], a: Param[Float], k: Param[Int],
 fn trace_twice(name: String) -> TileProg = {
   let first = trace(name)
   let second = trace(name)
-  if name == "flash_attn_bf16" || str.starts_with(name, "flash_bf16_sm") {
+  if name == "flash_attn" { fa64_source_check(first) }
+  if name == "flash_attn_bf16" || name == "flash_attn_bf16_demo" || str.starts_with(name, "flash_bf16_sm") {
     flash_output_check(name, first)
   }
-  if name == "flash_attn" || name == "flash_attn_bf16" || str.starts_with(name, "flash_bf16_sm") {
+  if name == "flash_attn" || name == "flash_attn_bf16" || name == "flash_attn_bf16_demo" || str.starts_with(name, "flash_bf16_sm") {
     flash_policy_check(name, first, name != "flash_attn")
   }
   if first != second { panic("tile-golden: `${name}` traced twice gave two different programs") } else { () }
   first
 }
 
-# These guards run on each of the five recording entries, independently of
+# Keep the internal same-format cast's zero-operation source witness even
+# though the reader now consumes a real F32 to BF16 conversion.
+fn fa64_source_check(want: TileProg) -> Unit = {
+  let q = cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [2, 0, 1], squeeze = [0])
+  let kv = fa_kv()
+  let (p, calls) = trace_calls("flash_attn", [],
+    () => (fa_kernel(F64, fa64_math()))(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3), param(F64, 4)),
+    markers = [erase(In(F64, q)), erase(In(F64, kv)), erase(In(F64, kv)), erase(Out(F64, q)), erase(Scalar(F64))])
+  if p != want { panic("internal f64 call marks changed the recording") }
+  let casts = list.filter(calls, c => c.name == "to")
+  if len(casts) != 1 || casts[0].ops_from != casts[0].ops_to || casts[0].at == None {
+    panic("internal f64 same-format to must retain a zero IR source call")
+  }
+}
+
+# These guards run on each BF16 recording entry, independently of
 # the golden bytes. A self-consistent f64 rollback must fail before launch.
 fn flash_output_check(name: String, p: TileProg) -> Unit = {
   if p.params != [ByPtr("bf16"), ByPtr("bf16"), ByPtr("bf16"), ByPtr("f32"), ByValue("f32")] {

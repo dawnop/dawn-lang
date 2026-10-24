@@ -33,6 +33,11 @@
 > 代码块都不标 `dawn run` / `dawn compile`，`doc-check.py` 不编译它们；
 > 已落地的部分以 `std/gpu.dawn` 及其 test 块为准。
 
+当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](flash-attn-bf16-front-design.md)与[实际样例](../site/play-ui/samples/flash_attn.dawn)。
+本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
+当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
+
 ## 1. 目标与非目标
 
 **目标**：让一个 Dawn 程序在宿主侧描述一个 tile kernel，把它编成 CUDA Tile IR 字节码，
@@ -6127,8 +6132,8 @@ scale）只省 4% 到 6%，因为不带 `flush_to_zero` 的 `exp2` 会在 `MUFU.
 
 **为什么只对 f32 开放。** 汇编器只在 f32 上接受：`'cuda_tile.exp2' op flush_to_zero modifier only supported for f32 data type, but got: 'f64'`
 （本刀实测，tileiras 13.4.92；与 `addf`、`mulf` 的同一条 `verifyFtz`）。f64 不需要它：f64 的 `exp` 与 `exp2` 在设备上都是软件序列，差别在噪声内
-（调研实测 ±0.6%），所以 f64 的 `flash_attn` 不改，GPU 页、站点 map 与 Playground 的样例展示的正是 f64 的 `flash_attn`，因此这三处没有变化
-（`flash_attn_bf16` 没有出现在它们任何一处）。参数本身对任意宽度都能写（`D` 是泛型），拒绝发生在汇编器，与 K2 对 `ftz` 的处理一致。
+（调研实测 ±0.6%），所以 P3 当时没有改 f64 的 `flash_attn`；当时 GPU 页、站点 map 与 Playground 仍展示它，三处没有变化。
+当前读者面已改为 BF16/F32 的小布局录制，不能把这段历史描述当作现状。参数本身对任意宽度都能写（`D` 是泛型），拒绝发生在汇编器，与 K2 对 `ftz` 的处理一致。
 
 **flash_attn_bf16 的改法。** kernel 里 `exp(s - m_new)` 与 `exp(m - m_new)` 改成 `exp2(.., ftz: true)`；发射标量由 `1/sqrt(d)` 改成 `log2(e)/sqrt(d)`
 （seq_diff 里 `narrow.f32(ATT_INV_SQRT_D * LOG2_E)`）。冲零在这里是安全的：低于 2^-126 的概率远低于行和 `l`（含最大值自己那一项 1）的一个 f32 ulp，

@@ -105,6 +105,11 @@ exports reaches either phase. Two consequences that are easy to get wrong:
   whose `comptime` runs ten seconds or more is slower under C1 and reaches the
   30 s compile budget sooner. The run-phase `java` is not affected.
 
+上述 2026-10-21 的 flash_attn 时延使用当时的 F64 样例，属于历史测量。
+当前读者样例为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](../../docs/flash-attn-bf16-front-design.md)；其冷请求和 miss
+必须在原预算内单独验证，不能沿用旧数字作当前性能承诺。
+
 Measured 2026-10-07 on the dev box (WSL2, other jobs running, so orders and
 not promises): `/run` and `/check` of the 11 starter programs through a fresh
 runner, outside the sandbox, every request a cold JVM start, median of three

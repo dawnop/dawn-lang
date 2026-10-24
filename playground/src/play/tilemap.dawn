@@ -495,14 +495,14 @@ fn trace_kernel(root: Node, value: Node, arity: Int) -> Option[String] = {
   }
 }
 
-# Deliberately bounded wiring for the page's fixed f64 instance. There is no
+# Deliberately bounded wiring for the page's fixed BF16 instance. There is no
 # host evaluator: one literal record constructor is forwarded unchanged by
 # the same-file factory. Other expressions keep the existing refusal.
 fn captured_policy(root: Node, value: Node) -> List[(String, Bool)] = {
   if value.kind != "Apply" || len(value.kids) != 3 || value.kids[0].kind != "Var" || second_word(value.kids[0].text) != "fa_kernel" { return [] }
-  if value.kids[1].kind != "Ctor" || second_word(value.kids[1].text) != "F64" { return [] }
+  if value.kids[1].kind != "Ctor" || second_word(value.kids[1].text) != "BF16" { return [] }
   let math = value.kids[2]
-  if math.kind != "Apply" || len(math.kids) != 1 || math.kids[0].kind != "Var" || second_word(math.kids[0].text) != "fa64_math" { return [] }
+  if math.kind != "Apply" || len(math.kids) != 1 || math.kids[0].kind != "Var" || second_word(math.kids[0].text) != "fa_bf16_math" { return [] }
   let factory = match kernel_fn(root, "fa_kernel") { Some(f) -> f
     None -> return [] }
   let lambda = match fn_body(factory) { Some(f) -> f
@@ -515,7 +515,7 @@ fn captured_policy(root: Node, value: Node) -> List[(String, Bool)] = {
     || call.kids[7].kind != "Var" || second_word(call.kids[7].text) != "math" { return [] }
   let factory_params = filter(factory.kids, p => p.kind == "Param")
   if len(factory_params) != 2 || second_word(factory_params[0].text) != "dt" || second_word(factory_params[1].text) != "math" { return [] }
-  let constructor = match kernel_fn(root, "fa64_math") { Some(f) -> f
+  let constructor = match kernel_fn(root, "fa_bf16_math") { Some(f) -> f
     None -> return [] }
   if list.any(constructor.kids, k => k.kind == "Param") { return [] }
   let record = match fn_body(constructor) { Some(f) -> f
@@ -631,7 +631,10 @@ pub fn plan(code: String, dump: String, dev: List[String]) -> Result[Plan, Strin
                       match kernel_fn(root, name) { Some(h) -> if h.lo < lo { h.lo } else { lo }
                         None -> lo } })
                     let (first, _c) = at(s, begin)
-                    let (last, _d) = at(s, f.hi)
+                    let end = list.fold(helpers, f.hi, (hi, p) => { let (name, _body) = p
+                      match kernel_fn(root, name) { Some(h) -> if h.hi > hi { h.hi } else { hi }
+                        None -> hi } })
+                    let (last, _d) = at(s, end)
                     let again = join(map(t.args, a => {
                       let (alo, ahi) = a
                       str.slice(code, alo, ahi)
@@ -1059,27 +1062,27 @@ test "the probe is the module the plan names, one tap for each marker count" {
   }
 }
 
-test "a fixed policy selects only a literal field of the forwarded f64 capture" {
+test "a fixed policy selects only a literal field of the forwarded BF16 capture" {
   let n = (text: String, kids: List[Node]) => test_node(text, kids)
   let names = ["q", "k", "v", "o", "scale"]
   let call = n("Apply", [n("Var flash_attn", [])] ++ map(names, x => n("Var ${x}", [])) ++ [n("Var dt", []), n("Var math", [])])
   let factory = n("Fn fa_kernel", map(["dt", "math"], x => n("Param ${x}", [])) ++ [n("Lambda", map(names, x => n("LParam ${x}", [])) ++ [call])])
-  let record = n("Record FaNumerics spread=false", map(["base2", "exp_ftz", "approx_div", "div_ftz"], x => n("Arg name=${x}", [n("Bool false", [])])))
-  let root = n("Module", [factory, n("Fn fa64_math", [record])])
-  let value = n("Apply", [n("Var fa_kernel", []), n("Ctor F64", []), n("Apply", [n("Var fa64_math", [])])])
+  let record = n("Record FaNumerics spread=false", map(["base2", "exp_ftz", "approx_div", "div_ftz"], x => n("Arg name=${x}", [n("Bool true", [])])))
+  let root = n("Module", [factory, n("Fn fa_bf16_math", [record])])
+  let value = n("Apply", [n("Var fa_kernel", []), n("Ctor BF16", []), n("Apply", [n("Var fa_bf16_math", [])])])
   let policy = captured_policy(root, value)
   assert len(policy) == 4
   let cond = n("FieldAccess base2", [n("Var math", [])])
-  assert selected_arm(cond, policy) == Some(false)
+  assert selected_arm(cond, policy) == Some(true)
   assert selected_arm(n("FieldAccess base2", [n("Var unknown", [])]), policy) == None
   let altered = Node { ..call, kids = list.take(call.kids, 7) ++ [n("Apply", [n("Var other_math", [])])] ++ list.drop(call.kids, 8) }
   let bad_factory = Node { ..factory, kids = filter(factory.kids, k => k.kind != "Lambda") ++ [n("Lambda", map(names, x => n("LParam ${x}", [])) ++ [altered])] }
-  assert captured_policy(n("Module", [bad_factory, n("Fn fa64_math", [record])]), value) == []
-  assert captured_policy(root, Node { ..value, kids = [value.kids[0], n("Ctor BF16", [])] ++ list.drop(value.kids, 2) }) == []
+  assert captured_policy(n("Module", [bad_factory, n("Fn fa_bf16_math", [record])]), value) == []
+  assert captured_policy(root, Node { ..value, kids = [value.kids[0], n("Ctor F64", [])] ++ list.drop(value.kids, 2) }) == []
   let env = Env { tiles = [], cells = [], decls = [], policy = policy, helpers = [] }
   let choose = n("If", [cond, n("Apply", [n("Var exp2", []), n("Var s", [])]), n("Apply", [n("Var exp", []), n("Var s", [])])])
   match walk(choose, ["exp", "exp2"], env, "") {
-    Ok((calls, _env)) -> { assert map(calls, c => c.names) == [["exp"]] }
+    Ok((calls, _env)) -> { assert map(calls, c => c.names) == [["exp2"]] }
     Err(_e) -> { assert false }
   }
   assert failed(walk(Node { ..choose, kids = [n("Var unknown", [])] ++ list.drop(choose.kids, 1) }, ["exp", "exp2"], env, ""))

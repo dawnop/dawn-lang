@@ -72,6 +72,9 @@
 
     /* a pane's own scroll, never the page's */
     function reveal(line) {
+      for (var parent = line && line.parentElement; parent && parent !== fig; parent = parent.parentElement) {
+        if (parent.tagName === "DETAILS") parent.open = true;
+      }
       var box = line && line.closest(".xp-code");
       if (!box) return;
       var top = line.offsetTop, h = line.offsetHeight;
@@ -139,6 +142,7 @@
       say();
       var kind = active();
       var first = kind && panes[kind] && panes[kind].querySelector(".xl.xp-hit");
+      if (!quiet && calls[id]) reveal(calls[id].closest(".xl") || calls[id]);
       if (!quiet && first) reveal(first);
     }
 

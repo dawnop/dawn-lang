@@ -6,6 +6,11 @@
 > 原 S3 设备条件 `if` 已由独立的 [staged-if-design.md](staged-if-design.md) 完成，包含 Unit 与值形式、token 分支及最终验收。见 §8。
 > 裁决记录在维护者工作区（ruling-staged-for-20261006，调研 research-staged-for-report-20261006）。
 
+当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](flash-attn-bf16-front-design.md)与[实际样例](../site/play-ui/samples/flash_attn.dawn)。
+本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
+当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
+
 ## 1. 目标与非目标
 
 目标：kernel 里写

@@ -2,9 +2,16 @@
 
 > 状态：**current**（2026-10-23；实现采用的合并约束）。依据 2026-10-23 的泛型合并任务与研究，基线为 A2 已合入的 `5c1bf13f`。
 
-当前两个具体函数分别实现 f64 输入/累加/输出和 bf16 输入、f32 累加/输出。合并目标是一份 `[D: FloatDtype, A: FloatDtype + ScalarDtype]` 在线 softmax 主体、一份五参闭包工厂及类型化录制组装。宿主记录保存 A 类型零与负无穷，以及固定的指数、FTZ、除法和初始化选择。仅允许 Float/Float 与 BF16/F32 实例；换底后的 scale 仍由启动侧提供。
+当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](flash-attn-bf16-front-design.md)与[实际样例](../site/play-ui/samples/flash_attn.dawn)。
+本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
+当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
 
-| 策略 | Float/Float | BF16/F32 |
+泛型合并前的两个具体函数分别实现 f64 输入/累加/输出和 bf16 输入、f32 累加/输出。合并目标是一份 `[D: FloatDtype, A: FloatDtype + ScalarDtype]` 在线 softmax 主体、一份五参闭包工厂及类型化录制组装。宿主记录保存 A 类型零与负无穷，以及固定的指数、FTZ、除法和初始化选择。仅允许 Float/Float 与 BF16/F32 实例；换底后的 scale 仍由启动侧提供。
+
+以下两列约束内部回归实例；当前公开样例只绑定 BF16/F32。
+
+| 策略 | Float/Float（内部） | BF16/F32 |
 |---|---|---|
 | Q/K/V；m/l/acc/scale/O | f64；f64 | bf16；f32 |
 | acc 初值 | `zeros(o)` | A 类型零的 `full` |

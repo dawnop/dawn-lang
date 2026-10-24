@@ -324,10 +324,26 @@ def check_site(base, r):
     else:
         text = body.decode("utf-8", "replace")
         r.check("c => c.name" in text, "bundle carries the arrow-lambda sample spelling")
+        r.check(current_flash_in_bundle(text),
+                "bundle carries the exact current BF16 flash attention sample")
         r.check(
             "fn(c) => c.name" not in text,
             "bundle no longer carries the retired `fn(c) =>` spelling",
         )
+
+
+def current_flash_in_bundle(text):
+    """Match the complete raw-import string, including its JS delimiters.
+
+    The bundler can choose quotes or a template literal. Compare exact
+    spellings without evaluating the bundle or accepting a source prefix.
+    """
+    sample = (SAMPLES / "flash_attn.dawn").read_text()
+    single = sample.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    template = sample.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+    return any(literal in text for literal in [
+        json.dumps(sample, ensure_ascii=False), "'" + single + "'", "`" + template + "`",
+    ])
 
 
 def check_page(base, expect, r, page_file=None):
@@ -438,6 +454,20 @@ def self_test():
         print("FAIL   barriers.out names its own file and every mention is rewritten")
     else:
         print("  ok   barriers.out names its own file and every mention is rewritten")
+    flash = (SAMPLES / "flash_attn.dawn").read_text()
+    stale = flash.replace("fa_kernel(BF16, fa_bf16_math())", "fa_kernel(F64, fa64_math())")
+    for label, text, should in [
+        ("template current flash sample", "`" + flash.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${") + "`", True),
+        ("escaped current flash sample", json.dumps(flash, ensure_ascii=False), True),
+        ("old reader wiring in bundle", json.dumps(stale), False),
+        ("current source prefix in changed bundle", json.dumps(flash + "# drift"), False),
+        ("changed flash source in bundle", json.dumps(flash.replace("plain attention mixed precision check passed", "old stdout")), False),
+    ]:
+        if current_flash_in_bundle(text) != should:
+            failed += 1
+            print(f"FAIL   {label}")
+        else:
+            print(f"  ok   {label}")
     failed += self_test_page()
     print(f"\nself-test: {failed} failed")
     return 1 if failed else 0

@@ -263,7 +263,7 @@ A value that changes as a loop goes is a `var`, which a `for` over a
 with a tile of the same format and shape, and after the loop it holds what the
 last iteration assigned. A `var` starts from a tile with a shape (`zeros(p)`,
 `full`, a `broadcast`), not from a rank-0 constant or a `lit`. This is
-FlashAttention with bf16 inputs and f32 accumulation (`scale` is a
+FlashAttention with bf16 inputs and f32 accumulation and output (`scale` is a
 `Scalar(F32)` parameter, read with `scalar(scale)`):
 
 ```dawn
@@ -273,17 +273,21 @@ use std/narrow.{f32}
 var m: Tile[F32] = full([BQ, 1], f32(-INFINITY))
 var l: Tile[F32] = full([BQ, 1], 0.0)
 var acc: Tile[F32] = full([BQ, D], 0.0)
-for j in d_range(0, N / BK) {
+for j in d_range(idx_const(0), blocks_of(k, 1)) {
   let s: Tile[F32] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
   let m_new = max(m, reduce_max(s, keepdims = true))
-  let p = exp(s - m_new)
-  let alpha = exp(m - m_new)
+  let p = exp2(s - m_new, ftz = true)
+  let alpha = exp2(m - m_new, ftz = true)
   l = l * alpha + reduce_sum(p, keepdims = true)
   acc = mma(p.to(BF16), load_at(v, [j]), acc * alpha)
   m = m_new
 }
-store_cell(o, (acc / l).to(F64))   # o: Param[Float], scale: Param[F32]
+store_cell(o, div(acc, l, approx = true, ftz = true))   # o, scale: Param[F32]
 ```
+
+The launch passes `f32(log2(e) / sqrt(D))` as the scale, changing base once.
+The [Playground sample](../../site/play-ui/samples/flash_attn.dawn) records the shared
+generic body with this BF16/F32 numerical policy and a 32×16 demonstration layout.
 
 `carry`, `get` and `set` remain for the loops a `for` cannot write: `d_loop`'s
 body is a closure with a data-dependent exit.

@@ -8,6 +8,11 @@
 > 与 [tileir-011-design.md](tileir-011-design.md) 的关系：那篇 §1 与 §10 第 13 条把 K4 明确排除在 0.11 之外，本文是那条「另立」的落地。
 > 本文所有行号是在上面那个提交上读出来的；没有量过的数字一律写「未量」，并写明由哪一刀去量。
 
+当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](flash-attn-bf16-front-design.md)与[实际样例](../site/play-ui/samples/flash_attn.dawn)。
+本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
+当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
+
 ## 0. 先纠正一个前提
 
 任务说明里写「kernel 的标量（尺寸、缩放因子、序列长度、grid-stride 的程序数）今天都是编译期常量」。核对后只有一半成立：

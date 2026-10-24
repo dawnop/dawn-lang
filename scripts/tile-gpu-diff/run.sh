@@ -1152,7 +1152,7 @@ sequenced=(lora_base lora_hidden lora_out attn_scores attn_softmax attn_context
   ols_gram ols_elim ols_beta
   gpt_ln gpt_qkv gpt_scores gpt_context gpt_dense gpt_fc gpt_gelu gpt_down
   llama_rms llama_qkv llama_rope llama_scores llama_out llama_ffn llama_down
-  flash_attn flash_attn_bf16)
+  flash_attn flash_attn_bf16 flash_attn_bf16_demo)
 
 # `vadd` is assembled with the first milestone's pair above, so it is not in
 # `sequenced` (that list is what the assemble loop walks) but it IS the
@@ -2496,6 +2496,17 @@ if [ "$seq_verdict" = pass ]; then
   echo "PASS  control: the device's flash_bf16 answer is not the answer of a reference that skips the p narrowing"
 fi
 
+# Both scales of the reader recording retain the strict rounded-p witness.
+for demo in flash_demo flash_demo_scaled; do
+  grep -q "^control unrounded-reference host sequence=$demo verdict differ:result " "$work/seq.out" ||
+    fail "$demo: strict tolerance accepted an unrounded probability reference"
+  if [ "$seq_verdict" = pass ]; then
+    grep -q "^control unrounded-reference device sequence=$demo verdict differ:result$" "$work/seq.out" ||
+      fail "$demo: device answer did not reject the unrounded reference"
+  fi
+  echo "PASS  control: $demo rejects the unrounded probability reference"
+done
+
 # `repeat`'s two boundaries. A repetition whose count is a host value can be
 # off by one in a way every sequence above would agree with, because they
 # would all be off by one together.
@@ -2601,20 +2612,21 @@ done
 # or to hand the first one's grid.
 seq_reds="$seq_reds last-launch-dropped:flash"
 seq_reds="$seq_reds last-launch-dropped:flash_bf16"
+seq_reds="$seq_reds last-launch-dropped:flash_demo last-launch-dropped:flash_demo_scaled"
 seq_reds="$seq_reds last-launch-dropped:decoupled"
 if [ "$seq_verdict" = pass ]; then
   seq_probe="$(sed -n 's/^probe mutants //p' "$work/seq.out" | tail -n 1)"
-  [ "$seq_probe" = "red=82 $seq_reds" ] ||
-    { printf 'wanted: red=82 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
+  [ "$seq_probe" = "red=84 $seq_reds" ] ||
+    { printf 'wanted: red=84 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
       fail "the sequence mutants' red set moved"; }
-  echo "PASS  mutant: the four sequence mutants red on exactly 82 of the 100 (mutant, sequence) pairs, by name"
+  echo "PASS  mutant: the four sequence mutants red on exactly 84 of the 108 (mutant, sequence) pairs, by name"
   seq_controls="$(grep -c '^control intermediate-round-tripped ' "$work/seq.out" || true)"
   seq_controls_moved="$(grep -c '^control intermediate-round-tripped .* verdict differ:result$' "$work/seq.out" || true)"
-  if [ "$seq_controls" != 25 ] || [ "$seq_controls_moved" != 0 ]; then
+  if [ "$seq_controls" != 27 ] || [ "$seq_controls_moved" != 0 ]; then
     cat "$work/seq.out" >&2
     fail "the round-trip control moved a verdict: $seq_controls_moved of $seq_controls"
   fi
-  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (25 of 25)"
+  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (27 of 27)"
 else
   echo "SKIP  mutant: the sequence mutants are not verifiable on this driver: the clean run is $seq_verdict, before any launch reaches the device"
 fi
@@ -2779,6 +2791,32 @@ case "$staged_verdict" in
   blocked:*) ;;
   *) cat "$work/staged.err" >&2; fail "staged_if_diff disagreed or printed no verdict (exit $rc)" ;;
 esac
+
+# The reader recording's numerical controls must produce valid cubins and
+# launch before the independent sequence oracle rejects their answers.
+for m in flash-demo-scale-constant flash-demo-last-kv flash-demo-no-rescale; do
+  variant="$work/$m-tree"
+  mkdir -p "$variant/scripts/tile-golden"
+  cp "$golden/kernels.dawn" "$variant/scripts/tile-golden/kernels.dawn"
+  python3 "$golden/mutate.py" "$m" "$variant"
+  cp "$variant/scripts/tile-golden/kernels.dawn" "$asm_proj/src/main.dawn"
+  "$root/bin/dawn" run "$asm_proj" -- flash_attn_bf16_demo --bytecode "$work/$m.tilebc" > "$work/$m.record.out" 2> "$work/$m.record.err" ||
+    { cat "$work/$m.record.err" >&2; fail "$m failed before recording"; }
+  assemble_golden flash_attn_bf16_demo "$work/$m.tilebc" "$work/$m.cubin"
+  broken_cubins=()
+  for k in "${seq_order[@]}"; do
+    if [ "$k" = flash_attn_bf16_demo ]; then broken_cubins+=("$work/$m.cubin")
+    else broken_cubins+=("$work/$k.cubin"); fi
+  done
+  rc=0
+  device "$work/seq.bin" "${broken_cubins[@]}" > "$work/$m.device.out" 2> "$work/$m.device.err" || rc=$?
+  [ "$rc" != 0 ] && grep -A8 '^sequence flash_demo_scaled ' "$work/$m.device.out" | grep -q 'verdict differ:result' ||
+    { cat "$work/$m.device.err" >&2; fail "$m did not reach the reader numerical oracle"; }
+  grep -A6 '^sequence flash_demo_scaled ' "$work/$m.device.out" | grep -q 'launch=ok sync=ok download=ok' ||
+    fail "$m did not successfully launch and download"
+  echo "PASS  mutant: $m (valid cubin, launch and independent numerical oracle red)"
+done
+cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
 
 # A2 typed output witnesses use additional recordings from the same factory.
 "$root/bin/dawn" run "$asm_proj" -- --flash-output-record "$gpu_name" "$work" > "$work/a2-record.out" 2> "$work/a2-record.err" ||

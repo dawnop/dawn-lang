@@ -7,6 +7,11 @@
 > [arith-operator-traits-design.md](arith-operator-traits-design.md)，投影纪律见
 > [assoc-types-design.md](assoc-types-design.md)。
 
+当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](flash-attn-bf16-front-design.md)与[实际样例](../site/play-ui/samples/flash_attn.dawn)。
+本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
+当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
+
 ## 落地提交
 
 | 刀 | main 提交 | 交付 |

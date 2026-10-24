@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 267e7573568a556e -->
+<!-- doc-check: translation-of docs/tutorial.md @ 81c321c3de1c6c41 -->
 
 # Dawn 教程
 
@@ -1948,8 +1948,9 @@ NumPy 连 `[32]` 也会替你加宽。不这么做，是因为它的规则会在
 减去的是第 j 行的最大值。这里那种写法被拒，`keepdims` 就是归约说明自己指哪个轴的方式。
 
 把这一步放进一个沿 key/value 块走的循环，带上一路的最大值和一路的和，就是 FlashAttention：
-`scripts/tile-golden/kernels.dawn` 里的 `flash_attn` 就是这个循环：三个 `var`，同一批操作；旁边的
-`flash_attn_bf16` 是同一个循环，输入 bf16、累加 f32，第二次乘积之前 `p.to(BF16)`。
+`scripts/tile-golden/kernels.dawn` 里的 `flash_attn` 是一份泛型循环，带三个 `var`。公开的
+`flash_attn_bf16_demo` 录制使用 bf16 输入与 f32 状态、scale 和输出；第二次乘积前
+`p.to(BF16)`，指数采用 exp2/FTZ，启动 scale 仅换底一次。
 [GPU 页](https://dawn-lang.dawnop.com/zh/gpu.html)展示了后端为这种规模的 kernel 记录下来的东西，
 以及它们在设备上的答案是怎么被核对的。
 
