@@ -49,18 +49,19 @@
 # The seed jar and its std already work offline: a cached copy is used without
 # a download and checked against a recorded digest on every use. The corpus
 # had no such form, so `--corpus site` could not run on a machine with no
-# route to GitHub. It has one now, on the same terms. ECO_TREE_SHA pins the
-# tree hash of backend-dawn/src (seedjar.sh's seed_tree_sha, the hash the
-# seed's std is held to), beside the commit it came from. `--pack-corpus F`
-# fetches the pinned commit where there is a network, checks it, writes that
-# subtree to the tar F and exits; DAWN_ECO_CORPUS=F makes `--corpus site`
-# read the tar instead of fetching, and refuse it unless it hashes to
-# ECO_TREE_SHA. Both read the one pin pair in this file. Unset, the fetch runs
-# as before, and it checks the tree hash too, silently on success, so a pin
-# advanced without its digest goes red at the next nightly rather than at the
-# next offline run. Either way a symbolic link or any other non-regular entry
-# is refused: the hash covers regular files only and the sweep below would
-# hand a link to the compiler unhashed.
+# route to GitHub. It has one now, on the same terms. ECO_TREES pairs each
+# production source root with its tree hash (seedjar.sh's seed_tree_sha, the
+# hash the seed's std is held to), beside the commit it came from.
+# `--pack-corpus F` fetches the pinned commit where there is a network, checks
+# every root, writes those subtrees to the tar F and exits; DAWN_ECO_CORPUS=F
+# makes `--corpus site` read the tar instead of fetching, and refuse it unless
+# every root matches its pin. Packing, verification and scanning read this
+# one list. Unset, the fetch checks the hashes too, silently on success, so a
+# pin advanced without its digests goes red at the next nightly rather than
+# at the next offline run. Missing roots and roots with no Dawn sources are
+# refused. Either way a symbolic link or any other non-regular entry is
+# refused: the hash covers regular files only and the sweep below would hand
+# a link to the compiler unhashed.
 #
 # The other inputs that reach outside are not changed. The declaration scan
 # reads `git log` since the seed tag, so this script needs a real repository
@@ -114,9 +115,21 @@ TAG=$(tr -d ' \n' < scripts/seed-release.txt)
 # revision whose bytes define this gate.
 ECO_URL=${DAWNOP_SITE_URL:-https://github.com/dawnop/dawnop-site.git}
 ECO_REPO=dawnop/dawnop-site
-ECO_REV=e4baa41972242a48ec863a59dafa44a23aba07ef
-# seed_tree_sha of backend-dawn/src at ECO_REV; advance the two together
-ECO_TREE_SHA=107ffb5a3bbdc1265b71d4584e3415e88652d7ba1b82c690ae8951a06e1b83ee
+ECO_REV=94fbd9450b07823969f19fc0a3aff61f9a474812
+# seed_tree_sha per production source root at ECO_REV; advance them together
+ECO_TREES=(
+  'backend-dawn/core/src 8e7131235a47e922c0b7602804b3c1c268b416e4ca18e87e0202c61a41365852'
+  'backend-dawn/app/jvm/src c2708c9f2820df68ee80678dcc1189204cc084520ccbe204081687e19a2006f0'
+  'backend-dawn/app/native/src 6e8a08db15d37f33119426e1edcc290d66857b9c94d8a8c4e1f3d4ebc5f01b6f'
+)
+ECO_ROOTS=()
+for pin in "${ECO_TREES[@]}"; do
+  ECO_ROOTS+=("${pin%% *}")
+done
+if [ "${#ECO_ROOTS[@]}" = 0 ]; then
+  echo "ERROR: no ecosystem source roots declared" >&2
+  exit 1
+fi
 
 if [ "$CHECK_PIN" = 1 ]; then
   bump=$(gh api "repos/$ECO_REPO/commits?path=.dawn-version&per_page=1" --jq '.[0].sha')
@@ -139,7 +152,7 @@ if [ "$CHECK_PIN" = 1 ]; then
       echo "STALE pin $ECO_REV ($pin_version) is $status relative to $ECO_REPO's last" \
         ".dawn-version change $bump ($bump_version). Advance ECO_REV in" \
         "scripts/selfhost-prev-diff.sh to $bump or later and run --corpus site;" \
-        "its failure prints the ECO_TREE_SHA that goes with it." >&2
+        "its failure identifies any missing root or mismatched tree hash." >&2
       exit 1 ;;
   esac
 fi
@@ -166,27 +179,36 @@ eco_fetch() {
   fi
 }
 
-# Hold the corpus under $1 to ECO_TREE_SHA; $2 names where it came from.
+# Hold each declared source root under $1 to its hash; $2 names the transport.
 eco_verify() {
-  local src=$1/backend-dawn/src odd got
-  if [ ! -d "$src" ]; then
-    echo "ERROR: $2 holds no backend-dawn/src" >&2
-    return 1
-  fi
-  odd=$(find "$src" ! -type f ! -type d | sed -n '1,3p')
-  if [ -n "$odd" ]; then
-    echo "ERROR: $2 holds entries that are neither files nor directories," >&2
-    echo "  which the tree hash does not cover:" >&2
-    printf '%s\n' "$odd" | sed 's/^/  /' >&2
-    return 1
-  fi
-  got=$(seed_tree_sha "$src")
-  if [ "$got" != "$ECO_TREE_SHA" ]; then
-    echo "ERROR: backend-dawn corpus from $2 failed verification" >&2
-    echo "  expected $ECO_TREE_SHA (ECO_TREE_SHA)" >&2
-    echo "  actual   ${got:-<no sha256sum or shasum on PATH>}" >&2
-    return 1
-  fi
+  local pin rel expected src odd got
+  for pin in "${ECO_TREES[@]}"; do
+    rel=${pin%% *}
+    expected=${pin#* }
+    src=$1/$rel
+    if [ ! -d "$src" ]; then
+      echo "ERROR: $2 holds no $rel" >&2
+      return 1
+    fi
+    odd=$(find "$src" ! -type f ! -type d | sed -n '1,3p')
+    if [ -n "$odd" ]; then
+      echo "ERROR: $2 holds entries in $rel that are neither files nor directories," >&2
+      echo "  which the tree hash does not cover:" >&2
+      printf '%s\n' "$odd" | sed 's/^/  /' >&2
+      return 1
+    fi
+    if [ -z "$(find "$src" -type f -name '*.dawn' -print -quit)" ]; then
+      echo "ERROR: $2 holds no Dawn source files in $rel" >&2
+      return 1
+    fi
+    got=$(seed_tree_sha "$src")
+    if [ "$got" != "$expected" ]; then
+      echo "ERROR: backend-dawn corpus from $2 failed verification for $rel" >&2
+      echo "  expected $expected (ECO_TREES)" >&2
+      echo "  actual   ${got:-<no sha256sum or shasum on PATH>}" >&2
+      return 1
+    fi
+  done
 }
 
 if [ -n "$PACK" ]; then
@@ -194,9 +216,9 @@ if [ -n "$PACK" ]; then
   trap 'rm -rf "$PACK_DIR"' EXIT
   eco_fetch "$PACK_DIR/eco" || exit 1
   eco_verify "$PACK_DIR/eco" "the pinned commit $ECO_REV" || exit 1
-  git -C "$PACK_DIR/eco" archive --format=tar HEAD backend-dawn/src > "$PACK_DIR/corpus.tar"
+  git -C "$PACK_DIR/eco" archive --format=tar HEAD "${ECO_ROOTS[@]}" > "$PACK_DIR/corpus.tar"
   mv "$PACK_DIR/corpus.tar" "$PACK"
-  echo "OK   packed backend-dawn corpus $ECO_REV (tree $ECO_TREE_SHA) into $PACK"
+  echo "OK   packed backend-dawn corpus $ECO_REV (${#ECO_ROOTS[@]} verified source roots) into $PACK"
   exit 0
 fi
 
@@ -226,7 +248,7 @@ if [ "$CORPUS" = site ] && [ -n "${DAWN_ECO_CORPUS:-}" ]; then
     exit 1
   fi
   eco_verify "$ECO" "DAWN_ECO_CORPUS=$DAWN_ECO_CORPUS" || exit 1
-  echo "OK   pinned backend-dawn corpus $ECO_REV (prepared archive, tree $ECO_TREE_SHA)"
+  echo "OK   pinned backend-dawn corpus $ECO_REV (prepared archive, ${#ECO_ROOTS[@]} verified source roots)"
 elif [ "$CORPUS" = site ]; then
   eco_fetch "$ECO" || exit 1
   eco_verify "$ECO" "the pinned commit $ECO_REV" || exit 1
@@ -273,7 +295,11 @@ done
 # the production ecosystem corpus: front-end dumps + formatter over
 # backend-dawn (its java-deps are not on this class path, so no emit)
 if [ "$CORPUS" = site ]; then
-  files=$(find "$ECO/backend-dawn/src" -name '*.dawn' | sort)
+  sources=()
+  for rel in "${ECO_ROOTS[@]}"; do
+    sources+=("$ECO/$rel")
+  done
+  files=$(find "${sources[@]}" -type f -name '*.dawn' | LC_ALL=C sort)
   # shellcheck disable=SC2086
   "${PREV[@]}" __lex $files > "$OUT/eco-lex-prev.txt"
   # shellcheck disable=SC2086
@@ -286,8 +312,11 @@ if [ "$CORPUS" = site ]; then
   "${HEAD_BIN[@]}" __parse $files > "$OUT/eco-parse-head.txt"
   if diff "$OUT/eco-parse-prev.txt" "$OUT/eco-parse-head.txt" > /dev/null
   then gate "parse backend-dawn" 0; else gate "parse backend-dawn" 1; fi
-  cp -r "$ECO/backend-dawn/src" "$OUT/fmt-prev"
-  cp -r "$ECO/backend-dawn/src" "$OUT/fmt-head"
+  for rel in "${ECO_ROOTS[@]}"; do
+    mkdir -p "$OUT/fmt-prev/$(dirname "$rel")" "$OUT/fmt-head/$(dirname "$rel")"
+    cp -r "$ECO/$rel" "$OUT/fmt-prev/$rel"
+    cp -r "$ECO/$rel" "$OUT/fmt-head/$rel"
+  done
   "${PREV[@]}" fmt "$OUT/fmt-prev" > /dev/null
   "${HEAD_BIN[@]}" fmt "$OUT/fmt-head" > /dev/null
   if diff -r "$OUT/fmt-prev" "$OUT/fmt-head" > /dev/null
