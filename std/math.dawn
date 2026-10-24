@@ -7,6 +7,52 @@
 # underflow cannot change the public contract. The constants below are frozen
 # MPFR round-to-nearest binary64 patterns, independent of decimal parsing.
 
+# Translated and modified from Netlib fdlibm 5.3. Distinct source notices
+# follow verbatim (the comment marker is the only formatting change).
+
+# /*
+#  * ====================================================
+#  * Copyright (C) 2004 by Sun Microsystems, Inc. All rights reserved.
+#  *
+#  * Permission to use, copy, modify, and distribute this
+#  * software is freely granted, provided that this notice
+#  * is preserved.
+#  * ====================================================
+#  */
+
+# /*
+#  * ====================================================
+#  * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+#  *
+#  * Developed at SunSoft, a Sun Microsystems, Inc. business.
+#  * Permission to use, copy, modify, and distribute this
+#  * software is freely granted, provided that this notice
+#  * is preserved.
+#  * ====================================================
+#  */
+
+# /*
+#  * ====================================================
+#  * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+#  *
+#  * Developed at SunSoft, a Sun Microsystems, Inc. business.
+#  * Permission to use, copy, modify, and distribute this
+#  * software is freely granted, provided that this notice
+#  * is preserved.
+#  * ====================================================
+#  *
+#  */
+
+# /*
+#  * ====================================================
+#  * Copyright 2004 Sun Microsystems, Inc.  All Rights Reserved.
+#  *
+#  * Permission to use, copy, modify, and distribute this
+#  * software is freely granted, provided that this notice
+#  * is preserved.
+#  * ====================================================
+#  */
+
 use std/float
 use std/list
 
@@ -256,4 +302,2278 @@ test "exponent operations cover every binade and extreme Int scaling" {
   assert ilogb(float.NAN) == None
   let (nan, n) = frexp(float.NAN)
   assert float.is_nan(nan) && n == 0
+}
+
+# fdlibm's words are explicitly 32 bits. A signed read sign-extends; an
+# unsigned read/mixed expression masks. Word writes preserve the other half.
+fn fd_i32(x: Int) -> Int = (x << 32) >> 32
+fn fd_u32(x: Int) -> Int = x & 0xffffffff
+fn fd_hi(x: Float) -> Int = float_to_bits(x) >> 32
+fn fd_lo(x: Float) -> Int = fd_i32(float_to_bits(x))
+fn fd_with_hi(x: Float, hi: Int) -> Float = float_of_bits((hi << 32) | (float_to_bits(x) & 0xffffffff))
+fn fd_with_lo(x: Float, lo: Int) -> Float = float_of_bits((float_to_bits(x) & (0xffffffff << 32)) | (lo & 0xffffffff))
+
+# Translated from e_exp.c, Netlib fdlibm 5.3.
+const FD_E_EXP_ONE: Float = float_of_bits(0x3ff0000000000000)
+const FD_E_EXP_HALF: List[Float] = [float_of_bits(0x3fe0000000000000), (-float_of_bits(0x3fe0000000000000))]
+const FD_E_EXP_HUGE: Float = float_of_bits(0x7e37e43c8800759c)
+const FD_E_EXP_TWOM1000: Float = float_of_bits(0x0170000000000000)
+const FD_E_EXP_O_THRESHOLD: Float = float_of_bits(0x40862e42fefa39ef)
+const FD_E_EXP_U_THRESHOLD: Float = (-float_of_bits(0x40874910d52d3051))
+const FD_E_EXP_LN2HI: List[Float] = [float_of_bits(0x3fe62e42fee00000), (-float_of_bits(0x3fe62e42fee00000))]
+const FD_E_EXP_LN2LO: List[Float] = [float_of_bits(0x3dea39ef35793c76), (-float_of_bits(0x3dea39ef35793c76))]
+const FD_E_EXP_INVLN2: Float = float_of_bits(0x3ff71547652b82fe)
+const FD_E_EXP_P1: Float = float_of_bits(0x3fc555555555553e)
+const FD_E_EXP_P2: Float = (-float_of_bits(0x3f66c16c16bebd93))
+const FD_E_EXP_P3: Float = float_of_bits(0x3f11566aaf25de2c)
+const FD_E_EXP_P4: Float = (-float_of_bits(0x3ebbbd41c5d26bf1))
+const FD_E_EXP_P5: Float = float_of_bits(0x3e66376972bea4d0)
+
+## Exponential. Both zeros give 1; -infinity gives +0; +infinity and NaN propagate.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn exp(x: Float) -> Float = {
+  var x_work = x
+  var y: Float = 0.0
+  var hi: Float = 0.0
+  var lo: Float = 0.0
+  var c: Float = 0.0
+  var t: Float = 0.0
+  var k: Int = 0
+  var xsb: Int = 0
+  var hx: Int = 0
+  hx = fd_u32(fd_hi(x_work))
+  xsb = fd_i32(((hx >>> 31) & fd_u32(1)))
+  hx = fd_u32((hx & fd_u32(0x7fffffff)))
+  if (hx >= fd_u32(0x40862E42)) {
+    if (hx >= fd_u32(0x7ff00000)) {
+      if (((hx & fd_u32(0xfffff)) | fd_u32(fd_lo(x_work))) != fd_u32(0)) {
+        return (x_work + x_work)
+      } else {
+        return (if (xsb == 0) { x_work } else { float_of_bits(0x0000000000000000) })
+      }
+    }
+    if (x_work > FD_E_EXP_O_THRESHOLD) {
+      return (FD_E_EXP_HUGE * FD_E_EXP_HUGE)
+    }
+    if (x_work < FD_E_EXP_U_THRESHOLD) {
+      return (FD_E_EXP_TWOM1000 * FD_E_EXP_TWOM1000)
+    }
+  }
+  if (hx > fd_u32(0x3fd62e42)) {
+    if (hx < fd_u32(0x3FF0A2B2)) {
+      hi = (x_work - FD_E_EXP_LN2HI[xsb])
+      lo = FD_E_EXP_LN2LO[xsb]
+      k = fd_i32((fd_i32((1 - xsb)) - xsb))
+    } else {
+      k = fd_i32(to_int(((FD_E_EXP_INVLN2 * x_work) + FD_E_EXP_HALF[xsb])))
+      t = to_float(k)
+      hi = (x_work - (t * FD_E_EXP_LN2HI[0]))
+      lo = (t * FD_E_EXP_LN2LO[0])
+    }
+    x_work = (hi - lo)
+  } else {
+    if (hx < fd_u32(0x3e300000)) {
+      if ((FD_E_EXP_HUGE + x_work) > FD_E_EXP_ONE) {
+        return (FD_E_EXP_ONE + x_work)
+      }
+    } else {
+      k = 0
+    }
+  }
+  t = (x_work * x_work)
+  c = (x_work - (t * (FD_E_EXP_P1 + (t * (FD_E_EXP_P2 + (t * (FD_E_EXP_P3 + (t * (FD_E_EXP_P4 + (t * FD_E_EXP_P5))))))))))
+  if (k == 0) {
+    return (FD_E_EXP_ONE - (((x_work * c) / (c - float_of_bits(0x4000000000000000))) - x_work))
+  } else {
+    y = (FD_E_EXP_ONE - ((lo - ((x_work * c) / (float_of_bits(0x4000000000000000) - c))) - hi))
+  }
+  if (k >= fd_i32((-1021))) {
+    y = fd_with_hi(y, (fd_hi(y) + fd_i32((k << 20))))
+    return y
+  } else {
+    y = fd_with_hi(y, (fd_hi(y) + fd_i32((fd_i32((k + 1000)) << 20))))
+    return (y * FD_E_EXP_TWOM1000)
+  }
+  0.0
+}
+
+# Translated from s_expm1.c, Netlib fdlibm 5.3.
+const FD_S_EXPM1_ONE: Float = float_of_bits(0x3ff0000000000000)
+const FD_S_EXPM1_HUGE: Float = float_of_bits(0x7e37e43c8800759c)
+const FD_S_EXPM1_TINY: Float = float_of_bits(0x01a56e1fc2f8f359)
+const FD_S_EXPM1_O_THRESHOLD: Float = float_of_bits(0x40862e42fefa39ef)
+const FD_S_EXPM1_LN2_HI: Float = float_of_bits(0x3fe62e42fee00000)
+const FD_S_EXPM1_LN2_LO: Float = float_of_bits(0x3dea39ef35793c76)
+const FD_S_EXPM1_INVLN2: Float = float_of_bits(0x3ff71547652b82fe)
+const FD_S_EXPM1_Q1: Float = (-float_of_bits(0x3fa11111111110f4))
+const FD_S_EXPM1_Q2: Float = float_of_bits(0x3f5a01a019fe5585)
+const FD_S_EXPM1_Q3: Float = (-float_of_bits(0x3f14ce199eaadbb7))
+const FD_S_EXPM1_Q4: Float = float_of_bits(0x3ed0cfca86e65239)
+const FD_S_EXPM1_Q5: Float = (-float_of_bits(0x3e8afdb76e09c32d))
+
+## Exponential minus one without cancellation. Preserve signed zero; -infinity gives -1, +infinity gives infinity, NaN propagates.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn expm1(x: Float) -> Float = {
+  var x_work = x
+  var y: Float = 0.0
+  var hi: Float = 0.0
+  var lo: Float = 0.0
+  var c: Float = 0.0
+  var t: Float = 0.0
+  var e: Float = 0.0
+  var hxs: Float = 0.0
+  var hfx: Float = 0.0
+  var r1: Float = 0.0
+  var k: Int = 0
+  var xsb: Int = 0
+  var hx: Int = 0
+  hx = fd_u32(fd_hi(x_work))
+  xsb = fd_i32((hx & 0x80000000))
+  if (xsb == 0) {
+    y = x_work
+  } else {
+    y = (-x_work)
+  }
+  hx = fd_u32((hx & fd_u32(0x7fffffff)))
+  if (hx >= fd_u32(0x4043687A)) {
+    if (hx >= fd_u32(0x40862E42)) {
+      if (hx >= fd_u32(0x7ff00000)) {
+        if (((hx & fd_u32(0xfffff)) | fd_u32(fd_lo(x_work))) != fd_u32(0)) {
+          return (x_work + x_work)
+        } else {
+          return (if (xsb == 0) { x_work } else { (-float_of_bits(0x3ff0000000000000)) })
+        }
+      }
+      if (x_work > FD_S_EXPM1_O_THRESHOLD) {
+        return (FD_S_EXPM1_HUGE * FD_S_EXPM1_HUGE)
+      }
+    }
+    if (xsb != 0) {
+      if ((x_work + FD_S_EXPM1_TINY) < float_of_bits(0x0000000000000000)) {
+        return (FD_S_EXPM1_TINY - FD_S_EXPM1_ONE)
+      }
+    }
+  }
+  if (hx > fd_u32(0x3fd62e42)) {
+    if (hx < fd_u32(0x3FF0A2B2)) {
+      if (xsb == 0) {
+        hi = (x_work - FD_S_EXPM1_LN2_HI)
+        lo = FD_S_EXPM1_LN2_LO
+        k = 1
+      } else {
+        hi = (x_work + FD_S_EXPM1_LN2_HI)
+        lo = (-FD_S_EXPM1_LN2_LO)
+        k = fd_i32((-1))
+      }
+    } else {
+      k = fd_i32(to_int(((FD_S_EXPM1_INVLN2 * x_work) + (if (xsb == 0) { float_of_bits(0x3fe0000000000000) } else { (-float_of_bits(0x3fe0000000000000)) }))))
+      t = to_float(k)
+      hi = (x_work - (t * FD_S_EXPM1_LN2_HI))
+      lo = (t * FD_S_EXPM1_LN2_LO)
+    }
+    x_work = (hi - lo)
+    c = ((hi - x_work) - lo)
+  } else {
+    if (hx < fd_u32(0x3c900000)) {
+      t = (FD_S_EXPM1_HUGE + x_work)
+      return (x_work - (t - (FD_S_EXPM1_HUGE + x_work)))
+    } else {
+      k = 0
+    }
+  }
+  hfx = (float_of_bits(0x3fe0000000000000) * x_work)
+  hxs = (x_work * hfx)
+  r1 = (FD_S_EXPM1_ONE + (hxs * (FD_S_EXPM1_Q1 + (hxs * (FD_S_EXPM1_Q2 + (hxs * (FD_S_EXPM1_Q3 + (hxs * (FD_S_EXPM1_Q4 + (hxs * FD_S_EXPM1_Q5))))))))))
+  t = (float_of_bits(0x4008000000000000) - (r1 * hfx))
+  e = (hxs * ((r1 - t) / (float_of_bits(0x4018000000000000) - (x_work * t))))
+  if (k == 0) {
+    return (x_work - ((x_work * e) - hxs))
+  } else {
+    e = ((x_work * (e - c)) - c)
+    e = (e - hxs)
+    if (k == fd_i32((-1))) {
+      return ((float_of_bits(0x3fe0000000000000) * (x_work - e)) - float_of_bits(0x3fe0000000000000))
+    }
+    if (k == 1) {
+      if (x_work < (-float_of_bits(0x3fd0000000000000))) {
+        return ((-float_of_bits(0x4000000000000000)) * (e - (x_work + float_of_bits(0x3fe0000000000000))))
+      } else {
+        return (FD_S_EXPM1_ONE + (float_of_bits(0x4000000000000000) * (x_work - e)))
+      }
+    }
+    if ((k <= fd_i32((-2))) || (k > 56)) {
+      y = (FD_S_EXPM1_ONE - (e - x_work))
+      y = fd_with_hi(y, (fd_hi(y) + fd_i32((k << 20))))
+      return (y - FD_S_EXPM1_ONE)
+    }
+    t = FD_S_EXPM1_ONE
+    if (k < 20) {
+      t = fd_with_hi(t, fd_i32((0x3ff00000 - (0x200000 >> k))))
+      y = (t - (e - x_work))
+      y = fd_with_hi(y, (fd_hi(y) + fd_i32((k << 20))))
+    } else {
+      t = fd_with_hi(t, fd_i32((fd_i32((0x3ff - k)) << 20)))
+      y = (x_work - (e + t))
+      y = (y + FD_S_EXPM1_ONE)
+      y = fd_with_hi(y, (fd_hi(y) + fd_i32((k << 20))))
+    }
+  }
+  return y
+  0.0
+}
+
+# Translated from e_log.c, Netlib fdlibm 5.3.
+const FD_E_LOG_LN2_HI: Float = float_of_bits(0x3fe62e42fee00000)
+const FD_E_LOG_LN2_LO: Float = float_of_bits(0x3dea39ef35793c76)
+const FD_E_LOG_TWO54: Float = float_of_bits(0x4350000000000000)
+const FD_E_LOG_LG1: Float = float_of_bits(0x3fe5555555555593)
+const FD_E_LOG_LG2: Float = float_of_bits(0x3fd999999997fa04)
+const FD_E_LOG_LG3: Float = float_of_bits(0x3fd2492494229359)
+const FD_E_LOG_LG4: Float = float_of_bits(0x3fcc71c51d8e78af)
+const FD_E_LOG_LG5: Float = float_of_bits(0x3fc7466496cb03de)
+const FD_E_LOG_LG6: Float = float_of_bits(0x3fc39a09d078c69f)
+const FD_E_LOG_LG7: Float = float_of_bits(0x3fc2f112df3e5244)
+const FD_E_LOG_ZERO: Float = float_of_bits(0x0000000000000000)
+
+## Natural logarithm. Both zeros give -infinity; negative inputs give NaN; +infinity and NaN propagate.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn log(x: Float) -> Float = {
+  var x_work = x
+  var hfsq: Float = 0.0
+  var f: Float = 0.0
+  var s: Float = 0.0
+  var z: Float = 0.0
+  var r: Float = 0.0
+  var w: Float = 0.0
+  var t1: Float = 0.0
+  var t2: Float = 0.0
+  var dk: Float = 0.0
+  var k: Int = 0
+  var hx: Int = 0
+  var i: Int = 0
+  var j: Int = 0
+  var lx: Int = 0
+  hx = fd_hi(x_work)
+  lx = fd_u32(fd_lo(x_work))
+  k = 0
+  if (hx < 0x00100000) {
+    if ((fd_u32((hx & 0x7fffffff)) | lx) == fd_u32(0)) {
+      return ((-FD_E_LOG_TWO54) / FD_E_LOG_ZERO)
+    }
+    if (hx < 0) {
+      return ((x_work - x_work) / FD_E_LOG_ZERO)
+    }
+    k = fd_i32((k - 54))
+    x_work = (x_work * FD_E_LOG_TWO54)
+    hx = fd_hi(x_work)
+  }
+  if (hx >= 0x7ff00000) {
+    return (x_work + x_work)
+  }
+  k = fd_i32((k + fd_i32(((hx >> 20) - 1023))))
+  hx = fd_i32((hx & 0x000fffff))
+  i = (fd_i32((hx + 0x95f64)) & 0x100000)
+  x_work = fd_with_hi(x_work, (hx | (i ^ 0x3ff00000)))
+  k = fd_i32((k + (i >> 20)))
+  f = (x_work - float_of_bits(0x3ff0000000000000))
+  if ((0x000fffff & fd_i32((2 + hx))) < 3) {
+    if (f == FD_E_LOG_ZERO) {
+      if (k == 0) {
+        return FD_E_LOG_ZERO
+      } else {
+        dk = to_float(k)
+        return ((dk * FD_E_LOG_LN2_HI) + (dk * FD_E_LOG_LN2_LO))
+      }
+    }
+    r = ((f * f) * (float_of_bits(0x3fe0000000000000) - (float_of_bits(0x3fd5555555555555) * f)))
+    if (k == 0) {
+      return (f - r)
+    } else {
+      dk = to_float(k)
+      return ((dk * FD_E_LOG_LN2_HI) - ((r - (dk * FD_E_LOG_LN2_LO)) - f))
+    }
+  }
+  s = (f / (float_of_bits(0x4000000000000000) + f))
+  dk = to_float(k)
+  z = (s * s)
+  i = fd_i32((hx - 0x6147a))
+  w = (z * z)
+  j = fd_i32((0x6b851 - hx))
+  t1 = (w * (FD_E_LOG_LG2 + (w * (FD_E_LOG_LG4 + (w * FD_E_LOG_LG6)))))
+  t2 = (z * (FD_E_LOG_LG1 + (w * (FD_E_LOG_LG3 + (w * (FD_E_LOG_LG5 + (w * FD_E_LOG_LG7)))))))
+  i = fd_i32((i | j))
+  r = (t2 + t1)
+  if (i > 0) {
+    hfsq = ((float_of_bits(0x3fe0000000000000) * f) * f)
+    if (k == 0) {
+      return (f - (hfsq - (s * (hfsq + r))))
+    } else {
+      return ((dk * FD_E_LOG_LN2_HI) - ((hfsq - ((s * (hfsq + r)) + (dk * FD_E_LOG_LN2_LO))) - f))
+    }
+  } else {
+    if (k == 0) {
+      return (f - (s * (f - r)))
+    } else {
+      return ((dk * FD_E_LOG_LN2_HI) - (((s * (f - r)) - (dk * FD_E_LOG_LN2_LO)) - f))
+    }
+  }
+  0.0
+}
+
+# Translated from s_log1p.c, Netlib fdlibm 5.3.
+const FD_S_LOG1P_LN2_HI: Float = float_of_bits(0x3fe62e42fee00000)
+const FD_S_LOG1P_LN2_LO: Float = float_of_bits(0x3dea39ef35793c76)
+const FD_S_LOG1P_TWO54: Float = float_of_bits(0x4350000000000000)
+const FD_S_LOG1P_LP1: Float = float_of_bits(0x3fe5555555555593)
+const FD_S_LOG1P_LP2: Float = float_of_bits(0x3fd999999997fa04)
+const FD_S_LOG1P_LP3: Float = float_of_bits(0x3fd2492494229359)
+const FD_S_LOG1P_LP4: Float = float_of_bits(0x3fcc71c51d8e78af)
+const FD_S_LOG1P_LP5: Float = float_of_bits(0x3fc7466496cb03de)
+const FD_S_LOG1P_LP6: Float = float_of_bits(0x3fc39a09d078c69f)
+const FD_S_LOG1P_LP7: Float = float_of_bits(0x3fc2f112df3e5244)
+const FD_S_LOG1P_ZERO: Float = float_of_bits(0x0000000000000000)
+
+## Natural logarithm of one plus x. Preserve signed zero; -1 gives -infinity, x < -1 gives NaN; +infinity and NaN propagate.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn log1p(x: Float) -> Float = {
+  var x_work = x
+  var hfsq: Float = 0.0
+  var f: Float = 0.0
+  var c: Float = 0.0
+  var s: Float = 0.0
+  var z: Float = 0.0
+  var r: Float = 0.0
+  var u: Float = 0.0
+  var k: Int = 0
+  var hx: Int = 0
+  var hu: Int = 0
+  var ax: Int = 0
+  hx = fd_hi(x_work)
+  ax = (hx & 0x7fffffff)
+  k = 1
+  if (hx < 0x3FDA827A) {
+    if (ax >= 0x3ff00000) {
+      if (x_work == (-float_of_bits(0x3ff0000000000000))) {
+        return ((-FD_S_LOG1P_TWO54) / FD_S_LOG1P_ZERO)
+      } else {
+        return ((x_work - x_work) / (x_work - x_work))
+      }
+    }
+    if (ax < 0x3e200000) {
+      if (((FD_S_LOG1P_TWO54 + x_work) > FD_S_LOG1P_ZERO) && (ax < 0x3c900000)) {
+        return x_work
+      } else {
+        return (x_work - ((x_work * x_work) * float_of_bits(0x3fe0000000000000)))
+      }
+    }
+    if ((hx > 0) || (hx <= fd_i32(0xbfd2bec3))) {
+      k = 0
+      f = x_work
+      hu = 1
+    }
+  }
+  if (hx >= 0x7ff00000) {
+    return (x_work + x_work)
+  }
+  if (k != 0) {
+    if (hx < 0x43400000) {
+      u = (float_of_bits(0x3ff0000000000000) + x_work)
+      hu = fd_hi(u)
+      k = fd_i32(((hu >> 20) - 1023))
+      c = (if (k > 0) { (float_of_bits(0x3ff0000000000000) - (u - x_work)) } else { (x_work - (u - float_of_bits(0x3ff0000000000000))) })
+      c = (c / u)
+    } else {
+      u = x_work
+      hu = fd_hi(u)
+      k = fd_i32(((hu >> 20) - 1023))
+      c = to_float(0)
+    }
+    hu = fd_i32((hu & 0x000fffff))
+    if (hu < 0x6a09e) {
+      u = fd_with_hi(u, (hu | 0x3ff00000))
+    } else {
+      k = fd_i32((k + 1))
+      u = fd_with_hi(u, (hu | 0x3fe00000))
+      hu = (fd_i32((0x00100000 - hu)) >> 2)
+    }
+    f = (u - float_of_bits(0x3ff0000000000000))
+  }
+  hfsq = ((float_of_bits(0x3fe0000000000000) * f) * f)
+  if (hu == 0) {
+    if (f == FD_S_LOG1P_ZERO) {
+      if (k == 0) {
+        return FD_S_LOG1P_ZERO
+      } else {
+        c = (c + (to_float(k) * FD_S_LOG1P_LN2_LO))
+        return ((to_float(k) * FD_S_LOG1P_LN2_HI) + c)
+      }
+    }
+    r = (hfsq * (float_of_bits(0x3ff0000000000000) - (float_of_bits(0x3fe5555555555555) * f)))
+    if (k == 0) {
+      return (f - r)
+    } else {
+      return ((to_float(k) * FD_S_LOG1P_LN2_HI) - ((r - ((to_float(k) * FD_S_LOG1P_LN2_LO) + c)) - f))
+    }
+  }
+  s = (f / (float_of_bits(0x4000000000000000) + f))
+  z = (s * s)
+  r = (z * (FD_S_LOG1P_LP1 + (z * (FD_S_LOG1P_LP2 + (z * (FD_S_LOG1P_LP3 + (z * (FD_S_LOG1P_LP4 + (z * (FD_S_LOG1P_LP5 + (z * (FD_S_LOG1P_LP6 + (z * FD_S_LOG1P_LP7)))))))))))))
+  if (k == 0) {
+    return (f - (hfsq - (s * (hfsq + r))))
+  } else {
+    return ((to_float(k) * FD_S_LOG1P_LN2_HI) - ((hfsq - ((s * (hfsq + r)) + ((to_float(k) * FD_S_LOG1P_LN2_LO) + c))) - f))
+  }
+  0.0
+}
+
+# Translated from e_log10.c, Netlib fdlibm 5.3.
+const FD_E_LOG10_TWO54: Float = float_of_bits(0x4350000000000000)
+const FD_E_LOG10_IVLN10: Float = float_of_bits(0x3fdbcb7b1526e50e)
+const FD_E_LOG10_LOG10_2HI: Float = float_of_bits(0x3fd34413509f6000)
+const FD_E_LOG10_LOG10_2LO: Float = float_of_bits(0x3d59fef311f12b36)
+const FD_E_LOG10_ZERO: Float = float_of_bits(0x0000000000000000)
+
+## Base-ten logarithm. Both zeros give -infinity; negative inputs give NaN; +infinity and NaN propagate.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn log10(x: Float) -> Float = {
+  var x_work = x
+  var y: Float = 0.0
+  var z: Float = 0.0
+  var i: Int = 0
+  var k: Int = 0
+  var hx: Int = 0
+  var lx: Int = 0
+  hx = fd_hi(x_work)
+  lx = fd_u32(fd_lo(x_work))
+  k = 0
+  if (hx < 0x00100000) {
+    if ((fd_u32((hx & 0x7fffffff)) | lx) == fd_u32(0)) {
+      return ((-FD_E_LOG10_TWO54) / FD_E_LOG10_ZERO)
+    }
+    if (hx < 0) {
+      return ((x_work - x_work) / FD_E_LOG10_ZERO)
+    }
+    k = fd_i32((k - 54))
+    x_work = (x_work * FD_E_LOG10_TWO54)
+    hx = fd_hi(x_work)
+  }
+  if (hx >= 0x7ff00000) {
+    return (x_work + x_work)
+  }
+  k = fd_i32((k + fd_i32(((hx >> 20) - 1023))))
+  i = fd_i32(((fd_u32(k) & 0x80000000) >>> 31))
+  hx = ((hx & 0x000fffff) | fd_i32((fd_i32((0x3ff - i)) << 20)))
+  y = to_float(fd_i32((k + i)))
+  x_work = fd_with_hi(x_work, hx)
+  z = ((y * FD_E_LOG10_LOG10_2LO) + (FD_E_LOG10_IVLN10 * log(x_work)))
+  return (z + (y * FD_E_LOG10_LOG10_2HI))
+  0.0
+}
+
+# Translated from e_rem_pio2.c, Netlib fdlibm 5.3.
+const FD_E_REM_PIO2_TWO_OVER_PI: List[Int] = [0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62, 0x95993C, 0x439041, 0xFE5163, 0xABDEBB, 0xC561B7, 0x246E3A, 0x424DD2, 0xE00649, 0x2EEA09, 0xD1921C, 0xFE1DEB, 0x1CB129, 0xA73EE8, 0x8235F5, 0x2EBB44, 0x84E99C, 0x7026B4, 0x5F7E41, 0x3991D6, 0x398353, 0x39F49C, 0x845F8B, 0xBDF928, 0x3B1FF8, 0x97FFDE, 0x05980F, 0xEF2F11, 0x8B5A0A, 0x6D1F6D, 0x367ECF, 0x27CB09, 0xB74F46, 0x3F669E, 0x5FEA2D, 0x7527BA, 0xC7EBE5, 0xF17B3D, 0x0739F7, 0x8A5292, 0xEA6BFB, 0x5FB11F, 0x8D5D08, 0x560330, 0x46FC7B, 0x6BABF0, 0xCFBC20, 0x9AF436, 0x1DA9E3, 0x91615E, 0xE61B08, 0x659985, 0x5F14A0, 0x68408D, 0xFFD880, 0x4D7327, 0x310606, 0x1556CA, 0x73A8C9, 0x60E27B, 0xC08C6B]
+const FD_E_REM_PIO2_NPIO2_HW: List[Int] = [0x3FF921FB, 0x400921FB, 0x4012D97C, 0x401921FB, 0x401F6A7A, 0x4022D97C, 0x4025FDBB, 0x402921FB, 0x402C463A, 0x402F6A7A, 0x4031475C, 0x4032D97C, 0x40346B9C, 0x4035FDBB, 0x40378FDB, 0x403921FB, 0x403AB41B, 0x403C463A, 0x403DD85A, 0x403F6A7A, 0x40407E4C, 0x4041475C, 0x4042106C, 0x4042D97C, 0x4043A28C, 0x40446B9C, 0x404534AC, 0x4045FDBB, 0x4046C6CB, 0x40478FDB, 0x404858EB, 0x404921FB]
+const FD_E_REM_PIO2_ZERO: Float = float_of_bits(0x0000000000000000)
+const FD_E_REM_PIO2_HALF: Float = float_of_bits(0x3fe0000000000000)
+const FD_E_REM_PIO2_TWO24: Float = float_of_bits(0x4170000000000000)
+const FD_E_REM_PIO2_INVPIO2: Float = float_of_bits(0x3fe45f306dc9c883)
+const FD_E_REM_PIO2_PIO2_1: Float = float_of_bits(0x3ff921fb54400000)
+const FD_E_REM_PIO2_PIO2_1T: Float = float_of_bits(0x3dd0b4611a626331)
+const FD_E_REM_PIO2_PIO2_2: Float = float_of_bits(0x3dd0b4611a600000)
+const FD_E_REM_PIO2_PIO2_2T: Float = float_of_bits(0x3ba3198a2e037073)
+const FD_E_REM_PIO2_PIO2_3: Float = float_of_bits(0x3ba3198a2e000000)
+const FD_E_REM_PIO2_PIO2_3T: Float = float_of_bits(0x397b839a252049c1)
+
+fn fd_rem_pio2(x_in: Float, y_in: List[Float]) -> (Int, List[Float]) = {
+  var x = x_in
+  var y = y_in
+  var z: Float = 0.0
+  var w: Float = 0.0
+  var t: Float = 0.0
+  var r: Float = 0.0
+  var fn_value: Float = 0.0
+  var tx: List[Float] = [0.0, 0.0, 0.0]
+  var e0: Int = 0
+  var i: Int = 0
+  var j: Int = 0
+  var nx: Int = 0
+  var n: Int = 0
+  var ix: Int = 0
+  var hx: Int = 0
+  hx = fd_hi(x)
+  ix = (hx & 0x7fffffff)
+  if (ix <= 0x3fe921fb) {
+    y = fd_set(y, 0, x)
+    y = fd_set(y, 1, to_float(0))
+    return (0, y)
+  }
+  if (ix < 0x4002d97c) {
+    if (hx > 0) {
+      z = (x - FD_E_REM_PIO2_PIO2_1)
+      if (ix != 0x3ff921fb) {
+        y = fd_set(y, 0, (z - FD_E_REM_PIO2_PIO2_1T))
+        y = fd_set(y, 1, ((z - y[0]) - FD_E_REM_PIO2_PIO2_1T))
+      } else {
+        z = (z - FD_E_REM_PIO2_PIO2_2)
+        y = fd_set(y, 0, (z - FD_E_REM_PIO2_PIO2_2T))
+        y = fd_set(y, 1, ((z - y[0]) - FD_E_REM_PIO2_PIO2_2T))
+      }
+      return (1, y)
+    } else {
+      z = (x + FD_E_REM_PIO2_PIO2_1)
+      if (ix != 0x3ff921fb) {
+        y = fd_set(y, 0, (z + FD_E_REM_PIO2_PIO2_1T))
+        y = fd_set(y, 1, ((z - y[0]) + FD_E_REM_PIO2_PIO2_1T))
+      } else {
+        z = (z + FD_E_REM_PIO2_PIO2_2)
+        y = fd_set(y, 0, (z + FD_E_REM_PIO2_PIO2_2T))
+        y = fd_set(y, 1, ((z - y[0]) + FD_E_REM_PIO2_PIO2_2T))
+      }
+      return (fd_i32((-1)), y)
+    }
+  }
+  if (ix <= 0x413921fb) {
+    t = abs(x)
+    n = fd_i32(to_int(((t * FD_E_REM_PIO2_INVPIO2) + FD_E_REM_PIO2_HALF)))
+    fn_value = to_float(n)
+    r = (t - (fn_value * FD_E_REM_PIO2_PIO2_1))
+    w = (fn_value * FD_E_REM_PIO2_PIO2_1T)
+    if ((n < 32) && (ix != FD_E_REM_PIO2_NPIO2_HW[fd_i32((n - 1))])) {
+      y = fd_set(y, 0, (r - w))
+    } else {
+      j = (ix >> 20)
+      y = fd_set(y, 0, (r - w))
+      i = fd_i32((j - ((fd_hi(y[0]) >> 20) & 0x7ff)))
+      if (i > 16) {
+        t = r
+        w = (fn_value * FD_E_REM_PIO2_PIO2_2)
+        r = (t - w)
+        w = ((fn_value * FD_E_REM_PIO2_PIO2_2T) - ((t - r) - w))
+        y = fd_set(y, 0, (r - w))
+        i = fd_i32((j - ((fd_hi(y[0]) >> 20) & 0x7ff)))
+        if (i > 49) {
+          t = r
+          w = (fn_value * FD_E_REM_PIO2_PIO2_3)
+          r = (t - w)
+          w = ((fn_value * FD_E_REM_PIO2_PIO2_3T) - ((t - r) - w))
+          y = fd_set(y, 0, (r - w))
+        }
+      }
+    }
+    y = fd_set(y, 1, ((r - y[0]) - w))
+    if (hx < 0) {
+      y = fd_set(y, 0, (-y[0]))
+      y = fd_set(y, 1, (-y[1]))
+      return (fd_i32((-n)), y)
+    } else {
+      return (n, y)
+    }
+  }
+  if (ix >= 0x7ff00000) {
+    y = fd_set(y, 1, (x - x))
+    y = fd_set(y, 0, y[1])
+    return (0, y)
+  }
+  z = fd_with_lo(z, fd_lo(x))
+  e0 = fd_i32(((ix >> 20) - 1046))
+  z = fd_with_hi(z, fd_i32((ix - fd_i32((e0 << 20)))))
+  i = 0
+  while (i < 2) {
+    tx = fd_set(tx, i, to_float(fd_i32(to_int(z))))
+    z = ((z - tx[i]) * FD_E_REM_PIO2_TWO24)
+    i = fd_i32((i + 1))
+  }
+  tx = fd_set(tx, 2, z)
+  nx = 3
+  while (tx[fd_i32((nx - 1))] == FD_E_REM_PIO2_ZERO) {
+    nx = fd_i32((nx - 1))
+  }
+  let (pair_1_n, pair_1_y) = fd_kernel_rem_pio2(tx, y, e0, nx, 2, FD_E_REM_PIO2_TWO_OVER_PI)
+  n = pair_1_n
+  y = pair_1_y
+  if (hx < 0) {
+    y = fd_set(y, 0, (-y[0]))
+    y = fd_set(y, 1, (-y[1]))
+    return (fd_i32((-n)), y)
+  }
+  return (n, y)
+  (0, y)
+}
+
+# Translated from k_rem_pio2.c, Netlib fdlibm 5.3.
+const FD_K_REM_PIO2_INIT_JK: List[Int] = [2, 3, 4, 6]
+const FD_K_REM_PIO2_PIO2: List[Float] = [float_of_bits(0x3ff921fb40000000), float_of_bits(0x3e74442d00000000), float_of_bits(0x3cf8469880000000), float_of_bits(0x3b78cc5160000000), float_of_bits(0x39f01b8380000000), float_of_bits(0x387a252040000000), float_of_bits(0x36e3822280000000), float_of_bits(0x3569f31d00000000)]
+const FD_K_REM_PIO2_ZERO: Float = float_of_bits(0x0000000000000000)
+const FD_K_REM_PIO2_ONE: Float = float_of_bits(0x3ff0000000000000)
+const FD_K_REM_PIO2_TWO24: Float = float_of_bits(0x4170000000000000)
+const FD_K_REM_PIO2_TWON24: Float = float_of_bits(0x3e70000000000000)
+
+fn fd_kernel_rem_pio2(x_in: List[Float], y_in: List[Float], e0_in: Int, nx_in: Int, prec_in: Int, ipio2_in: List[Int]) -> (Int, List[Float]) = {
+  var x = x_in
+  var y = y_in
+  var e0 = e0_in
+  var nx = nx_in
+  var prec = prec_in
+  var ipio2 = ipio2_in
+  var jz: Int = 0
+  var jx: Int = 0
+  var jv: Int = 0
+  var jp: Int = 0
+  var jk: Int = 0
+  var carry: Int = 0
+  var n: Int = 0
+  var iq: List[Int] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  var i: Int = 0
+  var j: Int = 0
+  var k: Int = 0
+  var m: Int = 0
+  var q0: Int = 0
+  var ih: Int = 0
+  var z: Float = 0.0
+  var fw: Float = 0.0
+  var f: List[Float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  var fq: List[Float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  var q: List[Float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  jk = FD_K_REM_PIO2_INIT_JK[prec]
+  jp = jk
+  jx = fd_i32((nx - 1))
+  jv = fd_i32((fd_i32((e0 - 3)) / 24))
+  if (jv < 0) {
+    jv = 0
+  }
+  q0 = fd_i32((e0 - fd_i32((24 * fd_i32((jv + 1))))))
+  j = fd_i32((jv - jx))
+  m = fd_i32((jx + jk))
+  i = 0
+  while (i <= m) {
+    f = fd_set(f, i, (if (j < 0) { FD_K_REM_PIO2_ZERO } else { to_float(ipio2[j]) }))
+    i = fd_i32((i + 1))
+    j = fd_i32((j + 1))
+  }
+  i = 0
+  while (i <= jk) {
+    j = 0
+    fw = float_of_bits(0x0000000000000000)
+    while (j <= jx) {
+      fw = (fw + (x[j] * f[fd_i32((fd_i32((jx + i)) - j))]))
+      j = fd_i32((j + 1))
+    }
+    q = fd_set(q, i, fw)
+    i = fd_i32((i + 1))
+  }
+  jz = jk
+  while (1 != 0) {
+    i = 0
+    j = jz
+    z = q[jz]
+    while (j > 0) {
+      fw = to_float(fd_i32(to_int((FD_K_REM_PIO2_TWON24 * z))))
+      iq = fd_set(iq, i, fd_i32(to_int((z - (FD_K_REM_PIO2_TWO24 * fw)))))
+      z = (q[fd_i32((j - 1))] + fw)
+      i = fd_i32((i + 1))
+      j = fd_i32((j - 1))
+    }
+    z = ldexp(z, q0)
+    z = (z - (float_of_bits(0x4020000000000000) * floor((z * float_of_bits(0x3fc0000000000000)))))
+    n = fd_i32(to_int(z))
+    z = (z - to_float(n))
+    ih = 0
+    if (q0 > 0) {
+      i = (iq[fd_i32((jz - 1))] >> fd_i32((24 - q0)))
+      n = fd_i32((n + i))
+      iq = fd_set(iq, fd_i32((jz - 1)), fd_i32((iq[fd_i32((jz - 1))] - fd_i32((i << fd_i32((24 - q0)))))))
+      ih = (iq[fd_i32((jz - 1))] >> fd_i32((23 - q0)))
+    } else {
+      if (q0 == 0) {
+        ih = (iq[fd_i32((jz - 1))] >> 23)
+      } else {
+        if (z >= float_of_bits(0x3fe0000000000000)) {
+          ih = 2
+        }
+      }
+    }
+    if (ih > 0) {
+      n = fd_i32((n + 1))
+      carry = 0
+      i = 0
+      while (i < jz) {
+        j = iq[i]
+        if (carry == 0) {
+          if (j != 0) {
+            carry = 1
+            iq = fd_set(iq, i, fd_i32((0x1000000 - j)))
+          }
+        } else {
+          iq = fd_set(iq, i, fd_i32((0xffffff - j)))
+        }
+        i = fd_i32((i + 1))
+      }
+      if (q0 > 0) {
+        match q0 {
+          1 -> {
+            iq = fd_set(iq, fd_i32((jz - 1)), fd_i32((iq[fd_i32((jz - 1))] & 0x7fffff)))
+          }
+          2 -> {
+            iq = fd_set(iq, fd_i32((jz - 1)), fd_i32((iq[fd_i32((jz - 1))] & 0x3fffff)))
+          }
+          _ -> ()
+        }
+      }
+      if (ih == 2) {
+        z = (FD_K_REM_PIO2_ONE - z)
+        if (carry != 0) {
+          z = (z - ldexp(FD_K_REM_PIO2_ONE, q0))
+        }
+      }
+    }
+    if (z == FD_K_REM_PIO2_ZERO) {
+      j = 0
+      i = fd_i32((jz - 1))
+      while (i >= jk) {
+        j = fd_i32((j | iq[i]))
+        i = fd_i32((i - 1))
+      }
+      if (j == 0) {
+        k = 1
+        while (iq[fd_i32((jk - k))] == 0) {
+          k = fd_i32((k + 1))
+        }
+        i = fd_i32((jz + 1))
+        while (i <= fd_i32((jz + k))) {
+          f = fd_set(f, fd_i32((jx + i)), to_float(ipio2[fd_i32((jv + i))]))
+          j = 0
+          fw = float_of_bits(0x0000000000000000)
+          while (j <= jx) {
+            fw = (fw + (x[j] * f[fd_i32((fd_i32((jx + i)) - j))]))
+            j = fd_i32((j + 1))
+          }
+          q = fd_set(q, i, fw)
+          i = fd_i32((i + 1))
+        }
+        jz = fd_i32((jz + k))
+        continue
+      }
+    }
+    break
+  }
+  if (z == float_of_bits(0x0000000000000000)) {
+    jz = fd_i32((jz - 1))
+    q0 = fd_i32((q0 - 24))
+    while (iq[jz] == 0) {
+      jz = fd_i32((jz - 1))
+      q0 = fd_i32((q0 - 24))
+    }
+  } else {
+    z = ldexp(z, fd_i32((-q0)))
+    if (z >= FD_K_REM_PIO2_TWO24) {
+      fw = to_float(fd_i32(to_int((FD_K_REM_PIO2_TWON24 * z))))
+      iq = fd_set(iq, jz, fd_i32(to_int((z - (FD_K_REM_PIO2_TWO24 * fw)))))
+      jz = fd_i32((jz + 1))
+      q0 = fd_i32((q0 + 24))
+      iq = fd_set(iq, jz, fd_i32(to_int(fw)))
+    } else {
+      iq = fd_set(iq, jz, fd_i32(to_int(z)))
+    }
+  }
+  fw = ldexp(FD_K_REM_PIO2_ONE, q0)
+  i = jz
+  while (i >= 0) {
+    q = fd_set(q, i, (fw * to_float(iq[i])))
+    fw = (fw * FD_K_REM_PIO2_TWON24)
+    i = fd_i32((i - 1))
+  }
+  i = jz
+  while (i >= 0) {
+    fw = float_of_bits(0x0000000000000000)
+    k = 0
+    while ((k <= jp) && (k <= fd_i32((jz - i)))) {
+      fw = (fw + (FD_K_REM_PIO2_PIO2[k] * q[fd_i32((i + k))]))
+      k = fd_i32((k + 1))
+    }
+    fq = fd_set(fq, fd_i32((jz - i)), fw)
+    i = fd_i32((i - 1))
+  }
+  match prec {
+    0 -> {
+      fw = float_of_bits(0x0000000000000000)
+      i = jz
+      while (i >= 0) {
+        fw = (fw + fq[i])
+        i = fd_i32((i - 1))
+      }
+      y = fd_set(y, 0, (if (ih == 0) { fw } else { (-fw) }))
+    }
+    1 | 2 -> {
+      fw = float_of_bits(0x0000000000000000)
+      i = jz
+      while (i >= 0) {
+        fw = (fw + fq[i])
+        i = fd_i32((i - 1))
+      }
+      y = fd_set(y, 0, (if (ih == 0) { fw } else { (-fw) }))
+      fw = (fq[0] - fw)
+      i = 1
+      while (i <= jz) {
+        fw = (fw + fq[i])
+        i = fd_i32((i + 1))
+      }
+      y = fd_set(y, 1, (if (ih == 0) { fw } else { (-fw) }))
+    }
+    3 -> {
+      i = jz
+      while (i > 0) {
+        fw = (fq[fd_i32((i - 1))] + fq[i])
+        fq = fd_set(fq, i, (fq[i] + (fq[fd_i32((i - 1))] - fw)))
+        fq = fd_set(fq, fd_i32((i - 1)), fw)
+        i = fd_i32((i - 1))
+      }
+      i = jz
+      while (i > 1) {
+        fw = (fq[fd_i32((i - 1))] + fq[i])
+        fq = fd_set(fq, i, (fq[i] + (fq[fd_i32((i - 1))] - fw)))
+        fq = fd_set(fq, fd_i32((i - 1)), fw)
+        i = fd_i32((i - 1))
+      }
+      fw = float_of_bits(0x0000000000000000)
+      i = jz
+      while (i >= 2) {
+        fw = (fw + fq[i])
+        i = fd_i32((i - 1))
+      }
+      if (ih == 0) {
+        y = fd_set(y, 0, fq[0])
+        y = fd_set(y, 1, fq[1])
+        y = fd_set(y, 2, fw)
+      } else {
+        y = fd_set(y, 0, (-fq[0]))
+        y = fd_set(y, 1, (-fq[1]))
+        y = fd_set(y, 2, (-fw))
+      }
+    }
+    _ -> ()
+  }
+  return ((n & 7), y)
+  (0, y)
+}
+
+# Translated from k_sin.c, Netlib fdlibm 5.3.
+const FD_K_SIN_HALF: Float = float_of_bits(0x3fe0000000000000)
+const FD_K_SIN_S1: Float = (-float_of_bits(0x3fc5555555555549))
+const FD_K_SIN_S2: Float = float_of_bits(0x3f8111111110f8a6)
+const FD_K_SIN_S3: Float = (-float_of_bits(0x3f2a01a019c161d5))
+const FD_K_SIN_S4: Float = float_of_bits(0x3ec71de357b1fe7d)
+const FD_K_SIN_S5: Float = (-float_of_bits(0x3e5ae5e68a2b9ceb))
+const FD_K_SIN_S6: Float = float_of_bits(0x3de5d93a5acfd57c)
+
+fn fd_kernel_sin(x_in: Float, y_in: Float, iy_in: Int) -> Float = {
+  var x = x_in
+  var y = y_in
+  var iy = iy_in
+  var z: Float = 0.0
+  var r: Float = 0.0
+  var v: Float = 0.0
+  var ix: Int = 0
+  ix = (fd_hi(x) & 0x7fffffff)
+  if (ix < 0x3e400000) {
+    if (fd_i32(to_int(x)) == 0) {
+      return x
+    }
+  }
+  z = (x * x)
+  v = (z * x)
+  r = (FD_K_SIN_S2 + (z * (FD_K_SIN_S3 + (z * (FD_K_SIN_S4 + (z * (FD_K_SIN_S5 + (z * FD_K_SIN_S6))))))))
+  if (iy == 0) {
+    return (x + (v * (FD_K_SIN_S1 + (z * r))))
+  } else {
+    return (x - (((z * ((FD_K_SIN_HALF * y) - (v * r))) - y) - (v * FD_K_SIN_S1)))
+  }
+  0.0
+}
+
+# Translated from k_cos.c, Netlib fdlibm 5.3.
+const FD_K_COS_ONE: Float = float_of_bits(0x3ff0000000000000)
+const FD_K_COS_C1: Float = float_of_bits(0x3fa555555555554c)
+const FD_K_COS_C2: Float = (-float_of_bits(0x3f56c16c16c15177))
+const FD_K_COS_C3: Float = float_of_bits(0x3efa01a019cb1590)
+const FD_K_COS_C4: Float = (-float_of_bits(0x3e927e4f809c52ad))
+const FD_K_COS_C5: Float = float_of_bits(0x3e21ee9ebdb4b1c4)
+const FD_K_COS_C6: Float = (-float_of_bits(0x3da8fae9be8838d4))
+
+fn fd_kernel_cos(x_in: Float, y_in: Float) -> Float = {
+  var x = x_in
+  var y = y_in
+  var a: Float = 0.0
+  var hz: Float = 0.0
+  var z: Float = 0.0
+  var r: Float = 0.0
+  var qx: Float = 0.0
+  var ix: Int = 0
+  ix = (fd_hi(x) & 0x7fffffff)
+  if (ix < 0x3e400000) {
+    if (fd_i32(to_int(x)) == 0) {
+      return FD_K_COS_ONE
+    }
+  }
+  z = (x * x)
+  r = (z * (FD_K_COS_C1 + (z * (FD_K_COS_C2 + (z * (FD_K_COS_C3 + (z * (FD_K_COS_C4 + (z * (FD_K_COS_C5 + (z * FD_K_COS_C6)))))))))))
+  if (ix < 0x3FD33333) {
+    return (FD_K_COS_ONE - ((float_of_bits(0x3fe0000000000000) * z) - ((z * r) - (x * y))))
+  } else {
+    if (ix > 0x3fe90000) {
+      qx = float_of_bits(0x3fd2000000000000)
+    } else {
+      qx = fd_with_hi(qx, fd_i32((ix - 0x00200000)))
+      qx = fd_with_lo(qx, 0)
+    }
+    hz = ((float_of_bits(0x3fe0000000000000) * z) - qx)
+    a = (FD_K_COS_ONE - qx)
+    return (a - (hz - ((z * r) - (x * y))))
+  }
+  0.0
+}
+
+# Translated from k_tan.c, Netlib fdlibm 5.3.
+const FD_K_TAN_XXX: List[Float] = [float_of_bits(0x3fd5555555555563), float_of_bits(0x3fc111111110fe7a), float_of_bits(0x3faba1ba1bb341fe), float_of_bits(0x3f9664f48406d637), float_of_bits(0x3f8226e3e96e8493), float_of_bits(0x3f6d6d22c9560328), float_of_bits(0x3f57dbc8fee08315), float_of_bits(0x3f4344d8f2f26501), float_of_bits(0x3f3026f71a8d1068), float_of_bits(0x3f147e88a03792a6), float_of_bits(0x3f12b80f32f0a7e9), (-float_of_bits(0x3ef375cbdb605373)), float_of_bits(0x3efb2a7074bf7ad4), float_of_bits(0x3ff0000000000000), float_of_bits(0x3fe921fb54442d18), float_of_bits(0x3c81a62633145c07)]
+
+fn fd_kernel_tan(x_in: Float, y_in: Float, iy_in: Int) -> Float = {
+  var x = x_in
+  var y = y_in
+  var iy = iy_in
+  var z: Float = 0.0
+  var r: Float = 0.0
+  var v: Float = 0.0
+  var w: Float = 0.0
+  var s: Float = 0.0
+  var ix: Int = 0
+  var hx: Int = 0
+  hx = fd_hi(x)
+  ix = (hx & 0x7fffffff)
+  if (ix < 0x3e300000) {
+    if (fd_i32(to_int(x)) == 0) {
+      if (((ix | fd_lo(x)) | fd_i32((iy + 1))) == 0) {
+        return (FD_K_TAN_XXX[13] / abs(x))
+      } else {
+        if (iy == 1) {
+          return x
+        } else {
+          var a: Float = 0.0
+          var t: Float = 0.0
+          w = (x + y)
+          z = w
+          z = fd_with_lo(z, 0)
+          v = (y - (z - x))
+          a = ((-FD_K_TAN_XXX[13]) / w)
+          t = a
+          t = fd_with_lo(t, 0)
+          s = (FD_K_TAN_XXX[13] + (t * z))
+          return (t + (a * (s + (t * v))))
+        }
+      }
+    }
+  }
+  if (ix >= 0x3FE59428) {
+    if (hx < 0) {
+      x = (-x)
+      y = (-y)
+    }
+    z = (FD_K_TAN_XXX[14] - x)
+    w = (FD_K_TAN_XXX[15] - y)
+    x = (z + w)
+    y = float_of_bits(0x0000000000000000)
+  }
+  z = (x * x)
+  w = (z * z)
+  r = (FD_K_TAN_XXX[1] + (w * (FD_K_TAN_XXX[3] + (w * (FD_K_TAN_XXX[5] + (w * (FD_K_TAN_XXX[7] + (w * (FD_K_TAN_XXX[9] + (w * FD_K_TAN_XXX[11]))))))))))
+  v = (z * (FD_K_TAN_XXX[2] + (w * (FD_K_TAN_XXX[4] + (w * (FD_K_TAN_XXX[6] + (w * (FD_K_TAN_XXX[8] + (w * (FD_K_TAN_XXX[10] + (w * FD_K_TAN_XXX[12])))))))))))
+  s = (z * x)
+  r = (y + (z * ((s * (r + v)) + y)))
+  r = (r + (FD_K_TAN_XXX[0] * s))
+  w = (x + r)
+  if (ix >= 0x3FE59428) {
+    v = to_float(iy)
+    return (to_float(fd_i32((1 - ((hx >> 30) & 2)))) * (v - (float_of_bits(0x4000000000000000) * (x - (((w * w) / (w + v)) - r)))))
+  }
+  if (iy == 1) {
+    return w
+  } else {
+    var a: Float = 0.0
+    var t: Float = 0.0
+    z = w
+    z = fd_with_lo(z, 0)
+    v = (r - (z - x))
+    a = ((-float_of_bits(0x3ff0000000000000)) / w)
+    t = a
+    t = fd_with_lo(t, 0)
+    s = (float_of_bits(0x3ff0000000000000) + (t * z))
+    return (t + (a * (s + (t * v))))
+  }
+  0.0
+}
+
+# Translated from s_sin.c, Netlib fdlibm 5.3.
+
+## Sine in radians. Preserve signed zero; infinities and NaN give NaN.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn sin(x: Float) -> Float = {
+  var x_work = x
+  var y: List[Float] = [0.0, 0.0]
+  var z: Float = float_of_bits(0x0000000000000000)
+  var n: Int = 0
+  var ix: Int = 0
+  ix = fd_hi(x_work)
+  ix = fd_i32((ix & 0x7fffffff))
+  if (ix <= 0x3fe921fb) {
+    return fd_kernel_sin(x_work, z, 0)
+  } else {
+    if (ix >= 0x7ff00000) {
+      return (x_work - x_work)
+    } else {
+      let (pair_1_n, pair_1_y) = fd_rem_pio2(x_work, y)
+      n = pair_1_n
+      y = pair_1_y
+      match (n & 3) {
+        0 -> {
+          return fd_kernel_sin(y[0], y[1], 1)
+        }
+        1 -> {
+          return fd_kernel_cos(y[0], y[1])
+        }
+        2 -> {
+          return (-fd_kernel_sin(y[0], y[1], 1))
+        }
+        _ -> {
+          return (-fd_kernel_cos(y[0], y[1]))
+        }
+      }
+    }
+  }
+  0.0
+}
+
+# Translated from s_cos.c, Netlib fdlibm 5.3.
+
+## Cosine in radians. Both zeros give 1; infinities and NaN give NaN.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn cos(x: Float) -> Float = {
+  var x_work = x
+  var y: List[Float] = [0.0, 0.0]
+  var z: Float = float_of_bits(0x0000000000000000)
+  var n: Int = 0
+  var ix: Int = 0
+  ix = fd_hi(x_work)
+  ix = fd_i32((ix & 0x7fffffff))
+  if (ix <= 0x3fe921fb) {
+    return fd_kernel_cos(x_work, z)
+  } else {
+    if (ix >= 0x7ff00000) {
+      return (x_work - x_work)
+    } else {
+      let (pair_1_n, pair_1_y) = fd_rem_pio2(x_work, y)
+      n = pair_1_n
+      y = pair_1_y
+      match (n & 3) {
+        0 -> {
+          return fd_kernel_cos(y[0], y[1])
+        }
+        1 -> {
+          return (-fd_kernel_sin(y[0], y[1], 1))
+        }
+        2 -> {
+          return (-fd_kernel_cos(y[0], y[1]))
+        }
+        _ -> {
+          return fd_kernel_sin(y[0], y[1], 1)
+        }
+      }
+    }
+  }
+  0.0
+}
+
+# Translated from s_tan.c, Netlib fdlibm 5.3.
+
+## Tangent in radians. Preserve signed zero; infinities and NaN give NaN.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn tan(x: Float) -> Float = {
+  var x_work = x
+  var y: List[Float] = [0.0, 0.0]
+  var z: Float = float_of_bits(0x0000000000000000)
+  var n: Int = 0
+  var ix: Int = 0
+  ix = fd_hi(x_work)
+  ix = fd_i32((ix & 0x7fffffff))
+  if (ix <= 0x3fe921fb) {
+    return fd_kernel_tan(x_work, z, 1)
+  } else {
+    if (ix >= 0x7ff00000) {
+      return (x_work - x_work)
+    } else {
+      let (pair_1_n, pair_1_y) = fd_rem_pio2(x_work, y)
+      n = pair_1_n
+      y = pair_1_y
+      return fd_kernel_tan(y[0], y[1], fd_i32((1 - fd_i32(((n & 1) << 1)))))
+    }
+  }
+  0.0
+}
+
+# Translated from e_asin.c, Netlib fdlibm 5.3.
+const FD_E_ASIN_ONE: Float = float_of_bits(0x3ff0000000000000)
+const FD_E_ASIN_HUGE: Float = float_of_bits(0x7e37e43c8800759c)
+const FD_E_ASIN_PIO2_HI: Float = float_of_bits(0x3ff921fb54442d18)
+const FD_E_ASIN_PIO2_LO: Float = float_of_bits(0x3c91a62633145c07)
+const FD_E_ASIN_PIO4_HI: Float = float_of_bits(0x3fe921fb54442d18)
+const FD_E_ASIN_PS0: Float = float_of_bits(0x3fc5555555555555)
+const FD_E_ASIN_PS1: Float = (-float_of_bits(0x3fd4d61203eb6f7d))
+const FD_E_ASIN_PS2: Float = float_of_bits(0x3fc9c1550e884455)
+const FD_E_ASIN_PS3: Float = (-float_of_bits(0x3fa48228b5688f3b))
+const FD_E_ASIN_PS4: Float = float_of_bits(0x3f49efe07501b288)
+const FD_E_ASIN_PS5: Float = float_of_bits(0x3f023de10dfdf709)
+const FD_E_ASIN_QS1: Float = (-float_of_bits(0x40033a271c8a2d4b))
+const FD_E_ASIN_QS2: Float = float_of_bits(0x40002ae59c598ac8)
+const FD_E_ASIN_QS3: Float = (-float_of_bits(0x3fe6066c1b8d0159))
+const FD_E_ASIN_QS4: Float = float_of_bits(0x3fb3b8c5b12e9282)
+
+## Inverse sine in radians. Preserve signed zero; inputs outside [-1,1], including infinities, give NaN; NaN propagates.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn asin(x: Float) -> Float = {
+  var x_work = x
+  var t: Float = 0.0
+  var w: Float = 0.0
+  var p: Float = 0.0
+  var q: Float = 0.0
+  var c: Float = 0.0
+  var r: Float = 0.0
+  var s: Float = 0.0
+  var hx: Int = 0
+  var ix: Int = 0
+  hx = fd_hi(x_work)
+  ix = (hx & 0x7fffffff)
+  if (ix >= 0x3ff00000) {
+    if ((fd_i32((ix - 0x3ff00000)) | fd_lo(x_work)) == 0) {
+      return ((x_work * FD_E_ASIN_PIO2_HI) + (x_work * FD_E_ASIN_PIO2_LO))
+    }
+    return ((x_work - x_work) / (x_work - x_work))
+  } else {
+    if (ix < 0x3fe00000) {
+      if (ix < 0x3e400000) {
+        if ((FD_E_ASIN_HUGE + x_work) > FD_E_ASIN_ONE) {
+          return x_work
+        }
+      } else {
+        t = (x_work * x_work)
+      }
+      p = (t * (FD_E_ASIN_PS0 + (t * (FD_E_ASIN_PS1 + (t * (FD_E_ASIN_PS2 + (t * (FD_E_ASIN_PS3 + (t * (FD_E_ASIN_PS4 + (t * FD_E_ASIN_PS5)))))))))))
+      q = (FD_E_ASIN_ONE + (t * (FD_E_ASIN_QS1 + (t * (FD_E_ASIN_QS2 + (t * (FD_E_ASIN_QS3 + (t * FD_E_ASIN_QS4))))))))
+      w = (p / q)
+      return (x_work + (x_work * w))
+    }
+  }
+  w = (FD_E_ASIN_ONE - abs(x_work))
+  t = (w * float_of_bits(0x3fe0000000000000))
+  p = (t * (FD_E_ASIN_PS0 + (t * (FD_E_ASIN_PS1 + (t * (FD_E_ASIN_PS2 + (t * (FD_E_ASIN_PS3 + (t * (FD_E_ASIN_PS4 + (t * FD_E_ASIN_PS5)))))))))))
+  q = (FD_E_ASIN_ONE + (t * (FD_E_ASIN_QS1 + (t * (FD_E_ASIN_QS2 + (t * (FD_E_ASIN_QS3 + (t * FD_E_ASIN_QS4))))))))
+  s = sqrt(t)
+  if (ix >= 0x3FEF3333) {
+    w = (p / q)
+    t = (FD_E_ASIN_PIO2_HI - ((float_of_bits(0x4000000000000000) * (s + (s * w))) - FD_E_ASIN_PIO2_LO))
+  } else {
+    w = s
+    w = fd_with_lo(w, 0)
+    c = ((t - (w * w)) / (s + w))
+    r = (p / q)
+    p = (((float_of_bits(0x4000000000000000) * s) * r) - (FD_E_ASIN_PIO2_LO - (float_of_bits(0x4000000000000000) * c)))
+    q = (FD_E_ASIN_PIO4_HI - (float_of_bits(0x4000000000000000) * w))
+    t = (FD_E_ASIN_PIO4_HI - (p - q))
+  }
+  if (hx > 0) {
+    return t
+  } else {
+    return (-t)
+  }
+  0.0
+}
+
+# Translated from e_acos.c, Netlib fdlibm 5.3.
+const FD_E_ACOS_ONE: Float = float_of_bits(0x3ff0000000000000)
+const FD_E_ACOS_PI: Float = float_of_bits(0x400921fb54442d18)
+const FD_E_ACOS_PIO2_HI: Float = float_of_bits(0x3ff921fb54442d18)
+const FD_E_ACOS_PIO2_LO: Float = float_of_bits(0x3c91a62633145c07)
+const FD_E_ACOS_PS0: Float = float_of_bits(0x3fc5555555555555)
+const FD_E_ACOS_PS1: Float = (-float_of_bits(0x3fd4d61203eb6f7d))
+const FD_E_ACOS_PS2: Float = float_of_bits(0x3fc9c1550e884455)
+const FD_E_ACOS_PS3: Float = (-float_of_bits(0x3fa48228b5688f3b))
+const FD_E_ACOS_PS4: Float = float_of_bits(0x3f49efe07501b288)
+const FD_E_ACOS_PS5: Float = float_of_bits(0x3f023de10dfdf709)
+const FD_E_ACOS_QS1: Float = (-float_of_bits(0x40033a271c8a2d4b))
+const FD_E_ACOS_QS2: Float = float_of_bits(0x40002ae59c598ac8)
+const FD_E_ACOS_QS3: Float = (-float_of_bits(0x3fe6066c1b8d0159))
+const FD_E_ACOS_QS4: Float = float_of_bits(0x3fb3b8c5b12e9282)
+
+## Inverse cosine in radians. Zero gives PI/2, 1 gives +0, -1 gives PI; inputs outside [-1,1] and NaN give NaN.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn acos(x: Float) -> Float = {
+  var x_work = x
+  var z: Float = 0.0
+  var p: Float = 0.0
+  var q: Float = 0.0
+  var r: Float = 0.0
+  var w: Float = 0.0
+  var s: Float = 0.0
+  var c: Float = 0.0
+  var df: Float = 0.0
+  var hx: Int = 0
+  var ix: Int = 0
+  hx = fd_hi(x_work)
+  ix = (hx & 0x7fffffff)
+  if (ix >= 0x3ff00000) {
+    if ((fd_i32((ix - 0x3ff00000)) | fd_lo(x_work)) == 0) {
+      if (hx > 0) {
+        return float_of_bits(0x0000000000000000)
+      } else {
+        return (FD_E_ACOS_PI + (float_of_bits(0x4000000000000000) * FD_E_ACOS_PIO2_LO))
+      }
+    }
+    return ((x_work - x_work) / (x_work - x_work))
+  }
+  if (ix < 0x3fe00000) {
+    if (ix <= 0x3c600000) {
+      return (FD_E_ACOS_PIO2_HI + FD_E_ACOS_PIO2_LO)
+    }
+    z = (x_work * x_work)
+    p = (z * (FD_E_ACOS_PS0 + (z * (FD_E_ACOS_PS1 + (z * (FD_E_ACOS_PS2 + (z * (FD_E_ACOS_PS3 + (z * (FD_E_ACOS_PS4 + (z * FD_E_ACOS_PS5)))))))))))
+    q = (FD_E_ACOS_ONE + (z * (FD_E_ACOS_QS1 + (z * (FD_E_ACOS_QS2 + (z * (FD_E_ACOS_QS3 + (z * FD_E_ACOS_QS4))))))))
+    r = (p / q)
+    return (FD_E_ACOS_PIO2_HI - (x_work - (FD_E_ACOS_PIO2_LO - (x_work * r))))
+  } else {
+    if (hx < 0) {
+      z = ((FD_E_ACOS_ONE + x_work) * float_of_bits(0x3fe0000000000000))
+      p = (z * (FD_E_ACOS_PS0 + (z * (FD_E_ACOS_PS1 + (z * (FD_E_ACOS_PS2 + (z * (FD_E_ACOS_PS3 + (z * (FD_E_ACOS_PS4 + (z * FD_E_ACOS_PS5)))))))))))
+      q = (FD_E_ACOS_ONE + (z * (FD_E_ACOS_QS1 + (z * (FD_E_ACOS_QS2 + (z * (FD_E_ACOS_QS3 + (z * FD_E_ACOS_QS4))))))))
+      s = sqrt(z)
+      r = (p / q)
+      w = ((r * s) - FD_E_ACOS_PIO2_LO)
+      return (FD_E_ACOS_PI - (float_of_bits(0x4000000000000000) * (s + w)))
+    } else {
+      z = ((FD_E_ACOS_ONE - x_work) * float_of_bits(0x3fe0000000000000))
+      s = sqrt(z)
+      df = s
+      df = fd_with_lo(df, 0)
+      c = ((z - (df * df)) / (s + df))
+      p = (z * (FD_E_ACOS_PS0 + (z * (FD_E_ACOS_PS1 + (z * (FD_E_ACOS_PS2 + (z * (FD_E_ACOS_PS3 + (z * (FD_E_ACOS_PS4 + (z * FD_E_ACOS_PS5)))))))))))
+      q = (FD_E_ACOS_ONE + (z * (FD_E_ACOS_QS1 + (z * (FD_E_ACOS_QS2 + (z * (FD_E_ACOS_QS3 + (z * FD_E_ACOS_QS4))))))))
+      r = (p / q)
+      w = ((r * s) + c)
+      return (float_of_bits(0x4000000000000000) * (df + w))
+    }
+  }
+  0.0
+}
+
+# Translated from s_atan.c, Netlib fdlibm 5.3.
+const FD_S_ATAN_ATANHI: List[Float] = [float_of_bits(0x3fddac670561bb4f), float_of_bits(0x3fe921fb54442d18), float_of_bits(0x3fef730bd281f69b), float_of_bits(0x3ff921fb54442d18)]
+const FD_S_ATAN_ATANLO: List[Float] = [float_of_bits(0x3c7a2b7f222f65e2), float_of_bits(0x3c81a62633145c07), float_of_bits(0x3c7007887af0cbbd), float_of_bits(0x3c91a62633145c07)]
+const FD_S_ATAN_AT: List[Float] = [float_of_bits(0x3fd555555555550d), (-float_of_bits(0x3fc999999998ebc4)), float_of_bits(0x3fc24924920083ff), (-float_of_bits(0x3fbc71c6fe231671)), float_of_bits(0x3fb745cdc54c206e), (-float_of_bits(0x3fb3b0f2af749a6d)), float_of_bits(0x3fb10d66a0d03d51), (-float_of_bits(0x3fadde2d52defd9a)), float_of_bits(0x3fa97b4b24760deb), (-float_of_bits(0x3fa2b4442c6a6c2f)), float_of_bits(0x3f90ad3ae322da11)]
+const FD_S_ATAN_ONE: Float = float_of_bits(0x3ff0000000000000)
+const FD_S_ATAN_HUGE: Float = float_of_bits(0x7e37e43c8800759c)
+
+## Inverse tangent in radians. Preserve signed zero; infinities give signed PI/2; NaN propagates.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn atan(x: Float) -> Float = {
+  var x_work = x
+  var w: Float = 0.0
+  var s1: Float = 0.0
+  var s2: Float = 0.0
+  var z: Float = 0.0
+  var ix: Int = 0
+  var hx: Int = 0
+  var id: Int = 0
+  hx = fd_hi(x_work)
+  ix = (hx & 0x7fffffff)
+  if (ix >= 0x44100000) {
+    if ((ix > 0x7ff00000) || ((ix == 0x7ff00000) && (fd_lo(x_work) != 0))) {
+      return (x_work + x_work)
+    }
+    if (hx > 0) {
+      return (FD_S_ATAN_ATANHI[3] + FD_S_ATAN_ATANLO[3])
+    } else {
+      return ((-FD_S_ATAN_ATANHI[3]) - FD_S_ATAN_ATANLO[3])
+    }
+  }
+  if (ix < 0x3fdc0000) {
+    if (ix < 0x3e200000) {
+      if ((FD_S_ATAN_HUGE + x_work) > FD_S_ATAN_ONE) {
+        return x_work
+      }
+    }
+    id = fd_i32((-1))
+  } else {
+    x_work = abs(x_work)
+    if (ix < 0x3ff30000) {
+      if (ix < 0x3fe60000) {
+        id = 0
+        x_work = (((float_of_bits(0x4000000000000000) * x_work) - FD_S_ATAN_ONE) / (float_of_bits(0x4000000000000000) + x_work))
+      } else {
+        id = 1
+        x_work = ((x_work - FD_S_ATAN_ONE) / (x_work + FD_S_ATAN_ONE))
+      }
+    } else {
+      if (ix < 0x40038000) {
+        id = 2
+        x_work = ((x_work - float_of_bits(0x3ff8000000000000)) / (FD_S_ATAN_ONE + (float_of_bits(0x3ff8000000000000) * x_work)))
+      } else {
+        id = 3
+        x_work = ((-float_of_bits(0x3ff0000000000000)) / x_work)
+      }
+    }
+  }
+  z = (x_work * x_work)
+  w = (z * z)
+  s1 = (z * (FD_S_ATAN_AT[0] + (w * (FD_S_ATAN_AT[2] + (w * (FD_S_ATAN_AT[4] + (w * (FD_S_ATAN_AT[6] + (w * (FD_S_ATAN_AT[8] + (w * FD_S_ATAN_AT[10])))))))))))
+  s2 = (w * (FD_S_ATAN_AT[1] + (w * (FD_S_ATAN_AT[3] + (w * (FD_S_ATAN_AT[5] + (w * (FD_S_ATAN_AT[7] + (w * FD_S_ATAN_AT[9])))))))))
+  if (id < 0) {
+    return (x_work - (x_work * (s1 + s2)))
+  } else {
+    z = (FD_S_ATAN_ATANHI[id] - (((x_work * (s1 + s2)) - FD_S_ATAN_ATANLO[id]) - x_work))
+    return (if (hx < 0) { (-z) } else { z })
+  }
+  0.0
+}
+
+# Translated from e_atan2.c, Netlib fdlibm 5.3.
+const FD_E_ATAN2_TINY: Float = float_of_bits(0x01a56e1fc2f8f359)
+const FD_E_ATAN2_ZERO: Float = float_of_bits(0x0000000000000000)
+const FD_E_ATAN2_PI_O_4: Float = float_of_bits(0x3fe921fb54442d18)
+const FD_E_ATAN2_PI_O_2: Float = float_of_bits(0x3ff921fb54442d18)
+const FD_E_ATAN2_PI: Float = float_of_bits(0x400921fb54442d18)
+const FD_E_ATAN2_PI_LO: Float = float_of_bits(0x3ca1a62633145c07)
+
+## Angle of (x,y) in radians. Signed zero and infinity quadrants follow IEEE fdlibm, including atan2(+0,-0)=PI and atan2(-0,-0)=-PI; either NaN gives NaN.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+fn fd_atan2(y_in: Float, x_in: Float) -> Float = {
+  var y = y_in
+  var x = x_in
+  var z: Float = 0.0
+  var k: Int = 0
+  var m: Int = 0
+  var hx: Int = 0
+  var hy: Int = 0
+  var ix: Int = 0
+  var iy: Int = 0
+  var lx: Int = 0
+  var ly: Int = 0
+  hx = fd_hi(x)
+  ix = (hx & 0x7fffffff)
+  lx = fd_u32(fd_lo(x))
+  hy = fd_hi(y)
+  iy = (hy & 0x7fffffff)
+  ly = fd_u32(fd_lo(y))
+  if (((fd_u32(ix) | ((lx | fd_u32((-lx))) >>> 31)) > fd_u32(0x7ff00000)) || ((fd_u32(iy) | ((ly | fd_u32((-ly))) >>> 31)) > fd_u32(0x7ff00000))) {
+    return (x + y)
+  }
+  if ((fd_u32(fd_i32((hx - 0x3ff00000))) | lx) == fd_u32(0)) {
+    return atan(y)
+  }
+  m = (((hy >> 31) & 1) | ((hx >> 30) & 2))
+  if ((fd_u32(iy) | ly) == fd_u32(0)) {
+    match m {
+      0 | 1 -> {
+        return y
+      }
+      2 -> {
+        return (FD_E_ATAN2_PI + FD_E_ATAN2_TINY)
+      }
+      3 -> {
+        return ((-FD_E_ATAN2_PI) - FD_E_ATAN2_TINY)
+      }
+      _ -> ()
+    }
+  }
+  if ((fd_u32(ix) | lx) == fd_u32(0)) {
+    return (if (hy < 0) { ((-FD_E_ATAN2_PI_O_2) - FD_E_ATAN2_TINY) } else { (FD_E_ATAN2_PI_O_2 + FD_E_ATAN2_TINY) })
+  }
+  if (ix == 0x7ff00000) {
+    if (iy == 0x7ff00000) {
+      match m {
+        0 -> {
+          return (FD_E_ATAN2_PI_O_4 + FD_E_ATAN2_TINY)
+        }
+        1 -> {
+          return ((-FD_E_ATAN2_PI_O_4) - FD_E_ATAN2_TINY)
+        }
+        2 -> {
+          return ((float_of_bits(0x4008000000000000) * FD_E_ATAN2_PI_O_4) + FD_E_ATAN2_TINY)
+        }
+        3 -> {
+          return (((-float_of_bits(0x4008000000000000)) * FD_E_ATAN2_PI_O_4) - FD_E_ATAN2_TINY)
+        }
+        _ -> ()
+      }
+    } else {
+      match m {
+        0 -> {
+          return FD_E_ATAN2_ZERO
+        }
+        1 -> {
+          return (-FD_E_ATAN2_ZERO)
+        }
+        2 -> {
+          return (FD_E_ATAN2_PI + FD_E_ATAN2_TINY)
+        }
+        3 -> {
+          return ((-FD_E_ATAN2_PI) - FD_E_ATAN2_TINY)
+        }
+        _ -> ()
+      }
+    }
+  }
+  if (iy == 0x7ff00000) {
+    return (if (hy < 0) { ((-FD_E_ATAN2_PI_O_2) - FD_E_ATAN2_TINY) } else { (FD_E_ATAN2_PI_O_2 + FD_E_ATAN2_TINY) })
+  }
+  k = (fd_i32((iy - ix)) >> 20)
+  if (k > 60) {
+    z = (FD_E_ATAN2_PI_O_2 + (float_of_bits(0x3fe0000000000000) * FD_E_ATAN2_PI_LO))
+  } else {
+    if ((hx < 0) && (k < fd_i32((-60)))) {
+      z = float_of_bits(0x0000000000000000)
+    } else {
+      z = atan(abs((y / x)))
+    }
+  }
+  match m {
+    0 -> {
+      return z
+    }
+    1 -> {
+      z = fd_with_hi(z, (fd_hi(z) ^ fd_i32(0x80000000)))
+      return z
+    }
+    2 -> {
+      return (FD_E_ATAN2_PI - (z - FD_E_ATAN2_PI_LO))
+    }
+    _ -> {
+      return ((z - FD_E_ATAN2_PI_LO) - FD_E_ATAN2_PI)
+    }
+  }
+  0.0
+}
+
+# Translated from e_pow.c, Netlib fdlibm 5.3.
+const FD_E_POW_BP: List[Float] = [float_of_bits(0x3ff0000000000000), float_of_bits(0x3ff8000000000000)]
+const FD_E_POW_DP_H: List[Float] = [float_of_bits(0x0000000000000000), float_of_bits(0x3fe2b80340000000)]
+const FD_E_POW_DP_L: List[Float] = [float_of_bits(0x0000000000000000), float_of_bits(0x3e4cfdeb43cfd006)]
+const FD_E_POW_ZERO: Float = float_of_bits(0x0000000000000000)
+const FD_E_POW_ONE: Float = float_of_bits(0x3ff0000000000000)
+const FD_E_POW_TWO: Float = float_of_bits(0x4000000000000000)
+const FD_E_POW_TWO53: Float = float_of_bits(0x4340000000000000)
+const FD_E_POW_HUGE: Float = float_of_bits(0x7e37e43c8800759c)
+const FD_E_POW_TINY: Float = float_of_bits(0x01a56e1fc2f8f359)
+const FD_E_POW_L1: Float = float_of_bits(0x3fe3333333333303)
+const FD_E_POW_L2: Float = float_of_bits(0x3fdb6db6db6fabff)
+const FD_E_POW_L3: Float = float_of_bits(0x3fd55555518f264d)
+const FD_E_POW_L4: Float = float_of_bits(0x3fd17460a91d4101)
+const FD_E_POW_L5: Float = float_of_bits(0x3fcd864a93c9db65)
+const FD_E_POW_L6: Float = float_of_bits(0x3fca7e284a454eef)
+const FD_E_POW_P1: Float = float_of_bits(0x3fc555555555553e)
+const FD_E_POW_P2: Float = (-float_of_bits(0x3f66c16c16bebd93))
+const FD_E_POW_P3: Float = float_of_bits(0x3f11566aaf25de2c)
+const FD_E_POW_P4: Float = (-float_of_bits(0x3ebbbd41c5d26bf1))
+const FD_E_POW_P5: Float = float_of_bits(0x3e66376972bea4d0)
+const FD_E_POW_LG2: Float = float_of_bits(0x3fe62e42fefa39ef)
+const FD_E_POW_LG2_H: Float = float_of_bits(0x3fe62e4300000000)
+const FD_E_POW_LG2_L: Float = (-float_of_bits(0x3e205c610ca86c39))
+const FD_E_POW_OVT: Float = float_of_bits(0x3c971547652b82fe)
+const FD_E_POW_CP: Float = float_of_bits(0x3feec709dc3a03fd)
+const FD_E_POW_CP_H: Float = float_of_bits(0x3feec709e0000000)
+const FD_E_POW_CP_L: Float = (-float_of_bits(0x3e3e2fe0145b01f5))
+const FD_E_POW_IVLN2: Float = float_of_bits(0x3ff71547652b82fe)
+const FD_E_POW_IVLN2_H: Float = float_of_bits(0x3ff7154760000000)
+const FD_E_POW_IVLN2_L: Float = float_of_bits(0x3e54ae0bf85ddf44)
+
+## x raised to y. Any x (including NaN) to either zero gives 1. Negative finite bases require integral exponents; odd exponents preserve the sign of zero and infinity. Absolute base 1 to infinite exponents gives NaN; other NaN inputs propagate.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn pow(x: Float, y: Float) -> Float = {
+  var x_work = x
+  var y_work = y
+  var z: Float = 0.0
+  var ax: Float = 0.0
+  var z_h: Float = 0.0
+  var z_l: Float = 0.0
+  var p_h: Float = 0.0
+  var p_l: Float = 0.0
+  var y1: Float = 0.0
+  var t1: Float = 0.0
+  var t2: Float = 0.0
+  var r: Float = 0.0
+  var s: Float = 0.0
+  var t: Float = 0.0
+  var u: Float = 0.0
+  var v: Float = 0.0
+  var w: Float = 0.0
+  var i0: Int = 0
+  var i1: Int = 0
+  var i: Int = 0
+  var j: Int = 0
+  var k: Int = 0
+  var yisint: Int = 0
+  var n: Int = 0
+  var hx: Int = 0
+  var hy: Int = 0
+  var ix: Int = 0
+  var iy: Int = 0
+  var lx: Int = 0
+  var ly: Int = 0
+  hx = fd_hi(x_work)
+  lx = fd_u32(fd_lo(x_work))
+  hy = fd_hi(y_work)
+  ly = fd_u32(fd_lo(y_work))
+  ix = (hx & 0x7fffffff)
+  iy = (hy & 0x7fffffff)
+  if ((fd_u32(iy) | ly) == fd_u32(0)) {
+    return FD_E_POW_ONE
+  }
+  if ((((ix > 0x7ff00000) || ((ix == 0x7ff00000) && (lx != fd_u32(0)))) || (iy > 0x7ff00000)) || ((iy == 0x7ff00000) && (ly != fd_u32(0)))) {
+    return (x_work + y_work)
+  }
+  yisint = 0
+  if (hx < 0) {
+    if (iy >= 0x43400000) {
+      yisint = 2
+    } else {
+      if (iy >= 0x3ff00000) {
+        k = fd_i32(((iy >> 20) - 0x3ff))
+        if (k > 20) {
+          j = fd_i32((ly >>> fd_i32((52 - k))))
+          if (fd_u32(fd_i32((j << fd_i32((52 - k))))) == ly) {
+            yisint = fd_i32((2 - (j & 1)))
+          }
+        } else {
+          if (ly == fd_u32(0)) {
+            j = (iy >> fd_i32((20 - k)))
+            if (fd_i32((j << fd_i32((20 - k)))) == iy) {
+              yisint = fd_i32((2 - (j & 1)))
+            }
+          }
+        }
+      }
+    }
+  }
+  if (ly == fd_u32(0)) {
+    if (iy == 0x7ff00000) {
+      if ((fd_u32(fd_i32((ix - 0x3ff00000))) | lx) == fd_u32(0)) {
+        return (y_work - y_work)
+      } else {
+        if (ix >= 0x3ff00000) {
+          return (if (hy >= 0) { y_work } else { FD_E_POW_ZERO })
+        } else {
+          return (if (hy < 0) { (-y_work) } else { FD_E_POW_ZERO })
+        }
+      }
+    }
+    if (iy == 0x3ff00000) {
+      if (hy < 0) {
+        return (FD_E_POW_ONE / x_work)
+      } else {
+        return x_work
+      }
+    }
+    if (hy == 0x40000000) {
+      return (x_work * x_work)
+    }
+    if (hy == 0x3fe00000) {
+      if (hx >= 0) {
+        return sqrt(x_work)
+      }
+    }
+  }
+  ax = abs(x_work)
+  if (lx == fd_u32(0)) {
+    if (((ix == 0x7ff00000) || (ix == 0)) || (ix == 0x3ff00000)) {
+      z = ax
+      if (hy < 0) {
+        z = (FD_E_POW_ONE / z)
+      }
+      if (hx < 0) {
+        if ((fd_i32((ix - 0x3ff00000)) | yisint) == 0) {
+          z = ((z - z) / (z - z))
+        } else {
+          if (yisint == 1) {
+            z = (-z)
+          }
+        }
+      }
+      return z
+    }
+  }
+  n = fd_i32(((hx >> 31) + 1))
+  if ((n | yisint) == 0) {
+    return ((x_work - x_work) / (x_work - x_work))
+  }
+  s = FD_E_POW_ONE
+  if ((n | fd_i32((yisint - 1))) == 0) {
+    s = (-FD_E_POW_ONE)
+  }
+  if (iy > 0x41e00000) {
+    if (iy > 0x43f00000) {
+      if (ix <= 0x3fefffff) {
+        return (if (hy < 0) { (FD_E_POW_HUGE * FD_E_POW_HUGE) } else { (FD_E_POW_TINY * FD_E_POW_TINY) })
+      }
+      if (ix >= 0x3ff00000) {
+        return (if (hy > 0) { (FD_E_POW_HUGE * FD_E_POW_HUGE) } else { (FD_E_POW_TINY * FD_E_POW_TINY) })
+      }
+    }
+    if (ix < 0x3fefffff) {
+      return (if (hy < 0) { ((s * FD_E_POW_HUGE) * FD_E_POW_HUGE) } else { ((s * FD_E_POW_TINY) * FD_E_POW_TINY) })
+    }
+    if (ix > 0x3ff00000) {
+      return (if (hy > 0) { ((s * FD_E_POW_HUGE) * FD_E_POW_HUGE) } else { ((s * FD_E_POW_TINY) * FD_E_POW_TINY) })
+    }
+    t = (ax - FD_E_POW_ONE)
+    w = ((t * t) * (float_of_bits(0x3fe0000000000000) - (t * (float_of_bits(0x3fd5555555555555) - (t * float_of_bits(0x3fd0000000000000))))))
+    u = (FD_E_POW_IVLN2_H * t)
+    v = ((t * FD_E_POW_IVLN2_L) - (w * FD_E_POW_IVLN2))
+    t1 = (u + v)
+    t1 = fd_with_lo(t1, 0)
+    t2 = (v - (t1 - u))
+  } else {
+    var ss: Float = 0.0
+    var s2: Float = 0.0
+    var s_h: Float = 0.0
+    var s_l: Float = 0.0
+    var t_h: Float = 0.0
+    var t_l: Float = 0.0
+    n = 0
+    if (ix < 0x00100000) {
+      ax = (ax * FD_E_POW_TWO53)
+      n = fd_i32((n - 53))
+      ix = fd_hi(ax)
+    }
+    n = fd_i32((n + fd_i32(((ix >> 20) - 0x3ff))))
+    j = (ix & 0x000fffff)
+    ix = (j | 0x3ff00000)
+    if (j <= 0x3988E) {
+      k = 0
+    } else {
+      if (j < 0xBB67A) {
+        k = 1
+      } else {
+        k = 0
+        n = fd_i32((n + 1))
+        ix = fd_i32((ix - 0x00100000))
+      }
+    }
+    ax = fd_with_hi(ax, ix)
+    u = (ax - FD_E_POW_BP[k])
+    v = (FD_E_POW_ONE / (ax + FD_E_POW_BP[k]))
+    ss = (u * v)
+    s_h = ss
+    s_h = fd_with_lo(s_h, 0)
+    t_h = FD_E_POW_ZERO
+    t_h = fd_with_hi(t_h, fd_i32((fd_i32((((ix >> 1) | 0x20000000) + 0x00080000)) + fd_i32((k << 18)))))
+    t_l = (ax - (t_h - FD_E_POW_BP[k]))
+    s_l = (v * ((u - (s_h * t_h)) - (s_h * t_l)))
+    s2 = (ss * ss)
+    r = ((s2 * s2) * (FD_E_POW_L1 + (s2 * (FD_E_POW_L2 + (s2 * (FD_E_POW_L3 + (s2 * (FD_E_POW_L4 + (s2 * (FD_E_POW_L5 + (s2 * FD_E_POW_L6)))))))))))
+    r = (r + (s_l * (s_h + ss)))
+    s2 = (s_h * s_h)
+    t_h = ((float_of_bits(0x4008000000000000) + s2) + r)
+    t_h = fd_with_lo(t_h, 0)
+    t_l = (r - ((t_h - float_of_bits(0x4008000000000000)) - s2))
+    u = (s_h * t_h)
+    v = ((s_l * t_h) + (t_l * ss))
+    p_h = (u + v)
+    p_h = fd_with_lo(p_h, 0)
+    p_l = (v - (p_h - u))
+    z_h = (FD_E_POW_CP_H * p_h)
+    z_l = (((FD_E_POW_CP_L * p_h) + (p_l * FD_E_POW_CP)) + FD_E_POW_DP_L[k])
+    t = to_float(n)
+    t1 = (((z_h + z_l) + FD_E_POW_DP_H[k]) + t)
+    t1 = fd_with_lo(t1, 0)
+    t2 = (z_l - (((t1 - t) - FD_E_POW_DP_H[k]) - z_h))
+  }
+  y1 = y_work
+  y1 = fd_with_lo(y1, 0)
+  p_l = (((y_work - y1) * t1) + (y_work * t2))
+  p_h = (y1 * t1)
+  z = (p_l + p_h)
+  j = fd_hi(z)
+  i = fd_lo(z)
+  if (j >= 0x40900000) {
+    if ((fd_i32((j - 0x40900000)) | i) != 0) {
+      return ((s * FD_E_POW_HUGE) * FD_E_POW_HUGE)
+    } else {
+      if ((p_l + FD_E_POW_OVT) > (z - p_h)) {
+        return ((s * FD_E_POW_HUGE) * FD_E_POW_HUGE)
+      }
+    }
+  } else {
+    if ((j & 0x7fffffff) >= 0x4090cc00) {
+      if ((fd_u32((fd_u32(j) - 0xc090cc00)) | fd_u32(i)) != fd_u32(0)) {
+        return ((s * FD_E_POW_TINY) * FD_E_POW_TINY)
+      } else {
+        if (p_l <= (z - p_h)) {
+          return ((s * FD_E_POW_TINY) * FD_E_POW_TINY)
+        }
+      }
+    }
+  }
+  i = (j & 0x7fffffff)
+  k = fd_i32(((i >> 20) - 0x3ff))
+  n = 0
+  if (i > 0x3fe00000) {
+    n = fd_i32((j + (0x00100000 >> fd_i32((k + 1)))))
+    k = fd_i32((((n & 0x7fffffff) >> 20) - 0x3ff))
+    t = FD_E_POW_ZERO
+    t = fd_with_hi(t, (n & ((0x000fffff >> k) ^ 0xffffffff)))
+    n = (((n & 0x000fffff) | 0x00100000) >> fd_i32((20 - k)))
+    if (j < 0) {
+      n = fd_i32((-n))
+    }
+    p_h = (p_h - t)
+  }
+  t = (p_l + p_h)
+  t = fd_with_lo(t, 0)
+  u = (t * FD_E_POW_LG2_H)
+  v = (((p_l - (t - p_h)) * FD_E_POW_LG2) + (t * FD_E_POW_LG2_L))
+  z = (u + v)
+  w = (v - (z - u))
+  t = (z * z)
+  t1 = (z - (t * (FD_E_POW_P1 + (t * (FD_E_POW_P2 + (t * (FD_E_POW_P3 + (t * (FD_E_POW_P4 + (t * FD_E_POW_P5))))))))))
+  r = (((z * t1) / (t1 - FD_E_POW_TWO)) - (w + (z * w)))
+  z = (FD_E_POW_ONE - (r - z))
+  j = fd_hi(z)
+  j = fd_i32((j + fd_i32((n << 20))))
+  if ((j >> 20) <= 0) {
+    z = ldexp(z, n)
+  } else {
+    z = fd_with_hi(z, (fd_hi(z) + fd_i32((n << 20))))
+  }
+  return (s * z)
+  0.0
+}
+
+# Translated from e_hypot.c, Netlib fdlibm 5.3.
+
+## Euclidean length without intermediate overflow. Zeros give +0; either infinity dominates NaN; otherwise NaN propagates.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn hypot(x: Float, y: Float) -> Float = {
+  var x_work = x
+  var y_work = y
+  var a: Float = x_work
+  var b: Float = y_work
+  var t1: Float = 0.0
+  var t2: Float = 0.0
+  var y1: Float = 0.0
+  var y2: Float = 0.0
+  var w: Float = 0.0
+  var j: Int = 0
+  var k: Int = 0
+  var ha: Int = 0
+  var hb: Int = 0
+  ha = (fd_hi(x_work) & 0x7fffffff)
+  hb = (fd_hi(y_work) & 0x7fffffff)
+  if (hb > ha) {
+    a = y_work
+    b = x_work
+    j = ha
+    ha = hb
+    hb = j
+  } else {
+    a = x_work
+    b = y_work
+  }
+  a = fd_with_hi(a, ha)
+  b = fd_with_hi(b, hb)
+  if (fd_i32((ha - hb)) > 0x3c00000) {
+    return (a + b)
+  }
+  k = 0
+  if (ha > 0x5f300000) {
+    if (ha >= 0x7ff00000) {
+      w = (a + b)
+      if (((ha & 0xfffff) | fd_lo(a)) == 0) {
+        w = a
+      }
+      if (((hb ^ 0x7ff00000) | fd_lo(b)) == 0) {
+        w = b
+      }
+      return w
+    }
+    ha = fd_i32((ha - 0x25800000))
+    hb = fd_i32((hb - 0x25800000))
+    k = fd_i32((k + 600))
+    a = fd_with_hi(a, ha)
+    b = fd_with_hi(b, hb)
+  }
+  if (hb < 0x20b00000) {
+    if (hb <= 0x000fffff) {
+      if ((hb | fd_lo(b)) == 0) {
+        return a
+      }
+      t1 = to_float(0)
+      t1 = fd_with_hi(t1, 0x7fd00000)
+      b = (b * t1)
+      a = (a * t1)
+      k = fd_i32((k - 1022))
+    } else {
+      ha = fd_i32((ha + 0x25800000))
+      hb = fd_i32((hb + 0x25800000))
+      k = fd_i32((k - 600))
+      a = fd_with_hi(a, ha)
+      b = fd_with_hi(b, hb)
+    }
+  }
+  w = (a - b)
+  if (w > b) {
+    t1 = to_float(0)
+    t1 = fd_with_hi(t1, ha)
+    t2 = (a - t1)
+    w = sqrt(((t1 * t1) - ((b * (-b)) - (t2 * (a + t1)))))
+  } else {
+    a = (a + a)
+    y1 = to_float(0)
+    y1 = fd_with_hi(y1, hb)
+    y2 = (b - y1)
+    t1 = to_float(0)
+    t1 = fd_with_hi(t1, fd_i32((ha + 0x00100000)))
+    t2 = (a - t1)
+    w = sqrt(((t1 * y1) - ((w * (-w)) - ((t1 * y2) + (t2 * b)))))
+  }
+  if (k != 0) {
+    t1 = float_of_bits(0x3ff0000000000000)
+    t1 = fd_with_hi(t1, (fd_hi(t1) + fd_i32((k << 20))))
+    return (t1 * w)
+  } else {
+    return w
+  }
+  0.0
+}
+
+# Translated from s_cbrt.c, Netlib fdlibm 5.3.
+const FD_S_CBRT_B1: Int = fd_u32(715094163)
+const FD_S_CBRT_B2: Int = fd_u32(696219795)
+const FD_S_CBRT_C: Float = float_of_bits(0x3fe15f15f15f15f1)
+const FD_S_CBRT_D: Float = (-float_of_bits(0x3fe691de2532c834))
+const FD_S_CBRT_E: Float = float_of_bits(0x3ff6a0ea0ea0ea0f)
+const FD_S_CBRT_F: Float = float_of_bits(0x3ff9b6db6db6db6e)
+const FD_S_CBRT_G: Float = float_of_bits(0x3fd6db6db6db6db7)
+
+## Cube root. Preserve signed zero and infinities; NaN propagates.
+## Finite results have true error at most 1 ulp; see docs/std-math-design.md.
+pub fn cbrt(x: Float) -> Float = {
+  var x_work = x
+  var hx: Int = 0
+  var r: Float = 0.0
+  var s: Float = 0.0
+  var t: Float = float_of_bits(0x0000000000000000)
+  var w: Float = 0.0
+  var sign: Int = 0
+  hx = fd_hi(x_work)
+  sign = (fd_u32(hx) & 0x80000000)
+  hx = fd_i32((hx ^ fd_i32(sign)))
+  if (hx >= 0x7ff00000) {
+    return (x_work + x_work)
+  }
+  if ((hx | fd_lo(x_work)) == 0) {
+    return x_work
+  }
+  x_work = fd_with_hi(x_work, hx)
+  if (hx < 0x00100000) {
+    t = fd_with_hi(t, 0x43500000)
+    t = (t * x_work)
+    t = fd_with_hi(t, fd_i32(fd_u32((fd_u32(fd_i32((fd_hi(t) / 3))) + FD_S_CBRT_B2))))
+  } else {
+    t = fd_with_hi(t, fd_i32(fd_u32((fd_u32(fd_i32((hx / 3))) + FD_S_CBRT_B1))))
+  }
+  r = ((t * t) / x_work)
+  s = (FD_S_CBRT_C + (r * t))
+  t = (t * (FD_S_CBRT_G + (FD_S_CBRT_F / ((s + FD_S_CBRT_E) + (FD_S_CBRT_D / s)))))
+  t = fd_with_lo(t, 0)
+  t = fd_with_hi(t, (fd_hi(t) + 0x00000001))
+  s = (t * t)
+  r = (x_work / s)
+  w = (t + t)
+  r = ((r - t) / (w + r))
+  t = (t + (t * r))
+  t = fd_with_hi(t, (fd_hi(t) | fd_i32(sign)))
+  return t
+  0.0
+}
+
+# Compensated extensions of fdlibm's exp/log reduction. The pair retains the
+# rounding residual instead of feeding a rounded expm1 into tanh's division.
+# Dekker products avoid a dependency on a host's extended precision or FMA.
+# Bounds, cancellation cases and the expanded MPFR search are documented in
+# docs/std-math-design.md. These are algorithmic corrections, not case patches.
+fn dd_add(a: (Float, Float), b: (Float, Float)) -> (Float, Float) = {
+  let s = dd_hi(a) + dd_hi(b)
+  let v = s - dd_hi(a)
+  let e = ((dd_hi(a) - (s - v)) + (dd_hi(b) - v)) + (dd_lo(a) + dd_lo(b))
+  let h = s + e
+  (h, e - (h - s))
+}
+fn dd_neg(a: (Float, Float)) -> (Float, Float) = (-dd_hi(a), -dd_lo(a))
+fn dd_mul(a: (Float, Float), b: (Float, Float)) -> (Float, Float) = {
+  let p = dd_hi(a) * dd_hi(b)
+  let ca = 134217729.0 * dd_hi(a)
+  let ah = ca - (ca - dd_hi(a))
+  let al = dd_hi(a) - ah
+  let cb = 134217729.0 * dd_hi(b)
+  let bh = cb - (cb - dd_hi(b))
+  let bl = dd_hi(b) - bh
+  let e = (((ah * bh - p) + ah * bl) + al * bh) + al * bl
+  let t = (e + (dd_hi(a) * dd_lo(b) + dd_lo(a) * dd_hi(b))) + dd_lo(a) * dd_lo(b)
+  let h = p + t
+  (h, t - (h - p))
+}
+fn dd_div(a: (Float, Float), b: (Float, Float)) -> (Float, Float) = {
+  let q = dd_hi(a) / dd_hi(b)
+  let r = dd_add(a, dd_neg(dd_mul((q, 0.0), b)))
+  dd_add((q, 0.0), ((dd_hi(r) + dd_lo(r)) / dd_hi(b), 0.0))
+}
+const DD_LN2: (Float, Float) = (float_of_bits(0x3fe62e42fefa39ef), float_of_bits(0x3c7abc9e3b39803f))
+const DD_LOG2_E: (Float, Float) = (float_of_bits(0x3ff71547652b82fe), float_of_bits(0x3c7777d0ffda0d24))
+const DD_EXP_COEFF: List[(Float, Float)] = [
+  (float_of_bits(0x3ff0000000000000), float_of_bits(0x0000000000000000)),
+  (float_of_bits(0x3ff0000000000000), float_of_bits(0x0000000000000000)),
+  (float_of_bits(0x3fe0000000000000), float_of_bits(0x0000000000000000)),
+  (float_of_bits(0x3fc5555555555555), float_of_bits(0x3c65555555555555)),
+  (float_of_bits(0x3fa5555555555555), float_of_bits(0x3c45555555555555)),
+  (float_of_bits(0x3f81111111111111), float_of_bits(0x3c01111111111111)),
+  (float_of_bits(0x3f56c16c16c16c17), float_of_bits(-4904620154189908833)),
+  (float_of_bits(0x3f2a01a01a01a01a), float_of_bits(0x3b6a01a01a01a01a)),
+  (float_of_bits(0x3efa01a01a01a01a), float_of_bits(0x3b3a01a01a01a01a)),
+  (float_of_bits(0x3ec71de3a556c734), float_of_bits(-4941551259705644032)),
+  (float_of_bits(0x3e927e4fb7789f5c), float_of_bits(0x3b3cbbc05b4fa99a)),
+  (float_of_bits(0x3e5ae64567f544e4), float_of_bits(-4973093093771185655)),
+  (float_of_bits(0x3e21eed8eff8d898), float_of_bits(-4989233257353491450)),
+  (float_of_bits(0x3de6124613a86d09), float_of_bits(0x3a8f28e0cc748ebe)),
+  (float_of_bits(0x3da93974a8c07c9d), float_of_bits(0x3a305d6f8a2efd1f)),
+  (float_of_bits(0x3d6ae7f3e733b81f), float_of_bits(0x39e1d8656b0ee8cb)),
+  (float_of_bits(0x3d2ae7f3e733b81f), float_of_bits(0x39a1d8656b0ee8cb)),
+  (float_of_bits(0x3ce952c77030ad4a), float_of_bits(0x398ac981465ddc6c)),
+  (float_of_bits(0x3ca6827863b97d97), float_of_bits(0x394eec01221a8b0b)),
+  (float_of_bits(0x3c62f49b46814157), float_of_bits(0x38f2650f61dbdcb4)),
+  (float_of_bits(0x3c1e542ba4020225), float_of_bits(0x387ea72b4afe3c2f)),
+  (float_of_bits(0x3bd71b8ef6dcf572), float_of_bits(-5152957747661355449)),
+  (float_of_bits(0x3b90ce396db7f853), float_of_bits(-5171561953207766244)),
+  (float_of_bits(0x3b4761b41316381a), float_of_bits(-5200740317110648753)),
+  (float_of_bits(0x3aff2cf01972f578), float_of_bits(-5221451364537619692)),
+  (float_of_bits(0x3ab3f3ccdd165fa9), float_of_bits(-5240626620188572537)),
+  (float_of_bits(0x3a688e85fc6a4e5a), float_of_bits(-5258203013426617024))
+]
+const DD_LOG_COEFF: List[(Float, Float)] = [
+  (float_of_bits(0x3ff0000000000000), float_of_bits(0x0000000000000000)),
+  (float_of_bits(0x3fd5555555555555), float_of_bits(0x3c75555555555555)),
+  (float_of_bits(0x3fc999999999999a), float_of_bits(-4870192637038454374)),
+  (float_of_bits(0x3fc2492492492492), float_of_bits(0x3c62492492492492)),
+  (float_of_bits(0x3fbc71c71c71c71c), float_of_bits(0x3c5c71c71c71c71c)),
+  (float_of_bits(0x3fb745d1745d1746), float_of_bits(-4879854905329903802)),
+  (float_of_bits(0x3fb3b13b13b13b14), float_of_bits(-4876359104220546284)),
+  (float_of_bits(0x3fb1111111111111), float_of_bits(0x3c31111111111111)),
+  (float_of_bits(0x3fae1e1e1e1e1e1e), float_of_bits(0x3c2e1e1e1e1e1e1e)),
+  (float_of_bits(0x3faaf286bca1af28), float_of_bits(0x3c4af286bca1af28)),
+  (float_of_bits(0x3fa8618618618618), float_of_bits(0x3c48618618618618)),
+  (float_of_bits(0x3fa642c8590b2164), float_of_bits(0x3c3642c8590b2164)),
+  (float_of_bits(0x3fa47ae147ae147b), float_of_bits(-4886765883667177800)),
+  (float_of_bits(0x3fa2f684bda12f68), float_of_bits(0x3c42f684bda12f68)),
+  (float_of_bits(0x3fa1a7b9611a7b96), float_of_bits(0x3c21a7b9611a7b96)),
+  (float_of_bits(0x3fa0842108421084), float_of_bits(0x3c30842108421084)),
+  (float_of_bits(0x3f9f07c1f07c1f08), float_of_bits(-4886678541128950008)),
+  (float_of_bits(0x3f9d41d41d41d41d), float_of_bits(0x3c30750750750750)),
+  (float_of_bits(0x3f9bacf914c1bad0), float_of_bits(-4883119185158096176)),
+  (float_of_bits(0x3f9a41a41a41a41a), float_of_bits(0x3c30690690690690)),
+  (float_of_bits(0x3f98f9c18f9c18fa), float_of_bits(-4886625283483689160)),
+  (float_of_bits(0x3f97d05f417d05f4), float_of_bits(0x3c17d05f417d05f4)),
+  (float_of_bits(0x3f96c16c16c16c17), float_of_bits(-4886605755680426849)),
+  (float_of_bits(0x3f95c9882b931057), float_of_bits(0x3c2310572620ae4c)),
+  (float_of_bits(0x3f94e5e0a72f0539), float_of_bits(0x3c3e0a72f0539783))
+]
+
+# |r| <= ln(2)/2. The degree-26 Taylor tail is < 2^-132;
+# rounded coefficient pairs and compensated Horner errors are bounded separately.
+fn dd_exp_reduced(r: (Float, Float)) -> (Float, Float) = {
+  var p = DD_EXP_COEFF[26]
+  var i = 25
+  while i >= 0 {
+    p = dd_add(DD_EXP_COEFF[i], dd_mul(r, p))
+    i = i - 1
+  }
+  p
+}
+fn dd_exp_reduction(x: Float) -> ((Float, Float), Int) = {
+  let k = to_int(round_even(x * LOG2_E))
+  let r = dd_add((x, 0.0), dd_neg(dd_mul((to_float(k), 0.0), DD_LN2)))
+  let p = dd_exp_reduced(r)
+  (p, k)
+}
+fn dd_exp(x: Float) -> (Float, Float) = {
+  let (p, k) = dd_exp_reduction(x)
+  (ldexp(dd_hi(p), k), ldexp(dd_lo(p), k))
+}
+
+## Hyperbolic tangent with compensated reduction and division. Preserve signed
+## zero; infinities give signed 1; NaN propagates. True error is at most 1 ulp.
+## This deliberately differs from StrictMath.tanh, whose rounded expm1 quotient
+## can exceed 1 ulp. The oracle registry records the correction and witnesses.
+pub fn tanh(x: Float) -> Float = {
+  if float.is_nan(x) { return x }
+  let a = abs(x)
+  # x - tanh(x) < x^3/3 here, below 1/12 ulp even at a binade boundary.
+  if a < float_of_bits(0x3e30000000000000) { return x }
+  # 1 - tanh(22) < 2*exp(-44) < half the spacing below 1.
+  if a >= 22.0 { return copysign(1.0, x) }
+  let e = dd_exp(-2.0 * a)
+  let n = dd_add((1.0, 0.0), dd_neg(e))
+  let d = dd_add((1.0, 0.0), e)
+  let q = dd_div(n, d)
+  copysign(dd_hi(q) + dd_lo(q), x)
+}
+
+## Base-two exponential. Integer powers in [-1074,1023] are exact, including
+## subnormals. Both zeros give 1; -infinity gives +0; +infinity gives +infinity;
+## NaN propagates. Finite results have true error at most 1 ulp.
+pub fn exp2(x: Float) -> Float = {
+  if float.is_nan(x) { return x }
+  if x >= 1024.0 { return float.INFINITY }
+  if x <= -1075.0 { return 0.0 }
+  let k = to_int(round_even(x))
+  let r = dd_mul((x - to_float(k), 0.0), DD_LN2)
+  let p = dd_exp_reduced(r)
+  ldexp(dd_hi(p) + dd_lo(p), k)
+}
+
+## Base-two logarithm. Every power of two, including subnormal powers, is exact.
+## Both zeros give -infinity; negative inputs give NaN; +infinity and NaN
+## propagate. Finite results have true error at most 1 ulp.
+pub fn log2(x: Float) -> Float = {
+  if x == 0.0 { return -float.INFINITY }
+  if x < 0.0 { return float.NAN }
+  if not float.is_finite(x) { return x }
+  let (sig, binade) = normalized(x)
+  var m = float_of_bits((1023 << 52) | (sig & 0x000fffffffffffff))
+  var e = binade
+  if m > SQRT_2 { m = m * 0.5
+    e = e + 1 }
+  if m == 1.0 { return to_float(e) }
+  # m-1 is exact; dd_add retains the rounding residual of m+1.
+  let z = dd_div((m - 1.0, 0.0), dd_add((m, 0.0), (1.0, 0.0)))
+  let zz = dd_mul(z, z)
+  var p = DD_LOG_COEFF[24]
+  var i = 23
+  while i >= 0 {
+    p = dd_add(DD_LOG_COEFF[i], dd_mul(zz, p))
+    i = i - 1
+  }
+  let l = dd_mul(dd_mul((2.0, 0.0), z), p)
+  let result = dd_add((to_float(e), 0.0), dd_mul(l, DD_LOG2_E))
+  dd_hi(result) + dd_lo(result)
+}
+
+fn dd_hi(p: (Float, Float)) -> Float = { let (h, _) = p
+  h }
+fn dd_lo(p: (Float, Float)) -> Float = { let (_, l) = p
+  l }
+
+# Small value lists keep the reduction workspace available at comptime.
+fn fd_set[T](xs: List[T], i: Int, x: T) -> List[T] = list.take(xs, i) ++ [x] ++ list.drop(xs, i + 1)
+
+const DD_PI: (Float, Float) = (float_of_bits(4614256656552045848), float_of_bits(4368955796522032135))
+const DD_ATAN_COEFF: List[(Float, Float)] = [
+  (float_of_bits(4607182418800017408), float_of_bits(0)),
+  (float_of_bits(-4623695617433709227), float_of_bits(-4866889997311716011)),
+  (float_of_bits(4596373779694328218), float_of_bits(-4870192637038454374)),
+  (float_of_bits(-4629057045561531246), float_of_bits(-4872251425439538030)),
+  (float_of_bits(4592670820000712476), float_of_bits(4349476440122705692)),
+  (float_of_bits(-4632156925824526522), float_of_bits(4343517131524872006)),
+  (float_of_bits(4590207312512236308), float_of_bits(-4876359104220546284)),
+  (float_of_bits(-4633903776589082351), float_of_bits(-4886105355721830127)),
+  (float_of_bits(4588638185040256542), float_of_bits(4336436605907508766)),
+  (float_of_bits(-4635626205920252120), float_of_bits(-4878820585798258904)),
+  (float_of_bits(4587023449039406616), float_of_bits(4343829069161399832)),
+  (float_of_bits(-4636945338076552860), float_of_bits(-4884643317581930140)),
+  (float_of_bits(4585925428558828667), float_of_bits(-4886765883667177800)),
+  (float_of_bits(-4637873616260616344), float_of_bits(-4881067996138623128)),
+  (float_of_bits(4585130310279789462), float_of_bits(4332928731147041686)),
+  (float_of_bits(-4638562338784276348), float_of_bits(-4886260318289653628)),
+  (float_of_bits(4584391475231203080), float_of_bits(-4886678541128950008)),
+  (float_of_bits(-4639479661842017251), float_of_bits(-4886276921421920432)),
+  (float_of_bits(4583447231574686416), float_of_bits(-4883119185158096176)),
+  (float_of_bits(-4640324292980923366), float_of_bits(-4886290118783465840)),
+  (float_of_bits(4582687230582855930), float_of_bits(-4886625283483689160)),
+  (float_of_bits(-4641011783442823692), float_of_bits(-4893213362575571468)),
+  (float_of_bits(4582062340878461975), float_of_bits(-4886605755680426849)),
+  (float_of_bits(-4641582254251634601), float_of_bits(-4890046803906351540)),
+  (float_of_bits(4581539473982948665), float_of_bits(4340918579606296451)),
+  (float_of_bits(-4642063239443377132), float_of_bits(-4894264818576124908)),
+  (float_of_bits(4581095530392418497), float_of_bits(4335436916756039178)),
+  (float_of_bits(-4642474263152684386), float_of_bits(-4886323712067399606)),
+  (float_of_bits(4580713894674243440), float_of_bits(4337519514796236656)),
+  (float_of_bits(-4642829554833610995), float_of_bits(-4904038333221099763)),
+  (float_of_bits(4580382309542058555), float_of_bits(-4886553254701164242)),
+  (float_of_bits(-4643139730110610416), float_of_bits(-4886334109988617200)),
+  (float_of_bits(4580022248739567648), float_of_bits(-4886544167993214944)),
+  (float_of_bits(-4643614523248298137), float_of_bits(-4894001218949120489)),
+  (float_of_bits(4579508125437624795), float_of_bits(-4897109803506970208)),
+  (float_of_bits(-4644099249548322037), float_of_bits(4330052464265063929)),
+  (float_of_bits(4579050344415346912), float_of_bits(4335855964537340128)),
+  (float_of_bits(-4644532271709676721), float_of_bits(4336846345167724435)),
+  (float_of_bits(4578640125057721278), float_of_bits(-4886522572310686095)),
+  (float_of_bits(-4644921443525577767), float_of_bits(-4896210901214807468)),
+  (float_of_bits(4578270421192206816), float_of_bits(4335076041314200032)),
+  (float_of_bits(-4645273104805006422), float_of_bits(4334470470279967855)),
+  (float_of_bits(4577935512984623128), float_of_bits(4325733933851875352)),
+  (float_of_bits(-4645592429415062328), float_of_bits(-4897794008547810104)),
+  (float_of_bits(4577630708885586288), float_of_bits(4329932729380209008)),
+  (float_of_bits(-4645883681531926505), float_of_bits(4336867460946197088)),
+  (float_of_bits(4577352124493993478), float_of_bits(-4886502447301877848)),
+  (float_of_bits(-4646150407154738963), float_of_bits(-4894986138144925631)),
+  (float_of_bits(4577096516134696981), float_of_bits(4327123522384565533)),
+  (float_of_bits(-4646395579191869605), float_of_bits(4336875459347133699)),
+  (float_of_bits(4576861153982077435), float_of_bits(-4899425903530574148)),
+  (float_of_bits(-4646621708740679422), float_of_bits(-4886667941306349548)),
+  (float_of_bits(4576643724183943188), float_of_bits(-4886491378547033312)),
+  (float_of_bits(-4646830931407335233), float_of_bits(-4888173363775021439)),
+  (float_of_bits(4576442252536130720), float_of_bits(-4890124164196651872)),
+  (float_of_bits(-4647025074962880715), float_of_bits(-4902431918695288574)),
+  (float_of_bits(4576255044367809400), float_of_bits(4324053465235061624)),
+  (float_of_bits(-4647205712879779555), float_of_bits(4323220671860335091)),
+  (float_of_bits(4576080636758005778), float_of_bits(-4886482580306003040)),
+  (float_of_bits(-4647374207071172591), float_of_bits(-4892347319575115621)),
+  (float_of_bits(4575917760229842064), float_of_bits(-4895152256130311024))
+]
+
+# With |z| <= 1/2, the alternating tail after z^121/121 is
+# at most |z|^123/123 < 2^-129. A pi/4 transform reduces larger ratios.
+fn dd_atan_unit(ratio: (Float, Float)) -> (Float, Float) = {
+  let transform = dd_hi(ratio) > 0.5
+  let z = if transform {
+    dd_div(dd_add(ratio, (-1.0, 0.0)), dd_add(ratio, (1.0, 0.0)))
+  } else { ratio }
+  let zz = dd_mul(z, z)
+  var p = DD_ATAN_COEFF[60]
+  var i = 59
+  while i >= 0 {
+    p = dd_add(DD_ATAN_COEFF[i], dd_mul(zz, p))
+    i = i - 1
+  }
+  let a = dd_mul(z, p)
+  if transform { dd_add(dd_mul(DD_PI, (0.25, 0.0)), a) } else { a }
+}
+
+## Angle of (x,y) in radians, with compensated quotient and quadrant evaluation.
+## Signed zeros and infinity quadrants follow fdlibm, including atan2(+0,-0)=PI
+## and atan2(-0,-0)=-PI. Either NaN gives NaN. True error is at most 1 ulp.
+## The oracle registry records why this differs from StrictMath.atan2.
+pub fn atan2(y: Float, x: Float) -> Float = {
+  if not float.is_finite(x) || not float.is_finite(y) || x == 0.0 || y == 0.0 { return fd_atan2(y, x) }
+  let ay = abs(y)
+  let ax = abs(x)
+  let (my, ey) = frexp(ay)
+  let (mx, ex) = frexp(ax)
+  let delta = ey - ex
+  # At this scale the neglected angle is < 2^-59. The ordinary division
+  # supplies correctly rounded gradual underflow when the angle tends to zero.
+  if delta > 60 { return copysign(PI * 0.5, y) }
+  if delta < -60 { return if x > 0.0 { y / x } else { copysign(PI, y) } }
+  let invert = ay > ax
+  let r = if invert { dd_div((ldexp(mx, ex - ey), 0.0), (my, 0.0)) }
+  else { dd_div((ldexp(my, ey - ex), 0.0), (mx, 0.0)) }
+  var a = dd_atan_unit(r)
+  if invert { a = dd_add(dd_mul(DD_PI, (0.5, 0.0)), dd_neg(a)) }
+  if x < 0.0 { a = dd_add(DD_PI, dd_neg(a)) }
+  copysign(dd_hi(a) + dd_lo(a), y)
+}
+
+# Half exp(a) scales only after the compensated evaluation, so inputs just
+# above log(MAX) never overflow a temporary. The omitted exp(-a)/2 is < 2^-64
+# relative for a >= 22, comfortably below the final rounding allowance.
+fn dd_half_exp(a: Float) -> Float = {
+  if a >= 711.0 { return float.INFINITY }
+  let (p, k) = dd_exp_reduction(a)
+  ldexp(dd_hi(p) + dd_lo(p), k - 1)
+}
+
+## Hyperbolic sine. Preserve signed zero and infinities; NaN propagates.
+## Finite overflow gives signed infinity. Compensated exp and subtraction
+## replace StrictMath's rounded expm1 composition; true error is at most 1 ulp.
+pub fn sinh(x: Float) -> Float = {
+  if not float.is_finite(x) { return x }
+  let a = abs(x)
+  if a < float_of_bits(0x3e30000000000000) { return x }
+  if a >= 22.0 { return copysign(dd_half_exp(a), x) }
+  let e = dd_exp(a)
+  let inv = dd_div((1.0, 0.0), e)
+  let result = dd_mul((0.5, 0.0), dd_add(e, dd_neg(inv)))
+  copysign(dd_hi(result) + dd_lo(result), x)
+}
+
+## Hyperbolic cosine. Both zeros give 1; either infinity gives +infinity;
+## NaN propagates. Finite overflow gives +infinity. Compensated exp and addition
+## replace StrictMath's rounded composition; true error is at most 1 ulp.
+pub fn cosh(x: Float) -> Float = {
+  if float.is_nan(x) { return x }
+  let a = abs(x)
+  if a < float_of_bits(0x3e30000000000000) { return 1.0 }
+  if a >= 22.0 { return dd_half_exp(a) }
+  let e = dd_exp(a)
+  let result = dd_mul((0.5, 0.0), dd_add(e, dd_div((1.0, 0.0), e)))
+  dd_hi(result) + dd_lo(result)
+}
+
+test "transcendentals preserve special values and domain boundaries" {
+  for op in [sin, tan, asin, atan, sinh, tanh, cbrt, expm1, log1p] {
+    assert float_to_bits(op(-0.0)) == 1 << 63
+    assert float.is_nan(op(float.NAN))
+  }
+  for op in [sin, cos, tan, asin, acos] { assert float.is_nan(op(float.INFINITY)) }
+  for op in [log, log2, log10] {
+    assert op(0.0) == -float.INFINITY
+    assert op(-0.0) == -float.INFINITY
+    assert float.is_nan(op(-1.0))
+    assert op(float.INFINITY) == float.INFINITY
+    assert op(1.0) == 0.0
+  }
+  assert exp(-float.INFINITY) == 0.0
+  assert exp(float.INFINITY) == float.INFINITY
+  assert exp(0.0) == 1.0
+  assert expm1(-float.INFINITY) == -1.0
+  assert log1p(-1.0) == -float.INFINITY
+  assert float.is_nan(log1p(-2.0))
+  assert cosh(-float.INFINITY) == float.INFINITY
+  assert tanh(-float.INFINITY) == -1.0
+  assert acos(1.0) == 0.0
+  assert acos(-1.0) == PI
+}
+
+test "base two functions are exact on every representable power" {
+  for power_index in range(-1074, 1024) {
+    let power_value = ldexp(1.0, power_index)
+    assert exp2(to_float(power_index)) == power_value
+    assert log2(power_value) == to_float(power_index)
+  }
+  assert exp2(-1075.0) == 0.0
+  assert exp2(1024.0) == float.INFINITY
+}
+
+test "binary transcendental special rules retain quadrant and parity" {
+  assert float_to_bits(atan2(-0.0, 0.0)) == 1 << 63
+  assert atan2(0.0, -0.0) == PI
+  assert atan2(-0.0, -0.0) == -PI
+  assert atan2(float.INFINITY, float.INFINITY) == PI * 0.25
+  assert atan2(float.INFINITY, -float.INFINITY) == PI * 0.75
+  assert hypot(float.INFINITY, float.NAN) == float.INFINITY
+  assert hypot(float.NAN, -float.INFINITY) == float.INFINITY
+  assert pow(float.NAN, 0.0) == 1.0
+  assert float.is_nan(pow(-1.0, float.INFINITY))
+  assert float.is_nan(pow(-2.0, 0.5))
+  assert float_to_bits(pow(-0.0, 3.0)) == 1 << 63
+  assert pow(-0.0, -3.0) == -float.INFINITY
+}
+
+test "compensated algorithms keep the MPFR hard cases" {
+  assert float_to_bits(tanh(float_of_bits(-4625859314199082240))) == -4626005395199644420
+  assert float_to_bits(sinh(float_of_bits(-4626150516536001627))) == -4626083282661128340
+  assert float_to_bits(cosh(float_of_bits(4649458370416596732))) == 9216829842976134031
+  assert float_to_bits(atan2(float_of_bits(-3088086972424488266), float_of_bits(-3095437049298422897))) == -4612222631650719084
 }
