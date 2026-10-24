@@ -6,6 +6,11 @@
 > 本稿建立在 PR #630（`/check` 与 `/compile` 的 C 视图改走 native `dawnc`，未合并时以其描述与 diff 为准）之上。
 > 起草时本稿只有第三节三组实测和一份刀序，各刀的落地记录写在第七节对应条目下。
 
+当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](flash-attn-bf16-front-design.md)与[实际样例](../site/play-ui/samples/flash_attn.dawn)。
+本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
+当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
+
 2026-10-23 C 独立视图更新见 [playground-c-only-design.md](playground-c-only-design.md)：先解析 target，再选择能力与工具链。C 仅信有效部署元数据、只探测 dawnc，独立 C job/result 不携带 JVM 原料；缺工具/元数据为 503，native 空诊断失败为 500，均不回落 JVM。/check 与 JVM 页策略保留。答案仍只由部署写；C 与 JVM 各有 schema 前缀，warm 明确请求两页。旧运行期双页缓存描述是历史，不能作为当前实现约束。
 
 ## 一、要什么，不要什么

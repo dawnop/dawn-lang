@@ -2103,9 +2103,9 @@ of row j. Here that is refused, and `keepdims` is how a reduction says which axi
 
 Put this step in a loop over blocks of keys and values, carry a running maximum and a
 running sum, and it is FlashAttention: `flash_attn` in `scripts/tile-golden/kernels.dawn`
-is that loop, three `var`s and these same operations, and `flash_attn_bf16` beside it
-is the same loop with bf16 inputs, f32 accumulators and `p.to(BF16)` before the second
-product. The
+is one generic loop with three `var`s. Its public `flash_attn_bf16_demo` recording
+uses bf16 inputs and f32 state, scale and output, with `p.to(BF16)` before the second
+product, exp2 with FTZ, and a launch scale changed to base 2 once. The
 [GPU page](https://dawn-lang.dawnop.com/gpu.html) shows what the backend records for
 kernels of that size, and how their answers on a device are checked.
 

@@ -700,7 +700,7 @@ TILEIR_USE = "use tileir/"
 PINNED_SAMPLES = {
     "flash_attn": (
         "scripts/tile-golden/kernels.dawn",
-        ["flash_attn", "fa_exp", "fa_divide", "fa_kernel", "fa64_math", "FaNumerics"],
+        ["flash_attn", "fa_exp", "fa_divide", "fa_kernel", "fa_bf16_math", "FaNumerics"],
     ),
     # The two cards of the GPU page that are not golden kernels. `refused` is
     # two kernels packages/tileir's tests record and hold the refusal of;
@@ -763,14 +763,28 @@ def check_pinned_sample(stem: str, sample: pathlib.Path, out: pathlib.Path) -> l
             bad.append(f"{rel}: its `fn {kernel}` is not the text of the one in "
                        f"{original}; the sample is a copy that must not drift")
     original_lines = set(orig.splitlines())
-    fixture_constants = {"ATT_M", "ATT_N", "ATT_D", "FA_BQ", "FA_BK", "ATT_INV_SQRT_D"}
+    shared_constants = {"ATT_M", "ATT_N", "ATT_D", "FA_BQ", "FA_BK", "ATT_INV_SQRT_D"}
+    fixture_lines = {
+        "const LOG2_E: Float = 1.4426950408889634",
+        "const PLAIN_ROUNDING: Float = 0.00390625",
+        "const PLAIN_MARGIN: Float = 0.00001",
+        "const PLAIN_RTOL: Float = 0.00001",
+    }
+    fixture_constants = shared_constants | {line.split()[1].rstrip(":") for line in fixture_lines}
     if stem == "flash_attn":
         actual = {line.split()[1].rstrip(":") for line in text.splitlines() if line.startswith("const ")}
         if actual != fixture_constants:
             bad.append(f"{rel}: fixture constants differ: expected {sorted(fixture_constants)}, got {sorted(actual)}")
     for line in text.splitlines():
-        if line.startswith("const ") and (stem != "flash_attn" or line.split()[1].rstrip(":") in fixture_constants) and line not in original_lines:
+        if line.startswith("const ") and (stem != "flash_attn" or line.split()[1].rstrip(":") in fixture_constants) and line not in original_lines | fixture_lines:
             bad.append(f"{rel}: `{line}` is not a line of {original}")
+    if stem == "flash_attn":
+        for fragment in ['trace5("flash_attn_bf16_demo",', 'fa_kernel(BF16, fa_bf16_math())',
+                         'Out(F32,', 'Scalar(F32)', '["bf16", "bf16", "bf16", "f32"]']:
+            if fragment not in text:
+                bad.append(f"{rel}: reader-instance wiring missing {fragment!r}")
+        if "fa64_math" in text or "In(F64," in text:
+            bad.append(f"{rel}: reader-instance must use BF16/F32")
     return bad
 
 
@@ -782,6 +796,48 @@ def run_tileir_sample(src: pathlib.Path):
             src.read_text(encoding="utf-8"), encoding="utf-8")
         (pathlib.Path(tmp) / "dawn.toml").write_text(tileir_manifest(), encoding="utf-8")
         return run_example([str(DAWN), "run", tmp], cwd=ROOT)
+
+
+def check_flash_runtime_guards(text: str) -> list[str]:
+    """A printing-only guard must fail even when the clean stdout agrees.
+
+    Build once, then corrupt a returned lane after interpretation. Reaching
+    the named panic with exit 1 is the oracle; compilation errors, timeouts
+    and a printed Bool cannot satisfy it.
+    """
+    anchor = "let got = o[i * ATT_D + d]"
+    if text.count(anchor) != 1:
+        return ["flash_attn: runtime guard probe needs exactly one returned-lane seam"]
+    replacement = ('let got = match args() {\n'
+                   '        ["nan"] -> 0.0 / 0.0\n'
+                   '        ["inf"] -> INFINITY\n'
+                   '        _ -> 12345.0\n'
+                   '      }')
+    with tempfile.TemporaryDirectory(prefix="doc-check-flash-guard-") as tmp:
+        work = pathlib.Path(tmp)
+        (work / "src").mkdir()
+        (work / "src/main.dawn").write_text(text.replace(anchor, replacement), encoding="utf-8")
+        (work / "dawn.toml").write_text(tileir_manifest(), encoding="utf-8")
+        jar = work / "guard.jar"
+        built = run_example([str(DAWN), "build", str(work), "-o", str(jar)], cwd=ROOT)
+        if built is None:
+            return ["flash_attn: runtime guard fixture build timed out"]
+        if built.returncode != 0:
+            detail = (built.stderr or built.stdout).strip().splitlines()
+            return ["flash_attn: runtime guard fixture did not build: " + (detail[0] if detail else str(built.returncode))]
+        probe = run_example([str(DAWN)], cwd=ROOT,
+                            env=dict(os.environ, DAWN_LAUNCHER_PRINT_JAVA="1"))
+        if probe is None or probe.returncode != 0 or not probe.stdout.strip():
+            return ["flash_attn: runtime guard probe has no matching JVM"]
+        java = probe.stdout.strip()
+        bad = []
+        for mode, oracle in [("nan", "non-finite result"), ("inf", "non-finite result"),
+                             ("wrong", "mixed precision tolerance")]:
+            ran = run_example([java, "-XX:-UsePerfData", "-Xss512m", "-Xmx256m",
+                               "-jar", str(jar), mode], cwd=ROOT)
+            if ran is None or ran.returncode != 1 or oracle not in ran.stderr:
+                bad.append(f"flash_attn: {mode} must fail at the runtime numerical guard")
+        return bad
 
 
 LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
@@ -4929,6 +4985,8 @@ def check_site_pages() -> tuple[list[str], int]:
                            f"shows) says {expected!r}")
             if named == src and named.parent == SITE_PROGRAMS[1] and named.stem in PINNED_SAMPLES:
                 bad += check_pinned_sample(named.stem, named, expected_file)
+                if named.stem == "flash_attn":
+                    bad += check_flash_runtime_guards(src.read_text(encoding="utf-8"))
     return bad, seen
 
 

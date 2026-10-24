@@ -6,6 +6,11 @@
 > 与 `std/narrow` 的窄格式，flash_attn 与 flash_attn_bf16 在覆盖内，Playground 的 flash_attn 样例真跑。
 > 下文 §1 到 §6 写的是 I1 时的状态；与 §7 冲突处以 §7 为准（§2.2 的值表、§2.6 的拒绝名单、§5 的覆盖数、§6 末条）。
 
+当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](flash-attn-bf16-front-design.md)与[实际样例](../site/play-ui/samples/flash_attn.dawn)。
+本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
+当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
+
 ## 0. 一句话
 
 假设备（`std/gpu` 的 `with_gpu_fake`）答的是一次 launch 的**宿主参考实现**，从来不跑

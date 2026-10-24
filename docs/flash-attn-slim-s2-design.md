@@ -2,6 +2,11 @@
 
 > 状态：**current**，实现完成；基线为 S1 合入的 a112a84860b497f4d0dfd8d34bd22765bbfd07f7。
 
+当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](flash-attn-bf16-front-design.md)与[实际样例](../site/play-ui/samples/flash_attn.dawn)。
+本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
+当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
+
 ## 设计契约
 
 普通 MHA 的 head 由三维存储和 grid axis 2 表达。Q/O 使用
@@ -33,8 +38,8 @@ store_cell 先精确验证值形状，保留 scalar 广播，再逆投影并走�
 原有两种具名策略；f64 精确 exp/div，bf16 保留 exp2/FTZ、未收窄 p 求和、
 第二 MMA 前 nearest-even 收窄和 approx/FTZ div。统一 acc=zeros(o)，不读取旧 O。
 
-样例展示字面 bq=32/bk=16、heads=1 三维布局，保留独立 plain attention
-与 1e-12 断言。doc-check 全文固定共享体、工厂、实际 helper 和必要类型。
+S2 当时的样例展示字面 bq=32/bk=16、heads=1 三维布局，保留独立 plain attention
+与 1e-12 断言；当前 BF16 样例采用单独的混合精度误差 guard。doc-check 全文固定共享体、工厂、实际 helper 和必要类型。
 xmap 的 TileCall 保留录制 id/parent，公开记录改形状按 0.x 升至 0.2.0。
 map 严格核对真实 trace、parser span、compiler Loc、父子调用树及唯一行归属；
 同名 helper 的两个调用分别配对，tile_shape 等零 IR 来源不能丢失。

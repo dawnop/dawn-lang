@@ -25,7 +25,7 @@ an effect, a call under unknown host control flow, a closure bound before the ca
 that runs it, a call of a closure. Which names are calls at all is read off
 packages/tileir/src/dev.dawn (its `called("<name>"` marks); every other call,
 `permute(..)` or `neg_inf()`, records nothing and is looked through.
-Only literal Bool fields of the f64 policy captured by fa_kernel select a
+Only literal Bool fields of the BF16 policy captured by fa_kernel select a
 source arm; every other host condition keeps the global refusal.
 
 The generator is a pure function of files on disk (site/build.sh says why:
@@ -65,8 +65,9 @@ ROOT = Path(__file__).resolve().parents[2]
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
 GOLDEN = ROOT / "scripts" / "tile-golden"
 DEV = ROOT / "packages" / "tileir" / "src" / "dev.dawn"
-NAME = "flash_attn"
-OUT = Path(__file__).resolve().parent / f"{NAME}.map"
+BODY = "flash_attn"
+NAME = "flash_attn_bf16_demo"
+OUT = Path(__file__).resolve().parent / f"{BODY}.map"
 
 PROBE_SRC = "pub fn probe() -> Int = 1\n"
 
@@ -192,7 +193,7 @@ def harness_source(src: str) -> str:
         fail(f"kernels.dawn has {len(found)} 'use tileir/prog.{{...}}' lines, expected 1")
     # The TileOp checks below CUT_AT are removed from this harness too.
     members = [name.strip() for name in found[0].split(",") if name.strip() != "TileOp"]
-    members += ["trace_calls", "op_count", "erase"]
+    members += [name for name in ["trace_calls", "op_count", "erase"] if name not in members]
     src = PROG_IMPORT.sub(lambda m: "use tileir/prog.{" + ", ".join(members) + "}" + "\n" * m.group(0).count("\n"), src, count=1)
     for old, new, times in EDITS:
         if src.count(old) != times:
@@ -204,18 +205,29 @@ def harness_source(src: str) -> str:
     # the kernel's dispatch arm, traced with the side table instead: its
     # `traceN` call becomes `trace_calls` over the same markers, erased
     arm = re.search(r'^  "' + NAME + r'" -> \{\n((?:    .*\n)+)  \}\n', src, re.M)
-    if not arm:
+    if arm:
+        lines = arm.group(1)
+    elif f'  "{NAME}" -> {NAME}()\n' in src:
+        # A separate recording assembler keeps the large dispatch below the
+        # JVM method limit. Read that actual zero-argument entry, not a plan.
+        entry = re.search(r'^fn ' + NAME + r'\(\) -> TileProg = \{\n(.*?)^\}\n', src, re.M | re.S)
+        if not entry:
+            fail(f"missing recording assembler for {NAME}")
+        lines = entry.group(1)
+    else:
         fail(f"kernels.dawn's dispatch has no arm for {NAME}")
-    body = " ".join(l.strip() for l in arm.group(1).splitlines())
+    body = " ".join(l.strip() for l in lines.splitlines())
     m = re.fullmatch(r'let \(p, _e\) = trace([1-5])\((.*)\) p', body)
     if not m:
         fail(f"the {NAME} arm is not one traceN call answered as `p`: {body}")
     args = split_args(m.group(2))
     count = int(m.group(1))
-    if len(args) != count + 2 or args[0] != f'"{NAME}"' or args[-1] != 'fa_kernel(F64, fa64_math())':
+    if len(args) != count + 2 or args[0] != f'"{NAME}"' or args[-1] != 'fa_kernel(BF16, fa_bf16_math())':
         fail(f"the {NAME} arm does not trace {NAME} itself with {count} markers: {body}")
     markers = args[1:-1]
     formats = [re.match(r'(?:In|Out|Shared|Scalar)\(([A-Z0-9]+)', k).group(1) for k in markers]
+    if count != 5 or formats != ["BF16", "BF16", "BF16", "F32", "F32"]:
+        fail("reader instance must use BF16 inputs and F32 output/scale")
     params = ", ".join(f"param({d}, {k})" for k, d in enumerate(formats))
     erased = ", ".join(f"erase({k})" for k in markers)
     traced = f'trace_calls("{NAME}", [], () => ({args[-1]})({params}), markers = [{erased}])'
@@ -581,16 +593,16 @@ def validate_factory(factory):
 
 
 def fixed_policy(dump):
-    """Read the literal Bool fields of the exact f64 capture used by the harness.
+    """Read the literal Bool fields of the exact BF16 capture used by the harness.
 
     This is one fixed strategy constructor, not an interpreter. Changes to
     its shape or an unknown condition fail closed. The runtime locations
     independently distinguish identical call names in the two source arms.
     """
-    fn = parse_tree(dump, "fa64_math")
+    fn = parse_tree(dump, "fa_bf16_math")
     bodies = [k for k in fn.kids if k.kind == "Record"]
     if len(bodies) != 1 or node_name(bodies[0]) != "FaNumerics" or "spread=false" not in bodies[0].text:
-        fail("fa64_math is not a literal FaNumerics constructor")
+        fail("fa_bf16_math is not a literal FaNumerics constructor")
     fields = {}
     for field in bodies[0].kids:
         name = node_name(field).removeprefix("name=")
@@ -599,7 +611,7 @@ def fixed_policy(dump):
                 fail(f"duplicate numeric policy field {name}")
             fields[name] = node_name(field.kids[0]) == "true"
     if set(fields) != {"base2", "exp_ftz", "approx_div", "div_ftz"}:
-        fail("fa64_math does not provide exactly the fixed Bool policy fields")
+        fail("fa_bf16_math does not provide exactly the fixed Bool policy fields")
     return fields
 
 
@@ -628,13 +640,13 @@ def strategy_controls(src, body, dev, policy, static, rows, paired):
     if len(queries) != 1 or queries[0]["lines"]:
         fail("tile_shape must retain exactly one zero IR source call")
     casts = [r for r in rows if r["name"] == "to"]
-    if len(casts) != 1 or casts[0]["lines"]:
-        fail("the same-format to must retain exactly one call with empty IR")
+    if len(casts) != 1 or not casts[0]["lines"]:
+        fail("the BF16 probability cast must own real IR")
     wrong = dict(policy, base2=not policy["base2"])
     expect_refused("wrong strategy arm", lambda: pair(static_calls(body, dev, Env(wrong)), rows))
     exp_rows = [i for i, row in enumerate(rows) if row["name"] == "fa_exp"]
     if len(exp_rows) != 2:
-        fail("the f64 instance did not record both natural exponentials")
+        fail("the BF16 instance did not record both base-2 exponentials")
     moved = copy.deepcopy(paired)
     moved[exp_rows[0]] = copy.deepcopy(paired[exp_rows[1]])
     expect_refused("same-name wrong source span", lambda: validate_pairs(src, rows, moved))
@@ -678,7 +690,7 @@ def record() -> str:
             fail(f"{name} has no unique block body")
         HELPERS[name] = bodies[0]
     dev |= set(HELPERS)
-    fn = parse_tree(p.stdout, NAME)
+    fn = parse_tree(p.stdout, BODY)
     body = [k for k in fn.kids if k.kind == "Block"]
     if len(body) != 1:
         fail(f"{NAME} is not a function with a block body")
@@ -704,12 +716,17 @@ def record() -> str:
     strategy_controls(src, body[0], dev, fixed_policy(p.stdout), static, rows, paired)
     print("PASS fresh recording controls: wrong arm, same-name span, missing helper, missing tile_shape, wrong factory forwarding, unknown host branch", file=sys.stderr)
     golden = (GOLDEN / f"{NAME}.mlir").read_text(encoding="utf-8")
+    cast_lines = [golden.splitlines()[i - 1] for span in next(r for r in rows if r["name"] == "to")["lines"]
+                  for i in range(*map(int, span.split("-")))]
+    if len(cast_lines) != 1 or not re.search(r"ftof .*rounding<nearest_even>.*f32.*bf16|ftof .*f32.*bf16.*rounding<nearest_even>", cast_lines[0]):
+        fail("reader probability cast must be nearest-even F32 to BF16: " + repr(cast_lines))
     if ran.split("@@ir\n", 1)[1].split("@@end\n", 1)[0] != golden:
         fail("the selected factory recording differs from the full golden text")
     if int(tail.split("-")[1]) - 1 != golden.count("\n"):
         fail(f"the map ends at line {int(tail.split('-')[1]) - 1}, {NAME}.mlir has {golden.count(chr(10))} lines")
-    first = src[:parse_tree(p.stdout, "fa_exp").lo].count("\n") + 1
-    last = src[:fn.hi].count("\n") + 1
+    definitions = [fn, parse_tree(p.stdout, "fa_kernel")] + [parse_tree(p.stdout, name) for name in HELPERS]
+    first = src[:min(f.lo for f in definitions)].count("\n") + 1
+    last = src[:max(f.hi for f in definitions)].count("\n") + 1
     out = [f"kernel {NAME}", f"fn {first}-{last}", f"ops {ops}", f"head {head}"]
     for r, s in zip(rows, paired):
         (a, b), (na, nb) = s["span"], s["name_span"]

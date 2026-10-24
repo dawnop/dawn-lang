@@ -553,7 +553,7 @@ kernels=(
   view_conv1d view_token_embed view_atomic view_atomic_bf16 view_stride_pad view_gather_pad
   insert_tile powi_sweep loop_return attr_sat attr_ftof attr_xchg token_fences
   view_inbounds view_inbounds_off view_inbounds_dim
-  flash_attn idx_softmax carry_extent flash_attn_bf16
+  flash_attn idx_softmax carry_extent flash_attn_bf16 flash_attn_bf16_demo
   flash_bf16_sm90_d64 flash_bf16_sm90_d128 flash_bf16_sm100_d64 flash_bf16_sm100_d128
   matmul_sm90 matmul_sm100
   matmul_f16_sm90 matmul_f16_sm100 matmul_i8_sm90 matmul_i8_sm100
@@ -701,6 +701,7 @@ mutants=(
   staged-token-checks staged-token-unmerged staged-token-join staged-fork-accepted staged-write-leaks
   flash-output-f64 flash-output-one-f64 flash-output-bf16
   flash-exp-swapped flash-exp-ftz-dropped flash-div-exact flash-div-ftz-dropped flash-l-rounded flash-p-unrounded
+  flash-demo-scale-constant flash-demo-last-kv flash-demo-no-rescale
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -3290,6 +3291,33 @@ if run_item flash-l-rounded; then
 fi
 if run_item flash-p-unrounded; then
   flash_policy_mutant flash-p-unrounded probability
+fi
+
+# These numerical faults remain legal recordings. Device and interpreter
+# comparisons independently reject their answers in tile-gpu-diff.
+flash_demo_mutant() {
+  local m="$1" backend out
+  kernel_mutant_project "$m"
+  build_native "$work/m-$m" "$work/m-$m.bin" -O0
+  mutant_run "$m" flash_attn_bf16_demo
+  mutant_run_bytecode "$m" flash_attn_bf16_demo
+  for backend in jvm native; do
+    out="$work/m-$m.flash_attn_bf16_demo.$backend"
+    [ "$(cat "$out.rc")" = 0 ] && [ "$(cat "$out.tilebc.rc")" = 0 ] || fail "$m did not record"
+    ! cmp -s "$here/flash_attn_bf16_demo.mlir" "$out" || fail "$m text stayed green"
+    ! cmp -s "$here/flash_attn_bf16_demo.tilebc" "$out.tilebc" || fail "$m bytes stayed green"
+  done
+  cmp -s "$work/m-$m.flash_attn_bf16_demo.jvm.tilebc" "$work/m-$m.flash_attn_bf16_demo.native.tilebc" || fail "$m backends disagree"
+  echo "PASS  mutant: $m (legal recording differs on both backends)"
+}
+if run_item flash-demo-scale-constant; then
+  flash_demo_mutant flash-demo-scale-constant
+fi
+if run_item flash-demo-last-kv; then
+  flash_demo_mutant flash-demo-last-kv
+fi
+if run_item flash-demo-no-rescale; then
+  flash_demo_mutant flash-demo-no-rescale
 fi
 
 _item_tick ""

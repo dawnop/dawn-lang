@@ -734,21 +734,22 @@ pub type Facts = {
   mutants: List[Mutant],
   cards: List[ApiCard],
   shows: List[ShowCard],
-  timings: List[List[String]],
 }
 
 ## The kernel the page draws, and where both halves live.
-fn kernel_name() -> String = "flash_attn"
+fn kernel_name() -> String = "flash_attn_bf16_demo"
+
+fn kernel_body() -> String = "flash_attn"
 
 fn kernels_file() -> String = "scripts/tile-golden/kernels.dawn"
 
-fn map_file() -> String = "site/gpu-map/${kernel_name()}.map"
+fn map_file() -> String = "site/gpu-map/flash_attn.map"
 
 # The numerical helpers are part of the displayed algorithm's closed
 # dependency set, so their definition spans remain visible and checkable.
 fn flash_source(src: String) -> Cut = {
-  let first = cut_fn(src, "fa_exp")
-  let last = cut_fn(src, kernel_name())
+  let first = cut_fn(src, kernel_body())
+  let last = cut_def(src, "fa_kernel")
   Cut { ..last, first = first.first, text = join(list.take(list.drop(str.split(src, "\n"), first.first - 1), last.last - first.first + 1), "\n") }
 }
 
@@ -781,7 +782,6 @@ pub fn load_facts() -> Facts !Fs = {
     mutants = muts,
     cards = api_cards(src),
     shows = show_cards(must_read(refused_file()), must_read(host_file())),
-    timings = flash_timings(),
   }
 }
 
@@ -1172,8 +1172,13 @@ fn map_figure(c: Copy, mu: fn(String) -> String, root: String, lang: Lang, f: Fa
   let widest = list.fold(list.drop(m.src, 1), 0, (w, l) => if len(l) > w { len(l) } else { w })
   let owners = ir_owners(m)
   let results = ir_results(m)
-  let src = join(map(range(m.first, last + 1), l => """<span class="xl" id="kl-${l}"><i>${l}</i>${dawn_line(m, l)}</span>"""), "")
-  let play_link = """<a class="xp-open" href="${root}/${lang_path(lang, "playground.html")}?sample=${m.name}&amp;view=tile">${line(c, "kernel-open", mu)}</a>"""
+  let body_length = match list.index_of(m.src, "}") { Some(n) -> n
+    None -> panic("flash source has no body terminator") }
+  let body_end = m.first + body_length
+  let draw = (lo: Int, hi: Int) => join(map(range(lo, hi), l => """<span class="xl" id="kl-${l}"><i>${l}</i>${dawn_line(m, l)}</span>"""), "")
+  let src = draw(m.first, body_end + 1)
+  let support = draw(body_end + 1, last + 1)
+  let play_link = """<a class="xp-open" href="${root}/${lang_path(lang, "playground.html")}?sample=flash_attn&amp;view=tile">${line(c, "kernel-open", mu)}</a>"""
   let ir = join(map(range(1, len(m.ir) + 1), n => ir_row(m, n, owners[n - 1], list.contains(results, n))), "")
   """<figure class="xp xp-flash" style="--kmn: ${widest}" data-w-line="${p("word-line")}" data-w-lines="${p("word-lines")}" data-w-none="${p("word-none")}">
 <figcaption class="xp-cap"><span class="xp-name"><code>${escape_html(m.name)}</code></span><span class="xp-kind">${line(c, "kernel-kind", mu)}</span>${play_link}${map_facts(c, mu, kernel_facts(f, m))}</figcaption>
@@ -1181,6 +1186,7 @@ fn map_figure(c: Copy, mu: fn(String) -> String, root: String, lang: Lang, f: Fa
 <div class="xp-src">
 <p class="xp-head"><span>${line(c, "kernel-left", mu)}</span><span class="xp-shown">${src_link}</span></p>
 <pre class="xp-code" aria-label="${p("kernel-left")}"><code>${src}</code></pre>
+<details><summary>${line(c, "kernel-support", mu)}</summary><pre class="xp-code"><code>${support}</code></pre></details>
 <p class="xp-status" role="status" aria-live="polite"></p>
 <p class="xp-note" hidden>${line(c, "kernel-note", mu)}</p>
 </div>
@@ -1320,23 +1326,6 @@ ${join(map(f.ledgers, row), "\n")}
 <p class="gpu-note">${line(c, "ledger-tiers", mu)}</p>"""
 }
 
-# Timing rows are recorded measurements, not constants in page copy. Each
-# names the card, target, toolchain and full configuration it measured.
-fn flash_timings() -> List[List[String]] !Fs = {
-  let rows = map(filter(str.split(must_read("site/gpu-map/flash-perf.tsv"), "\n"),
-    l => l != "" && not str.starts_with(l, "#")), l => str.split(l, "\t"))
-  if len(rows) == 0 || list.any(rows, r => len(r) != 9) { panic("invalid flash timing table") } else { () }
-  rows
-}
-
-fn timing_table(c: Copy, mu: fn(String) -> String, f: Facts) -> String = {
-  let headers = ["th-gpu", "perf-format", "perf-workload", "perf-tools", "perf-config", "perf-before", "perf-after", "perf-cutile", "perf-sdpa"]
-  "<div class=\"table-wrap\"><table><thead><tr>"
-    ++ join(map(headers, k => "<th>${line(c, k, mu)}</th>"), "") ++ "</tr></thead><tbody>"
-    ++ join(map(f.timings, r => "<tr>" ++ join(map(r, v => "<td>${escape_html(v)}</td>"), "") ++ "</tr>"), "\n")
-    ++ "</tbody></table></div>"
-}
-
 ## The page's sections, in order: each heading's id and the copy key its
 ## `<key>-title` and `<key>-body` are under. The page writes its headings from
 ## this list and gen/search indexes them from it, so a section renamed or
@@ -1405,7 +1394,7 @@ fn gpu_page_with(a: Assets, js: String, ex_js: String, lang: Lang, f: Facts, doc
     ++ prose(c, mu, "layers") ++ "\n" ++ layers(c, mu) ++ "\n"
     ++ prose(c, mu, "api") ++ "\n" ++ api_section(c, mu, root, lang, f) ++ "\n"
     ++ prose(c, mu, "kernel") ++ "\n" ++ map_figure(c, mu, root, lang, f) ++ "\n"
-    ++ prose(c, mu, "performance") ++ "\n" ++ timing_table(c, mu, f) ++ "\n"
+    ++ prose(c, mu, "performance") ++ "\n"
     ++ prose(c, mu, "coverage") ++ "\n" ++ figures(c, mu, f) ++ "\n"
     ++ prose(c, mu, "gates") ++ "\n" ++ gates(c, mu, f) ++ "\n"
     ++ prose(c, mu, "ledgers") ++ "\n" ++ ledger_table(c, mu, f) ++ "\n</main>"
@@ -1579,15 +1568,15 @@ test "a ledger line with a column missing or moved is an error" {
 test "the kernel beside its golden is the whole function, from the lines it names" {
   with_fs_real(() => {
     let src = must_read(kernels_file())
-    let k = cut_fn(src, kernel_name())
+    let k = cut_fn(src, kernel_body())
     assert k.text != ""
     assert str.starts_with(k.text, "fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](")
     assert str.contains(k.text, "!Dev")
     assert str.ends_with(k.text, "\n}")
     let lines = str.split(src, "\n")
     assert join(list.slice(lines, k.first - 1, k.last), "\n") == k.text
-    let mlir = must_read("scripts/tile-golden/flash_attn.mlir")
-    assert str.contains(mlir, "entry @flash_attn(")
+    let mlir = must_read("scripts/tile-golden/flash_attn_bf16_demo.mlir")
+    assert str.contains(mlir, "entry @flash_attn_bf16_demo(")
   })
 }
 
@@ -1632,7 +1621,7 @@ test "the page states what the files say, and links nowhere it should not" {
       assert str.contains(p, "<code>${l.commit}</code>")
     }
     assert str.contains(p, `<span class="k">fn</span> <span class="f">flash_attn</span>`)
-    assert str.contains(p, "entry @flash_attn(")
+    assert str.contains(p, "entry @flash_attn_bf16_demo(")
     # paired: the header switches to the twin and both alternates are there
     assert str.contains(p, `class="lang"`)
     assert str.contains(p, `hreflang="zh-CN"`)
@@ -1711,7 +1700,7 @@ test "flash_attn lines up with its golden, call by call" {
     let cut = flash_source(must_read(kernels_file()))
     assert join(m.src, "\n") == cut.text
     assert m.first == cut.first
-    assert m.ir == str.split(str.trim_end(must_read("scripts/tile-golden/flash_attn.mlir")), "\n")
+    assert m.ir == str.split(str.trim_end(must_read("scripts/tile-golden/flash_attn_bf16_demo.mlir")), "\n")
     var owned: List[Int] = []
     for r in m.rows {
       for s in r.segs {
@@ -1766,7 +1755,7 @@ fn ops_for(name: String) -> List[String] =
     "fa_exp" -> []
     "fa_divide" -> []
     "blocks_of" -> ["constant"]
-    "to" -> []
+    "to" -> ["ftof"]
     "carry" -> []
     "get" -> []
     "set" -> []
@@ -1779,7 +1768,7 @@ fn ops_for(name: String) -> List[String] =
     "sub" -> ["subf"]
     "add" -> ["addf"]
     "div" -> ["divf"]
-    "exp" -> ["exp"]
+    "exp2" -> ["exp2"]
     "max" -> ["maxf"]
     "reduce_max" -> ["reshape"]
     "reduce_sum" -> ["reshape"]
@@ -1877,7 +1866,7 @@ test "a Tile IR line keeps its text and colours its value and operation" {
   assert str.contains(store, """<span class="io">store_view_tko</span>""")
   let close = ir_colored("    }", true)
   assert not str.contains(close, "class=\"io\"")
-  assert not str.contains(ir_colored("  entry @flash_attn(%arg0: tile<ptr<f64>>) {", false), "class=\"io\"")
+  assert not str.contains(ir_colored("  entry @flash_attn_bf16_demo(%arg0: tile<ptr<f64>>) {", false), "class=\"io\"")
 }
 
 ## One kernel, drawn with no script: no picker, no replay, no file fetched
@@ -1889,6 +1878,13 @@ test "the page draws one kernel and nothing a script has to finish" {
     for lang in [En, Zh] {
       let p = gpu_page(plain_assets(), "gpu.js", lang, f, [])
       assert not str.contains(p, "<select")
+      assert not str.contains(p, "fa64_math")
+      assert not str.contains(p, "entry @flash_attn(")
+      assert not str.contains(p, "Float/Float")
+      assert not str.contains(p, "P4-c")
+      assert str.contains(p, "entry @flash_attn_bf16_demo(")
+      assert str.contains(p, "<details><summary>")
+      assert str.contains(p, "rounding&lt;nearest_even&gt;")
       assert not str.contains(p, "gpu/k/")
       assert not str.contains(p, "gm-")
       assert not str.contains(p, "xp-tab")
@@ -1914,7 +1910,7 @@ test "the facts beside the map are the map's and the files' numbers" {
     let kf = kernel_facts(f, m)
     let p = gpu_page(plain_assets(), "gpu.js", En, f, [])
     let size =
-      match io.read_bytes("scripts/tile-golden/flash_attn.tilebc") {
+      match io.read_bytes("scripts/tile-golden/flash_attn_bf16_demo.tilebc") {
         Ok(b) -> len(b)
         Err(e) -> panic("cannot read flash_attn.tilebc: ${e}")
       }
@@ -1924,7 +1920,7 @@ test "the facts beside the map are the map's and the files' numbers" {
     for v in [m.ops, len(m.ir), size, len(m.calls)] {
       assert str.contains(p, "<b>${v}</b>")
     }
-    let (rows, muts) = cited_by(f, "flash_attn")
+    let (rows, muts) = cited_by(f, kernel_name())
     if len(rows) > 0 {
       assert str.contains(p, "<b>${len(rows)}</b>")
     }

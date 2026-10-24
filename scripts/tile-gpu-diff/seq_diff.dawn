@@ -131,6 +131,7 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/narrow
+use std/str
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, last_out_with, vadd_ref}
 use tileref/ref.{matmul_ref, matmul_bt_ref, lora_out_ref, row_softmax_ref, swiglu_act_ref, apsp_step_ref,
   causal_scores_ref, alibi_scores_ref, window_scores_ref, sink_scores_ref, decay_scores_ref, cce_row_ref,
@@ -1366,6 +1367,19 @@ fn flash_bf16_seq() -> Seq = Seq {
   stale_at = 0
 }
 
+# The reader recording visits four KV blocks. Two launches of the same
+# cubin use different runtime scales, with the strict rounded-p reference.
+fn flash_demo_seq(scaled: Bool) -> Seq = Seq {
+  name = if scaled { "flash_demo_scaled" } else { "flash_demo" },
+  tier = "tolerance",
+  bufs = flash_bf16_bufs(),
+  steps = [step_scalars("flash_attn_bf16_demo", ATT_M / FA_BQ, 1, 1, ["q", "k", "v", "o"],
+    [gpu.erase(gpu.scalar_arg(narrow.f32(ATT_INV_SQRT_D * LOG2_E * (if scaled { 0.625 } else { 1.0 }))))])],
+  reads = ["o"],
+  via = "o",
+  stale_at = 0
+}
+
 ## The tolerance a sequence is held to, `(atol, rtol)`: leetgpu's for every
 ## sequence but `flash_bf16`, whose absolute part is `2^-16 * max|v|`.
 ##
@@ -1396,7 +1410,7 @@ fn flash_bf16_seq() -> Seq = Seq {
 ## f32 arithmetic everywhere else is ~1e-7 relative and is what `RTOL` keeps
 ## covering.
 fn tolerance_of(name: String) -> (Float, Float) =
-  if name == "flash_bf16" {
+  if name == "flash_bf16" || str.starts_with(name, "flash_demo") {
     let v = flash_bf16_bufs()[2].data
     let biggest = list.fold(v, 0.0, (a, x) => {
       let m = if x > 0.0 { x } else { 0.0 - x }
@@ -1434,7 +1448,7 @@ fn sequences() -> List[Seq] =
     causal_seq(), alibi_seq(), window_seq(), sinks_seq(), decay_seq(), cce_seq(), mha_seq(),
     xattn_seq(), gqa_seq(), grpo_seq(), kmeans_seq(),
     kv_seq(), attn_bwd_seq(), lin_attn_seq(), ols_seq(),
-    gpt2_seq(), llama_seq(), flash_seq(), flash_bf16_seq(),
+    gpt2_seq(), llama_seq(), flash_seq(), flash_bf16_seq(), flash_demo_seq(false), flash_demo_seq(true),
     decoupled_seq()]
 
 ## The kernels each sequence launches, as a set: what
@@ -1468,6 +1482,8 @@ pub fn sequence_kernels() -> List[(String, List[String])] =
       "gqa_context", "llama_out", "vadd", "llama_ffn", "swiglu_act", "llama_down"]),
     ("flash", ["flash_attn"]),
     ("flash_bf16", ["flash_attn_bf16"]),
+    ("flash_demo", ["flash_attn_bf16_demo"]),
+    ("flash_demo_scaled", ["flash_attn_bf16_demo"]),
     ("decoupled", ["matpow_step"])]
 
 ## The sequences compared under the tolerance tier. `apsp` is not here:
@@ -1477,7 +1493,7 @@ pub fn sequence_kernels() -> List[(String, List[String])] =
 ## column of scripts/leetgpu-diff/problems.txt against it.
 pub fn tolerance_tier() -> List[String] =
   ["lora", "attention", "matpow", "swiglu", "causal", "alibi", "window", "sinks", "decay", "cce", "mha",
-    "xattn", "gqa", "grpo", "kv", "attnbwd", "linattn", "gpt2", "llama", "flash", "flash_bf16",
+    "xattn", "gqa", "grpo", "kv", "attnbwd", "linattn", "gpt2", "llama", "flash", "flash_bf16", "flash_demo", "flash_demo_scaled",
     "decoupled"]
 
 # ---- the reference tables ----
@@ -1621,6 +1637,10 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
   } else if name == "flash_bf16" {
     map.from([("flash_attn_bf16", (4, last_out_with((dts, ins, ss) =>
         flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BF_BK, ss[0], dts, ins, p_round = "bf16", base2 = true))))])
+  } else if str.starts_with(name, "flash_demo") {
+    map.from([("flash_attn_bf16_demo", (4, last_out_with((dts, ins, ss) =>
+        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ss[0], dts, ins,
+          p_round = if str.ends_with(name, "_unrounded") { "" } else { "bf16" }, base2 = true))))])
   } else if name == "flash_bf16_unrounded" {
     # NOT a sequence of `sequences()`: the control's reference, the honest
     # one with `p_round` left out (see `tolerance_of`).
@@ -1773,7 +1793,7 @@ fn cubin_names() -> List[String] =
     "ols_gram", "ols_elim", "ols_beta",
     "gpt_ln", "gpt_qkv", "gpt_scores", "gpt_context", "gpt_dense", "gpt_fc", "gpt_gelu", "gpt_down",
     "llama_rms", "llama_qkv", "llama_rope", "llama_scores", "llama_out", "llama_ffn", "llama_down",
-    "flash_attn", "flash_attn_bf16", "vadd"]
+    "flash_attn", "flash_attn_bf16", "flash_attn_bf16_demo", "vadd"]
 
 fn usage() -> Unit !Exit !io = {
   io.eprintln("usage: seq_diff " ++ list.fold(cubin_names(), "", (a, n) =>
@@ -1851,8 +1871,8 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     # the device says. The first line is host-only (the honest fake against
     # the unrounded one) and is held on every driver; the second puts the
     # device's own answer in the same chair and is held when it ran.
-    if s.name == "flash_bf16" {
-      let forgetful = run_fake(Seq { ..s, name = "flash_bf16_unrounded" }, 0 - 1, "", "")
+    if s.name == "flash_bf16" || str.starts_with(s.name, "flash_demo") {
+      let forgetful = run_fake(Seq { ..s, name = s.name ++ "_unrounded" }, 0 - 1, "", "")
       io.println("control unrounded-reference host sequence=${s.name} verdict ${verdict(s.tier, tol, fake, forgetful)}"
           ++ " miss ${miss_line(forgetful, fake, tol)}")
       io.println("control unrounded-reference device sequence=${s.name} verdict ${verdict(s.tier, tol, forgetful, real)}")

@@ -95,6 +95,8 @@ esac
 # or more is slower under C1 and reaches the 30 s compile budget sooner
 # (SANDBOX.md). The run phase is a separate `java` the runner starts and is
 # not touched.
+# These 2026-10-21 flash_attn timings used the earlier F64 sample. The current
+# BF16/F32 reader sample has separate cold and miss validation at these limits.
 SANDBOX_JVM_OPTS="-Xss512m -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1"
 
 # The JDK the unit's `bin/dawn` launches the compiler on. The unit's PATH is

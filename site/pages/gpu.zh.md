@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ 5c10067ba9fddfa1 -->
+<!-- doc-check: translation-of site/pages/gpu.md @ 47b1ba8038adaa1b -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -140,7 +140,11 @@ kernel 在录制时就被检查：函数体只跑一遍，某个运算的形状�
 
 ## kernel-body
 
-一个融合注意力 kernel（也就是上面那两行行统计的出处），和它的调用写出的 Tile IR 并排放着。配对来自记录本身和 Dawn 自己的解析器，不来自手写的对照表；调用名和它写出的行是同一种颜色。在 Playground 里还能把同一个函数和它编出来的 C 与 JVM 字节码并排看。 这里把共享的 `[D, A]` 主体录成 Float/Float 实例：自然指数与精确 f64 除法。BF16/F32 实例保留带 FTZ 的二进制指数、bf16 概率舍入和近似 f32 除法。三维 cells 将 head 放在 grid axis 2，并投影单例 tile 轴得到矩阵值；算法通过 tile_shape 与 blocks_of 查询形状和键块，工厂只捕获 dtype 见证与数值策略。架构选择和 entry hints 留在 host plan，测量记录只留审计台账。f64 使用一份 32×16、无 entry hints 的 plan。
+一个融合注意力 kernel，BF16 输入，F32 累加、scale 和输出。共享的 `[D,A]` 主体保留在线 softmax、未收窄概率的行和，以及第二次 MMA 前的 BF16 nearest-even 收窄。数值 helper 使用 exp2/FTZ 与近似 F32 除法；启动 scale 只换底一次。三维 cells 将 head 放在 grid axis 2，squeeze 得到二维矩阵值。这里录制 32×16 的小布局，无 entry hints。泛型算法、数值策略、host plan 和测量审计各有自己的职责；Playground 可在 CPU 解释执行同一实例，并查看 C、JVM 与 Tile IR。
+
+## kernel-support
+
+数值策略与工厂支持定义
 
 ## kernel-open
 
@@ -314,40 +318,8 @@ tileiras
 
 ## perf-title
 
-Flash attention 测时
+BF16 实现与启动计划
 
 ## perf-body
 
-以下为旧展平布局的 P4-c 历史测量，早于 A2 输出迁移和 S2 三轴布局；这些时间不代表 S2 实测，新布局仅沿用启动计划。当前 bf16 kernel 存 f32；下表实测的是 f64 输出，不能当作 f32 输出的测时。按 `(arch, d)` 离线选配置，在同一进程、同一流内用 CUDA events 交错测五轮。时间为毫秒，中位数 / p90。基线是 64×64、无 entry hint；bf16 用 f32 累加、f64 输出，f64 调优后用 32×16。cuTile 是上游 bf16 attention 样例四个实测配置的最快格；SDPA 采用所在行的 bf16 或 f64 格式。cuTile 输出 bf16，Dawn 输出 f64。f64 行没有对应的 cuTile 样例。[配置台账](https://github.com/dawnop/dawn-lang/blob/main/scripts/flash-config/ledger.json) 保留选表证据，包括未入表的 sm_100 d64 单头候选。配置在录制前固定，不做运行期搜索。
-
-## perf-format
-
-格式
-
-## perf-workload
-
-负载
-
-## perf-tools
-
-tileiras / 优化级别
-
-## perf-config
-
-配置
-
-## perf-before
-
-改前
-
-## perf-after
-
-改后
-
-## perf-cutile
-
-cuTile 1.7.0
-
-## perf-sdpa
-
-torch SDPA
+当前实现采用 BF16 输入与 F32 输出，架构相关 tiles 和 hints 在录制前由 host plan 确定，不做运行期搜索。此页的小样例布局用于展示四个键块的在线更新，不是生产性能配置。历史测量留在内部审计目录；它们不代表当前三轴布局或此样例的性能。

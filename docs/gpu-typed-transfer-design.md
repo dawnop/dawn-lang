@@ -9,6 +9,11 @@
 > 已有裁决（协调者，不在此重裁）：只存储格式（TF32、F8\*）按位型传输；§12.6 的规则句随 U3 进 spec（英文原文在前，中文在后）；`Tensor[U32]` 仍可写成类型。
 > 本文所有计数都在基线上用 `git grep` 数出，不含 `selfhost/src/embed`；没量过的写「未量」并写明由哪一刀去量。
 
+当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见
+[读者面设计](flash-attn-bf16-front-design.md)与[实际样例](../site/play-ui/samples/flash_attn.dawn)。
+本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
+当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
+
 ## 0. 先说三个与 U0 §6.2 假设不同的事实
 
 U0 的 §6.2 把 U3 写成「加一个 `Pod[T]` 类的 trait，编码走 `Bytes`，`HasDtype` 只给名字」。核对基线后有三处要改：
