@@ -398,6 +398,7 @@ Pure functions with no operation of their own: they build the attribute values t
 | `trace3` | `make_token`, `return` | `module`, `entry` |
 | `trace4` | `make_token`, `return` | `module`, `entry` |
 | `trace5` | `make_token`, `return` | `module`, `entry` |
+| `trace6` | `make_token`, `return` | `module`, `entry` |
 | `trace_kernel` | `make_token`, `return` | `module`, `entry` |
 | `trace_calls` | `make_token`, `return` | `module`, `entry` |
 | `cells` | - | - |

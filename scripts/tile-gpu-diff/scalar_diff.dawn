@@ -46,6 +46,7 @@ use std/str
 use tileref/ref.{scalar_scale_ref, scalar_len_ref, scalar_loop_ref, scalar_wide_ref}
 use std/list
 use std/map
+use std/dtype.{F64, I64}
 
 ## The sentinel every output buffer holds past its answer.
 pub const SENTINEL: Float = 0.0 - 12345.678
@@ -120,8 +121,49 @@ fn args_of(spec: List[Spec], hs: List[Int]) -> List[LaunchArg] =
     W(w) -> w
   })
 
+# The historical six-argument ABI now crosses the public typed entry path.
+# The raw transport controls still mutate the common real handler below it.
+fn wide_typed(bufs: List[(String, List[Float])], spec: List[Spec]) -> Result[List[Float], ForeignError] !Gpu = {
+  let (_df, bf) = bufs[0]
+  let (_di, bi) = bufs[1]
+  let (_dof, bof) = bufs[2]
+  let (_doi, boi) = bufs[3]
+  let xf = gpu.alloc(F64, len(bf))?
+  let xi = gpu.alloc(I64, len(bi))?
+  let of = gpu.alloc(F64, len(bof))?
+  let oi = gpu.alloc(I64, len(boi))?
+  gpu.gpu_copy_from_host(gpu.handle_of(xf), gpu.encode_floats("f64", bf))?
+  gpu.gpu_copy_from_host(gpu.handle_of(xi), gpu.encode_floats("i64", bi))?
+  gpu.gpu_copy_from_host(gpu.handle_of(of), gpu.encode_floats("f64", bof))?
+  gpu.gpu_copy_from_host(gpu.handle_of(oi), gpu.encode_floats("i64", boi))?
+  let aw = match spec[2] { W(w) -> w
+    _ -> panic("scalar_wide scale must be a Word") }
+  let kw = match spec[3] { W(Word("i64", k)) -> k
+    _ -> panic("scalar_wide offset must be an i64 Word") }
+  let a = match aw { Word("f64", bits) -> narrow.f64_of_bits(bits)
+    _ -> panic("scalar_wide scale must be an f64 Word") }
+  let e: gpu.Entry6[Float, Int, Float, Int, Float, Int] = gpu.entry6("scalar_wide",
+    gpu.arg_shared(), gpu.arg_shared(), gpu.arg_scalar(), gpu.arg_scalar(), gpu.arg_shared(), gpu.arg_shared())
+  gpu.launch_entry6(e, gpu.buffer_arg(xf), gpu.buffer_arg(xi), gpu.scalar_arg(a), gpu.scalar_arg(kw),
+    gpu.buffer_arg(of), gpu.buffer_arg(oi), grid = [2])?
+  gpu.gpu_sync()?
+  let rf = gpu.gpu_copy_to_host(gpu.handle_of(of))?
+  let ri = gpu.gpu_copy_to_host(gpu.handle_of(oi))?
+  gpu.free(xf)?
+  gpu.free(xi)?
+  gpu.free(of)?
+  gpu.free(oi)?
+  Ok(gpu.decode_floats("f64", rf) ++ gpu.decode_floats("i64", ri))
+}
+
 fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])], spec: List[Spec],
-  back: List[Int]) -> Trace !Gpu =
+  back: List[Int]) -> Trace !Gpu = {
+  if kernel == "scalar_wide" {
+    return match wide_typed(bufs, spec) {
+      Ok(got) -> Trace { alloc = "ok", upload = "ok", launch = "ok", sync = "ok", download = "ok", result = Some(got), note = "" }
+      Err(e) -> Trace { ..blank(), launch = e.kind, note = e.message }
+    }
+  }
   match alloc_all(bufs) {
     Err(e) -> Trace { ..blank(), alloc = e.kind, note = e.message }
     Ok(hs) -> {
@@ -168,6 +210,8 @@ fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])], spec: List
       }
     }
   }
+
+}
 
 ## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
 fn stopped(t: Trace) -> String =
@@ -410,14 +454,25 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
   for i in range(0, 4) {
     cubins = map.insert(cubins, names[i], read_cubin(paths[i]))
   }
+  let cs = cases()
+  # Replay wide values through one loaded module. The other legacy controls
+  # keep fresh logical handles so Word(2) still names their second buffer.
+  let wide_cases = list.filter(cs, c => c.kernel == "scalar_wide")
+  let wide_runs = with_gpu_real(cubins, () => list.map(wide_cases, c => stages(c.kernel, c.grid, c.bufs, c.spec, c.back)))
+  var wide_index = 0
   var all_agreed = true
   var blocked = ""
   var any_differ = false
   var exact_count = 0
   var real_results: Map[String, String] = map.empty()
-  for c in cases() {
+  for i in range(0, len(cs)) {
+    let c = cs[i]
     let fake = with_gpu_fake(c.refs, () => stages(c.kernel, c.grid, c.bufs, c.spec, c.back))
-    let real = with_gpu_real(cubins, () => stages(c.kernel, c.grid, c.bufs, c.spec, c.back))
+    let real = if c.kernel == "scalar_wide" {
+      let r = wide_runs[wide_index]
+      wide_index = wide_index + 1
+      r
+    } else { with_gpu_real(cubins, () => stages(c.kernel, c.grid, c.bufs, c.spec, c.back)) }
     let v = verdict("exact", fake, real)
     real_results = map.insert(real_results, c.tag, rendered(real.result))
     io.println("kernel ${c.kernel} ${c.tag} tier=exact grid=(${c.grid}, 1, 1)")

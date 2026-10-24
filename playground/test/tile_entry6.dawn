@@ -1,0 +1,22 @@
+# A real ordinary six-parameter trace for the Tile pane. S2 storage geometry
+# remains three-dimensional while tile_shape observes the projected value.
+use std/io
+use std/narrow.{F32}
+use std/int/i32.{I32}
+use tileir/dev.{Dev, Param, load_cell, store_cell, tile_shape, extent_of, blocks_of, scalar, int_to_float, f_const}
+use tileir/prog.{trace6, cells, In, Out, Scalar}
+use tileir/render.{render}
+
+fn six(x: Param[F32], y: Param[F32], z: Param[F32], out: Param[F32], scale: Param[F32], bias: Param[I32]) -> Unit !Dev = {
+  let a = load_cell(x)
+  let _shape = tile_shape(a)
+  let _extent = extent_of(x, 0)
+  let _blocks = blocks_of(x, 1)
+  store_cell(out, (a + load_cell(y) * f_const(F32, 2.0) + load_cell(z) * f_const(F32, 4.0)) * scalar(scale) + int_to_float(scalar(bias), F32))
+}
+
+pub fn main() -> Unit !io = {
+  let g = cells([3, 4, 4], [1, 2, 4], along = [2, 0, 1], squeeze = [0])
+  let (p, _e) = trace6("six", In(F32, g), In(F32, g), In(F32, g), Out(F32, g), Scalar(F32), Scalar(I32), six)
+  io.print(render(p))
+}

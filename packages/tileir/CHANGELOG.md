@@ -7,6 +7,12 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.27.1 (2026-10-24)
+
+- Add `trace6` and the typed `Entry6` launch family, preserving the existing
+  role, cell, hint, caller and flat parameter contracts. This is an additive
+  API change within the 0.27 compatibility class, with no Dev or bytecode change.
+
 ## 0.27.0
 
 - 新增 `cells(..., squeeze = [])` 与 `Grid` 的第五个字段。投影只从值中删除

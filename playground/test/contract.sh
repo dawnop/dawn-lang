@@ -363,7 +363,7 @@ open(f"{out}/broken.dawn", "w").write('pub fn main() -> Unit !io = println(nope)
 # manifest does not name
 tile = open(f"{root}/playground/test/tile_vadd.dawn", encoding="utf-8").read()
 open(f"{out}/tile.dawn", "w", encoding="utf-8").write(tile)
-for name in ("tile_hostif", "tile_broken"):
+for name in ("tile_hostif", "tile_broken", "tile_entry6"):
     open(f"{out}/{name}.dawn", "w", encoding="utf-8").write(open(f"{root}/playground/test/{name}.dawn", encoding="utf-8").read())
 open(f"{out}/tile_syntax.dawn", "w", encoding="utf-8").write(tile + "\nfn broken(\n")
 # the flash attention starter: the Playground's own sample, not a copy of it
@@ -447,6 +447,14 @@ tile_ccheck() { # name, program file, extra request fields (JSON object), assert
 }
 tile_ccheck "compile: a tileir program's pane is the text dawn run prints, and its calls are paired with the source" "$CASES/tile.dawn" '{}' \
   'len(expected)>200 and d["ok"] is True and d["phase"]=="compile-view" and d["target"]=="tile" and d["cached"] is False and d["pane"]["kind"]=="tile" and "\n".join(d["pane"]["text"])+"\n"==expected and d["pane"]["shown"]==len(d["pane"]["text"]) and d["pane"]["truncated"] is False and "unmapped" not in d and [c["name"] for c in d["calls"]]==["store_cell","add","load_cell","load_cell"] and [c["parent"] for c in d["calls"]]==[-1,0,1,1] and len(d["pane"]["outs"])==4 and all(o["lines"] for o in d["pane"]["outs"]) and d["gaps"]["count"]==0 and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw and "explore_probe" not in raw and "@@tile" not in raw'
+# A fresh six-parameter recording must actually pass tap6 and strict source
+# pairing. Its text is compared with the ordinary uninstrumented execution.
+cp "$CASES/tile.expected" "$CASES/tile.vadd.expected"
+cp "$CASES/tile_entry6.dawn" "$TILE_PROJ/src/main.dawn"
+"$DAWN_BIN" run "$TILE_PROJ" >"$CASES/tile.expected" 2>"$CASES/tile.entry6.err"
+tile_ccheck "compile: trace6 keeps projected cells and pairs every actual call" "$CASES/tile_entry6.dawn" '{}' \
+  'd["ok"] is True and "unmapped" not in d and "\n".join(d["pane"]["text"])+"\n"==expected and d["gaps"]["count"]==0 and len(d["calls"])==len(d["pane"]["outs"]) and any(c["name"]=="tile_shape" for c in d["calls"]) and any(c["name"]=="scalar" for c in d["calls"]) and any("%arg5: tile<i32>" in l for l in d["pane"]["text"])'
+cp "$CASES/tile.vadd.expected" "$CASES/tile.expected"
 TILE_EXPECTED="$CASES/tile.expected"
 ATTN_GOLDEN="$ROOT/site/play-ui/samples/flash_attn.out"
 export TILE_EXPECTED ATTN_GOLDEN

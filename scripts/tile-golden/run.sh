@@ -558,6 +558,7 @@ kernels=(
   matmul_sm90 matmul_sm100
   matmul_f16_sm90 matmul_f16_sm100 matmul_i8_sm90 matmul_i8_sm100
   scalar_scale scalar_len scalar_loop scalar_wide
+  entry6_dynamic entry6_project1 entry6_project3
   dtype_e5m3 mmaf_scaled_e5m3
   vadd_producer vadd_debug foldif_debug
   bitwise_i8 bitwise_i16 bitwise_i32 bitwise_i64 bitwise_mask
@@ -702,6 +703,8 @@ mutants=(
   flash-output-f64 flash-output-one-f64 flash-output-bf16
   flash-exp-swapped flash-exp-ftz-dropped flash-div-exact flash-div-ftz-dropped flash-l-rounded flash-p-unrounded
   flash-demo-scale-constant flash-demo-last-kv flash-demo-no-rescale
+  entry6-type-rejections entry6-source-controls
+  entry6-n-constant entry6-view-capacity entry6-loop-floor entry6-unmarked entry6-sixth-as-pointer entry6-erase-projection
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -3318,6 +3321,94 @@ if run_item flash-demo-last-kv; then
 fi
 if run_item flash-demo-no-rescale; then
   flash_demo_mutant flash-demo-no-rescale
+fi
+
+if run_item entry6-type-rejections; then
+  project "$work/entry6-rejected" "$root/packages/tileir"
+  cp "$here/entry6-rejected.dawn" "$work/entry6-rejected/src/main.dawn"
+  if "$root/bin/dawn" check "$work/entry6-rejected" > "$work/entry6-rejected.out" 2>&1; then
+    fail "entry6-type-rejections: sixth Launch[F32] accepted as I32"
+  fi
+  sed -n '/^error:/p' "$work/entry6-rejected.out" > "$work/entry6-rejected.errors"
+  cmp -s "$here/entry6-rejected.expected" "$work/entry6-rejected.errors" || {
+    diff -u "$here/entry6-rejected.expected" "$work/entry6-rejected.errors" >&2 || true
+    fail "entry6-type-rejections: checker refusal changed"
+  }
+  echo "PASS  entry6 checker: sixth dtype refused independently of runtime kind"
+fi
+
+if run_item entry6-source-controls; then
+  python3 "$here/entry6-source-controls.py"
+fi
+
+# Numeric mutants must record and assemble before the independent device
+# oracle judges them. A separate mode proves the structural dataflow red.
+entry6_numeric_mutant() {
+  local m="$1"
+  kernel_mutant_project "$m"
+  build_native "$work/m-$m" "$work/m-$m.bin" -O0
+  mutant_run "$m" entry6_dynamic
+  mutant_run_bytecode "$m" entry6_dynamic
+  for backend in jvm native; do
+    out="$work/m-$m.entry6_dynamic.$backend"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "$m did not record"; }
+    ! cmp -s "$here/entry6_dynamic.mlir" "$out" || fail "$m stayed golden"
+  done
+  rc=0; run_jvm "$work/m-$m" "$work/$m.structure" --entry6-structure || rc=$?
+  [ "$rc" != 0 ] && grep -Eq 'entry6: (sixth scalar dataflow|dynamicShape|dynamic index space|dynamic loop bound)' "$work/$m.structure.err" ||
+    { cat "$work/$m.structure.err" >&2; fail "$m escaped the structural oracle"; }
+}
+entry6_assemble_mutant() {
+  local m="$1"
+  assemble "$work/m-$m.entry6_dynamic.jvm.tilebc" "$work/$m.cubin" "$gpu_name" ||
+    { cat "$work/$m.cubin.log" >&2; fail "$m failed assembly"; }
+}
+if run_item entry6-n-constant; then
+  entry6_numeric_mutant entry6-n-constant
+  if [ -n "$tileiras" ]; then
+    entry6_assemble_mutant entry6-n-constant
+  fi
+  echo "PASS  mutant: entry6-n-constant (recorded on both backends; structural oracle red; assembly checked when available)"
+fi
+if run_item entry6-view-capacity; then
+  entry6_numeric_mutant entry6-view-capacity
+  if [ -n "$tileiras" ]; then
+    entry6_assemble_mutant entry6-view-capacity
+  fi
+  echo "PASS  mutant: entry6-view-capacity (recorded on both backends; structural oracle red; assembly checked when available)"
+fi
+if run_item entry6-loop-floor; then
+  entry6_numeric_mutant entry6-loop-floor
+  if [ -n "$tileiras" ]; then
+    entry6_assemble_mutant entry6-loop-floor
+  fi
+  echo "PASS  mutant: entry6-loop-floor (recorded on both backends; structural oracle red; assembly checked when available)"
+fi
+entry6_refusal_mutant() {
+  local m="$1" k fragment
+  mutant_project "$m" prog.dawn
+  k=entry6_dynamic
+  fragment='no marker'
+  if [ "$m" = entry6-sixth-as-pointer ]; then fragment='passed by value'; fi
+  if [ "$m" = entry6-erase-projection ]; then k=entry6_project3; fragment='projected value shape'; fi
+  mutant_run "$m" "$k"
+  for backend in jvm native; do
+    out="$work/m-$m.$k.$backend"
+    [ "$(cat "$out.rc")" != 0 ] && grep -Fq "$fragment" "$out.err" ||
+      { cat "$out.err" >&2; fail "$m missed its recording oracle"; }
+  done
+}
+if run_item entry6-unmarked; then
+  entry6_refusal_mutant entry6-unmarked
+  echo "PASS  mutant: entry6-unmarked (compiled; expected marker or projection refusal)"
+fi
+if run_item entry6-sixth-as-pointer; then
+  entry6_refusal_mutant entry6-sixth-as-pointer
+  echo "PASS  mutant: entry6-sixth-as-pointer (compiled; expected marker or projection refusal)"
+fi
+if run_item entry6-erase-projection; then
+  entry6_refusal_mutant entry6-erase-projection
+  echo "PASS  mutant: entry6-erase-projection (compiled; expected marker or projection refusal)"
 fi
 
 _item_tick ""

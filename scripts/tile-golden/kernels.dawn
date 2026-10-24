@@ -32,11 +32,11 @@ use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, FloatDtype
   global_ptrs, alloca_ptrs, mma_scaled, addi, subi, muli, consti, sqrt_approx, eq_u, ne_u, lt_u, le_u,
   gt_u, ge_u, atomic_rmw, ByArch, EntryHints, entry_hints, ptr_hints, view_hints, for_arch,
   tensor_view, partition_view, load_view, store_view, tensor_view_dyn, tensor_dim, index_space_dim,
-  idx_of, Dyn, strided_view, gather_scatter_view, load_gather, atomic_red_view, At, Rows, NoPadding, PadZero,
+  idx_of, Fixed, Dyn, strided_view, gather_scatter_view, load_gather, atomic_red_view, At, Rows, NoPadding, PadZero,
   PadNegZero, PadNan, PadPosInf, PadNegInf, Padding, broadcast, reshape, idx_as_tile, le_i, atomic_cas, atomic_add, load_cell, load_at,
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
   blocks_of, tile_shape, t_call_enter, t_call_exit, t_body_enter, t_body_exit }
-use tileir/prog.{TileOp, TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
+use tileir/prog.{TileOp, TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, trace6, cells, In, Out, Shared,
   Whole, FREE_AXIS, Scalar, trace_calls, erase }
 use tileir/render.{render, text_debug}
 use tileir/bytecode.{encode, bytecode_version}
@@ -5911,9 +5911,19 @@ fn trace(name: String) -> TileProg = match name {
     () => scalar_len(param(F64, 0), param(I32, 1), param(F64, 2)))
   "scalar_loop" -> trace_kernel("scalar_loop", [ByPtr("f64"), ByValue("i32"), ByPtr("f64")],
     () => scalar_loop(param(F64, 0), param(I32, 1), param(F64, 2)))
-  "scalar_wide" -> trace_kernel("scalar_wide",
-    [ByPtr("f64"), ByPtr("i64"), ByValue("f64"), ByValue("i64"), ByPtr("f64"), ByPtr("i64")],
-    () => scalar_wide(param(F64, 0), param(I64, 1), param(F64, 2), param(I64, 3), param(F64, 4), param(I64, 5)))
+  "scalar_wide" -> {
+    let (p, _e) = trace6("scalar_wide", Shared(F64), Shared(I64), Scalar(F64), Scalar(I64),
+      Shared(F64), Shared(I64), scalar_wide)
+    p
+  }
+  "entry6_dynamic" -> {
+    let input = cells([4, 32], [2, 8], along = [0, FREE_AXIS])
+    let (p, _e) = trace6("entry6_dynamic", In(F32, input), In(F32, input), In(F32, input),
+      Out(F32, cells([4], [2])), Scalar(F32), Scalar(I32), entry6_dynamic)
+    p
+  }
+  "entry6_project1" -> entry6_project_record("entry6_project1", 1)
+  "entry6_project3" -> entry6_project_record("entry6_project3", 3)
   "carry_extent" -> {
     let (p, _e) = trace2("carry_extent",
       In(F64, cells([CE_N, 128], [CE_T, 128], along= [FREE_AXIS, FREE_AXIS])),
@@ -6541,11 +6551,9 @@ fn trace(name: String) -> TileProg = match name {
 #
 # The first entry parameters that are not pointers: a `tile<f32>`, `tile<i32>`,
 # `tile<f64>` or `tile<i64>` the launch passes by value, read with `scalar`.
-# Nothing is loaded, so a kernel that reads one has no memory operation and no
-# buffer for it (the T12 kernels' `dims` buffer was both). These three are
-# recorded with `trace_kernel` and `ByPtr`/`ByValue`: the typed entries
-# (`trace1` to `trace5`) have no scalar marker until the host side of the
-# launch can carry one (docs/tileir-k4-design.md 5, knife 2).
+# Nothing is loaded for a scalar, and it has no buffer. The historical first
+# three controls retain trace_kernel; scalar_wide now uses trace6 with four
+# Shared markers, preserving its original memory tokens and golden bytes.
 const SK_TILE: Int = 128
 const SK_WIDE_TILE: Int = 64
 
@@ -6591,10 +6599,57 @@ fn scalar_wide(xf: Param[Float], xi: Param[Int], a: Param[Float], k: Param[Int],
   store(out_i, base, add_i64(load(xi, base, [SK_WIDE_TILE]), scalar(k)))
 }
 
+# K3-0: static capacity and physical stride, with a runtime logical prefix.
+# No attention geometry is involved. The sixth ByValue i32 drives both the
+# dynamicShape and the index-space loop bound; inputs retain their In tokens.
+fn entry6_dynamic(x: Param[F32], y: Param[F32], z: Param[F32], out: Param[F32],
+  scale: Param[F32], n: Param[I32]) -> Unit !Dev = {
+  let live = idx_of(scalar(n))
+  let shape = [Fixed(4), Dyn(live)]
+  let strides = [Fixed(32), Fixed(1)]
+  let vx = partition_view(tensor_view_dyn(x, idx_const(0), shape, strides), [2, 8], [0, 1], PadZero)
+  let vy = partition_view(tensor_view_dyn(y, idx_const(0), shape, strides), [2, 8], [0, 1], PadZero)
+  let vz = partition_view(tensor_view_dyn(z, idx_const(0), shape, strides), [2, 8], [0, 1], PadZero)
+  var acc: Tile[F32] = full([2], 0.0)
+  for j in d_range(idx_const(0), index_space_dim(vx, 1)) {
+    let at = [block_id(0), j]
+    acc = acc + reduce_sum(load_view(vx, at) + load_view(vy, at) * 2.0 + load_view(vz, at) * 4.0)
+  }
+  store_cell(out, acc * scalar(scale))
+}
+
+# Independent of the dynamic probe: S2 storage rank, axis 2 and value shape.
+fn entry6_project(x: Param[F32], y: Param[F32], z: Param[F32], out: Param[F32],
+  scale: Param[F32], bias: Param[I32]) -> Unit !Dev = {
+  let a = load_cell(x)
+  if tile_shape(a) != [2, 4] { panic("entry6: projected value shape") }
+  store_cell(out, (a + load_cell(y) * 2.0 + load_cell(z) * 4.0) * scalar(scale) + int_to_float(scalar(bias), F32))
+}
+
+fn entry6_project_record(name: String, heads: Int) -> TileProg = {
+  let hs: ByArch[EntryHints] = if heads == 1 { [for_arch("sm_86", entry_hints(occupancy = Some(2)))] } else { [] }
+  let g = cells([heads, 4, 4], [1, 2, 4], along = [2, 0, 1], squeeze = [0])
+  let body = (x: Param[F32], y: Param[F32], z: Param[F32], o: Param[F32], s: Param[F32], n: Param[I32]) => {
+    let _extent = extent_of(x, 0)
+    let _blocks = blocks_of(x, 1)
+    entry6_project(x, y, z, o, s, n)
+  }
+  let (p, _e) = trace6(name, In(F32, g), In(F32, g), In(F32, g), Out(F32, g), Scalar(F32), Scalar(I32), body, hints = hs)
+  let (q, calls) = trace_calls(name, [],
+    () => body(param(F32, 0), param(F32, 1), param(F32, 2), param(F32, 3), param(F32, 4), param(I32, 5)),
+    hints = hs, markers = [erase(In(F32, g)), erase(In(F32, g)), erase(In(F32, g)), erase(Out(F32, g)), erase(Scalar(F32)), erase(Scalar(I32))])
+  if p != q { panic("entry6: call marks changed projected recording") }
+  if not list.any(calls, c => c.name == "tile_shape" && c.ops_from == c.ops_to && c.at != None) {
+    panic("entry6: tile_shape zero IR source missing")
+  }
+  p
+}
+
 # Trace `name` twice and answer the record, or panic if the two runs differ.
 fn trace_twice(name: String) -> TileProg = {
   let first = trace(name)
   let second = trace(name)
+  if name == "entry6_dynamic" { entry6_dynamic_check(first) }
   if name == "flash_attn" { fa64_source_check(first) }
   if name == "flash_attn_bf16" || name == "flash_attn_bf16_demo" || str.starts_with(name, "flash_bf16_sm") {
     flash_output_check(name, first)
@@ -6604,6 +6659,29 @@ fn trace_twice(name: String) -> TileProg = {
   }
   if first != second { panic("tile-golden: `${name}` traced twice gave two different programs") } else { () }
   first
+}
+
+fn entry6_dynamic_check(p: TileProg) -> Unit = {
+  if p.params != [ByPtr("f32"), ByPtr("f32"), ByPtr("f32"), ByPtr("f32"), ByValue("f32"), ByValue("i32")] {
+    panic("entry6: flat parameter sequence")
+  }
+  let ns = list.filter(p.ops, o => match o { ScalarArg(_d, 5, "i32") -> true
+    _ -> false })
+  if len(ns) != 1 { panic("entry6: sixth scalar dataflow") }
+  let n = match ns[0] { ScalarArg(d, _p, _dt) -> d
+    _ -> -1 }
+  let views = list.filter(p.ops, o => match o {
+    TensorViewOf(_d, k, "f32", _b, shape, [32, 1], [v], []) -> k < 3 && v == n && shape == [4, DYN_DIM]
+    _ -> false
+  })
+  if len(views) != 3 { panic("entry6: dynamicShape must use sixth scalar and capacity stride") }
+  let bounds = list.filter(p.ops, o => match o { IndexSpaceShapeOf(_d, _v, 1) -> true
+    _ -> false })
+  if len(bounds) != 1 { panic("entry6: dynamic index space") }
+  let upper = match bounds[0] { IndexSpaceShapeOf(d, _v, _dim) -> d
+    _ -> -1 }
+  if not list.any(p.ops, o => match o { For(_iv, _lo, hi, _s, _u, _in, _ca, _rs, _body) -> hi == upper
+    _ -> false }) { panic("entry6: dynamic loop bound") }
 }
 
 # Keep the internal same-format cast's zero-operation source witness even
@@ -6898,6 +6976,15 @@ fn fa_config_check() -> Unit = {
 }
 
 pub fn main() -> Unit !io = match args() {
+  ["--entry6-programs"] -> {
+    for name in ["entry6_dynamic", "entry6_project1", "entry6_project3"] {
+      println("${name} ${show(trace_twice(name))}")
+    }
+  }
+  ["--entry6-structure"] -> {
+    entry6_dynamic_check(trace("entry6_dynamic"))
+    println("PASS entry6 dynamicShape and loop dataflow")
+  }
   ["--config-manifest"] -> config_manifest()
   ["--config-check"] -> {
     mm_config_check()
