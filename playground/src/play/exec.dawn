@@ -1250,6 +1250,8 @@ test "with_request removes the request directory when the body fails" {
 # ends the work by the pid `run` recorded under the unit id. A detached supervisor
 # reaps the work, and stop waits for that reap, matching systemctl's synchronous
 # stop instead of racing signal delivery or an orphan's eventual reap by init.
+# The stop loop is bounded independently of run_timed's outer timeout, so a
+# broken fixture reports which completion condition failed within five seconds.
 fn fake_wrapper(d: String) -> String !io = {
   let path = "${d}/fake-sandbox.sh"
   let body =
@@ -1257,7 +1259,7 @@ fn fake_wrapper(d: String) -> String !io = {
     "d=\$(dirname \"\$0\")\n" ++
     "case \"\$1\" in\n" ++
     "  run) id=\$2; shift 2; setsid sh -c 'file=\$1; shift; \"\$@\" & pid=\$!; echo \$pid > \"\$file\"; wait \$pid' sh \"\$d/\$id.pid\" \"\$@\" & wait \$! ;;\n" ++
-    "  stop) pid=\$(cat \"\$d/\$2.pid\"); kill \"\$pid\"; while kill -0 \"\$pid\" 2>/dev/null; do sleep 0.01; done ;;\n" ++
+    "  stop) pid=\$(cat \"\$d/\$2.pid\"); kill \"\$pid\"; timeout 5 sh -c 'while kill -0 \"\$1\" 2>/dev/null; do sleep 0.01; done' sh \"\$pid\" || exit 1; touch \"\$d/\$2.stopped\" ;;\n" ++
     "esac\n"
   let _ = with_fs_real(() => io.write_file(path, body))
   path
@@ -1281,7 +1283,11 @@ test "a timed-out phase is stopped through the wrapper, not only killed" {
   let fake = fake_wrapper(d)
   let unit = fresh_unit()
   assert len(unit) == 32
-  assert run_timed(["sh", fake, "run", unit, "sleep", "30"], "${d}/o.txt", "${d}/o.rc", 1, ["sh", fake, "stop", unit]) == None
+  # Delay termination deliberately: a signal-only stop must fail even on an
+  # idle machine. The detached supervisor still owns and reaps this worker.
+  let work = ["sh", "-c", "trap 'sleep 0.2; exit 0' TERM; while :; do sleep 1; done"]
+  assert run_timed(["sh", fake, "run", unit] ++ work, "${d}/o.txt", "${d}/o.rc", 1, ["sh", fake, "stop", unit]) == None
+  if not present("${d}/${unit}.stopped") { panic("the wrapper did not finish stopping within 5 seconds") }
   # the work the wrapper started is gone by the time the phase returns
   assert not alive(d, unit)
 }
