@@ -34,6 +34,11 @@ saved page instead of fetching one (the live health probe still runs).
 `--self-test` runs the offline cases of the sample comparison below and talks
 to no server.
 
+Runner checks also append a fresh harmless comment to flash_attn and send it
+through /check, /run and all three /compile targets. These five cache misses
+share a 120 second budget and print their added client wall clock. Call totals
+come from the sidebar fixture's existing playground/test/contract.sh oracles.
+
 `PLAY_API_URL` is where the runner checks go, while the static checks stay on
 `PLAY_BASE_URL`. It is the `/api` base itself (no trailing `/run`). The public
 pages are on a CDN and the Playground service is not (docs/site-cdn-design.md),
@@ -51,6 +56,8 @@ import json
 import os
 import pathlib
 import re
+import secrets
+import shlex
 import sys
 import time
 import urllib.error
@@ -131,23 +138,38 @@ class Results:
 # calls and treat 429 as backpressure to wait out, never as a result.
 RUN_PACE_SECS = 5.5
 RUN_429_RETRIES = 6
+# Five sequential cold requests, including pacing and 429 backoff, share this
+# budget. A failed or saturated deployment must not add five long timeouts.
+FLASH_MISS_BUDGET_SECS = 120
+FLASH_MISS_REQUEST_SECS = 30
 
 
 def post_run(api, code, timeout=120):
     """POST one program to /run, waiting out rate limiting. Returns decoded JSON."""
+    return post_json(api, "run", {"code": code}, timeout)
+
+
+def post_json(api, route, payload, timeout=120, deadline=None):
+    """POST JSON, with optional shared deadline for requests and 429 backoff."""
     req = urllib.request.Request(
-        f"{api}/run",
-        data=json.dumps({"code": code}).encode(),
+        f"{api}/{route}",
+        data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
     for attempt in range(RUN_429_RETRIES):
+        remaining = deadline - time.monotonic() if deadline is not None else timeout
+        if remaining <= 0:
+            raise TimeoutError("flash cache-miss budget exhausted")
         try:
-            with OPENER.open(req, timeout=timeout) as resp:
+            with OPENER.open(req, timeout=min(timeout, remaining)) as resp:
                 return json.load(resp)
         except urllib.error.HTTPError as e:
             if e.code != 429 or attempt == RUN_429_RETRIES - 1:
                 raise
-            time.sleep(RUN_PACE_SECS * (attempt + 1))
+            delay = RUN_PACE_SECS * (attempt + 1)
+            if deadline is not None and delay >= deadline - time.monotonic():
+                raise TimeoutError("flash cache-miss budget exhausted during 429 backoff") from e
+            time.sleep(delay)
     raise RuntimeError("unreachable")
 
 
@@ -295,6 +317,99 @@ def check_runner(api, r, pace):
     except Exception as e:  # noqa: BLE001
         r.check(False, "bare arrow lambda is ACCEPTED and runs", f"request failed: {e}")
 
+    check_flash_miss(api, r, pace)
+
+
+def flash_call_counts():
+    """Read the real sidebar fixture's contract oracles, without a local build.
+
+    The static GPU map covers a different recording. The runner contract owns
+    the sidebar's C and Tile totals; its JVM oracle requires the same calls as
+    C. Fail closed if those assertions disappear or become ambiguous.
+    """
+    contract = (ROOT / "playground" / "test" / "contract.sh").read_text()
+    counts = {}
+    paired_jvm = False
+    for line in contract.replace("\\\n", " ").splitlines():
+        if not line.startswith(("ccheck ", "tile_ccheck ")):
+            continue
+        args = shlex.split(line)
+        if args[2] != "$CASES/tile_attn.dawn":
+            continue
+        target = "tile" if args[0] == "tile_ccheck" else args[3]
+        oracle = args[-1]
+        if target == "jvm":
+            paired_jvm = 'd["calls"]==prev["calls"]' in oracle
+            continue
+        matches = re.findall(r'd\["calls_total"\]\s*==\s*([0-9]+)\b', oracle)
+        if len(matches) != 1 or target in counts or int(matches[0]) <= 0:
+            raise ValueError(f"ambiguous flash {target} call-count oracle")
+        counts[target] = int(matches[0])
+    if set(counts) != {"c", "tile"} or not paired_jvm:
+        raise ValueError("missing flash C/Tile totals or paired JVM oracle")
+    return {"c": counts["c"], "jvm": counts["c"], "tile": counts["tile"]}
+
+
+def flash_miss_response(got, route, expected, counts, target=None):
+    """Validate the cold response itself; used unchanged by negative controls."""
+    if not isinstance(got, dict) or got.get("ok") is not True:
+        return False, f"unsuccessful response: {got!r}"
+    # /check and a live /run omit cached; compile views explicitly emit false.
+    if got.get("cached", False) is not False:
+        return False, "response is a cache hit"
+    if route == "check":
+        ok = got.get("phase") == "check"
+    elif route == "run":
+        ok = (got.get("phase") == "run" and got.get("exit") == 0
+              and got.get("truncated") is False
+              and isinstance(got.get("output"), str)
+              and got["output"].encode() == expected)
+    else:
+        pane = got.get("pane", {})
+        calls = got.get("calls", [])
+        ok = (got.get("phase") == "compile-view" and got.get("target") == target
+              and got.get("cached") is False and pane.get("kind") == target
+              and got.get("calls_total") == counts[target]
+              and len(calls) == counts[target]
+              and got.get("calls_truncated") is False
+              and len(pane.get("outs", [])) == counts[target]
+              and "unmapped" not in got
+              and got.get("gaps", {}).get("count") == 0
+              and got["gaps"].get("first") == [])
+    return ok, "" if ok else f"unexpected {route}/{target or ''} response: {got!r}"[:2000]
+
+
+def check_flash_miss(api, r, pace):
+    """Exercise the compile path hidden by the sidebar's precomputed answers."""
+    started = time.monotonic()
+    deadline = started + FLASH_MISS_BUDGET_SECS
+    try:
+        counts = flash_call_counts()
+        source = (SAMPLES / "flash_attn.dawn").read_text()
+        # A fresh suffix on every invocation also misses an on-demand store.
+        # Appending preserves every original source span and stdout position.
+        code = source + ("" if source.endswith("\n") else "\n") + f"# live-check cache miss {secrets.token_hex(16)}\n"
+        expected = (SAMPLES / "flash_attn.out").read_bytes()
+        for route, target in [("check", None), ("run", None),
+                              ("compile", "c"), ("compile", "jvm"), ("compile", "tile")]:
+            name = f"flash cache miss /{route}" + (f" {target} ({counts[target]} calls)" if target else "")
+            try:
+                if route == "run":
+                    time.sleep(min(pace, max(0, deadline - time.monotonic())))
+                payload = {"code": code}
+                if target:
+                    payload["target"] = target
+                got = post_json(api, route, payload, FLASH_MISS_REQUEST_SECS, deadline)
+                ok, detail = flash_miss_response(got, route, expected, counts, target)
+                r.check(ok, name, detail)
+            except Exception as e:  # noqa: BLE001
+                r.check(False, name, f"request failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        r.check(False, "flash cache-miss setup", e)
+    finally:
+        print(f"  flash cache-miss wall clock: {time.monotonic() - started:.2f}s "
+              f"(budget {FLASH_MISS_BUDGET_SECS}s)")
+
 
 def check_site(base, r):
     print(f"== site: {base} ==")
@@ -405,6 +520,90 @@ def self_test_page():
     return failed
 
 
+def self_test_flash_miss():
+    """Drive the real five-request check, proving each corrupt answer is red."""
+    import copy
+    import io
+    from contextlib import redirect_stdout
+    from unittest.mock import patch
+
+    counts = flash_call_counts()
+    expected = (SAMPLES / "flash_attn.out").read_text()
+    source = (SAMPLES / "flash_attn.dawn").read_text()
+    good = {
+        ("check", None): {"ok": True, "phase": "check"},
+        ("run", None): {"ok": True, "phase": "run", "exit": 0,
+                        "output": expected, "truncated": False},
+    }
+    for target, count in counts.items():
+        good["compile", target] = {
+            "ok": True, "phase": "compile-view", "target": target, "cached": False,
+            "calls_total": count, "calls": [{}] * count, "calls_truncated": False,
+            "pane": {"kind": target, "outs": [{}] * count},
+            "gaps": {"count": 0, "first": []},
+        }
+    cases = [("cold flash responses pass", None, {})]
+    cases += [
+        ("stale stdout fails", ("run", None), {"output": expected + "stale\n"}),
+        ("nonzero exit fails", ("run", None), {"exit": 1}),
+    ]
+    for key in good:
+        cases.append((f"cached {key} fails", key, {"cached": True}))
+    for target in counts:
+        key = ("compile", target)
+        cases += [
+            (f"wrong {target} call count fails", key, {"calls_total": counts[target] + 1}),
+            (f"truncated {target} calls fail", key, {"calls": good[key]["calls"][:-1]}),
+            (f"unmapped {target} spans fail", key, {"unmapped": "unmapped source spans"}),
+            (f"{target} gaps fail", key, {"gaps": {"count": 1, "first": ["lost span"]}}),
+        ]
+    failed = 0
+    for label, key, change in cases:
+        responses = copy.deepcopy(good)
+        if key:
+            responses[key].update(change)
+        requests = []
+
+        def post(api, route, payload, timeout, deadline):
+            requests.append((api, route, payload, timeout, deadline))
+            return responses[route, payload.get("target")]
+
+        result = Results()
+        with patch(__name__ + ".post_json", post), redirect_stdout(io.StringIO()):
+            check_flash_miss("http://runner.example.test", result, 0)
+        codes = {req[2]["code"] for req in requests}
+        coherent = ([(req[1], req[2].get("target")) for req in requests] == list(good)
+                    and len(codes) == 1
+                    and all(req[0] == "http://runner.example.test" for req in requests)
+                    and all(req[3] == FLASH_MISS_REQUEST_SECS for req in requests)
+                    and len({req[4] for req in requests}) == 1)
+        if coherent:
+            code = codes.pop()
+            suffix = code[len(source):]
+            coherent = (code.startswith(source) and suffix.startswith("# live-check cache miss ")
+                        and len(suffix.splitlines()) == 1)
+        ok = coherent and result.failed == (1 if key else 0) and result.passed + result.failed == 5
+        print(f"  ok   {label}" if ok else f"FAIL   {label}")
+        failed += not ok
+
+    # No real wait or network: an expired budget must stop before opening a
+    # connection, and a 429 must not sleep past the remaining shared budget.
+    for label, remaining in [("expired miss budget fails", -1),
+                             ("429 cannot outwait miss budget", 1)]:
+        busy = urllib.error.HTTPError("http://runner.example.test/check", 429, "busy", {}, None)
+        with patch.object(OPENER, "open", side_effect=busy) as opening, patch("time.sleep") as sleeping:
+            try:
+                post_json("http://runner.example.test", "check", {}, FLASH_MISS_REQUEST_SECS,
+                          time.monotonic() + remaining)
+                ok = False
+            except TimeoutError:
+                ok = (opening.call_count == (0 if remaining < 0 else 1)
+                      and not sleeping.called)
+        print(f"  ok   {label}" if ok else f"FAIL   {label}")
+        failed += not ok
+    return failed
+
+
 def self_test():
     """The sample comparison, offline: what it forgives and what it still catches."""
     out = b"caught: boom at barriers.dawn:50:46\n"
@@ -469,6 +668,7 @@ def self_test():
         else:
             print(f"  ok   {label}")
     failed += self_test_page()
+    failed += self_test_flash_miss()
     print(f"\nself-test: {failed} failed")
     return 1 if failed else 0
 
