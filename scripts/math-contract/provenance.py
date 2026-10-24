@@ -37,6 +37,7 @@ def main():
     if audit['source_sha256']!=hashlib.sha256((ROOT/'std/math.dawn').read_bytes()).hexdigest():raise AssertionError('stale algorithm audit')
     if audit['auditor_sha256']!=hashlib.sha256((HERE/'audit.py').read_bytes()).hexdigest():raise AssertionError('stale auditor evidence')
     if audit['generator_sha256']!=hashlib.sha256((HERE/'gen.py').read_bytes()).hexdigest():raise AssertionError('stale search generator evidence')
+    if audit['oracle_sha256']!=hashlib.sha256((HERE/'mpfr.py').read_bytes()).hexdigest():raise AssertionError('stale interval oracle evidence')
     registry=json.loads((HERE/'oracle-differences.json').read_text())
     required=set(registry['strictmath_equal'])|set(registry['mpfr_oracles'])|{'sqrt','fma'}
     if set(audit['functions'])!=required:raise AssertionError('missing audited function')

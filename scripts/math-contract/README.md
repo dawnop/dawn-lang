@@ -6,7 +6,7 @@ The license check verifies every pinned digest and every distinct Sun notice in
 both source and embedded std.
 
 The permanent corpus compares raw bits for direct calls, function values and
-108 actual folded constants. Only NaNs are canonicalized. The input contains
+111 actual folded constants. Only NaNs are canonicalized. The input contains
 special values, every log exponent layer, every representable binary power,
 exact root midpoint neighborhoods, fma cancellation and extreme exponents,
 large trig reduction and the recorded accuracy failures with adjacent inputs.

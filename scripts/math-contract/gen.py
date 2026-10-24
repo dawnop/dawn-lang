@@ -99,7 +99,8 @@ def corpus(extra=0):
     for args in [(1+2**-27, 1-2**-27, -1.), (value(1), 0.5, value(1)),
                  (value(0x7fefffffffffffff), 2., -value(0x7fefffffffffffff)),
                  (0., math.inf, 1.), (math.inf, 1., -math.inf),
-                 (1., 2**-1000, 2**1000), (-0., 1., -0.)]:
+                 (1., 2**-1000, 2**1000), (-0., 1., -0.), (1., 1., -1.),
+                 (-0., 1., 0.), (0., 1., -0.)]:
         add('fma', *map(bits, args))
     for _ in range(100):add('fma',rng.getrandbits(64),rng.getrandbits(64),rng.getrandbits(64))
     # Inputs on either side of the square of exact root midpoints.
@@ -179,6 +180,10 @@ fn direct(op: String, x: Float, y: Float, z: Float) -> Float = match op {
         candidates = [chosen[0], chosen[2], next((r for r in chosen if r[1] == bits(0.5)), chosen[-1]), chosen[-1]]
         if op in ['sin','cos','tan']: candidates.append((op, bits(1e300), 0, 0))
         if op == 'tanh': candidates.append((op, bits(float.fromhex('-0x1.da5766c3b4b00p-3')),0,0))
+        if op == 'fma':
+            candidates.extend([('fma',bits(1.),bits(1.),bits(-1.)),
+                               ('fma',bits(-0.),bits(1.),bits(0.)),
+                               ('fma',bits(-0.),bits(1.),bits(-0.))])
         for row in dict.fromkeys(candidates):
             name=f'C{len(constants)}';constants.append(row)
             _, x,y,z=row

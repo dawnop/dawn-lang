@@ -65,6 +65,7 @@ def main():
     report={'mpfr':oracle.version,'input_sha256':hashlib.sha256(a.inputs.read_bytes()).hexdigest(),
             'output_sha256':hashlib.sha256(a.actual.read_bytes()).hexdigest(),'all_intervals_decided':True,
             'functions':summary,'failures':failures,'finite_search_only':True,
+            'oracle_sha256':hashlib.sha256(Path(__file__).with_name('mpfr.py').read_bytes()).hexdigest(),
             'auditor_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             'source_sha256':hashlib.sha256((Path(__file__).resolve().parents[2]/'std/math.dawn').read_bytes()).hexdigest(),
             'generator_sha256':hashlib.sha256(Path(__file__).with_name('gen.py').read_bytes()).hexdigest(),
