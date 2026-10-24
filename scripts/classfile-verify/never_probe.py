@@ -91,7 +91,7 @@ ADD_EXPORTS = ["--add-exports", "java.base/jdk.internal.vm=ALL-UNNAMED"]
 
 
 def compiler_command(jar, *args):
-    return ["java", "-Xss512m", "-Xmx2g", "-jar", str(jar), *args]
+    return ["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", str(jar), *args]
 
 
 def run(command, **kwargs):
@@ -124,7 +124,7 @@ def method_body(disassembly, signature):
 
 
 def javap(class_file):
-    proc = run(["javap", "-c", "-p", str(class_file)])
+    proc = run(["javap", "-J-XX:-UsePerfData", "-c", "-p", str(class_file)])
     return proc.stdout if proc.returncode == 0 else ""
 
 
@@ -356,7 +356,7 @@ def main():
             ])
             if verify.returncode != 0:
                 failed.append("NEVER_CLASSFILE_VERIFY")
-            executed = run(["java", *ADD_EXPORTS, "-cp", str(out_dir), "never_calls"])
+            executed = run(["java", "-XX:-UsePerfData", *ADD_EXPORTS, "-cp", str(out_dir), "never_calls"])
             if executed.returncode != 0 or executed.stdout != EXPECTED or executed.stderr != "":
                 failed.append("NEVER_CALL_RUNTIME")
             if wide_accepts:
@@ -371,7 +371,7 @@ def main():
                 if wide_verify.returncode != 0:
                     failed.append("NEVER_CLASSFILE_VERIFY")
                 wide_executed = run([
-                    "java", *ADD_EXPORTS, "-cp", str(wide_out_dir), "never_wide_sam"
+                    "java", "-XX:-UsePerfData", *ADD_EXPORTS, "-cp", str(wide_out_dir), "never_wide_sam"
                 ])
                 if (
                     wide_executed.returncode != 0

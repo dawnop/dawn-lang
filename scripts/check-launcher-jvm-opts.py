@@ -112,7 +112,7 @@ def static_problems(texts: dict[str, str]) -> list[str]:
         if '"$JAVA"' not in line or "-jar" not in line:
             continue
         want = "$DAWN_RUN_JVM_OPTS" if '-jar "$SJAR"' in line else "$DAWN_JVM_OPTS"
-        if f'"$JAVA" {want} -jar' not in line:
+        if f'"$JAVA" {want} -XX:-UsePerfData -jar' not in line:
             bad.append(f"{LAUNCHER}:{n}: expected {want} on: {line.strip()}")
     child = child_java_cmd(texts[MAIN])
     xss = [o for o in compile_ if o.startswith("-Xss")]
@@ -170,10 +170,13 @@ def behaviour_problems(texts: dict[str, str]) -> list[str]:
         (["test", "lsp"], None, compile_, "`dawn test lsp` (lsp is an argument, not the subcommand)"),
         (["lsp"], "-Xss64m -Xmx64m", ["-Xss64m", "-Xmx64m"], "`dawn lsp` with DAWN_JVM_OPTS given"),
         (["check", "x.dawn"], "-Xmx64m", ["-Xmx64m"], "`dawn check` with DAWN_JVM_OPTS given"),
+        (["check", "x.dawn"], "-Xmx64m -XX:+UsePerfData",
+         ["-Xmx64m", "-XX:+UsePerfData"], "an explicit perf-data override"),
     ]
     bad = []
     for args, env_opts, want, what in cases:
         got, cmd = launched(texts[LAUNCHER], args, env_opts)
+        want = want + ["-XX:-UsePerfData"]
         if got != want or cmd != args[0]:
             bad.append(f"{what}: java got {got} for {cmd!r}, expected {want} for {args[0]!r}")
     return bad
@@ -199,6 +202,9 @@ def self_test() -> None:
     assert problems(texts) == [], problems(texts)
     lsp_line = one(r'^DAWN_LSP_JVM_OPTS="[^"$]*"$', texts[LAUNCHER], LAUNCHER, re.M).group(0)
     regressions = {
+        "the launcher permits HotSpot warnings in compared output":
+            (LAUNCHER, '\nexec "$JAVA" $DAWN_RUN_JVM_OPTS -XX:-UsePerfData -jar',
+             '\nexec "$JAVA" $DAWN_RUN_JVM_OPTS -jar'),
         "the language server default names SerialGC":
             (LAUNCHER, lsp_line, lsp_line.replace(LSP_GC, COMPILE_GC)),
         "the language server default drops -Xss":
@@ -208,14 +214,14 @@ def self_test() -> None:
         "an explicit DAWN_JVM_OPTS is overridden for lsp":
             (LAUNCHER, 'if [ -z "$DAWN_JVM_OPTS_GIVEN" ]; then', 'if true; then'),
         "the repo form's exec runs the compile options":
-            (LAUNCHER, '\nexec "$JAVA" $DAWN_RUN_JVM_OPTS -jar "$SJAR" "$@"\n',
-             '\nexec "$JAVA" $DAWN_JVM_OPTS -jar "$SJAR" "$@"\n'),
+            (LAUNCHER, '\nexec "$JAVA" $DAWN_RUN_JVM_OPTS -XX:-UsePerfData -jar "$SJAR" "$@"\n',
+             '\nexec "$JAVA" $DAWN_JVM_OPTS -XX:-UsePerfData -jar "$SJAR" "$@"\n'),
         "the deployed form's exec runs the compile options":
-            (LAUNCHER, '\n  exec "$JAVA" $DAWN_RUN_JVM_OPTS -jar "$SJAR" "$@"\n',
-             '\n  exec "$JAVA" $DAWN_JVM_OPTS -jar "$SJAR" "$@"\n'),
+            (LAUNCHER, '\n  exec "$JAVA" $DAWN_RUN_JVM_OPTS -XX:-UsePerfData -jar "$SJAR" "$@"\n',
+             '\n  exec "$JAVA" $DAWN_JVM_OPTS -XX:-UsePerfData -jar "$SJAR" "$@"\n'),
         "a rebuild compiles with the language server's options":
-            (LAUNCHER, '"$JAVA" $DAWN_JVM_OPTS -jar "$SEED" build',
-             '"$JAVA" $DAWN_RUN_JVM_OPTS -jar "$SEED" build'),
+            (LAUNCHER, '"$JAVA" $DAWN_JVM_OPTS -XX:-UsePerfData -jar "$SEED" build',
+             '"$JAVA" $DAWN_RUN_JVM_OPTS -XX:-UsePerfData -jar "$SEED" build'),
         "child_java_cmd() drifts from the compile collector":
             (MAIN, '"-XX:+UseSerialGC", "-XX:-UsePerfData"', '"-XX:+UseG1GC", "-XX:-UsePerfData"'),
         "selfhost-bench drifts from the compile default":

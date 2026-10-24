@@ -280,7 +280,7 @@ for entry in dawn/rt/Asm.class dawn/rt/AsmWriter.class; do
     fail "bridge-importing target jar did not contain exactly one $entry"
   fi
 done
-capture bridge-run java -jar "$work/bridge.jar"
+capture bridge-run java -XX:-UsePerfData -jar "$work/bridge.jar"
 if [ "$CAPTURE_STATUS" -ne 0 ] || [ -s "$work/bridge-run.err" ]; then
   cat "$work/bridge-run.out" >&2
   cat "$work/bridge-run.err" >&2
@@ -591,7 +591,7 @@ build_mutant() {
 run_mutant() {
   local label=$1 jar_path=$2
   shift 2
-  capture "$label" java -Xss512m -Xmx2g -jar "$jar_path" "$@"
+  capture "$label" java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar_path" "$@"
 }
 
 build_mutant always-system
@@ -614,7 +614,7 @@ echo "PASS  system-loader check/doc mutant compiles, then loses target dependenc
 build_mutant merge-classpaths
 merged_cp="$repo/fixture/api-a/1/api-a-1.jar$(python3 -c 'import os; print(os.pathsep, end="")')$repo/fixture/api-b/1/api-b-1.jar"
 capture merge-classpaths env DAWN_MUTANT_MERGED_CP="$merged_cp" \
-  java -Xss512m -Xmx2g -jar "$MUTANT_JAR" check "$work/app-a" "$work/app-b"
+  java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$MUTANT_JAR" check "$work/app-a" "$work/app-b"
 if [ "$CAPTURE_STATUS" -ne 1 ] || ! grep -Fq 'onlyB' "$work/merge-classpaths.err"; then
   cat "$work/merge-classpaths.out" >&2
   cat "$work/merge-classpaths.err" >&2
@@ -654,7 +654,7 @@ echo "PASS  planner-fetch mutant compiles, then lets lock I/O hide planner diagn
 
 build_mutant plan-before-preflight
 capture preflight-mutant env COURSIER_CACHE="$work/preflight-mutant-cache" \
-  java -Xss512m -Xmx2g -jar "$MUTANT_JAR" check "$work/no-src"
+  java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$MUTANT_JAR" check "$work/no-src"
 if [ "$CAPTURE_STATUS" -ne 1 ] ||
     ! grep -Fq 'could not resolve dependency fixture:no-such:1' "$work/preflight-mutant.err"; then
   cat "$work/preflight-mutant.out" >&2
@@ -669,7 +669,7 @@ control_jar="$MUTANT_DIR/control.jar"
 build_private_jar close-control "$MUTANT_DIR" "$control_jar"
 control_sentinel="$work/close-control.sentinel"
 capture close-control env DAWN_TARGET_CLOSE_SENTINEL="$control_sentinel" \
-  java -Xss512m -Xmx2g -jar "$control_jar" check "$work/jdk"
+  java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$control_jar" check "$work/jdk"
 if [ "$CAPTURE_STATUS" -ne 0 ] || [ "$(cat "$control_sentinel" 2>/dev/null || true)" != "closed" ]; then
   cat "$work/close-control.out" >&2
   cat "$work/close-control.err" >&2
@@ -680,7 +680,7 @@ bypass_jar="$MUTANT_DIR/bypass.jar"
 build_private_jar bypass-bracket "$MUTANT_DIR" "$bypass_jar"
 bypass_sentinel="$work/bypass.sentinel"
 capture bypass-bracket env DAWN_TARGET_CLOSE_SENTINEL="$bypass_sentinel" \
-  java -Xss512m -Xmx2g -jar "$bypass_jar" check "$work/jdk"
+  java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$bypass_jar" check "$work/jdk"
 if [ "$CAPTURE_STATUS" -ne 0 ] || [ -e "$bypass_sentinel" ]; then
   cat "$work/bypass-bracket.out" >&2
   cat "$work/bypass-bracket.err" >&2

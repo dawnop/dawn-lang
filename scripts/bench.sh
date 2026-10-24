@@ -66,7 +66,7 @@ echo "building examples/projects/json ..."
 # dies of OutOfMemoryError inside a caught region could otherwise "succeed" while
 # printing nothing, and the search would converge on a heap that does not work.
 ok() {
-  [ "$(java "-Xmx${1}m" -jar "$JAR" "$CORPUS" 2>/dev/null)" = "valid" ]
+  [ "$(java -XX:-UsePerfData "-Xmx${1}m" -jar "$JAR" "$CORPUS" 2>/dev/null)" = "valid" ]
 }
 
 lo=4

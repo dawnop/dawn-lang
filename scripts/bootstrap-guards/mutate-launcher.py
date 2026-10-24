@@ -66,7 +66,7 @@ fi
         '''else
   if [ -f "$SJAR" ] &&
       ! find "$ROOT/selfhost/src" -type f -newer "$SJAR" -print -quit | grep -q .; then
-    exec "$JAVA" $DAWN_RUN_JVM_OPTS -jar "$SJAR" "$@"
+    exec "$JAVA" $DAWN_RUN_JVM_OPTS -XX:-UsePerfData -jar "$SJAR" "$@"
   fi
   echo "error: no sha256sum or shasum on PATH" >&2
   exit 1

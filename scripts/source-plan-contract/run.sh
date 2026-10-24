@@ -31,7 +31,7 @@ compare_compiler_inputs() {
 
 run_jar_exact() {
   local jar_path=$1 label=$2
-  if ! java -jar "$jar_path" > "$work/$label.run.out" 2> "$work/$label.run.err"; then
+  if ! java -XX:-UsePerfData -jar "$jar_path" > "$work/$label.run.out" 2> "$work/$label.run.err"; then
     cat "$work/$label.run.err" >&2
     fail "$label jar did not run"
   fi

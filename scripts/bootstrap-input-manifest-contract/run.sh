@@ -39,7 +39,7 @@ run_input_manifest() {
 run_producer() {
   local jar_path=$1 output=$2
   shift 2
-  java -Xss512m -Xmx2g -jar "$jar_path" "$@" > "$output.out" 2> "$output.err"
+  java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar_path" "$@" > "$output.out" 2> "$output.err"
 }
 
 render_probe_manifest() {

@@ -131,7 +131,7 @@ assert_inputs_unchanged() {
   fi
 }
 
-java -Xss512m -jar "$root/build/dawn-selfhost.jar" __emitc \
+java -XX:-UsePerfData -Xss512m -jar "$root/build/dawn-selfhost.jar" __emitc \
   "$root/selfhost/src/nmain.dawn" -o "$work/A.c" --build-info "$work/A.info.c" \
   --split "$work/A.units"
 assert_inputs_unchanged "after generation A"
@@ -177,7 +177,7 @@ fi
 # the fixed-point compiler reads the manifest it was linked with, and the JVM
 # reader finds the same one in the file without running it
 self_line="$("$work/dawnc-B" --version)"
-listed="$(java -Xss512m -jar "$root/build/dawn-selfhost.jar" version -m "$work/dawnc-B" \
+listed="$(java -XX:-UsePerfData -Xss512m -jar "$root/build/dawn-selfhost.jar" version -m "$work/dawnc-B" \
   | sed -n 's/^\tbuild\tb1:\([0-9a-f]\{12\}\).*$/\1/p')"
 if [ -z "$listed" ] || [ "$self_line" != "${self_line% b1:*} b1:$listed" ]; then
   echo "FAIL: dawnc-B says '$self_line', its manifest lists b1:${listed:-<none>}" >&2

@@ -14,7 +14,8 @@ mkdir -p "$W/work" "$W/slots"
 export PLAY_UNSAFE_LOCAL=1 PLAY_WORK_ROOT="$W/work" PLAY_SLOT_DIR="$W/slots"
 export PLAY_PACKAGES="$ROOT/packages" PLAY_COMPILE_TIMEOUT=60 PLAY_TIMEOUT=10
 export DAWN_BIN="$ROOT/bin/dawn"
-export PLAY_JAVAP="${JAVA_HOME:?a JDK is required}/bin/javap" PLAY_JAVA="$JAVA_HOME/bin/java"
+: "${JAVA_HOME:?a JDK is required}"
+export PLAY_JAVAP="$ROOT/playground/test/javap-no-perf.sh" PLAY_JAVA="$ROOT/playground/test/java-no-perf.sh"
 PLAY_TOOLCHAIN_ID=$("$DAWN_BIN" --version | tail -n 1 | sed -e 's/^dawn //' -e 's/ (selfhost)//')
 export PLAY_TOOLCHAIN_ID
 DAWNC=$(DAWNC_BIN="${PLAY_TEST_DAWNC:-${DAWNC_BIN:-}}" bash -euc '. site/dawnc.sh; site_dawnc')

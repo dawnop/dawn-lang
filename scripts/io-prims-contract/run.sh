@@ -126,7 +126,7 @@ native "$OUT/streams.c" "$ROOT/runtime/c" "$OUT/streams-asan" san
 # is the claim. Its resident set is the JVM's own (78 MiB on one JDK, 274 MiB on
 # the GraalVM one CI uses, with the heap capped the same) and is reported, not
 # bounded.
-JVM_PROG=("$JAVA" -Xmx64m -jar "$OUT/streams.jar")
+JVM_PROG=("$JAVA" -XX:-UsePerfData -Xmx64m -jar "$OUT/streams.jar")
 $CHECK ready -- "${JVM_PROG[@]}"
 $CHECK append --mb "$MB" -- "${JVM_PROG[@]}"
 $CHECK range --mb "$MB" -- "${JVM_PROG[@]}"

@@ -173,7 +173,7 @@ for mutation in "${MUTANTS[@]}"; do
   fi
   cat > "$mutant/dawn" <<EOF
 #!/bin/sh
-exec java -Xss512m -Xmx2g -jar "$mutant/compiler.jar" "\$@"
+exec java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$mutant/compiler.jar" "\$@"
 EOF
   chmod +x "$mutant/dawn"
   if ! "$mutant/dawn" --version > "$mutant/version.out" 2>&1; then

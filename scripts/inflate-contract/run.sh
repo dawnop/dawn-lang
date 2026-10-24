@@ -179,7 +179,7 @@ if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
   java="$JAVA_HOME/bin/java"
 fi
 "$root/bin/dawn" build "$work" -o "$work/probe.jar" > /dev/null
-if "$java" -Xss512m -Xmx256m -jar "$work/probe.jar" --bomb 512 \
+if "$java" -XX:-UsePerfData -Xss512m -Xmx256m -jar "$work/probe.jar" --bomb 512 \
     > "$bomb_out" 2>&1 && [ "$(tail -n 1 "$bomb_out")" = "mismatches 0" ]; then
   echo "PASS  a 512MB compression bomb is refused inside a 256MB heap"
 else
@@ -194,7 +194,7 @@ fi
 # OutOfMemoryError; the default ceiling has to refuse each of them and say so.
 # This is the leg that goes red if the default is ever put back to `None`.
 default_out="$work/bomb-default.txt"
-if "$java" -Xss512m -Xmx256m -jar "$work/probe.jar" --bomb-default 512 \
+if "$java" -XX:-UsePerfData -Xss512m -Xmx256m -jar "$work/probe.jar" --bomb-default 512 \
     > "$default_out" 2>&1 && [ "$(tail -n 1 "$default_out")" = "mismatches 0" ]; then
   echo "PASS  the default ceiling refuses a 512MB bomb inside a 256MB heap, at every entry point"
 else
@@ -213,7 +213,7 @@ fi
 # a stream. Hoisted and linear, they take well under a second, so a 30 s limit
 # is far from both and does not care how loaded the machine is.
 empty_out="$work/empty-fixed.txt"
-if timeout 30 "$java" -Xss512m -Xmx2g -XX:+UseSerialGC -jar "$work/probe.jar" \
+if timeout 30 "$java" -XX:-UsePerfData -Xss512m -Xmx2g -XX:+UseSerialGC -jar "$work/probe.jar" \
     --empty-blocks fixed 40000 > "$empty_out" 2>&1 &&
     [ "$(tail -n 1 "$empty_out")" = "mismatches 0" ]; then
   echo "PASS  40000 empty fixed blocks decode in linear time"

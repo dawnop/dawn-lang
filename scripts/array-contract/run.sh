@@ -43,7 +43,7 @@ cp "$here/array.dawn" "$work/"
 echo array >> "$work/modules.txt"
 
 out="$work/out.txt"
-java -Xss512m -jar "$jar" run --std "$work" "$here/probe.dawn" > "$out"
+java -XX:-UsePerfData -Xss512m -jar "$jar" run --std "$work" "$here/probe.dawn" > "$out"
 
 if ! diff -u "$here/expected.txt" <(grep -v '^linear\|^forked\|^extendlinear' "$out"); then
   echo "FAIL: Array value semantics changed" >&2
@@ -157,7 +157,7 @@ echo "PASS  steal rate: with ${with_in}/$((with_in + with_cp)) in place, steal $
 # extend workload rides at the end of that binary, and the shell's `timeout`
 # is its clock: milliseconds with the in-place claim, tens of minutes without.
 nat_bin="$work/probe_native"
-java -Xss512m -jar "$jar" __emitc --std "$work" "$here/native_probe.dawn" -o "$work/probe_native.c"
+java -XX:-UsePerfData -Xss512m -jar "$jar" __emitc --std "$work" "$here/native_probe.dawn" -o "$work/probe_native.c"
 "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
   -Wall -Wextra -Werror \
   -Wno-unused-variable -Wno-unused-but-set-variable \

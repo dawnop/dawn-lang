@@ -159,7 +159,7 @@ add_exports=(--add-exports java.base/jdk.internal.vm=ALL-UNNAMED)
 
 emit() { # emit <outdir> <prefix-of-classpath-or-empty>
   mkdir -p "$1"
-  java -Xss512m "${add_exports[@]}" -cp "${2:+$2:}$root/build/dawn-selfhost.jar" main \
+  java -XX:-UsePerfData -Xss512m "${add_exports[@]}" -cp "${2:+$2:}$root/build/dawn-selfhost.jar" main \
     __emit selfhost -o "$1" > /dev/null
   for c in Asm AsmWriter; do
     if [ ! -f "$1/dawn/rt/$c.class" ]; then
@@ -178,7 +178,7 @@ javac -cp "$root/build/dawn-selfhost.jar" -d "$work" scripts/asm-adapter-contrac
 # question about which `dawn.rt.Asm` a check looked at. It carries the same
 # export: it defines emitted Dawn classes, and a run that loads emitted classes
 # under conditions no real run has is the thing 8d825aff was about.
-java "${add_exports[@]}" -cp "$work:$work/ref:$root/build/dawn-selfhost.jar" Diff \
+java -XX:-UsePerfData "${add_exports[@]}" -cp "$work:$work/ref:$root/build/dawn-selfhost.jar" Diff \
   "$work/self/dawn/rt/Asm.class" \
   "$work/ddc/dawn/rt/Asm.class" \
   "$work/canary-emit/dawn/rt/Asm.class" \

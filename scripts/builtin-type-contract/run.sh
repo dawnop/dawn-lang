@@ -101,7 +101,7 @@ build_mutant() {
     cat "$mutant/build.out" >&2
     fail "$1 mutant did not compile"
   fi
-  if ! java -jar "$mutant/compiler.jar" --version \
+  if ! java -XX:-UsePerfData -jar "$mutant/compiler.jar" --version \
       > "$mutant/version.out" 2>&1; then
     cat "$mutant/version.out" >&2
     fail "$1 mutant jar did not answer --version"

@@ -23,15 +23,15 @@ def main():
                 raise RuntimeError('unexpected emission failure: ' + emitted.stderr + emitted.stdout)
             print('ASSERT: NEVER_STATEMENT_FLOW')
             return 1
-        verified = run(['java', *ADD_EXPORTS, '-cp', f'{verifier}:{jar}', 'Verify', str(out)])
+        verified = run(['java', "-XX:-UsePerfData", *ADD_EXPORTS, '-cp', f'{verifier}:{jar}', 'Verify', str(out)])
         if verified.returncode:
             raise RuntimeError('statement class verification failed: ' + verified.stderr + verified.stdout)
-        executed = run(['java', *ADD_EXPORTS, '-cp', str(out), 'never_statements'])
+        executed = run(['java', "-XX:-UsePerfData", *ADD_EXPORTS, '-cp', str(out), 'never_statements'])
         if executed.returncode or executed.stdout != expected or executed.stderr:
             print('ASSERT: NEVER_STATEMENT_FLOW')
             print(executed.stdout + executed.stderr)
             return 1
-        taken = run(['java', *ADD_EXPORTS, '-cp', str(out), 'never_statements', 'take-lists'])
+        taken = run(['java', "-XX:-UsePerfData", *ADD_EXPORTS, '-cp', str(out), 'never_statements', 'take-lists'])
         taken_expected = expected.replace('21\n22\n', 'stop\nstop\n')
         if taken.returncode or taken.stdout != taken_expected or taken.stderr:
             print('ASSERT: NEVER_STATEMENT_FLOW')

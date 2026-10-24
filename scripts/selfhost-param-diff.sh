@@ -66,7 +66,7 @@ fi
 # The one seed invocation, used for the dump and the canary alike, so the
 # canary tests the very command line that produced the dump.
 seed_doc() { # std-dir
-  (cd "$OUT/seed-cwd" && "$SEEDJAVA" -Xss512m -jar "$SEEDJAR" doc --stdlib --std "$1")
+  (cd "$OUT/seed-cwd" && "$SEEDJAVA" -XX:-UsePerfData -Xss512m -jar "$SEEDJAR" doc --stdlib --std "$1")
 }
 
 seed_doc "$SEED_STD" > "$OUT/seed.json"

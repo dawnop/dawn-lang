@@ -87,7 +87,7 @@ run_contract() {
     --fixture-root "$work/fixtures" \
     --maven-repo "$repo" \
     --cache "$work/cache" \
-    -- java -Xss512m -Xmx2g -jar "$jar_path" lsp
+    -- java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar_path" lsp
 }
 
 prepare_subject observed

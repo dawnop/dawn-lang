@@ -303,7 +303,7 @@ if [ "$jar_sha" != "$sidecar_sha" ]; then
 fi
 
 jar_version_file="$work/jar-version.txt"
-if ! java -Xss512m -jar "$jar_file" --version > "$jar_version_file"; then
+if ! java -XX:-UsePerfData -Xss512m -jar "$jar_file" --version > "$jar_version_file"; then
   die "the $tag release JAR does not run"
 fi
 # Since build manifests (docs/build-info-design.md) the line ends in the short

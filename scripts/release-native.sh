@@ -102,7 +102,7 @@ echo "building $(basename "$OUT") ($VERSION) from selfhost/src/nmain.dawn..."
 if [ -n "$JAR" ]; then
   # release.yml hands us the jar it is about to publish, so the binary is that
   # jar's own output rather than a second toolchain built beside it.
-  DAWN_JVM=(java -Xss512m -jar "$JAR")
+  DAWN_JVM=(java -XX:-UsePerfData -Xss512m -jar "$JAR")
 else
   DAWN_JVM=(./bin/dawn)
 fi

@@ -67,7 +67,7 @@ sys.path.insert(0, str(HERE))
 from dawnmap import load, unit_line  # noqa: E402
 
 DAWN_BIN = os.environ.get("DAWN_BIN", str(ROOT / "bin" / "dawn"))
-DAWN = (["java", "-Xss512m", "-Xmx4g", "-jar", DAWN_BIN] if DAWN_BIN.endswith(".jar") else [DAWN_BIN])
+DAWN = (["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx4g", "-jar", DAWN_BIN] if DAWN_BIN.endswith(".jar") else [DAWN_BIN])
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
 
 CASES = ["corpus", "kernels", "nmain"]

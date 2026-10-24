@@ -54,7 +54,7 @@ expect() {
   # the same option run.sh puts on the gate's own Verify runs, so the mutants
   # below prove the command shape the corpora are checked with, not a variant
   # of it. These fixtures name no jdk.internal class; the flag is inert here.
-  java --add-exports java.base/jdk.internal.vm=ALL-UNNAMED -cp "$vcp" Verify \
+  java -XX:-UsePerfData --add-exports java.base/jdk.internal.vm=ALL-UNNAMED -cp "$vcp" Verify \
     "$work/$name" > "$work/$name.out" 2> "$work/$name.err" || got=$?
   if [ "$got" != "$want" ]; then
     echo "SELFTEST FAIL $name: exit $got, expected $want" >&2

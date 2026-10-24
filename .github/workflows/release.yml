@@ -203,13 +203,13 @@ jobs:
           # carries (docs/build-info-design.md). The expected digest is
           # computed by listing this checkout's selfhost sources, so the
           # comparison also says the jar was built from the tagged tree.
-          BUILD=$(java -Xss512m -jar dawn-selfhost.jar version -m selfhost \
+          BUILD=$(java -XX:-UsePerfData -Xss512m -jar dawn-selfhost.jar version -m selfhost \
             | sed -nE 's/^\tbuild\t(b1:[0-9a-f]{12})[0-9a-f]{52}$/\1/p')
           if [ -z "$BUILD" ]; then
             echo "::error::'version -m selfhost' printed no build digest"
             exit 1
           fi
-          OUT=$(java -Xss512m -jar dawn-selfhost.jar --version)
+          OUT=$(java -XX:-UsePerfData -Xss512m -jar dawn-selfhost.jar --version)
           echo "$OUT"
           if [ "$OUT" != "dawn $VERSION (selfhost) $BUILD" ]; then
             echo "::error::--version said '$OUT', expected 'dawn $VERSION (selfhost) $BUILD'"
@@ -260,7 +260,7 @@ jobs:
         run: |
           python3 scripts/api-diff.py --self-test
           python3 scripts/api-snapshot.py \
-            --dawn "java -Xss512m -jar $PWD/dawn-selfhost.jar" \
+            --dawn "java -XX:-UsePerfData -Xss512m -jar $PWD/dawn-selfhost.jar" \
             -o dawn-pub-api.json
           PREVIOUS=$(
             gh release list --limit 30 --json tagName --jq '.[].tagName' \

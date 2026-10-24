@@ -111,9 +111,9 @@ def env_for(work, slots):
         "PLAY_COMPILE_TIMEOUT": "60",
     })
     jh = e.get("JAVA_HOME", "")
+    e["PLAY_JAVA"] = os.path.join(ROOT, "playground/test/java-no-perf.sh")
+    e["PLAY_JAVAP"] = os.path.join(ROOT, "playground/test/javap-no-perf.sh")
     if jh:
-        e["PLAY_JAVA"] = os.path.join(jh, "bin", "java")
-        e["PLAY_JAVAP"] = os.path.join(jh, "bin", "javap")
         e["PATH"] = os.path.join(jh, "bin") + ":" + e["PATH"]
     return e
 

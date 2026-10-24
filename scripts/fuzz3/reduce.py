@@ -654,7 +654,7 @@ class Reducer:
         rc, o, e = self.tc.dawn("build", str(src), "-o", str(jar))
         if rc != 0:
             return None
-        rc, o, e = run.sh(["java", "-Xss512m", "-jar", str(jar)], timeout=RUN_TIMEOUT)
+        rc, o, e = run.sh(["java", "-XX:-UsePerfData", "-Xss512m", "-jar", str(jar)], timeout=RUN_TIMEOUT)
         if rc != 0:
             return None
         return "\n".join(l for l in o.split("\n") if not l.startswith("@@ ")).rstrip("\n") + "\n"

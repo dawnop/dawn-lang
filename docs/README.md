@@ -46,6 +46,8 @@ Playground 补全生成入口：[play-ui-builtins-design.md](play-ui-builtins-de
 
 ## 当前架构与流程
 
+[JVM 差分输出与 perf-data 审查](jvm-perf-data-audit.md)。
+
 | 文档 | 生命周期 | 说明 |
 |---|---|---|
 | [incremental-semantics-removal.md](incremental-semantics-removal.md) | current | 2026-09-27 拆除增量引擎的 opt-in 切片（体级重放、准入类别、读取日志与写日志）：三次 G3 实测为什么判它不值钱、两刀各拆了什么、留下的身份/调度/按键产物为什么是 laziness 的地基，以及不做的。 |

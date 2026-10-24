@@ -187,7 +187,7 @@ printf '%s\n' "${mutations[@]}" | xargs -P 4 -I{} bash -c 'build_one "$1" "$2" "
   fail "a mutant compiler did not build"
 for m in "${mutations[@]}"; do
   mdir="$work/$m/compiler"
-  printf '#!/bin/sh\nexec java -Xss512m -Xmx2g -jar "%s" "$@"\n' "$mdir/compiler.jar" > "$mdir/dawn"
+  printf '#!/bin/sh\nexec java -XX:-UsePerfData -Xss512m -Xmx2g -jar "%s" "$@"\n' "$mdir/compiler.jar" > "$mdir/dawn"
   chmod +x "$mdir/dawn"
 done
 

@@ -34,7 +34,7 @@ trap 'rm -rf "$OUT"' EXIT
 
 SEEDJAR="$(seed_jar)"
 SEEDJAVA="$(seed_java)"
-printf '#!/bin/sh\nexec "%s" -Xss512m -jar "%s" "$@"\n' "$SEEDJAVA" "$SEEDJAR" > "$OUT/seed-cli"
+printf '#!/bin/sh\nexec "%s" -XX:-UsePerfData -Xss512m -jar "%s" "$@"\n' "$SEEDJAVA" "$SEEDJAR" > "$OUT/seed-cli"
 chmod +x "$OUT/seed-cli"
 DAWN=${DAWN_BIN:-"$OUT/seed-cli"}
 SELF=${DAWN_SELF:-./bin/dawn}

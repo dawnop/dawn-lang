@@ -128,7 +128,7 @@ if ! "$dawn" build "$mutant/selfhost" -o "$mutant/compiler.jar" \
   cat "$mutant/build.out" >&2
   fail "$mutation mutant did not compile"
 fi
-if ! java -Xss512m -Xmx2g -jar "$mutant/compiler.jar" --version \
+if ! java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$mutant/compiler.jar" --version \
     > "$mutant/version.out" 2>&1; then
   cat "$mutant/version.out" >&2
   fail "$mutation mutant compiled but --version exited nonzero"
@@ -139,7 +139,7 @@ if ! version_answers "$mutant/version.out"; then
 fi
 cat > "$mutant/dawn" <<EOF
 #!/bin/sh
-exec java -Xss512m -Xmx2g -jar "$mutant/compiler.jar" "\$@"
+exec java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$mutant/compiler.jar" "\$@"
 EOF
 chmod +x "$mutant/dawn"
 

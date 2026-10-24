@@ -104,7 +104,7 @@ def mutants(work):
             jar = tree / "compiler.jar"
             run([DAWN, "build", tree / "selfhost", "-o", jar])
             source = tree / "broken.c"
-            run(["java", "-Xss512m", "-Xmx2g", "-jar", jar, "__emitc", HERE / "roundtrip.dawn", "-o", source])
+            run(["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", jar, "__emitc", HERE / "roundtrip.dawn", "-o", source])
             binary = tree / "broken"
             compile_c(source, binary, SAN)
             r = run([binary], good=False, env=ENV)

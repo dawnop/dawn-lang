@@ -131,7 +131,7 @@ build_never_mutant() {
     cat "$never_mutant/build.out" >&2
     never_die "$1 mutant did not compile"
   fi
-  if ! java -jar "$never_mutant/compiler.jar" --version \
+  if ! java -XX:-UsePerfData -jar "$never_mutant/compiler.jar" --version \
       > "$never_mutant/version.out" 2>&1; then
     cat "$never_mutant/version.out" >&2
     never_die "$1 mutant jar did not answer --version"
@@ -284,7 +284,7 @@ for t in "${corpus[@]}"; do
   ./bin/dawn __emit "$t" -o "$out" > /dev/null
   # the toolchain jar (and its lib/) sit on the parent class path: selfhost's
   # own classes reference the vendored ASM and coursier types
-  if java "${add_exports[@]}" -cp "$work:$root/build/dawn-selfhost.jar" Verify "$out" \
+  if java -XX:-UsePerfData "${add_exports[@]}" -cp "$work:$root/build/dawn-selfhost.jar" Verify "$out" \
       | sed "s|^|  $t: |"; then
     :
   else
@@ -301,7 +301,7 @@ echo "OK: every emitted class links, and every reference it names resolves and i
 # The export above is needed by the corpora that reach the control runtime,
 # not by merely importing a declaration from std. Both directions are held
 # against emitted program references, independently of reach.Live's answer.
-java -cp "$work" ControlFreightCheck "$work"/emit/*
+java -XX:-UsePerfData -cp "$work" ControlFreightCheck "$work"/emit/*
 quiet="$work/emit/examples_text_chars.dawn"
 unused="$work/emit/scripts_classfile-verify_control_unused.dawn"
 suspends="$work/emit/scripts_spike-native_ctl_resume.dawn"
@@ -338,7 +338,7 @@ for name in Ctl CtlCont CtlK; do
   rm "$missing_ctl/dawn/rt/$name.class"
 done
 for mutant in "$extra_ctl" "$missing_ctl"; do
-  if java -cp "$work" ControlFreightCheck "$mutant" > "$mutant.log" 2>&1; then
+  if java -XX:-UsePerfData -cp "$work" ControlFreightCheck "$mutant" > "$mutant.log" 2>&1; then
     echo "FAIL: CONTROL_FREIGHT accepted artifact mutant $mutant" >&2
     exit 1
   fi
@@ -352,19 +352,19 @@ string_ctl="$work/control-string"
 mkdir -p "$signature_ctl" "$string_ctl"
 javac -cp "$suspends" -d "$signature_ctl" scripts/classfile-verify/ControlSignatureFixture.java
 javac -d "$string_ctl" scripts/classfile-verify/ControlStringFixture.java
-if java -cp "$work" ControlFreightCheck "$signature_ctl" > "$signature_ctl.log" 2>&1; then
+if java -XX:-UsePerfData -cp "$work" ControlFreightCheck "$signature_ctl" > "$signature_ctl.log" 2>&1; then
   echo "FAIL: CONTROL_FREIGHT ignored declaration-only runtime descriptors" >&2
   exit 1
 fi
 grep -q '^CONTROL_FREIGHT FAIL:' "$signature_ctl.log"
-java -cp "$work" ControlFreightCheck "$string_ctl"
+java -XX:-UsePerfData -cp "$work" ControlFreightCheck "$string_ctl"
 mkdir -p "$signature_ctl/dawn/rt" "$string_ctl/dawn/rt"
 for name in Ctl CtlCont CtlK; do
   cp "$suspends/dawn/rt/$name.class" "$signature_ctl/dawn/rt/$name.class"
   cp "$suspends/dawn/rt/$name.class" "$string_ctl/dawn/rt/$name.class"
 done
-java -cp "$work" ControlFreightCheck "$signature_ctl"
-if java -cp "$work" ControlFreightCheck "$string_ctl" > "$string_ctl.log" 2>&1; then
+java -XX:-UsePerfData -cp "$work" ControlFreightCheck "$signature_ctl"
+if java -XX:-UsePerfData -cp "$work" ControlFreightCheck "$string_ctl" > "$string_ctl.log" 2>&1; then
   echo "FAIL: CONTROL_FREIGHT treated an ordinary string as a runtime reference" >&2
   exit 1
 fi
@@ -403,7 +403,7 @@ build_operand_mutant unspilled-loop-operands
 expect_operand_frame_failure() {
   local fixture="$1"
   local output="$never_mutant/$(basename "$fixture").out"
-  if java -Xss512m -jar "$never_mutant/compiler.jar" __emit \
+  if java -XX:-UsePerfData -Xss512m -jar "$never_mutant/compiler.jar" __emit \
       --std "$root/std" "$fixture" -o "$never_mutant/emit" > "$output" 2>&1; then
     never_die "LOOP_OPERAND_STACK: the unspilled emitter accepted $fixture"
   fi
@@ -428,9 +428,9 @@ echo "OK: LOOP_OPERAND_STACK mutant reproduces the original ASM frame failure"
 javac --release 21 -d "$work/operand-probe" scripts/classfile-verify/InitOrder.java
 jar cf "$work/operand-probe.jar" -C "$work/operand-probe" .
 init_fixture=scripts/classfile-verify/constructor_init.dawn
-java -Xss512m "${add_exports[@]}" -cp "$root/build/dawn-selfhost.jar:$work/operand-probe.jar" main \
+java -XX:-UsePerfData -Xss512m "${add_exports[@]}" -cp "$root/build/dawn-selfhost.jar:$work/operand-probe.jar" main \
   __emit --std "$root/std" "$init_fixture" -o "$work/init-classes" > /dev/null
-java "${add_exports[@]}" -cp "$work:$root/build/dawn-selfhost.jar:$work/operand-probe.jar" \
+java -XX:-UsePerfData "${add_exports[@]}" -cp "$work:$root/build/dawn-selfhost.jar:$work/operand-probe.jar" \
   Verify "$work/init-classes"
 ./bin/dawn run --cp "$work/operand-probe.jar" "$init_fixture" -- control > "$work/init-control.out"
 diff -u scripts/classfile-verify/constructor_init_control.expect "$work/init-control.out"
@@ -439,7 +439,7 @@ diff -u scripts/classfile-verify/constructor_init.expect "$work/init-jumps.out"
 
 new_never_mutant late-java-constructor-init
 build_operand_mutant late-java-constructor-init
-java -Xss512m -jar "$never_mutant/compiler.jar" run --cp "$work/operand-probe.jar" \
+java -XX:-UsePerfData -Xss512m -jar "$never_mutant/compiler.jar" run --cp "$work/operand-probe.jar" \
   "$init_fixture" > "$work/init-mutant.out"
 if diff -q scripts/classfile-verify/constructor_init.expect "$work/init-mutant.out" > /dev/null; then
   never_die "JAVA_NEW_ORDER: the delayed NEW mutant preserved initialization order"
@@ -461,7 +461,7 @@ echo "OK: JAVA_NEW_ORDER preserves initialization before escaping argument effec
 mut="$work/corpus-mutant"
 cp -r "$work/emit/selfhost" "$mut"
 scripts/classfile-verify/privatise.py "$mut/dawn/rt/Strings.class" join
-if java "${add_exports[@]}" -cp "$work:$root/build/dawn-selfhost.jar" Verify "$mut" \
+if java -XX:-UsePerfData "${add_exports[@]}" -cp "$work:$root/build/dawn-selfhost.jar" Verify "$mut" \
     > /dev/null 2>&1; then
   echo "FAIL: the gate passed a corpus with a private dawn/rt/Strings.join in it," >&2
   echo "      so its verdict on the real corpora carries no information" >&2

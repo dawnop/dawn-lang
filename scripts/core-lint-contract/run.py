@@ -138,7 +138,7 @@ def compile_with(jar: Path, backend: str, prog: Path, out: Path, lint: bool):
         env["DAWN_CORE_LINT"] = "1"
     mode = "__emit" if backend == "jvm" else "__emitc"
     target = out / (prog.name + (".classes" if backend == "jvm" else ".c"))
-    return run(["java", "-Xss512m", "-Xmx2g", "-jar", str(jar), mode, str(prog), "-o", str(target)],
+    return run(["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", str(jar), mode, str(prog), "-o", str(target)],
                env=env, timeout=300)
 
 

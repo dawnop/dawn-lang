@@ -79,9 +79,9 @@ fi
 export JAVA_HOME
 export PATH="$JAVA_HOME/bin:$PATH"
 export DAWN_BIN="$ROOT/bin/dawn"
-export PLAY_JAVA="$JAVA_HOME/bin/java"
+export PLAY_JAVA="$ROOT/playground/test/java-no-perf.sh"
 # /compile lists the class with javap, which belongs to the same JDK as java.
-export PLAY_JAVAP="$JAVA_HOME/bin/javap"
+export PLAY_JAVAP="$ROOT/playground/test/javap-no-perf.sh"
 # The Tile IR view imports the packages the runner's manifest names.
 export PLAY_PACKAGES="$ROOT/packages"
 export PLAY_TIMEOUT=3

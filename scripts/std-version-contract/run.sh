@@ -256,7 +256,7 @@ check_mutant() {
     fail "$name mutant did not compile"
   fi
 
-  printf '#!/bin/sh\nexec java -Xss512m -Xmx2g -jar "%s" "$@"\n' "$dir/compiler.jar" > "$dir/cli"
+  printf '#!/bin/sh\nexec java -XX:-UsePerfData -Xss512m -Xmx2g -jar "%s" "$@"\n' "$dir/compiler.jar" > "$dir/cli"
   chmod +x "$dir/cli"
 
   run_all_assertions "$dir/cli" "$name" > "$dir/assert"
@@ -311,7 +311,7 @@ if ! "$dawn" build "$probe/selfhost" -o "$probe/compiler.jar" > "$probe/build.ou
   fail "the embedded-std probe did not compile"
 fi
 set +e
-java -Xss512m -Xmx2g -jar "$probe/compiler.jar" check --std "$work/there-is-no-std-here" \
+java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$probe/compiler.jar" check --std "$work/there-is-no-std-here" \
   "$work/proj/hello.dawn" > "$probe/out" 2>&1
 probe_status=$?
 set -e

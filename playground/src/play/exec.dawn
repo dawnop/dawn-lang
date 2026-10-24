@@ -753,7 +753,7 @@ fn diagnostics(dir: String, box: String, name: String) -> String !io = {
 # file is its stem, and the file is always prog.dawn; the module of a project
 # is `main`.
 fn list_and_gather(dir: String, box: String, started: Instant, module: String) -> ViewRaw !io = {
-  let argv = [javap_bin(), "-J-Xmx128m", "-J-Dstdout.encoding=UTF-8", "-c", "-p", "-s", "${box}/classes/${module}.class"]
+  let argv = [javap_bin(), "-J-Xmx128m", "-J-XX:-UsePerfData", "-J-Dstdout.encoding=UTF-8", "-c", "-p", "-s", "${box}/classes/${module}.class"]
   match await_unit(dir, box, "javap", argv, budget_left(started)) {
     None -> RawBroken("the listing tool timed out")
     Some(code) ->
@@ -973,7 +973,7 @@ fn run_phase(dir: String, box: String) -> Outcome !io = {
   let run_out = "${dir}/run.txt"
   let unit = fresh_unit()
   let started = tick()
-  match run_timed(sandboxed(unit, box, [java_bin(), RUN_HEAP, "-jar", "${box}/prog.jar"]), run_out, "${dir}/run.rc", timeout_secs(), stop_argv(unit)) {
+  match run_timed(sandboxed(unit, box, [java_bin(), RUN_HEAP, "-XX:-UsePerfData", "-jar", "${box}/prog.jar"]), run_out, "${dir}/run.rc", timeout_secs(), stop_argv(unit)) {
     Some(code) -> {
       let ms = ms_since(started)
       let (out, cut) = shown(run_out, dir, box)

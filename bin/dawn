@@ -150,13 +150,16 @@ if [ -z "$DAWN_JVM_OPTS_GIVEN" ]; then
   esac
 fi
 
+# Disable HotSpot perf-data files after the configurable options: a pid-file
+# collision can print a VM warning into a compiler or LSP transcript. No Dawn
+# harness consumes these counters, and program stderr must remain untouched.
 # deployed form: no sources, no seed resolver — run the shipped jar as-is
 if [ ! -f "$ROOT/scripts/seedjar.sh" ]; then
   if [ ! -f "$SJAR" ]; then
     echo "error: $SJAR not found (deployments must ship build/dawn-selfhost.jar)" >&2
     exit 2
   fi
-  exec "$JAVA" $DAWN_RUN_JVM_OPTS -jar "$SJAR" "$@"
+  exec "$JAVA" $DAWN_RUN_JVM_OPTS -XX:-UsePerfData -jar "$SJAR" "$@"
 fi
 
 . "$ROOT/scripts/seedjar.sh"
@@ -929,7 +932,7 @@ cache_pair_matches_locked() {
 produce_manifest() {
   producer_jar=$1
   producer_output=$2
-  if ! "$JAVA" $DAWN_JVM_OPTS -jar "$producer_jar" \
+  if ! "$JAVA" $DAWN_JVM_OPTS -XX:-UsePerfData -jar "$producer_jar" \
       __source-inputs --base "$ROOT" "$ROOT/selfhost" > "$producer_output"; then
     echo "error: bootstrap compiler failed to produce source input manifest" >&2
     return 1
@@ -954,7 +957,7 @@ build_generation() {
 
   echo "dawn: rebuilding the selfhost toolchain (sources changed)..." >&2
   SEED_STD=$(seed_std_dir) || return 1
-  if ! "$JAVA" $DAWN_JVM_OPTS -jar "$SEED" build "$ROOT/selfhost" -o "$stage1" \
+  if ! "$JAVA" $DAWN_JVM_OPTS -XX:-UsePerfData -jar "$SEED" build "$ROOT/selfhost" -o "$stage1" \
       --std "$SEED_STD" \
       --vendor org/objectweb/asm --vendor coursierapi > /dev/null; then
     echo "error: bootstrap seed failed to build stage1" >&2
@@ -970,7 +973,7 @@ build_generation() {
   pre_inputs=$DIGEST_INPUTS
   pre_stream=$DIGEST_SOURCE_STREAM
 
-  if ! "$JAVA" $DAWN_JVM_OPTS -jar "$stage1" build "$ROOT/selfhost" -o "$candidate" \
+  if ! "$JAVA" $DAWN_JVM_OPTS -XX:-UsePerfData -jar "$stage1" build "$ROOT/selfhost" -o "$candidate" \
       --std "$STD" \
       --vendor org/objectweb/asm --vendor coursierapi > /dev/null; then
     echo "error: stage1 failed to build the selfhost candidate" >&2
@@ -1126,4 +1129,4 @@ if [ -n "${DAWN_PRINT_STAMP:-}" ]; then
   exit 0
 fi
 
-exec "$JAVA" $DAWN_RUN_JVM_OPTS -jar "$SJAR" "$@"
+exec "$JAVA" $DAWN_RUN_JVM_OPTS -XX:-UsePerfData -jar "$SJAR" "$@"
