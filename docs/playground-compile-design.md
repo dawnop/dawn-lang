@@ -465,6 +465,24 @@ K6 补的是 C / JVM 窗格早有的那一半：点源码里的一次调用，Ti
 - 未配对：K5 的形状（程序的标准输出为窗格，没有 `calls`），多一个 `"unmapped": "<第一条原因>"`；程序非零退出、超时、编译错误与 K5 完全相同。
 - 缓存键与 K5 同（`<toolchain+code 哈希>/tile`），只缓存成功；两种形状都算成功。
 
+**#835 的效果边界（2026-10-24）。** `tapN` 会打印记录，具有真实的 `!io`。
+发现 trace 时保存最近 callable 的上下文及原始 code-point span；仍先判定零候选或多候选，
+只有唯一候选才检查是否允许插入 IO。`Fn`、`LocalFn` 各自读取 AST dump 的完整 `eff=` token，
+按逗号拆 row，只允许精确的 `io` 成员；`_` 是已知纯，其他不含 `io` 的 row 不能称为纯。
+进入 `Lambda` 或 `Lambda(with)` 重置为未知，因为 parse dump 没有推断后的效果 row，
+不能继承外层函数的 `!io`。普通 block/if 等词法嵌套保留上下文；未确认的声明区域保守拒绝。
+已知纯函数的理由包含函数名与 trace 在新增 import 前的原始行号；未知闭包说明无法确认 IO 上下文。
+拒绝由 `plan` 的 `Err` 沿现有 `tile_try -> TriedNot -> execute(code)` 执行原源码，
+在写入或编译 probe 工程之前结束。未知的 probe 编译失败仍保留 operator 日志及既有失败分类。
+`host_launch` 的源码、纯 lookup callback、Run/Check 与五行输出不改；理由仅走现有 `unmapped` 提示，
+不借 editor diagnostics 表示映射能力。部署使用新 runner 向全新目录 warm 并整体替换答案库，
+不增加运行期缓存、旧原因转换或效果兼容层。
+
+验收覆盖真实 parser 与 HTTP/job 路径、纯 helper/LocalFn/闭包、精确 row、混合两 trace、
+Unicode 原始位置、合法 IO 正控的 calls/parent/span/outs/IR 与零 gap、异常 probe 日志及 fresh warm。
+不做效果推断、纯 probe 隐式打印、修改 `traceN`/checker/样例或扩大任意纯 helper 的映射覆盖，
+因为本刀只证明插入现有 IO probe 的合法边界。
+
 **沙箱与限额。** 没有新的未沙箱执行：`dawn parse`、`dawn build`、`java -jar` 都是 `sandboxed()` 包住的单元，与 `/run` 同一个包装脚本、同一份属性集、同一个许可（`/compile` 与 `/check` 共用的两个）。
 - 输入：请求体 64 KiB（K2 的 413，不变）；`dawn parse` 的输出读入上限 4 MiB，语法节点超过 12 万个则不配对；用户程序输出读入 64 KiB（`OUTPUT_LIMIT`），超限则不配对（读不全就不读）。
 - 时间：解析与构建共用 `PLAY_COMPILE_TIMEOUT`（默认 30 s）各自计时，运行用 `PLAY_TIMEOUT`（默认 10 s）；超时就地答复（`phase:"timeout"` 或编译超时的诊断），**不**再跑一遍降级路径，所以访客最多等一次超时。

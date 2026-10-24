@@ -429,8 +429,46 @@ fn walk_apply(n: Node, dev: List[String], env0: Env, src: String) -> Result[(Lis
 
 ## The call that records the visitor's kernel and what the walk needs of it:
 ## its markers' count, its span, the spans of its arguments and the kernel
-## function selected by its final argument.
-pub type Trace = { arity: Int, lo: Int, hi: Int, args: List[(Int, Int)], kernel: String, value: Node }
+## function selected by its final argument, plus its own callable's context.
+pub type Trace = { arity: Int, lo: Int, hi: Int, args: List[(Int, Int)], kernel: String, value: Node, context: ProbeContext }
+
+## Parse-only evidence about the callable containing a trace, never inferred
+## from a caller's effects or from the effects of the kernel being recorded.
+pub type ProbeContext = ProbeIO | ProbePure(name: String) | ProbeNonIO(name: String, row: String) | ProbeUnknown(region: String)
+
+fn named_context(n: Node) -> ProbeContext = {
+  let fields = filter(str.split(n.text, " "), w => str.starts_with(w, "eff="))
+  let name = second_word(n.text)
+  if len(fields) != 1 { return ProbeUnknown("function `${name}`") }
+  let row = str.drop(fields[0], len("eff="))
+  if row == "_" { return ProbePure(name) }
+  let atoms = str.split(row, ",")
+  if list.any(atoms, a => a == "" || a == "_") { return ProbeUnknown("function `${name}`") }
+  if list.contains(atoms, "io") { ProbeIO } else { ProbeNonIO(name, row) }
+}
+
+# Only these expression/statement containers preserve a callable's context.
+# A new dump region must be understood before it may authorize probe IO.
+fn probe_context(n: Node, outer: ProbeContext) -> ProbeContext =
+  if n.kind == "Fn" || n.kind == "LocalFn" {
+    named_context(n)
+  } else if n.kind == "Lambda" || n.kind == "Lambda(with)" {
+    ProbeUnknown("lambda")
+  } else if list.contains(["Block", "Let", "LetPat", "Assign", "ExprStmt", "Assert", "While", "For", "Str", "SInterp", "Apply", "MethodCall", "Arg", "Record", "FieldAccess", "ListLit", "Spread", "IfElem", "TupleLit", "Propagate", "Unwrap", "Index", "Return", "Binary", "Unary", "If", "Match", "Arm"], n.kind) {
+    outer
+  } else {
+    ProbeUnknown("`${n.kind}` region")
+  }
+
+fn probe_refusal(t: Trace, code: String) -> Option[String] = {
+  let (line, _col) = at(src_of(code), t.lo)
+  match t.context {
+    ProbeIO -> None
+    ProbePure(name) -> Some("the trace call in pure function `${name}` at line ${line} cannot be mapped by an IO probe")
+    ProbeNonIO(name, row) -> Some("the trace call in function `${name}` at line ${line} cannot be mapped by an IO probe: its declared effect row `${row}` does not include `io`")
+    ProbeUnknown(where) -> Some("the trace call in ${where} at line ${line} cannot be mapped by an IO probe: its IO context cannot be confirmed from the parse tree")
+  }
+}
 
 # A configuration factory is transparent only when its sole expression is
 # a lambda forwarding the trace parameters unchanged to one named kernel.
@@ -507,7 +545,8 @@ fn selected_arm(cond: Node, policy: List[(String, Bool)]) -> Option[Bool] = {
   }
 }
 
-fn find_traces(root: Node, n: Node, out: List[Trace]) -> List[Trace] = {
+fn find_traces(root: Node, n: Node, outer: ProbeContext, out: List[Trace]) -> List[Trace] = {
+  let context = probe_context(n, outer)
   var found = out
   if n.kind == "Apply" && len(n.kids) > 0 && n.kids[0].kind == "Var" {
     let callee = second_word(n.kids[0].text)
@@ -515,11 +554,11 @@ fn find_traces(root: Node, n: Node, out: List[Trace]) -> List[Trace] = {
     match arity {
       Some(k) -> {
         let args = list.drop(n.kids, 1)
-        let last = args[len(args) - 1]
         if len(args) == k + 2 && not list.any(args, a => a.kind == "Arg") {
+          let last = args[len(args) - 1]
           match trace_kernel(root, last, k) {
             None -> ()
-            Some(kernel) -> { found = found ++ [Trace { arity = k, lo = n.lo, hi = n.hi, args = map(args, a => (a.lo, a.hi)), kernel = kernel, value = last }] }
+            Some(kernel) -> { found = found ++ [Trace { arity = k, lo = n.lo, hi = n.hi, args = map(args, a => (a.lo, a.hi)), kernel = kernel, value = last, context = context }] }
           }
         }
       }
@@ -527,7 +566,7 @@ fn find_traces(root: Node, n: Node, out: List[Trace]) -> List[Trace] = {
     }
   }
   for k in n.kids {
-    found = find_traces(root, k, found)
+    found = find_traces(root, k, context, found)
   }
   found
 }
@@ -552,18 +591,24 @@ pub type Plan = { program: String, kernel: String, first: Int, last: Int, calls:
 ## the program is not mapped. The program must record exactly one kernel, with
 ## `trace1` to `trace5` called plainly (positional arguments, no hints), and
 ## the kernel must be a function of the same file, directly or through a
-## factory whose lambda forwards its parameters unchanged.
+## factory whose lambda forwards its parameters unchanged. The trace site's
+## own named callable must explicitly include IO; parse-only lambdas cannot
+## authorize the IO probe.
 pub fn plan(code: String, dump: String, dev: List[String]) -> Result[Plan, String] =
   match parse_dump(dump) {
     Err(e) -> Err(e)
     Ok(root) -> {
-      let traces = find_traces(root, root, [])
+      let traces = find_traces(root, root, ProbeUnknown("module"), [])
       if len(traces) == 0 {
         Err("the program does not record a kernel with a plain `trace1` to `trace5` call")
       } else if len(traces) > 1 {
         Err("the program records more than one kernel")
       } else {
         let t = traces[0]
+        match probe_refusal(t, code) {
+          Some(reason) -> { return Err(reason) }
+          None -> ()
+        }
         match kernel_fn(root, t.kernel) {
           None -> Err("`${t.kernel}` is not a function of this file")
           Some(f) ->
@@ -894,6 +939,79 @@ test "the plan of a kernel names it, its lines, its calls in evaluation order, a
 test "a program with no plain trace call, or two, is not mapped and says so" {
   assert failed(plan("fn main() = ()\n", "Module\n  Fn main pub=false eff= name@3..7 @0..14\n", dev()))
   assert failed(plan(VADD_CODE, "", dev()))
+}
+
+# Keep the real vadd parse spans and move only the callable boundary around
+# its body, so these assertions exercise plan, including candidate selection.
+fn context_dump(header: String, wrappers: List[String]) -> String = {
+  let (before, body) = str.split_once(VADD_DUMP, "  Fn main pub=true eff=io name@300..304 @297..464\n")
+    .expect("main dump")
+  let nested = join(map(filter(str.split(body, "\n"), l => l != ""), l => str.repeat("  ", len(wrappers)) ++ l), "\n")
+  before ++ "  " ++ header ++ "\n" ++ join(map(range(0, len(wrappers)), i => {
+    str.repeat("  ", i + 2) ++ wrappers[i]
+  }), "\n") ++ "\n" ++ nested ++ "\n"
+}
+
+fn plan_reason(dump: String) -> String = match plan(VADD_CODE, dump, dev()) {
+  Err(e) -> e
+  Ok(_p) -> "mapped"
+}
+
+test "the unique trace requires its own callable's exact IO effect atom" {
+  let pure = "the trace call in pure function `main` at line 12 cannot be mapped by an IO probe"
+  assert plan_reason(context_dump("Fn main eff=_", [])) == pure
+  assert plan_reason(context_dump("Fn main eff=io", [])) == "mapped"
+  assert plan_reason(context_dump("Fn main eff=Dev,io,Gpu", [])) == "mapped"
+  assert plan_reason(context_dump("Fn main eff=e,io", [])) == "mapped"
+  for row in ["Dev", "Gpu", "e", "Dev,e", "radio", "io_extra", "stdio", "IO", "Other.io", "io.member"] {
+    assert plan_reason(context_dump("Fn main eff=${row}", [])) == "the trace call in function `main` at line 12 cannot be mapped by an IO probe: its declared effect row `${row}` does not include `io`"
+  }
+  for header in ["Fn main", "Fn main eff=", "Fn main eff=io,", "Fn main eff=_,io", "Fn main eff=io eff=io"] {
+    assert str.contains(plan_reason(context_dump(header, [])), "IO context cannot be confirmed")
+  }
+}
+
+test "local functions and both lambda forms reset the outer callable context" {
+  assert plan_reason(context_dump("Fn main eff=io", ["LocalFn helper eff=_"])) == "the trace call in pure function `helper` at line 12 cannot be mapped by an IO probe"
+  assert plan_reason(context_dump("Fn main eff=_", ["LocalFn helper eff=io"])) == "mapped"
+  for wrappers in [["Lambda"], ["Lambda(with)"], ["Lambda", "Lambda(with)"], ["LocalFn helper eff=io", "Lambda"], ["Lambda", "LocalFn helper eff=_"]] {
+    assert plan_reason(context_dump("Fn main eff=io", wrappers)) != "mapped"
+  }
+  assert plan_reason(context_dump("Fn main eff=io", ["Lambda"])) == "the trace call in lambda at line 12 cannot be mapped by an IO probe: its IO context cannot be confirmed from the parse tree"
+  for region in ["Comptime", "Extern", "FutureCallable", "Const x", "TraitMethod f eff=io"] {
+    assert str.contains(plan_reason(context_dump("Fn main eff=io", [region])), "IO context cannot be confirmed")
+  }
+  for wrappers in [["Block", "If"], ["Match", "Arm", "Block"], ["While", "For"]] {
+    assert plan_reason(context_dump("Fn main eff=io", wrappers)) == "mapped"
+  }
+}
+
+test "unsupported contexts remain candidates for the multiple-kernel rule" {
+  let extra = "  Fn pure_helper eff=_\n    Apply nargs=5 @380..437\n      Var trace3 @380..386\n      Str @387..393\n      Var a\n      Var b\n      Var c\n      Var vadd\n"
+  assert plan_reason(VADD_DUMP ++ extra) == "the program records more than one kernel"
+  assert plan_reason(context_dump("Fn main eff=_", []) ++ extra) == "the program records more than one kernel"
+}
+
+test "zero traces hints and external kernels keep their deterministic refusals" {
+  let absent = "the program does not record a kernel with a plain `trace1` to `trace5` call"
+  assert plan_reason(str.replace(VADD_DUMP, "Var trace3", "Var other")) == absent
+  assert plan_reason(str.replace(VADD_DUMP, "Str @387..393", "Arg name=hints @387..393")) == absent
+  assert plan_reason(str.replace(VADD_DUMP, "Var vadd @432..436", "Var external @432..436")) == "`external` is not a function of this file"
+  assert plan_reason("Module\n  Fn main eff=io\n    Apply nargs=0\n      Var trace3\n") == absent
+}
+
+test "a pure trace refusal uses original code-point positions before the probe import" {
+  let prefix = "# " ++ str.repeat("π🙂", 30) ++ "\n"
+  let shifted = join(map(str.split(VADD_DUMP, "\n"), line => join(map(str.split(line, " "), word => {
+    match str.split_once(word, "@") {
+      Some((tag, span)) -> match range_of(span) {
+        Some((lo, hi)) -> "${tag}@${lo + len(prefix)}..${hi + len(prefix)}"
+        None -> word
+      }
+      None -> word
+    }
+  }), " ")), "\n")
+  assert plan(prefix ++ VADD_CODE, str.replace(shifted, "eff=io", "eff=_"), dev()) == Err("the trace call in pure function `main` at line 13 cannot be mapped by an IO probe")
 }
 
 test "the recording is read only when it ends" {

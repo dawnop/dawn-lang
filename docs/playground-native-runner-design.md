@@ -291,7 +291,8 @@ probe 的 JVM 编译、执行、沙箱、预算与普通程序回落保持现有
 AST dump 共 113,836 字节、完整插桩计划及程序逐字节一致；最终 tile JSON 只归一 ms，
 不导入 tileir 的侧栏样例则比较两版 runner 的 400 响应。八个生成的多文件 probe 工程、
 三个路径依赖包的 13 个源文件也逐字节比较了 parse dump。probe 编译与运行仍由 JVM 完成。
-`host_launch` 仍因插桩工程无法编译而降级，原因与输出不变；其 probe 问题由 #835 另行处理。
+在 #863 验收时，`host_launch` 仍因插桩工程无法编译而降级，原因与输出不变；
+这是当时的历史结果，#835 的后续方案见下节。
 
 契约数 `parse` 本身：每次原生快路恰一次 dawnc parse、零 JVM parse，并仍有 JVM build。
 修改分派前，同一新契约在基线二进制上只有这条断言失败（73 passed, 1 failed）。
@@ -310,6 +311,22 @@ parse、JVM probe 编译与执行，不是生产延迟。
 
 **不做的（理由）。** 不改编译器输出，不改 `/run` 或 probe 为 native 执行（B 路仍暂缓），
 不发版、不部署、不合并，不因解析工具路径改变而人为失效答案键。
+
+### 4.7 Tile probe 的 callable 效果边界（2026-10-24）
+
+沿用 4.6 的 native/JVM parse 选择与失败回落，只在纯字符串 planner 内检查 trace 的 callable。
+命名函数和局部函数从各自 `eff=` row 判断精确 `io` 成员；纯 row `_`、无 IO 的 row、
+缺字段或未知区域均不插 probe。两种 lambda 没有解析期推断后的 row，进入时重置为未知，
+不能把外层 `!io` 当成闭包许可。保留所有候选后先执行零/多 trace 规则，再检查唯一候选。
+已知纯 helper 返回含函数名与原始行号的 `unmapped`，未知闭包另述未确认 IO 的边界。
+`plan` 拒绝后只编译并执行原工程，不生成 `src/explore_probe.dawn`；意外 probe 编译失败
+仍记录 operator 错误。Run/Check、语言纯度、UI 协议与 #863 的工具故障分类不变。
+
+契约同时审计真实命令和 build 输入，证明 host_launch 一次 parse 后只有一次原工程 build，
+而非仅静音预期 checker 错误；native/JVM dump、规划结果与 HTTP 响应需一致。
+新 runner 向全新目录预热全侧栏样例，新理由入库后热响应除时间和 cached 外与冷响应逐字节一致，
+命中无 parse/build。旧工具链身份或同身份的旧答案目录不能作为已修复的证据。
+不做编译器效果推断、隐式打印、旧 store 转换或 B 路 native 执行，保持本刀在 planner/probe 路径。
 
 ## 五、沙箱单元的相互作用
 
