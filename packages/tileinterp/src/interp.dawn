@@ -42,10 +42,10 @@ use tileir/lower.{lower, Kernel, Instr, Ty, Ref, Token, Tile, TensorView, Partit
   PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile,
   PrintTile, TokenOnlyTile, GetGlobalPtr, AllocaPtr, MakeTensorView, MakePartitionView, MakeStridedView,
   MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, Ret }
-use std/narrow.{Down, Up}
-use math.{INF, NAN, Downward, Upward, is_nan, sign_bit, flush, sqrt_rn, add_dir, mul_dir, div_dir,
-  floor_f, ceil_f, rem_f, exp_f, exp2_f, log_f, log2_f, rsqrt_f, tanh_f, sin_f, cos_f, tan_f, sinh_f, cosh_f, atan2_f,
-  pow_f, SIGN_BIT, bits_of, float_of, odd_of }
+use std/narrow.{Down, Up, f64_bits, f64_of_bits}
+use std/math as host_math
+use std/float.{INFINITY, NAN, is_nan, sign_bit}
+use math.{Downward, Upward, flush, add_dir, mul_dir, div_dir, odd_of}
 use formats.{is_float_format, is_unmodelled_float, float_width, mode_of, round_into, nearest, to_bits, of_bits, flush_in}
 use mma.{mma_float, mma_scaled, mma_int, fma_in}
 
@@ -584,10 +584,10 @@ fn to_raw(v: V) -> (List[Float], List[Bool]) = match v {
 fn pad_value(p: Padding, elem: String) -> Float = match p {
   NoPadding -> NAN
   PadZero -> 0.0
-  PadNegZero -> float_of(SIGN_BIT)
-  PadNan -> float_of(0x7FF8000000000000)
-  PadPosInf -> INF
-  PadNegInf -> 0.0 - INF
+  PadNegZero -> f64_of_bits(SIGN_BIT)
+  PadNan -> f64_of_bits(0x7FF8000000000000)
+  PadPosInf -> INFINITY
+  PadNegInf -> 0.0 - INFINITY
 }
 
 # The tensor coordinates of lane `c` of the tile at `idx` of a partition view.
@@ -627,9 +627,9 @@ fn check_promise(cx: Cx, p: Part, idx: List[Int], inbounds: List[Bool], what: St
 
 # ---- arithmetic ----
 
-fn neg_f(x: Float) -> Float = float_of(bits_of(x) ^ SIGN_BIT)
+const SIGN_BIT: Int = 1 << 63
 
-fn abs_f(x: Float) -> Float = float_of(bits_of(x) & 0x7FFFFFFFFFFFFFFF)
+fn neg_f(x: Float) -> Float = f64_of_bits(f64_bits(x) ^ SIGN_BIT)
 
 # IEEE 754-2019 maximumNumber with +0 above -0: the dialect's `maxf`
 # without `propagate_nan`; `propagate` makes it maximum (NaN if either is).
@@ -661,22 +661,22 @@ fn min_f(a: Float, b: Float, propagate: Bool) -> Float =
 
 fn float_un(op: String, x: Float) -> Float = match op {
   "negf" -> neg_f(x)
-  "absf" -> abs_f(x)
-  "ceil" -> ceil_f(x)
-  "floor" -> floor_f(x)
-  "sqrt" -> sqrt_rn(x)
-  "sqrt_approx" -> sqrt_rn(x)
-  "exp" -> exp_f(x)
-  "exp2" -> exp2_f(x)
-  "log" -> log_f(x)
-  "log2" -> log2_f(x)
-  "rsqrt" -> rsqrt_f(x)
-  "tanh" -> tanh_f(x)
-  "sin" -> sin_f(x)
-  "cos" -> cos_f(x)
-  "tan" -> tan_f(x)
-  "sinh" -> sinh_f(x)
-  "cosh" -> cosh_f(x)
+  "absf" -> host_math.abs(x)
+  "ceil" -> host_math.ceil(x)
+  "floor" -> host_math.floor(x)
+  "sqrt" -> host_math.sqrt(x)
+  "sqrt_approx" -> host_math.sqrt(x)
+  "exp" -> host_math.exp(x)
+  "exp2" -> host_math.exp2(x)
+  "log" -> host_math.log(x)
+  "log2" -> host_math.log2(x)
+  "rsqrt" -> 1.0 / host_math.sqrt(x)
+  "tanh" -> host_math.tanh(x)
+  "sin" -> host_math.sin(x)
+  "cos" -> host_math.cos(x)
+  "tan" -> host_math.tan(x)
+  "sinh" -> host_math.sinh(x)
+  "cosh" -> host_math.cosh(x)
   _ -> internal("float operation ${op} passed the static walk")
 }
 
@@ -689,9 +689,9 @@ fn float_bin(op: String, a: Float, b: Float) -> Float = match op {
   "minf" -> min_f(a, b, false)
   "maxf_nan" -> max_f(a, b, true)
   "minf_nan" -> min_f(a, b, true)
-  "remf" -> rem_f(a, b)
-  "pow" -> pow_f(a, b)
-  "atan2" -> atan2_f(a, b)
+  "remf" -> a % b
+  "pow" -> host_math.pow(a, b)
+  "atan2" -> host_math.atan2(a, b)
   "addf_neg_inf" -> add_dir(a, b, Downward)
   "addf_pos_inf" -> add_dir(a, b, Upward)
   "mulf_neg_inf" -> mul_dir(a, b, Downward)
@@ -712,7 +712,7 @@ fn float_un_in(fmt: String, op: String, x: Float) -> Float =
   if op == "exp2_ftz" {
     # flushed at the format's own smallest normal on the way in and on the
     # way out, as the binary flush variants are (`float_bin_in`)
-    flush_in(fmt, nearest(fmt, exp2_f(flush_in(fmt, x))))
+    flush_in(fmt, nearest(fmt, host_math.exp2(flush_in(fmt, x))))
   } else if fmt == "f64" {
     float_un(op, x)
   } else {
@@ -823,7 +823,7 @@ fn ftoi(cx: Cx, w: Int, x: Float, sat: Bool) -> Int = {
   if is_nan(x) {
     if sat { 0 } else if cx.ub { refuse_ub("ftoi of a NaN (undefined without `saturating`)") } else { lo }
   } else {
-    let t = if x < 0.0 { ceil_f(x) } else { floor_f(x) }
+    let t = if x < 0.0 { host_math.ceil(x) } else { host_math.floor(x) }
     if t > to_float(hi) || t < to_float(lo) {
       if not sat && cx.ub { ub_stop("ftoi of ${x}, outside the i${w} range (undefined without `saturating`)") } else { () }
       if t > 0.0 { hi } else { lo }
@@ -933,10 +933,10 @@ fn cast(cx: Cx, op: String, from: Ty, to: Ty, v: V) -> V = {
     "bitcast" ->
       if fe == "f64" && te == "i64" {
         let (xs, u) = floats_of(v, "bitcast")
-        VI(shape, list.map(xs, x => bits_of(x)), u)
+        VI(shape, list.map(xs, x => f64_bits(x)), u)
       } else if fe == "i64" && te == "f64" {
         let (xs, u) = ints_of(v, "bitcast")
-        VF(shape, list.map(xs, x => float_of(x)), u)
+        VF(shape, list.map(xs, x => f64_of_bits(x)), u)
       } else if is_float_format(fe) && is_float_format(te) {
         let (xs, u) = floats_of(v, "bitcast")
         VF(shape, list.map(xs, x => of_bits(te, to_bits(fe, x))), u)
@@ -1032,7 +1032,7 @@ fn check_assume(cx: Cx, p: AssumePred, v: V) -> Unit =
           }
           let differs = match v {
             VI(_s, xs, _u) -> list.any(range(0, n), i => xs[i] != xs[first(i)])
-            VF(_s, xs, _u) -> list.any(range(0, n), i => bits_of(xs[i]) != bits_of(xs[first(i)]))
+            VF(_s, xs, _u) -> list.any(range(0, n), i => f64_bits(xs[i]) != f64_bits(xs[first(i)]))
             _ -> false
           }
           if differs { ub_stop("assume same_elements<${show(groups)}> on a tile whose groups differ") } else { () }
@@ -1769,4 +1769,28 @@ test "integer shifts mask all counts even when UB checks are enabled" {
       }
     }
   })
+}
+
+test "host math dispatch retains the K1 exp witness and IEEE boundaries" {
+  # K1's repeated-squaring exp returned 71405552942727215 here, 45356
+  # representable steps from the MPFR-rounded answer. fdlibm is one step up.
+  let x = f64_of_bits(-4574020494064819919)
+  assert f64_bits(float_un("exp", x)) == 71405552942681860
+  let negzero = f64_of_bits(1 << 63)
+  assert f64_bits(float_un("sqrt", negzero)) == (1 << 63)
+  assert f64_bits(float_un("sin", negzero)) == (1 << 63)
+  assert f64_bits(float_un("tanh", negzero)) == (1 << 63)
+  assert f64_bits(float_bin("atan2", negzero, 0.0)) == (1 << 63)
+  assert float_un("exp", 0.0 - INFINITY) == 0.0
+  assert float_un("exp", INFINITY) == INFINITY
+  assert is_nan(float_un("sin", INFINITY))
+  assert float_un("log", 0.0) == 0.0 - INFINITY
+  assert is_nan(float_un("log", -1.0))
+  assert float_un("rsqrt", 4.0) == 0.5
+  assert float_un("exp2", -1074.0) == f64_of_bits(1)
+  assert float_un("log2", f64_of_bits(1)) == -1074.0
+  assert f64_bits(float_bin("remf", -4.0, 2.0)) == (1 << 63)
+  assert is_nan(float_bin("remf", INFINITY, 1.0))
+  assert float_bin("pow", NAN, 0.0) == 1.0
+  assert is_nan(float_bin("pow", -1.0, INFINITY))
 }

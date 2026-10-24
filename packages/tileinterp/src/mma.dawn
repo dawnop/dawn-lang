@@ -24,19 +24,21 @@
 #     is documented to make; the tensor core's own error is of the same
 #     order as binary64's, far below the format's.
 use std/list
-use math.{fma_f64, add_odd, is_finite}
+use std/math as host_math
+use std/float.{is_finite}
+use math.{add_odd}
 use formats.{nearest}
 
 ## `a * b + c` in format `fmt`, rounded once.
 ##
-## Binary64: Boldo and Melquiond's emulation (`math.fma_f64`). A narrower
+## Binary64: std/math.fma, including extreme exponents. A narrower
 ## format: the product of two operands of at most 24 significand bits is
 ## exact in binary64, `c` is added by rounding to odd, and that value is
 ## rounded into `fmt`; rounding to odd first loses nothing for a format with
 ## at most 51 significand bits, so the second step is the only rounding.
 pub fn fma_in(fmt: String, a: Float, b: Float, c: Float) -> Float =
   if fmt == "f64" {
-    fma_f64(a, b, c)
+    host_math.fma(a, b, c)
   } else {
     let p = a * b
     if is_finite(p) && is_finite(c) { nearest(fmt, add_odd(p, c)) } else { nearest(fmt, p + c) }
@@ -57,7 +59,7 @@ pub fn mma_float(out: String, m: Int, k: Int, n: Int, a: List[Float], b: List[Fl
     let r = rows[idx / n]
     let c = cols[idx % n]
     if out == "f64" {
-      list.fold(range(0, k), acc[idx], (s, p) => fma_f64(r[p], c[p], s))
+      list.fold(range(0, k), acc[idx], (s, p) => host_math.fma(r[p], c[p], s))
     } else {
       nearest(out, list.fold(range(0, k), acc[idx], (s, p) => s + r[p] * c[p]))
     }
@@ -99,3 +101,12 @@ pub fn mma_int(m: Int, k: Int, n: Int, a: List[Int], b: List[Int], acc: List[Int
   })
 
 fn wrap32(v: Int) -> Int = ((v + 2147483648) & 4294967295) - 2147483648
+
+test "binary64 fusion handles intermediate overflow and subnormal ties" {
+  let largest = 1.7976931348623157e308
+  assert fma_in("f64", largest, 2.0, 0.0 - largest) == largest
+  # Half a minimum subnormal plus one minimum subnormal is a tie whose
+  # even result is two units; rounding the product first gives one unit.
+  let tiny = 4.9406564584124654e-324
+  assert fma_in("f64", tiny, 0.5, tiny) == 2.0 * tiny
+}
