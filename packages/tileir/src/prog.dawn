@@ -19,7 +19,7 @@ use std/map
 use std/str
 use std/loc
 use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, with_gpu_fake, reference_kernels, launch_entry3, buffer_arg, arg_scalar, last_out_with, EntryArg, Entry1,
-  Entry2, Entry3, Entry4, Entry5, entry1, entry2, entry3, entry4, entry5, arg_in, arg_in_whole, arg_out,
+  Entry2, Entry3, Entry4, Entry5, Entry6, entry1, entry2, entry3, entry4, entry5, entry6, arg_in, arg_in_whole, arg_out,
   arg_shared, entry_grid }
 use std/gpu
 use std/dtype.{F64, I64, Dtype, dtype_name}
@@ -1654,7 +1654,7 @@ pub fn trace_kernel(name: String, params: List[KParam], body: fn() -> Unit !Dev,
 # Dawn has no variadic generics: the list is the only way to say "this many
 # parameters, of these formats" in one signature, and it repeats what the
 # body's own `Param[Float]` already says (191 of 191 kernels in
-# scripts/tile-golden). `trace1` to `trace5` take one MARKER per parameter
+# scripts/tile-golden). `trace1` to `trace6` take one MARKER per parameter
 # instead, the way `d_for2` to `d_for4` once took one carried value each (tileir
 # 0.9.0 replaced them with `Carry`), and
 # compute the list: `In(F64, cells(..))` says the format once, and says the
@@ -1716,7 +1716,7 @@ pub fn cells(extent: List[Int], tile: List[Int], pad: Padding = PadZero,
   along: List[Int] = list.map(range(0, len(tile)), k => if k < 3 { k } else { FREE_AXIS }), squeeze: List[Int] = []) -> Cells =
   Grid(extent, tile, pad, along, squeeze)
 
-## One parameter of a kernel, for `trace1` to `trace5`: its format marker
+## One parameter of a kernel, for `trace1` to `trace6`: its format marker
 ## (std/gpu's `F64` and so on), what the kernel does to it, and for `In` and
 ## `Out` how its tensor is cut.
 ##
@@ -1956,6 +1956,20 @@ pub fn trace5[A, B, C, E, F](name: String, a: Arg[A], b: Arg[B],
     () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2), param(marker(d), 3),
       param(marker(e), 4)), hints)
   (prog, entry5(name, args[0], args[1], args[2], args[3], args[4]))
+}
+
+## [`trace1`] for six parameters.
+pub fn trace6[A, B, C, E, F, G](name: String, a: Arg[A], b: Arg[B],
+  c: Arg[C], d: Arg[E], e: Arg[F], f: Arg[G],
+  body: fn(Param[A], Param[B], Param[C], Param[E], Param[F], Param[G]) -> Unit !Dev,
+  hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry6[A, B, C, E, F, G]) = {
+  let ctx0 = entry_ctx(name, at)
+  let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d), sig_of(e), sig_of(f)]
+  let args = entry_args(ctx0, sigs)
+  let prog = record_sigs(ctx0, sigs,
+    () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2), param(marker(d), 3),
+      param(marker(e), 4), param(marker(f), 5)), hints)
+  (prog, entry6(name, args[0], args[1], args[2], args[3], args[4], args[5]))
 }
 
 # Whether a read of what `aim` points at is ordered by nothing: the target is
@@ -2349,7 +2363,7 @@ fn check_same_rows(name: Ctx, frames: List[Frame], ops: List[TileOp], held: Map[
 fn cells_of(name: Ctx, frames: List[Frame], ops: List[TileOp], geoms: List[Cells], roles: List[Access],
   param: Int, op: String) -> (List[Int], List[Int], Padding, List[Int]) =
   if len(geoms) == 0 {
-    refuse_at(name, frames, ops, op, "parameter ${param} has no marker; cells are what an In or an Out marker of trace1 to trace5 says, and trace_kernel takes none")
+    refuse_at(name, frames, ops, op, "parameter ${param} has no marker; cells are what an In or an Out marker of trace1 to trace6 says, and trace_kernel takes none")
   } else if param < 0 || param >= len(geoms) {
     refuse_at(name, frames, ops, op, "names parameter ${param}, but ${len(geoms)} parameter(s) are declared")
   } else {
@@ -2630,7 +2644,7 @@ fn kernel_side(marks: List[Mark]) -> Bool =
 ## into `ops`.
 ##
 ## With `markers` (one [`erase`]d marker a parameter, and `params` empty) it
-## is `trace1` to `trace5`'s recording instead, roles and cells and all, and
+## is `trace1` to `trace6`'s recording instead, roles and cells and all, and
 ## the program is the one they answer: the body then reads its parameters
 ## with `param(d, k)` in the markers' formats. What the site's call map of a
 ## kernel recorded with cells runs.
@@ -2655,7 +2669,7 @@ pub fn trace_calls(name: String, params: List[KParam], body: fn() -> Unit !Dev, 
 # `trace_calls` with a role for each parameter (knife C2) and its cells (the
 # batch's PR-1): both empty for the two public recorders above, which know
 # no roles and refuse nothing on their account and have no cells to read,
-# and one per parameter for `trace1` to `trace5`.
+# and one per parameter for `trace1` to `trace6`.
 fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: List[Cells],
   body: fn() -> Unit !Dev, entry_hints: ByArch[EntryHints]) -> (TileProg, List[Call]) = {
   # the entry's hints are checked before the body runs, like the shapes of its parameters
@@ -7993,4 +8007,57 @@ test "S2: tile_shape allocates no operation and retains its zero IR source call"
   assert len(queries) == 2
   assert list.all(queries, c => c.ops_from == c.ops_to && c.at != None)
   let (_r, _er) = trace1("rank0", Scalar(F32), s => { assert tile_shape(scalar(s)) == [] })
+}
+
+# Six positions must retain the same marker checks and read-only token path
+# as the older arities, including when the last parameter is a buffer.
+test "K3-0: trace6 preserves positions hints calls projection and In tokens" {
+  let g = cells([3, 4, 4], [1, 2, 4], along = [2, 0, 1], squeeze = [0])
+  let hs = [for_arch("sm_86", entry_hints(occupancy = Some(2)))]
+  let body = (a: Param[F32], b: Param[F32], c: Param[F32], o: Param[F32], s: Param[F32], n: Param[I32]) => {
+    let t = load_cell(a)
+    assert tile_shape(t) == [2, 4]
+    let _extent = extent_of(a, 0)
+    let _blocks = blocks_of(a, 1)
+    for j in d_range(0, 2) {
+      let _v = load_cell(b) + load_cell(c)
+      let _j = j
+    }
+    let _n = scalar(n)
+    store_cell(o, t * scalar(s))
+  }
+  let (p, _e) = trace6("six", In(F32, g), In(F32, g), In(F32, g), Out(F32, g), Scalar(F32), Scalar(I32), body, hints = hs)
+  let (q, calls) = trace_calls("six", [],
+    () => body(param(F32, 0), param(F32, 1), param(F32, 2), param(F32, 3), param(F32, 4), param(I32, 5)),
+    hints = hs, markers = [erase(In(F32, g)), erase(In(F32, g)), erase(In(F32, g)), erase(Out(F32, g)), erase(Scalar(F32)), erase(Scalar(I32))])
+  assert p == q
+  assert p.params == [ByPtr("f32"), ByPtr("f32"), ByPtr("f32"), ByPtr("f32"), ByValue("f32"), ByValue("i32")]
+  assert p.hints == wire_entry(hs)
+  assert list.any(calls, c => c.name == "tile_shape" && c.ops_from == c.ops_to && c.at != None)
+  assert list.any(p.ops, o => match o { BlockId(_d, 2) -> true
+    _ -> false })
+  let loads = ops_where(p.ops, o => match o { LoadView(_d, _t, _dt, _v, _i, _ti, _in, _h) -> true
+    _ -> false })
+  assert len(loads) == 3
+  assert list.all(loads, o => match o { LoadView(_d, _t, _dt, _v, _i, ti, _in, _h) -> ti == 0
+    _ -> false })
+}
+
+test "K3-0: sixth marker refuses before body and preserves caller" {
+  let bad = cells([8], [0])
+  let why = marked(() => trace6("six_bad", Shared(F64), Shared(F64), Shared(F64), Shared(F64), Shared(F64), In(F64, bad),
+    (_a, _b, _c, _d, _e, _f) => panic("body must not run")))
+  assert str.contains(why, "argument 5 (In)")
+  assert str.contains(why, "prog.dawn:")
+  assert not str.contains(why, "body must not run")
+  let g = cells([8], [8])
+  let write = marked(() => trace6("six_write", Shared(F64), Shared(F64), Shared(F64), Shared(F64), Shared(F64), In(F64, g),
+    (_a, _b, _c, _d, _e, f) => store_cell(f, full([8], 1.0))))
+  assert str.contains(write, "In") && str.contains(write, "parameter 5")
+  let value = marked(() => trace6("six_scalar", Shared(F64), Shared(F64), Shared(F64), Shared(F64), Shared(F64), Scalar(F64),
+    (_a, _b, _c, _d, _e, f) => { let _v = load(f, idx_const(0), [8]) }))
+  assert str.contains(value, "scalar")
+  let pointer = marked(() => trace6("six_pointer", Shared(F64), Shared(F64), Shared(F64), Shared(F64), Shared(F64), Shared(F64),
+    (_a, _b, _c, _d, _e, f) => { let _v = scalar(f) }))
+  assert str.contains(pointer, "scalar")
 }

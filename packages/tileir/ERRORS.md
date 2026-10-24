@@ -6,7 +6,7 @@ Knowing which one spoke is most of the fix.
 | Layer | When it runs | What it looks like | The usual fix |
 |---|---|---|---|
 | **type check** | `dawn check`, `dawn run`, the editor; before anything executes | a compiler error with a source position | change the type: the format, the effect or the argument is wrong |
-| **record** | while `trace1` to `trace5` or `trace_kernel` runs your kernel body once | a panic `tileir: kernel `name`: op #N `op`: ... at src/main.dawn:L:C`, the line of your own call | the kernel asks for something the shapes or roles cannot give; change the call it names |
+| **record** | while `trace1` to `trace6` or `trace_kernel` runs your kernel body once | a panic `tileir: kernel `name`: op #N `op`: ... at src/main.dawn:L:C`, the line of your own call | the kernel asks for something the shapes or roles cannot give; change the call it names |
 | **emit** | `render`, `encode`, `lower`, then `tileiras` | a panic `tileir: ...` with no kernel name, or `tileiras` refusing the bytes | usually a view or a region whose parts disagree; occasionally a defect in the assembler |
 | **device** | the host program, on the fake device or a real one | an `Err(ForeignError)` whose `kind` is `gpu.*` or `cuda.*` | the host call, the launch geometry or the machine; the kind says which |
 
@@ -40,7 +40,7 @@ operation (`add(load_cell(a), load_cell(b))` over a `Param[Float]` and a
 
 ## Record
 
-`trace1` to `trace5` run the kernel body once under a handler that writes every
+`trace1` to `trace6` run the kernel body once under a handler that writes every
 operation down, and that handler holds each operation to the shapes and
 formats of its operands, to the role of each parameter and to the cells that
 cut it. A refusal is a panic that names the kernel and, for an operation, its
@@ -62,7 +62,7 @@ was written). A refusal that needs an operand says where that operand was made
 `d_if` it is in, each with its line. An operator (`+ - * /`, a `var`, a float
 literal) has no line of its own, because a trait method takes no `caller()`
 default; its message ends in the nearest line it does have, the enclosing
-region's, else the line that called `trace_kernel` or `trace1` to `trace5`. The
+region's, else the line that called `trace_kernel` or `trace1` to `trace6`. The
 kernel name says which function, the operation name which call in
 it; `op #N` counts operations, so a run of `load`s and `add`s is a few numbers
 long and the one named is the one to look at. The recorder has no codes, only

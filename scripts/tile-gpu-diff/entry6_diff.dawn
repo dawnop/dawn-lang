@@ -1,0 +1,165 @@
+# One real handler loads each static module once, then replays runtime n and
+# scale. The scalar host reference never uses tile reduction or view geometry.
+# Raw F32 words and guard lanes are printed for independent evidence checks.
+use std/io
+use std/io.{with_fs_real, read_bytes}
+use std/list
+use std/map
+use std/bytes
+use std/gpu
+use std/gpu.{Gpu, with_gpu_real, with_gpu_fake, DeviceBuffer, Entry6, WideRefFn}
+use std/narrow.{F32, f32}
+use std/int/i32
+use std/int/i32.{I32}
+use tileref/ref.{entry6_ref}
+
+type Case = { kernel: String, n: Int, scale: Float, tail: Float, changed: Int }
+
+fn domain(rows: Int, tile: Int, capacity: Int, n: Int) -> Result[Unit, ForeignError] =
+  if rows < 1 || tile < 1 || capacity < 1 || rows > 2147483647 / capacity
+    || tile > capacity || n < 1 || n > capacity {
+    Err(ForeignError { kind = "entry6.bad_domain", message = "positive static dimensions and 1 <= n <= capacity are required", cause = None })
+  } else { Ok(()) }
+
+fn dynamic_entry() -> Entry6[F32, F32, F32, F32, F32, I32] = {
+  let input = gpu.arg_in([4, 32], [2, 8], [0, -1])
+  gpu.entry6("entry6_dynamic", input, input, input, gpu.arg_out([4], [2]), gpu.arg_scalar(), gpu.arg_scalar())
+}
+
+fn project_entry(name: String, heads: Int) -> Entry6[F32, F32, F32, F32, F32, I32] = {
+  let input = gpu.arg_in([heads, 4, 4], [1, 2, 4], [2, 0, 1])
+  gpu.entry6(name, input, input, input, gpu.arg_out([4, 4, heads], [2, 4, 1]), gpu.arg_scalar(), gpu.arg_scalar())
+}
+
+fn launch_dynamic(x: DeviceBuffer[F32], y: DeviceBuffer[F32], z: DeviceBuffer[F32], o: DeviceBuffer[F32],
+  scale: Float, n: Int) -> Result[Unit, ForeignError] !Gpu = {
+  domain(4, 8, 32, n)?
+  gpu.launch_entry6(dynamic_entry(), gpu.buffer_arg(x), gpu.buffer_arg(y), gpu.buffer_arg(z), gpu.buffer_arg(o),
+    gpu.scalar_arg(f32(scale)), gpu.scalar_arg(i32.wrap(n)))
+}
+
+fn corpus(c: Case) -> List[List[Float]] = {
+  let dynamic = c.kernel == "entry6_dynamic"
+  let size = if dynamic { 128 } else if c.kernel == "entry6_project1" { 16 } else { 48 }
+  let ins = list.map(range(0, 3), k => list.map(range(0, size), i => {
+    let valid = not dynamic || i % 32 < c.n
+    let value = to_float((i * (k + 1) + k * 3) % 17 - 8) / 8.0
+    if not valid { c.tail + to_float(k) } else if c.changed == k && i % 32 == c.n - 1 { value + 8.0 } else { value }
+  }))
+  ins ++ [list.map(range(0, (if dynamic { 4 } else { size }) + 4), _i => -4096.0)]
+}
+
+fn one(c: Case) -> Result[Bytes, ForeignError] !Gpu = {
+  let ins = corpus(c)
+  let x = gpu.alloc(F32, len(ins[0]))?
+  let y = gpu.alloc(F32, len(ins[1]))?
+  let z = gpu.alloc(F32, len(ins[2]))?
+  let o = gpu.alloc(F32, len(ins[3]))?
+  gpu.copy_from_host(x, list.map(ins[0], f32))?
+  gpu.copy_from_host(y, list.map(ins[1], f32))?
+  gpu.copy_from_host(z, list.map(ins[2], f32))?
+  gpu.copy_from_host(o, list.map(ins[3], f32))?
+  if c.kernel == "entry6_dynamic" {
+    launch_dynamic(x, y, z, o, c.scale, c.n)?
+  } else {
+    gpu.launch_entry6(project_entry(c.kernel, if c.kernel == "entry6_project1" { 1 } else { 3 }),
+      gpu.buffer_arg(x), gpu.buffer_arg(y), gpu.buffer_arg(z), gpu.buffer_arg(o),
+      gpu.scalar_arg(f32(c.scale)), gpu.scalar_arg(i32.wrap(c.n)))?
+  }
+  gpu.gpu_sync()?
+  let raw = gpu.gpu_copy_to_host(gpu.handle_of(o))?
+  if len(raw) != 4 * len(ins[3]) { panic("entry6: F32 raw download width") }
+  gpu.free(x)?
+  gpu.free(y)?
+  gpu.free(z)?
+  gpu.free(o)?
+  Ok(raw)
+}
+
+fn cases() -> List[Case] = {
+  var cs: List[Case] = []
+  for scale in [0.5, -0.25] {
+    for n in [1, 7, 8, 9, 19, 32, 1] {
+      for control in [-2, -1, 0, 1, 2] {
+        cs = cs ++ [Case { kernel = "entry6_dynamic", n = n, scale = scale,
+          tail = if control == -2 { 128.0 } else { -256.0 }, changed = control }]
+      }
+    }
+    for name in ["entry6_project1", "entry6_project3"] {
+      for bias in [2, -3] {
+        cs = cs ++ [Case { kernel = name, n = bias, scale = scale, tail = 0.0, changed = -1 }]
+      }
+    }
+  }
+  cs
+}
+
+# Invalid host domains are tested under a handler whose every operation
+# panics. Rejection must happen before I32 conversion or any device request.
+fn rejected() -> Unit = {
+  for shape in [(-1, 8, 32, 1), (4, 0, 32, 1), (4, 8, 0, 1), (2147483647, 8, 32, 1)] {
+    let (r, t, c, n) = shape
+    if domain(r, t, c, n) == Ok(()) { panic("entry6: static domain accepted") }
+  }
+  let result = {
+    with handle Gpu {
+      gpu_alloc(_d, _n) => Ok(1)
+      gpu_copy_from_host(_h, _b) => panic("entry6: invalid domain reached handler")
+      gpu_copy_to_host(_h) => panic("entry6: invalid domain reached handler")
+      gpu_launch(_k, _x, _y, _z, _a) => panic("entry6: invalid domain reached handler")
+      gpu_module_global(_k, _n, _d) => panic("entry6: invalid domain reached handler")
+      gpu_free(_h) => panic("entry6: invalid domain reached handler")
+      gpu_sync() => panic("entry6: invalid domain reached handler")
+    }
+    let b = match gpu.alloc(F32, 128) { Ok(v) -> v
+      Err(e) -> panic(e.message) }
+    for n in [-1, 0, 33, 2147483648] {
+      let r = launch_dynamic(b, b, b, b, 0.5, n)
+      match r {
+        Err(e) -> if e.kind != "entry6.bad_domain" { panic("entry6: wrong domain refusal") }
+        Ok(_) -> panic("entry6: invalid n accepted")
+      }
+    }
+    true
+  }
+  if not result { panic("entry6: domain refusal") }
+}
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let paths = args()
+  if len(paths) != 3 { panic("usage: entry6_diff <entry6_dynamic.cubin> <entry6_project1.cubin> <entry6_project3.cubin>") }
+  let names = ["entry6_dynamic", "entry6_project1", "entry6_project3"]
+  let cubins = map.from(list.map(range(0, 3), i => (names[i], with_fs_real(() => match read_bytes(paths[i]) {
+    Ok(raw) -> raw
+    Err(e) -> panic(e.message)
+  }))))
+  rejected()
+  let refs: Map[String, (Int, WideRefFn)] = map.from(list.map(names, name => (name,
+    (4, (_d, ins, ss) => [(3, entry6_ref(name, ins, ss))]))))
+  let cs = cases()
+  let real_runs = with_gpu_real(cubins, () => list.map(cs, one))
+  var count = 0
+  for i in range(0, len(cs)) {
+    let c = cs[i]
+    let want = gpu.encode_floats("f32", entry6_ref(c.kernel, corpus(c), [c.scale, to_float(c.n)]))
+    let fake = with_gpu_fake(refs, () => one(c))
+    let real = real_runs[i]
+    io.println("kernel ${c.kernel} n${c.n}-s${c.scale}-tail${c.tail}-change${c.changed} tier=exact grid=(2, 1, ${if c.kernel == "entry6_project3" { 3 } else { 1 }})")
+    match (fake, real) {
+      (Ok(f), Ok(r)) -> {
+        io.println("  raw-f32 ${show(bytes.unpack_ints(r, 4, false))}")
+        if f != want || r != want {
+          io.println("  verdict differ:result")
+          io.println("tile-gpu-diff: fail")
+          io.exit(1)
+        }
+        io.println("  verdict identical:exact")
+      }
+      (_, Err(e)) -> panic("entry6: device refusal ${e.kind}: ${e.message}")
+      (Err(e), _) -> panic("entry6: reference refusal ${e.kind}: ${e.message}")
+    }
+    count = count + 1
+  }
+  io.println("probe entry6 modules=3 runtime-cases=${count} domain=refused")
+  io.println("tile-gpu-diff: pass")
+})

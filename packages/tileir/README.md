@@ -119,7 +119,7 @@ let bytes = encode(prog)    # bytecode for tileiras
 | Module | Contents |
 |------|------|
 | `dev` | the `Dev` effect, the opaque handle types (`Tile[D]`, `Param[D]`, `Idx`, views, ...) and the typed functions a kernel calls |
-| `prog` | `TileProg`; `trace1` to `trace5` and `trace_kernel`, the recording handlers; the parameter markers |
+| `prog` | `TileProg`; `trace1` to `trace6` and `trace_kernel`, the recording handlers; the parameter markers |
 | `lower` | `lower(prog)`, the linear instruction table |
 | `render` | `render(prog)`, the `cuda_tile` text; `line_map` |
 | `bytecode` | `encode(prog)`; `bytecode_version()` is `"13.4"` |
@@ -132,7 +132,7 @@ what it looks like and how to fix it. Both are checked against the source.
 
 ## Parameters and cells
 
-`trace1` to `trace5` take one marker per parameter and answer an entry
+`trace1` to `trace6` take one marker per parameter and answer an entry
 `std/gpu` can launch with typed arguments (`launch_entryN`):
 
 - `In(d, cells)` is read only; a write into it is refused while recording.
@@ -335,7 +335,7 @@ it depends on what carries the hint:
 
 | Carried by | Record | Keys |
 |---|---|---|
-| the entry (`trace_kernel`, `trace1` to `trace5`) | `entry_hints(..)` | `num_cta_in_cga`, `num_worker_warps_per_cta`, `occupancy` |
+| the entry (`trace_kernel`, `trace1` to `trace6`) | `entry_hints(..)` | `num_cta_in_cga`, `num_worker_warps_per_cta`, `occupancy` |
 | `load`, `store` | `ptr_hints(..)` | `latency` |
 | `load_cell`, `load_at`, `store_cell`, `store_sub`, `load_view`, `store_view`, `load_gather`, `store_gather` | `view_hints(..)` | `allow_tma`, `latency` |
 

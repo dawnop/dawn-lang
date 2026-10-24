@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 81c321c3de1c6c41 -->
+<!-- doc-check: translation-of docs/tutorial.md @ c92b74a4fc20adf1 -->
 
 # Dawn 教程
 
@@ -2003,7 +2003,7 @@ recorded
 没有 `Out` 时网格归调用方：`launch_entry2(entry, buffer_arg(x), buffer_arg(out), grid = [4, 2])`。
 
 另有两条出路，各一句话。一个 kernel 要用两种形状读同一个 `In`，就用 `retile(p, extent, tile)`
-给它第二个视图。`trace1` 到 `trace5` 记录最多五个参数的 kernel，参数更多时用 `trace_kernel`，
+给它第二个视图。`trace1` 到 `trace6` 记录最多六个参数的 kernel，参数更多时用 `trace_kernel`，
 每个参数都是 `Shared`。
 
 ### 上真卡
