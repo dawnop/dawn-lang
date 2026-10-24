@@ -391,6 +391,9 @@ Pure functions with no operation of their own: they build the attribute values t
 
 `traceN` and `trace_kernel` run a kernel body once under the recording handler. Every kernel starts with `make_token`, ends in `return`, and is wrapped in the `entry` and `module` records.
 
+`arg_memory` builds a host policy. Recorders apply it to view reads and writes
+by parameter provenance; it adds no operation and changes no token.
+
 | Function | Operation | Also |
 |---|---|---|
 | `trace1` | `make_token`, `return` | `module`, `entry` |
@@ -401,6 +404,7 @@ Pure functions with no operation of their own: they build the attribute values t
 | `trace6` | `make_token`, `return` | `module`, `entry` |
 | `trace_kernel` | `make_token`, `return` | `module`, `entry` |
 | `trace_calls` | `make_token`, `return` | `module`, `entry` |
+| `arg_memory` | - | - |
 | `cells` | - | - |
 | `erase` | - | - |
 | `kparam_dtype` | - | - |

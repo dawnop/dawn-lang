@@ -7,6 +7,16 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.28.0 (2026-10-24)
+
+- Add host `ArgMemory` policies to every recording entry, binding view reads
+  and writes independently by logical parameter provenance. Empty policies
+  preserve existing records. Conflicting effective host and operation hints
+  are refused; matching fields and disjoint fields combine.
+- Recording function types gain a `memory` parameter before `at`. Direct
+  calls can omit its default; stored function values must use the new type.
+  Dev, TileProg, launch ABI and bytecode are unchanged.
+
 ## 0.27.1 (2026-10-24)
 
 - Add `trace6` and the typed `Entry6` launch family, preserving the existing

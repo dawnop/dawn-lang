@@ -27,6 +27,8 @@ prints how many there are on every run.
 | [spec.md](spec.md) | **normative** | 语言的权威定义（词法、类型、效果、comptime、互操作、编译模型）。 |
 | [spec.en.md](spec.en.md) | **normative** | 上面那篇的**英文译本**。改规范先改中文，再改这里；两者不脱节由 `doc-check.py` 的 transl 检查盯着。 |
 
+宿主参数内存策略：[tile-host-memory-policy-design.md](tile-host-memory-policy-design.md)。
+
 固定六参入口：[gpu-k3-entry6-design.md](gpu-k3-entry6-design.md)。
 
 ## 当前全仓审查（v2）

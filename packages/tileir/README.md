@@ -345,6 +345,21 @@ value outside the dialect's range is refused when the kernel is recorded:
 `num_cta_in_cga` a power of two to 16 and 1 on sm_80 to sm_89. An
 architecture must be `default` or `sm_` and a number, and appear once.
 
+Host plans can bind the same view hints through `prog.arg_memory`:
+`memory: [arg_memory(1, read: [for_arch("sm_90", view_hints(latency: Some(3)))])]`.
+Every recorder (`trace1` through `trace6`, `trace_kernel`, `trace_calls`)
+accepts `memory`, independently of cells and entry hints. Indices are zero
+based. Bind each buffer once; Scalar and In write policies are refused before
+the body. Out and Shared accept separate read and write policies. Derived
+views retain their parameter identity, including in loops and branches;
+pointer accesses keep their `PtrHints` interface.
+
+Host and explicit operation hints combine after each source's existing
+whole-dictionary architecture fallback. Equal fields are accepted, different
+fields combine, and conflicting values are refused. Empty host policies
+preserve the original recording. See the
+[policy design](../../docs/tile-host-memory-policy-design.md).
+
 ## What the recorder refuses
 
 Each value handle has a format and a shape, and every element-wise operand is

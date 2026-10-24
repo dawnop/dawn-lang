@@ -33,7 +33,7 @@ use dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, bits_dtype, shift
   assume_same_elements, assume_in_range, param, block_id, tile_at, load, store, gather, scatter, atomic_rmw, atomic_add,
   atomic_cas, add, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_range, By, d_loop, Carry, carry, get, set,
   d_reduce, d_if, max, gt, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, ptrs, int_to_ptr, ptr_to_int,
-  tensor_view, partition_view, load_view, store_view, NoPadding, PadNegInf, extract, insert, powi, d_return_if,
+  tensor_view, strided_view, gather_scatter_view, load_gather, Rows, partition_view, load_view, store_view, NoPadding, PadNegInf, extract, insert, powi, d_return_if,
   float_to_float, sub, add_i, alloca_ptrs, d_fork2, select, lt, arange, mma, full, to, transpose, permute_tile, rounding_name, Overflow, Padding, PadZero, padding_name,
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
   retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, ByArch, EntryHints, PtrHints, ViewHints, wire_entry, wire_ptr, wire_view, for_arch, entry_hints, ptr_hints, view_hints, lit, idx_div,
@@ -1643,8 +1643,8 @@ fn first_overlap(wi: List[Write], wj: List[Write]) -> Option[String] = {
 ## `trace_kernel_hinted` into it; docs/std-defaults-design.md 3 says why the
 ## defaults go after the body).
 pub fn trace_kernel(name: String, params: List[KParam], body: fn() -> Unit !Dev,
-  hints: ByArch[EntryHints] = [], at: Loc = caller()) -> TileProg = {
-  let (prog, _calls) = trace_calls(name, params, body, hints = hints, at = at)
+  hints: ByArch[EntryHints] = [], memory: List[ArgMemory] = [], at: Loc = caller()) -> TileProg = {
+  let (prog, _calls) = trace_calls(name, params, body, hints = hints, memory = memory, at = at)
   prog
 }
 
@@ -1734,6 +1734,17 @@ pub type Arg[D] =
   | Out(d: Dtype[D], g: Cells)
   | Shared(d: Dtype[D])
   | Scalar(d: Dtype[D])
+
+## A host policy for one logical parameter's view reads and writes.
+## `param` is zero based. It is checked before the body runs, including for
+## empty hints; a parameter may be bound once, and a Scalar may not be bound.
+## In accepts reads only; Out and Shared accept both directions. Pointer
+## operations keep their separate PtrHints surface.
+pub type ArgMemory = { param: Int, read: ByArch[ViewHints], write: ByArch[ViewHints] }
+
+## Bind view hints to one parameter, independently for reads and writes.
+pub fn arg_memory(param: Int, read: ByArch[ViewHints] = [], write: ByArch[ViewHints] = []) -> ArgMemory =
+  ArgMemory { param = param, read = read, write = write }
 
 # What the recording holds a parameter to: its role without its format.
 type Access =
@@ -1890,10 +1901,91 @@ fn entry_args(name: Ctx, sigs: List[Sig]) -> List[EntryArg] = {
   }
 }
 
-fn record_sigs(name: Ctx, sigs: List[Sig], body: fn() -> Unit !Dev, hints: ByArch[EntryHints]) -> TileProg = {
+fn record_sigs(name: Ctx, sigs: List[Sig], body: fn() -> Unit !Dev, hints: ByArch[EntryHints], memory: List[ArgMemory]) -> TileProg = {
   let (prog, _calls) = record_calls(name, list.map(sigs, kparam_of), list.map(sigs, s => s.access),
-    list.map(sigs, s => s.g), body, hints)
+    list.map(sigs, s => s.g), body, hints, memory)
   prog
+}
+
+# Validated once, before any Dev call; recording only looks up provenance.
+type MemoryHints = { read: Hints, write: Hints }
+
+fn check_memory(name: Ctx, params: List[KParam], roles: List[Access], memory: List[ArgMemory]) -> Map[Int, MemoryHints] = {
+  var checked: Map[Int, MemoryHints] = map.empty()
+  for m in memory {
+    let p = m.param
+    if p < 0 || p >= len(params) {
+      refuse(name, "memory policy argument ${p} is outside 0 to ${len(params) - 1}")
+    }
+    if map.has(checked, p) {
+      refuse(name, "memory policy argument ${p} appears twice")
+    }
+    match params[p] {
+      ByValue(_dt) -> refuse(name, "memory policy argument ${p} is Scalar, expected a buffer")
+      ByPtr(_dt) -> ()
+    }
+    if p < len(roles) && roles[p] == Reading && len(m.write) > 0 {
+      refuse(name, "memory policy argument ${p} is In and cannot have a write policy")
+    }
+    checked = map.insert(checked, p, MemoryHints { read = wire_view(m.read), write = wire_view(m.write) })
+  }
+  checked
+}
+
+# Each source keeps ByArch's whole-dictionary default fallback. Merge the
+# effective dictionaries, so a specific arch cannot hide a default conflict.
+fn hints_at(hints: Hints, arch: String) -> List[(String, Int)] = match list.find(hints, h => {
+  let (a, _v) = h
+  a == arch
+}) {
+  Some(h) -> { let (_a, v) = h
+    v }
+  None -> match list.find(hints, h => { let (a, _v) = h
+    a == "default" }) {
+    Some(h) -> { let (_a, v) = h
+      v }
+    None -> []
+  }
+}
+
+fn merge_memory_hints(name: Ctx, host: Hints, op: Hints) -> Hints = {
+  if len(host) == 0 { return op }
+  if len(op) == 0 { return host }
+  let archs = list.sort(list.fold(host ++ op, [], (xs: List[String], h) =>
+      { let (a, _v) = h
+        if list.contains(xs, a) { xs } else { xs ++ [a] } }))
+  list.map(archs, arch => {
+    let a = hints_at(host, arch)
+    let b = hints_at(op, arch)
+    let keys = ["allow_tma", "latency"]
+    let fields = list.fold(keys, [], (fields: List[(String, Int)], key) => {
+      let av = list.find(a, h => { let (k, _v) = h
+        k == key })
+      let bv = list.find(b, h => { let (k, _v) = h
+        k == key })
+      fields ++ match (av, bv) {
+        (Some(x), Some(y)) -> {
+          let (_kx, vx) = x
+          let (_ky, vy) = y
+          if vx == vy { [x] } else {
+            refuse(name, "memory policy conflicts with op hint `${key}` for `${arch}`: ${vx} versus ${vy}")
+          }
+        }
+        (Some(x), None) -> [x]
+        (None, Some(y)) -> [y]
+        (None, None) -> []
+      }
+    })
+    (arch, fields)
+  })
+}
+
+fn memory_hints(name: Ctx, policies: Map[Int, MemoryHints], aim: Option[Int], write: Bool, op: Hints) -> Hints = match aim {
+  Some(p) -> match map.get(policies, p) {
+    Some(m) -> merge_memory_hints(name, if write { m.write } else { m.read }, op)
+    None -> op
+  }
+  None -> op
 }
 
 ## `trace_kernel` for a kernel of one parameter, described by its marker
@@ -1903,44 +1995,48 @@ fn record_sigs(name: Ctx, sigs: List[Sig], body: fn() -> Unit !Dev, hints: ByArc
 ## disagree with another's or with the grid, is refused before the body
 ## runs; a write into an `In` parameter is refused while it records. The
 ## program is the one `trace_kernel` records for the same body.
+## `memory` binds view hints by parameter and direction, independently of
+## cells. It follows derived views, including in regions. Explicit op hints
+## combine by field after each source's ByArch fallback: equal values are
+## accepted, conflicting values refused. Empty policies preserve the record.
 pub fn trace1[A](name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev,
-  hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry1[A]) = {
+  hints: ByArch[EntryHints] = [], memory: List[ArgMemory] = [], at: Loc = caller()) -> (TileProg, Entry1[A]) = {
   let ctx0 = entry_ctx(name, at)
   let args = entry_args(ctx0, [sig_of(a)])
-  let prog = record_sigs(ctx0, [sig_of(a)], () => body(param(marker(a), 0)), hints)
+  let prog = record_sigs(ctx0, [sig_of(a)], () => body(param(marker(a), 0)), hints, memory)
   (prog, entry1(name, args[0]))
 }
 
 ## [`trace1`] for two parameters.
 pub fn trace2[A, B](name: String, a: Arg[A], b: Arg[B],
-  body: fn(Param[A], Param[B]) -> Unit !Dev, hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry2[A, B]) = {
+  body: fn(Param[A], Param[B]) -> Unit !Dev, hints: ByArch[EntryHints] = [], memory: List[ArgMemory] = [], at: Loc = caller()) -> (TileProg, Entry2[A, B]) = {
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b)]
   let args = entry_args(ctx0, sigs)
-  let prog = record_sigs(ctx0, sigs, () => body(param(marker(a), 0), param(marker(b), 1)), hints)
+  let prog = record_sigs(ctx0, sigs, () => body(param(marker(a), 0), param(marker(b), 1)), hints, memory)
   (prog, entry2(name, args[0], args[1]))
 }
 
 ## [`trace1`] for three parameters.
 pub fn trace3[A, B, C](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
-  body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev, hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry3[A, B, C]) = {
+  body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev, hints: ByArch[EntryHints] = [], memory: List[ArgMemory] = [], at: Loc = caller()) -> (TileProg, Entry3[A, B, C]) = {
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c)]
   let args = entry_args(ctx0, sigs)
   let prog = record_sigs(ctx0, sigs,
-    () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2)), hints)
+    () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2)), hints, memory)
   (prog, entry3(name, args[0], args[1], args[2]))
 }
 
 ## [`trace1`] for four parameters.
 pub fn trace4[A, B, C, E](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
   d: Arg[E], body: fn(Param[A], Param[B], Param[C], Param[E]) -> Unit !Dev,
-  hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry4[A, B, C, E]) = {
+  hints: ByArch[EntryHints] = [], memory: List[ArgMemory] = [], at: Loc = caller()) -> (TileProg, Entry4[A, B, C, E]) = {
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d)]
   let args = entry_args(ctx0, sigs)
   let prog = record_sigs(ctx0, sigs,
-    () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2), param(marker(d), 3)), hints)
+    () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2), param(marker(d), 3)), hints, memory)
   (prog, entry4(name, args[0], args[1], args[2], args[3]))
 }
 
@@ -1948,13 +2044,13 @@ pub fn trace4[A, B, C, E](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
 pub fn trace5[A, B, C, E, F](name: String, a: Arg[A], b: Arg[B],
   c: Arg[C], d: Arg[E], e: Arg[F],
   body: fn(Param[A], Param[B], Param[C], Param[E], Param[F]) -> Unit !Dev,
-  hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry5[A, B, C, E, F]) = {
+  hints: ByArch[EntryHints] = [], memory: List[ArgMemory] = [], at: Loc = caller()) -> (TileProg, Entry5[A, B, C, E, F]) = {
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d), sig_of(e)]
   let args = entry_args(ctx0, sigs)
   let prog = record_sigs(ctx0, sigs,
     () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2), param(marker(d), 3),
-      param(marker(e), 4)), hints)
+      param(marker(e), 4)), hints, memory)
   (prog, entry5(name, args[0], args[1], args[2], args[3], args[4]))
 }
 
@@ -1962,13 +2058,13 @@ pub fn trace5[A, B, C, E, F](name: String, a: Arg[A], b: Arg[B],
 pub fn trace6[A, B, C, E, F, G](name: String, a: Arg[A], b: Arg[B],
   c: Arg[C], d: Arg[E], e: Arg[F], f: Arg[G],
   body: fn(Param[A], Param[B], Param[C], Param[E], Param[F], Param[G]) -> Unit !Dev,
-  hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry6[A, B, C, E, F, G]) = {
+  hints: ByArch[EntryHints] = [], memory: List[ArgMemory] = [], at: Loc = caller()) -> (TileProg, Entry6[A, B, C, E, F, G]) = {
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d), sig_of(e), sig_of(f)]
   let args = entry_args(ctx0, sigs)
   let prog = record_sigs(ctx0, sigs,
     () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2), param(marker(d), 3),
-      param(marker(e), 4), param(marker(f), 5)), hints)
+      param(marker(e), 4), param(marker(f), 5)), hints, memory)
   (prog, entry6(name, args[0], args[1], args[2], args[3], args[4], args[5]))
 }
 
@@ -2649,10 +2745,10 @@ fn kernel_side(marks: List[Mark]) -> Bool =
 ## with `param(d, k)` in the markers' formats. What the site's call map of a
 ## kernel recorded with cells runs.
 pub fn trace_calls(name: String, params: List[KParam], body: fn() -> Unit !Dev, hints: ByArch[EntryHints] = [],
-  markers: List[Marker] = [], at: Loc = caller()) -> (TileProg, List[Call]) = {
+  markers: List[Marker] = [], memory: List[ArgMemory] = [], at: Loc = caller()) -> (TileProg, List[Call]) = {
   let c = entry_ctx(name, at)
   if len(markers) == 0 {
-    record_calls(c, params, [], [], body, hints)
+    record_calls(c, params, [], [], body, hints, memory)
   } else if len(params) != 0 {
     refuse(c, "`trace_calls` takes formats or markers, not both")
   } else {
@@ -2662,7 +2758,7 @@ pub fn trace_calls(name: String, params: List[KParam], body: fn() -> Unit !Dev, 
     })
     let _args = entry_args(c, sigs)
     record_calls(c, list.map(sigs, kparam_of), list.map(sigs, s => s.access), list.map(sigs, s => s.g),
-      body, hints)
+      body, hints, memory)
   }
 }
 
@@ -2671,10 +2767,11 @@ pub fn trace_calls(name: String, params: List[KParam], body: fn() -> Unit !Dev, 
 # no roles and refuse nothing on their account and have no cells to read,
 # and one per parameter for `trace1` to `trace6`.
 fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: List[Cells],
-  body: fn() -> Unit !Dev, entry_hints: ByArch[EntryHints]) -> (TileProg, List[Call]) = {
+  body: fn() -> Unit !Dev, entry_hints: ByArch[EntryHints], memory: List[ArgMemory]) -> (TileProg, List[Call]) = {
   # the entry's hints are checked before the body runs, like the shapes of its parameters
   let hints = wire_entry(entry_hints)
   check_by_value(entry, params)
+  let policies = check_memory(entry, params, roles, memory)
   let (globals, ops, calls) = {
     with handle Dev {
       var next: Int = 1
@@ -4275,6 +4372,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         let d = next
         let tv = next + 1
         next = mint(name, next, 2)
+        let hints = memory_hints(name, policies, map.get(aims, view), false, hints)
         if unordered_read(roles, map.get(aims, view)) {
           ops = ops ++ [LoadView(d, tv, dtype, view, indices, 0, inbounds, hints)]
         } else {
@@ -4311,6 +4409,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         spreads = g.spreads
         let tv = next
         next = mint(name, next, 1)
+        let hints = memory_hints(name, policies, map.get(aims, view), true, hints)
         ops = ops ++ [StoreView(tv, dtype, view, indices, value, tok, inbounds, hints)]
         tok = tv
         ()
@@ -8060,4 +8159,135 @@ test "K3-0: sixth marker refuses before body and preserves caller" {
   let pointer = marked(() => trace6("six_pointer", Shared(F64), Shared(F64), Shared(F64), Shared(F64), Shared(F64), Shared(F64),
     (_a, _b, _c, _d, _e, f) => { let _v = scalar(f) }))
   assert str.contains(pointer, "scalar")
+}
+
+# Refusals run before the positive propagation cases below.
+test "host memory: invalid bindings refuse before the body" {
+  let hs = [for_arch("sm_90", view_hints(latency = Some(3)))]
+  for pos in [0 - 1, 1] {
+    let why = marked(() => trace1("policy", Shared(F64), _x => panic("body ran"), memory = [arg_memory(pos, read = hs)]))
+    assert str.contains(why, "memory policy argument ${pos} is outside")
+  }
+  assert str.contains(marked(() => trace1("policy", Scalar(F32), _s => panic("body ran"), memory = [arg_memory(0)])), "is Scalar")
+  assert str.contains(marked(() => trace_kernel("policy", [ByValue("f32")], () => panic("body ran"), memory = [arg_memory(0)])), "is Scalar")
+  assert str.contains(marked(() => trace1("policy", In(F64, Whole), _x => panic("body ran"), memory = [arg_memory(0, write = hs)])), "is In")
+  assert str.contains(marked(() => trace1("policy", Shared(F64), _x => panic("body ran"), memory = [arg_memory(0), arg_memory(0, read = hs)])), "appears twice")
+  for latency in [0, 11] {
+    let why = marked(() => trace1("policy", Shared(F64), _x => panic("body ran"),
+      memory = [arg_memory(0, read = [for_arch("sm_90", view_hints(latency = Some(latency)))])]))
+    assert str.contains(why, "the dialect takes 1 to 10")
+  }
+  for hs0 in [[for_arch("sm90", view_hints())], [for_arch("sm_90", view_hints()), for_arch("sm_90", view_hints())]] {
+    let why = marked(() => trace1("policy", Shared(F64), _x => panic("body ran"), memory = [arg_memory(0, read = hs0)]))
+    assert str.contains(why, "optimization hint architecture")
+  }
+}
+
+test "host memory: explicit conflicts include effective default hints" {
+  let g = cells([8], [8])
+  for arch in ["sm_90", "default"] {
+    let why = marked(() => trace1("policy", In(F64, g), x => {
+      let _t = load_cell(x, hints = [for_arch("sm_90", view_hints(latency = Some(4)))])
+    }, memory = [arg_memory(0, read = [for_arch(arch, view_hints(latency = Some(3)))])]))
+    assert str.contains(why, "memory policy conflicts with op hint `latency` for `sm_90`")
+  }
+  let why = marked(() => trace1("policy", Out(F64, g), o => store_cell(o, zeros(o),
+    hints = [for_arch("sm_90", view_hints(allow_tma = Some(true)))]),
+    memory = [arg_memory(0, write = [for_arch("sm_90", view_hints(allow_tma = Some(false)))])]))
+  assert str.contains(why, "conflicts with op hint `allow_tma`")
+}
+
+test "host memory: provenance separates equal cells across derived views loops and branches" {
+  let g = cells([8], [8])
+  let hs = (n: Int) => [for_arch("sm_90", view_hints(latency = Some(n)))]
+  let memory = [arg_memory(0, read = hs(3)), arg_memory(1, read = hs(7)), arg_memory(2, read = hs(2), write = hs(9))]
+  let (p, _e) = trace3("policy", In(F64, g), In(F64, g), Out(F64, g), (a, b, o) => {
+    let va = partition_view(tensor_view(a, idx_const(0), [8], [1]), [8], [0], NoPadding)
+    let vb = strided_view(tensor_view(b, idx_const(0), [8], [1]), [8], [1], [0], NoPadding)
+    for j in d_range(0, 2) {
+      if idx_eq(j, idx_const(0)) {
+        store_cell(o, load_view(va, [idx_const(0)]) + load_cell(o))
+      } else {
+        store_cell(o, load_view(vb, [idx_const(0)]))
+      }
+    }
+  }, memory = memory)
+  let no_defs: Map[Int, TileOp] = map.empty()
+  let defs = list.fold(flat(p.ops), no_defs, (m, op) => list.fold(defined(op), m, (m2, h) => map.insert(m2, h, op)))
+  let loads = ops_where(p.ops, op => match op { LoadView(_d, _t, _dt, _v, _ix, _ti, _ib, _h) -> true
+    _ -> false })
+  assert len(loads) == 3
+  for op in loads {
+    match op {
+      LoadView(_d, _t, _dt, v, _ix, ti, _ib, hints) -> {
+        let pos = match view_param(defs, v) { Some(k) -> k
+          None -> panic("lost view provenance") }
+        assert hints == wire_view(memory[pos].read)
+        if pos < 2 { assert ti == 0 }
+      }
+      _ -> panic("missing load")
+    }
+  }
+  let stores = ops_where(p.ops, op => match op { StoreView(_t, _dt, _v, _ix, _val, _ti, _ib, _h) -> true
+    _ -> false })
+  assert len(stores) == 2
+  for op in stores {
+    match op { StoreView(_t, _dt, v, _ix, _val, _ti, _ib, h) -> {
+      assert view_param(defs, v) == Some(2)
+      assert h == wire_view(hs(9))
+    }
+      _ -> panic("missing store") }
+  }
+}
+
+fn policy_read(x: Param[Float]) -> Unit !Dev = {
+  let tv = tensor_view(x, idx_const(0), [8], [1])
+  let v = gather_scatter_view(tv, [8], 0, NoPadding)
+  let _t = load_gather(v, [Rows(arange(8))])
+}
+
+test "host memory: all trace arities and erased markers share the policy path" {
+  let hs = [for_arch("sm_90", view_hints(latency = Some(3)))]
+  let m = [arg_memory(0, read = hs)]
+  let a = Shared(F64)
+  let (p1, _e1) = trace1("p", a, policy_read, memory = m)
+  let (p2, _e2) = trace2("p", a, a, (x, _b) => policy_read(x), memory = m)
+  let (p3, _e3) = trace3("p", a, a, a, (x, _b, _c) => policy_read(x), memory = m)
+  let (p4, _e4) = trace4("p", a, a, a, a, (x, _b, _c, _d) => policy_read(x), memory = m)
+  let (p5, _e5) = trace5("p", a, a, a, a, a, (x, _b, _c, _d, _e) => policy_read(x), memory = m)
+  let (p6, _e6) = trace6("p", a, a, a, a, a, a, (x, _b, _c, _d, _e, _f) => policy_read(x), memory = m)
+  for p in [p1, p2, p3, p4, p5, p6] {
+    let plain = trace_kernel("p", p.params, () => policy_read(param(F64, 0)))
+    let raw = trace_kernel("p", p.params, () => policy_read(param(F64, 0)), memory = m)
+    assert p == raw
+    assert p != plain
+    let (erased, _calls) = trace_calls("p", [], () => policy_read(param(F64, 0)),
+      markers = list.map(p.params, _p => erase(a)), memory = m)
+    assert erased == p
+    assert trace_kernel("p", p.params, () => policy_read(param(F64, 0)), memory = []) == plain
+  }
+  # The last position is covered independently from parameter zero.
+  let (last, _el) = trace6("p", a, a, a, a, a, a, (_a, _b, _c, _d, _e, f) => policy_read(f), memory = [arg_memory(5, read = hs)])
+  let loads = ops_where(last.ops, op => match op { LoadView(_d, _t, _dt, _v, _ix, _ti, _ib, h) -> h == wire_view(hs)
+    _ -> false })
+  assert len(loads) == 1
+}
+
+test "host memory: same values merge and arch dictionaries retain whole default fallback" {
+  let c = entry_ctx("policy", loc.here())
+  let a = wire_view([for_arch("default", view_hints(latency = Some(3))), for_arch("sm_100", view_hints(allow_tma = Some(false)))])
+  let b = wire_view([for_arch("sm_90", view_hints(latency = Some(3), allow_tma = Some(true)))])
+  let combined = merge_memory_hints(c, a, b)
+  assert hints_at(combined, "sm_90") == [("allow_tma", 1), ("latency", 3)]
+  assert hints_at(combined, "sm_100") == [("allow_tma", 0)]
+  assert hints_at(combined, "sm_86") == [("latency", 3)]
+  assert combined == merge_memory_hints(c, b, a)
+  for n in range(1, 11) {
+    let hs = wire_view([for_arch("sm_90", view_hints(latency = Some(n)))])
+    assert merge_memory_hints(c, hs, hs) == hs
+  }
+  let policies = check_memory(c, [ByPtr("f64")], [], [arg_memory(0, read = [for_arch("sm_90", view_hints(latency = Some(3)))])])
+  assert memory_hints(c, policies, None, false, []) == []
+  assert memory_hints(c, policies, Some(NO_PARAM), false, []) == []
+  assert memory_hints(c, policies, Some(1), false, []) == []
 }

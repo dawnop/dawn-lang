@@ -769,8 +769,9 @@ grep -q "V${want_tileiras}\b" "$work/tileiras.version" ||
 # the extra argument are written into the ledger line as `o0=`, next to
 # `asm=` (the arguments every kernel got), so a reader of a remote line sees
 # which cubins were assembled at which level.
-asm_names="$(awk '/^fn trace\(name/{f=1} f&&/^  "[a-z0-9_]+" ->/{gsub(/"/,"",$1); print $1} f&&/^}/{exit}' "$golden/kernels.dawn" | tr '\n' ' ')"
-[ -n "$asm_names" ] || fail "kernels.dawn's trace has no kernel arms"
+# The persistent golden inventory is independent of dispatcher method size.
+asm_names="$(for bc in "$golden"/*.tilebc; do basename "$bc" .tilebc; done | tr '\n' ' ')"
+[ -n "$asm_names" ] || fail "tile-golden has no bytecode assets"
 asm_proj="$work/proj-asm"
 mkdir -p "$asm_proj/src"
 cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
