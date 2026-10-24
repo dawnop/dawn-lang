@@ -13,7 +13,7 @@ use std/io
 use std/gpu.{ScalarDtype}
 use std/float.{INFINITY}
 use std/list
-use tileir/dev.{Dev, Param, Tile, FloatDtype, Idx, idx_const, block_id, load_cell, store_cell, load_at, full, zeros, mma, transpose, scalar, max, exp, exp2, div, to, reduce_max, reduce_sum, d_range}
+use tileir/dev.{Dev, Param, Tile, FloatDtype, idx_const, tile_shape, blocks_of, t_call_enter, t_call_exit, t_body_enter, t_body_exit, load_cell, store_cell, load_at, full, zeros, mma, transpose, scalar, max, exp, exp2, div, to, reduce_max, reduce_sum, d_range}
 use tileir/prog.{trace5, cells, In, Out, Scalar, FREE_AXIS}
 use tileinterp/interp.{interp_ref}
 use tileinterp/math.{exp_f}
@@ -25,36 +25,47 @@ const FA_BQ: Int = 32
 const FA_BK: Int = 16
 const ATT_INV_SQRT_D: Float = 0.17677669529663687
 
-type FaShape = { n: Int, d: Int, bh: Int }
+type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool }
+fn fa64_math() -> FaNumerics[Float] = FaNumerics { zero = 0.0, neg_inf = -INFINITY, base2 = false, exp_ftz = false, approx_div = false, div_ftz = false }
 
-type FaTiles = { bq: Int, bk: Int }
-
-type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool, acc_from_out: Bool }
-
-fn fa64_math() -> FaNumerics[Float] = FaNumerics { zero = 0.0, neg_inf = -INFINITY, base2 = false, exp_ftz = false, approx_div = false, div_ftz = false, acc_from_out = true }
-
-fn fa_kv_index(j: Idx, bh: Int, s: Int, c: FaTiles) -> Idx !Dev =
-  if bh == 1 { j } else { (block_id(0) / idx_const(s / c.bq)) * idx_const(s / c.bk) + j }
-
-fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[D], v: Param[D], o: Param[A], scale: Param[A], dt: Dtype[D], math: FaNumerics[A], cfg: FaTiles, shape: FaShape) -> Unit !Dev = {
-  let tq = load_cell(q)
-  var m: Tile[A] = full([cfg.bq, 1], math.neg_inf)
-  var l: Tile[A] = full([cfg.bq, 1], math.zero)
-  var acc: Tile[A] = if math.acc_from_out { zeros(o) } else { full([cfg.bq, shape.d], math.zero) }
-  for j in d_range(0, shape.n / cfg.bk) {
-    let s: Tile[A] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
-    let m_new = max(m, reduce_max(s, keepdims = true))
-    let p = if math.base2 { exp2(s - m_new, ftz = math.exp_ftz) } else { exp(s - m_new) }
-    let alpha = if math.base2 { exp2(m - m_new, ftz = math.exp_ftz) } else { exp(m - m_new) }
-    l = l * alpha + reduce_sum(p, keepdims = true)
-    acc = mma(p.to(dt), load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
-    m = m_new
-  }
-  store_cell(o, if math.approx_div { div(acc, l, approx = true, ftz = math.div_ftz) } else { acc / l })
+fn fa_exp[A: FloatDtype](math: FaNumerics[A], x: Tile[A], at: Loc = caller()) -> Tile[A] !Dev = {
+  t_call_enter("fa_exp", Some(at))
+  t_body_enter()
+  let result = if math.base2 { exp2(x, ftz = math.exp_ftz) } else { exp(x) }
+  t_body_exit()
+  t_call_exit()
+  result
 }
 
-fn fa_kernel[D: FloatDtype, A: FloatDtype + ScalarDtype](dt: Dtype[D], math: FaNumerics[A], c: FaTiles, n: Int, d: Int, bh: Int) -> fn(Param[D], Param[D], Param[D], Param[A], Param[A]) -> Unit !Dev =
-  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, dt, math, c, FaShape { n = n, d = d, bh = bh })
+fn fa_divide[A: FloatDtype](math: FaNumerics[A], x: Tile[A], y: Tile[A], at: Loc = caller()) -> Tile[A] !Dev = {
+  t_call_enter("fa_divide", Some(at))
+  t_body_enter()
+  let result = if math.approx_div { div(x, y, approx = true, ftz = math.div_ftz) } else { x / y }
+  t_body_exit()
+  t_call_exit()
+  result
+}
+
+fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[D], v: Param[D], o: Param[A], scale: Param[A], dt: Dtype[D], math: FaNumerics[A]) -> Unit !Dev = {
+  let tq = load_cell(q)
+  let rows = tile_shape(tq)[0]
+  var m: Tile[A] = full([rows, 1], math.neg_inf)
+  var l: Tile[A] = full([rows, 1], math.zero)
+  var acc = zeros(o)
+  for j in d_range(idx_const(0), blocks_of(k, 1)) {
+    let s: Tile[A] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
+    let m_new = max(m, reduce_max(s, keepdims = true))
+    let p = fa_exp(math, s - m_new)
+    let alpha = fa_exp(math, m - m_new)
+    l = l * alpha + reduce_sum(p, keepdims = true)
+    acc = mma(p.to(dt), load_at(v, [j]), acc * alpha)
+    m = m_new
+  }
+  store_cell(o, fa_divide(math, acc, l))
+}
+
+fn fa_kernel[D: FloatDtype, A: FloatDtype + ScalarDtype](dt: Dtype[D], math: FaNumerics[A]) -> fn(Param[D], Param[D], Param[D], Param[A], Param[A]) -> Unit !Dev =
+  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, dt, math)
 
 # Small deterministic inputs: integers over eight, so every score is a short
 # binary fraction.
@@ -72,16 +83,16 @@ fn plain_row(q: List[Float], k: List[Float], v: List[Float], i: Int) -> List[Flo
 }
 
 pub fn main() -> Unit !io = {
-  let kv = cells([ATT_N, ATT_D], [FA_BK, ATT_D], along = [FREE_AXIS, 1])
+  let kv = cells([1, ATT_N, ATT_D], [1, FA_BK, ATT_D], along = [2, FREE_AXIS, 1], squeeze = [0])
   let (prog, _e) = trace5("flash_attn",
-    In(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(F64, kv), In(F64, kv),
-    Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), fa_kernel(F64, fa64_math(), FaTiles { bq = 32, bk = 16 }, ATT_N, ATT_D, 1))
+    In(F64, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [2, 0, 1], squeeze = [0])), In(F64, kv), In(F64, kv),
+    Out(F64, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [2, 0, 1], squeeze = [0])), Scalar(F64), fa_kernel(F64, fa64_math()))
   let q = wave(ATT_M * ATT_D, 1)
   let k = wave(ATT_N * ATT_D, 2)
   let v = wave(ATT_N * ATT_D, 3)
   let blank = list.map(range(0, ATT_M * ATT_D), _i => 0.0)
-  # grid: one block per FA_BQ query rows
-  let run = interp_ref(prog, [ATT_M / FA_BQ])
+  # grid [2, 1, 1]: query blocks on axis 0, one head on axis 2
+  let run = interp_ref(prog, [ATT_M / FA_BQ, 1, 1])
   let answers = run(["f64", "f64", "f64", "f64"], [q, k, v, blank], [ATT_INV_SQRT_D])
   let (_buf, o) = answers[0]
   io.println("flash_attn on the host: ${ATT_M} queries, ${ATT_N} keys, head size ${ATT_D}, ${ATT_M / FA_BQ} blocks")
@@ -90,9 +101,11 @@ pub fn main() -> Unit !io = {
     let want = plain_row(q, k, v, i)
     for d in range(0, ATT_D) {
       let gap = o[i * ATT_D + d] - want[d]
+      if gap != gap { panic("plain attention check: non-finite result") }
       worst = max_float(worst, if gap < 0.0 { 0.0 - gap } else { gap })
     }
   }
+  if not (worst < 1e-12) { panic("plain attention check exceeds 1e-12") }
   io.println("query 0, first four of ${ATT_D}: ${list.slice(o, 0, 4)}")
   io.println("query ${ATT_M - 1}, first four of ${ATT_D}: ${list.slice(o, (ATT_M - 1) * ATT_D, (ATT_M - 1) * ATT_D + 4)}")
   io.println("agrees with plain attention to 1e-12: ${worst < 1e-12}")

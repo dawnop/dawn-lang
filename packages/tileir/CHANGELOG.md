@@ -7,6 +7,15 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.27.0
+
+- 新增 `cells(..., squeeze = [])` 与 `Grid` 的第五个字段。投影只从值中删除
+  长度为 1 的 tile 轴，storage 几何、grid、边界与所有权保持完整。轴列表按集合
+  解释，重复轴拒绝；支持 scalar store、rank-0，`store_sub` 逆投影插入单例
+  storage 轴与零 piece 下标。
+- 新增类型化记录期查询 `tile_shape(Tile[D])`，保留零指令来源调用；新增内部
+  `Dev.t_cell_shape`。外部 handler 必须处理该查询；无新 opcode 或字节码版本变更。
+
 ## 0.26.0 (2026-10-23)
 
 - Remove `prog.check_config` without a compatibility wrapper. Measured tileiras row tile performance filters belong to the application recording policy; generic hint range, dtype and shape validation remains in tileir.

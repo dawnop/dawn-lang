@@ -826,10 +826,13 @@ pub opaque type Ptrs[D] = Int
 ## parameter itself), because a buffer std/gpu allocates starts on a
 ## 256-byte boundary and an In's cells start at its first element; for an
 ## Out it carries none. `t_cell_fill` answers a tile of the parameter's
-## cell shape and format with every lane `value`, which for an integer
+## projected value shape and format with every lane `value`, which for an integer
 ## format must be a whole number. A parameter with no cells (a `Whole` or
 ## `Shared` marker, or any parameter under `trace_kernel`) is refused by
 ## both, under the kernel's name and the call that asked.
+##
+## `t_cell_shape(param)` queries the complete storage tile and its singleton
+## projection axes without allocating any handle or device operation.
 ##
 ## `t_sub_view(param, dtype, sub, at)` is `t_cell_view`'s finer cut, for
 ## an Out written in pieces (`store_sub`): a partition view over the same
@@ -985,6 +988,7 @@ pub effect Dev {
   fn t_tensor_shape(view: Int, dim: Int) -> Int
   fn t_index_space_shape(view: Int, dim: Int) -> Int
   fn t_cell_view(param: Int, dtype: String, free: List[Int]) -> (Int, List[Int])
+  fn t_cell_shape(param: Int) -> (List[Int], List[Int])
   fn t_cell_fill(param: Int, value: Float) -> Int
   fn t_sub_view(param: Int, dtype: String, sub: List[Int], at: List[Int]) -> (Int, List[Int])
   fn t_retile(param: Int, dtype: String, extent: List[Int], tile: List[Int], pad: Padding) -> Int
@@ -1359,6 +1363,15 @@ fn shape_of(h: Int) -> List[Int] !Dev = {
   let (_d, s) = t_shape_of(h)
   s
 }
+
+## The recording-time static value shape of `t`. This queries the recorded
+## tile without allocating a handle or emitting a device instruction. A
+## cells projection is already reflected in this shape; storage dimensions
+## remain the numbering of `extent_of` and `blocks_of`.
+pub fn tile_shape[D](t: Tile[D], at: Loc = caller()) -> List[Int] !Dev = called("tile_shape", at, () => {
+  let h: Int = t
+  shape_of(h)
+})
 
 # The shape an element-wise operation over the handles `hs` declares: the
 # first operand of rank one or more, or rank 0 when every one is, with each
@@ -3995,7 +4008,8 @@ pub fn gdc_wait(at: Loc = caller()) -> Unit !Dev = called("gdc_wait", at, () => 
 
 ## This block's cell of `p`, read through a view of `p`'s cells: the tile
 ## of `p`'s marker, at the block ids of the grid axes its dimensions
-## follow. Lanes past the extent read the marker's padding value, so
+## follow, reshaped to the marker's projected value shape. Lanes past the
+## extent read the marker's padding value, so
 ## `cells([1000], [1024], pad: PadNegInf)` reads a whole row with no mask.
 ## Every dimension must follow a grid axis; [`load_at`] names the cells of
 ## the ones that do not. `p` must be an `In` or an `Out` cut into cells.
@@ -4014,13 +4028,32 @@ pub fn load_at[D](p: Param[D], free: List[Idx], hints: ByArch[ViewHints] = [], a
 fn read_cell[D](p: Param[D], free: List[Idx], hints: ByArch[ViewHints]) -> Tile[D] !Dev = {
   let (v, ix) = t_cell_view(position(p), param_dtype(p), list.map(free, idx_handle))
   let h: Tile[D] = t_load_view(param_dtype(p), v, ix, [], wire_view(hints))
-  h
+  let (storage, squeeze) = t_cell_shape(position(p))
+  if len(squeeze) == 0 { h } else { reshape(h, projected_shape(storage, squeeze)) }
+}
+
+# Projection changes values alone. All views and their ownership proofs keep
+# the complete storage geometry, including singleton tile axes.
+fn projected_shape(storage: List[Int], squeeze: List[Int]) -> List[Int] =
+  list.map(list.filter(range(0, len(storage)), j => not list.contains(squeeze, j)), j => storage[j])
+
+fn inserted_shape(value: List[Int], storage: List[Int], squeeze: List[Int], singleton: Int) -> List[Int] = {
+  var k = 0
+  var out: List[Int] = []
+  for j in range(0, len(storage)) {
+    if list.contains(squeeze, j) { out = out ++ [singleton] } else {
+      out = out ++ [value[k]]
+      k = k + 1
+    }
+  }
+  out
 }
 
 ## `t` written into this block's cell of `p`, an `Out` cut into cells:
 ## the same view `load_cell` reads, at the block's own index. Lanes past
 ## the extent are not written. No format marker and no shape: `t` must be
-## the tile of `p`'s marker, which the recording holds it to, and a rank-0
+## the projected value shape of `p`'s marker, which the recording holds it
+## to before restoring storage axes, and a rank-0
 ## `t` is widened to it (every lane of the cell the same value).
 ##
 ## This and `store_sub` are the only writes an Out takes (the batch's D-7):
@@ -4029,8 +4062,17 @@ fn read_cell[D](p: Param[D], free: List[Idx], hints: ByArch[ViewHints]) -> Tile[
 ## cell and nothing else" is not a convention but the only thing a kernel
 ## can say.
 pub fn store_cell[D](p: Param[D], t: Tile[D], hints: ByArch[ViewHints] = [], at: Loc = caller()) -> Unit !Dev = called("store_cell", at, () => {
+  let (storage, squeeze) = t_cell_shape(position(p))
+  let y: Int = if len(squeeze) == 0 { t } else {
+    let value = projected_shape(storage, squeeze)
+    let actual = tile_shape(t)
+    if len(actual) != 0 && actual != value {
+      panic("tileir: store_cell: parameter ${position(p)} expects projected value shape ${show(value)}, got ${show(actual)}", at = at)
+    }
+    let filled = if len(actual) == 0 && len(value) > 0 { broadcast(t, value) } else { t }
+    reshape(filled, storage)
+  }
   let (v, ix) = t_cell_view(position(p), param_dtype(p), [])
-  let y: Int = t
   t_store_view(param_dtype(p), v, ix, y, [], wire_view(hints))
 })
 
@@ -4041,10 +4083,21 @@ pub fn store_cell[D](p: Param[D], t: Tile[D], hints: ByArch[ViewHints] = [], at:
 ## writes its cell in several parts writes with: a slab per segment, the
 ## two halves of a rotated row. The piece can never leave the block's cell,
 ## which is the recording's claim and the reason `piece` is a host number.
+## Piece dimensions are value dimensions; squeezed storage axes are restored
+## with shape 1 and piece 0 before the same containment proof.
 pub fn store_sub[D](p: Param[D], piece: List[Int], t: Tile[D],
   hints: ByArch[ViewHints] = [], at: Loc = caller()) -> Unit !Dev = called("store_sub", at, () => {
-    let y: Int = t
-    let (v, ix) = t_sub_view(position(p), param_dtype(p), shape_of(y), piece)
+    let h: Int = t
+    let sub = shape_of(h)
+    let (storage, squeeze) = t_cell_shape(position(p))
+    let rank = len(storage) - len(squeeze)
+    if len(squeeze) > 0 && (len(sub) != rank || len(piece) != rank) {
+      panic("tileir: store_sub: parameter ${position(p)} expects ${rank} projected value dimensions and piece numbers, got shape ${show(sub)} at ${show(piece)}", at = at)
+    }
+    let shape = if len(squeeze) == 0 { sub } else { inserted_shape(sub, storage, squeeze, 1) }
+    let at_piece = if len(squeeze) == 0 { piece } else { inserted_shape(piece, storage, squeeze, 0) }
+    let y: Int = if len(squeeze) == 0 { t } else { reshape(t, shape) }
+    let (v, ix) = t_sub_view(position(p), param_dtype(p), shape, at_piece)
     t_store_view(param_dtype(p), v, ix, y, [], wire_view(hints))
   })
 
@@ -4555,6 +4608,7 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       (h, free)
     }
+    t_cell_shape(_param) => ([], [])
     t_cell_fill(_param, _value) => {
       let h = next
       next = next + 1
@@ -5010,6 +5064,7 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       log = log ++ ["cell_view ${param} ${dtype} ${show(free)}"]
       (87, free)
     }
+    t_cell_shape(_param) => ([], [])
     t_cell_fill(param, value) => {
       log = log ++ ["cell_fill ${param} ${value}"]
       88
@@ -5662,6 +5717,7 @@ test "d_range hands the body the carried handle and passes its answer back as th
       t_tensor_shape(_view, _dim) => 83
       t_index_space_shape(_view, _dim) => 84
       t_cell_view(_param, _dtype, free) => (87, free)
+      t_cell_shape(_param) => ([], [])
       t_cell_fill(_param, _value) => 88
       t_sub_view(_param, _dtype, _sub, at) => (91, at)
       t_retile(_param, _dtype, _extent, _tile, _pad) => 92

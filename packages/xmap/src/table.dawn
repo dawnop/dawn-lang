@@ -41,7 +41,7 @@ use source.{Src, src_of, at, off, pos, ident_at, text_between}
 pub type Call = { id: Int, parent: Int, name: String, lo: Int, hi: Int, nlo: Int, nhi: Int, lines: List[String] }
 
 ## A call row of `flash_attn.map`, before its positions are offsets.
-pub type TileCall = { name: String, lo: (Int, Int), hi: (Int, Int), nlo: (Int, Int), nhi: (Int, Int), lines: List[String] }
+pub type TileCall = { id: Int, parent: Int, name: String, lo: (Int, Int), hi: (Int, Int), nlo: (Int, Int), nhi: (Int, Int), lines: List[String] }
 
 ## `flash_attn.map` read: the lines `first` to `last` of the kernel's source
 ## its function is on, and its calls.
@@ -80,9 +80,10 @@ pub fn parse_tile_map(text: String) -> Result[TileMap, String] = {
   var calls: List[TileCall] = []
   for w in rows {
     if w[0] == "call" && len(w) >= 6 && not list.contains(["carry", "get", "set"], w[3]) {
-      match (parse_span(w[4]), parse_span(w[5])) {
-        (Some((a, b)), Some((na, nb))) -> {
-          calls = calls ++ [TileCall { name = w[3], lo = a, hi = b, nlo = na, nhi = nb, lines = list.drop(w, 6) }]
+      match (parse_span(w[4]), parse_span(w[5]), parse_int(w[1]), parse_int(w[2])) {
+        (Some((a, b)), Some((na, nb)), Some(id), Some(parent)) -> {
+          if parent < -1 || parent >= id || list.any(calls, c => c.id >= id) { return Err("invalid recorded call identity or parent") }
+          calls = calls ++ [TileCall { id = id, parent = parent, name = w[3], lo = a, hi = b, nlo = na, nhi = nb, lines = list.drop(w, 6) }]
         }
         _ -> {
           return Err("not a call row: ${join(w, " ")}")
@@ -130,14 +131,23 @@ pub fn tree(rows: List[Call]) -> List[Call] = {
 
 ## The calls of the Tile IR recording as the table, in the source's own
 ## coordinates.
-pub fn table_from_tile(src: Src, t: TileMap) -> List[Call] =
-  tree(map(t.calls, c => {
+pub fn table_from_tile(src: Src, t: TileMap) -> List[Call] = {
+  let raw = map(t.calls, c => {
     let (l0, c0) = c.lo
     let (l1, c1) = c.hi
     let (n0, m0) = c.nlo
     let (n1, m1) = c.nhi
-    Call { id = 0, parent = -1, name = c.name, lo = off(src, l0, c0), hi = off(src, l1, c1), nlo = off(src, n0, m0), nhi = off(src, n1, m1), lines = c.lines }
-  }))
+    Call { id = c.id, parent = c.parent, name = c.name, lo = off(src, l0, c0), hi = off(src, l1, c1), nlo = off(src, n0, m0), nhi = off(src, n1, m1), lines = c.lines }
+  })
+  let sorted = sort_by(raw, by_span)
+  let lexical = tree(raw)
+  map(range(0, len(sorted)), i => {
+    let c = sorted[i]
+    let parent = list.find(range(0, len(sorted)), j => sorted[j].id == c.parent && helper_contains(src, sorted[j].name, c.lo, c.hi))
+    match parent { Some(j) -> Call { ..lexical[i], parent = j }
+      None -> lexical[i] }
+  })
+}
 
 # ---- the host maps ----
 
@@ -325,6 +335,19 @@ pub fn spelled(name: String, text: String) -> Bool = {
   })
 }
 
+# The two fixed numerical helpers have separate invocation and definition
+# spans. All other parent edges remain lexically contained in the source.
+fn helper_contains(src: Src, name: String, lo: Int, hi: Int) -> Bool = {
+  if not list.contains(["fa_exp", "fa_divide"], name) { return false }
+  let starts = filter(range(0, len(src.lines)), j => str.starts_with(src.lines[j], "fn ${name}[") || str.starts_with(src.lines[j], "fn ${name}("))
+  if len(starts) != 1 { return false }
+  let start = starts[0]
+  match list.find(range(start + 1, len(src.lines)), j => src.lines[j] == "}") {
+    Some(end) -> src.starts[start] <= lo && hi <= src.starts[end] + len(src.lines[end])
+    None -> false
+  }
+}
+
 ## What is wrong with `table` as a table of the function on lines `first` to
 ## `last` of `src`, one message for each fault, in call order.
 pub fn check_table(src: Src, table: List[Call], first: Int, last: Int) -> List[String] = {
@@ -345,7 +368,7 @@ pub fn check_table(src: Src, table: List[Call], first: Int, last: Int) -> List[S
     }
     if c.parent >= 0 {
       let p = table[c.parent]
-      if not (p.lo <= c.lo && c.hi <= p.hi) {
+      if not ((p.lo <= c.lo && c.hi <= p.hi) || helper_contains(src, p.name, c.lo, c.hi)) {
         gaps = gaps ++ ["${who} is not inside its parent's span"]
       }
     }
@@ -457,4 +480,23 @@ test "an operator or a literal that the maps record as a call is named by its me
   assert spelled("from_int", "3")
   assert not spelled("from_int", "x")
   assert spelled("rem", "%")
+}
+
+test "fixed helper calls keep two invocation parents for one definition span" {
+  let text = "fn fa_exp(x: Int) -> Int = {\n  exp(x)\n}\nfn kernel() -> Unit = {\n  fa_exp(1)\n  fa_exp(2)\n}\n"
+  let src = src_of(text)
+  let raw = "kernel kernel\nfn 1-7\nops 2\nhead 1-2\ncall 0 -1 fa_exp 5:3-5:12 5:3-5:9\ncall 1 0 exp 2:3-2:9 2:3-2:6 2-3\ncall 2 -1 fa_exp 6:3-6:12 6:3-6:9\ncall 3 2 exp 2:3-2:9 2:3-2:6 3-4\ntail 4-5\n"
+  match parse_tile_map(raw) {
+    Err(e) -> panic(e)
+    Ok(t) -> {
+      let table = table_from_tile(src, t)
+      assert check_table(src, table, 1, 7) == []
+      let exps = filter(table, c => c.name == "exp")
+      assert len(exps) == 2 && exps[0].lo == exps[1].lo
+      assert exps[0].parent != exps[1].parent
+      assert list.all(exps, c => c.parent >= 0 && table[c.parent].name == "fa_exp")
+      let broken = map(table, c => if c.name == "exp" { Call { ..c, lo = off(src, 7, 1), hi = off(src, 7, 2), nlo = off(src, 7, 1), nhi = off(src, 7, 2) } } else { c })
+      assert len(check_table(src, broken, 1, 7)) > 0
+    }
+  }
 }

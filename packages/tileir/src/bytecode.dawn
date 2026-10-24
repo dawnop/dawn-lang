@@ -72,9 +72,10 @@ use std/list
 use std/map
 use std/narrow
 use std/str
+use std/dtype.{F64}
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding,
-  PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf, DYN_DIM }
-use prog.{TileProg, ByPtr, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Lanes, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert, DebugInfo}
+  PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf, DYN_DIM, load_cell, store_cell, tile_shape, reshape }
+use prog.{trace2, cells, In, Out, TileProg, ByPtr, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Lanes, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert, DebugInfo}
 use lower.{kparam_ty, Kernel, Instr, instr_count, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, TokenOnlyTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
@@ -3683,4 +3684,20 @@ test "P4: approximate division writes the approximate rounding enum and independ
   assert float_rounding("divf_approx_ftz") == Some(4)
   assert float_flags("divf_approx") == 0
   assert float_flags("divf_approx_ftz") == FLOAT_FLAG_FTZ
+}
+
+# A recording query is held below both consumers, not only the text renderer.
+test "S2: tile_shape leaves the complete program, lower table and bytes unchanged" {
+  let g = cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])
+  let (a, _ea) = trace2("shape", In(F64, g), Out(F64, g), (x, o) => store_cell(o, load_cell(x)))
+  let (b, _eb) = trace2("shape", In(F64, g), Out(F64, g), (x, o) => {
+    let t = load_cell(x)
+    assert tile_shape(t) == [4, 4]
+    store_cell(o, t)
+  })
+  assert a == b && lower(a) == lower(b) && encode(a) == encode(b)
+  let storage = cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1])
+  let (manual, _em) = trace2("shape", In(F64, storage), Out(F64, storage), (x, o) =>
+      store_cell(o, reshape(reshape(load_cell(x), [4, 4]), [1, 4, 4])))
+  assert a == manual && lower(a) == lower(manual) && encode(a) == encode(manual)
 }

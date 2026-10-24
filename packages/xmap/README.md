@@ -38,3 +38,8 @@ Its ids, parents, ownership and gaps can differ from the paired entry. A zero
 gap count here proves only local C mapping. The paired entry and strict oracle
 retain their intersection and cross-backend diagnostics. Pane aggregation by
 `(lo, hi)` and identifier naming from source are shared intentionally.
+
+Tile 调用记录保留录制 id 与 parent，因此具名数值 helper `fa_exp` 与
+`fa_divide` 可同时展示实际调用与定义，同一定义的重复调用分别保留。
+子 span 必须位于同文件唯一的具名定义内；其它 parent 继续使用词法包含规则。
+没有引入通用 host branch 求值器。

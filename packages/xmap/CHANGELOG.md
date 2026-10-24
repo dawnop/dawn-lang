@@ -1,5 +1,11 @@
 # xmap changelog
 
+## 0.2.0
+
+- `TileCall` 保留录制 id 与 parent。两个具名 FlashAttention 数值 helper
+  在 Tile pane 中保留实际调用到定义的边，同一定义的重复调用分别显示。
+  普通调用保留词法嵌套，定义边界与名称 span 仍严格检查。
+
 ## 0.1.4 (2026-10-23)
 
 Add `explore_c` and `table_from_c` for an independent C call table and pane.

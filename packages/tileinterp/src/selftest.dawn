@@ -15,8 +15,8 @@ use std/narrow.{F32, BF16, F16}
 use std/gpu.{Gpu, with_gpu_fake, gpu_alloc, gpu_copy_from_host, gpu_copy_to_host, gpu_launch, Buffer, encode_floats,
   decode_floats, WideRefFn }
 use tileir/dev.{Dev, Param, param, block_id, tile_at, load, store, load_cell, store_cell, add, mul, tail_mask,
-  f_const, mma, fma, float_to_float, sqrt, exp2, reduce_sum, scan_sum, d_range, idx_const, broadcast, memory_fence_alias, DYN_DIM }
-use tileir/prog.{TileProg, trace_kernel, ByPtr, trace3, cells, In, Out}
+  f_const, mma, fma, float_to_float, sqrt, exp2, reduce_sum, scan_sum, d_range, idx_const, broadcast, memory_fence_alias, DYN_DIM, store_sub, full }
+use tileir/prog.{TileProg, trace_kernel, ByPtr, trace1, trace2, trace3, cells, In, Out}
 use interp.{interp_ref, interp_kernel, unsupported_in}
 use device.{with_gpu_interp, with_gpu_interp_log}
 use tileir/lower.{lower}
@@ -367,4 +367,24 @@ test "a launch that does not fit the kernel is refused as such" {
     Err(e) -> { assert e.kind == "interp.bad_launch" }
     Ok(_) -> { assert false }
   }
+}
+
+# A batched copy exercises singleton projection without attention semantics.
+test "S2: projected copies and pieces write every lane of every batch" {
+  let g = cells([3, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])
+  let (p, _e) = trace2("project_copy", In(F64, g), Out(F64, g), (x, o) => store_cell(o, load_cell(x)))
+  let xs = floats(3 * 8 * 4, i => to_float(i + 1))
+  let blank = floats(3 * 8 * 4, _i => -9999.0)
+  let result = interp_ref(p, [2, 1, 3])(["f64", "f64"], [xs, blank], [])
+  assert result == [(1, xs)]
+  let (pieces, _ep) = trace1("project_pieces", Out(F64, g), o => {
+    store_sub(o, [0, 0], full([2, 4], 2.0))
+    store_sub(o, [1, 0], full([2, 4], 3.0))
+  })
+  let want = floats(3 * 8 * 4, i => if (i / 4) % 4 < 2 { 2.0 } else { 3.0 })
+  assert interp_ref(pieces, [2, 1, 3])(["f64"], [blank], []) == [(0, want)]
+  let all = cells([3, 2], [1, 1], squeeze = [1, 0])
+  let (rank0, _er) = trace2("project_scalar", In(F64, all), Out(F64, all), (x, o) => store_cell(o, load_cell(x)))
+  let values = floats(6, i => to_float(i + 1))
+  assert interp_ref(rank0, [3, 2])(["f64", "f64"], [values, floats(6, _i => -9999.0)], []) == [(1, values)]
 }
