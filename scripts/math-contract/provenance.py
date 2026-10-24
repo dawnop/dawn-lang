@@ -32,11 +32,14 @@ def main():
     actual={p.name for p in (HERE/'fdlibm').glob('*.c')}
     if actual!=expected:raise AssertionError('unmapped source snapshots')
     audit=json.loads((HERE/'accuracy-audit.json').read_text())
-    from fractions import Fraction
     from mpfr import error
     if audit['failures'] or not audit['all_intervals_decided']:raise AssertionError('accuracy audit failed')
     if audit['source_sha256']!=hashlib.sha256((ROOT/'std/math.dawn').read_bytes()).hexdigest():raise AssertionError('stale algorithm audit')
     if audit['auditor_sha256']!=hashlib.sha256((HERE/'audit.py').read_bytes()).hexdigest():raise AssertionError('stale auditor evidence')
+    if audit['generator_sha256']!=hashlib.sha256((HERE/'gen.py').read_bytes()).hexdigest():raise AssertionError('stale search generator evidence')
+    registry=json.loads((HERE/'oracle-differences.json').read_text())
+    required=set(registry['strictmath_equal'])|set(registry['mpfr_oracles'])|{'sqrt','fma'}
+    if set(audit['functions'])!=required:raise AssertionError('missing audited function')
     for item in audit['functions'].values():
         witness=item['witness']
         if error(witness['interval'],witness['output'])>1:raise AssertionError('frozen accuracy witness exceeds 1 ulp')

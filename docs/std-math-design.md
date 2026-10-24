@@ -3,7 +3,7 @@
 > 状态：**current**。2026-10-24 的 K1 设计契约，依据 2026-10-21 的 std/math 裁决；
 > K0 已随 [#873](https://github.com/dawnop/dawn-lang/pull/873) 合并，K1 随
 > [#874](https://github.com/dawnop/dawn-lang/pull/874) 合并。K2 已在 `04ffe868` 实现；
-> K3 的函数表已实现；K4 与 K3 同 PR 分提交交付。K5/K6 仍为后续要求。
+> K3 的函数表与 K4 永久门禁已实现，同 PR 分提交交付。K5/K6 仍为后续要求。
 > K2 的落地与验证见第四节末尾，K3 的修正分析见第五节末尾。
 
 ## 一、问题、依据与边界
@@ -279,6 +279,7 @@ MPFR 区间证明；该函数用冻结的 Dawn 位语料验跨端，用 MPFR 验
 
 ### K3 落地、修正分析与证据（2026-10-24）
 
+算法提交 `8e65e1128e460f822d1306a292e299edff5aebdc`：
 `std/math.dawn` 实现第三节的 20 个 K3 入口，内核全部私有，没有新增公开模块。
 `scripts/math-contract/fdlibm/` 保留实际采用的 23 份 Netlib 文件和 5.3 readme；
 `manifest.json` 逐文件记录 URL、版本、SHA-256、Dawn 落点及修改理由。
@@ -398,6 +399,33 @@ K4 接入现有 native-diff/wasm 对应门片，复用已有工具链与 ASan ru
 先测冷运行及新增墙钟，再按 Gate-Budget 规则容纳，本文不预报秒数或承诺预算不变。
 新增公开 std 面同时跑 `scripts/api-diff.py` 与 run-diff；自举固定点、prev-diff、
 native CLI、wasm 和完整外部门禁仍需通过。不能只跑新 math gate 就声明 K3/K4 完成。
+
+### K4 落地与成本（2026-10-24）
+
+永久工具与使用说明在 `scripts/math-contract/`。固定种子 20261024 的语料含 20658 行
+运行期输入和 108 项实际 comptime 常量，每行同时比较直接调用与函数值，NaN 只比分类。
+`gen.py --check` 重跑 Java 21.0.2，MPFR 修正语料单独登记；输入、期望输出、程序及
+定向见证均有摘要。JVM/native/ASan 与两种编译器常量产物的 native/wasm 执行全部比较
+同一份期望；常量 C 产物逐字节相同，wasm 软件 fma 实际执行，计数对象全部释放。
+
+永久负控先成功编译并执行到完整结束标记，再要求对应行比较失败：删除 exp 的末项，
+破坏 Payne-Hanek 的 pi/2 拆分，将 round 改为 `floor(x+0.5)`。前三项在 JVM/native
+均实跑；另在 emitted C 中仅把 native 的直接 exp 调用移 1 ulp，函数值和常量保持原值，
+同一位 oracle 必须判红。所有源码锚点由 mutation-anchor-preflight 登记并先验唯一。
+
+CI 在现有 native-diff-2 中增加一个 run step；普通 corpus 也由 spike-native 自动分片并跑
+ASan。wasm-contract 复用自己的 driver 与 SDK 调用两种编译器常量验证，不新建 workflow
+job。已运行 steps_lock record，28 个 family 共 172 个 run step。新增原生契约冷运行
+35.76 秒（含全部控制）；独立 wasm 常量验证 17.42 秒。整条 wasm gate 在一次本机测量中
+从 34.06 秒到 71.22 秒，后者有其他验证同时运行，其中新增部分 24.63 秒，因此不把差值
+当成稳定增量。后续同一 driver 的复测为 52.87 秒，其中新增部分 16.37 秒，
+相对基线增加 18.81 秒。最终外部门禁提供实际 job 墙钟。没有提高 native-diff-2 的 635 秒、
+wasm-target 的 820 秒、950 秒 run-pole 或 24188 秒 push-total 预算。
+
+扩展 MPFR 4.2.1 审计共 600884 行输入（含精确舍入原语），没有未决区间或越线。
+其中 tanh 检查 44263 项，包含完整 K1 序列；逐函数最大真实误差和位距见
+`accuracy-audit.json`。这不是 binary64 全域穷举；上述算法界与源码分析仍是契约依据。
+API 快照差分为 20 项新增、零破坏、零参数重命名；没有 K5/K6 改动。
 
 ## 七、K5：tileinterp 迁移与参考独立性
 
