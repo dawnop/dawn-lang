@@ -62,7 +62,7 @@ trap 'rm -rf "$OUT"' EXIT
 JAVA=$(DAWN_LAUNCHER_PRINT_JAVA=1 ./bin/dawn)
 CHECK="python3 -I $HERE/io_check.py"
 
-CFLAGS=(-std=c11 -fwrapv -fexceptions -fno-strict-aliasing -pthread
+CFLAGS=(-std=c11 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread
   -Wall -Wextra -Werror
   -Wno-unused-variable -Wno-unused-but-set-variable
   -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality)

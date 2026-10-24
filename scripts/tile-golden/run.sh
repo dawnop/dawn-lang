@@ -795,7 +795,7 @@ fi
 
 # The runtime is compiled once; every native build below links this object.
 rt_obj="$work/dawn_rt.o"
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -I "$root/runtime/c" -c -o "$rt_obj" "$root/runtime/c/dawn_rt.c" ||
   fail "the C runtime does not compile"
 
@@ -832,7 +832,7 @@ run_jvm() { # project, out, args... ; returns the program's exit code
 build_native() { # project, bin[, opt]
   "$root/bin/dawn" __emitc "$1" -o "$2.c" > "$2.emit" 2>&1 ||
     { cat "$2.emit" >&2; fail "native emit failed for $1"; }
-  "$cc_bin" -std=c11 "${3:--O2}" -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  "$cc_bin" -std=c11 "${3:--O2}" -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -I "$root/runtime/c" -o "$2" "$2.c" "$rt_obj" -lm > "$2.cc" 2>&1 ||
     { cat "$2.cc" >&2; fail "native compile failed for $1"; }
 }

@@ -37,7 +37,7 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 warn=(-Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function)
-common=(-std=c11 -g -fwrapv -fexceptions -fno-strict-aliasing -pthread "${warn[@]}")
+common=(-std=c11 -g -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread "${warn[@]}")
 run_timeout=60
 
 fail() {
@@ -149,7 +149,7 @@ build_c() { # variant runtime-dir csource output [extra flags...]
     asan) flags=(-O1 -fno-omit-frame-pointer -fsanitize=address) ;;
     imm31) flags=(-O1 -DDAWN_IMM_BITS=31) ;;
   esac
-  "$cc_bin" -std=c11 -g -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  "$cc_bin" -std=c11 -g -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -w "${flags[@]}" "$@" -I "$dir" -o "$out" "$src" "$dir/dawn_rt.c" -lm
 }
 for variant in plain inline asan imm31; do

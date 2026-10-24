@@ -59,7 +59,7 @@ if [ "$(tail -n 1 "$pure_jvm")" != "mismatches 0" ]; then
 fi
 
 "$root/bin/dawn" __emitc "$work/pure" -o "$work/pure.c" > /dev/null
-"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
   -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
   -I "$root/runtime/c" -o "$work/pure.bin" "$work/pure.c" "$root/runtime/c/dawn_rt.c" -lm
@@ -89,7 +89,7 @@ inflate = "$root/packages/inflate"
 sha2 = "$root/packages/sha2"
 TOML
 "$root/bin/dawn" __emitc "$work/sums" -o "$work/sums.c" > /dev/null
-"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -I "$root/runtime/c" -o "$work/sums.bin" "$work/sums.c" "$root/runtime/c/dawn_rt.c" -lm
 sums_want="$(python3 -c '
 import hashlib, zlib

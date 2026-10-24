@@ -62,7 +62,7 @@ trap 'rm -rf "$work"' EXIT
 # (scripts/spike-native/run.sh says why each is correctness rather than tuning),
 # and the same four -Wno- flags covering noise a code generator legitimately
 # produces.
-cflags=(-std=c11 -fwrapv -fexceptions -fno-strict-aliasing -pthread)
+cflags=(-std=c11 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread)
 warn=(-Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable
   -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality)
 

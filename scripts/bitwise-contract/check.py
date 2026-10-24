@@ -88,7 +88,7 @@ def cross_layer(work):
 
 
 def c_build(c, target, cc, opt):
-    run([cc, "-std=c11", opt, "-fwrapv", "-fexceptions", "-fno-strict-aliasing",
+    run([cc, "-std=c11", opt, "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-ffp-contract=off",
          "-fsanitize=undefined", "-fno-sanitize-recover=all", "-pthread",
          "-I", ROOT / "runtime/c", "-o", target, c, ROOT / "runtime/c/dawn_rt.c", "-lm"])
 

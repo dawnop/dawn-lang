@@ -66,7 +66,7 @@ EOF
 compile_c() { # compiler source output-c output-bin
   local compiler=$1 source=$2 c_out=$3 bin_out=$4
   "$compiler" __emitc --std "$root/std" "$source" -o "$c_out" > "$c_out.emit" 2>&1 &&
-    "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+    "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
       -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
       -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$root/runtime/c" \
       -o "$bin_out" "$c_out" "$root/runtime/c/dawn_rt.c" -lm \

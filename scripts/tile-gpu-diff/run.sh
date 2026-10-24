@@ -1272,7 +1272,7 @@ echo "      driver: $driver (nvidia-smi); toolchain.txt says $pinned_driver"
 
 # The runtime is compiled once; every native build below links this object.
 rt_obj="$work/dawn_rt.o"
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -I "$root/runtime/c" -c -o "$rt_obj" "$root/runtime/c/dawn_rt.c" ||
   fail "the C runtime does not compile"
 
@@ -1298,7 +1298,7 @@ tileref = "$root/packages/tileref"
 TOML
   "$root/bin/dawn" __emitc --std "$1" "$proj" -o "$2.c" > "$2.emit" 2>&1 ||
     { cat "$2.emit" >&2; fail "native emit failed for $program against $1"; }
-  "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -I "$root/runtime/c" -o "$2" "$2.c" "$rt_obj" -lm > "$2.cc" 2>&1 ||
     { cat "$2.cc" >&2; fail "native compile failed for $program against $1"; }
 }
@@ -3239,10 +3239,10 @@ python3 "$here/mutate.py" "$mutant_rt/dawn_rt.c" grid-y-ignored \
   '  r = dawn_gpu.launch_kernel(fn, (unsigned int)gx, 1, (unsigned int)gz, 1, 1, 1, 0,'
 after=$(digest "$mutant_rt/dawn_rt.c")
 echo "      grid-y-ignored: runtime/c/dawn_rt.c md5 $before -> $after"
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -I "$mutant_rt" -c -o "$work/m-grid-y.o" "$mutant_rt/dawn_rt.c" ||
   fail "grid-y-ignored: the mutated C runtime does not compile"
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -I "$mutant_rt" -o "$work/m-grid-y.bin" "$work/twod.bin.c" "$work/m-grid-y.o" -lm ||
   fail "grid-y-ignored: mm_diff does not link against the mutated runtime"
 rc=0

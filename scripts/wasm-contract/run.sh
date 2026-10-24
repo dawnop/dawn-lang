@@ -101,7 +101,7 @@ wasm_tag_build() { # <src.c> <out.o>
 }
 wasm_c_build() { # <out.wasm> <main.c> <dawn_rt.c> <shim.o> <include-dir> <tag.o>
   "$wasm_cc" --target="$wasm_target" -std=c11 -O2 -fwrapv -fwasm-exceptions \
-    -fno-strict-aliasing -Wno-parentheses-equality -I "$5" \
+    -fno-strict-aliasing -ffp-contract=off -Wno-parentheses-equality -I "$5" \
     -o "$1" "$2" "$3" "$4" "$6" -lm
 }
 

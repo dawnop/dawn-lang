@@ -61,7 +61,7 @@ shift
 
 cc_bin="${CC:-cc}"
 jobs="${CC_JOBS:-$(nproc 2>/dev/null || echo 4)}"
-ccflags=(-std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread "${inline[@]+"${inline[@]}"}" -I "$root/runtime/c")
+ccflags=(-std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread "${inline[@]+"${inline[@]}"}" -I "$root/runtime/c")
 
 srcs=()
 while IFS= read -r f; do srcs+=("$f"); done < <(find "$units" -maxdepth 1 -name 'tu*.c' | LC_ALL=C sort)

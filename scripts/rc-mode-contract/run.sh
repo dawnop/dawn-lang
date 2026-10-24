@@ -129,7 +129,7 @@ emit() {
 # flags for this code generator, not tuning.
 build_asan() {
   "$cc_bin" -std=c11 -g -O0 -fno-omit-frame-pointer -fwrapv -fexceptions \
-    -fno-strict-aliasing -fsanitize=address -pthread \
+    -fno-strict-aliasing -ffp-contract=off -fsanitize=address -pthread \
     -I "$root/runtime/c" \
     -o "$2" "$1" "$root/runtime/c/dawn_rt.c" -lm >"$2.cc" 2>&1
 }

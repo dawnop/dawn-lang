@@ -87,7 +87,7 @@ judge() {
   fi
   echo "     emits  ok"
   if ! "$cc_bin" -std=c11 -g -O1 -fno-omit-frame-pointer -fwrapv -fexceptions \
-      -fno-strict-aliasing -fsanitize=address -pthread -w \
+      -fno-strict-aliasing -ffp-contract=off -fsanitize=address -pthread -w \
       -DDAWN_RC_CONTRACT -DDAWN_REUSE_POISON -I "$rt" \
       -o "$dir/probe" "$dir/probe.c" "$rt/dawn_rt.c" -lm > "$dir/cc.out" 2>&1; then
     red_or_fail emits "$(tail -5 "$dir/cc.out")"

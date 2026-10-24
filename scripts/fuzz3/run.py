@@ -71,7 +71,7 @@ CC = os.environ.get("CC", "cc")
 # spike-native's flags, for the reasons its header gives: -fwrapv because Int
 # wraps, -fexceptions because a raise unwinds, -Werror because a Core type
 # that reaches C wrong shows up first as a warning.
-CFLAGS = ["-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread"]
+CFLAGS = ["-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-ffp-contract=off", "-pthread"]
 # spike-native's own -Wno- set: noise any code generator produces
 WFLAGS = ["-Wall", "-Wextra", "-Werror", "-Wno-unused-variable", "-Wno-unused-but-set-variable",
           "-Wno-unused-parameter", "-Wno-unused-label",
@@ -121,7 +121,7 @@ def cc_family(cc):
 
 
 SANFLAGS = ["-std=c11", "-g", "-O0", "-fno-omit-frame-pointer", "-fwrapv", "-fexceptions",
-            "-fno-strict-aliasing", "-pthread", "-fsanitize=address,undefined",
+            "-fno-strict-aliasing", "-ffp-contract=off", "-pthread", "-fsanitize=address,undefined",
             "-fno-sanitize-recover=undefined"]
 SAN_ENV = {"ASAN_OPTIONS": "detect_leaks=1", "UBSAN_OPTIONS": "print_stacktrace=1"}
 LEGS = frozenset({"jvm", "emitc", "native", "san", "comptime"})

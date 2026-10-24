@@ -49,7 +49,7 @@ fail() {
   exit 1
 }
 
-CFLAGS=(-std=c11 -g -fwrapv -fexceptions -fno-strict-aliasing -pthread
+CFLAGS=(-std=c11 -g -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread
   -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function)
 
 # the sanitizers must exist, or the leg below is green about nothing

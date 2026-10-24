@@ -52,7 +52,7 @@ echo "PASS  JVM values, panics and workloads"
 # ---- native ----------------------------------------------------------------
 cc_bin="${CC:-cc}"
 java -XX:-UsePerfData -Xss512m -jar "$jar" __emitc "$here/probe.dawn" -o "$work/probe.c"
-cflags=(-std=c11 -fwrapv -fexceptions -fno-strict-aliasing -pthread
+cflags=(-std=c11 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread
   -Wall -Wextra -Werror
   -Wno-unused-variable -Wno-unused-but-set-variable
   -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality

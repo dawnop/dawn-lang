@@ -37,6 +37,7 @@ CORE_CFLAGS = [
     "-fwrapv",
     "-fexceptions",
     "-fno-strict-aliasing",
+    "-ffp-contract=off",
     "-pthread",
 ]
 ALL_WORKLOADS = ("lexer", "rbtree", "compiler")

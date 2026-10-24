@@ -39,7 +39,7 @@ if grep -Fq 'INT64_C(-9223372036854775808)' "$work/probe.c"; then
   exit 1
 fi
 
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -Wall -Wextra -Werror \
   -Wno-unused-variable -Wno-unused-but-set-variable \
   -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \

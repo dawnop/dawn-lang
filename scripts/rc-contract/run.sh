@@ -114,7 +114,7 @@ if [ -n "$stray" ]; then
 fi
 
 echo "== sanitized =="
-"$cc_bin" -std=c11 -O1 -g -fsanitize=address -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O1 -g -fsanitize=address -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   "${warn[@]}" -I "$root/runtime/c" \
   -o "$work/rc_asan" "$here/rc_test.c" "$root/runtime/c/dawn_rt.c"
 "$work/rc_asan"
@@ -123,7 +123,7 @@ ASAN_OPTIONS=detect_leaks=0 "$work/rc_asan" leak
 # ASan replaces the allocator and grows stack frames, so the stack-depth check
 # has to be a plain build.
 echo "== small stack =="
-"$cc_bin" -std=c11 -O1 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O1 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   "${warn[@]}" -I "$root/runtime/c" \
   -o "$work/rc_plain" "$here/rc_test.c" "$root/runtime/c/dawn_rt.c"
 ( ulimit -s 512 && "$work/rc_plain" )
@@ -133,7 +133,7 @@ echo "== small stack =="
 # them. This leg is what keeps that spelling from rotting: the same roster,
 # at -O2 so the inlined copies are the ones that run.
 echo "== inline rc fast paths =="
-"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -DDAWN_RT_INLINE_RC "${warn[@]}" -I "$root/runtime/c" \
   -o "$work/rc_inline" "$here/rc_test.c" "$root/runtime/c/dawn_rt.c"
 "$work/rc_inline"
@@ -173,13 +173,13 @@ if grep -q ' FAIL$' "$work/baseline.out"; then
 fi
 
 build_plain() { # runtime-dir output
-  "$cc_bin" -std=c11 -O1 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  "$cc_bin" -std=c11 -O1 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     "${warn[@]}" -I "$1" -o "$2" "$here/rc_test.c" "$1/dawn_rt.c"
 }
 
 build_poisoned() { # runtime-dir source output
   "$cc_bin" -std=c11 -O1 -g -fsanitize=address -DDAWN_SLAB_FORCE \
-    -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+    -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     "${warn[@]}" -I "$1" -o "$3" "$2" "$1/dawn_rt.c"
 }
 
@@ -187,7 +187,7 @@ build_poisoned() { # runtime-dir source output
 # 1024-byte batch under a 1152-byte class. The production 32KiB batch cannot
 # produce one, so this build is where the boundary is observable at all.
 build_tail() { # runtime-dir output
-  "$cc_bin" -std=c11 -O1 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  "$cc_bin" -std=c11 -O1 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
     -DDAWN_SL_BATCH=1024 "${warn[@]}" -I "$1" \
     -o "$2" "$here/slab_batch_tail.c" "$1/dawn_rt.c"
 }

@@ -43,7 +43,7 @@ fi
 compile_c() { # compiler output-c output-bin
   local compiler=$1 c_out=$2 bin_out=$3
   "$compiler" __emitc --std "$root/std" "$probe" -o "$c_out" > "$c_out.emit" 2>&1 &&
-    "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+    "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
       -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
       -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$root/runtime/c" \
       -o "$bin_out" "$c_out" "$root/runtime/c/dawn_rt.c" -lm \
