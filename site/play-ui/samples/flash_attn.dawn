@@ -10,7 +10,7 @@ use std/list
 use tileir/dev.{Dev, Param, Tile, FloatDtype, host_float, idx_const, tile_shape, blocks_of, t_call_enter, t_call_exit, t_body_enter, t_body_exit, load_cell, store_cell, load_at, full, zeros, mma, transpose, scalar, max, exp, exp2, div, to, reduce_max, reduce_sum, d_range}
 use tileir/prog.{trace5, cells, In, Out, Scalar, FREE_AXIS}
 use tileinterp/interp.{interp_ref}
-use tileinterp/math.{exp_f}
+use std/math.{exp as host_exp}
 
 use std/narrow.{BF16, F32, f32}
 
@@ -121,7 +121,7 @@ fn plain_row(q: List[Float], k: List[Float], v: List[Float], i: Int) -> List[Flo
   let scores = list.map(range(0, ATT_N), j =>
       list.fold(range(0, ATT_D), 0.0, (a, d) => a + q[i * ATT_D + d] * k[j * ATT_D + d]) * ATT_INV_SQRT_D)
   let top = list.fold(scores, -INFINITY, (a, s) => if s > a { s } else { a })
-  let w = list.map(scores, s => exp_f(s - top))
+  let w = list.map(scores, s => host_exp(s - top))
   let total = list.fold(w, 0.0, (a, x) => a + x)
   list.map(range(0, ATT_D), d => list.fold(range(0, ATT_N), 0.0, (a, j) => a + w[j] * v[j * ATT_D + d]) / total)
 }
