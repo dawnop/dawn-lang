@@ -6,6 +6,10 @@
 Each mutant breaks packages/tileinterp the way the 2026-10-20 task sheet
 names, and run.sh --selftest requires the named check to go red on it:
 
+  exp-misrouted        perturb the new host dispatch: the saved K1 exp
+                       witness must fail its raw-bit oracle.
+  reference-borrows-exp alias std/math and forward exp from tileref: it must
+                       compile and run, then fail the independence oracle.
   mulf-adds            an element-wise operation computes the wrong thing
                        (`mulf` adds): the interpreter-against-tileref
                        comparison must fail.
@@ -38,6 +42,22 @@ MMA = "packages/tileinterp/src/mma.dawn"
 FORMATS = "packages/tileinterp/src/formats.dawn"
 
 MUTATIONS = {
+    "exp-misrouted": ((
+        INTERP,
+        '  "exp" -> host_math.exp(x)\n',
+        '  "exp" -> host_math.exp(x) * 1.0000000000000002\n',
+    ),),
+    "reference-borrows-exp": ((
+        "packages/tileref/src/ref.dawn",
+        'use std/list\n',
+        'use std/math as borrowed_math\nuse std/list\n',
+    ), (
+        "packages/tileref/src/ref.dawn",
+        'pub fn ref_exp(x: Float) -> Float =\n',
+        'pub fn ref_exp(x: Float) -> Float = borrowed_exp(x)\n\n'
+        'fn borrowed_exp(x: Float) -> Float = borrowed_math.exp(x)\n\n'
+        'fn unused_ref_exp(x: Float) -> Float =\n',
+    )),
     "shift-ub-restored": ((
         INTERP,
         '  "shli" -> wrap(w, a << (b & (w - 1)))',
@@ -55,8 +75,8 @@ MUTATIONS = {
     ),),
     "mma-drops-term": ((
         MMA,
-        '      list.fold(range(0, k), acc[idx], (s, p) => fma_f64(r[p], c[p], s))',
-        '      list.fold(range(0, k - 1), acc[idx], (s, p) => fma_f64(r[p], c[p], s))',
+        '      list.fold(range(0, k), acc[idx], (s, p) => host_math.fma(r[p], c[p], s))',
+        '      list.fold(range(0, k - 1), acc[idx], (s, p) => host_math.fma(r[p], c[p], s))',
     ),),
     "narrow-unrounded": ((
         FORMATS,
@@ -65,7 +85,7 @@ MUTATIONS = {
     ),),
     "fma-two-roundings": ((
         MMA,
-        '    fma_f64(a, b, c)\n  } else {',
+        '    host_math.fma(a, b, c)\n  } else {',
         '    a * b + c\n  } else {',
     ), (
         MMA,

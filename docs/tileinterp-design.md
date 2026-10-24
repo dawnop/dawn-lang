@@ -274,11 +274,8 @@ PeerJ Computer Science 2021，<https://peerj.com/articles/cs-330/>）。所以�
 
 ### 7.3 fma 是单次舍入
 
-- **binary64**：Boldo 与 Melquiond 的 round-to-odd 仿真（"Emulation of FMA and correctly rounded sums: proved algorithms using rounding to odd"，
-  IEEE Trans. Computers 57(4) 2008）：精确乘积 `uh + ul`（Dekker）、`c + uh` 得 `th + tl`（TwoSum）、`v = RO(tl + ul)`、结果 `RN(th + v)`。
-  测试：`(2^30+1)(2^30+3) - 2^60` 融合给 `2^32+3`，先舍乘积给 `2^32`（`math :: fma_f64 rounds the exact a * b + c once`）。
-  适用范围 |a|、|b| < 2^500、|c| < 2^1000、|a*b| 在 2^-900 与 2^900 之间；之外、以及无穷与 NaN，退化为 `a*b + c`
-  （特殊值上精确，极端指数上是两次舍入）。语料里没有 kernel 落在范围外。
+- **binary64**：std/math K5 后直接调用 `std/math.fma`，全部有限指数范围均为单次舍入；不再有旧的极端指数两次舍入兜底。
+  包内测试保留乘积相消，并新增中间乘积溢出后有限相消、次正规中点；窄格式继续走下述 round-to-odd。
 - **窄格式**：操作数至多 24 位，乘积在 binary64 里精确；`c` 用 round-to-odd 加上，再舍进格式；对至多 51 位有效数的目标格式，
   先 round-to-odd 再舍入等于对精确值舍入一次。测试：f32 的 `(1+2^-12)^2 - (1+2^-11)` 是 `2^-24`，先舍乘积会得 0。
 
@@ -345,9 +342,9 @@ fma 的 6 个，以及架构门控的 `dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2
 - **f8E5M3FNU**：`std/narrow` 没有舍入函数也没有宿主值，边缘行为未实测；在这个库补它之前解释器不替它猜。`ftof_pos_inf` 到 `f8E8M0FNU` 同理。
 - **模拟张量核的内部对齐与截断**：Fasi 等量出了 V100/A100/H100 各自的行为，但那是各代各型号的细节，且 `mmaf` 不承诺它；模型选「宽累加一次舍入」，
   在容差档上与设备同量级（7.1），再往细里做是把一个型号的实现当成语义。
-- **fma 的极端指数范围单次舍入**：Boldo–Melquiond 需要乘积不下溢、不溢出；范围外要先缩放，会引入新的双舍入点。语料没有落在范围外的 kernel，退化为两次舍入并在 7.3 写明。
+- **另造宿主数学实现**：std/math K5 已替换旧的宿主算法；GPU 的 FTZ、定向舍入与窄格式适配仍在包内，tileref 保留独立级数。
 - **把 fma 的对拍做成逐位**：语料里的 fma kernel 都含超越函数或扫描，本来就是容差档；逐位要新写语料，那是 tile-gpu-diff 的事，不在解释器这刀。
-- **在本机重录三本台账**：tileir 与 std 没动，摘要没变，重录是空转（同 I1 的判断）。
+- **把远端架构台账冒充本机结果**：本机只重验自身设备，sm_90/sm_100 既有记录不改写；std/math K5 的本机重验另见其交付记录。
 
 
 ## 按位刀 4 的移位语义

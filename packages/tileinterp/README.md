@@ -63,9 +63,11 @@ every operation ends by rounding into the format with `std/narrow`'s own
 functions, so the interpreter and `std/narrow` cannot disagree about a
 format. Add, subtract, multiply, divide, square root, the directed roundings
 and `fma` are exact (one rounding of the exact result); the transcendental
-functions are written here (not taken from packages/tileref, which is what CI
-holds this package against) and are good to about 1e-13 relative, the
-tolerance tier's side of docs/tile-backend-design.md 6.6.
+functions use std/math's binary64 implementation, with error at most 1 ulp.
+They remain tolerance-tier device models (docs/tile-backend-design.md 6.6).
+packages/tileref keeps independent transcendental series so the comparison
+continues to have a second opinion. GPU flush, directed rounding and narrow
+format adapters stay in this package; they are not std/math parameters.
 
 A matrix product promises a product and nothing about how the sum over `k` is
 grouped, so the interpreter's accumulation is a model: a binary64 accumulator

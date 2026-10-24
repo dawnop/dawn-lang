@@ -7,7 +7,7 @@
 #
 #   scripts/tileinterp-diff/run.sh             # run and judge (the CI gate)
 #   scripts/tileinterp-diff/run.sh --write     # run and rewrite covered.txt
-#   scripts/tileinterp-diff/run.sh --selftest  # the three negative controls
+#   scripts/tileinterp-diff/run.sh --selftest  # compiled negative controls
 #
 # The run: build.py copies the family programs into one project with the
 # device swapped (its header says how and why), `dawn build` compiles it once,
@@ -122,12 +122,62 @@ if [ "$mode" != selftest ]; then
 fi
 
 # ---- --selftest
-for m in mulf-adds bounds-unchecked unsupported-skipped mma-drops-term narrow-unrounded fma-two-roundings shift-ub-restored; do
+# The reference dependency control is legal Dawn, compiled and executed before
+# the independence oracle sees it. A compiler refusal is not a killed mutant.
+d="$work/reference-borrows-exp"
+mkdir -p "$d/tree/packages" "$d/probe/src"
+cp -r "$root/packages/tileref" "$d/tree/packages/tileref"
+python3 "$here/mutate.py" reference-borrows-exp "$d/tree"
+cat > "$d/probe/dawn.toml" <<EOF
+schema = 1
+name = "referenceprobe"
+version = "0.0.0"
+[deps]
+tileref = "$d/tree/packages/tileref"
+EOF
+cat > "$d/probe/src/main.dawn" <<'EOF'
+# Prove that aliasing and forwarding a host algorithm is legal but dependent.
+use tileref/ref
+pub fn main() -> Unit ! io = {
+  if ref.ref_exp(0.0) != 1.0 { panic("forwarder did not run") } else { () }
+  println("reference-forwarder complete")
+}
+EOF
+./bin/dawn build "$d/probe" -o "$d/probe.jar" > "$d/build.log" 2>&1 ||
+  { cat "$d/build.log" >&2; fail "reference-borrows-exp did not compile"; }
+"$java_bin" -jar "$d/probe.jar" > "$d/run.out" 2>&1 || fail "reference-borrows-exp did not execute"
+grep -qx 'reference-forwarder complete' "$d/run.out" || fail "reference-borrows-exp did not finish"
+if python3 - "$root" "$d/tree" > "$d/judge.out" <<'PYCONTROL'
+import runpy
+import sys
+from pathlib import Path
+root, mutant = map(Path, sys.argv[1:])
+gate = runpy.run_path(str(root / "scripts/leetgpu-diff/check.py"))
+files = gate["gather"]()
+path = "packages/tileref/src/ref.dawn"
+files[path] = (mutant / path).read_text()
+_listed, problems = gate["check"](gate["TABLE"].read_text(), files, gate["LEDGER"].read_text())
+for problem in problems:
+    print("FAIL: " + problem)
+sys.exit(bool(problems))
+PYCONTROL
+then fail "reference-borrows-exp: the independence oracle stayed green"; fi
+grep -q 'reaches std/math.exp: a reference must keep' "$d/judge.out" ||
+  { cat "$d/judge.out" >&2; fail "reference-borrows-exp: the wrong oracle failed"; }
+echo "PASS  reference-borrows-exp: compiled, executed, then the independence oracle went red"
+
+for m in exp-misrouted mulf-adds bounds-unchecked unsupported-skipped mma-drops-term narrow-unrounded fma-two-roundings shift-ub-restored; do
   d="$work/$m"
   mkdir -p "$d"
   mutant_package "$d" "$m"
   pkg="$d/tree/packages/tileinterp"
   case "$m" in
+    exp-misrouted)
+      if ./bin/dawn test "$pkg" > "$d/test.out" 2>&1; then fail "$m: the dispatch test stayed green"; fi
+      grep -q '^FAIL  interp :: host math dispatch retains the K1 exp witness and IEEE boundaries' "$d/test.out" ||
+        { cat "$d/test.out" >&2; fail "$m: the K1 witness oracle did not fail"; }
+      echo "PASS  $m: compiled and the K1 exp witness test went red"
+      ;;
     mulf-adds)
       build_jar "$d" "$pkg"
       run_families "$d" 30

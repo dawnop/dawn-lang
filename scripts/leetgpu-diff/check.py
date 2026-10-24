@@ -105,6 +105,76 @@ def manifest_deps(text):
     return names
 
 
+
+# These are the host algorithms the interpreter now calls. Exact operations
+# (sqrt, fma, remainder, classification) may be shared with a reference.
+TRANSCENDENTALS = frozenset(
+    "exp exp2 expm1 log log2 log10 log1p sin cos tan asin acos atan atan2 "
+    "sinh cosh tanh pow hypot cbrt".split())
+IMPORT = re.compile(
+    r"^\s*use\s+([a-z_][a-z0-9_]*(?:\s*/\s*[a-z_][a-z0-9_]*)*)"
+    r"(?:\s*\.\s*\{([^}]+)\}|[ \t]+as[ \t]+([a-z_][a-z0-9_]*))?", re.M)
+
+
+def without_comments(text):
+    # Keep strings intact: a qualified reference inside an interpolation is
+    # executable too. A quoted example can conservatively be a finding; this
+    # dependency guard is not a Dawn parser or a proof of algorithmic novelty.
+    return re.sub(r'"(?:\\.|[^"\\])*"|#[^\n]*',
+                  lambda m: m.group(0) if m.group(0).startswith('"') else "", text)
+
+
+def reference_math_problems(packages, files):
+    """Follow source imports, including local forwarding modules.
+
+    Scan every module of a reference package, even an unlisted helper. A
+    selective import records its original name before any local rename; a
+    namespace import records the alias used for member references and function
+    values. Follow non-math modules so forwarding through a shared helper
+    cannot hide the forbidden import at the reference's immediate call site.
+    """
+    pending = [path for path in files if any(
+        path.startswith(f"packages/{pkg}/src/") and path.endswith(".dawn")
+        for pkg in packages)]
+    seen, problems = set(), []
+    while pending:
+        path = pending.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        text = without_comments(files[path])
+        for match in IMPORT.finditer(text):
+            module, selected, alias = match.groups()
+            module = re.sub(r"\s+", "", module)
+            if module == "std/math":
+                if selected is not None:
+                    used = {entry.strip().split()[0] for entry in selected.split(",") if entry.strip()}
+                else:
+                    namespace = alias or "math"
+                    used = set(re.findall(r"\b" + re.escape(namespace) + r"\s*\.\s*(\w+)", text))
+                for name in sorted(used & TRANSCENDENTALS):
+                    problems.append(f"{path} reaches std/math.{name}: a reference must keep "
+                                    "its independent transcendental algorithm")
+                continue
+            if module.startswith("std/math/"):
+                problems.append(f"{path} reaches {module}: a reference must keep "
+                                "its independent transcendental algorithm")
+                continue
+            # A slash-free module is relative to the importing package. Std
+            # modules also use relative imports within std.
+            if "/" not in module:
+                if path.startswith("std/"):
+                    target = f"std/{module}.dawn"
+                else:
+                    pkg = path.split("/")[1]
+                    target = f"packages/{pkg}/src/{module}.dawn"
+            else:
+                target = module_path(module)
+            if target in files:
+                pending.append(target)
+    return sorted(problems)
+
+
 def tolerance_tier(program_text):
     """The kernels a layer-2 program compares under the tolerance tier.
 
@@ -252,6 +322,8 @@ def check(table_text, files, ledger_text):
                 f"{manifest} depends on {bad}: a host reference is the second opinion on a kernel and "
                 f"may not reach the kernel's code path")
 
+    problems += reference_math_problems(reference_packages, files)
+
     # The header's own count. One line, matched literally, so a table without
     # it is a table that makes no claim rather than one that fails.
     m = re.search(r"^# (\d+) of the 97 reachable problems\b", table_text, re.M)
@@ -301,6 +373,11 @@ def gather():
     for golden in GOLDEN.glob("*"):
         if golden.suffix in (".mlir", ".tilebc"):
             files[f"scripts/tile-golden/{golden.name}"] = ""
+    # Include helper modules and their imports, rather than only ref.dawn.
+    for directory in (ROOT / "packages", ROOT / "std"):
+        for path in directory.rglob("*.dawn"):
+            if directory.name == "std" or "/src/" in path.as_posix():
+                files[path.relative_to(ROOT).as_posix()] = read(path)
     return files
 
 
@@ -401,6 +478,40 @@ def self_test():
         else:
             print(f"FAIL  self-test: {name} was accepted (got {found})")
             bad += 1
+    # The same dependency oracle is exercised on legal imports, aliases,
+    # selective renames, function values and a forwarding helper. The live
+    # aliased-forwarder control is also compiled by tileinterp-diff --selftest.
+    ref_path = "packages/tileref/src/ref.dawn"
+    for name, extra, helper in [
+        ("a direct host transcendental", "use std/math\nfn borrowed(x: Float) -> Float = math.sin(x)\n", ""),
+        ("an aliased namespace forwarding exp", "use std/math as borrowed_math\nfn borrowed(x: Float) -> Float = borrowed_math.exp(x)\n", ""),
+        ("a selective renamed exp", "use std/math.{exp as borrowed_exp}\nfn borrowed(x: Float) -> Float = borrowed_exp(x)\n", ""),
+        ("a selective multiline log", "use std/math.{\n log, sqrt\n}\n", ""),
+        ("an aliased function value", "use std/math as borrowed_math\nlet borrowed = borrowed_math.exp\n", ""),
+        ("a local forwarding helper", "use borrowed.{borrowed}\n", "use std/math as m\npub fn borrowed(x: Float) -> Float = m.exp(x)\n"),
+        ("a shared forwarding helper", "use mathhelper/borrowed.{borrowed}\n", "use std/math.{exp as e}\npub fn borrowed(x: Float) -> Float = e(x)\n"),
+    ]:
+        mutated = dict(files)
+        mutated[ref_path] += "\n" + extra
+        if helper:
+            helper_path = ("packages/mathhelper/src/borrowed.dawn" if "shared" in name
+                           else "packages/tileref/src/borrowed.dawn")
+            mutated[helper_path] = helper
+        _listed, found = check(good, mutated, ledger)
+        if any("independent transcendental algorithm" in p for p in found):
+            print(f"PASS  self-test: {name}")
+        else:
+            print(f"FAIL  self-test: {name} was accepted (got {found})")
+            bad += 1
+    exact = dict(files)
+    exact[ref_path] += "\nuse std/math as m\nfn shared_sqrt(x: Float) -> Float = m.sqrt(x)\n"
+    _listed, found = check(good, exact, ledger)
+    if found:
+        print(f"FAIL  self-test: sharing exact sqrt was refused: {found}")
+        bad += 1
+    else:
+        print("PASS  self-test: exact operations may be shared")
+
     missing = {k: v for k, v in files.items() if k != manifest}
     _listed, found = check(good, missing, ledger)
     if any(f"{manifest} does not exist" in p for p in found):
