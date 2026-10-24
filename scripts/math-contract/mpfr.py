@@ -86,16 +86,16 @@ class Oracle:
                 fn(C.byref(n), *[C.byref(a) for a in self.args[:count]], rounding)
             a = canonical(bits(self.get(C.byref(self.lo), 0)))
             b = canonical(bits(self.get(C.byref(self.hi), 0)))
+            if self.zero(C.byref(self.lo)) and self.zero(C.byref(self.hi)):
+                # RN determines the exact zero sign, including exact FMA cancellation.
+                fn(C.byref(self.lo), *[C.byref(n) for n in self.args[:count]], 0)
+                return {'bits': bits(self.get(C.byref(self.lo), 0)), 'precision': precision, 'class': 'zero'}
             if a != b:
                 continue
             if self.nan(C.byref(self.lo)):
                 return {'bits': a, 'precision': precision, 'class': 'nan'}
             if self.inf(C.byref(self.lo)) or a & ((1 << 63) - 1) == INF:
                 return {'bits': a, 'precision': precision, 'class': 'infinity'}
-            if self.zero(C.byref(self.lo)) and self.zero(C.byref(self.hi)):
-                # RN determines the exact zero sign, including exact FMA cancellation.
-                fn(C.byref(self.lo), *[C.byref(n) for n in self.args[:count]], 0)
-                return {'bits': bits(self.get(C.byref(self.lo), 0)), 'precision': precision, 'class': 'zero'}
             if max(self.lo.exponent, self.hi.exponent) < -1075:
                 # MPFR itself can underflow for exp(very negative). Enclose
                 # its directed endpoints on a small dyadic grid instead of
