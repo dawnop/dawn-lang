@@ -95,11 +95,12 @@ A cell is this block's piece of a parameter. Reading one builds a tensor view an
 | `position` | - | - |
 | `param_dtype` | - | - |
 | `scalar` | - | - |
-| `load_cell` | `load_view_tko` | `make_tensor_view`, `make_partition_view`, `assume`, `get_tile_block_id`, `get_num_tile_blocks`, `muli`, `constant` |
-| `load_at` | `load_view_tko` | `make_tensor_view`, `make_partition_view`, `assume`, `get_tile_block_id`, `get_num_tile_blocks`, `muli`, `constant` |
+| `load_cell` | `load_view_tko` | `make_tensor_view`, `make_partition_view`, `assume`, `get_tile_block_id`, `get_num_tile_blocks`, `muli`, `constant`, `reshape` |
+| `load_at` | `load_view_tko` | `make_tensor_view`, `make_partition_view`, `assume`, `get_tile_block_id`, `get_num_tile_blocks`, `muli`, `constant`, `reshape` |
 | `store_cell` | `store_view_tko` | `make_tensor_view`, `make_partition_view`, `assume`, `get_tile_block_id`, `get_num_tile_blocks`, `muli`, `constant`, `reshape`, `broadcast` |
-| `store_sub` | `store_view_tko` | `make_tensor_view`, `make_partition_view`, `assume`, `get_tile_block_id`, `get_num_tile_blocks`, `muli`, `addi`, `constant` |
+| `store_sub` | `store_view_tko` | `make_tensor_view`, `make_partition_view`, `assume`, `get_tile_block_id`, `get_num_tile_blocks`, `muli`, `addi`, `constant`, `reshape` |
 | `zeros` | `constant` | - |
+| `tile_shape` | - | - |
 | `fill` | `constant` | - |
 | `retile` | `make_tensor_view`, `make_partition_view` | `assume`, `get_num_tile_blocks`, `muli`, `constant` |
 
@@ -408,3 +409,7 @@ Pure functions with no operation of their own: they build the attribute values t
 | `op_count` | - | - |
 | `defined` | - | - |
 | `defined_inside` | - | - |
+
+单例 cells 投影在 load 后、store 前使用已有 `reshape`；`zeros`/`fill`
+直接生成投影后的值形状。`tile_shape` 在记录期读取该形状，不新增 opcode。
+storage view 与完整 dim_map 不受投影影响。

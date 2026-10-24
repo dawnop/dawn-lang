@@ -1,6 +1,6 @@
 # FlashAttention 与 matmul 的 host plan 分层
 
-> 状态：current，S1 实现与验收边界；后续几何变更另见 S2。
+> 状态：current，S1 实现与验收边界；算法几何已由 [S2](flash-attn-slim-s2-design.md) 迁移，本文保留 S1 的逐字节验收边界。
 
 S1 以泛型合并后的实现为基线，保留全部有效配置的 MLIR、tilebc、数值策略、初始化、五参 ABI 和展平网格。配置选择在录制侧完成：`FaTiles`、`MmTiles` 只保存块尺寸，`FaPlan`、`MmPlan` 保存 tiles 与 `ByArch[EntryHints]`。算法及闭包只消费 tiles、shape 与数值实例。f64 只有一份 32×16、无 hints 的 plan。
 

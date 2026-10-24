@@ -189,6 +189,15 @@ let (prog, entry) = trace3("matmul",
   `store_sub(o, [i, j], t)` writes one piece of it, shaped like `t`. These
   are the only writes an `Out` takes: a `store`, `scatter`, atomic or
   `store_view` into one is refused while recording.
+- `cells(..., squeeze = [axis, ...])` 按原 storage 维度编号，从值中删除 tile
+  长度为 1 的轴，extent 可以大于 1。轴顺序无关；重复、负数、越界与非单例轴
+  在 body 前拒绝。全轴投影得到 rank-0。storage 几何、launch grid、reach、
+  alias 与 Out 所有权保持完整。load 在 view load 后 reshape，store 精确验证
+  值形状，必要时广播 scalar，再恢复单例 storage 轴。`store_sub` 的 piece
+  使用值维度，在投影轴插零；`extent_of`、`blocks_of` 与 `load_at` 的 free
+  下标始终使用 storage 维度。
+- `tile_shape(t)` 返回 `Tile[D]` 的记录期静态值形状，类型为 host `List[Int]`。
+  不发设备操作、不分配 handle；rank-0 与同格式值也保留来源调用。
 - `zeros(p)` and `fill(p, v)` are a tile shaped like a cell of `p`, the
   accumulator a block starts from. `full(shape, v)` is a float tile of any
   shape whose format is the one it is checked against:

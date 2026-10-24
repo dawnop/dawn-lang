@@ -298,6 +298,20 @@ fn spelled(name: String, text: String) -> Bool =
     false
   }
 
+# A numerical helper's child has a definition span, while its parent has
+# the invocation span. Only these two fixed same-file helpers cross that
+# boundary; the source must contain exactly one complete definition.
+fn helper_contains(src: List[String], first: Int, name: String, lo: Int, hi: Int) -> Bool = {
+  if not list.contains(["fa_exp", "fa_divide"], name) { return false }
+  let starts = filter(range(0, len(src)), j => str.starts_with(src[j], "fn ${name}[") || str.starts_with(src[j], "fn ${name}("))
+  if len(starts) != 1 { return false }
+  let start = starts[0]
+  match list.find(range(start + 1, len(src)), j => src[j] == "}") {
+    Some(end) -> first + start <= lo && hi <= first + end
+    None -> false
+  }
+}
+
 ## Why call `c` (of `calls`) does not fit the text, or "". Once shared
 ## with the explorer page, retired 2026-10-17.
 pub fn call_fault(calls: List[MCall], first: Int, last: Int, src: List[String], c: MCall) -> String = {
@@ -308,7 +322,7 @@ pub fn call_fault(calls: List[MCall], first: Int, last: Int, src: List[String], 
   let in_parent =
     if c.parent >= 0 && c.parent < c.id {
       let p = calls[c.parent]
-      before_or_at(p.from, c.from) && before_or_at(c.to, p.to)
+      (before_or_at(p.from, c.from) && before_or_at(c.to, p.to)) || helper_contains(src, first, p.name, c.from.line, c.to.line)
     } else {
       true
     }

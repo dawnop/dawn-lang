@@ -211,6 +211,7 @@ Playground 补全生成入口：[play-ui-builtins-design.md](play-ui-builtins-de
 | [mem-buffer-design.md](mem-buffer-design.md) | proposed | 平铺数值缓冲与 `Mem` 效果（可变数组线 K1）：bcrypt 在 JVM 慢约 10 倍的根因是读写都装箱且无 O(1) 按位置写，装箱数组即使就地写也只有约 2.6 倍。方案 = `std/mem` 的 `I64Buf`（JVM `long[]`、native `int64_t[]` 的 RC 对象，借用形参）加 `Mem` 效果，`with_mem` 内部消解所以对外纯；不改 `Array`/pvec。逃逸四规则（结果类型不得提及缓冲、用户不能装 `Mem` handler、缓冲不入 effect 操作签名与 handler `var`、不过 `use java`）与十条变异体负控；越界两后端同文案 panic；native 用头文件 `static inline` 而不开 LTO；与批量打包线的缓冲端点；bcrypt 迁移草图；K2 到 K6 刀表与验收（JVM <= 1.5 倍、native <= 1.2 倍 jBCrypt）、7 个待裁、14 条不做。引 K0 实测（JVM 约 1.05 倍、native 无 LTO 约 1.7 倍），并写明 K0 未覆盖的五处。 |
 | [flash-attn-ideal-audit.md](flash-attn-ideal-audit.md) | current | flash_attn 对照理想写法与 Triton 教程的逐行复核：scale 迁成运行期标量参数的前后对照，A2 后的共享泛型主体与两套固定数值策略、P4-c 尺寸工厂、P3 exp2 状态及保留的历史问题。 |
 | [flash-generic-merge-design.md](flash-generic-merge-design.md) | current | A2 后保语义合并 flash 主体、闭包与录制组装；固定两套数值策略及严格静态实例调用图。 |
+| [flash-attn-slim-s2-design.md](flash-attn-slim-s2-design.md) | current | 普通 flash 的三维存储、单例 tile 轴投影、静态值形状查询和严格来源契约。 |
 | [fa-host-plan-design.md](fa-host-plan-design.md) | current | S1 分离算法 tiles、宿主 plan 与历史证据，迁移应用性能过滤并保持设备产物。 |
 | [operator-traits-design.md](operator-traits-design.md) | historical | `[]` 背后的 `Index`，第六个 prelude trait；权威条文在 spec §4.8。 |
 | [prelude-namespace-design.md](prelude-namespace-design.md) | historical | 函数命名空间的「一道门」与追加兼容性，三刀于 2026-08-02 完成。 |

@@ -212,7 +212,7 @@ def harness_source(src: str) -> str:
         fail(f"the {NAME} arm is not one traceN call answered as `p`: {body}")
     args = split_args(m.group(2))
     count = int(m.group(1))
-    if len(args) != count + 2 or args[0] != f'"{NAME}"' or args[-1] != 'fa_kernel(F64, fa64_math(), fa64_plan().tiles, ATT_N, ATT_D, 1)':
+    if len(args) != count + 2 or args[0] != f'"{NAME}"' or args[-1] != 'fa_kernel(F64, fa64_math())':
         fail(f"the {NAME} arm does not trace {NAME} itself with {count} markers: {body}")
     markers = args[1:-1]
     formats = [re.match(r'(?:In|Out|Shared|Scalar)\(([A-Z0-9]+)', k).group(1) for k in markers]
@@ -329,11 +329,16 @@ def node_name(n: Node) -> str:
     return n.text.split(" ")[1]
 
 
+HELPERS = {}
+
+
 def tile_valued(n: Node, dev: set, env: Env) -> bool:
     """Whether an expression's value is a tile (or an index): it calls a
     recorded function, mentions a cell, or mentions a name bound to one. The
     pairing below proves the guess: a host operation taken for a tile
     operation, or the reverse, makes the two lists of calls differ."""
+    if n.kind == "Apply" and n.kids and n.kids[0].kind == "Var" and node_name(n.kids[0]) == "tile_shape":
+        return False
     if n.kind == "Apply" and n.kids and n.kids[0].kind == "Var" and node_name(n.kids[0]) in dev:
         return True
     if n.kind == "MethodCall" and node_name(n) in dev:
@@ -462,6 +467,10 @@ def static_calls(n: Node, dev: set, env: "Env" = None) -> list:
                                    "name_span": (inner.lo, inner.hi), "text": SRC[inner.lo:inner.hi], "kids": []})
         if head is not None and head.kind != "Var":
             before = static_calls(head, dev, env) + before
+        if callee in HELPERS:
+            inside = Env(env.policy)
+            inside.tiles = {"x", "y"}
+            closures = static_calls(HELPERS[callee], dev, inside)
         if callee in dev:
             return before + [{"names": {callee}, "span": (n.lo, n.hi), "name_span": name_span, "text": callee,
                               "kids": closures}]
@@ -552,6 +561,25 @@ def place(src: str):
     return at
 
 
+def fixed_factory(dump):
+    validate_factory(parse_tree(dump, "fa_kernel"))
+
+
+def validate_factory(factory):
+    params = [node_name(k) for k in factory.kids if k.kind == "Param"]
+    lambdas = [k for k in factory.kids if k.kind == "Lambda"]
+    if params != ["dt", "math"] or len(lambdas) != 1:
+        fail("fa_kernel does not capture exactly dt and math")
+    lam = lambdas[0]
+    forwarded = [node_name(k) for k in lam.kids if k.kind == "LParam"]
+    calls = [k for k in lam.kids if k.kind != "LParam"]
+    if forwarded != ["q", "k", "v", "o", "scale"] or len(calls) != 1:
+        fail("fa_kernel does not return the five parameter closure")
+    call = calls[0]
+    if call.kind != "Apply" or any(k.kind != "Var" for k in call.kids) or [node_name(k) for k in call.kids] != ["flash_attn"] + forwarded + params:
+        fail("fa_kernel does not forward its parameters unchanged")
+
+
 def fixed_policy(dump):
     """Read the literal Bool fields of the exact f64 capture used by the harness.
 
@@ -570,7 +598,7 @@ def fixed_policy(dump):
             if name in fields:
                 fail(f"duplicate numeric policy field {name}")
             fields[name] = node_name(field.kids[0]) == "true"
-    if set(fields) != {"base2", "exp_ftz", "approx_div", "div_ftz", "acc_from_out"}:
+    if set(fields) != {"base2", "exp_ftz", "approx_div", "div_ftz"}:
         fail("fa64_math does not provide exactly the fixed Bool policy fields")
     return fields
 
@@ -596,28 +624,35 @@ def expect_refused(label, action):
 
 def strategy_controls(src, body, dev, policy, static, rows, paired):
     """Faults over this real recording, including two same-named exp sites."""
+    queries = [r for r in rows if r["name"] == "tile_shape"]
+    if len(queries) != 1 or queries[0]["lines"]:
+        fail("tile_shape must retain exactly one zero IR source call")
+    casts = [r for r in rows if r["name"] == "to"]
+    if len(casts) != 1 or casts[0]["lines"]:
+        fail("the same-format to must retain exactly one call with empty IR")
     wrong = dict(policy, base2=not policy["base2"])
     expect_refused("wrong strategy arm", lambda: pair(static_calls(body, dev, Env(wrong)), rows))
-    exp_rows = [i for i, row in enumerate(rows) if row["name"] == "exp"]
+    exp_rows = [i for i, row in enumerate(rows) if row["name"] == "fa_exp"]
     if len(exp_rows) != 2:
         fail("the f64 instance did not record both natural exponentials")
     moved = copy.deepcopy(paired)
     moved[exp_rows[0]] = copy.deepcopy(paired[exp_rows[1]])
     expect_refused("same-name wrong source span", lambda: validate_pairs(src, rows, moved))
     missing = copy.deepcopy(static)
-    missing.pop(0)
-    expect_refused("missing actual call", lambda: pair(missing, rows))
+    def drop_call(calls, name):
+        return [dict(c, kids=drop_call(c["kids"], name)) for c in calls if name not in c["names"]]
+    for name in ["fa_exp", "tile_shape"]:
+        expect_refused("missing " + name, lambda: pair(drop_call(static, name), rows))
     unknown = copy.deepcopy(body)
     def spoil(n):
         if n.kind == "FieldAccess" and node_name(n) == "base2":
             n.kids[0].text = "Var unknown_capture"
         for k in n.kids:
             spoil(k)
+    unknown = copy.deepcopy(HELPERS["fa_exp"])
     spoil(unknown)
     expect_refused("unknown host condition", lambda: static_calls(unknown, dev, Env(policy)))
-    casts = [r for r in rows if r["name"] == "to"]
-    if len(casts) != 1 or casts[0]["lines"]:
-        fail("the same-format to must retain exactly one call with empty IR")
+
 
 
 def record() -> str:
@@ -628,6 +663,21 @@ def record() -> str:
                        capture_output=True, text=True, cwd=ROOT)
     if p.returncode != 0:
         fail("`dawnc parse` failed:\n" + (p.stderr or p.stdout)[-2000:])
+    fixed_factory(p.stdout)
+    altered = copy.deepcopy(parse_tree(p.stdout, "fa_kernel"))
+    lam = next(k for k in altered.kids if k.kind == "Lambda")
+    call = next(k for k in lam.kids if k.kind != "LParam")
+    call.kids[1], call.kids[2] = call.kids[2], call.kids[1]
+    expect_refused("wrong factory forwarding", lambda: validate_factory(altered))
+    global HELPERS
+    HELPERS = {}
+    for name in ["fa_exp", "fa_divide"]:
+        helper = parse_tree(p.stdout, name)
+        bodies = [k for k in helper.kids if k.kind == "Block"]
+        if len(bodies) != 1:
+            fail(f"{name} has no unique block body")
+        HELPERS[name] = bodies[0]
+    dev |= set(HELPERS)
     fn = parse_tree(p.stdout, NAME)
     body = [k for k in fn.kids if k.kind == "Block"]
     if len(body) != 1:
@@ -652,12 +702,13 @@ def record() -> str:
     at = place(src)
     validate_pairs(src, rows, paired)
     strategy_controls(src, body[0], dev, fixed_policy(p.stdout), static, rows, paired)
+    print("PASS fresh recording controls: wrong arm, same-name span, missing helper, missing tile_shape, wrong factory forwarding, unknown host branch", file=sys.stderr)
     golden = (GOLDEN / f"{NAME}.mlir").read_text(encoding="utf-8")
     if ran.split("@@ir\n", 1)[1].split("@@end\n", 1)[0] != golden:
         fail("the selected factory recording differs from the full golden text")
     if int(tail.split("-")[1]) - 1 != golden.count("\n"):
         fail(f"the map ends at line {int(tail.split('-')[1]) - 1}, {NAME}.mlir has {golden.count(chr(10))} lines")
-    first = src[:fn.lo].count("\n") + 1
+    first = src[:parse_tree(p.stdout, "fa_exp").lo].count("\n") + 1
     last = src[:fn.hi].count("\n") + 1
     out = [f"kernel {NAME}", f"fn {first}-{last}", f"ops {ops}", f"head {head}"]
     for r, s in zip(rows, paired):

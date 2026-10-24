@@ -75,6 +75,9 @@ the message and not by a code.
 | `nothing writes an In` | record | a store into a parameter whose marker is `In` | make the marker `Out` (written one cell per block) or `Shared` (the escape hatch for atomics and scatters) |
 | `which is written through its cells alone` | record | `store`, `scatter`, an atomic or `store_view` into an `Out` | write the cell with `store_cell` or `store_sub`, or mark the parameter `Shared` |
 | `every tile dimension is a power of two` | record | a tile, a cell or a view with a dimension that is not 1, 2, 4, 8, ... | cut the tensor into power-of-two tiles and let the tail be padding or a mask |
+| `squeeze axis` | record | 轴为负数、越过 storage rank、重复，或 tile 长度不是 1 | 每个单例 storage tile 轴至多使用一次；extent 不要求为 1 |
+| `expects projected value shape` | record | 非 scalar store 的值形状错误，即使元素总数相同也拒绝 | 在 store_cell 前显式 reshape 为投影值形状 |
+| `projected value dimensions and piece numbers` | record | store_sub 使用了 storage rank，没有使用投影值 rank | shape 与 piece 按值维度指定；单例 storage 轴自动恢复 |
 | `loops nest deeper than` | record | a body that recurses through `d_range` or `d_loop` unrolls forever | make the recursion a loop; the bound is `MAX_LOOP_DEPTH` |
 | `but the dialect takes` | record | an `optimization hint` value outside the dialect's range (`latency` 1 to 10, `occupancy` 1 to 32, `num_worker_warps_per_cta` 4 or 8, `num_cta_in_cga` a power of two to 16 and 1 on sm_80 to sm_89), or an architecture that is not `default` or `sm_` and a number, or one given twice; `tileiras` accepts every one of these in silence and ignores it | change the value to the one the message names; the check is here because the assembler's own is off by default |
 

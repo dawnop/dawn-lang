@@ -35,7 +35,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, FloatDtype
   idx_of, Dyn, strided_view, gather_scatter_view, load_gather, atomic_red_view, At, Rows, NoPadding, PadZero,
   PadNegZero, PadNan, PadPosInf, PadNegInf, Padding, broadcast, reshape, idx_as_tile, le_i, atomic_cas, atomic_add, load_cell, load_at,
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
-  blocks_of }
+  blocks_of, tile_shape, t_call_enter, t_call_exit, t_body_enter, t_body_exit }
 use tileir/prog.{TileOp, TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
   Whole, FREE_AXIS, Scalar }
 use tileir/render.{render, text_debug}
@@ -2343,11 +2343,7 @@ fn attn_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev 
 const FA_BQ: Int = 32
 const FA_BK: Int = 16
 
-# Tiles enter the algorithm; plans and architecture selection stay here.
-type FaShape = { n: Int, d: Int, bh: Int }
-
-fn fa_shape() -> FaShape = FaShape { n = ATT_N, d = ATT_D, bh = 1 }
-
+# Tiles, plans and architecture selection stay on the host.
 type FaTiles = { bq: Int, bk: Int }
 type FaPlan = { tiles: FaTiles, hints: ByArch[EntryHints] }
 
@@ -2361,34 +2357,51 @@ fn fa_plan(arch: String, d: Int) -> FaPlan = match (arch, d) {
 
 fn fa64_plan() -> FaPlan = FaPlan { tiles = FaTiles { bq = 32, bk = 16 }, hints = [] }
 
-# Heads share the flat launch grid; no workload class enters fa_plan.
-fn fa_kv_index(j: Idx, bh: Int, s: Int, c: FaTiles) -> Idx !Dev =
-  if bh == 1 { j } else { (block_id(0) / idx_const(s / c.bq)) * idx_const(s / c.bk) + j }
+type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool }
+fn fa64_math() -> FaNumerics[Float] = FaNumerics { zero = 0.0, neg_inf = -INFINITY, base2 = false, exp_ftz = false, approx_div = false, div_ftz = false }
+fn fa_bf16_math() -> FaNumerics[F32] = FaNumerics { zero = f32(0.0), neg_inf = f32(-INFINITY), base2 = true, exp_ftz = true, approx_div = true, div_ftz = true }
 
-type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool, acc_from_out: Bool }
-fn fa64_math() -> FaNumerics[Float] = FaNumerics { zero = 0.0, neg_inf = -INFINITY, base2 = false, exp_ftz = false, approx_div = false, div_ftz = false, acc_from_out = true }
-fn fa_bf16_math() -> FaNumerics[F32] = FaNumerics { zero = f32(0.0), neg_inf = f32(-INFINITY), base2 = true, exp_ftz = true, approx_div = true, div_ftz = true, acc_from_out = false }
+# Explicit call and body marks keep private numerical helpers in the source
+# tree, with their call sites separate from the operations in their bodies.
+fn fa_exp[A: FloatDtype](math: FaNumerics[A], x: Tile[A], at: Loc = caller()) -> Tile[A] !Dev = {
+  t_call_enter("fa_exp", Some(at))
+  t_body_enter()
+  let result = if math.base2 { exp2(x, ftz = math.exp_ftz) } else { exp(x) }
+  t_body_exit()
+  t_call_exit()
+  result
+}
 
-fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[D], v: Param[D], o: Param[A], scale: Param[A], dt: Dtype[D], math: FaNumerics[A], cfg: FaTiles, shape: FaShape) -> Unit !Dev = {
+fn fa_divide[A: FloatDtype](math: FaNumerics[A], x: Tile[A], y: Tile[A], at: Loc = caller()) -> Tile[A] !Dev = {
+  t_call_enter("fa_divide", Some(at))
+  t_body_enter()
+  let result = if math.approx_div { div(x, y, approx = true, ftz = math.div_ftz) } else { x / y }
+  t_body_exit()
+  t_call_exit()
+  result
+}
+
+fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[D], v: Param[D], o: Param[A], scale: Param[A], dt: Dtype[D], math: FaNumerics[A]) -> Unit !Dev = {
   let tq = load_cell(q)
-  var m: Tile[A] = full([cfg.bq, 1], math.neg_inf)
-  var l: Tile[A] = full([cfg.bq, 1], math.zero)
-  var acc: Tile[A] = if math.acc_from_out { zeros(o) } else { full([cfg.bq, shape.d], math.zero) }
-  for j in d_range(0, shape.n / cfg.bk) {
-    let s: Tile[A] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
+  let rows = tile_shape(tq)[0]
+  var m: Tile[A] = full([rows, 1], math.neg_inf)
+  var l: Tile[A] = full([rows, 1], math.zero)
+  var acc = zeros(o)
+  for j in d_range(idx_const(0), blocks_of(k, 1)) {
+    let s: Tile[A] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
     let m_new = max(m, reduce_max(s, keepdims = true))
-    let p = if math.base2 { exp2(s - m_new, ftz = math.exp_ftz) } else { exp(s - m_new) }
-    let alpha = if math.base2 { exp2(m - m_new, ftz = math.exp_ftz) } else { exp(m - m_new) }
+    let p = fa_exp(math, s - m_new)
+    let alpha = fa_exp(math, m - m_new)
     l = l * alpha + reduce_sum(p, keepdims = true)
-    acc = mma(p.to(dt), load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
+    acc = mma(p.to(dt), load_at(v, [j]), acc * alpha)
     m = m_new
   }
-  store_cell(o, if math.approx_div { div(acc, l, approx = true, ftz = math.div_ftz) } else { acc / l })
+  store_cell(o, fa_divide(math, acc, l))
 }
 
 # The two supported instances capture their policy before recording.
-fn fa_kernel[D: FloatDtype, A: FloatDtype + ScalarDtype](dt: Dtype[D], math: FaNumerics[A], c: FaTiles, n: Int, d: Int, bh: Int) -> fn(Param[D], Param[D], Param[D], Param[A], Param[A]) -> Unit !Dev =
-  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, dt, math, c, FaShape { n = n, d = d, bh = bh })
+fn fa_kernel[D: FloatDtype, A: FloatDtype + ScalarDtype](dt: Dtype[D], math: FaNumerics[A]) -> fn(Param[D], Param[D], Param[D], Param[A], Param[A]) -> Unit !Dev =
+  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, dt, math)
 
 # Refuse unsupported tails before cells can silently pad or cross a head.
 # Division guards element products before multiplication.
@@ -2402,7 +2415,7 @@ fn fa_domain(d: Int, n: Int, bh: Int, t: FaTiles, at: Loc = caller()) -> Unit = 
   # Device offsets count elements; byte addresses use pointer-width arithmetic.
   let limit = 2147483647
   if d > limit || n > limit / d || bh > limit / (n * d)
-      || t.bq > limit / d || t.bk > limit / d || t.bq > limit / t.bk {
+    || t.bq > limit / d || t.bk > limit / d || t.bq > limit / t.bk {
     panic("flash_attn: tile or buffer offset product exceeds I32", at = at)
   }
 }
@@ -2414,17 +2427,17 @@ fn fa_record_typed[D: FloatDtype, A: FloatDtype + ScalarDtype](name: String, arc
   if host_float(math.zero) != 0.0 || host_float(math.neg_inf) != -INFINITY {
     panic("flash_attn: unsupported numeric constants", at = at)
   }
-  if not ((f64 && not math.base2 && not math.exp_ftz && not math.approx_div && not math.div_ftz && math.acc_from_out)
-      || (bf16 && math.base2 && math.exp_ftz && math.approx_div && math.div_ftz && not math.acc_from_out)) {
+  if not ((f64 && not math.base2 && not math.exp_ftz && not math.approx_div && not math.div_ftz)
+      || (bf16 && math.base2 && math.exp_ftz && math.approx_div && math.div_ftz)) {
     panic("flash_attn: unsupported format or numeric policy", at = at)
   }
   let c = plan.tiles
   fa_domain(d, n, bh, c, at = at)
   recording_policy(arch, c.bq, plan.hints, at = at)
-  let q = cells([bh * n, d], [c.bq, d])
-  let kv = cells([bh * n, d], [c.bk, d], along = [FREE_AXIS, 1])
+  let q = cells([bh, n, d], [1, c.bq, d], along = [2, 0, 1], squeeze = [0])
+  let kv = cells([bh, n, d], [1, c.bk, d], along = [2, FREE_AXIS, 1], squeeze = [0])
   let (p, _e) = trace5(name, In(dt, q), In(dt, kv), In(dt, kv), Out(acc_dtype, q), Scalar(acc_dtype),
-    fa_kernel(dt, math, c, n, d, bh), hints = plan.hints)
+    fa_kernel(dt, math), hints = plan.hints)
   p
 }
 
@@ -2438,7 +2451,7 @@ fn fa_record(arch: String, d: Int, n: Int, bh: Int, bf16: Bool, plan: Option[FaP
   }
 }
 
-fn fa_named(name: String, arch: String, d: Int) -> TileProg = TileProg { ..fa_record(arch, d, 256, 1, true), name= name }
+fn fa_named(name: String, arch: String, d: Int) -> TileProg = TileProg { ..fa_record(arch, d, 256, 1, true), name = name }
 
 # ---- tileir 0.8.2: index division, same-rank broadcasting, `lit` ----
 
@@ -5233,7 +5246,7 @@ fn att_qk(name: String, body: fn(Param[Float], Param[Float], Param[Float]) -> Un
 }
 
 ## FlashAttention's keys and values: FA_BK rows a cell, picked by the loop.
-fn fa_kv() -> Cells = cells([ATT_N, ATT_D], [FA_BK, ATT_D], along= [FREE_AXIS, 1])
+fn fa_kv() -> Cells = cells([1, ATT_N, ATT_D], [1, FA_BK, ATT_D], along = [2, FREE_AXIS, 1], squeeze = [0])
 
 ## LoRA's activations: every row, LORA_T columns a cell picked by the loop.
 fn lora_x() -> Cells = cells([LORA_M, LORA_DIN], [LORA_M, LORA_T], along= [0, FREE_AXIS])
@@ -5859,8 +5872,8 @@ fn trace(name: String) -> TileProg = match name {
   }
   "flash_attn" -> {
     let (p, _e) = trace5("flash_attn",
-      In(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(F64, fa_kv()), In(F64, fa_kv()),
-      Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), fa_kernel(F64, fa64_math(), fa64_plan().tiles, ATT_N, ATT_D, 1))
+      In(F64, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [2, 0, 1], squeeze = [0])), In(F64, fa_kv()), In(F64, fa_kv()),
+      Out(F64, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [2, 0, 1], squeeze = [0])), Scalar(F64), fa_kernel(F64, fa64_math()))
     p
   }
   "flash_bf16_sm90_d64" -> fa_named("flash_bf16_sm90_d64", "sm_90", 64)
@@ -5869,10 +5882,10 @@ fn trace(name: String) -> TileProg = match name {
   "flash_bf16_sm100_d128" -> fa_named("flash_bf16_sm100_d128", "sm_100", 128)
   "flash_attn_bf16" -> {
     let (p, _e) = trace5("flash_attn_bf16",
-      In(BF16, cells([ATT_M, ATT_D], [64, ATT_D])),
-      In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along= [FREE_AXIS, 1])),
-      In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along= [FREE_AXIS, 1])),
-      Out(F32, cells([ATT_M, ATT_D], [64, ATT_D])), Scalar(F32), fa_kernel(BF16, fa_bf16_math(), fa_plan("default", ATT_D).tiles, ATT_N, ATT_D, 1))
+      In(BF16, cells([1, ATT_M, ATT_D], [1, 64, ATT_D], along = [2, 0, 1], squeeze = [0])),
+      In(BF16, cells([1, ATT_N, ATT_D], [1, 64, ATT_D], along = [2, FREE_AXIS, 1], squeeze = [0])),
+      In(BF16, cells([1, ATT_N, ATT_D], [1, 64, ATT_D], along = [2, FREE_AXIS, 1], squeeze = [0])),
+      Out(F32, cells([1, ATT_M, ATT_D], [1, 64, ATT_D], along = [2, 0, 1], squeeze = [0])), Scalar(F32), fa_kernel(BF16, fa_bf16_math()))
     p
   }
   "idx_softmax" -> {
@@ -6830,8 +6843,8 @@ fn fa_config_check() -> Unit = {
   let why = mm_refusal(() => fa_record("default", 32, 63, 1, false))
   mm_expect(str.contains(why, "n must be a multiple of bq and bk"))
   mm_expect(str.contains(why, " at ${file}:${line + 1}:"))
-  for shape in [FaShape { n = 0, d = 32, bh = 1 }, FaShape { n = 64, d = 0, bh = 1 }, FaShape { n = 64, d = 32, bh = 0 }, FaShape { n = -64, d = 32, bh = 1 }] {
-    mm_expect(str.contains(mm_refusal(() => fa_record("default", shape.d, shape.n, shape.bh, false)), "dimensions and tiles must be positive"))
+  for (n, d, bh) in [(0, 32, 1), (64, 0, 1), (64, 32, 0), (-64, 32, 1)] {
+    mm_expect(str.contains(mm_refusal(() => fa_record("default", d, n, bh, false)), "dimensions and tiles must be positive"))
   }
   for t in [FaTiles { bq = 0, bk = 16 }, FaTiles { bq = 32, bk = -16 }] {
     mm_expect(str.contains(mm_refusal(() => fa_record("default", 32, 64, 1, false, plan = Some(FaPlan { tiles = t, hints = [] }))), "dimensions and tiles must be positive"))
@@ -6839,8 +6852,8 @@ fn fa_config_check() -> Unit = {
   for t in [FaTiles { bq = 32, bk = 24 }, FaTiles { bq = 48, bk = 16 }] {
     mm_expect(str.contains(mm_refusal(() => fa_record("default", 32, 64, 1, false, plan = Some(FaPlan { tiles = t, hints = [] }))), "n must be a multiple of bq and bk"))
   }
-  for shape in [FaShape { n = 64, d = 2147483647, bh = 1 }, FaShape { n = 64, d = 32, bh = 2147483647 }, FaShape { n = 2147483616, d = 32, bh = 1 }] {
-    mm_expect(str.contains(mm_refusal(() => fa_record("default", shape.d, shape.n, shape.bh, false)), "offset product exceeds I32"))
+  for (n, d, bh) in [(64, 2147483647, 1), (64, 32, 2147483647), (2147483616, 32, 1)] {
+    mm_expect(str.contains(mm_refusal(() => fa_record("default", d, n, bh, false)), "offset product exceeds I32"))
   }
   # A 2 GiB f64 buffer still has representable I32 element offsets.
   let large = fa_record("default", 32, 32, 262144, false)

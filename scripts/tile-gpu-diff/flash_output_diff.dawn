@@ -42,10 +42,10 @@ fn sample(d: Int, bq: Int, bk: Int) -> Result[Unit, ForeignError] !Gpu = {
   gpu.copy_from_host(v, list.map(range(0, n), i => narrow.bf16(value(i / d, i % d, d))))?
   gpu.copy_from_host(o, list.map(range(0, n), _i => narrow.f32(-12345.0)))?
   let e: Entry5[BF16, BF16, BF16, F32, F32] = gpu.entry5("flash_attn_bf16",
-    gpu.arg_in([1024, d], [bq, d], [0, 1]),
-    gpu.arg_in([1024, d], [bk, d], [-1, 1]),
-    gpu.arg_in([1024, d], [bk, d], [-1, 1]),
-    gpu.arg_out([1024, d], [bq, d]), gpu.arg_scalar())
+    gpu.arg_in([2, 512, d], [1, bq, d], [2, 0, 1]),
+    gpu.arg_in([2, 512, d], [1, bk, d], [2, -1, 1]),
+    gpu.arg_in([2, 512, d], [1, bk, d], [2, -1, 1]),
+    gpu.arg_out([512, d, 2], [bq, d, 1]), gpu.arg_scalar())
   gpu.launch_entry5(e, gpu.buffer_arg(q), gpu.buffer_arg(k), gpu.buffer_arg(v), gpu.buffer_arg(o),
     gpu.scalar_arg(narrow.f32(1.4426950408889634)))?
   gpu.sync()?

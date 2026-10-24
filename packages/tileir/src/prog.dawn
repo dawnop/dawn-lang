@@ -37,7 +37,7 @@ use dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, bits_dtype, shift
   float_to_float, sub, add_i, alloca_ptrs, d_fork2, select, lt, arange, mma, full, to, transpose, permute_tile, rounding_name, Overflow, Padding, PadZero, padding_name,
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
   retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, ByArch, EntryHints, PtrHints, ViewHints, wire_entry, wire_ptr, wire_view, for_arch, entry_hints, ptr_hints, view_hints, lit, idx_div,
-  idx_rem, idx_sub, extent_of, blocks_of, scalar, idx_as_tile }
+  idx_rem, idx_sub, extent_of, blocks_of, scalar, idx_as_tile, tile_shape }
 use std/narrow.{F32, F16, BF16, Rounding, bf16}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
@@ -1691,12 +1691,14 @@ pub const FREE_AXIS: Int = 0 - 1
 ## - `along[j]` is the grid axis dimension `j` follows, or `FREE_AXIS`. A
 ##   dimension that follows axis `k` has as many cells as the grid has
 ##   blocks along `k`.
+## - `squeeze` names singleton tile axes removed from values only. The
+##   full storage geometry still determines the launch and ownership.
 ##
 ## [`cells`] builds one with the defaults; `Whole` and `Grid` are its
 ## values, for a match.
 pub type Cells =
   | Whole
-  | Grid(extent: List[Int], tile: List[Int], pad: Padding, along: List[Int])
+  | Grid(extent: List[Int], tile: List[Int], pad: Padding, along: List[Int], squeeze: List[Int])
 derive Show
 
 ## `extent` cut into cells of `tile`, a read past the extent answering
@@ -1706,9 +1708,13 @@ derive Show
 ## along its rows and `FREE_AXIS` along K. An `Out`'s dimensions each follow
 ## an axis, no two the same one: a batched product's output cut
 ## `along: [2, 0, 1]` keeps its batch on axis 2.
+## `squeeze` is an unordered set of storage axes whose tile length is 1.
+## Repeated, negative, out-of-range or non-singleton axes are refused before
+## the body runs. Remaining value axes keep their storage order; projecting
+## every axis yields a rank-zero value. Extents and storage checks stay full.
 pub fn cells(extent: List[Int], tile: List[Int], pad: Padding = PadZero,
-  along: List[Int] = list.map(range(0, len(tile)), k => if k < 3 { k } else { FREE_AXIS })) -> Cells =
-  Grid(extent, tile, pad, along)
+  along: List[Int] = list.map(range(0, len(tile)), k => if k < 3 { k } else { FREE_AXIS }), squeeze: List[Int] = []) -> Cells =
+  Grid(extent, tile, pad, along, squeeze)
 
 ## One parameter of a kernel, for `trace1` to `trace5`: its format marker
 ## (std/gpu's `F64` and so on), what the kernel does to it, and for `In` and
@@ -1798,8 +1804,18 @@ fn access_word(a: Access) -> String = match a {
 # one: a dimension no axis decides is not the grid's.
 fn check_cells(name: Ctx, k: Int, s: Sig) -> Unit = match s.g {
   Whole -> ()
-  Grid(_extent, tile, pad, along) -> {
+  Grid(_extent, tile, pad, along, squeeze) -> {
     let who = "argument ${k} (${access_word(s.access)})"
+    for j in range(0, len(squeeze)) {
+      let axis = squeeze[j]
+      if axis < 0 || axis >= len(tile) {
+        refuse(name, "${who} squeeze axis ${axis} is outside storage rank ${len(tile)}")
+      } else if list.contains(list.take(squeeze, j), axis) {
+        refuse(name, "${who} squeeze axis ${axis} is repeated")
+      } else if tile[axis] != 1 {
+        refuse(name, "${who} squeeze axis ${axis} has tile length ${tile[axis]}, expected 1")
+      } else { () }
+    }
     match list.find(tile, t => not is_pow2(t)) {
       Some(_t) -> refuse(name, "${who} has a tile of ${show(tile)}; every tile dimension is a power of two")
       None -> ()
@@ -1828,9 +1844,9 @@ fn check_cells(name: Ctx, k: Int, s: Sig) -> Unit = match s.g {
 
 fn entry_arg(s: Sig) -> EntryArg = match (s.access, s.g) {
   (Reading, Whole) -> arg_in_whole()
-  (Reading, Grid(extent, tile, _pad, along)) -> arg_in(extent, tile, along)
+  (Reading, Grid(extent, tile, _pad, along, _squeeze)) -> arg_in(extent, tile, along)
   (Owning, Whole) -> arg_out([], [])
-  (Owning, Grid(extent, tile, _pad, along)) -> {
+  (Owning, Grid(extent, tile, _pad, along, _squeeze)) -> {
     let (e, t) = out_axes(extent, tile, along)
     arg_out(e, t)
   }
@@ -2338,7 +2354,7 @@ fn cells_of(name: Ctx, frames: List[Frame], ops: List[TileOp], geoms: List[Cells
     refuse_at(name, frames, ops, op, "names parameter ${param}, but ${len(geoms)} parameter(s) are declared")
   } else {
     match geoms[param] {
-      Grid(extent, tile, pad, along) -> (extent, tile, pad, along)
+      Grid(extent, tile, pad, along, _squeeze) -> (extent, tile, pad, along)
       Whole ->
         if roles[param] == Sharing {
           refuse_at(name, frames, ops, op, "parameter ${param} is a Shared, which has no cells")
@@ -4366,9 +4382,19 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         cell_blocks = seen
         (view, ix)
       }
+      t_cell_shape(param) => {
+        let asking = writer(marks, calls, "cell_shape")
+        let (_extent, tile, _pad, _along) = cells_of(name, frames, ops, geoms, roles, param, asking)
+        let squeeze = match geoms[param] { Grid(_e, _t, _p, _a, axes) -> axes
+          Whole -> [] }
+        (tile, squeeze)
+      }
       t_cell_fill(param, value) => {
         let asking = writer(marks, calls, "cell_fill")
-        let (_extent, tile, _pad, _along) = cells_of(name, frames, ops, geoms, roles, param, asking)
+        let (_extent, storage, _pad, _along) = cells_of(name, frames, ops, geoms, roles, param, asking)
+        let squeeze = match geoms[param] { Grid(_e, _t, _p, _a, axes) -> axes
+          Whole -> [] }
+        let tile = list.map(list.filter(range(0, len(storage)), j => not list.contains(squeeze, j)), j => storage[j])
         let dtype = kparam_dtype(params[param])
         let whole = is_float_dtype(dtype) || to_float(to_int(value)) == value
         if not whole {
@@ -7845,4 +7871,126 @@ test "S3: an unknown conditional write target conflicts with a fork sibling" {
   })
   assert str.contains(why, "the chains it joins are unordered and may write the same element")
   assert str.contains(why, "a write whose target is not a parameter")
+}
+
+# Singleton projection is a value contract, independent of the workload.
+test "S2: projected batched copy is exactly the explicit reshape program" {
+  let storage = cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1])
+  let projected = cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])
+  let (a, ea) = trace2("copy", In(F64, projected), Out(F64, projected), (x, o) => store_cell(o, load_cell(x)))
+  let (b, eb) = trace2("copy", In(F64, storage), Out(F64, storage), (x, o) =>
+      store_cell(o, reshape(reshape(load_cell(x), [4, 4]), [1, 4, 4])))
+  assert a == b
+  assert ea == eb
+  let (empty, _e) = trace2("copy", In(F64, cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [])),
+    Out(F64, storage), (x, o) => store_cell(o, load_cell(x)))
+  let (old, _e2) = trace2("copy", In(F64, storage), Out(F64, storage), (x, o) => store_cell(o, load_cell(x)))
+  assert empty == old
+}
+
+test "S2: unordered singleton axes, direct value constants and rank zero" {
+  let g = cells([2, 8, 3], [1, 4, 1], along = [2, 0, 1], squeeze = [2, 0])
+  let (p, _e) = trace2("project", In(F64, g), Out(F64, g), (x, o) => {
+    assert tile_shape(load_cell(x)) == [4]
+    assert tile_shape(zeros(o)) == [4]
+    assert tile_shape(fill(o, 2.0)) == [4]
+    store_cell(o, f_const(F64, 3.0))
+  })
+  assert len(ops_where(p.ops, o => match o { ConstF(_d, "f64", [4], _v) -> true
+    _ -> false })) == 3
+  let all = cells([2, 3], [1, 1], squeeze = [1, 0])
+  let (r, _er) = trace2("scalar", In(F32, all), Out(F32, all), (x, o) => {
+    assert tile_shape(load_cell(x)) == []
+    assert tile_shape(zeros(o)) == []
+    store_cell(o, fill(o, 7.0))
+  })
+  assert len(ops_where(r.ops, o => match o { ConstF(_d, "f32", [], _v) -> true
+    _ -> false })) == 2
+}
+
+test "S2: invalid projections refuse before the body and preserve argument identity" {
+  for (axes, message) in [([-1], "outside storage rank"), ([3], "outside storage rank"),
+    ([0, 0], "is repeated"), ([1], "has tile length 4")] {
+    let why = marked(() => trace1("bad_projection", Out(F64, cells([2, 8, 4], [1, 4, 4], squeeze = axes)),
+      _o => panic("body ran")))
+    assert str.contains(why, "argument 0 (Out) squeeze axis")
+    assert str.contains(why, message)
+    assert not str.contains(why, "body ran")
+  }
+  let g = cells([2, 8, 4], [1, 4, 4], squeeze = [0])
+  for shape in [[2, 8], [1, 4, 4], [16]] {
+    assert str.contains(marked(() => trace1("wrong_shape", Out(F64, g), o => store_cell(o, full(shape, 0.0)))),
+      "parameter 0 expects projected value shape [4, 4]")
+  }
+}
+
+test "S2: projection cannot relax storage following, rank, dynamic extent or Out ownership" {
+  for along in [[FREE_AXIS, 0, 1], [2, 0, 0], [3, 0, 1]] {
+    assert marked(() => trace1("bad", Out(F64, cells([2, 8, 4], [1, 4, 4], along = along, squeeze = [0])),
+      _o => panic("body ran"))) != "accepted"
+  }
+  let rank4 = marked(() => trace1("bad", Out(F64, cells([2, 8, 4, 1], [1, 4, 4, 1], squeeze = [3])),
+    _o => panic("body ran")))
+  assert str.contains(rank4, "argument 0") && not str.contains(rank4, "body ran")
+  assert str.contains(marked(() => trace2("follow",
+    In(F64, cells([3, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])),
+    Out(F64, cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])),
+    (_x, _o) => panic("body ran"))), "grid has 2 block(s)")
+  assert str.contains(marked(() => trace1("dynamic",
+    In(F64, cells([DYN_DIM, 8], [1, 4], along = [FREE_AXIS, 0], squeeze = [0])),
+    _x => panic("body ran"))), "dynamic")
+}
+
+test "S2: free indices and extent queries use storage dimensions" {
+  let g = cells([2, 8, 4], [1, 4, 4], along = [2, FREE_AXIS, 1], squeeze = [0])
+  let out = cells([2, 4, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])
+  let (p, _e) = trace2("free", In(F64, g), Out(F64, out), (x, o) => {
+    let n = extent_of(x, 1)
+    let blocks = blocks_of(x, 1)
+    store_cell(o, load_at(x, [blocks - n / idx_const(4)]))
+  })
+  assert len(ops_where(p.ops, o => match o { IdxConst(_d, 8) -> true
+    _ -> false })) == 1
+  assert len(ops_where(p.ops, o => match o { IdxConst(_d, 2) -> true
+    _ -> false })) == 1
+  assert str.contains(marked(() => trace2("free", In(F64, g), Out(F64, out), (x, o) => store_cell(o, load_cell(x)))),
+    "has 1 dimension(s) that follow no grid axis")
+}
+
+test "S2: store_sub inserts singleton shape and zero piece before the original proof" {
+  let projected = cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])
+  let storage = cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1])
+  let (a, _ea) = trace1("piece", Out(F64, projected), o => store_sub(o, [1, 0], full([2, 4], 3.0)))
+  let (b, _eb) = trace1("piece", Out(F64, storage), o => store_sub(o, [0, 1, 0], reshape(full([2, 4], 3.0), [1, 2, 4])))
+  assert a == b
+  assert str.contains(marked(() => trace1("piece", Out(F64, projected), o => store_sub(o, [2, 0], full([2, 4], 3.0)))),
+    "is not inside the cell")
+  assert str.contains(marked(() => trace1("piece", Out(F64, projected), o => store_sub(o, [0, 0, 0], full([1, 2, 4], 3.0)))),
+    "expects 2 projected value dimensions")
+  let all = cells([2, 3], [1, 1], squeeze = [0, 1])
+  let (_r, _er) = trace1("piece_scalar", Out(F64, all), o => store_sub(o, [], f_const(F64, 2.0)))
+}
+
+test "S2: tile_shape allocates no operation and retains its zero IR source call" {
+  let g = cells([8, 4], [4, 4])
+  let body = (x: Param[Float], o: Param[Float], query: Bool) => {
+    let t = load_cell(x)
+    if query { assert tile_shape(t) == [4, 4] }
+    var acc = reshape(t, [2, 8])
+    for _j in d_range(0, 2) {
+      if query { assert tile_shape(acc) == [2, 8] }
+      acc = acc + acc
+    }
+    store_cell(o, reshape(acc, [4, 4]))
+  }
+  let (a, _ea) = trace2("shape", In(F64, g), Out(F64, g), (x, o) => body(x, o, false))
+  let (b, _eb) = trace2("shape", In(F64, g), Out(F64, g), (x, o) => body(x, o, true))
+  assert a == b
+  let (c, calls) = trace_calls("shape", [], () => body(param(F64, 0), param(F64, 1), true),
+    markers = [erase(In(F64, g)), erase(Out(F64, g))])
+  assert b == c
+  let queries = list.filter(calls, c => c.name == "tile_shape")
+  assert len(queries) == 2
+  assert list.all(queries, c => c.ops_from == c.ops_to && c.at != None)
+  let (_r, _er) = trace1("rank0", Scalar(F32), s => { assert tile_shape(scalar(s)) == [] })
 }

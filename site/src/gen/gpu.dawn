@@ -744,6 +744,14 @@ fn kernels_file() -> String = "scripts/tile-golden/kernels.dawn"
 
 fn map_file() -> String = "site/gpu-map/${kernel_name()}.map"
 
+# The numerical helpers are part of the displayed algorithm's closed
+# dependency set, so their definition spans remain visible and checkable.
+fn flash_source(src: String) -> Cut = {
+  let first = cut_fn(src, "fa_exp")
+  let last = cut_fn(src, kernel_name())
+  Cut { ..last, first = first.first, text = join(list.take(list.drop(str.split(src, "\n"), first.first - 1), last.last - first.first + 1), "\n") }
+}
+
 ## Everything the page states, read from the tile gates' files in place.
 ## `flash_attn` has to line up: a recording, a kernels.dawn or a golden it no
 ## longer lines up with stops the build.
@@ -753,7 +761,7 @@ pub fn load_facts() -> Facts !Fs = {
     panic("scripts/tile-golden holds no .mlir golden")
   }
   let src = must_read(kernels_file())
-  let cut = cut_fn(src, kernel_name())
+  let cut = flash_source(src)
   let path = "scripts/tile-golden/${kernel_name()}.tilebc"
   let size =
     match io.read_bytes(path) {
@@ -1700,7 +1708,7 @@ test "flash_attn lines up with its golden, call by call" {
   with_fs_real(() => {
     let f = load_facts()
     let m = f.flash
-    let cut = cut_fn(must_read(kernels_file()), "flash_attn")
+    let cut = flash_source(must_read(kernels_file()))
     assert join(m.src, "\n") == cut.text
     assert m.first == cut.first
     assert m.ir == str.split(str.trim_end(must_read("scripts/tile-golden/flash_attn.mlir")), "\n")
@@ -1712,12 +1720,14 @@ test "flash_attn lines up with its golden, call by call" {
     }
     assert sort(owned) == range(1, len(m.ir) + 1)
     assert map(m.rows, r => r.line) == range(cut.first, cut.last + 1)
-    # the loop's body is the d_range's, and nothing else has children
+    # The loop and numerical helpers retain distinct parent edges.
     let loops = filter(m.calls, c => c.name == "d_range")
     assert len(loops) == 1
     let body = filter(m.calls, c => c.parent == loops[0].id)
     assert len(body) == 26
-    assert len(filter(m.calls, c => c.parent >= 0)) == 26
+    assert len(filter(m.calls, c => c.parent >= 0)) == 29
+    assert len(filter(m.calls, c => c.name == "fa_exp")) == 2
+    assert len(filter(m.calls, c => c.name == "fa_divide")) == 1
     # a region call keeps its header on its own line and its terminator and
     # brace on the line its span ends on
     assert len(loops[0].lines) == 2
@@ -1744,14 +1754,18 @@ test "flash_attn lines up with its golden, call by call" {
 # operator is spelled `+`, `-`, `*` or `/`.
 fn ops_for(name: String) -> List[String] =
   match name {
-    "load_cell" -> ["load_view_tko"]
-    "load_at" -> ["load_view_tko"]
+    "load_cell" -> ["reshape"]
+    "load_at" -> ["reshape"]
     "store_cell" -> ["store_view_tko"]
     "idx_const" -> ["constant"]
     "zeros" -> ["constant"]
     "f_const" -> []
     "lit" -> []
     "scalar" -> []
+    "tile_shape" -> []
+    "fa_exp" -> []
+    "fa_divide" -> []
+    "blocks_of" -> ["constant"]
     "to" -> []
     "carry" -> []
     "get" -> []
@@ -1906,7 +1920,7 @@ test "the facts beside the map are the map's and the files' numbers" {
       }
     assert kf.bytes == size
     assert kf.lines == len(m.ir)
-    assert kf.calls == 39
+    assert kf.calls == 45
     for v in [m.ops, len(m.ir), size, len(m.calls)] {
       assert str.contains(p, "<b>${v}</b>")
     }

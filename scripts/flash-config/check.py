@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import json
 import math
+import re
 from pathlib import Path
 import sys
 
@@ -92,10 +93,18 @@ def wiring(record):
         _, _, dtype, d, bh = key
         q, k = cfg['bq'], cfg['bk']
         acc = 'f32' if dtype == 'bf16' else 'f64'
-        shapes = [(q, d), (k, d)]
+        shapes = []
         mma = f': tile<{q}x{d}x{dtype}>, tile<{d}x{k}x{dtype}>, tile<{q}x{k}x{acc}>'
-        if f'shape = [{bh * 512}, {d}], strides = [{d}, 1]' not in ir:
+        storage = f'shape = [{bh}, 512, {d}], strides = [{512 * d}, {d}, 1]'
+        views = [line for line in ir.splitlines() if ' = make_tensor_view ' in line]
+        parts = [line for line in ir.splitlines() if ' = make_partition_view ' in line]
+        if len(views) != 4 or any(storage not in line for line in views):
             problems.append(f"{key}: recorded storage differs from domain")
+        if len(parts) != 4 or any('dim_map=[0, 1, 2]' not in line for line in parts) or [
+                sum(f'tile=(1x{size}x{d})' in line for line in parts) for size in set((q, k))] != [
+                (4 if q == k else 2) for size in set((q, k))]:
+            problems.append(f"{key}: recorded three dimensional partition differs from plan")
+        problems += flash_indices(key, ir, q, k, d, dtype, acc)
     else:
         dtype = key[2]
         q, n, k = cfg['tm'], cfg['tn'], cfg['tk']
@@ -105,6 +114,46 @@ def wiring(record):
     if any(f'tile=({a}x{b})' not in ir for a, b in shapes) or mma not in ir:
         problems.append(f"{key}: recorded view/MMA tiles differ from plan")
     return problems
+
+
+def flash_indices(key, ir, bq, bk, d, dtype, acc):
+    """Follow the emitted SSA edges, including singleton boundary reshapes."""
+    errors = []
+    axes = {}
+    for match in re.finditer(r'(%\d+), (%\d+), (%\d+) = get_tile_block_id', ir):
+        axes.update({value: axis for axis, value in enumerate(match.groups())})
+    loops = list(re.finditer(r'for (%\d+) in \((%\d+) to (%\d+), step (%\d+)\)', ir))
+    constants = dict(re.findall(r'(%\d+) = constant <i32: (-?\d+)>', ir))
+    if len(loops) != 1:
+        return [f"{key}: recorded key loop count differs"]
+    iv, lower, upper, step = loops[0].groups()
+    if [constants.get(value) for value in (lower, upper, step)] != ['0', str(512 // bk), '1']:
+        errors.append(f"{key}: recorded storage dim 1 loop bound differs")
+    loads = re.findall(r'(%\d+), %\d+ = load_view_tko weak %\d+\[([^]]+)\].* -> tile<([^>]+)>', ir)
+    stores = re.findall(r'store_view_tko weak (%\d+), %\d+\[([^]]+)\]', ir)
+    reshapes = dict((dst, (src, before, after)) for dst, src, before, after in re.findall(
+        r'(%\d+) = reshape (%\d+) : tile<([^>]+)> -> tile<([^>]+)>', ir))
+    if len(loads) != 3 or len(stores) != 1:
+        return errors + [f"{key}: recorded memory boundary count differs"]
+    for j, (value, indices, shape) in enumerate(loads):
+        ix = indices.split(', ')
+        expected = [2, 0 if j == 0 else None, 1]
+        if len(ix) != 3 or any(axes.get(x) != axis for x, axis in zip(ix, expected) if axis is not None) or (j > 0 and ix[1] != iv):
+            errors.append(f"{key}: recorded head/query/key index dataflow differs")
+        rows = bq if j == 0 else bk
+        if shape != f'1x{rows}x{d}x{dtype}' or sum(
+                src == value and before == shape and after == f'{rows}x{d}x{dtype}'
+                for src, before, after in reshapes.values()) != 1:
+            errors.append(f"{key}: recorded load projection differs")
+    value, indices = stores[0]
+    ix = indices.split(', ')
+    if len(ix) != 3 or [axes.get(x) for x in ix] != [2, 0, 1]:
+        errors.append(f"{key}: recorded output head/query index differs")
+    if value not in reshapes or reshapes[value][1:] != (f'{bq}x{d}x{acc}', f'1x{bq}x{d}x{acc}'):
+        errors.append(f"{key}: recorded store inverse projection differs")
+    if re.search(r' = (?:divi|muli|addi) ', ir):
+        errors.append(f"{key}: unexpected head integer arithmetic")
+    return errors
 
 
 def cliff(arch, bq, cga):
@@ -167,8 +216,8 @@ def self_test(records, ledger):
     target = next(r for r in changed if r['key'] == ('flash', 'sm_100', 'bf16', 64, 1))
     target['ir'] = target['ir'].replace('num_cta_in_cga = 2, ', '')
     assert any('recorded hints' in p for p in check(changed, ledger)), 'lost trace hints stayed green'
-    target['ir'] = target['ir'].replace('tile=(256x64)', 'tile=(128x64)')
-    assert any('view/MMA' in p for p in check(changed, ledger)), 'lost tile wiring stayed green'
+    target['ir'] = target['ir'].replace('tile=(1x256x64)', 'tile=(1x128x64)')
+    assert any('partition' in p for p in check(changed, ledger)), 'lost tile wiring stayed green'
     print('PASS flash audit controls: missing evidence, median, compiler, measured arch, tile, absent hint and actual IR wiring')
 
 
