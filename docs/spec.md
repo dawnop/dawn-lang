@@ -3468,7 +3468,8 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - `std/int/u16`：无符号 16 位整数 `U16`，`Int` 上的不透明类型，回绕算术（§11「定宽整数」）
 - `std/int/u32`：无符号 32 位整数 `U32`，`Int` 上的不透明类型，回绕算术（§11「定宽整数」）
 - `std/int/u64`：无符号 64 位整数 `U64`，`Int` 上的不透明类型，回绕算术（§11「定宽整数」）
-- `std/float`：`Float` 的两个无字面量的值 `INFINITY` 与 `NAN`
+- `std/float`：binary64 极限常量、分类、符号位及相邻可表示值
+- `std/math`：binary64 精确宿主数学、数学常量及指数拆分与缩放（§11「数学内建」）
 - `std/list`：`List` 的函数与 `Iter` 实例
 - `std/bytes`：字节串，及 UTF-8、hex、base64 编解码
 - `std/io`：控制台、文件、环境与子进程（`Fs`/`Proc`/`Env` 等效果）
@@ -3734,9 +3735,18 @@ RFC 4648 section 4 的标准字母表，`Url*` 用 section 5 的 url/文件名�
     overlong 编码顺流而下、被下游按码点走的原语当成真字符
     （[`stdlib-impl-notes.md`](stdlib-impl-notes.md)）
 
-**数学内建。** 当前没有通用数学函数族，也没有宿主数学库包装。数字的内建表面限于
+**数学内建。** 数字的公开内建表面限于
 `Int`/`Float` 算术运算符；内建转换函数是
 <!-- doc-check: builtin-list --> `to_float`、`to_int`。
+
+`std/math` 提供 binary64 的 `sqrt fma floor ceil trunc round_even` 精确运算，全部纯、
+可在运行期和 comptime 求值；JVM、native、wasm 与 comptime 的非 NaN 结果逐位一致。
+`fma(x,y,z)` 对精确乘加只舍入一次；普通 `x*y+z` 仍逐运算分别舍入。
+`round_even` 中点取偶数，`round` 中点远离零；整数舍入保留零的符号。
+位级函数与 `frexp ldexp ilogb` 由 Dawn 源码实现，`ldexp` 正确舍入且支持渐进下溢。
+`std/float` 提供分类、相邻值及极限常量，其中 `MIN_POSITIVE` 是最小正正规数。
+NaN 只承诺分类，不承诺符号或 payload。超越函数尚未提供；函数面和特殊值规则见
+[`std-math-design.md`](std-math-design.md) 第三至四节。
 额外运算由纯 Dawn 源库提供，例如 `std/narrow` 用整数算法计算平方根，不依赖宿主数学库。
 `std/narrow` 的三个格式有 `+ - * / %`、一元 `-`（§3.5 的 `Add`…`Neg`，默认舍入即最近偶数，
 `%` 是精确的截断余数）与 `FromFloat`：`let w: BF16 = 0.1` 就是 `bf16(0.1)`，在编译期折叠；
