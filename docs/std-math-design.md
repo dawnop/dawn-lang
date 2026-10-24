@@ -3,7 +3,8 @@
 > 状态：**current**。2026-10-24 的 K1 设计契约，依据 2026-10-21 的 std/math 裁决；
 > K0 已随 [#873](https://github.com/dawnop/dawn-lang/pull/873) 合并，K1 随
 > [#874](https://github.com/dawnop/dawn-lang/pull/874) 合并。K2 已在 `04ffe868` 实现；
-> K3 的函数表与 K4 永久门禁已实现，同 PR 分提交交付。K5/K6 仍为后续要求。
+> K3 的函数表与 K4 永久门禁已随 [#876](https://github.com/dawnop/dawn-lang/pull/876) 合并。
+> K5 已实现宿主迁移与参考独立性检查，交付记录见第七节；K6 仍为按需后续要求。
 > K2 的落地与验证见第四节末尾，K3 的修正分析见第五节末尾。
 
 ## 一、问题、依据与边界
@@ -461,6 +462,75 @@ tileref 保留 `ref_exp/ref_log/ref_sin/...` 的独立级数，不能导入 std/
 narrow-contract 的全语料和困难边界证明位不变，补齐双舍入条件，达不到就保留整数开方。
 这不是把任意超越函数「先 Float 后舍入」当成设备语义的许可。
 
+### K5 落地与复测（2026-10-24）
+
+宿主迁移提交 `27a5eb6b`，参考依赖检查补强提交 `6ca64fb4`。
+`tileinterp/math` 删除旧宿主函数和分类、相邻值、指数缩放副本，调用者直接使用
+`std/math`、`std/float` 和现有 `std/narrow` 位转换；没有兼容转发层。
+`interp` 的 rsqrt 仍在包内组合 `1 / math.sqrt(x)`，rem 使用 Float `%`。
+GPU 的 Dir、FTZ、signed_zero、TwoSum、round-to-odd 和窄格式适配保留。
+
+定向乘除先用 frexp 精确正规化，再以 `fma(a,b,-p)` 求乘积残差；两个分量在此范围
+均可表示，不能把这一恒等式直接应用到原尺度的下溢乘积。回到原尺度的 RN 结果
+用 ldexp 精确带回正规化范围，再按残差符号选邻居。新增边界测试覆盖最小次正规
+乘除中点、正负零和有限溢出。binary64 的 fma 与矩阵累加改用正确舍入原语，覆盖
+中间乘积溢出后相消以及次正规中点；旧极端指数两次舍入兜底已删除。
+
+`tileref` 源码完全不改，保留 ref_exp/ref_log/ref_sin 等独立级数。leetgpu 检查器
+沿源模块导入追踪依赖，识别模块别名、选择性导入及其重命名、函数值、本地与共享
+转发辅助；未知源码依赖拒绝认证。精确 sqrt 等仍可共享。它是保守的依赖检查，
+不能替代独立性源码审查，也不证明算法未被手抄。别名导入并转发 exp 的变异体
+先成功编译并执行到完成标记，再由同一依赖 oracle 判红；exp 调度的位扰动也须
+成功编译，并由保存的 K1 见证测试判红。既有七个变异控制继续运行。
+
+K1 相同 LCG、80000 行输入由真实 Tile IR load/unary/store 与 interp_ref 执行，
+输入摘要仍为 `10a18ab76571b6f334057df1cbc91797645966335102ce260146dd379becc9f1`。
+JVM、native、wasm 的全部结果逐字节相同，输出摘要均为
+`98f04f0ea996359d41d837fefb23a8640139b7559d1abd5711b50c5042cafb29`。
+MPFR 4.2.1 在 256 位定向区间上决定全部参考位、真值单位和预算，无未决项。
+exp/sin/log/tanh 的最大真实误差上界分别为 0.822763、0.837543、0.595599、
+0.499940 ulp（向上略取整），均无越线；这仍是固定语料复测，不是全域穷举。
+
+K1 的 exp 输入 `-0x1.5d09847e8e131p+9` 从结果位 `71405552942727215`
+变为 `71405552942681860`，正确舍入位 `71405552942681859`；真实误差从
+45355.559826 ulp 降为 0.559826 ulp。研究中的 44795 是旧语料历史值，原探针
+已删，本次不冒称精确复现它；新的 45356 位距见证已固定在真实解释器调度测试中。
+原始程序、三端产物、MPFR 汇总与精确区间在
+`~/workspace/gx-out/std-math-k5-local-20261024/measure/`。
+
+初版 tileinterp-diff 重新录制后仍为 agreed=196、blocked=24、UB=2，覆盖 194 个 kernel，
+拒绝 18 个，covered.txt 无差异。仅容差相等的 kernel 从 67 降为 64：cce_mean、
+cce_row、dpo_loss 的 log/exp 及后续算术在至少一个语料中与独立参考逐位相等，
+无需修改既有容差或提升这些操作的设备契约。narrow 的整数 sqrt 保留，源码逐字
+不变；不引入新的双舍入路径，也没有 std/math/f32 入口。
+
+flash sample 原先直接导入已删除的 tileinterp/math.exp_f，因此只迁移宿主导入和
+普通参考的一处调用，不保留兼容层。初版 F64 sample 的两行输出末位随在线 softmax
+的 exp、求和、归一化和加权累加变化，原 1e-12 比较通过。
+验证结束后并行展示分支随 #877 合入 main（`638b1ee3`），K5 随即合并 main 并保留其
+BF16/F32 sample、kernel、GPU page、tilemap 和设备 golden。相对新 main，sample
+仍只有两行调用点迁移；BF16 的 F32 输出位不变，只有 plain reference 的 exp 改进
+使最大误差打印从 `4.583459094062575E-4` 变为 `4.5834590941654096E-4`。
+既有混合精度容差和 2048 项有限值检查均不变。
+
+本机初版完整设备复录通过，72 组变异控制符合指定 oracle，耗时 2114.84 秒，
+单独台账提交 `208f5dbc` 的输入摘要为 `766f06fa5315`。
+合并 main 时保留所有历史行，并把 main 已验证的新输入记录留在最后；K5 相对新
+main 不改变台账输入，当前摘要为 `f680cacf21ac`，与其末条设备记录一致。
+本次不把初版设备运行冒充为新 BF16 展示输入的重录，也不改写其他架构台账。
+
+合并后 tileinterp-diff 再录制为 agreed=198、blocked=24、UB=2，覆盖 195 个 kernel，
+拒绝 18 个，仅容差相等 65 个。增加的两条 agreed 是 #877 的 flash_demo 与
+flash_demo_scaled，新增覆盖 kernel 是 flash_attn_bf16_demo；拒绝与 UB 均不变。
+covered.txt 相对新 main 无差异，未改容差。合并后实跑共 37.30 秒（构建 5 秒、
+家族 32 秒），leetgpu self-test 为 1.92 秒；冷热与负载不同，不把总差值当稳定增量。
+旧 head 的外部证据不复用，合并后的最终 head 必须重新完成全集与 tile CI。
+
+步骤锁已重新 record，仍为 28 个 family、172 个 run step，没有 workflow 变化或
+预算上调。初版 leetgpu self-test 从 1.21 秒到 2.56 秒；新增的实际编译负控在可选本机
+selftest 中。tileinterp-diff 首次迁移前共 74.59 秒（含冷构建 36 秒），迁移后
+54.56 秒（构建 7 秒、家族 47 秒）；并行负载与冷热不同，不把差值当稳定性能收益。
+
 ## 八、K6：f32 按需，正确舍入另行验收
 
 K6 不阻塞 K2 至 K5；目标路径 `std/math/f32`，输入输出为 `narrow.F32`，同名靠模块区分。
@@ -488,7 +558,7 @@ bf16/f16/f8/f4 的设备超越函数、ftz、approx、定向舍入仍归 tileir 
 | K1，已合并 | 裁决、K0 报告 | #874：本文、固定语料证据、文档索引；无行为变化 |
 | K2，已实现 | K1 | `04ffe868`：六 intrinsic、位转换 comptime、std/float 扩充、std/math 精确面；种子可编译、两种编译器的常量及运行期同位 |
 | K3 + K4 | K0、K2 | fdlibm 全表与许可来源；tanh/exp2/log2 等逐函数精度证据；同 PR 的永久三端契约与变异负控全部通过 |
-| K5 | K3/K4 | tileinterp 迁移、tileref 独立性检查、narrow sqrt 的等价证据、容差判词与受影响设备台账重验 |
+| K5，已实现 | K3/K4 | `27a5eb6b`、`6ca64fb4`：tileinterp 迁移、tileref 独立性门、保留 narrow 整数 sqrt、K1 精度复测与容差判词；设备重验见第七节交付记录 |
 | K6 | K3/K4，按需求排 | 逐函数 f32 正确舍入、完整穷举及困难点证据，不夹带设备语义 |
 
 K2 至 K6 实现时回填本文状态与落地提交，不能让完成表只存在于交接目录。

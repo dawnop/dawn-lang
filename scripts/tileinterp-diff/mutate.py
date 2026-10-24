@@ -3,8 +3,8 @@
 
     scripts/tileinterp-diff/mutate.py <mutant> <tree-root>
 
-Each mutant breaks packages/tileinterp the way the 2026-10-20 task sheet
-names, and run.sh --selftest requires the named check to go red on it:
+Each mutant breaks interpreter behavior or reference independence, and
+run.sh --selftest requires the check that owns it to go red:
 
   exp-misrouted        perturb the new host dispatch: the saved K1 exp
                        witness must fail its raw-bit oracle.
