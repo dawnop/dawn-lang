@@ -105,6 +105,7 @@ def wiring(record):
                 (4 if q == k else 2) for size in set((q, k))]:
             problems.append(f"{key}: recorded three dimensional partition differs from plan")
         problems += flash_indices(key, ir, q, k, d, dtype, acc)
+        problems += flash_memory(key, ir)
     else:
         dtype = key[2]
         q, n, k = cfg['tm'], cfg['tn'], cfg['tk']
@@ -114,6 +115,34 @@ def wiring(record):
     if any(f'tile=({a}x{b})' not in ir for a, b in shapes) or mma not in ir:
         problems.append(f"{key}: recorded view/MMA tiles differ from plan")
     return problems
+
+
+def flash_memory(key, ir):
+    """Follow recorded view provenance, independently of cell size or order."""
+    _, arch, dtype, d, _bh = key
+    target = arch == 'sm_90' and dtype == 'bf16' and d == 64
+    origins = {f'%arg{k}': k for k in range(4)}
+    accesses = []
+    for line in ir.splitlines():
+        definition = re.search(r'(%\d+) = (?:assume div_by<\d+>,|make_tensor_view|make_partition_view) (%\w+)', line)
+        if definition:
+            dst, src = definition.groups()
+            if src in origins:
+                origins[dst] = origins[src]
+        load = re.search(r'= load_view_tko weak (%\d+)\[', line)
+        store = re.search(r'= store_view_tko weak %\d+, (%\d+)\[', line)
+        if load or store:
+            view = (load or store).group(1)
+            param = origins.get(view)
+            hint = re.search(r' optimization_hints=<([^>]+)>', line)
+            actual = hint.group(1) if hint else ''
+            want = 'sm_90 = {latency = 3}' if target and load and param in (1, 2) else ''
+            accesses.append((bool(load), param))
+            if actual != want:
+                return [f'{key}: parameter view memory policy differs at {param}']
+    if len(accesses) != 4 or set(accesses) != {(False, 3), (True, 0), (True, 1), (True, 2)}:
+        return [f'{key}: parameter view memory provenance differs']
+    return []
 
 
 def flash_indices(key, ir, bq, bk, d, dtype, acc):
@@ -218,6 +247,15 @@ def self_test(records, ledger):
     assert any('recorded hints' in p for p in check(changed, ledger)), 'lost trace hints stayed green'
     target['ir'] = target['ir'].replace('tile=(1x256x64)', 'tile=(1x128x64)')
     assert any('partition' in p for p in check(changed, ledger)), 'lost tile wiring stayed green'
+    target_key = ('flash', 'sm_90', 'bf16', 64, 1)
+    changed = copy.deepcopy(records)
+    target = next(r for r in changed if r['key'] == target_key)
+    target['ir'] = target['ir'].replace(' optimization_hints=<sm_90 = {latency = 3}>', '')
+    assert any('memory policy' in p for p in check(changed, ledger)), 'missing host read policy stayed green'
+    changed = copy.deepcopy(records)
+    target = next(r for r in changed if r['key'] == target_key)
+    target['ir'] = target['ir'].replace('token=%0 : partition_view', 'token=%0 optimization_hints=<sm_90 = {latency = 3}> : partition_view', 1)
+    assert any('memory policy' in p for p in check(changed, ledger)), 'Q inherited K/V policy'
     print('PASS flash audit controls: missing evidence, median, compiler, measured arch, tile, absent hint and actual IR wiring')
 
 

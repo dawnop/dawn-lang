@@ -37,7 +37,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, FloatDtype
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
   blocks_of, tile_shape, t_call_enter, t_call_exit, t_body_enter, t_body_exit }
 use tileir/prog.{TileOp, TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, trace6, cells, In, Out, Shared,
-  Whole, FREE_AXIS, Scalar, trace_calls, erase }
+  Whole, FREE_AXIS, Scalar, trace_calls, erase, ArgMemory, arg_memory }
 use tileir/render.{render, text_debug}
 use tileir/bytecode.{encode, bytecode_version}
 use tileir/asm.{tileiras_args}
@@ -2345,17 +2345,17 @@ const FA_BK: Int = 16
 
 # Tiles, plans and architecture selection stay on the host.
 type FaTiles = { bq: Int, bk: Int }
-type FaPlan = { tiles: FaTiles, hints: ByArch[EntryHints] }
+type FaPlan = { tiles: FaTiles, hints: ByArch[EntryHints], memory: List[ArgMemory] }
 
 fn fa_plan(arch: String, d: Int) -> FaPlan = match (arch, d) {
-  ("sm_90", 64) -> FaPlan { tiles = FaTiles { bq = 64, bk = 128 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2)))] }
-  ("sm_90", 128) -> FaPlan { tiles = FaTiles { bq = 64, bk = 64 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2)))] }
-  ("sm_100", 64) -> FaPlan { tiles = FaTiles { bq = 256, bk = 64 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2), num_cta_in_cga = Some(2)))] }
-  ("sm_100", 128) -> FaPlan { tiles = FaTiles { bq = 256, bk = 128 }, hints = [for_arch(arch, entry_hints(num_cta_in_cga = Some(2)))] }
-  _ -> FaPlan { tiles = FaTiles { bq = 64, bk = 64 }, hints = [] }
+  ("sm_90", 64) -> FaPlan { tiles = FaTiles { bq = 64, bk = 128 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2)))], memory = [arg_memory(1, read = [for_arch("sm_90", view_hints(latency = Some(3)))]), arg_memory(2, read = [for_arch("sm_90", view_hints(latency = Some(3)))])] }
+  ("sm_90", 128) -> FaPlan { tiles = FaTiles { bq = 64, bk = 64 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2)))], memory = [] }
+  ("sm_100", 64) -> FaPlan { tiles = FaTiles { bq = 256, bk = 64 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2), num_cta_in_cga = Some(2)))], memory = [] }
+  ("sm_100", 128) -> FaPlan { tiles = FaTiles { bq = 256, bk = 128 }, hints = [for_arch(arch, entry_hints(num_cta_in_cga = Some(2)))], memory = [] }
+  _ -> FaPlan { tiles = FaTiles { bq = 64, bk = 64 }, hints = [], memory = [] }
 }
 
-fn fa64_plan() -> FaPlan = FaPlan { tiles = FaTiles { bq = 32, bk = 16 }, hints = [] }
+fn fa64_plan() -> FaPlan = FaPlan { tiles = FaTiles { bq = 32, bk = 16 }, hints = [], memory = [] }
 
 fn fa64_math() -> FaNumerics[Float] = FaNumerics { zero = 0.0, neg_inf = -INFINITY, base2 = false, exp_ftz = false, approx_div = false, div_ftz = false }
 
@@ -2447,7 +2447,7 @@ fn fa_record_typed[D: FloatDtype, A: FloatDtype + ScalarDtype](name: String, arc
   let q = cells([bh, n, d], [1, c.bq, d], along = [2, 0, 1], squeeze = [0])
   let kv = cells([bh, n, d], [1, c.bk, d], along = [2, FREE_AXIS, 1], squeeze = [0])
   let (p, _e) = trace5(name, In(dt, q), In(dt, kv), In(dt, kv), Out(acc_dtype, q), Scalar(acc_dtype),
-    fa_kernel(dt, math), hints = plan.hints)
+    fa_kernel(dt, math), hints = plan.hints, memory = plan.memory)
   p
 }
 
@@ -6957,10 +6957,10 @@ fn fa_config_check() -> Unit = {
     mm_expect(str.contains(mm_refusal(() => fa_record("default", d, n, bh, false)), "dimensions and tiles must be positive"))
   }
   for t in [FaTiles { bq = 0, bk = 16 }, FaTiles { bq = 32, bk = -16 }] {
-    mm_expect(str.contains(mm_refusal(() => fa_record("default", 32, 64, 1, false, plan = Some(FaPlan { tiles = t, hints = [] }))), "dimensions and tiles must be positive"))
+    mm_expect(str.contains(mm_refusal(() => fa_record("default", 32, 64, 1, false, plan = Some(FaPlan { tiles = t, hints = [], memory = [] }))), "dimensions and tiles must be positive"))
   }
   for t in [FaTiles { bq = 32, bk = 24 }, FaTiles { bq = 48, bk = 16 }] {
-    mm_expect(str.contains(mm_refusal(() => fa_record("default", 32, 64, 1, false, plan = Some(FaPlan { tiles = t, hints = [] }))), "n must be a multiple of bq and bk"))
+    mm_expect(str.contains(mm_refusal(() => fa_record("default", 32, 64, 1, false, plan = Some(FaPlan { tiles = t, hints = [], memory = [] }))), "n must be a multiple of bq and bk"))
   }
   for (n, d, bh) in [(64, 2147483647, 1), (64, 32, 2147483647), (2147483616, 32, 1)] {
     mm_expect(str.contains(mm_refusal(() => fa_record("default", d, n, bh, false)), "offset product exceeds I32"))
@@ -6975,9 +6975,9 @@ fn fa_config_check() -> Unit = {
     ("sm_100", FaTiles { bq = 64, bk = 64 }, [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))], "cga=2 requires row_tile >= 128"),
     ("sm_90", FaTiles { bq = 256, bk = 64 }, [], "sm_90 row_tile=256 requires cga=2")
   ] {
-    mm_expect(str.contains(mm_refusal(() => fa_record(arch, 64, 512, 1, true, plan = Some(FaPlan { tiles = t, hints = h }))), fragment))
+    mm_expect(str.contains(mm_refusal(() => fa_record(arch, 64, 512, 1, true, plan = Some(FaPlan { tiles = t, hints = h, memory = [] }))), fragment))
   }
-  let _edge = fa_record("sm_100", 64, 512, 1, true, plan = Some(FaPlan { tiles = FaTiles { bq = 128, bk = 64 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))
+  let _edge = fa_record("sm_100", 64, 512, 1, true, plan = Some(FaPlan { tiles = FaTiles { bq = 128, bk = 64 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))], memory = [] }))
 }
 
 pub fn main() -> Unit !io = match args() {

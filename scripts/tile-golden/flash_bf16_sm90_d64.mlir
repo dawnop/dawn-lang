@@ -19,7 +19,7 @@ cuda_tile.module @m {
       %29 = assume div_by<16>, %arg1 : tile<ptr<bf16>>
       %30 = make_tensor_view %29, shape = [1, 256, 64], strides = [16384, 64, 1] : tensor_view<1x256x64xbf16, strides=[16384, 64, 1]>
       %31 = make_partition_view %30 : partition_view<tile=(1x128x64), padding_value = zero, tensor_view<1x256x64xbf16, strides=[16384, 64, 1]>, dim_map=[0, 1, 2]>
-      %32, %33 = load_view_tko weak %31[%6, %25, %11] token=%0 : partition_view<tile=(1x128x64), padding_value = zero, tensor_view<1x256x64xbf16, strides=[16384, 64, 1]>, dim_map=[0, 1, 2]>, tile<i32> -> tile<1x128x64xbf16>, token
+      %32, %33 = load_view_tko weak %31[%6, %25, %11] token=%0 optimization_hints=<sm_90 = {latency = 3}> : partition_view<tile=(1x128x64), padding_value = zero, tensor_view<1x256x64xbf16, strides=[16384, 64, 1]>, dim_map=[0, 1, 2]>, tile<i32> -> tile<1x128x64xbf16>, token
       %34 = reshape %32 : tile<1x128x64xbf16> -> tile<128x64xbf16>
       %35 = permute %34 [1, 0] : tile<128x64xbf16> -> tile<64x128xbf16>
       %36 = constant <f32: 0.0> : tile<64x128xf32>
@@ -49,7 +49,7 @@ cuda_tile.module @m {
       %60 = assume div_by<16>, %arg2 : tile<ptr<bf16>>
       %61 = make_tensor_view %60, shape = [1, 256, 64], strides = [16384, 64, 1] : tensor_view<1x256x64xbf16, strides=[16384, 64, 1]>
       %62 = make_partition_view %61 : partition_view<tile=(1x128x64), padding_value = zero, tensor_view<1x256x64xbf16, strides=[16384, 64, 1]>, dim_map=[0, 1, 2]>
-      %63, %64 = load_view_tko weak %62[%6, %25, %11] token=%0 : partition_view<tile=(1x128x64), padding_value = zero, tensor_view<1x256x64xbf16, strides=[16384, 64, 1]>, dim_map=[0, 1, 2]>, tile<i32> -> tile<1x128x64xbf16>, token
+      %63, %64 = load_view_tko weak %62[%6, %25, %11] token=%0 optimization_hints=<sm_90 = {latency = 3}> : partition_view<tile=(1x128x64), padding_value = zero, tensor_view<1x256x64xbf16, strides=[16384, 64, 1]>, dim_map=[0, 1, 2]>, tile<i32> -> tile<1x128x64xbf16>, token
       %65 = reshape %63 : tile<1x128x64xbf16> -> tile<128x64xbf16>
       %66 = broadcast %51 : tile<64x1xf32> -> tile<64x64xf32>
       %67 = mulf %28, %66 rounding<nearest_even> : tile<64x64xf32>

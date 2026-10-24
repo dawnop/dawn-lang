@@ -6639,7 +6639,7 @@ TMA store 4→2，末尾 F32→F64 32→0。具体汇编器启发式与各项因
 
 ### S1：host 配置分层（2026-10-23）
 
-`FaTiles`/`MmTiles` 只含块尺寸，`FaPlan`/`MmPlan` 在录制端保存 tiles 与原生可选 hints；算法、闭包不接收 plan 或测量记录。f64 只有一份 32×16、无 hints 的 plan。历史 evidence/median/baseline 只在 `scripts/flash-config`，P4-b 记录以具名规范化 SHA256 固定；P4-c/A2 与 matmul 原始网格保留原身份。对账门运行实际 selector 并检查实际 IR 的 view、MMA 与 hints，包括未测尺寸和其它架构的 fallback。
+`FaTiles`/`MmTiles` 只含块尺寸，`FaPlan`/`MmPlan` 在录制端保存 tiles 与原生可选 hints；`FaPlan.memory` 另存按参数读写方向的 view 策略（[设计](tile-host-memory-policy-design.md)），仅 BF16 sm_90/d64 的 K/V 读选择 latency=3；算法、闭包不接收 plan 或测量记录。f64 只有一份 32×16、无 hints 的 plan。历史 evidence/median/baseline 只在 `scripts/flash-config`，P4-b 记录以具名规范化 SHA256 固定；P4-c/A2 与 matmul 原始网格保留原身份。对账门运行实际 selector 并检查实际 IR 的 view、MMA 与 hints，包括未测尺寸和其它架构的 fallback。
 
 flash recorder 在构造 cells 前拒绝非正 n/d/bh/bq/bk、n 非 bq 或 bk 的整倍数及 I32 乘积溢出；当前 M=N 整块域不扩展。共享样例只构造字面 32×16 tiles，精确 pin 算法闭合依赖，不复制架构选择表。S2 已删除 `fa_kv_index`、`FaShape`、`acc_from_out` 与算法侧 FaTiles；三维 cells 的 axis 2 选择 head，squeeze=[0] 投影为二维值，tile_shape/blocks_of 从录制获取形状和完整键块数，初始化统一为 zeros(o)。P4/A2 的旧展平布局测时仅作历史计划来源，不能冒称新布局实测。设计见 [fa-host-plan-design.md](fa-host-plan-design.md) 与 [flash-attn-slim-s2-design.md](flash-attn-slim-s2-design.md)。
 
