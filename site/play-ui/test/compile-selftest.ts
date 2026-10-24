@@ -205,6 +205,11 @@ export function compileViewTests(expect: Expect): number {
     kind: 'tile', tile: { text: ['cuda_tile.module @m {', '}'], total: 2, truncated: false, unmapped: 'a call under host control flow at line 9' }, build: 'b1:x', cached: false, ms: 2600,
   })
   t('the reason is a note under the tabs', tileNotes({ text: ['a'], total: 1, truncated: false, unmapped: 'x' }), ['Calls are not matched to the Tile IR: x.'])
+  const pureReason = 'the trace call in pure function `vadd_prog` at line 26 cannot be mapped by an IO probe'
+  const pure = classify(200, tileWire({ unmapped: pureReason }), 'tile')
+  t('a pure helper keeps its pane and shows the IO boundary as a note',
+    [pure.kind, pure.kind === 'tile' ? tileNotes(pure.tile) : []],
+    ['tile', [`Calls are not matched to the Tile IR: ${pureReason}.`]])
   t('a tile answer is not another tab\'s', [classify(200, tileWire(), 'c').kind, classify(200, wire(), 'tile').kind], ['unreadable', 'unreadable'])
   t('a tile pane whose count is not its text is unreadable', classify(200, tileWire({ pane: { kind: 'tile', total: 2, shown: 5, truncated: false, text: ['a'] } }), 'tile').kind, 'unreadable')
   t('a program that fails shows its output under its own heading', [

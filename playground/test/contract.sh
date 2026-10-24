@@ -922,6 +922,7 @@ if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: a sample that ge
 # tools poisoned. This cannot be satisfied by the native happy path alone.
 python3 -I -B test/c-only-contract.py "$NATIVE_BIN" "$DAWNC_REAL"
 python3 -I -B "$ROOT/scripts/play-c-only-contract/controls.py" "$DAWNC_REAL"
+python3 -I -B test/tile-probe-contract.py "$NATIVE_BIN" "$DAWNC_REAL"
 
 # The access log names each program by the SHA-256 of its `code` field, with
 # the toolchain that answered it, and never by its text: a program carrying a
