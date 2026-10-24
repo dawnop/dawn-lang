@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 87a934050574f17d -->
+<!-- doc-check: translation-of docs/spec.md @ 542762c3aa8b11bb -->
 
 # Dawn Language Specification
 
@@ -387,6 +387,11 @@ The non-generic, compiler-owned basic types users may name directly are `Int` (6
 (a Unicode scalar value), `Loc` (a call site, §8.4), `Float` (double), `Bool`, `String`, `Bytes` (an immutable byte sequence),
 and `Unit`. These eight names, together with the three public generic names in the next section,
 are the complete public builtin type surface.
+
+Each `Float` arithmetic operation rounds separately to binary64 using round to nearest,
+ties to even. Backends must not fuse a multiplication and an addition or subtraction into
+a single rounding. Native and wasm builds pass `-ffp-contract=off` when compiling emitted C
+to preserve the same rounding boundaries as the JVM.
 
 `Unit` is a first-class value (its only value is `()`) and **may appear anywhere a value can
 appear**: parameters, local variables, closure captures, tuple elements, return values, and as an
