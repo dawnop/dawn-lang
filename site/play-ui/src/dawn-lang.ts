@@ -96,7 +96,8 @@ function scanStringBody(stream: any, closer: string, raw: boolean): boolean {
   return false
 }
 
-const dawnMode = StreamLanguage.define<State>({
+export const dawnMode = StreamLanguage.define<State>({
+  name: 'dawn',
   startState: () => ({ contexts: [], afterFn: false }),
   copyState: state => ({ contexts: state.contexts.map(frame => ({ ...frame })), afterFn: state.afterFn }),
   blankLine(state) {

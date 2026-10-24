@@ -1,3 +1,4 @@
+import { docRenderTests } from './doc-render-tests'
 // Exercise editor decisions without a browser or gateway, so regressions in
 // syntax and LSP routing can run offline against the same CodeMirror objects.
 import { comparePaneTests } from './compare-pane-selftest'
@@ -348,30 +349,30 @@ try { playEndpoints('https://play.example.test/api/', 'https://site.example.test
 expect('an endpoint that is not a run URL is refused', badEndpoint.includes('does not end in /run'), true)
 expect('markdown hover fence is plain text', hoverText('```dawn\nfn f() -> Int\n```'), 'fn f() -> Int')
 // a `##` doc after the fence (docs/lsp-hover-design.md §A3): the code stays
-// code, the doc is text, and neither the fence marks nor the rule leak through
+// code, and the doc keeps its own Markdown fences after the protocol rule
 const documented = {
   kind: 'markdown',
   value: '```dawn\nfn helper(n: Int) -> Int\n```\n\n---\n\n`n` past the limit.\n\nExample:\n```dawn\nhelper(1)\n```',
 }
 expect('a documented hover splits into code and doc', hoverParts(documented), {
   code: 'fn helper(n: Int) -> Int',
-  doc: '`n` past the limit.\n\nExample:\nhelper(1)',
+  doc: '`n` past the limit.\n\nExample:\n```dawn\nhelper(1)\n```',
 })
-expect('a documented hover leaks no fence or rule', /```|---/.test(hoverText(documented)), false)
+expect('a documented hover keeps doc fences', hoverText(documented).includes('```dawn\nhelper(1)\n```'), true)
 expect('a documented hover reads code, blank line, doc', hoverText(documented),
-  'fn helper(n: Int) -> Int\n\n`n` past the limit.\n\nExample:\nhelper(1)')
+  'fn helper(n: Int) -> Int\n\n`n` past the limit.\n\nExample:\n```dawn\nhelper(1)\n```')
 expect('an undocumented hover has no doc', hoverParts('```dawn\nInt\n0xFF = 255\n```'), { code: 'Int\n0xFF = 255', doc: '' })
-expect('a plain-text hover is all code', hoverParts({ kind: 'plaintext', value: 'Int' }), { code: 'Int', doc: '' })
+expect('a plaintext hover keeps literal documentation', hoverParts({ kind: 'plaintext', value: 'Int' }), { code: '', doc: 'Int', kind: 'plaintext' })
 // a doc link the server resolved (§A5) shows as its code span; the file:// URI
 // names a path on the Playground's server and does not reach the tooltip
-expect('a resolved doc link keeps its code and drops its target',
+expect('a resolved doc link reaches the renderer intact',
   hoverParts('```dawn\nfn f() -> Int\n```\n\n---\n\nSee [`g`](file:///srv/play/main.dawn#L3,4) and [`h`].').doc,
-  'See `g` and `h`.')
+  'See [`g`](file:///srv/play/main.dawn#L3,4) and [`h`].')
 // one the server left as written (the Playground's std is compiled in and has
 // no file to link to) loses its brackets the same way
-expect('an unresolved doc link keeps its code and drops its brackets',
+expect('an unresolved doc link reaches the renderer intact',
   hoverParts('```dawn\nfn len(s: String) -> Int\n```\n\n---\n\nCounts what [`code_points`] yields; see [`str.take`].').doc,
-  'Counts what `code_points` yields; see `str.take`.')
+  'Counts what [`code_points`] yields; see [`str.take`].')
 
 // ---- inlay hints (docs/lsp-hover-design.md §A4) ----
 expect('an inlay hint keeps its label, kind and the padding that is on', inlayHintOf({
@@ -419,7 +420,10 @@ expect('an inlay widget is classed by kind and padding', [
     parentNode: HoverDOM | null = null
     children: HoverDOM[] = []
     className = ''
-    textContent = ''
+    private text = ''
+    get textContent(): string { return this.text + this.children.map((c) => c.textContent).join('') }
+    set textContent(value: string) { this.text = value; this.children = [] }
+    classList = { add: (_name: string) => {} }
     rect = { left: 60, right: 140, top: 20, bottom: 36 }
     appendChild(child: HoverDOM): void { child.parentNode = this; this.children.push(child) }
     contains(node: HoverDOM | null): boolean {
@@ -429,7 +433,7 @@ expect('an inlay widget is classed by kind and padding', [
     getBoundingClientRect() { return this.rect }
   }
   const originalDocument = globalThis.document
-  Object.assign(globalThis, { document: { createElement: () => new HoverDOM() } })
+  Object.assign(globalThis, { document: { createElement: () => new HoverDOM(), createTextNode: (text: string) => { const node = new HoverDOM(); node.textContent = text; return node } } })
   try {
     const content = new HoverDOM()
     const codeDOM = new HoverDOM()
@@ -706,7 +710,7 @@ expect('out-of-order older definition is rejected', await oldDefinition, 'reject
     label: 'fn f(a: Int, b: Int) -> Int',
     parameters: [[5, 11], [13, 19]],
     active: 1,
-    doc: 'Adds.',
+    doc: { kind: 'markdown', value: 'Adds.' },
   })
   expect('the active parameter is cut out of the label', signatureParts(help!),
     ['fn f(a: Int, ', 'b: Int', ') -> Int'])
@@ -870,9 +874,9 @@ expect('inlay hint response keeps the well-formed hints', await inlay, [
     documentation: { kind: 'markdown', value: 'A reversed copy; see [`map`](file:///srv/std/list.dawn#L65,8).' },
   } })
   const markdown = await doc
-  expect('resolve answers the documentation', markdown, 'A reversed copy; see [`map`](file:///srv/std/list.dawn#L65,8).')
-  expect('the info pane shows it as hover does, server paths dropped',
-    completionInfoText(markdown), 'A reversed copy; see `map`.')
+  expect('resolve preserves documentation kind', markdown, { kind: 'markdown', value: 'A reversed copy; see [`map`](file:///srv/std/list.dawn#L65,8).' })
+  expect('the source-text helper keeps Markdown intact',
+    completionInfoText(markdown), 'A reversed copy; see [`map`](file:///srv/std/list.dawn#L65,8).')
   // a list with LSP 3.17 defaults: items without data of their own take the list's
   const listed = client.completion(3)
   await tick()
@@ -1115,6 +1119,7 @@ blackholeClient.stop()
 
 fails += await comparePaneTests(expect)
 fails += compileViewTests(expect)
+fails += await docRenderTests(expect)
 fails += sanitizeTests(expect)
 fails += panesTests(expect)
 

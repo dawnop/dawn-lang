@@ -16,7 +16,7 @@ import type {
   CompletionSource,
 } from '@codemirror/autocomplete'
 import type { Diagnostic } from '@codemirror/lint'
-import { LSPClient, LSPPlugin, Workspace, type Transport, type WorkspaceFile } from '@codemirror/lsp-client'
+import { LSPClient, Workspace, type Transport, type WorkspaceFile } from '@codemirror/lsp-client'
 import { ChangeSet, type Extension, type Range, StateEffect, StateField, Text } from '@codemirror/state'
 import {
   closeHoverTooltip,
@@ -35,6 +35,7 @@ import {
   WidgetType,
 } from '@codemirror/view'
 import { sanitizeHTML } from './sanitize'
+import { docContent, docValue, docElement, docPreview, renderDawnCode, highlightLanguage, type DocContent } from './doc-render'
 
 export const DAWN_LSP_URI = 'untitled:dawn-playground/prog.dawn'
 export const DAWN_LSP_PROTOCOL = 'dawn-lsp-v1'
@@ -338,13 +339,6 @@ function textEditsOf(value: unknown): LspTextEdit[] {
   return edits
 }
 
-/** A `MarkupContent` or bare string's text; '' for anything else. */
-function markupValue(value: unknown): string {
-  if (typeof value === 'string') return value
-  const record = asRecord(value)
-  return typeof record?.value === 'string' ? record.value : ''
-}
-
 export function lspWebSocketUrl(endpoint: string, baseHref: string): string {
   const url = new URL(endpoint, baseHref)
   if (url.protocol === 'https:') url.protocol = 'wss:'
@@ -586,6 +580,7 @@ export class DawnLspClient {
       timeout: INITIALIZE_TIMEOUT_MS,
       workspace: (client) => new DawnWorkspace(client),
       sanitizeHTML: (html) => sanitizeHTML(html),
+      highlightLanguage,
       notificationHandlers: {
         'textDocument/publishDiagnostics': (_client, params) => {
           this.receiveDiagnostics(params)
@@ -688,13 +683,13 @@ export class DawnLspClient {
    * never with the list: the server reads a doc only for the item a reader
    * stops on. The item goes back with only what the server reads.
    */
-  async completionDoc(item: LspCompletionItem, timeoutMs = 1000): Promise<string> {
+  async completionDoc(item: LspCompletionItem, timeoutMs = 1000): Promise<DocContent> {
     const value = await this.queryWith('completionItem/resolve', () => ({
       label: item.label,
       ...(item.kind != null ? { kind: item.kind } : {}),
       ...(item.data != null ? { data: item.data } : {}),
     }), timeoutMs)
-    return markupValue(asRecord(value)?.documentation)
+    return docContent(asRecord(value)?.documentation)
   }
 
   async hover(offset: number, timeoutMs = 1000): Promise<LspHover | null> {
@@ -1081,7 +1076,7 @@ function completionType(kind: number | undefined): string {
 
 /**
  * An item with `data` may have a doc, and its `info` fetches it when the list
- * selects it; an item without has none to fetch and shows no info pane.
+ * selects it. A detail also gets a pane, even without documentation.
  */
 export function completionOf(item: LspCompletionItem, client?: DawnLspClient): Completion | null {
   if (typeof item.label !== 'string' || item.label.length === 0) return null
@@ -1094,7 +1089,7 @@ export function completionOf(item: LspCompletionItem, client?: DawnLspClient): C
       ? { apply: applyWithEdits(item.insertText ?? item.label, item.additionalTextEdits) }
       : typeof item.insertText === 'string' ? { apply: item.insertText } : {}),
     ...(typeof item.detail === 'string' ? { detail: item.detail } : {}),
-    ...(client != null && item.data != null ? { info: () => completionInfo(client, item) } : {}),
+    ...(client != null && (item.data != null || item.detail) ? { info: () => completionInfo(client, item) } : {}),
   }
 }
 
@@ -1120,26 +1115,29 @@ function applyWithEdits(text: string, edits: readonly LspTextEdit[]) {
   }
 }
 
-/** The text the info pane shows for a resolved doc: hover's (`docText`). */
-export function completionInfoText(markdown: string): string {
-  return docText(markdown)
+/** Rendering keeps Markdown intact; this helper exports the same source text. */
+export function completionInfoText(doc: DocContent): string {
+  return docValue(doc)
 }
 
-/**
- * The info pane beside the completion list: the item's doc, as hover shows
- * one (`docText`, then `docNode`), or nothing when it has none or the
- * question went stale.
- */
+/** Resolve once on selection, and never attach documentation to a newer view. */
 export async function completionInfo(
   client: DawnLspClient,
   item: LspCompletionItem,
 ): Promise<HTMLElement | null> {
+  const view = client.view
+  const snapshot = view?.state.doc
+  let doc: DocContent = ''
   try {
-    const doc = completionInfoText(await client.completionDoc(item, 1000))
-    return doc ? docElement(client.view, doc, 'dp-completion-doc') : null
+    if (item.data != null) doc = await client.completionDoc(item, 1000)
   } catch {
-    return null
+    // The signature remains useful when resolve fails or times out.
   }
+  if (client.view !== view || view?.state.doc !== snapshot) return null
+  const parts = hoverParts(doc)
+  const detail = item.detail ?? ''
+  if (parts.code.trim() === detail.trim() && parts.code) doc = parts.doc
+  return docPreview(view, detail, doc, 'dp-completion-doc')
 }
 
 export function mergeCompletionResults(
@@ -1213,94 +1211,33 @@ export function prefetchWhenOffline(
   })
 }
 
-/**
- * A hover reply split into what the tooltip shows: the code of its first
- * ```dawn fence, and the `##` doc the server puts after a `---` rule
- * (docs/lsp-hover-design.md §A3). A reply without a fence is all code, as a
- * plain-text server sends it. The doc is the comment's own markdown; the
- * tooltip shows it as text, so its fence lines are dropped (their contents
- * kept) and nothing of the markup but inline `code` survives as written.
+/** Only the leading server Dawn signature and its protocol rule are split out.
+ * Everything in the documentation, including fences and blank lines, survives.
  */
 export interface HoverParts {
   code: string
   doc: string
+  kind?: 'plaintext'
 }
 
 export function hoverParts(contents: unknown): HoverParts {
-  const values = Array.isArray(contents) ? contents : [contents]
-  const text = values.flatMap((value) => {
-    if (typeof value === 'string') return [value]
-    const record = asRecord(value)
-    return typeof record?.value === 'string' ? [record.value] : []
-  }).join('\n\n').trim()
-  const fenced = /^```(?:dawn)?[ \t]*\n([\s\S]*?)\n```[ \t]*(?:\n([\s\S]*))?$/.exec(text)
-  if (!fenced) return { code: text, doc: '' }
-  const rest = (fenced[2] ?? '').trim().replace(/^-{3,}[ \t]*(?:\n|$)/, '')
-  return { code: fenced[1], doc: docText(rest) }
+  if (Array.isArray(contents)) {
+    const parts = contents.map(hoverParts)
+    return { code: '', doc: parts.map((p) => p.code ? '```dawn\n' + p.code + '\n```\n\n' + p.doc : p.doc).join('\n\n') }
+  }
+  const content = docContent(contents)
+  const text = docValue(content)
+  if (typeof content !== 'string' && content.kind === 'plaintext') return { code: '', doc: text, kind: 'plaintext' }
+  const fenced = /^```dawn[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\r?\n|$)/i.exec(text)
+  if (!fenced) return { code: '', doc: text }
+  const rest = text.slice(fenced[0].length).replace(/^(?:[ \t]*\r?\n)*---[ \t]*(?:\r?\n|$)(?:[ \t]*\r?\n)?/, '')
+  return { code: fenced[1], doc: rest }
 }
 
-/**
- * The doc as plain text: fence lines and horizontal rules go, and a Markdown
- * link keeps its label and loses its target. The server turns a doc's
- * [`name`] links into `file://` links to the declaration
- * (docs/lsp-hover-design.md §A5), which name paths on the Playground's
- * server: nothing a browser tab can open, and not something to show.
- *
- * A link the server left as written loses its brackets too. That is every
- * link in a std doc on the Playground: the std there is the copy compiled
- * into the toolchain, which has no file to point at, so the server keeps the
- * `` [`name`] `` it was given and the tooltip showed the brackets.
- */
-function docText(markdown: string): string {
-  return markdown
-    .split('\n')
-    .filter((line) => !/^\s*```/.test(line) && !/^\s*-{3,}\s*$/.test(line))
-    .join('\n')
-    .replace(/\[(`[^`\n]+`)\]\([^)\s]*\)/g, '$1')
-    .replace(/\[(`[^`\n]+`)\](?!\()/g, '$1')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-}
-
-/** The tooltip's text: the code, then the doc after a blank line. */
+/** Export source text separately from DOM rendering. */
 export function hoverText(contents: unknown): string {
   const { code, doc } = hoverParts(contents)
-  return doc ? `${code}\n\n${doc}` : code
-}
-
-/** The doc's text with each inline `code` span as a <code> element. */
-function docNode(doc: string, className = 'dp-hover-doc'): HTMLElement {
-  const node = document.createElement('div')
-  node.className = className
-  doc.split(/(`[^`\n]+`)/).forEach((piece) => {
-    if (/^`[^`\n]+`$/.test(piece)) {
-      const code = document.createElement('code')
-      code.textContent = piece.slice(1, -1)
-      node.appendChild(code)
-    } else if (piece) {
-      node.appendChild(document.createTextNode(piece))
-    }
-  })
-  return node
-}
-
-/**
- * The doc as the client's Markdown renderer draws it, through the sanitizer
- * configured on the `LSPClient` (`LSPPlugin.docToHTML` applies it). A view
- * without the plugin, or a renderer that throws, gets the plain-text node.
- */
-function docElement(view: EditorView | null, doc: string, className: string): HTMLElement {
-  const plugin = view != null ? LSPPlugin.get(view) : null
-  if (plugin == null) return docNode(doc, className)
-  try {
-    const html = plugin.docToHTML(doc, 'markdown')
-    const node = document.createElement('div')
-    node.className = className
-    node.innerHTML = html
-    return node
-  } catch {
-    return docNode(doc, className)
-  }
+  return [code, doc].filter(Boolean).join('\n\n')
 }
 
 const inlayHoverTooltips = new WeakSet<Tooltip>()
@@ -1315,11 +1252,8 @@ function hoverResult(contents: unknown, from: number, to: number, inlayDOM?: HTM
     create: (view) => {
       const dom = document.createElement('div')
       dom.className = 'dp-hover'
-      const code = document.createElement('div')
-      code.className = 'dp-hover-code'
-      code.textContent = parts.code.trim()
-      dom.appendChild(code)
-      if (parts.doc) dom.appendChild(docElement(view, parts.doc, 'dp-hover-doc'))
+      if (parts.code) dom.appendChild(renderDawnCode(parts.code))
+      if (parts.doc.trim()) dom.appendChild(docElement(view, parts.kind ? { kind: parts.kind, value: parts.doc } : parts.doc, 'dp-hover-doc'))
       return { dom, ...(inlayDOM ? { getCoords: () => inlayDOM.getBoundingClientRect() } : {}) }
     },
   }
@@ -1683,7 +1617,7 @@ export interface SignatureHelp {
   /** [start, end) of each parameter inside `label`, in UTF-16 units. */
   parameters: [number, number][]
   active: number | null
-  doc: string
+  doc: DocContent
 }
 
 export function signatureHelpOf(value: unknown): SignatureHelp | null {
@@ -1704,7 +1638,7 @@ export function signatureHelpOf(value: unknown): SignatureHelp | null {
   }
   const active = [signature.activeParameter, help?.activeParameter]
     .find((n) => Number.isInteger(n) && n >= 0)
-  return { label, parameters, active: active ?? null, doc: markupValue(signature.documentation) }
+  return { label, parameters, active: active ?? null, doc: docContent(signature.documentation) }
 }
 
 /** The label cut into the text before, inside and after the active parameter. */
@@ -1729,19 +1663,9 @@ const signatureField = StateField.define<{ pos: number; help: SignatureHelp } | 
     create: (view) => {
       const dom = document.createElement('div')
       dom.className = 'dp-hover dp-signature'
-      const code = document.createElement('div')
-      code.className = 'dp-hover-code'
-      const [before, active, after] = signatureParts(value.help)
-      code.appendChild(document.createTextNode(before))
-      if (active) {
-        const mark = document.createElement('strong')
-        mark.className = 'dp-signature-active'
-        mark.textContent = active
-        code.appendChild(mark)
-      }
-      code.appendChild(document.createTextNode(after))
-      dom.appendChild(code)
-      if (value.help.doc) dom.appendChild(docElement(view, value.help.doc, 'dp-hover-doc'))
+      const active = value.help.active != null ? value.help.parameters[value.help.active] : undefined
+      dom.appendChild(renderDawnCode(value.help.label, active))
+      if (docValue(value.help.doc)) dom.appendChild(docElement(view, value.help.doc, 'dp-hover-doc'))
       return { dom }
     },
   }),

@@ -294,3 +294,25 @@ std 里的名字照旧被拒绝，回包仍只含本缓冲区的编辑，网关�
 - **不放行 prepareRename**：输入框的初值取光标下的词，服务端的拒绝在 rename 回复里就能拿到，多一次往返没有收益。
 - **不放行 documentHighlight、declaration、typeDefinition、implementation**：lsp-client 不默认发前者，
   服务端未实现后三者（调研 §8）。
+
+
+## 8. 提示中的代码与文档（2026-10-24）
+
+`doc-render.ts` 与编辑器共用命名为 `dawn` 的 StreamLanguage、`dawnHighlight` 和 `tok-*` 主题变量。
+签名完整解析一次，再按 UTF-16 活动参数范围切分安全 DOM；活动参数加粗和下划线不覆盖 token 色。
+文档片段没有主编辑器的语义位置，不伪造 LSP semantic token 装饰。
+
+hover 只拆出最前面的 Dawn 签名围栏与协议分隔线，正文 Markdown 原样交给
+`LSPPlugin.docToHTML`。LSPClient 的 `highlightLanguage` 对 Dawn、无标签和缩进代码返回既有语言，
+其他语言保持纯文本；顺序仍为 Markdown、语法高亮、`sanitizeHTML`。代码块中的 `<br>` 恢复为真实换行，
+便于选择和复制。未解析的代码引用链接只整理 prose 的相邻节点，不改写代码字面量。
+`MarkupContent.kind=plaintext`、无插件和解析异常均保留安全的字面文本。
+
+普通 hover、inlay tooltip、signature help、在线与静态 completion info 共用文档排版。
+completion 有 detail 时显示完整签名，resolve 失败仍可读签名，过期响应不显示。
+`documentedCompletionSource` 从 CompletionContext 捕获 view，只替换静态字符串 info，
+保留结果字段、插入行为和 builtin 表原有延迟加载时机。
+
+提示尺寸和颜色变量定义在 `.dp-editor`，正文 13px/1.45、外壳 6px×8px、代码块 4px×6px。
+代码块保留缩进并横向滚动，长签名可换行；hover 的 CodeMirror 外壳与 signature 根各只保留一层边框和内边距。
+规则只覆盖产品文档提示，不改变诊断的纯文本或站点文章代码块。

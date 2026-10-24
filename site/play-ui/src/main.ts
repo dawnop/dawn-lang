@@ -1,3 +1,4 @@
+import { documentedCompletionSource } from './doc-render'
 // Entry: build the Playground UI inside #dawn-playground — a VS Code-style
 // full-viewport IDE: an explorer sidebar listing the sample programs as files,
 // and an editor column (toolbar, line-numbered CodeMirror, console panel that
@@ -361,7 +362,7 @@ function mount(root: HTMLElement) {
         lineNumbers(),
         highlightActiveLineGutter(),
         highlightActiveLine(),
-        dawn(lspCompletionSource(lsp, staticCompletions, dawnCompletions)),
+        dawn(documentedCompletionSource(lspCompletionSource(lsp, staticCompletions, dawnCompletions))),
         dawnDiagnostics(checkEndpoint, lsp, (busy) => (checking.hidden = !busy)),
         lsp.extension(),
         lspHover(lsp),
