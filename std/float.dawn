@@ -1,12 +1,11 @@
-## The two `Float` values that no literal spells: positive infinity and NaN.
+## Binary64 limits, classification and adjacent representable values.
 #
 # Why a module and not a literal or a builtin: `Float` is the compiler's own
 # type, and its special values were only ever reachable as `1.0 / 0.0` and
 # `0.0 / 0.0`, which every caller that wanted one wrote out for itself
-# (std/fmt does, the tile kernels' `neg_inf()` is the same expression). A named
-# constant is the one place that fact is written down, in the way Rust has
-# `f64::INFINITY` and Zig has `std.math.inf`. `MAX`, `EPSILON` and `is_nan`
-# belong here too when something needs them.
+# (std/fmt does, the tile kernels' `neg_inf()` is the same expression). Named
+# limits and raw-bit classification give callers one backend-independent
+# definition, including gradual underflow and the sign of zero.
 #
 # Negative infinity is `-INFINITY`; there is no `NEG_INFINITY`, since unary
 # minus on a `Float` is the native negation and a second name would only be
@@ -21,6 +20,90 @@ pub const INFINITY: Float = 1.0 / 0.0
 
 ## Not a number. Unequal to every `Float`, itself included.
 pub const NAN: Float = 0.0 / 0.0
+
+## Largest finite positive binary64 value.
+pub const MAX: Float = float_of_bits(0x7fefffffffffffff)
+
+## Smallest positive normal binary64 value; subnormals are smaller.
+pub const MIN_POSITIVE: Float = float_of_bits(0x0010000000000000)
+
+## Distance from 1 to its next larger representable value, 2^-52.
+pub const EPSILON: Float = float_of_bits(0x3cb0000000000000)
+
+## Whether x is NaN; no sign or payload is promised.
+pub fn is_nan(x: Float) -> Bool = x != x
+
+## Whether x is either infinity.
+pub fn is_infinite(x: Float) -> Bool = (float_to_bits(x) & 0x7fffffffffffffff) == 0x7ff0000000000000
+
+## Whether x is neither NaN nor infinity, including both zeros.
+pub fn is_finite(x: Float) -> Bool = (float_to_bits(x) & 0x7ff0000000000000) != 0x7ff0000000000000
+
+## Whether x is nonzero and smaller in magnitude than MIN_POSITIVE.
+pub fn is_subnormal(x: Float) -> Bool = {
+  let b = float_to_bits(x) & 0x7fffffffffffffff
+  b != 0 && b < 0x0010000000000000
+}
+
+## The sign bit, including negative zero. NaN payloads remain unspecified.
+pub fn sign_bit(x: Float) -> Bool = float_to_bits(x) < 0
+
+## The next greater value. Both zeros step to the smallest positive subnormal;
+## positive infinity stays fixed, negative infinity steps to -MAX, NaN stays NaN.
+pub fn next_up(x: Float) -> Float = {
+  if is_nan(x) || x == INFINITY { x }
+  else if x == 0.0 { float_of_bits(1) }
+  else {
+    let b = float_to_bits(x)
+    float_of_bits(if b < 0 { b - 1 } else { b + 1 })
+  }
+}
+
+## The next smaller value. Both zeros step to the smallest negative subnormal;
+## negative infinity stays fixed, positive infinity steps to MAX, NaN stays NaN.
+pub fn next_down(x: Float) -> Float = {
+  if is_nan(x) || x == -INFINITY { x }
+  else if x == 0.0 { float_of_bits((1 << 63) | 1) }
+  else {
+    let b = float_to_bits(x)
+    float_of_bits(if b < 0 { b + 1 } else { b - 1 })
+  }
+}
+
+test "classification distinguishes zero subnormal finite infinite and nan" {
+  assert float_to_bits(MAX) == 0x7fefffffffffffff
+  assert float_to_bits(MIN_POSITIVE) == 1 << 52
+  assert 1.0 + EPSILON == next_up(1.0)
+  for x in [0.0, -0.0, 1.0, MAX, MIN_POSITIVE, float_of_bits(1)] { assert is_finite(x) }
+  assert not is_finite(INFINITY)
+  assert not is_finite(NAN)
+  assert is_infinite(-INFINITY)
+  assert not is_infinite(NAN)
+  assert is_nan(NAN)
+  assert is_subnormal(float_of_bits(1))
+  assert is_subnormal(float_of_bits((1 << 63) | 0x000fffffffffffff))
+  assert not is_subnormal(-0.0)
+  assert not is_subnormal(MIN_POSITIVE)
+  assert sign_bit(-0.0)
+  assert not sign_bit(0.0)
+}
+
+test "adjacent values cross normal boundaries zeros and infinities" {
+  assert float_to_bits(next_up(-0.0)) == 1
+  assert float_to_bits(next_down(0.0)) == (1 << 63) | 1
+  assert float_to_bits(next_up(float_of_bits((1 << 63) | 1))) == 1 << 63
+  assert float_to_bits(next_down(float_of_bits(1))) == 0
+  assert next_up(MAX) == INFINITY
+  assert next_down(INFINITY) == MAX
+  assert next_down(-MAX) == -INFINITY
+  assert next_up(-INFINITY) == -MAX
+  assert next_up(INFINITY) == INFINITY
+  assert next_down(-INFINITY) == -INFINITY
+  assert float_to_bits(next_down(MIN_POSITIVE)) == 0x000fffffffffffff
+  assert next_up(next_down(MIN_POSITIVE)) == MIN_POSITIVE
+  assert is_nan(next_up(NAN))
+  assert is_nan(next_down(NAN))
+}
 
 # A negative operand is bound before the assert: `dawn fmt` rewrites
 # `assert -x < y` to `assert - x < y` (#588), which reads as a subtraction.

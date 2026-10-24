@@ -91,10 +91,10 @@ use jvm/ops.{
   ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC,
   COMPUTE_FRAMES, OP_AALOAD, OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY,
   OP_ARETURN, OP_ASTORE,
-  OP_ATHROW, OP_BASTORE, OP_CASTORE, OP_CHECKCAST, OP_D2F, OP_D2L, OP_DADD, OP_DASTORE, OP_DDIV,
+  OP_ATHROW, OP_BASTORE, OP_CASTORE, OP_CHECKCAST, OP_D2F, OP_D2L, OP_DADD, OP_DASTORE, OP_DCMPG, OP_DDIV,
   OP_DLOAD, OP_DMUL, OP_DNEG, OP_DREM, OP_DRETURN, OP_DSUB, OP_DUP, OP_DUP_X1, OP_F2D, OP_FASTORE, OP_FLOAD,
   OP_FRETURN, OP_GETFIELD, OP_GETSTATIC, OP_GOTO, OP_I2B, OP_I2L, OP_I2S, OP_IASTORE,
-  OP_ICONST_0, OP_ICONST_1, OP_IFEQ, OP_IFNE, OP_IFNONNULL, OP_IF_ACMPEQ,
+  OP_ICONST_0, OP_ICONST_1, OP_IFEQ, OP_IFLT, OP_IFNE, OP_IFNONNULL, OP_IF_ACMPEQ,
   OP_ILOAD,
   OP_INSTANCEOF, OP_INVOKEINTERFACE, OP_INVOKESPECIAL, OP_INVOKESTATIC, OP_INVOKEVIRTUAL,
   OP_IRETURN, OP_IXOR, OP_L2D, OP_L2I, OP_LADD, OP_LAND, OP_LASTORE, OP_LCMP,
@@ -3794,6 +3794,35 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     g1.mv.visitInsn(OP_L2D)
   } else if name == "to_int" {
     g1.mv.visitInsn(OP_D2L)
+  } else if name == "float_sqrt" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "sqrt", "(D)D", false)
+  } else if name == "float_fma" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "fma", "(DDD)D", false)
+  } else if name == "float_floor" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "floor", "(D)D", false)
+  } else if name == "float_ceil" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "ceil", "(D)D", false)
+  } else if name == "float_trunc" {
+    # Retain the argument in a local: the comparison consumes its copy, and
+    # NaN may take either arm. Both Math operations preserve a negative zero.
+    let (g2, slot) = alloc(g1, 2)
+    store_slot(g2.mv, TyFloat, slot)
+    g2.mv.visitVarInsn(OP_DLOAD, slot)
+    ldc_double(g2.mv, 0.0)
+    g2.mv.visitInsn(OP_DCMPG)
+    let negative = Label.new()
+    let end = Label.new()
+    g2.mv.visitJumpInsn(OP_IFLT, negative)
+    g2.mv.visitVarInsn(OP_DLOAD, slot)
+    g2.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "floor", "(D)D", false)
+    g2.mv.visitJumpInsn(OP_GOTO, end)
+    g2.mv.visitLabel(negative)
+    g2.mv.visitVarInsn(OP_DLOAD, slot)
+    g2.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "ceil", "(D)D", false)
+    g2.mv.visitLabel(end)
+    return (g2, true)
+  } else if name == "float_round_even" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "rint", "(D)D", false)
   } else if name == "str_of_int" {
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
       "(J)Ljava/lang/String;", false)

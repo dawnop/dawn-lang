@@ -3682,6 +3682,12 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("caller", [], [], ty_loc()),
     bsig("to_float", [TyInt], ["n"], TyFloat),
     bsig("to_int", [TyFloat], ["x"], TyInt),
+    bsig("float_sqrt", [TyFloat], ["x"], TyFloat),
+    bsig("float_fma", [TyFloat, TyFloat, TyFloat], ["x", "y", "z"], TyFloat),
+    bsig("float_floor", [TyFloat], ["x"], TyFloat),
+    bsig("float_ceil", [TyFloat], ["x"], TyFloat),
+    bsig("float_trunc", [TyFloat], ["x"], TyFloat),
+    bsig("float_round_even", [TyFloat], ["x"], TyFloat),
     tp1(bsig("list_len", [TyList(t)], ["xs"], TyInt), t),
     tp1(bsig("get", [TyList(t), TyInt], ["xs", "i"], opt_ty(t)), t),
     bsig("range", [TyInt, TyInt], ["from", "to"], TyList(TyInt)),
@@ -3759,9 +3765,9 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("bytes_decode_latin1", [TyBytes], ["b"], TyString),
     # The raw reinterpretation between a Float and its 64 bits (Java's
     # `doubleToRawLongBits`, Rust's `f64::to_bits`). They sit with the byte
-    # primitives because the one thing they are for is the wire format of a
-    # device buffer: std/dtype's `DeviceBits[Float]` needs a bit pattern that
-    # keeps a NaN's payload, and the arithmetic `narrow.f64_bits` cannot.
+    # primitives because device buffer codecs first needed the raw pattern.
+    # std/float and std/math also use them, including at comptime; ownership
+    # remains RtBytes rather than inventing a second home for the same pair.
     bsig("float_to_bits", [TyFloat], ["x"], TyInt),
     bsig("float_of_bits", [TyInt], ["b"], TyFloat),
     bsig("bytes_len", [TyBytes], ["b"], TyInt),
@@ -4487,6 +4493,11 @@ pub fn intrinsics() -> Map[String, Intr] = {
     rt_of = map.insert(rt_of, op, RtBytes)
     internal = set.insert(internal, op)
   }
+  # Exact host arithmetic is emitted locally by each backend. There is no
+  # runtime module or erased ABI behind these std-only Float operations.
+  for op in ["sqrt", "fma", "floor", "ceil", "trunc", "round_even"] {
+    internal = set.insert(internal, "float_" ++ op)
+  }
   rt_of = map.insert(rt_of, "popcount", RtArray)
   internal = set.insert(internal, "popcount")
   # the cursor walk and the search it rests on are the representation, not
@@ -4584,6 +4595,25 @@ pub fn intr_owned_args(name: String) -> List[Int] = {
 }
 
 # ---- tests ----
+
+test "exact Float operations are std-only inline intrinsics with a scalar ABI" {
+  let it = intrinsics()
+  for n in ["sqrt", "fma", "floor", "ceil", "trunc", "round_even"] {
+    let i = map.get(it, "float_" ++ n).expect("exact Float intrinsic")
+    assert i.rt == None
+    assert i.internal
+    assert not i.erased
+    assert i.sig.ret == TyFloat
+    assert i.sig.eff == EPure
+    assert i.sig.param_tys == if n == "fma" { [TyFloat, TyFloat, TyFloat] } else { [TyFloat] }
+  }
+  for n in ["float_to_bits", "float_of_bits"] {
+    let i = map.get(it, n).expect("raw-bit pair")
+    assert i.rt == Some(RtBytes)
+    assert i.internal
+    assert not i.erased
+  }
+}
 
 test "every intrinsic property is declared against a real intrinsic" {
   let bs = builtins()
@@ -5308,7 +5338,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 146
+  assert map_size2(bs) == 152
 }
 
 test "the reclaim's failure is a value, under the one name left" {

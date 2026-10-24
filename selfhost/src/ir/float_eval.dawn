@@ -1,0 +1,215 @@
+# Exact binary64 evaluation for a compiler built by the previous seed. Calling
+# the new float intrinsics here would require advancing that seed first, and
+# calling them through the interpreter would recurse into the same evaluator.
+# Only the already supported raw-bit pair crosses the host boundary.
+#
+# sqrt uses a restoring integer square root of a 106-bit radicand; its root
+# and remainder fit in Int. fma uses radix-2^26 limbs at a fixed binary point
+# of 2^-2148. All 4196 possible product bits survive alignment and cancellation,
+# including products that overflow or underflow binary64 before addition.
+# Each operation rounds exactly once, with no intermediate Float arithmetic.
+
+use std/narrow
+
+const SIGN: Int = 1 << 63
+const FRAC: Int = 0x000fffffffffffff
+const INF: Int = 0x7ff0000000000000
+const BASE: Int = 1 << 26
+const MASK: Int = BASE - 1
+
+pub(pkg) fn to_bits(x: Float) -> Int = narrow.f64_bits(x)
+
+pub(pkg) fn of_bits(b: Int) -> Float = narrow.f64_of_bits(b)
+
+pub(pkg) fn trunc(x: Float) -> Float = {
+  let b = to_bits(x)
+  let e = ((b >>> 52) & 2047) - 1023
+  if e < 0 { of_bits(b & SIGN) }
+  else if e >= 52 { x }
+  else { of_bits(b & ~((1 << (52 - e)) - 1)) }
+}
+
+pub(pkg) fn floor(x: Float) -> Float = {
+  let t = trunc(x)
+  if x < 0.0 && x != t { t - 1.0 } else { t }
+}
+
+pub(pkg) fn ceil(x: Float) -> Float = {
+  let t = trunc(x)
+  if x > 0.0 && x != t { t + 1.0 } else { t }
+}
+
+pub(pkg) fn round_even(x: Float) -> Float = {
+  let t = trunc(x)
+  let d = x - t
+  if d > 0.5 || (d == 0.5 && (to_int(t) & 1) != 0) { t + 1.0 }
+  else if d < -0.5 || (d == -0.5 && (to_int(t) & 1) != 0) { t - 1.0 }
+  else { t }
+}
+
+# Positive finite nonzero magnitude: m has exactly 53 bits, x = m * 2^(e-52).
+fn normalized(b: Int) -> (Int, Int) = {
+  var m = b & FRAC
+  var e = ((b >>> 52) & 2047) - 1023
+  if e == -1023 {
+    e = -1022
+    while m < 1 << 52 {
+      m = m << 1
+      e = e - 1
+    }
+  } else { m = m | (1 << 52) }
+  (m, e)
+}
+
+fn radicand_bit(m: Int, i: Int) -> Int =
+  if i < 52 { 0 } else { (m >>> (i - 52)) & 1 }
+
+pub(pkg) fn sqrt(x: Float) -> Float = {
+  let b = to_bits(x)
+  if x != x || x == 0.0 || b == INF { return x }
+  if b < 0 { return of_bits(INF | (1 << 51)) }
+  let (m0, e0) = normalized(b)
+  let odd = (e0 & 1) != 0
+  let m = if odd { m0 << 1 } else { m0 }
+  let e = if odd { e0 - 1 } else { e0 }
+  var q = 0
+  var rem = 0
+  var i = 52
+  while i >= 0 {
+    rem = (rem << 2) | (radicand_bit(m, 2 * i + 1) << 1) | radicand_bit(m, 2 * i)
+    q = q << 1
+    let trial = (q << 1) + 1
+    if rem >= trial {
+      rem = rem - trial
+      q = q + 1
+    }
+    i = i - 1
+  }
+  # The exact half-square is q^2 + q + 1/4, so an integer radicand never ties.
+  if rem > q { q = q + 1 }
+  of_bits(((e / 2 + 1022) << 52) + q)
+}
+
+# Finite magnitude without normalization: x = m * 2^e, zero included.
+fn parts(b: Int) -> (Int, Int) = {
+  let e = (b >>> 52) & 2047
+  if e == 0 { (b & FRAC, -1074) }
+  else { ((b & FRAC) | (1 << 52), e - 1075) }
+}
+
+fn digit(xs: List[Int], i: Int) -> Int =
+  if i < 0 || i >= len(xs) { 0 } else { xs[i] }
+
+fn limbs(m: Int) -> List[Int] = [m & MASK, (m >>> 26) & MASK, m >>> 52]
+
+fn product(a: Int, b: Int) -> List[Int] = {
+  let xs = limbs(a)
+  let ys = limbs(b)
+  var out: List[Int] = []
+  var carry = 0
+  for i in range(0, 5) {
+    var v = carry
+    for j in range(0, 3) { v = v + xs[j] * digit(ys, i - j) }
+    out = out ++ [v & MASK]
+    carry = v >>> 26
+  }
+  out
+}
+
+fn shifted(xs: List[Int], shift: Int, i: Int) -> Int = {
+  let j = i - shift / 26
+  let r = shift % 26
+  let low = (digit(xs, j) << r) & MASK
+  if r == 0 { low } else { low | (digit(xs, j - 1) >>> (26 - r)) }
+}
+
+fn bit(xs: List[Int], i: Int) -> Int = (digit(xs, i / 26) >>> (i % 26)) & 1
+
+fn rounded(xs: List[Int], sign: Int) -> Float = {
+  var top = len(xs) * 26 - 1
+  while top >= 0 && bit(xs, top) == 0 { top = top - 1 }
+  if top < 0 { return of_bits(sign) }
+  if top > 3171 { return of_bits(sign | INF) }
+  let shift = if top - 52 > 1074 { top - 52 } else { 1074 }
+  var q = 0
+  var i = top
+  while i >= shift {
+    q = (q << 1) | bit(xs, i)
+    i = i - 1
+  }
+  var sticky = false
+  i = 0
+  while i < shift - 1 && not sticky {
+    sticky = bit(xs, i) != 0
+    i = i + 1
+  }
+  if bit(xs, shift - 1) != 0 && (sticky || (q & 1) != 0) { q = q + 1 }
+  let magnitude = if top < 1126 { q } else { ((top - 2148 + 1022) << 52) + q }
+  of_bits(sign | magnitude)
+}
+
+pub(pkg) fn fma(x: Float, y: Float, z: Float) -> Float = {
+  let xb = to_bits(x)
+  let yb = to_bits(y)
+  let zb = to_bits(z)
+  let ax = xb & ~SIGN
+  let ay = yb & ~SIGN
+  let az = zb & ~SIGN
+  let ps = (xb ^ yb) & SIGN
+  let zs = zb & SIGN
+  if ax > INF || ay > INF || az > INF ||
+    (ax == 0 && ay == INF) || (ay == 0 && ax == INF) {
+    return of_bits(INF | (1 << 51))
+  }
+  if ax == INF || ay == INF {
+    if az == INF && ps != zs { return of_bits(INF | (1 << 51)) }
+    return of_bits(ps | INF)
+  }
+  if az == INF { return z }
+  let (mx, ex) = parts(ax)
+  let (my, ey) = parts(ay)
+  let (mz, ez) = parts(az)
+  let p = product(mx, my)
+  let c = limbs(mz)
+  let pe = ex + ey + 2148
+  let ce = ez + 2148
+  var order = 0
+  var i = 162
+  while i >= 0 && order == 0 {
+    let pd = shifted(p, pe, i)
+    let cd = shifted(c, ce, i)
+    if pd > cd { order = 1 } else if pd < cd { order = -1 }
+    i = i - 1
+  }
+  let add = ps == zs
+  if not add && order == 0 { return of_bits(0) }
+  let sign = if add || order > 0 { ps } else { zs }
+  var out: List[Int] = []
+  var carry = 0
+  for k in range(0, 163) {
+    let pd = shifted(p, pe, k)
+    let cd = shifted(c, ce, k)
+    let v = if add { pd + cd + carry }
+    else if order > 0 { pd - cd + carry } else { cd - pd + carry }
+    out = out ++ [v & MASK]
+    carry = v >> 26
+  }
+  rounded(out, sign)
+}
+
+test "sqrt retains the remainder and scales subnormals exactly" {
+  assert to_bits(sqrt(2.0)) == 0x3ff6a09e667f3bcd
+  assert to_bits(sqrt(of_bits(0x3ff0000000000001))) == 0x3ff0000000000000
+  assert to_bits(sqrt(of_bits(0x3fefffffffffffff))) == 0x3fefffffffffffff
+  assert to_bits(sqrt(of_bits(1))) == 0x1e60000000000000
+  assert to_bits(sqrt(of_bits(SIGN))) == SIGN
+  assert to_bits(sqrt(of_bits(0x7fefffffffffffff))) == 0x5fefffffffffffff
+}
+
+test "fma rounds after cancellation even outside binary64 intermediate range" {
+  assert to_bits(fma(1.0 + 1.0 / 134217728.0, 1.0 - 1.0 / 134217728.0, -1.0)) == ((1 << 63) | 0x3c90000000000000)
+  assert to_bits(fma(of_bits(1), 0.5, of_bits(1))) == 2
+  assert to_bits(fma(of_bits(0x7fefffffffffffff), 2.0, -of_bits(0x7fefffffffffffff))) == 0x7fefffffffffffff
+  assert to_bits(fma(-0.0, 1.0, -0.0)) == SIGN
+  assert to_bits(fma(-0.0, 1.0, 0.0)) == 0
+}

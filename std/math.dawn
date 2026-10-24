@@ -1,0 +1,259 @@
+## Exact binary64 host mathematics, with identical non-NaN bits at runtime and
+## comptime on JVM, native and wasm. Each primitive rounds to nearest even once;
+## integer rounding preserves signed zero. No dynamic rounding mode is exposed.
+#
+# Backends own only the six exact operations. Classification and scaling stay
+# here over the raw-bit pair, so a libm's NaN-ignoring min/max or intermediate
+# underflow cannot change the public contract. The constants below are frozen
+# MPFR round-to-nearest binary64 patterns, independent of decimal parsing.
+
+use std/float
+use std/list
+
+## Pi, rounded to binary64 with MPFR.
+pub const PI: Float = float_of_bits(0x400921fb54442d18)
+## Euler's number, rounded to binary64 with MPFR.
+pub const E: Float = float_of_bits(0x4005bf0a8b145769)
+## Two pi, rounded to binary64 with MPFR.
+pub const TAU: Float = float_of_bits(0x401921fb54442d18)
+## Natural logarithm of two, rounded to binary64 with MPFR.
+pub const LN_2: Float = float_of_bits(0x3fe62e42fefa39ef)
+## Natural logarithm of ten, rounded to binary64 with MPFR.
+pub const LN_10: Float = float_of_bits(0x40026bb1bbb55516)
+## Base-two logarithm of e, rounded to binary64 with MPFR.
+pub const LOG2_E: Float = float_of_bits(0x3ff71547652b82fe)
+## Base-ten logarithm of e, rounded to binary64 with MPFR.
+pub const LOG10_E: Float = float_of_bits(0x3fdbcb7b1526e50e)
+## Square root of two, rounded to binary64 with MPFR.
+pub const SQRT_2: Float = float_of_bits(0x3ff6a09e667f3bcd)
+
+## Correctly rounded square root. Preserves both zeros and +infinity;
+## negative nonzero inputs and NaN return NaN.
+pub fn sqrt(x: Float) -> Float = float_sqrt(x)
+
+## The exact x*y+z rounded once, including intermediate overflow and underflow.
+## Zero times infinity and opposite infinities return NaN. Exact cancellation
+## returns +0; a negative zero product plus negative zero returns -0. NaN propagates.
+pub fn fma(x: Float, y: Float, z: Float) -> Float = float_fma(x, y, z)
+
+## Round toward negative infinity. Preserve infinities, NaN and both zeros.
+pub fn floor(x: Float) -> Float = float_floor(x)
+
+## Round toward positive infinity. Preserve infinities, NaN and both zeros.
+pub fn ceil(x: Float) -> Float = float_ceil(x)
+
+## Round toward zero. Preserve infinities, NaN and both zeros.
+pub fn trunc(x: Float) -> Float = float_trunc(x)
+
+## Round to the nearest integer, ties to even. Preserve infinities, NaN and
+## both zeros; a negative input that rounds to zero returns -0.
+pub fn round_even(x: Float) -> Float = float_round_even(x)
+
+## Round to the nearest integer, ties away from zero. Preserve infinities,
+## NaN and both zeros; a negative input that rounds to zero returns -0.
+pub fn round(x: Float) -> Float = {
+  let t = trunc(x)
+  let d = x - t
+  if d >= 0.5 { t + 1.0 } else if d <= -0.5 { t - 1.0 } else { t }
+}
+
+## Clear the sign bit, including -0 and -infinity. NaN remains NaN.
+pub fn abs(x: Float) -> Float = float_of_bits(float_to_bits(x) & 0x7fffffffffffffff)
+
+## Copy y's sign bit onto x's magnitude, including zero, infinity and NaN.
+pub fn copysign(x: Float, y: Float) -> Float =
+  float_of_bits((float_to_bits(x) & 0x7fffffffffffffff) | (float_to_bits(y) & (1 << 63)))
+
+## The smaller argument, propagating NaN and choosing -0 over +0.
+pub fn min(x: Float, y: Float) -> Float =
+  if float.is_nan(x) { x } else if float.is_nan(y) { y }
+  else if x < y || (x == y && float.sign_bit(x)) { x } else { y }
+
+## The larger argument, propagating NaN and choosing +0 over -0.
+pub fn max(x: Float, y: Float) -> Float =
+  if float.is_nan(x) { x } else if float.is_nan(y) { y }
+  else if x > y || (x == y && not float.sign_bit(x)) { x } else { y }
+
+## Step from x toward y by one representable value. Equal inputs return y,
+## including opposite zeros. Either NaN returns NaN; infinity can step inward.
+pub fn next_after(x: Float, y: Float) -> Float =
+  if float.is_nan(x) || float.is_nan(y) { float.NAN }
+  else if x == y { y }
+  else if x < y { float.next_up(x) } else { float.next_down(x) }
+
+# A nonzero finite magnitude normalized to 53 significand bits and its binade.
+fn normalized(x: Float) -> (Int, Int) = {
+  let b = float_to_bits(x)
+  var m = b & 0x000fffffffffffff
+  var e = ((b >>> 52) & 2047) - 1023
+  if e == -1023 {
+    e = -1022
+    while m < 1 << 52 {
+      m = m << 1
+      e = e - 1
+    }
+  } else { m = m | (1 << 52) }
+  (m, e)
+}
+
+## Decompose finite nonzero x as m*2^e, with 0.5 <= abs(m) < 1, exactly.
+## For either zero, infinity or NaN return (x, 0), preserving the zero's sign.
+pub fn frexp(x: Float) -> (Float, Int) = {
+  if x == 0.0 || not float.is_finite(x) { (x, 0) }
+  else {
+    let (m, e) = normalized(x)
+    (float_of_bits((float_to_bits(x) & (1 << 63)) | (1022 << 52) | (m & 0x000fffffffffffff)), e + 1)
+  }
+}
+
+## Scale x by 2^n with one nearest-even rounding, gradual underflow and signed
+## zero. Overflow returns signed infinity. Zero, infinity and NaN return x.
+## Every Int exponent is accepted without overflowing intermediate arithmetic.
+pub fn ldexp(x: Float, n: Int) -> Float = {
+  if x == 0.0 || not float.is_finite(x) { return x }
+  let sign = float_to_bits(x) & (1 << 63)
+  if n > 4096 { return float_of_bits(sign | 0x7ff0000000000000) }
+  if n < -4096 { return float_of_bits(sign) }
+  let (m, e) = normalized(x)
+  let target = e + n
+  if target > 1023 { return float_of_bits(sign | 0x7ff0000000000000) }
+  if target >= -1022 { return float_of_bits(sign | ((target + 1023) << 52) | (m & 0x000fffffffffffff)) }
+  if target < -1075 { return float_of_bits(sign) }
+  let shift = -1022 - target
+  var q = m >>> shift
+  let rem = m & ((1 << shift) - 1)
+  let half = 1 << (shift - 1)
+  if rem > half || (rem == half && (q & 1) != 0) { q = q + 1 }
+  float_of_bits(sign | q)
+}
+
+## The binade exponent floor(log2(abs(x))) for finite nonzero x, including
+## subnormals. Zero, infinity and NaN return None.
+pub fn ilogb(x: Float) -> Option[Int] = {
+  if x == 0.0 || not float.is_finite(x) { None }
+  else {
+    let (_, e) = normalized(x)
+    Some(e)
+  }
+}
+
+test "constant patterns are the frozen MPFR results" {
+  assert float_to_bits(PI) == 0x400921fb54442d18
+  assert float_to_bits(E) == 0x4005bf0a8b145769
+  assert float_to_bits(TAU) == 0x401921fb54442d18
+  assert float_to_bits(LN_2) == 0x3fe62e42fefa39ef
+  assert float_to_bits(LN_10) == 0x40026bb1bbb55516
+  assert float_to_bits(LOG2_E) == 0x3ff71547652b82fe
+  assert float_to_bits(LOG10_E) == 0x3fdbcb7b1526e50e
+  assert float_to_bits(SQRT_2) == 0x3ff6a09e667f3bcd
+}
+
+test "integer rounding handles both ties adjacent halves and signed zero" {
+  assert round(0.49999999999999994) == 0.0
+  assert round(0.5) == 1.0
+  assert round(-0.5) == -1.0
+  assert round_even(0.5) == 0.0
+  assert round_even(1.5) == 2.0
+  assert round_even(2.5) == 2.0
+  assert round_even(-1.5) == -2.0
+  for f in [round, round_even, trunc, ceil] { assert float_to_bits(f(-0.25)) == 1 << 63 }
+  for f in [round, round_even, trunc, ceil, floor] {
+    assert float_to_bits(f(-0.0)) == 1 << 63
+    assert f(float.INFINITY) == float.INFINITY
+    assert f(-float.INFINITY) == -float.INFINITY
+    assert float.is_nan(f(float.NAN))
+  }
+  assert floor(-0.25) == -1.0
+  assert ceil(0.25) == 1.0
+  assert trunc(-1.75) == -1.0
+}
+
+test "exact primitives retain cancellation and gradual underflow" {
+  assert sqrt(4.0) == 2.0
+  assert float_to_bits(sqrt(-0.0)) == 1 << 63
+  assert sqrt(2.0) == SQRT_2
+  assert float.is_nan(sqrt(-1.0))
+  assert float.is_nan(fma(0.0, float.INFINITY, 1.0))
+  assert float.is_nan(fma(float.INFINITY, 1.0, -float.INFINITY))
+  assert float_to_bits(fma(float_of_bits(1), 0.5, float_of_bits(1))) == 2
+  assert fma(float.MAX, 2.0, -float.MAX) == float.MAX
+  assert float_to_bits(fma(1.0 + 1.0 / 134217728.0, 1.0 - 1.0 / 134217728.0, -1.0)) == ((1 << 63) | 0x3c90000000000000)
+}
+
+fn negative_half(op: fn(Float) -> Float) -> Int = float_to_bits(op(-0.5))
+
+test "intrinsics taken as values use the same lowering as direct calls" {
+  let s: fn(Float) -> Float = float_sqrt
+  let f: fn(Float, Float, Float) -> Float = float_fma
+  let lo: fn(Float) -> Float = float_floor
+  let hi: fn(Float) -> Float = float_ceil
+  let t: fn(Float) -> Float = float_trunc
+  let r: fn(Float) -> Float = float_round_even
+  assert s(2.0) == sqrt(2.0)
+  assert float_to_bits(f(float_of_bits(1), 0.5, float_of_bits(1))) == 2
+  assert lo(-1.25) == floor(-1.25)
+  assert hi(-1.25) == ceil(-1.25)
+  assert t(-1.25) == trunc(-1.25)
+  assert r(2.5) == round_even(2.5)
+  let cs = comptime {
+    let op: fn(Float) -> Float = float_sqrt
+    float_to_bits(op(2.0))
+  }
+  let cf = comptime {
+    let op: fn(Float, Float, Float) -> Float = float_fma
+    float_to_bits(op(float_of_bits(1), 0.5, float_of_bits(1)))
+  }
+  let cr = comptime {
+    let ops: List[fn(Float) -> Float] = [float_floor, float_ceil, float_trunc, float_round_even]
+    list.map(ops, negative_half)
+  }
+  assert cs == float_to_bits(s(2.0))
+  assert cf == 2
+  assert cr == list.map([lo, hi, t, r], negative_half)
+}
+
+test "bit functions respect nan propagation and zero ordering" {
+  assert float_to_bits(abs(-0.0)) == 0
+  assert abs(-float.INFINITY) == float.INFINITY
+  assert float_to_bits(copysign(0.0, -1.0)) == 1 << 63
+  assert copysign(-2.0, 0.0) == 2.0
+  for pair in [(0.0, -0.0), (-0.0, 0.0)] {
+    let (a, b) = pair
+    assert float_to_bits(min(a, b)) == 1 << 63
+    assert float_to_bits(max(a, b)) == 0
+    assert float.is_nan(min(a, float.NAN))
+    assert float.is_nan(max(float.NAN, b))
+  }
+  assert float_to_bits(next_after(0.0, -0.0)) == 1 << 63
+  assert float_to_bits(next_after(-0.0, 0.0)) == 0
+  assert next_after(float.INFINITY, 0.0) == float.MAX
+  assert float.is_nan(next_after(1.0, float.NAN))
+}
+
+test "exponent operations cover every binade and extreme Int scaling" {
+  for e in range(-1074, 1024) {
+    let x = ldexp(1.0, e)
+    assert ilogb(x) == Some(e)
+    let (m, n) = frexp(x)
+    assert m == 0.5
+    assert n == e + 1
+    assert ldexp(m, n) == x
+  }
+  let (m, e) = frexp(float.MAX)
+  assert ldexp(m, e) == float.MAX
+  assert float_to_bits(ldexp(-1.0, -1075)) == 1 << 63
+  assert float_to_bits(ldexp(1.5, -1074)) == 2
+  assert float_to_bits(ldexp(float_of_bits(0x001fffffffffffff), -1)) == 0x0010000000000000
+  assert ldexp(1.0, 9223372036854775807) == float.INFINITY
+  assert float_to_bits(ldexp(-1.0, 1 << 63)) == 1 << 63
+  for x in [0.0, -0.0, float.INFINITY, -float.INFINITY] {
+    assert float_to_bits(ldexp(x, 1 << 63)) == float_to_bits(x)
+    let (a, n) = frexp(x)
+    assert float_to_bits(a) == float_to_bits(x)
+    assert n == 0
+    assert ilogb(x) == None
+  }
+  assert ilogb(float.NAN) == None
+  let (nan, n) = frexp(float.NAN)
+  assert float.is_nan(nan) && n == 0
+}

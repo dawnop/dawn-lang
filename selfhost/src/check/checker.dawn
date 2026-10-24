@@ -16206,6 +16206,26 @@ fn msgs_of(src: String) -> List[String] !io = {
   map(cx.diags, d => d.msg)
 }
 
+test "exact Float intrinsics are visible only inside std for calls and values" {
+  let env: Map[String, ModExports] = map.empty()
+  for n in ["sqrt", "fma", "floor", "ceil", "trunc", "round_even"] {
+    let name = "float_" ++ n
+    let params = if n == "fma" { "Float, Float, Float" } else { "Float" }
+    let args = if n == "fma" { "x, x, x" } else { "x" }
+    let src = "fn direct(x: Float) -> Float = " ++ name ++ "(" ++ args ++ ")\n" ++
+      "fn value() -> fn(" ++ params ++ ") -> Float = " ++ name ++ "\n"
+    let (m, pd) = parser.parse_module(src)
+    assert len(pd) == 0
+    let base = seed_prelude(test_cx())
+    let (user, _) = check_module(base, m, env)
+    assert len(user.diags) == 2
+    assert str.contains(user.diags[0].msg, "undefined function: " ++ name)
+    assert str.contains(user.diags[1].msg, "undefined variable: " ++ name)
+    let (lib, _) = check_module(Cx { ..base, is_std_module = true }, m, env)
+    assert len(lib.diags) == 0
+  }
+}
+
 ## #317's fixture: a trait whose methods answer associated types, one impl
 ## binding them to concrete types, and three consumers of a method value.
 fn assoc_value_src(body: String) -> String =
