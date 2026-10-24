@@ -455,7 +455,7 @@ K6 补的是 C / JVM 窗格早有的那一半：点源码里的一次调用，Ti
 `playground/src/play/tilemap.dawn`，逐层严格配对：同一父调用下，源码里按求值顺序出现的调用名，必须**恰好等于**记录里按运行顺序的调用名
 （`lit` 常量行可选，`var` 的 `carry/get/set` 由分阶段 `for` 的规则生成）。对不上不是错误，是「这个程序不配对」，窗格照旧显示 Tile IR 文本并说出第一条原因。
 - **谁跑什么：** (1) `dawn parse` 在与 `/run` 同一个沙箱单元里解析用户源码（不运行任何东西）；(2) runner 走一遍语法树（`tilemap.dawn`），
-  找到唯一一处 `trace1` 至 `trace5` 的朴素调用（位置参数、无 `hints:`），其最后一个参数是同文件里的 kernel 函数；(3) 把这处调用包进 runner 自己的模块
+  找到唯一一处 `trace1` 至 `trace6` 的朴素调用（位置参数、无 `hints:`），其最后一个参数是同文件里的 kernel 函数；(3) 把这处调用包进 runner 自己的模块
   `explore_probe.tapN(原调用, 原参数…)`，写入项目的 `src/explore_probe.dawn`，用户程序其余字节不变，原调用还在，所以它的 `use` 仍被用到（本语言把未用导入当错误）；
   (4) `dawn build` 加 `java -jar`，探针用 `trace_calls`（标记擦除）再录一遍，两份程序不等就拒答，等则把 Tile IR 文本、侧表和每个调用的行区间打印成带 `@@tile ` 前缀的行，以 `@@tile end` 收尾；
   (5) runner 读这些行，与第 2 步的静态调用逐层配对，写出 `site/gpu-map/flash_attn.map` 同格式的文本，再由 `packages/xmap` 的 `table_from_tile` / `tile_pane` 变成与 C、JVM 同形的响应。

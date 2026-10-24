@@ -72,6 +72,7 @@ FAMILIES = [
     ("hint", "hint_diff.dawn", "hint_order"),
     ("seq", "seq_diff.dawn", "seq_order"),
     ("scalar", "scalar_diff.dawn", "scalars"),
+    ("entry6", "entry6_diff.dawn", "entry_six"),
     # architecture-gated kernels (fp8, fp4, scaled mma): the card decides which
     # a cubin run can try, the interpreter has no card and tries all of them
     ("arch", "arch_diff.dawn", "arch_kernels"),

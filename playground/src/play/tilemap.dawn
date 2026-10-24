@@ -550,7 +550,7 @@ fn find_traces(root: Node, n: Node, outer: ProbeContext, out: List[Trace]) -> Li
   var found = out
   if n.kind == "Apply" && len(n.kids) > 0 && n.kids[0].kind == "Var" {
     let callee = second_word(n.kids[0].text)
-    let arity = list.find([1, 2, 3, 4, 5], k => callee == "trace${k}")
+    let arity = list.find([1, 2, 3, 4, 5, 6], k => callee == "trace${k}")
     match arity {
       Some(k) -> {
         let args = list.drop(n.kids, 1)
@@ -589,7 +589,7 @@ pub type Plan = { program: String, kernel: String, first: Int, last: Int, calls:
 ## The plan for `code` from the dump `dump` of it and the names of the
 ## functions the recording sees (`called("<name>"` marks of dev.dawn), or why
 ## the program is not mapped. The program must record exactly one kernel, with
-## `trace1` to `trace5` called plainly (positional arguments, no hints), and
+## `trace1` to `trace6` called plainly (positional arguments, no hints), and
 ## the kernel must be a function of the same file, directly or through a
 ## factory whose lambda forwards its parameters unchanged. The trace site's
 ## own named callable must explicitly include IO; parse-only lambdas cannot
@@ -600,7 +600,7 @@ pub fn plan(code: String, dump: String, dev: List[String]) -> Result[Plan, Strin
     Ok(root) -> {
       let traces = find_traces(root, root, ProbeUnknown("module"), [])
       if len(traces) == 0 {
-        Err("the program does not record a kernel with a plain `trace1` to `trace5` call")
+        Err("the program does not record a kernel with a plain `trace1` to `trace6` call")
       } else if len(traces) > 1 {
         Err("the program records more than one kernel")
       } else {
@@ -817,7 +817,7 @@ const PROBE_LINES: List[String] = [
   "use std/str",
   "use std/list",
   "use std/dtype.{Dtype}",
-  "use std/gpu.{Entry1, Entry2, Entry3, Entry4, Entry5}",
+  "use std/gpu.{Entry1, Entry2, Entry3, Entry4, Entry5, Entry6}",
   "use tileir/dev.{Dev, Param, param}",
   "use tileir/prog.{TileProg, Arg, In, Out, Shared, Scalar, Call, trace_calls, erase, op_count}",
   "use tileir/render.{line_map}",
@@ -888,6 +888,13 @@ const PROBE_LINES: List[String] = [
   "pub fn tap5[A, B, C, E, F](r: (TileProg, Entry5[A, B, C, E, F]), name: String, a: Arg[A], b: Arg[B], c: Arg[C], d: Arg[E], f: Arg[F], body: fn(Param[A], Param[B], Param[C], Param[E], Param[F]) -> Unit !Dev) -> (TileProg, Entry5[A, B, C, E, F]) !io = {",
   "  let (p, _e) = r",
   "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2), param(dt(d), 3), param(dt(f), 4)), markers = [erase(a), erase(b), erase(c), erase(d), erase(f)])",
+  "  check(p, q, calls)",
+  "  r",
+  "}",
+  "",
+  "pub fn tap6[A, B, C, E, F, G](r: (TileProg, Entry6[A, B, C, E, F, G]), name: String, a: Arg[A], b: Arg[B], c: Arg[C], d: Arg[E], f: Arg[F], g: Arg[G], body: fn(Param[A], Param[B], Param[C], Param[E], Param[F], Param[G]) -> Unit !Dev) -> (TileProg, Entry6[A, B, C, E, F, G]) !io = {",
+  "  let (p, _e) = r",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2), param(dt(d), 3), param(dt(f), 4), param(dt(g), 5)), markers = [erase(a), erase(b), erase(c), erase(d), erase(f), erase(g)])",
   "  check(p, q, calls)",
   "  r",
   "}",
@@ -996,7 +1003,7 @@ test "unsupported contexts remain candidates for the multiple-kernel rule" {
 }
 
 test "zero traces hints and external kernels keep their deterministic refusals" {
-  let absent = "the program does not record a kernel with a plain `trace1` to `trace5` call"
+  let absent = "the program does not record a kernel with a plain `trace1` to `trace6` call"
   assert plan_reason(str.replace(VADD_DUMP, "Var trace3", "Var other")) == absent
   assert plan_reason(str.replace(VADD_DUMP, "Str @387..393", "Arg name=hints @387..393")) == absent
   assert plan_reason(str.replace(VADD_DUMP, "Var vadd @432..436", "Var external @432..436")) == "`external` is not a function of this file"
@@ -1057,7 +1064,7 @@ test "the names the recording sees are the called marks of dev.dawn" {
 
 test "the probe is the module the plan names, one tap for each marker count" {
   let src = probe_source()
-  for k in [1, 2, 3, 4, 5] {
+  for k in [1, 2, 3, 4, 5, 6] {
     assert str.contains(src, "pub fn tap${k}[")
   }
 }

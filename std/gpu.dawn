@@ -28,6 +28,7 @@
 # unchanged.
 use std/bytes
 use std/list
+use std/str
 use std/map
 use std/narrow
 use std/dtype.{Dtype, HasDtype, DeviceBits, to_bits, from_bits, dtype_of, dtype_name, dtype_from_name, F64, I64}
@@ -910,6 +911,9 @@ pub opaque type Entry4[A, B, C, D] = (String, List[EntryArg])
 ## [`Entry1`] for five arguments.
 pub opaque type Entry5[A, B, C, D, E] = (String, List[EntryArg])
 
+## [`Entry1`] for six arguments.
+pub opaque type Entry6[A, B, C, D, E, F] = (String, List[EntryArg])
+
 ## The entry of `kernel`, whose one argument is `a`. The format is the
 ## type's: a recorder fixes it from the kernel's own parameter.
 pub fn entry1[A](kernel: String, a: EntryArg) -> Entry1[A] = {
@@ -940,6 +944,13 @@ pub fn entry4[A, B, C, D](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg,
 pub fn entry5[A, B, C, D, E](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg,
   d: EntryArg, x: EntryArg) -> Entry5[A, B, C, D, E] = {
   let e: Entry5[A, B, C, D, E] = (kernel, [a, b, c, d, x])
+  e
+}
+
+## [`entry1`] for six arguments.
+pub fn entry6[A, B, C, D, E, F](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg,
+  d: EntryArg, x: EntryArg, y: EntryArg) -> Entry6[A, B, C, D, E, F] = {
+  let e: Entry6[A, B, C, D, E, F] = (kernel, [a, b, c, d, x, y])
   e
 }
 
@@ -990,6 +1001,14 @@ pub fn launch_entry5[A, B, C, D, E](e: Entry5[A, B, C, D, E], a: Launch[A], b: L
   let p: (String, List[EntryArg]) = e
   let (kernel, args) = p
   launch_args(kernel, args, [pair(a), pair(b), pair(c), pair(d), pair(x)], grid)
+}
+
+## [`launch_entry1`] for six arguments.
+pub fn launch_entry6[A, B, C, D, E, F](e: Entry6[A, B, C, D, E, F], a: Launch[A], b: Launch[B],
+  c: Launch[C], d: Launch[D], x: Launch[E], y: Launch[F], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg]) = e
+  let (kernel, args) = p
+  launch_args(kernel, args, [pair(a), pair(b), pair(c), pair(d), pair(x), pair(y)], grid)
 }
 
 ## The module-level global named `name`, in the module that defines
@@ -2902,4 +2921,60 @@ fn short_raw_upload() -> Result[Unit, ForeignError] !Gpu = {
 
 test "a raw upload of the wrong byte count is refused by the fake device" {
   assert kind_of(with_gpu_fake(reference_kernels(), short_raw_upload)) == "gpu.length_mismatch"
+}
+
+# The sixth position is exercised with every role, above a handler that
+# reports its invocation. Refusals must therefore never reach the handler.
+fn six_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
+  let a = match alloc(F64, 48) { Ok(b) -> b
+    Err(_e) -> return [] }
+  let b = match alloc(F64, 48) { Ok(v) -> v
+    Err(_e) -> return [] }
+  let c = match alloc(F64, 48) { Ok(v) -> v
+    Err(_e) -> return [] }
+  let o = match alloc(F64, 48) { Ok(v) -> v
+    Err(_e) -> return [] }
+  let short = match alloc(F64, 47) { Ok(v) -> v
+    Err(_e) -> return [] }
+  let input = arg_in([3, 4, 4], [1, 2, 4], [2, 0, 1])
+  let out = arg_out([4, 4, 3], [2, 4, 1])
+  let e: Entry6[Float, Float, Float, Float, Float, Float] =
+    entry6("six_scalar", input, input, input, out, arg_scalar(), arg_scalar())
+  let input6: Entry6[Float, Float, Float, Float, Float, Float] =
+    entry6("six_in", input, input, arg_scalar(), out, arg_scalar(), input)
+  let out6: Entry6[Float, Float, Float, Float, Float, Float] =
+    entry6("six_out", input, input, input, arg_scalar(), arg_scalar(), out)
+  let shared6: Entry6[Float, Float, Float, Float, Float, Float] =
+    entry6("six_shared", input, input, arg_scalar(), out, arg_scalar(), arg_shared())
+  [
+    launch_entry6(e, buffer_arg(a), buffer_arg(b), buffer_arg(c), buffer_arg(o), scalar_arg(0.0), scalar_arg(0.0)),
+    launch_entry6(e, buffer_arg(a), buffer_arg(b), buffer_arg(c), buffer_arg(o), scalar_arg(2.0), buffer_arg(c)),
+    launch_entry6(e, buffer_arg(a), buffer_arg(b), buffer_arg(c), buffer_arg(o), scalar_arg(2.0), scalar_arg(3.0), grid = [2, 1, 2]),
+    launch_entry6(input6, buffer_arg(a), buffer_arg(b), scalar_arg(2.0), buffer_arg(o), scalar_arg(3.0), buffer_arg(c)),
+    launch_entry6(input6, buffer_arg(a), buffer_arg(b), scalar_arg(2.0), buffer_arg(o), scalar_arg(3.0), buffer_arg(o)),
+    launch_entry6(input6, buffer_arg(a), buffer_arg(b), scalar_arg(2.0), buffer_arg(o), scalar_arg(3.0), buffer_arg(short)),
+    launch_entry6(input6, buffer_arg(a), buffer_arg(b), scalar_arg(2.0), buffer_arg(o), scalar_arg(3.0), scalar_arg(4.0)),
+    launch_entry6(out6, buffer_arg(a), buffer_arg(b), buffer_arg(c), scalar_arg(2.0), scalar_arg(3.0), buffer_arg(o)),
+    launch_entry6(out6, buffer_arg(a), buffer_arg(b), buffer_arg(c), scalar_arg(2.0), scalar_arg(3.0), buffer_arg(a)),
+    launch_entry6(out6, buffer_arg(a), buffer_arg(b), buffer_arg(c), scalar_arg(2.0), scalar_arg(3.0), buffer_arg(short)),
+    launch_entry6(shared6, buffer_arg(a), buffer_arg(b), scalar_arg(2.0), buffer_arg(o), scalar_arg(3.0), buffer_arg(c)),
+    launch_entry6(shared6, buffer_arg(a), buffer_arg(b), scalar_arg(2.0), buffer_arg(o), scalar_arg(3.0), buffer_arg(a))
+  ]
+}
+
+test "K3-0: six typed launch positions and sixth-role refusals precede handlers" {
+  let rs = entry_launches(six_launches)
+  assert len(rs) == 12
+  assert rs[0] == "test.launch: six_scalar 2 1 3 [1, 2, 3, 4] scalars [0.0, 0.0]"
+  assert str.starts_with(rs[1], "gpu.bad_entry:") && str.contains(rs[1], "argument 5 (Scalar)")
+  assert str.starts_with(rs[2], "gpu.grid_mismatch:") && str.contains(rs[2], "axis 2")
+  assert rs[3] == "test.launch: six_in 2 1 3 [1, 2, 4, 3] scalars [2.0, 3.0]"
+  assert str.starts_with(rs[4], "gpu.aliased_argument:") && str.contains(rs[4], "argument 5 (In)")
+  assert str.starts_with(rs[5], "gpu.short_tensor:") && str.contains(rs[5], "argument 5 (In)")
+  assert str.starts_with(rs[6], "gpu.bad_entry:") && str.contains(rs[6], "argument 5 (In)")
+  assert rs[7] == "test.launch: six_out 2 1 3 [1, 2, 3, 4] scalars [2.0, 3.0]"
+  assert str.starts_with(rs[8], "gpu.aliased_argument:") && str.contains(rs[8], "argument 5 (Out)")
+  assert str.starts_with(rs[9], "gpu.short_tensor:") && str.contains(rs[9], "argument 5 (Out)")
+  assert rs[10] == "test.launch: six_shared 2 1 3 [1, 2, 4, 3] scalars [2.0, 3.0]"
+  assert str.starts_with(rs[11], "gpu.aliased_argument:") && str.contains(rs[11], "argument 5 (Shared)")
 }

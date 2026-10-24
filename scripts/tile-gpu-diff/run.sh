@@ -1108,6 +1108,7 @@ dyn_order=("${dyns[@]}" view_transpose)
 # half of the 8-byte argument word); that is a property of scalar_diff's case
 # list and not of this one.
 scalars=(scalar_scale scalar_len scalar_loop scalar_wide)
+entry_six=(entry6_dynamic entry6_project1 entry6_project3)
 
 # The rest of the view family (knife T13), in the order gsview_diff takes
 # them: the two views a grid view cannot spell (a strided one, whose
@@ -1206,7 +1207,7 @@ echo "      arch: ${#arch_ran[@]} of ${#arch_kernels[@]} architecture-gated kern
 for k in vadd vadd_bf16 vadd_f32 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
   "${shaped[@]}" "${dtypes[@]}" "${bitwise_kernels[@]}" "${shift_kernels[@]}" "${staged_kernels[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
-  "${hints[@]}" "${views[@]}" "${inbounds_ks[@]}" "${dyns[@]}" "${scalars[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
+  "${hints[@]}" "${views[@]}" "${inbounds_ks[@]}" "${dyns[@]}" "${entry_six[@]}" "${scalars[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
   "${sequenced[@]}" ${arch_ran[@]+"${arch_ran[@]}"}; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
@@ -1261,6 +1262,8 @@ gsview_cubins=()
 for k in "${gsview_order[@]}"; do gsview_cubins+=("$work/$k.cubin"); done
 scalar_cubins=()
 for k in "${scalars[@]}"; do scalar_cubins+=("$work/$k.cubin"); done
+entry6_cubins=()
+for k in "${entry_six[@]}"; do entry6_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -2689,6 +2692,32 @@ case "$scalar_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/scalar.out" | sed -n 1p)"
 
+# The fixed-six family is part of the normal device gate, sharing one real
+# handler across the complete runtime-length and projection replay.
+build_native "$root/std" "$work/entry6.bin" "$here/entry6_diff.dawn"
+device "$work/entry6.bin" "${entry6_cubins[@]}" > "$work/entry6.out" 2> "$work/entry6.err" || {
+  cat "$work/entry6.out" "$work/entry6.err" >&2
+  fail "entry6 runtime reference or launch refused"
+}
+cat "$work/entry6.out"
+[ "$(verdict_of "$work/entry6.out")" = pass ] || fail "entry6 runtime reference differs"
+echo "PASS  native: entry6 dynamic prefix and projected storage agree exactly"
+if [ -n "${ENTRY6_DEVICE_EVIDENCE:-}" ]; then
+  mkdir -p "$ENTRY6_DEVICE_EVIDENCE"
+  "$root/bin/dawn" run "$asm_proj" -- --entry6-programs > "$ENTRY6_DEVICE_EVIDENCE/entry6.programs.txt" 2> "$work/entry6.identity.err" ||
+    { cat "$work/entry6.identity.err" >&2; fail "entry6 identity recording failed"; }
+  while read -r kernel program; do
+    case "$kernel" in entry6_dynamic|entry6_project1|entry6_project3) ;; *) fail "unexpected entry6 program identity";; esac
+    printf '%s\n' "$program" > "$ENTRY6_DEVICE_EVIDENCE/$kernel.prog"
+  done < "$ENTRY6_DEVICE_EVIDENCE/entry6.programs.txt"
+  cp "$work/entry6.out" "$work/entry6.err" "$ENTRY6_DEVICE_EVIDENCE/"
+  for k in "${entry_six[@]}"; do
+    cp "$work/$k.cubin" "$golden/$k.tilebc" "$golden/$k.mlir" "$ENTRY6_DEVICE_EVIDENCE/"
+  done
+  (cd "$ENTRY6_DEVICE_EVIDENCE" && sha256sum *.prog *.tilebc *.cubin) > "$ENTRY6_DEVICE_EVIDENCE/SHA256SUMS"
+fi
+
+
 # The scalar corpus, held field by field. `garbage` is the cases that hand the
 # device a word with garbage in its upper half; zero would mean the
 # assumption was never tested. `masked` is the lanes the mask bound switched
@@ -2814,6 +2843,29 @@ for m in flash-demo-scale-constant flash-demo-last-kv flash-demo-no-rescale; do
     { cat "$work/$m.device.err" >&2; fail "$m did not reach the reader numerical oracle"; }
   grep -A6 '^sequence flash_demo_scaled ' "$work/$m.device.out" | grep -q 'launch=ok sync=ok download=ok' ||
     fail "$m did not successfully launch and download"
+  echo "PASS  mutant: $m (valid cubin, launch and independent numerical oracle red)"
+done
+cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
+
+# The same assembled module remains valid for these three wrong numerical
+# programs. Their first runtime sample must reach a successful raw download
+# and then fail the independent scalar reference, never a device refusal.
+for m in entry6-n-constant entry6-view-capacity entry6-loop-floor; do
+  variant="$work/$m-tree"
+  mkdir -p "$variant/scripts/tile-golden"
+  cp "$golden/kernels.dawn" "$variant/scripts/tile-golden/kernels.dawn"
+  python3 "$golden/mutate.py" "$m" "$variant"
+  cp "$variant/scripts/tile-golden/kernels.dawn" "$asm_proj/src/main.dawn"
+  "$root/bin/dawn" run "$asm_proj" -- entry6_dynamic --bytecode "$work/$m.tilebc" > "$work/$m.record.out" 2> "$work/$m.record.err" ||
+    { cat "$work/$m.record.err" >&2; fail "$m failed recording"; }
+  assemble_golden entry6_dynamic "$work/$m.tilebc" "$work/$m.cubin"
+  rc=0
+  device "$work/entry6.bin" "$work/$m.cubin" "$work/entry6_project1.cubin" "$work/entry6_project3.cubin" > "$work/$m.device.out" 2> "$work/$m.device.err" || rc=$?
+  [ "$rc" != 0 ] && grep -q '^  raw-f32 ' "$work/$m.device.out" && grep -q '^  verdict differ:result$' "$work/$m.device.out" ||
+    { cat "$work/$m.device.out" "$work/$m.device.err" >&2; fail "$m did not reach its independent numerical oracle"; }
+  if [ -n "${ENTRY6_DEVICE_EVIDENCE:-}" ]; then
+    cp "$work/$m.cubin" "$work/$m.tilebc" "$work/$m.device.out" "$work/$m.device.err" "$ENTRY6_DEVICE_EVIDENCE/"
+  fi
   echo "PASS  mutant: $m (valid cubin, launch and independent numerical oracle red)"
 done
 cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
@@ -5966,7 +6018,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/sym_diff.dawn \
   scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
-  scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn scripts/tile-gpu-diff/scalar_diff.dawn \
+  scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn scripts/tile-gpu-diff/scalar_diff.dawn scripts/tile-gpu-diff/entry6_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
   scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py scripts/tile-gpu-diff/fold_verdict.sh)"
 [ -z "$dirty" ] ||
@@ -5982,6 +6034,7 @@ summary="$summary alloca=$alloca_shape symbols=$sym_probe views=$view_shape_line
 summary="$summary dyn=$dyn_shape_line $dyn_probe"
 summary="$summary gsview=$gsview_shape_line $gsview_probe"
 summary="$summary scalar=$scalar_shape_line $scalar_probe"
+summary="$summary $(sed -n 's/^probe entry6 /entry6=/p' "$work/entry6.out")"
 summary="$summary bitwise:$(sed -n 's/^tiers //p' "$work/bitwise.out" | tail -n 1)"
 summary="$summary shift:$(sed -n 's/^tiers //p' "$work/shift.out" | tail -n 1)"
 summary="$summary staged:$(sed -n 's/^tiers //p' "$work/staged.out" | tail -n 1)"

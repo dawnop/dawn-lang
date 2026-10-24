@@ -2161,8 +2161,8 @@ writes two regions are `Shared` for the same reason, and `grep Shared(` finds ev
 With no `Out` the grid is the caller's: `launch_entry2(entry, buffer_arg(x), buffer_arg(out), grid = [4, 2])`.
 
 Two more ways out, each a sentence. A kernel that reads one `In` in two shapes takes a
-second view of it with `retile(p, extent, tile)`. `trace1` to `trace5` record kernels of
-up to five parameters, and `trace_kernel` records one with more, every parameter `Shared`.
+second view of it with `retile(p, extent, tile)`. `trace1` to `trace6` record kernels of
+up to six parameters, and `trace_kernel` records one with more, every parameter `Shared`.
 
 ### On a real card
 
