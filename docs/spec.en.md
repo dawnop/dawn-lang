@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 542762c3aa8b11bb -->
+<!-- doc-check: translation-of docs/spec.md @ e9171ad6d37fad08 -->
 
 # Dawn Language Specification
 
@@ -4405,7 +4405,9 @@ two together; one module too many or too few fails it):
   arithmetic (§11 "Fixed-width integers")
 - `std/int/u64`: the unsigned 64-bit integer `U64`, an opaque type over `Int` with wrapping
   arithmetic (§11 "Fixed-width integers")
-- `std/float`: the two `Float` values no literal spells, `INFINITY` and `NAN`
+- `std/float`: binary64 limits, classification, sign bits and adjacent representable values
+- `std/math`: exact binary64 host mathematics, mathematical constants and exponent
+  decomposition and scaling (§11 "Math builtins")
 - `std/list`: `List` functions and the `Iter` instance
 - `std/bytes`: byte strings, with UTF-8, hex and base64 encoding
 - `std/io`: console, files, environment and subprocesses (the `Fs`/`Proc`/`Env` effects
@@ -4782,10 +4784,21 @@ behaviours are:
     taken for real characters by primitives that walk by code point
     ([`stdlib-impl-notes.md`](stdlib-impl-notes.md))
 
-**Math builtins.** There is no general math-function family and no host-math wrapper. The
-builtin numeric surface is limited to `Int`/`Float` arithmetic operators; the builtin
+**Math builtins.** The public builtin numeric surface is limited to `Int`/`Float` arithmetic operators; the builtin
 conversion functions are
-<!-- doc-check: builtin-list --> `to_float` and `to_int`. Additional
+<!-- doc-check: builtin-list --> `to_float` and `to_int`.
+
+`std/math` provides the exact binary64 operations `sqrt fma floor ceil trunc round_even`,
+all pure and available at runtime and comptime. Non-NaN results have identical bits on
+JVM, native, wasm and comptime. `fma(x,y,z)` rounds the exact product and sum once;
+ordinary `x*y+z` still rounds each operation separately. `round_even` breaks ties to even,
+while `round` breaks ties away from zero; integer rounding preserves the sign of zero.
+Bit operations and `frexp ldexp ilogb` are Dawn source; `ldexp` is correctly rounded with
+gradual underflow. `std/float` provides classification, adjacent values and limits;
+`MIN_POSITIVE` is the smallest positive normal value. Only NaN classification is promised,
+not its sign or payload. Transcendental functions are not yet provided; see
+[`std-math-design.md`](std-math-design.md), sections 3 and 4, for the surface and special values.
+Additional
 operations live in pure Dawn source libraries; for example, `std/narrow` computes square
 roots with integer arithmetic and does not depend on a host math library.
 `std/narrow`'s three formats have `+ - * / %` and unary `-` (§3.5's `Add` to `Neg`, with the
