@@ -63,6 +63,7 @@ use ir/core.{
   CBinOp
 }
 use ir/lower
+use ir/float_eval
 use check/cx.{cx_new}
 
 type CtFrame =
@@ -599,6 +600,12 @@ fn as_int(v: CValue) -> Int =
   match v {
     VInt(n) -> n
     _ -> panic("comptime interpreter bug: expected an Int")
+  }
+
+fn as_float(v: CValue) -> Float =
+  match v {
+    VFloat(x) -> x
+    _ -> panic("comptime interpreter bug: expected a Float")
   }
 
 ## A `Char` argument, which is a `VInt` here: `Char` is opaque over `Int`, so
@@ -1175,8 +1182,8 @@ fn call_named(
 # published as "a `const` cannot use this" -- while `const Z = parse_int_radix
 # ("ff", 16)` folds to `Some(255)`, through std/fmt's Core like any other call.
 
-## Every name the chain below has an arm for -- 43 of them, 13 emitted by
-## lowering and 30 writable by a user.
+## Every name the chain below has an arm for. The partition test below holds
+## the list to both the declarations and the actual dispatch.
 ##
 ## Consulted *before* the chain rather than alongside it, so this is a gate and
 ## not a second copy: a name missing from here can never reach an arm, which
@@ -1192,6 +1199,8 @@ fn interp_arms() -> List[String] = [
   "dbg_line",
   # user builtins
   "panic", "todo", "expect", "unwrap_or", "to_float", "to_int", "to_string",
+  "float_to_bits", "float_of_bits", "float_sqrt", "float_fma",
+  "float_floor", "float_ceil", "float_trunc", "float_round_even",
   "len", "get", "range", "sort_by", "join",
   "cursor_start", "cursor_end", "cursor_done", "cursor_char", "cursor_next",
   "cursor_prev", "cursor_slice",
@@ -1285,9 +1294,6 @@ fn comptime_rejects() -> List[String] = {
   out = out ++ ["list_to_array", "array_to_list"]
   # a bitmap operation on the array representation, so it is refused with it
   out = out ++ ["popcount"]
-  # a raw reinterpretation of the double's bits: `CValue` could hold it, but
-  # nothing at compile time needs it, and an arm is a thing to keep right
-  out = out ++ ["float_to_bits", "float_of_bits"]
   # the handler-local slot. Reachable, and refused here. The checker refuses a
   # `with handle` written in a `const` initialiser or comptime block itself
   # (checker.dawn's comptime gate, "`with handle` is not available at compile
@@ -1582,6 +1588,22 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     }
   } else if name == "to_float" {
     Ok((st, env, VFloat(to_float(as_int(args[0])))))
+  } else if name == "float_to_bits" {
+    Ok((st, env, VInt(float_eval.to_bits(as_float(args[0])))))
+  } else if name == "float_of_bits" {
+    Ok((st, env, VFloat(float_eval.of_bits(as_int(args[0])))))
+  } else if name == "float_sqrt" {
+    Ok((st, env, VFloat(float_eval.sqrt(as_float(args[0])))))
+  } else if name == "float_fma" {
+    Ok((st, env, VFloat(float_eval.fma(as_float(args[0]), as_float(args[1]), as_float(args[2])))))
+  } else if name == "float_floor" {
+    Ok((st, env, VFloat(float_eval.floor(as_float(args[0])))))
+  } else if name == "float_ceil" {
+    Ok((st, env, VFloat(float_eval.ceil(as_float(args[0])))))
+  } else if name == "float_trunc" {
+    Ok((st, env, VFloat(float_eval.trunc(as_float(args[0])))))
+  } else if name == "float_round_even" {
+    Ok((st, env, VFloat(float_eval.round_even(as_float(args[0])))))
   } else if name == "to_int" {
     let f = match args[0] {
       VFloat(x) -> x
@@ -3331,8 +3353,8 @@ test "the comptime interpreter covers every intrinsic, removes it in lowering, o
   #    went wrong in the list this gate replaces -- lowering's own said
   #    "thirteen more" and "all twelve" in the same paragraph -- so the
   #    numbers this file states are asserted rather than asserted-by-nobody.
-  assert len(arms) == 44
-  assert len(rejects) == 102
+  assert len(arms) == 52
+  assert len(rejects) == 100
   assert len(after) == 18
 }
 

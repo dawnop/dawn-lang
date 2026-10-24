@@ -1,0 +1,37 @@
+# Frozen exact-operation witnesses compare runtime calls with actual folded
+# constants, including cases where a multiply followed by an add is incorrect.
+# Raw bits keep negative zero and gradual underflow visible to the oracle.
+
+use std/math
+use std/float
+use std/narrow
+
+const ROOT: Int = narrow.f64_bits(math.sqrt(2.0))
+const TINY_ROOT: Int = narrow.f64_bits(math.sqrt(narrow.f64_of_bits(1)))
+const FUSED: Int = narrow.f64_bits(math.fma(1.0 + 1.0 / 134217728.0, 1.0 - 1.0 / 134217728.0, -1.0))
+const UNDERFLOW: Int = narrow.f64_bits(math.fma(narrow.f64_of_bits(1), 0.5, narrow.f64_of_bits(1)))
+const OVERFLOW: Int = narrow.f64_bits(math.fma(float.MAX, 2.0, -float.MAX))
+const ROUNDED: List[Int] = map([math.floor, math.ceil, math.trunc, math.round_even, math.round], f => narrow.f64_bits(f(-0.5)))
+const BITS: Int = narrow.f64_bits(narrow.f64_of_bits((1 << 63) | 1))
+const SCALE: Int = narrow.f64_bits(math.ldexp(1.5, -1074))
+
+fn bits(x: Float) -> Int = narrow.f64_bits(x)
+
+pub fn main() -> Unit !io = {
+  println("${ROOT} ${bits(math.sqrt(2.0))}")
+  println("${TINY_ROOT} ${bits(math.sqrt(narrow.f64_of_bits(1)))}")
+  println("${FUSED} ${bits(math.fma(1.0 + 1.0 / 134217728.0, 1.0 - 1.0 / 134217728.0, -1.0))}")
+  println("${UNDERFLOW} ${bits(math.fma(narrow.f64_of_bits(1), 0.5, narrow.f64_of_bits(1)))}")
+  println("${OVERFLOW} ${bits(math.fma(float.MAX, 2.0, -float.MAX))}")
+  var i = 0
+  for f in [math.floor, math.ceil, math.trunc, math.round_even, math.round] {
+    println("${ROUNDED[i]} ${bits(f(-0.5))}")
+    i = i + 1
+  }
+  println("${bits(math.round(0.49999999999999994))} ${bits(math.round(-0.49999999999999994))}")
+  println("${BITS} ${bits(narrow.f64_of_bits((1 << 63) | 1))}")
+  println("${SCALE} ${bits(math.ldexp(1.5, -1074))}")
+  println("${bits(math.min(0.0, -0.0))} ${bits(math.max(-0.0, 0.0))}")
+  println("${float.is_nan(math.sqrt(-1.0))} ${float.is_nan(math.fma(0.0, float.INFINITY, 0.0))}")
+  println("${float.is_nan(math.min(1.0, float.NAN))} ${float.is_nan(math.max(float.NAN, 1.0))}")
+}

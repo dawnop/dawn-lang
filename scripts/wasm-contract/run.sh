@@ -107,9 +107,10 @@ wasm_c_build() { # <out.wasm> <main.c> <dawn_rt.c> <shim.o> <include-dir> <tag.o
 
 # ---- both targets, one oracle: the native run's bytes ----------------------
 # Every wasm run also reports the leak ledger; zero is the only green.
-for prog in hello stress failure imm random; do
+for prog in hello stress failure imm random std_math; do
   src="$here/$prog.dawn"
   [ "$prog" != imm ] || src="$root/scripts/imm-contract/imm.dawn"
+  [ "$prog" != std_math ] || src="$root/scripts/spike-native/std_math.dawn"
   "$DAWNC" build "$src" -o "$work/$prog.native" 2>"$work/$prog.cc-err" ||
     { echo "FAIL: native build of $prog broke:" >&2; cat "$work/$prog.cc-err" >&2; exit 1; }
   "$work/$prog.native" >"$work/$prog.native.out"
@@ -125,6 +126,15 @@ for prog in hello stress failure imm random; do
     echo "FAIL: $prog stdout differs between native and wasm" >&2
     diff "$work/$prog.native.out" "$work/$prog.wasm.out" | sed -n '1,20p' >&2
     fail=1
+  fi
+  if [ "$prog" = std_math ]; then
+    if cmp -s "$work/$prog.wasm.out" "$root/scripts/spike-native/std_math.expect"; then
+      echo "OK   std_math: exact-operation witnesses match the frozen bits"
+    else
+      echo "FAIL: std_math exact-operation oracle differs" >&2
+      diff -u "$root/scripts/spike-native/std_math.expect" "$work/$prog.wasm.out" >&2 || true
+      fail=1
+    fi
   fi
   if grep -q '^rc-balance: 0$' "$work/$prog.wasm.err"; then
     echo "OK   $prog: rc-balance 0 (every counted object released)"
@@ -260,4 +270,4 @@ else
 fi
 
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "wasm contract ok (hello, stress, failure, imm, failure_uncaught, 5 negative controls)"
+echo "wasm contract ok (hello, stress, failure, imm, std_math, failure_uncaught, 5 negative controls)"
