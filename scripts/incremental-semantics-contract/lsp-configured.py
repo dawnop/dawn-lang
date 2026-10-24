@@ -190,7 +190,7 @@ def selftest():
         raise AssertionError("configuration accepted drifted anchors or invalid policy")
     print("OK: two private policies, observation schema, and four rejection controls")
     command = native_command("/tool/cc", Path("/private"))
-    assert command[1:7] == list(NATIVE_FLAGS)
+    assert command[1:8] == list(NATIVE_FLAGS)
     assert command[-3:] == ["/private/nmain.c", "/private/runtime/c/dawn_rt.c", "-lm"]
     assert command.count("-o") == 1 and command[command.index("-o") + 1] == "/private/dawnc"
     print("OK: native recipe preserves canonical C flags and fresh runtime/output paths")
