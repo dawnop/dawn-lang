@@ -402,6 +402,7 @@ native CLI、wasm 和完整外部门禁仍需通过。不能只跑新 math gate 
 
 ### K4 落地与成本（2026-10-24）
 
+契约门提交 `9089eddf7c9561fef90d2b219c0f77571d30f09f`。
 永久工具与使用说明在 `scripts/math-contract/`。固定种子 20261024 的语料含 20658 行
 运行期输入和 108 项实际 comptime 常量，每行同时比较直接调用与函数值，NaN 只比分类。
 `gen.py --check` 重跑 Java 21.0.2，MPFR 修正语料单独登记；输入、期望输出、程序及
@@ -416,7 +417,8 @@ native CLI、wasm 和完整外部门禁仍需通过。不能只跑新 math gate 
 CI 在现有 native-diff-2 中增加一个 run step；普通 corpus 也由 spike-native 自动分片并跑
 ASan。wasm-contract 复用自己的 driver 与 SDK 调用两种编译器常量验证，不新建 workflow
 job。已运行 steps_lock record，28 个 family 共 172 个 run step。新增原生契约冷运行
-35.76 秒（含全部控制）；独立 wasm 常量验证 17.42 秒。整条 wasm gate 在一次本机测量中
+35.76 秒（含全部控制）；普通 spike-native 项单独运行 10.15 秒，
+并行分片的实际增量仍由最终 job 墙钟判断。独立 wasm 常量验证 17.42 秒。整条 wasm gate 在一次本机测量中
 从 34.06 秒到 71.22 秒，后者有其他验证同时运行，其中新增部分 24.63 秒，因此不把差值
 当成稳定增量。后续同一 driver 的复测为 52.87 秒，其中新增部分 16.37 秒，
 相对基线增加 18.81 秒。最终外部门禁提供实际 job 墙钟。没有提高 native-diff-2 的 635 秒、
