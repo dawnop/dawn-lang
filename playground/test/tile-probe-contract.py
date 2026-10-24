@@ -246,7 +246,12 @@ os.execv(tool, [tool] + a)
             d, hit, calls, _ = request(f'warm-hit-{mode}', host, mode=mode, changes={'PLAY_ANSWERS': str(store)})
             assert d['cached'] is True and normalized(hit) == normalized(raw), ('fresh reason/cache mismatch', d, cold)
             assert not any(c['command'] in ('parse', 'build') for c in calls), calls
-        for name, code, changes in [('byte', host + ' ', {}), ('toolchain', host, {'PLAY_TOOLCHAIN_ID': '0.101.0 b1:000000000000'})]:
+        # Keep native_ready's release version from the canonical compiler ID.
+        # Flipping one hex digit guarantees a miss even for an all-zero digest.
+        version, digest = env['PLAY_TOOLCHAIN_ID'].split(' b1:')
+        miss_digest = ('0' if digest[0] != '0' else '1') + digest[1:]
+        miss_toolchain = f'{version} b1:{miss_digest}'
+        for name, code, changes in [('byte', host + ' ', {}), ('toolchain', host, {'PLAY_TOOLCHAIN_ID': miss_toolchain})]:
             d, _, calls, _ = request(f'warm-miss-{name}', code, changes={'PLAY_ANSWERS': str(store)} | changes)
             assert not d['cached'] and d['unmapped'] == cold['unmapped'], d
             parse_builds(calls, 'native', False, code)
