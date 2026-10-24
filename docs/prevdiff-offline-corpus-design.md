@@ -1,6 +1,6 @@
 # 生态语料离线输入：`selfhost-prev-diff.sh --corpus site` 不联网也能整跑
 
-> 状态：**current**。实现：`scripts/selfhost-prev-diff.sh`（`ECO_TREE_SHA`、`--pack-corpus`、`DAWN_ECO_CORPUS`）。
+> 状态：**current**。实现：`scripts/selfhost-prev-diff.sh`（`ECO_TREES`、`--pack-corpus`、`DAWN_ECO_CORPUS`）。
 
 ## 问题
 
@@ -23,18 +23,23 @@ git 元数据是这个门本身的输入（声明扫描就是读提交信息）�
 
 与种子同一条规矩：**输入已备好就不联网，备好的输入每次按仓库里钉住的摘要校验。**
 
-1. `ECO_REV` 旁边钉 `ECO_TREE_SHA`：`backend-dawn/src` 的树摘要，算法是 `seedjar.sh` 的
+1. `ECO_REV` 旁边的 `ECO_TREES` 每行钉一个生产源根与其树摘要，算法是 `seedjar.sh` 的
    `seed_tree_sha`（种子 std 用的同一个：按路径排序，每个文件贡献长度、路径、字节）。
-   只摘 `backend-dawn/src`，因为脚本只读它。
-2. `--pack-corpus FILE`：在联网的机器上取 `ECO_REV`、核对提交与树摘要后，把 `backend-dawn/src`
-   打成 tar 写到 `FILE`，然后退出。打包与使用读的是同一个脚本里的同一对 pin，没有第二份副本。
-3. `DAWN_ECO_CORPUS=FILE`：设了就从这个 tar 解出语料、算树摘要，不等于 `ECO_TREE_SHA` 即拒绝；
+   dawnop-site `94fbd945`（v0.100.0）已删除 `backend-dawn/src`，因此只声明
+   `backend-dawn/core/src`、`backend-dawn/app/jvm/src`、`backend-dawn/app/native/src`。
+   不兼容旧布局，不加入站点的独立测试根。每个源根都必须存在且包含至少一个普通 `.dawn` 文件。
+2. `--pack-corpus FILE`：在联网的机器上取 `ECO_REV`、逐根核对树摘要后，把这三个源根
+   打成 tar 写到 `FILE`，然后退出。打包、验证与扫描都从同一份声明派生路径，没有第二份清单。
+3. `DAWN_ECO_CORPUS=FILE`：设了就从这个 tar 解出语料、逐根算树摘要，不等于声明的摘要即拒绝；
    全程不碰网络。没设就走原来的 `git fetch`，行为不变。
 4. 两条路径都拒绝树里的符号链接与其他非普通文件：`seed_tree_sha` 只摘普通文件，
    而扫描用 `find -name '*.dawn'` 会把链接也交给编译器，摘要看不见的东西不能进语料。
 5. `git fetch` 路径在核对提交之后也核对树摘要。提交哈希本身已经够强；多核一次是为了让
-   pin 对保持诚实：推进 `ECO_REV` 忘了改 `ECO_TREE_SHA`，nightly 当天就红并印出新摘要，
+   pin 保持诚实：推进 `ECO_REV` 忘了更新源根摘要，nightly 当天就红并印出不匹配源根的新摘要，
    而不是等某次离线运行才发现。成功时不多印一行，nightly 的输出不变。
+
+每个源根直接配一个摘要，沿用现有算法，不引入额外的根清单摘要编码，也不用维护两份按位置配对的数组。
+验证错误指出具体源根；格式化只复制声明的源根并保留相对路径，额外解包的文件不会进入扫描。
 
 git 元数据由运行方提供：在本地按提交做一个包含 `<seed tag>..HEAD` 全部提交的浅仓库，
 连同 `.dawn/seeds` 里已校验的种子一起送过去，在那个仓库里跑脚本。这一半不进公开仓：
@@ -44,7 +49,8 @@ git 元数据由运行方提供：在本地按提交做一个包含 `<seed tag>.
 
 - 改 tar 里任一文件一个字节：`DAWN_ECO_CORPUS` 路径报 `failed verification` 退出 1，扫描不开始。
 - tar 里放一个符号链接：报非普通文件退出 1。
-- 改 `ECO_TREE_SHA` 一位、不设 `DAWN_ECO_CORPUS`：`git fetch` 路径报摘要不符退出 1。
+- 删除任一个声明源根：报缺少该源根退出 1；清空源根或只留非 Dawn 文件：报无 Dawn 源文件退出 1。
+- 改任一声明的树摘要一位、不设 `DAWN_ECO_CORPUS`：`git fetch` 路径报摘要不符退出 1。
 - 不设 `DAWN_ECO_CORPUS`、pin 对一致：输出与改动前逐行相同。
 
 ## 不做的（理由）
@@ -53,6 +59,7 @@ git 元数据由运行方提供：在本地按提交做一个包含 `<seed tag>.
   按设计不带 `--corpus site`（生态语料 2026-09 挪去 nightly，理由见脚本头）。没有作业读它，
   放进去只是让每次 `ECO_REV` 推进多一次重发输入包。
 - **按 tar 文件的 sha256 钉。** `git archive` 的字节随 git 版本可能变，树摘要只看内容。
+- **整个 `backend-dawn` 一起钉与扫描。** 会把独立测试根、脚本和文档引入生产源码扫描；显式源根保持范围不变。
 - **脚本里认「无 `.git`」并改读提交信息文件。** `EMITCHANGE_SOURCE` 是自测钩子；让生产路径读一个
   外部给的声明文件，等于让运行方自己写豁免。真 git 仓库里 `git log` 读到的就是提交本身。
 - **GitHub 的 `archive/<rev>.tar.gz`。** 不保证字节稳定，且仍要联网。
