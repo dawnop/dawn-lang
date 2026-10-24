@@ -160,18 +160,20 @@ def reference_math_problems(packages, files):
                 problems.append(f"{path} reaches {module}: a reference must keep "
                                 "its independent transcendental algorithm")
                 continue
-            # A slash-free module is relative to the importing package. Std
-            # modules also use relative imports within std.
-            if "/" not in module:
-                if path.startswith("std/"):
-                    target = f"std/{module}.dawn"
-                else:
-                    pkg = path.split("/")[1]
-                    target = f"packages/{pkg}/src/{module}.dawn"
+            # Follow both repository package imports and package-relative
+            # paths (including nested helpers). Over-approximation is safe
+            # here: a helper's unrelated import can require review, but an
+            # unknown dependency cannot silently certify independence.
+            targets = {module_path(module)}
+            if path.startswith("std/"):
+                targets.add(f"std/{module}.dawn")
             else:
-                target = module_path(module)
-            if target in files:
-                pending.append(target)
+                pkg = path.split("/")[1]
+                targets.add(f"packages/{pkg}/src/{module}.dawn")
+            found = targets & files.keys()
+            if not found:
+                problems.append(f"{path} cannot inspect reference dependency {module}")
+            pending.extend(found)
     return sorted(problems)
 
 
@@ -503,6 +505,24 @@ def self_test():
         else:
             print(f"FAIL  self-test: {name} was accepted (got {found})")
             bad += 1
+    nested = dict(files)
+    nested[ref_path] += "\nuse mathhelper/borrowed.{borrowed}\n"
+    nested["packages/mathhelper/src/borrowed.dawn"] = "use util/forward\npub fn borrowed(x: Float) -> Float = forward.borrowed(x)\n"
+    nested["packages/mathhelper/src/util/forward.dawn"] = "use std/math as m\npub fn borrowed(x: Float) -> Float = m.exp(x)\n"
+    _listed, found = check(good, nested, ledger)
+    if any("reaches std/math.exp" in p for p in found):
+        print("PASS  self-test: a nested shared forwarding helper")
+    else:
+        print(f"FAIL  self-test: a nested shared forwarding helper was accepted: {found}")
+        bad += 1
+    missing_helper = dict(files)
+    missing_helper[ref_path] += "\nuse uninspected/helper\n"
+    _listed, found = check(good, missing_helper, ledger)
+    if any("cannot inspect reference dependency uninspected/helper" in p for p in found):
+        print("PASS  self-test: an unavailable dependency cannot certify independence")
+    else:
+        print(f"FAIL  self-test: an unavailable dependency was accepted: {found}")
+        bad += 1
     exact = dict(files)
     exact[ref_path] += "\nuse std/math as m\nfn shared_sqrt(x: Float) -> Float = m.sqrt(x)\n"
     _listed, found = check(good, exact, ledger)

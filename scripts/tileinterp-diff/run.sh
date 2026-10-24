@@ -198,6 +198,10 @@ for m in exp-misrouted mulf-adds bounds-unchecked unsupported-skipped mma-drops-
       build_jar "$d" "$pkg"
       run_families "$d" 30
       if judge "$d" > "$d/judge.out" 2>&1; then cat "$d/judge.out" >&2; fail "$m: the comparison stayed green"; fi
+      # Skipping a fence newly covers token_fences. Require that precise
+      # oracle, so a timeout in an unrelated family cannot kill this control.
+      grep -q '^FAIL  covered but not in covered.txt: token_fences$' "$d/judge.out" ||
+        { cat "$d/judge.out" >&2; fail "$m: the newly accepted fence was not named"; }
       echo "PASS  $m: the refusal test and the comparison went red (first: $(grep -m1 '^FAIL ' "$d/judge.out" | cut -c1-160))"
       ;;
     mma-drops-term | narrow-unrounded)
