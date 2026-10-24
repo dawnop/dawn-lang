@@ -43,7 +43,7 @@ NEWLY_DOCUMENTED_FUNCTIONS = {
 
 
 def java_command(jar, *args):
-    return ["java", "-Xss512m", "-Xmx2g", "-jar", str(jar), *args]
+    return ["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", str(jar), *args]
 
 
 def checker_is_complete(jar):

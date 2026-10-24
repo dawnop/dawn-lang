@@ -119,7 +119,7 @@ def write_raw(prog, outdir):
         target, module = target_of(prog, work)
         run([DAWN, "__emitc", str(target), "-o", str(d / "out.c"), "--map", str(d / "c.dawnmap")])
         run([DAWN, "__emit", str(target), "-o", str(work / "classes"), "--map", str(d / "jvm.dawnmap")])
-        listing = run([javap_binary(), "-c", "-p", "-s", str(work / "classes" / f"{module}.class")]).stdout
+        listing = run([javap_binary(), "-J-XX:-UsePerfData", "-c", "-p", "-s", str(work / "classes" / f"{module}.class")]).stdout
     (d / "javap.txt").write_text(listing, encoding="utf-8")
     spec = [f"source {prog['source']}", f"module {module}"]
     (d / "spec.txt").write_text("\n".join(spec) + "\n", encoding="utf-8")

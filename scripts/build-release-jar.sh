@@ -44,7 +44,7 @@ stage_a="$work/stage-a.jar"
 stage_b="$work/stage-b.jar"
 stage_c="$work/stage-c.jar"
 smoke_dir="$work/smoke"
-java_cmd=(java -Xss512m)
+java_cmd=(java -XX:-UsePerfData -Xss512m)
 seed_args=(
   --std "$seed_std"
   --vendor org/objectweb/asm

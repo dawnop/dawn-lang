@@ -119,7 +119,7 @@ def ubsan(work):
 
 
 def checker(jar, case, std):
-    p = run(["java", "-Xss512m", "-Xmx2g", "-jar", jar, "__check",
+    p = run(["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", jar, "__check",
              "--std", std,
              ROOT / "scripts/checker-corpus/cases" / case])
     return "\n".join(s for s in p.stdout.splitlines() if s.startswith("D\t"))
@@ -156,7 +156,7 @@ def controls(work, only):
             run([sys.executable, tree / "scripts/gen-stdsrc.py"])
         jar = tree / "compiler.jar"
         run([DAWN, "build", tree / "selfhost", "-o", jar])
-        run(["java", "-jar", jar, "--version"])
+        run(["java", "-XX:-UsePerfData", "-jar", jar, "--version"])
         if name == "effect-forward":
             p = run([DAWN, "test", tree / "selfhost/src/check/checker.dawn"], expected=None)
             marker = "FAIL  check/checker :: bitwise Int operators keep native TAST and Amount reduces before a count is checked"
@@ -176,11 +176,11 @@ def controls(work, only):
                 raise RuntimeError(f"{name}: positive control failed")
             if name == "c-truncation":
                 c, target = tree / "probe.c", tree / "probe.bin"
-                run(["java", "-Xss512m", "-Xmx2g", "-jar", jar, "__emitc", source, "-o", c])
+                run(["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", jar, "__emitc", source, "-o", c])
                 c_build(c, target, "gcc", "-O2")
                 p = run([target])
             else:
-                p = run(["java", "-Xss512m", "-Xmx2g", "-jar", jar, "run", "--std", tree / "std", source])
+                p = run(["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", jar, "run", "--std", tree / "std", source])
             if p.stdout == want or p.stderr:
                 raise RuntimeError(f"{name}: numerical control stayed green or crashed: {p}")
             print(f"RED {name}: expected={want.strip()} actual={p.stdout.strip()}", flush=True)

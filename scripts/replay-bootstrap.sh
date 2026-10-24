@@ -87,7 +87,7 @@ SEED_STAGE="$OUT/seed-stage"
 mkdir -p "$SEED_STAGE"
 (
   cd "$SEED_STAGE"
-  java -Xss512m -jar "$SEED" build "$ROOT/selfhost" -o "$OUT/boot.jar" > /dev/null
+  java -XX:-UsePerfData -Xss512m -jar "$SEED" build "$ROOT/selfhost" -o "$OUT/boot.jar" > /dev/null
 )
 echo "seed compiled selfhost"
 
@@ -104,17 +104,17 @@ add_exports=(--add-exports java.base/jdk.internal.vm=ALL-UNNAMED)
 # 2) fixed point: boot emits selfhost, that compiler emits selfhost again —
 #    byte-identical (the seed's influence is gone after one generation).
 #    boot.jar comes first on the class path so its `main` wins over the seed's.
-java -Xss512m "${add_exports[@]}" -cp "$OUT/boot.jar:$SEED" main \
+java -XX:-UsePerfData -Xss512m "${add_exports[@]}" -cp "$OUT/boot.jar:$SEED" main \
   emit selfhost -o "$OUT/s2" --std std > /dev/null
-java -Xss512m "${add_exports[@]}" -cp "$OUT/s2:$SEED" main \
+java -XX:-UsePerfData -Xss512m "${add_exports[@]}" -cp "$OUT/s2:$SEED" main \
   emit selfhost -o "$OUT/s3" --std std > /dev/null
 diff -r "$OUT/s2" "$OUT/s3" > /dev/null || { echo "FAIL: stage3 != stage2"; exit 1; }
 echo "OK: fixed point — stage2 == stage3"
 
 # 3) standalone closure from the replayed generation
-java -Xss512m "${add_exports[@]}" -cp "$OUT/boot.jar:$SEED" main \
+java -XX:-UsePerfData -Xss512m "${add_exports[@]}" -cp "$OUT/boot.jar:$SEED" main \
   build selfhost -o "$OUT/a.jar" "${VENDOR[@]}" > /dev/null
-java -Xss512m -jar "$OUT/a.jar" build selfhost -o "$OUT/b.jar" "${VENDOR[@]}" > /dev/null
+java -XX:-UsePerfData -Xss512m -jar "$OUT/a.jar" build selfhost -o "$OUT/b.jar" "${VENDOR[@]}" > /dev/null
 cmp "$OUT/a.jar" "$OUT/b.jar"
 echo "OK: standalone closure"
 

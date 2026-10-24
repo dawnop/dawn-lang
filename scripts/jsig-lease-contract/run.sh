@@ -93,7 +93,7 @@ build_case() {
 
 run_case() {
   local case_dir=$1
-  java -Xss512m -Xmx1g -jar "$case_dir/app.jar" "$work/a.jar" "$work/b.jar"
+  java -XX:-UsePerfData -Xss512m -Xmx1g -jar "$case_dir/app.jar" "$work/a.jar" "$work/b.jar"
 }
 
 positive="$work/positive"

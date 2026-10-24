@@ -59,7 +59,7 @@ run_probe() {
   local project=$1 fixture=$2 jar=$3
   "$dawn" build "$project" -o "$jar" --std "$root/std"
   DAWN_PROJECT_PLAN_FIXTURE="$fixture" \
-    java -Xss512m -Xmx2g -jar "$jar"
+    java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar"
 }
 
 setup_captured_fixture "$work/captured-baseline"
@@ -85,7 +85,7 @@ if ! "$dawn" build "$loader_probe" -o "$work/loader-mutant.jar" \
   fail "fresh-replan loader mutant did not compile"
 fi
 if DAWN_PROJECT_PLAN_FIXTURE="$work/captured-loader-mutant" \
-    java -Xss512m -Xmx2g -jar "$work/loader-mutant.jar" \
+    java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$work/loader-mutant.jar" \
     > "$work/loader-mutant.out" 2>&1; then
   fail "fresh-replan loader mutant stayed green"
 fi
@@ -107,7 +107,7 @@ if ! "$dawn" build "$completion_mutant/selfhost" -o "$work/completion-mutant.jar
   fail "fresh-completion mutant did not compile"
 fi
 if python3 "$here/completion.py" \
-    java -Xss512m -Xmx2g -jar "$work/completion-mutant.jar" lsp \
+    java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$work/completion-mutant.jar" lsp \
     > "$work/completion-mutant.out" 2>&1; then
   fail "fresh-completion mutant stayed green"
 fi

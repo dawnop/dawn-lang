@@ -124,7 +124,7 @@ private_compiler() { # name [mutation] -- a private selfhost jar, optionally mut
 }
 
 jar_cmd() { # jar
-  CMD=(env DAWN_SELFHOST_CP= java -Xss512m -Xmx2g -jar "$1")
+  CMD=(env DAWN_SELFHOST_CP= java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$1")
 }
 
 private_compiler baseline

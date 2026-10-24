@@ -22,11 +22,11 @@ OUT=build
 rm -rf "$OUT" && mkdir -p "$OUT"
 
 javac -cp "$JAR" -d "$OUT" SamGen.java
-java -cp "$JAR:$OUT" SamGen "$OUT"
+java -XX:-UsePerfData -cp "$JAR:$OUT" SamGen "$OUT"
 javac -cp "$OUT" -d "$OUT" SpikeMain.java
 
 echo "== JVM =="
-java -cp "$OUT" SpikeMain | tee "$OUT/jvm.out"
+java -XX:-UsePerfData -cp "$OUT" SpikeMain | tee "$OUT/jvm.out"
 
 echo "== native-image =="
 native-image --no-fallback -cp "$OUT" -o "$OUT/spikemain" SpikeMain

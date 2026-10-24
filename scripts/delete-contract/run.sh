@@ -236,7 +236,7 @@ cp -R "$root/selfhost" "$work/jvm-mutant/selfhost"
 cp -R "$root/compiler-plan" "$work/jvm-mutant/compiler-plan"
 cp -R "$root/packages" "$work/jvm-mutant/packages"
 python3 "$here/mutate.py" jvm-file-delete "$work/jvm-mutant"
-if ! java -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
+if ! java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
     "$work/jvm-mutant/selfhost" -o "$work/jvm-mutant/compiler.jar" \
     --std "$root/std" --vendor org/objectweb/asm --vendor coursierapi \
     > "$work/jvm-mutant/build.out" 2>&1; then
@@ -245,7 +245,7 @@ if ! java -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
 fi
 prepare_cwd "$work/jvm-mutant/cwd"
 if ! (cd "$work/jvm-mutant/cwd" &&
-    java -Xss512m -Xmx2g -jar "$work/jvm-mutant/compiler.jar" run \
+    java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$work/jvm-mutant/compiler.jar" run \
     --std "$root/std" "$here/probe.dawn") \
     > "$work/jvm-mutant/out" 2> "$work/jvm-mutant/err"; then
   cat "$work/jvm-mutant/err" >&2
@@ -261,7 +261,7 @@ cp -R "$root/selfhost" "$work/jvm-query-mutant/selfhost"
 cp -R "$root/compiler-plan" "$work/jvm-query-mutant/compiler-plan"
 cp -R "$root/packages" "$work/jvm-query-mutant/packages"
 python3 "$here/mutate.py" jvm-is-symlink-nul "$work/jvm-query-mutant"
-if ! java -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
+if ! java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
     "$work/jvm-query-mutant/selfhost" -o "$work/jvm-query-mutant/compiler.jar" \
     --std "$root/std" --vendor org/objectweb/asm --vendor coursierapi \
     > "$work/jvm-query-mutant/build.out" 2>&1; then
@@ -270,7 +270,7 @@ if ! java -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
 fi
 prepare_cwd "$work/jvm-query-mutant/cwd"
 if ! (cd "$work/jvm-query-mutant/cwd" &&
-    java -Xss512m -Xmx2g -jar "$work/jvm-query-mutant/compiler.jar" run \
+    java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$work/jvm-query-mutant/compiler.jar" run \
     --std "$root/std" "$here/probe.dawn") \
     > "$work/jvm-query-mutant/out" 2> "$work/jvm-query-mutant/err"; then
   cat "$work/jvm-query-mutant/err" >&2

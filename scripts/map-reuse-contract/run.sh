@@ -233,7 +233,7 @@ if ! "$root/bin/dawn" build "$mdir/selfhost" -o "$mdir/compiler.jar" \
   cat "$mdir/build.out" >&2
   fail "$mutation did not compile"
 fi
-printf '#!/bin/sh\nexec java -Xss512m -Xmx2g -jar "%s" "$@"\n' "$mdir/compiler.jar" > "$mdir/dawn"
+printf '#!/bin/sh\nexec java -XX:-UsePerfData -Xss512m -Xmx2g -jar "%s" "$@"\n' "$mdir/compiler.jar" > "$mdir/dawn"
 chmod +x "$mdir/dawn"
 run_leg "$mutation" "" "$mdir/dawn"
 run_record_leg "$mutation" "" "$mdir/dawn"

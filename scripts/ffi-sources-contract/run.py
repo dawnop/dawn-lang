@@ -196,7 +196,7 @@ def collection_mutant(app, work, env):
     jar = tree / "mutant.jar"
     run([DAWN, "build", tree / "selfhost/src/nmain.dawn", "-o", jar])
     reset_log(env)
-    r = run(["java", "-Xss512m", "-Xmx2g", "-jar", jar, "build", app, "-o", work / "mutant"], env=env, good=False)
+    r = run(["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", jar, "build", app, "-o", work / "mutant"], env=env, good=False)
     assert r.returncode and "extern `f1_add` needs the package" in r.stdout + r.stderr, r.stdout + r.stderr
     assert entries(env) == []
     ok("mutant: omitting the transitive leaf collection fails its real build before cc")

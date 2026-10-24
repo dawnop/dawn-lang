@@ -389,7 +389,7 @@ std_expect() { # want label dir env-args -- dawn-args...
   local envs=()
   while [ "$1" != -- ]; do envs+=("$1"); shift; done
   shift
-  (cd "$dir" && env "${envs[@]}" "$STDRES_JAVA" -Xss512m -Xmx2g \
+  (cd "$dir" && env "${envs[@]}" "$STDRES_JAVA" -XX:-UsePerfData -Xss512m -Xmx2g \
     -jar "$ROOT/build/dawn-selfhost.jar" "$@") > "$OUT/j.out" 2> "$OUT/j.err" \
     && PAIR_J=0 || PAIR_J=$?
   (cd "$dir" && env "${envs[@]}" "$DAWNC" "$@") > "$OUT/n.out" 2> "$OUT/n.err" \

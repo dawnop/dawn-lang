@@ -78,7 +78,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "c-map"))
 from dawnmap import load  # noqa: E402
 
 DAWN_BIN = os.environ.get("DAWN_BIN", str(ROOT / "bin" / "dawn"))
-DAWN = (["java", "-Xss512m", "-Xmx6g", "-jar", DAWN_BIN] if DAWN_BIN.endswith(".jar") else [DAWN_BIN])
+DAWN = (["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx6g", "-jar", DAWN_BIN] if DAWN_BIN.endswith(".jar") else [DAWN_BIN])
 JAVAP = os.environ.get("JAVAP", "javap")
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
 READ_CLASS = runpy.run_path(str(ROOT / "scripts" / "method-size-gate.py"))["read_class"]
@@ -379,7 +379,7 @@ def check_case(name, work):
     if m["backend"] != "jvm":
         fail(f"{name}: the map is for backend {m['backend']!r}")
     owners = sorted({split_symbol(f["symbol"])[0] for f in m["fns"]})
-    listing = parse_javap(run([JAVAP, "-c", "-p", "-s"] +
+    listing = parse_javap(run([JAVAP, "-J-XX:-UsePerfData", "-c", "-p", "-s"] +
                               [str(d / "mapped" / (o + ".class")) for o in owners]).stdout)
     lengths = class_lengths(d / "mapped", owners)
     # where the labelled emission cannot be trusted: the whole of `dead`, and

@@ -76,7 +76,7 @@ def checked(jar: Path):
 
 def dumped(jar: Path, out: Path) -> str:
     out.mkdir()
-    result = run(["java", "-Xss512m", "-Xmx2g", "-jar", str(jar), "__lower", "--dump", str(out),
+    result = run(["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", str(jar), "__lower", "--dump", str(out),
                   str(HERE / "corpus.dawn")], env=dict(os.environ, DAWN_STD=str(ROOT / "std")))
     if result.returncode != 0:
         raise SystemExit(f"FAIL: `__lower --dump` failed with {jar.name}\n{result.stdout[-3000:]}")

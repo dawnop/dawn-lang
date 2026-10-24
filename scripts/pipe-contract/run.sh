@@ -208,12 +208,12 @@ build_mutant() { # mutation -> path to a driver that runs the mutant
     cat "$dir/build.out" >&2
     fail "$mutation mutant did not compile"
   fi
-  if ! java -jar "$dir/compiler.jar" --version > "$dir/version.out" 2>&1; then
+  if ! java -XX:-UsePerfData -jar "$dir/compiler.jar" --version > "$dir/version.out" 2>&1; then
     cat "$dir/version.out" >&2
     fail "$mutation mutant compiled but could not run"
   fi
   # hover.py execs its first argument, so hand the mutant over as a driver
-  printf '#!/bin/sh\nexec java -jar %s/compiler.jar "$@"\n' "$dir" > "$dir/dawn"
+  printf '#!/bin/sh\nexec java -XX:-UsePerfData -jar %s/compiler.jar "$@"\n' "$dir" > "$dir/dawn"
   chmod +x "$dir/dawn"
   printf '%s\n' "$dir/dawn"
 }

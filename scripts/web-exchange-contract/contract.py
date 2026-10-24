@@ -296,7 +296,7 @@ def main():
         want = set(a.only.split(","))
         fixtures = [f for f in FIXTURES if f.name in want]
     tmp = tempfile.mkdtemp(prefix="web-exchange-contract.")
-    jvm = subprocess.Popen([a.java, "-jar", a.jvm], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=dict(os.environ, TMPDIR=tmp))
+    jvm = subprocess.Popen([a.java, "-XX:-UsePerfData", "-jar", a.jvm], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=dict(os.environ, TMPDIR=tmp))
     try:
         port = int(jvm.stdout.readline().decode().strip())
         failures, agreed, exact = [], 0, 0

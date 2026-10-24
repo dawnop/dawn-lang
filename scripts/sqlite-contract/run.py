@@ -269,7 +269,7 @@ def backends(driver, work, env):
         if mutant == "jvm-success":
             jar = tree / "fallback.jar"
             run([DAWN, "build", pkg / "src/sqlite.dawn", "-o", jar], env=env)
-            r = run(["java", "-jar", jar], env=env, good=False)
+            r = run(["java", "-XX:-UsePerfData", "-jar", jar], env=env, good=False)
             cause = "sqlite_busy_timeout: unsupported entry returned Ok"
         else:
             wasm = tree / "fallback.wasm"
@@ -337,7 +337,7 @@ def main():
             jar = work / "nmain.jar"
             run([DAWN, "build", ROOT / "selfhost/src/nmain.dawn", "-o", jar])
             driver = work / "dawnc"
-            write(driver, '#!/bin/sh\nexec java -Djava.io.tmpdir="$TMPDIR" -Xss512m -Xmx2g -jar "' + str(jar) + '" "$@"\n')
+            write(driver, '#!/bin/sh\nexec java -XX:-UsePerfData -Djava.io.tmpdir="$TMPDIR" -Xss512m -Xmx2g -jar "' + str(jar) + '" "$@"\n')
             driver.chmod(0o755)
         env = dict(os.environ, CC=str(wrapper(work)), F3_REAL_CC=CC, F3_CC_LOG=str(work / "cc.jsonl"),
                    DAWN_PKG_CACHE=str(work / "pkg-cache"), ASAN_OPTIONS="detect_leaks=1:halt_on_error=1",

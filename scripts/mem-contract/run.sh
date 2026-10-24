@@ -42,7 +42,7 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 # ---- JVM -------------------------------------------------------------------
-java -Xss512m -jar "$jar" run "$here/probe.dawn" > "$work/jvm_out.txt"
+java -XX:-UsePerfData -Xss512m -jar "$jar" run "$here/probe.dawn" > "$work/jvm_out.txt"
 if ! diff -u "$here/expected.txt" "$work/jvm_out.txt"; then
   echo "FAIL: the JVM run of the I64Buf probe disagrees with expected.txt" >&2
   exit 1
@@ -51,7 +51,7 @@ echo "PASS  JVM values, panics and workloads"
 
 # ---- native ----------------------------------------------------------------
 cc_bin="${CC:-cc}"
-java -Xss512m -jar "$jar" __emitc "$here/probe.dawn" -o "$work/probe.c"
+java -XX:-UsePerfData -Xss512m -jar "$jar" __emitc "$here/probe.dawn" -o "$work/probe.c"
 cflags=(-std=c11 -fwrapv -fexceptions -fno-strict-aliasing -pthread
   -Wall -Wextra -Werror
   -Wno-unused-variable -Wno-unused-but-set-variable
@@ -109,7 +109,7 @@ echo "PASS  at, set and len compile inline"
 # A `Mem` call is not a pure call. Core has no dead-code or common-subexpression
 # pass today; if one arrives it must leave order.dawn's four calls alone: two
 # reads of one slot with a write between them, and a read nobody uses.
-java -Xss512m -jar "$jar" __lower --dump "$work/core" "$here/order.dawn" > /dev/null
+java -XX:-UsePerfData -Xss512m -jar "$jar" __lower --dump "$work/core" "$here/order.dawn" > /dev/null
 python3 - "$work/core/order.core" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
@@ -121,7 +121,7 @@ if calls != want:
     print("      a read or a write was merged, moved or dropped (docs/mem-buffer-design.md 9, K3)", file=sys.stderr)
     sys.exit(1)
 PY
-got="$(java -Xss512m -jar "$jar" run "$here/order.dawn")"
+got="$(java -XX:-UsePerfData -Xss512m -jar "$jar" run "$here/order.dawn")"
 if [ "$got" != "7" ]; then
   echo "FAIL: order.dawn printed '$got', want 7 (first read 0, second read 7)" >&2
   exit 1
@@ -171,10 +171,10 @@ sys.exit(bad)
 PY
 }
 
-java -Xss512m -jar "$jar" __emitc "$here/kernel.dawn" -o "$work/kernel.c"
+java -XX:-UsePerfData -Xss512m -jar "$jar" __emitc "$here/kernel.dawn" -o "$work/kernel.c"
 borrow_check "$work/kernel.c"
 "$cc_bin" "${cflags[@]}" -O2 -o "$work/kernel_native" "$work/kernel.c" "$root/runtime/c/dawn_rt.c" -lm
-want_k="$(java -Xss512m -jar "$jar" run "$here/kernel.dawn")"
+want_k="$(java -XX:-UsePerfData -Xss512m -jar "$jar" run "$here/kernel.dawn")"
 got_k="$("$work/kernel_native")"
 if [ "$got_k" != "$want_k" ]; then
   echo "FAIL: the native kernel printed '$got_k', the JVM '$want_k'" >&2
@@ -186,7 +186,7 @@ echo "PASS  Mem evidence is borrowed in the generated C"
 # coherent flip of rc-mode-contract, `both`) and the same check has to go red,
 # or a regex that stopped matching would pass this section for ever.
 DAWN_RC_MODE_FLIPS="kernel:feistel:3:2=both" \
-  java -Xss512m -jar "$jar" __emitc "$here/kernel.dawn" -o "$work/kernel_owned.c"
+  java -XX:-UsePerfData -Xss512m -jar "$jar" __emitc "$here/kernel.dawn" -o "$work/kernel_owned.c"
 if borrow_check "$work/kernel_owned.c" 2> "$work/borrow_neg.err"; then
   echo "FAIL: the evidence-borrow check passed on C that passes the evidence owned" >&2
   exit 1

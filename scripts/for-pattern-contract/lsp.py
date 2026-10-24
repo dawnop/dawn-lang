@@ -409,7 +409,7 @@ def main() -> int:
         {"jsonrpc": "2.0", "method": "exit", "params": {}},
     ]
     done = subprocess.run(
-        [java, "-Xss512m", "-Xmx2g", "-jar", jar, "lsp"],
+        [java, "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", jar, "lsp"],
         input=b"".join(frame(message) for message in messages),
         capture_output=True,
         cwd=cwd,

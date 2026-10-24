@@ -28,7 +28,7 @@ expect_mutant_red() {
   cp -R "$root/compiler-plan" "$mutant/compiler-plan"
   ln -s "$root/packages" "$mutant/packages"
   mutate "$name" "$mutant"
-  if ! java -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
+  if ! java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
       "$mutant/selfhost" -o "$mutant/compiler.jar" --std "$root/std" \
       --vendor org/objectweb/asm --vendor coursierapi \
       > "$mutant/build.out" 2>&1; then
@@ -36,7 +36,7 @@ expect_mutant_red() {
     fail "$name mutant did not compile"
   fi
   if "$harness" --case "$case_name" \
-      java -Xss512m -Xmx2g -jar "$mutant/compiler.jar" lsp \
+      java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$mutant/compiler.jar" lsp \
       > "$mutant/run.out" 2>&1; then
     fail "$name mutant stayed green"
   fi

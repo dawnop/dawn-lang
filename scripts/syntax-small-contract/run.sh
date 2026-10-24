@@ -79,7 +79,7 @@ capture_checker_jar() {
   local jar_path=$1
   local fixture_path=$2
   local output_path=$3
-  java -Xss512m -Xmx2g -jar "$jar_path" __check "$fixture_path" | grep '^D' |
+  java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar_path" __check "$fixture_path" | grep '^D' |
     sed 's|\t[^\t]*/\([^\t/]*\)\t|\t\1\t|' > "$output_path"
 }
 
@@ -221,7 +221,7 @@ run_syntax_mutant() {
 
     restore-parser-builtin-branch)
       build_syntax_mutant "$1"
-      java -Xss512m -Xmx2g -jar "$mdir/compiler.jar" __parse "$builtin_hint_fixture" \
+      java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$mdir/compiler.jar" __parse "$builtin_hint_fixture" \
         > "$mdir/parser.out"
       if assert_parser_neutral "$mdir/parser.out" \
           > "$mdir/assert.out" 2>&1; then

@@ -84,7 +84,7 @@ def checked(jar: Path):
 
 def tested(jar: Path, tree: Path):
     env = dict(os.environ, DAWN_STD=str(ROOT / "std"))
-    return run(["java", "-Xss512m", "-Xmx4g", "-jar", str(jar), "test", str(tree / "selfhost")], env=env)
+    return run(["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx4g", "-jar", str(jar), "test", str(tree / "selfhost")], env=env)
 
 
 def main() -> None:

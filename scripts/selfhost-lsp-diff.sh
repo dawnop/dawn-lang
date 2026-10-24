@@ -45,7 +45,7 @@ mkdir -p "$OUT/proj/src"
 SEEDJAR="$(seed_jar)"
 SEEDJAVA="$(seed_java)"
 seed_root "$OUT/seed-root"
-printf '#!/bin/sh\ncd "%s" && DAWN_STD="%s" exec "%s" -Xss512m -jar "%s" "$@"\n' \
+printf '#!/bin/sh\ncd "%s" && DAWN_STD="%s" exec "%s" -XX:-UsePerfData -Xss512m -jar "%s" "$@"\n' \
   "$OUT/seed-root" "$OUT/seed-root/std" "$SEEDJAVA" "$SEEDJAR" > "$OUT/seed-cli"
 chmod +x "$OUT/seed-cli"
 REF=${DAWN_BIN:-"$OUT/seed-cli"}

@@ -326,7 +326,7 @@ check_mutant() {
     fail "$name mutant did not compile"
   fi
 
-  printf '#!/bin/sh\nexec java -Xss512m -Xmx2g -jar "%s" "$@"\n' "$dir/compiler.jar" \
+  printf '#!/bin/sh\nexec java -XX:-UsePerfData -Xss512m -Xmx2g -jar "%s" "$@"\n' "$dir/compiler.jar" \
     > "$dir/cli"
   chmod +x "$dir/cli"
 

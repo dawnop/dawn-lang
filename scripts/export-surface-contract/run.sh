@@ -44,7 +44,7 @@ run_dawn() {
   local compiler=$1
   shift
   case "$compiler" in
-    *.jar) java -jar "$compiler" "$@" ;;
+    *.jar) java -XX:-UsePerfData -jar "$compiler" "$@" ;;
     *) "$compiler" "$@" ;;
   esac
 }
@@ -97,7 +97,7 @@ build_mutant() {
     cat "$dir/build.out" >&2
     fail "$mutation mutant did not compile"
   fi
-  if ! java -jar "$dir/compiler.jar" --version > "$dir/version.out" 2>&1; then
+  if ! java -XX:-UsePerfData -jar "$dir/compiler.jar" --version > "$dir/version.out" 2>&1; then
     cat "$dir/version.out" >&2
     fail "$mutation mutant compiled but could not run"
   fi
@@ -487,7 +487,7 @@ mutant_breaks_std() {
   local mutation=$1 message=$2 mutant out
   mutant=$(build_mutant "$mutation")
   out="$work/breaks.$RANDOM"
-  if java -jar "$mutant" __check "$cases/accepted.dawn" > "$out" 2>&1; then
+  if java -XX:-UsePerfData -jar "$mutant" __check "$cases/accepted.dawn" > "$out" 2>&1; then
     cat "$out" >&2
     fail "$mutation: the bundled std still loads"
   fi
@@ -502,7 +502,7 @@ mutant_diverges() {
   local mutation=$1 name=$2 mutant out
   mutant=$(build_mutant "$mutation")
   out="$work/diverge.$RANDOM"
-  if timeout 120 java -jar "$mutant" __check "$cases/$name.dawn" > "$out" 2>&1; then
+  if timeout 120 java -XX:-UsePerfData -jar "$mutant" __check "$cases/$name.dawn" > "$out" 2>&1; then
     cat "$out" >&2
     fail "$mutation: the recursive type still checks once"
   fi
@@ -528,7 +528,7 @@ mutant_lsp_offers_internal_std() {
   local mutation=$1 mutant out
   mutant=$(build_mutant "$mutation")
   out="$work/lsp-use.$RANDOM"
-  if python3 "$root/scripts/lsp-use-completion.py" java -jar "$mutant" lsp > "$out" 2>&1; then
+  if python3 "$root/scripts/lsp-use-completion.py" java -XX:-UsePerfData -jar "$mutant" lsp > "$out" 2>&1; then
     cat "$out" >&2
     fail "$mutation: the completion list still answers to the audience"
   fi

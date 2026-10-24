@@ -52,7 +52,7 @@ def main():
             status, output = run('build', '--cp', oracle, fixture, '-o', root / 'subject.jar')
             if status:
                 raise RuntimeError(name + ' did not compile\n' + output)
-            result = subprocess.run(['java', '-Xss64m', '-Xmx2g', '-cp',
+            result = subprocess.run(['java', "-XX:-UsePerfData", '-Xss64m', '-Xmx2g', '-cp',
                                      str(oracle) + os.pathsep + str(root / 'subject.jar'),
                                      'contract.BodySchedulerSnapshot'], cwd=ROOT, text=True,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300)

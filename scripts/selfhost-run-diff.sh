@@ -29,7 +29,7 @@ SEEDJAR="$(seed_jar)"
 SEEDJAVA="$(seed_java)"
 seed_root "$OUT/seed-root"
 printf '#!/bin/sh
-cd "%s" && DAWN_STD="%s" exec "%s" -Xss512m -jar "%s" "$@"
+cd "%s" && DAWN_STD="%s" exec "%s" -XX:-UsePerfData -Xss512m -jar "%s" "$@"
 ' "$OUT/seed-root" "$OUT/seed-root/std" "$SEEDJAVA" "$SEEDJAR" > "$OUT/seed-cli"
 chmod +x "$OUT/seed-cli"
 DAWN=${DAWN_BIN:-"$OUT/seed-cli"}

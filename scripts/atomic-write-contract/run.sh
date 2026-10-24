@@ -482,7 +482,7 @@ cs_run() { # jar, args...
   shift
   if env "DAWN_MAVEN_MIRROR=file://$cs/repo" "COURSIER_CACHE=$cs/coursier" \
       "DAWN_PKG_CACHE=$cs/pkg" "DAWN_SELFHOST_CP=" \
-      "$JAVA_BIN" -Xss512m -Xmx2g -jar "$jar" "$@" > "$cs/last.out" 2> "$cs/last.err"; then
+      "$JAVA_BIN" -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" "$@" > "$cs/last.out" 2> "$cs/last.err"; then
     echo ok
   else
     echo err
@@ -726,7 +726,7 @@ fmt_build_native() { # outbin -- the native driver, from the checkout
 }
 
 fmt_jvm_driver() { # jar -- the command line prefix for a private JVM compiler
-  FMT_DRIVER=(env "DAWN_SELFHOST_CP=" "$JAVA_BIN" -Xss512m -Xmx2g -jar "$1")
+  FMT_DRIVER=(env "DAWN_SELFHOST_CP=" "$JAVA_BIN" -XX:-UsePerfData -Xss512m -Xmx2g -jar "$1")
 }
 
 fmt_expect_baseline() { # label, out

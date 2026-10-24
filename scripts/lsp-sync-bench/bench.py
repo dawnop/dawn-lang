@@ -219,7 +219,7 @@ class Server:
             env["DAWN_STD"] = str(std)
         self.name = name
         self.err = tempfile.TemporaryFile()
-        self.proc = subprocess.Popen(["java", *jvm, "-jar", str(jar), "lsp"], cwd=cwd, env=env,
+        self.proc = subprocess.Popen(["java", "-XX:-UsePerfData", *jvm, "-jar", str(jar), "lsp"], cwd=cwd, env=env,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self.err, start_new_session=True)
         self.buf = bytearray()

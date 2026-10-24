@@ -49,7 +49,7 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = ROOT / "scripts" / "core-sites"
 # a launcher, or a compiler jar (run.py's mutants), run the way bin/dawn runs one
 DAWN_BIN = os.environ.get("DAWN_BIN", str(ROOT / "bin" / "dawn"))
-DAWN = ["java", "-Xss512m", "-Xmx2g", "-jar", DAWN_BIN] if DAWN_BIN.endswith(".jar") else [DAWN_BIN]
+DAWN = ["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", DAWN_BIN] if DAWN_BIN.endswith(".jar") else [DAWN_BIN]
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
 
 

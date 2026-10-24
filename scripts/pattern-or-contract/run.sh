@@ -194,14 +194,14 @@ build_compiler() {
     cat "$work/$label-build.out" >&2
     fail "$label compiler did not compile"
   fi
-  java -Xss512m -Xmx2g -jar "$output" --version > /dev/null ||
+  java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$output" --version > /dev/null ||
     fail "$label compiler did not initialize"
 }
 
 capture_diagnostics() {
   local jar=$1 source=$2 output=$3
   local status=0
-  timeout --kill-after=5s 20s java -Xss512m -Xmx2g -jar "$jar" __check "$source" \
+  timeout --kill-after=5s 20s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __check "$source" \
     > "$output.raw" 2>&1 || status=$?
   grep '^D' "$output.raw" > "$output" || true
   return "$status"
@@ -210,7 +210,7 @@ capture_diagnostics() {
 capture_parse_diagnostics() {
   local jar=$1 source=$2 output=$3
   local status=0
-  timeout --kill-after=5s 20s java -Xss512m -Xmx2g -jar "$jar" __parse "$source" \
+  timeout --kill-after=5s 20s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __parse "$source" \
     > "$output.raw" 2>&1 || status=$?
   grep '^!' "$output.raw" > "$output" || true
   return "$status"
@@ -286,7 +286,7 @@ leading_pipe_assertions() {
 
 capture_runtime() {
   local jar=$1 output=$2
-  (cd "$root" && java -Xss512m -Xmx2g -jar "$jar" run "$runtime_fixture") > "$output" 2>&1
+  (cd "$root" && java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" run "$runtime_fixture") > "$output" 2>&1
 }
 
 runtime_assertions() {

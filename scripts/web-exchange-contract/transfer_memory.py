@@ -23,7 +23,7 @@ def transfer(java, jar, native, mb, chunked):
     with tempfile.TemporaryDirectory(prefix="web-source-transfer.") as tmp:
         env = dict(os.environ, TMPDIR=tmp)
         if jar:
-            p = subprocess.Popen([java, "-Xms32m", "-Xmx32m", "-XX:+AlwaysPreTouch",
+            p = subprocess.Popen([java, "-XX:-UsePerfData", "-Xms32m", "-Xmx32m", "-XX:+AlwaysPreTouch",
                                   "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC",
                                   f"-Djava.io.tmpdir={tmp}", "-jar", jar],
                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)

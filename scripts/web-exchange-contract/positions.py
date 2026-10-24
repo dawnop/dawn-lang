@@ -47,7 +47,7 @@ def main():
         trace = Path(tmp) / "jvm-trace"
         native_trace = Path(tmp) / "native-trace"
         env = dict(os.environ, TMPDIR=tmp, WEB_SOURCE_TRACE=str(trace))
-        jvm = subprocess.Popen([a.java, "-jar", a.jvm], stdout=subprocess.PIPE,
+        jvm = subprocess.Popen([a.java, "-XX:-UsePerfData", "-jar", a.jvm], stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, env=env)
         try:
             port = int(jvm.stdout.readline())

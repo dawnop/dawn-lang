@@ -206,7 +206,7 @@ fi
 range_enter
 TAG=${RANGE_TAG:-$TAG}
 # on bin/dawn's JDK, not PATH's java (seedjar.sh seed_java, issue #267)
-PREV=("$(seed_java)" -Xss512m -jar "$(seed_jar)")
+PREV=("$(seed_java)" -XX:-UsePerfData -Xss512m -jar "$(seed_jar)")
 # the seed compiles against the std it released with, not today's std/ --
 # the repo std may use prelude machinery one generation ahead of the seed's
 # checker (seedjar.sh seed_std_dir). Std-source changes therefore show up in

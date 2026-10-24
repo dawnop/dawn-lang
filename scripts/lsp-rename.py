@@ -874,7 +874,7 @@ def build_mutant(dawn, work, name):
     if r.returncode != 0:
         sys.stderr.write(r.stdout + r.stderr)
         raise SystemExit("%s: mutant did not compile" % name)
-    return ["java", "-Xss512m", "-Xmx2g", "-jar", jar, "lsp"]
+    return ["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-jar", jar, "lsp"]
 
 
 def main():

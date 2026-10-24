@@ -97,7 +97,7 @@ with tempfile.TemporaryDirectory(prefix='play-c-matrix.') as work:
                 assert native == (output.read_bytes(), cmap.read_bytes()), (source.stem, 'compiler C/map bytes differ')
                 classes, jmap = raw / 'classes', raw / 'jvm.dawnmap'
                 run([ROOT / 'bin/dawn', '__emit', target, '-o', classes, '--map', jmap], env=env)
-                listing = run([os.environ.get('PLAY_JAVAP', 'javap'), '-J-Dstdout.encoding=UTF-8', '-c', '-p', '-s', classes / ('main.class' if project else 'prog.class')], env=env)
+                listing = run([os.environ.get('PLAY_JAVAP', 'javap'), '-J-XX:-UsePerfData', '-J-Dstdout.encoding=UTF-8', '-c', '-p', '-s', classes / ('main.class' if project else 'prog.class')], env=env)
                 print('C artifacts ' + json.dumps({'sample': source.stem, 'form': 'project' if project else 'file',
                     'jvm_map_sha256': hashlib.sha256(jmap.read_bytes()).hexdigest(), 'javap_sha256': hashlib.sha256(listing).hexdigest(),
                     'c_sha256': hashlib.sha256(native[0]).hexdigest(), 'map_sha256': hashlib.sha256(native[1]).hexdigest()}), flush=True)

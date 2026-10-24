@@ -159,7 +159,7 @@ class Toolchain:
         std = ["--std", str(self.std)] if self.std else []
         env = dict(os.environ)
         env.pop("DAWN_STD", None)
-        cmd = ["java", *JVM_OPTS, "-jar", str(self.jar), args[0], *std, *args[1:]]
+        cmd = ["java", "-XX:-UsePerfData", *JVM_OPTS, "-jar", str(self.jar), args[0], *std, *args[1:]]
         return sh(cmd, env=env, timeout=timeout)
 
 
@@ -289,7 +289,7 @@ class Batch:
         """Load the main class and run no case: as many arguments as there are
         cases start main past the last one. A class the verifier rejects fails
         here, and would otherwise fail every case of the batch at once."""
-        return sh(["java", "-Xss512m", "-jar", str(jar)] + ["x"] * len(self.indices), timeout=RUN_TIMEOUT)
+        return sh(["java", "-XX:-UsePerfData", "-Xss512m", "-jar", str(jar)] + ["x"] * len(self.indices), timeout=RUN_TIMEOUT)
 
     def stage(self, stage, src, work):
         if stage == "jvm-compile":
@@ -298,7 +298,7 @@ class Batch:
             rc, o, e = self.compile_jvm(src, work / "one.jar")
             if rc != 0:
                 return rc, o, e
-            return sh(["java", "-Xss512m", "-jar", str(work / "one.jar")] + ["x"] * len(self.indices),
+            return sh(["java", "-XX:-UsePerfData", "-Xss512m", "-jar", str(work / "one.jar")] + ["x"] * len(self.indices),
                       timeout=RUN_TIMEOUT)
         return self.tc.dawn("__emitc", str(src), "-o", str(work / "one.c"))
 
@@ -360,7 +360,7 @@ class Batch:
             san_ok = rc == 0
             if not san_ok:
                 self.find("cc-san", -1, e2)
-        jv = run_cases(["java", "-Xss512m", "-jar", str(jar)], labels)
+        jv = run_cases(["java", "-XX:-UsePerfData", "-Xss512m", "-jar", str(jar)], labels)
         nv = run_cases([str(nbin)], labels) if native_ok else None
         sv = run_cases([str(sbin)], labels, SAN_ENV) if san_ok else None
         agreed = []
@@ -418,7 +418,7 @@ class Batch:
             self.comptime(agreed[half:], jv)
             return
         self.stats["comptime"] += len(agreed)
-        kv = run_cases(["java", "-jar", str(jar)], agreed)
+        kv = run_cases(["java", "-XX:-UsePerfData", "-jar", str(jar)], agreed)
         for i in agreed:
             k = kv.get(i)
             if k is None or k["status"] != "ok":

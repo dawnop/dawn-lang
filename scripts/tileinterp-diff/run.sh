@@ -78,7 +78,7 @@ run_families() {
   local fam rc
   while read -r fam _mod _n; do
     rc=0
-    timeout -k 5 "${2:-120}" "$java_bin" -Xss512m -Xmx2g -jar "$1/diff.jar" "$fam" \
+    timeout -k 5 "${2:-120}" "$java_bin" -XX:-UsePerfData -Xss512m -Xmx2g -jar "$1/diff.jar" "$fam" \
       > "$1/out/$fam.out" 2> "$1/out/$fam.err" || rc=$?
     if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
       echo "  verdict timeout:${2:-120}s" | tee -a "$1/out/$fam.out" >> "$1/out/$fam.err"

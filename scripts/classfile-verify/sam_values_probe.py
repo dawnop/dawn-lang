@@ -31,8 +31,8 @@ def main():
             require(compiler_command(jar, "build", "--cp", str(fixture), str(source), "-o", str(program)), label + "_BUILD")
             with zipfile.ZipFile(program) as archive:
                 archive.extractall(out)
-            require(["java", *ADD_EXPORTS, "-cp", f"{verifier}:{fixture}:{jar}", "Verify", str(out)], label + "_VERIFY")
-            require(["java", "-jar", str(program)], label + "_VALUE", label + "_OK\n")
+            require(["java", "-XX:-UsePerfData", *ADD_EXPORTS, "-cp", f"{verifier}:{fixture}:{jar}", "Verify", str(out)], label + "_VERIFY")
+            require(["java", "-XX:-UsePerfData", "-jar", str(program)], label + "_VALUE", label + "_OK\n")
         invalid = work / "bad.dawn"
         invalid.write_text('use java "fixture.SamValues"\npub fn main() -> Unit !io = { let _ = SamValues.bytesValue(() => "not bytes") }\n')
         rejected = run(compiler_command(jar, "build", "--cp", str(fixture), str(invalid), "-o", str(work / "bad.jar")))
