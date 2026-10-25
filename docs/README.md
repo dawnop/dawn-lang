@@ -29,6 +29,8 @@ prints how many there are on every run.
 
 固定六参入口：[gpu-k3-entry6-design.md](gpu-k3-entry6-design.md)。
 
+只读布局与有效前缀：[tile-read-layout-design.md](tile-read-layout-design.md)。
+
 ## 当前全仓审查（v2）
 
 SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。

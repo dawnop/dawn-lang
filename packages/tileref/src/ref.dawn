@@ -5503,3 +5503,48 @@ pub fn entry6_ref(name: String, ins: List[List[Float]], scalars: List[Float]) ->
   }
   out ++ list.drop(ins[3], rows)
 }
+
+## Independent scalar batch/head/key indexing for the K3-G layout probes.
+## B is two, Q/O have two rows of four, K/V have capacity seventeen.
+## G is derived from HQ/HKV; no view, recorder or tile arithmetic is used.
+pub fn read_layout_ref(hq: Int, hkv: Int, ins: List[List[Float]], scale: Float, n: Int) -> List[Float] = {
+  let group = hq / hkv
+  let result = list.map(range(0, 2 * hq * 2 * 4), i => {
+    let batch = i / (hq * 2 * 4)
+    let head = i / (2 * 4) % hq
+    let column = i % 4
+    let kv_head = batch * hkv + head / group
+    var value = ins[0][i]
+    for key in range(0, n) {
+      let at = (kv_head * 17 + key) * 4 + column
+      value = value + ins[1][at] + 2.0 * ins[2][at]
+    }
+    scale * value
+  })
+  result ++ list.drop(ins[3], len(result))
+}
+
+## Independent full-prefix softmax for the small BF16 K3-G mask probe.
+## The nonzero corpus uses integral base-two scores, making probabilities
+## exact BF16 powers of two even when a later block increases the maximum.
+pub fn read_mask_ref(ins: List[List[Float]], scale: Float, n: Int) -> List[Float] = {
+  let result = list.map(range(0, 12 * 16 * 16), i => {
+    let batch = i / (6 * 16 * 16)
+    let head = i / (16 * 16) % 6
+    let query = i / 16 % 16
+    let column = i % 16
+    let kv_head = batch * 2 + head / 3
+    let scores = list.map(range(0, n), key => {
+      var dot = 0.0
+      for d in range(0, 16) { dot = dot + ins[0][((batch * 6 + head) * 16 + query) * 16 + d] * ins[1][(kv_head * 35 + key) * 16 + d] }
+      dot * scale
+    })
+    let peak = list.fold(scores, -INFINITY, (a, b) => if a > b { a } else { b })
+    let weights = list.map(scores, s => ref_exp2(s - peak))
+    let total = list.fold(weights, 0.0, (a, b) => a + b)
+    var numerator = 0.0
+    for key in range(0, n) { numerator = numerator + narrow.round_bf16(weights[key]) * ins[2][(kv_head * 35 + key) * 16 + column] }
+    numerator / total
+  })
+  result ++ list.drop(ins[3], len(result))
+}

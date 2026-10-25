@@ -559,6 +559,7 @@ kernels=(
   matmul_f16_sm90 matmul_f16_sm100 matmul_i8_sm90 matmul_i8_sm100
   scalar_scale scalar_len scalar_loop scalar_wide
   entry6_dynamic entry6_project1 entry6_project3
+  read_layout_g3 read_layout_g1 read_layout_mqa read_repeat read_mask
   dtype_e5m3 mmaf_scaled_e5m3
   vadd_producer vadd_debug foldif_debug
   bitwise_i8 bitwise_i16 bitwise_i32 bitwise_i64 bitwise_mask
@@ -705,6 +706,7 @@ mutants=(
   flash-demo-scale-constant flash-demo-last-kv flash-demo-no-rescale
   entry6-type-rejections entry6-source-controls
   entry6-n-constant entry6-view-capacity entry6-loop-floor entry6-unmarked entry6-sixth-as-pointer entry6-erase-projection
+  read-layout-type-rejections read-group-axis read-group-zero read-group-div2 read-group-shift read-n-constant read-loop-floor read-view-capacity read-live-stride read-no-mask
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -2703,13 +2705,13 @@ fi
 # follow one axis would make two blocks write one cell, which is the
 # disjointness the injectivity check keeps; no kernel here is written that
 # way, so the claim is held by a probe kernels.dawn keeps out of the
-# goldens, `out_along_twice`, cut `along: [0, 0]`. The clean recording
+# goldens, `out_along_twice`, cut `along: [Axis(0), Axis(0)]`. The clean recording
 # refuses it, by name, on both backends; under the mutant it records and
 # renders (exit 0), so the refusal is the check and nothing else is.
 if run_item out-along-twice-accepted; then
   mutant_project out-along-twice-accepted prog.dawn
   mutant_run out-along-twice-accepted out_along_twice
-  refusal='tileir: kernel `out_along_twice`: argument 0 (Out) follows grid axes [0, 0]; two of its dimensions follow one axis, so two blocks would write one cell'
+  refusal='tileir: kernel `out_along_twice`: argument 0 (Out) follows grid axes [Axis(0), Axis(0)]; two of its dimensions follow one axis, so two blocks would write one cell'
   for backend in jvm native; do
     clean="$work/out_along_twice.clean.$backend"
     rc=0
@@ -3409,6 +3411,74 @@ fi
 if run_item entry6-erase-projection; then
   entry6_refusal_mutant entry6-erase-projection
   echo "PASS  mutant: entry6-erase-projection (compiled; expected marker or projection refusal)"
+fi
+
+
+if run_item read-layout-type-rejections; then
+  project "$work/read-rejected" "$root/packages/tileir"
+  cp "$here/read-layout-rejected.dawn" "$work/read-rejected/src/main.dawn"
+  if "$root/bin/dawn" check "$work/read-rejected" > "$work/read-rejected.out" 2>&1; then fail "read view write or integer along accepted"; fi
+  sed -n '/^error:/p' "$work/read-rejected.out" > "$work/read-rejected.errors"
+  cmp -s "$here/read-layout-rejected.expected" "$work/read-rejected.errors" || {
+    cat "$work/read-rejected.out" >&2; fail "read layout type refusal changed";
+  }
+  echo "PASS  read layout checker: integer along and writing ReadView refused"
+fi
+
+read_layout_mutant() {
+  local m="$1" k=read_layout_g3 backend out rc=0
+  case "$m" in
+    read-n-constant|read-loop-floor|read-no-mask) kernel_mutant_project "$m"; build_native "$work/m-$m" "$work/m-$m.bin" -O0 ;;
+    *) mutant_project "$m" prog.dawn ;;
+  esac
+  if [ "$m" = read-no-mask ]; then k=read_mask; fi
+  mutant_run "$m" "$k"
+  mutant_run_bytecode "$m" "$k"
+  for backend in jvm native; do
+    out="$work/m-$m.$k.$backend"
+    [ "$(cat "$out.rc")" = 0 ] && [ "$(cat "$out.tilebc.rc")" = 0 ] || { cat "$out.err" >&2; fail "$m did not record"; }
+    ! cmp -s "$here/$k.tilebc" "$out.tilebc" || fail "$m stayed golden"
+  done
+  cmp -s "$work/m-$m.$k.jvm.tilebc" "$work/m-$m.$k.native.tilebc" || fail "$m backend bytes disagree"
+  if [ "$without_tileiras" != yes ]; then assemble "$work/m-$m.$k.jvm.tilebc" "$work/$m.cubin" "$gpu_name" || fail "$m assembly refused"; fi
+  if [ "$m" != read-no-mask ]; then
+    run_jvm "$work/m-$m" "$work/$m.structure" --read-layout-structure || rc=$?
+    local fragment
+    case "$m" in
+      read-group-*) fragment='read layout: grouped axis2 division by three' ;;
+      read-loop-floor) fragment='read layout: effective loop bound' ;;
+      *) fragment='read layout: dynamicShape and capacity stride' ;;
+    esac
+    [ "$rc" != 0 ] && grep -Fq "$fragment" "$work/$m.structure.err" || fail "$m structural oracle stayed green"
+  fi
+  echo "PASS  mutant: $m (legal JVM/native recording, byte parity and assembly; structural or device reference oracle)"
+}
+if run_item read-group-axis; then
+  read_layout_mutant read-group-axis
+fi
+if run_item read-group-zero; then
+  read_layout_mutant read-group-zero
+fi
+if run_item read-group-div2; then
+  read_layout_mutant read-group-div2
+fi
+if run_item read-group-shift; then
+  read_layout_mutant read-group-shift
+fi
+if run_item read-n-constant; then
+  read_layout_mutant read-n-constant
+fi
+if run_item read-loop-floor; then
+  read_layout_mutant read-loop-floor
+fi
+if run_item read-view-capacity; then
+  read_layout_mutant read-view-capacity
+fi
+if run_item read-live-stride; then
+  read_layout_mutant read-live-stride
+fi
+if run_item read-no-mask; then
+  read_layout_mutant read-no-mask
 fi
 
 _item_tick ""

@@ -1,5 +1,11 @@
 # tileref changelog
 
+## 0.1.6
+
+- Add independent scalar references for grouped read layouts and the small
+  BF16 prefix score-mask probe.
+
+
 ## 0.1.5 (2026-10-24)
 
 - Add the independent scalar-loop reference for fixed six-argument dynamic-prefix and projected-cell consumers.

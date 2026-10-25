@@ -108,6 +108,54 @@ def main():
         old_proj, old_dump = prepare("old-clean", old)
         verify("old-clean", old_proj, old_dump, old)
 
+        read_fixture = ROOT / "playground/test/tile_read_layout.dawn"
+        read_proj, read_dump = prepare("read-clean", read_fixture)
+        read_map = verify("read-clean", read_proj, read_dump, read_fixture)
+        for api in ["read_prefix", "read_blocks", "read_at", "tile_shape"]:
+            if api not in read_map:
+                sys.exit("FAIL read-clean: source API missing: " + api)
+        lost_read = work / "read-missing-call"
+        shutil.copytree(read_proj, lost_read)
+        probe = lost_read / "src/explore_probe.dawn"
+        old_loop = "for k in range(0, len(calls)) {"
+        text = probe.read_text()
+        if text.count(old_loop) != 1:
+            sys.exit("read call anchor is not unique")
+        probe.write_text(text.replace(old_loop, old_loop + '\n        if calls[k].name == "read_at" { continue }'))
+        verify("read-missing-call", lost_read, read_dump, read_fixture, refusal="source ")
+
+        # Remove grouping while expanding marker capacity so the altered tap
+        # still records legally. Equality must detect its different layout.
+        ungrouped = work / "read-lost-grouping"
+        shutil.copytree(read_proj, ungrouped)
+        probe = ungrouped / "src/explore_probe.dawn"
+        text = probe.read_text()
+        at = text.index("pub fn tap6[")
+        prefix, six = text[:at], text[at:]
+        helper = """use std/gpu
+use tileir/prog
+fn ungrouped[D](a: Arg[D]) -> Arg[D] = match a {
+  In(d, prog.Grid(e, t, p, along, sq)) -> {
+    let expanded = list.map(range(0, len(e)), j => match along[j] { gpu.Grouped(_k, g) -> e[j] * g, _ -> e[j] })
+    let axes = list.map(along, axis => match axis { gpu.Grouped(k, _g) -> gpu.Axis(k), other -> other })
+    In(d, prog.Grid(expanded, t, p, axes, sq))
+  }
+  other -> other
+}
+"""
+        for marker in "abcdefg":
+            six = six.replace(f"erase({marker})", f"erase(ungrouped({marker}))")
+        probe.write_text(helper + prefix + six)
+        verify("read-lost-grouping", ungrouped, read_dump, read_fixture,
+               refusal="call marks changed the program")
+
+        for tag, altered_probe in [("read-call-old", lost_read / "src/explore_probe.dawn"),
+                                   ("read-group-old", ungrouped / "src/explore_probe.dawn")]:
+            control = work / tag
+            shutil.copytree(old_proj, control)
+            (control / "src/explore_probe.dawn").write_text(altered_probe.read_text())
+            verify(tag, control, old_dump, old)
+
         # Keep the sixth Param the same dtype as the fifth, so the misplaced
         # position is type-correct and reaches the recording-equality oracle.
         same = work / "six_same.dawn"
@@ -141,7 +189,7 @@ def main():
                 six = change_once(six, "erase(g)", "erase(a)")
             elif tag in ("lost-projection", "wrong-axis"):
                 transform = "[]" if tag == "lost-projection" else "sq"
-                along = "along" if tag == "lost-projection" else "[0, 2, 1]"
+                along = "along" if tag == "lost-projection" else "[gpu.Axis(0), gpu.Axis(2), gpu.Axis(1)]"
                 helper = f'''fn altered[D](a: Arg[D]) -> Arg[D] = match a {{
   In(d, tileir.prog.Grid(e, t, p, along, sq)) -> In(d, tileir.prog.Grid(e, t, p, {along}, {transform}))
   Out(d, tileir.prog.Grid(e, t, p, along, sq)) -> Out(d, tileir.prog.Grid(e, t, p, {along}, {transform}))
@@ -149,7 +197,7 @@ def main():
 }}
 '''
                 # Use a module alias for the existing public Cells constructors.
-                helper = "use tileir/prog\n" + helper.replace("tileir.prog.Grid", "prog.Grid")
+                helper = ("use std/gpu\n" if tag == "wrong-axis" else "") + "use tileir/prog\n" + helper.replace("tileir.prog.Grid", "prog.Grid")
                 prefix = helper + prefix
                 for marker in "abcdefg":
                     if f"erase({marker})" in six:
@@ -193,6 +241,16 @@ def main():
                          expect=1, fragment="FAIL  K3-0: six typed launch positions")
             if failed.count("FAIL  ") != 1:
                 sys.exit(f"FAIL {mutation}: an older launch control also failed")
+        run("read-unit-clean", [DAWN, "test", ROOT / "packages/tileir"])
+        for mutation in ["read-prefix-cache", "read-drop-squeeze"]:
+            private = work / mutation
+            shutil.copytree(ROOT / "packages/tileir", private / "packages/tileir")
+            run(mutation + "-mutate", [sys.executable, ROOT / "scripts/tile-golden/mutate.py", mutation, private])
+            run(mutation + "-check", [DAWN, "check", private / "packages/tileir"])
+            failed = run(mutation + "-red", [DAWN, "test", private / "packages/tileir"],
+                         expect=1, fragment="FAIL  prog :: K3-G: distinct prefix views")
+            if failed.count("FAIL  ") != 1:
+                sys.exit("FAIL " + mutation + ": an unrelated unit control also failed")
         (evidence / "receipts.json").write_text(json.dumps(receipts, indent=2) + "\n")
         print("PASS entry6 source controls: fresh map, sixth position, projection, axis, call, recognition and launch order")
 

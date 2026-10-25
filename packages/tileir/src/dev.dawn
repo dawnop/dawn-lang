@@ -987,6 +987,8 @@ pub effect Dev {
     hints: Hints) -> Unit
   fn t_tensor_shape(view: Int, dim: Int) -> Int
   fn t_index_space_shape(view: Int, dim: Int) -> Int
+  fn t_read_prefix(param: Int, dtype: String, dim: Int, limit: Int) -> Int
+  fn t_read_index(param: Int, free: List[Int]) -> List[Int]
   fn t_cell_view(param: Int, dtype: String, free: List[Int]) -> (Int, List[Int])
   fn t_cell_shape(param: Int) -> (List[Int], List[Int])
   fn t_cell_fill(param: Int, value: Float) -> Int
@@ -4006,6 +4008,44 @@ pub fn gdc_wait(at: Loc = caller()) -> Unit !Dev = called("gdc_wait", at, () => 
 # (`t_shape_of`). So none of them can be called with a shape that disagrees
 # with the operand.
 
+## A read-only prefix of an In Grid's storage, created by `read_prefix`.
+## It retains the marker's capacity strides, tile, padding, axes and squeeze.
+## It cannot be converted to GridView or passed to a write operation.
+pub opaque type ReadView[D] = (Param[D], Int)
+
+## Read the zero-based prefix of one Free storage dimension of `p`.
+## All capacity extents must be static. `length` must be a rank-0 i32;
+## the caller must check 1 <= length <= capacity before launching. Entry6
+## does not infer this scalar precondition. Other dimensions and physical
+## strides remain the marker's; this does not change load_at(p, ...).
+pub fn read_prefix[D](p: Param[D], dim: Int, length: Idx, at: Loc = caller()) -> ReadView[D] !Dev = called("read_prefix", at, () => {
+  let h: Int = length
+  let v: ReadView[D] = (p, t_read_prefix(position(p), param_dtype(p), dim, h))
+  v
+})
+
+## The effective index-space extent in storage dimension `dim`, including
+## a partial last tile. `blocks_of` on the original Param still queries capacity.
+pub fn read_blocks[D](v: ReadView[D], dim: Int, at: Loc = caller()) -> Idx !Dev = called("read_blocks", at, () => {
+  let parts: (Param[D], Int) = v
+  let (_p, h) = parts
+  let view: GridView[D] = h
+  index_space_dim(view, dim)
+})
+
+## Read a legal cell of the effective view, supplying indices for Free
+## storage dimensions in order. Tail lanes use marker padding; the caller
+## must mask invalid scores explicitly before softmax. No inbounds or
+## divisibility assumption is inferred from the tile width.
+pub fn read_at[D](v: ReadView[D], free: List[Idx], hints: ByArch[ViewHints] = [], at: Loc = caller()) -> Tile[D] !Dev = called("read_at", at, () => {
+  let parts: (Param[D], Int) = v
+  let (p, view) = parts
+  let ix = t_read_index(position(p), list.map(free, idx_handle))
+  let h: Tile[D] = t_load_view(param_dtype(p), view, ix, [], wire_view(hints))
+  let (storage, squeeze) = t_cell_shape(position(p))
+  if len(squeeze) == 0 { h } else { reshape(h, projected_shape(storage, squeeze)) }
+})
+
 ## This block's cell of `p`, read through a view of `p`'s cells: the tile
 ## of `p`'s marker, at the block ids of the grid axes its dimensions
 ## follow, reshaped to the marker's projected value shape. Lanes past the
@@ -4017,10 +4057,10 @@ pub fn load_cell[D](p: Param[D], hints: ByArch[ViewHints] = [], at: Loc = caller
   called("load_cell", at, () => read_cell(p, [], hints))
 
 ## [`load_cell`] for a parameter some of whose dimensions follow no grid
-## axis (`FREE_AXIS` in its `along`): `free` names the cell along each of
+## axis (`Free` in its `along`): `free` names the cell along each of
 ## those, in dimension order, and the others are the block's own, as for
 ## `load_cell`. The left operand of a matrix product cut
-## `cells([M, K], [TM, TK], along: [0, FREE_AXIS])` is read
+## `cells([M, K], [TM, TK], along: [Axis(0), Free])` is read
 ## `load_at(a, [k])` inside the loop over `k`.
 pub fn load_at[D](p: Param[D], free: List[Idx], hints: ByArch[ViewHints] = [], at: Loc = caller()) -> Tile[D] !Dev =
   called("load_at", at, () => read_cell(p, free, hints))
@@ -4603,6 +4643,12 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_read_prefix(_param, _dtype, _dim, _limit) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_read_index(_param, free) => free
     t_cell_view(_param, _dtype, free) => {
       let h = next
       next = next + 1
@@ -5059,6 +5105,16 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_index_space_shape(view, dim) => {
       log = log ++ ["index_space_shape ${view} ${dim}"]
       84
+    }
+    t_read_prefix(param, dtype, dim, limit) => {
+      log = log ++ ["read_prefix ${param} ${dtype} ${dim} ${limit}"]
+      let shape: List[Int] = []
+      rows = [(93, dtype, shape)] ++ rows
+      93
+    }
+    t_read_index(param, free) => {
+      log = log ++ ["read_index ${param} ${show(free)}"]
+      free
     }
     t_cell_view(param, dtype, free) => {
       log = log ++ ["cell_view ${param} ${dtype} ${show(free)}"]
@@ -5716,6 +5772,8 @@ test "d_range hands the body the carried handle and passes its answer back as th
       t_store_view(_dtype, _view, _indices, _value, _inbounds, _hints) => ()
       t_tensor_shape(_view, _dim) => 83
       t_index_space_shape(_view, _dim) => 84
+      t_read_prefix(_param, _dtype, _dim, _limit) => 93
+      t_read_index(_param, free) => free
       t_cell_view(_param, _dtype, free) => (87, free)
       t_cell_shape(_param) => ([], [])
       t_cell_fill(_param, _value) => 88
@@ -5728,4 +5786,20 @@ test "d_range hands the body the carried handle and passes its answer back as th
     log
   }
   assert seen == ["loop_begin 10 4 10 [1]", "addf 31 1", "loop_end [2]"]
+}
+
+test "K3-G: read-only prefix wrappers hand the mocks the parameter length free indices and hints" {
+  let seen = logged(() => {
+    let p = param(F32, 2)
+    let view = read_prefix(p, 1, idx_const(5))
+    let _blocks = read_blocks(view, 1)
+    let _tile = read_at(view, [idx_const(0)], hints = [for_arch("sm_90", view_hints(latency = Some(3)))])
+    ()
+  })
+  assert len(seen) == 4
+  assert seen[0] == "read_prefix 2 f32 1 12"
+  assert seen[1] == "index_space_shape 93 1"
+  assert seen[2] == "read_index 2 [12]"
+  assert str.starts_with(seen[3], "load_view f32 93 [12]")
+  assert str.contains(seen[3], "sm_90") && str.contains(seen[3], "3")
 }

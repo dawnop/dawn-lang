@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ e9171ad6d37fad08 -->
+<!-- doc-check: translation-of docs/spec.md @ 4206de7251dad06f -->
 
 # Dawn Language Specification
 
@@ -5136,6 +5136,24 @@ library:
 
 The reasons, the roadmap and the measurements are in
 [`tile-backend-design.md`](tile-backend-design.md) §4–§6 (in Chinese).
+
+The cell markers of `trace1` through `trace6` share `std/gpu.CellAxis` with
+typed launch. `Axis(k)` follows a grid axis one to one, `Free` takes an
+explicit cell index, and `Grouped(k,g)` reads floor(block_id(k)/g). Grouped
+requires static In capacity, a positive i32 group, and complete grid groups.
+Out accepts only an injection of Axis entries. Integer axis lists are no
+longer part of the interface.
+
+`read_prefix` creates a read-only `ReadView` by narrowing one Free storage
+dimension of an In Grid. Its logical shape narrows while capacity strides
+and the original Param remain complete. `read_at` reads a legal cell and
+`read_blocks` queries the effective domain; `extent_of` and `blocks_of` still
+query capacity. Length must be a rank-0 i32, and the caller must ensure
+1 <= length <= capacity before launch. Entry6 does not infer domain constraints
+from scalar positions. ReadView has no write API and no implicit conversion to
+GridView. These library compositions add no device opcode, language syntax,
+or ABI argument.
+
 
 **A kernel body** is an ordinary Dawn function whose effect row is `Dev` alone, of the shape
 `fn(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev`.

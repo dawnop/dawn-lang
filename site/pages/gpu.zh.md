@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ 47b1ba8038adaa1b -->
+<!-- doc-check: translation-of site/pages/gpu.md @ c42bded901bc94e5 -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -76,7 +76,7 @@ kernel 在参数标记上一次说清它读哪里、写哪里，凡是能从操�
 
 ## api-out
 
-`Out` 只接受 `store_cell` 与 `store_sub` 两种写，累加器从它的 `zeros` 起步。`FREE_AXIS` 把一维留给 kernel 自己挑，这里是循环的 `k`。
+`Out` 只接受 `store_cell` 与 `store_sub` 两种写，累加器从它的 `zeros` 起步。`Free` 把一维留给 kernel 自己挑，这里是循环的 `k`。
 
 ## api-shared-title
 

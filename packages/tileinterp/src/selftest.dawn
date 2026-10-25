@@ -11,12 +11,13 @@ use std/list
 use std/map
 use std/str
 use std/dtype.{F64}
+use std/int/i32.{I32}
 use std/narrow.{F32, BF16, F16}
-use std/gpu.{Gpu, with_gpu_fake, gpu_alloc, gpu_copy_from_host, gpu_copy_to_host, gpu_launch, Buffer, encode_floats,
+use std/gpu.{Axis, Free, Grouped, Gpu, with_gpu_fake, gpu_alloc, gpu_copy_from_host, gpu_copy_to_host, gpu_launch, Buffer, encode_floats,
   decode_floats, WideRefFn }
-use tileir/dev.{Dev, Param, param, block_id, tile_at, load, store, load_cell, store_cell, add, mul, tail_mask,
+use tileir/dev.{Dev, Param, Tile, read_prefix, read_blocks, read_at, idx_of, scalar, idx_eq, param, block_id, tile_at, load, store, load_cell, store_cell, add, mul, tail_mask,
   f_const, mma, fma, float_to_float, sqrt, exp2, reduce_sum, scan_sum, d_range, idx_const, broadcast, memory_fence_alias, DYN_DIM, store_sub, full }
-use tileir/prog.{TileProg, trace_kernel, ByPtr, trace1, trace2, trace3, cells, In, Out}
+use tileir/prog.{TileProg, trace_kernel, ByPtr, trace1, trace2, trace3, cells, In, Out, Scalar}
 use interp.{interp_ref, interp_kernel, unsupported_in}
 use device.{with_gpu_interp, with_gpu_interp_log}
 use tileir/lower.{lower}
@@ -371,7 +372,7 @@ test "a launch that does not fit the kernel is refused as such" {
 
 # A batched copy exercises singleton projection without attention semantics.
 test "S2: projected copies and pieces write every lane of every batch" {
-  let g = cells([3, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])
+  let g = cells([3, 8, 4], [1, 4, 4], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])
   let (p, _e) = trace2("project_copy", In(F64, g), Out(F64, g), (x, o) => store_cell(o, load_cell(x)))
   let xs = floats(3 * 8 * 4, i => to_float(i + 1))
   let blank = floats(3 * 8 * 4, _i => -9999.0)
@@ -387,4 +388,34 @@ test "S2: projected copies and pieces write every lane of every batch" {
   let (rank0, _er) = trace2("project_scalar", In(F64, all), Out(F64, all), (x, o) => store_cell(o, load_cell(x)))
   let values = floats(6, i => to_float(i + 1))
   assert interp_ref(rank0, [3, 2])(["f64", "f64"], [values, floats(6, _i => -9999.0)], []) == [(1, values)]
+}
+
+# The first prefix must remain one key while separate dynamic prefixes are
+# constructed in loop trials and both branch regions of the same Param.
+test "K3-G: two prefix lengths survive nested trials branches and projected grouped reads" {
+  let input = cells([4, 17, 4], [1, 4, 4], along = [Grouped(2, 3), Free, Axis(1)], squeeze = [0])
+  let output = cells([12, 1, 4], [1, 1, 4], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])
+  let (p, _e) = trace3("two_prefixes", In(F32, input), Out(F32, output), Scalar(I32), (x, o, n) => {
+    let short = read_prefix(x, 1, idx_const(1))
+    var total: Tile[F32] = full([1, 4], 0.0)
+    for pass in d_range(idx_const(0), idx_const(2)) {
+      if idx_eq(pass, idx_const(0)) {
+        let live = read_prefix(x, 1, idx_of(scalar(n)))
+        for j in d_range(idx_const(0), read_blocks(live, 1)) {
+          total = total + reduce_sum(read_at(live, [j]), dim = 0, keepdims = true)
+        }
+      } else {
+        let live = read_prefix(x, 1, idx_of(scalar(n)))
+        for j in d_range(idx_const(0), read_blocks(live, 1)) {
+          total = total + reduce_sum(read_at(live, [j]), dim = 0, keepdims = true)
+        }
+      }
+    }
+    total = total + reduce_sum(read_at(short, [idx_const(0)]), dim = 0, keepdims = true)
+    store_cell(o, total)
+  })
+  let xs = floats(4 * 17 * 4, i => to_float(i / 68 * 100 + i % 68))
+  let blank = floats(12 * 4 + 4, _i => -9999.0)
+  let want = floats(12 * 4, i => to_float(11 * (i / 4 / 3 * 100 + i % 4) + 80)) ++ [-9999.0, -9999.0, -9999.0, -9999.0]
+  assert interp_ref(p, [1, 1, 12])(["f32", "f32"], [xs, blank], [5.0]) == [(1, want)]
 }

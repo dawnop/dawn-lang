@@ -4011,6 +4011,18 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
 
 理由、路线与实测见 [`tile-backend-design.md`](tile-backend-design.md) §4–§6。
 
+`trace1` 到 `trace6` 的 cell 标记与 typed launch 共用 `std/gpu.CellAxis`：
+`Axis(k)` 一对一跟随网格轴，`Free` 由调用者传 cell 下标，`Grouped(k,g)` 只读并选
+floor(block_id(k)/g)。Grouped 仅用于静态容量 In，g 是正 i32，grid 必须完整分组；
+Out 只接受 Axis 单射。整数沿轴列表不再是接口。
+
+`read_prefix` 从 In Grid 的一个 Free storage 维创建只读 `ReadView`，逻辑 shape 收窄，
+容量 strides 与原 Param 保持完整。`read_at` 读取合法 cell，`read_blocks` 查询有效域；
+`extent_of` 和 `blocks_of` 仍查询容量。length 必须是 rank-0 i32，调用者在发射前保证
+1 <= length <= capacity；Entry6 不从标量位置推断领域约束。ReadView 没有写接口，
+不隐式转 GridView。这些是库组合，不新增设备 opcode、语言语法或 ABI 参数。
+
+
 **kernel 体**是效果行只有 `Dev` 的普通 Dawn 函数，形如
 `fn(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev`。
 

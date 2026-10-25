@@ -769,8 +769,8 @@ grep -q "V${want_tileiras}\b" "$work/tileiras.version" ||
 # the extra argument are written into the ledger line as `o0=`, next to
 # `asm=` (the arguments every kernel got), so a reader of a remote line sees
 # which cubins were assembled at which level.
-asm_names="$(awk '/^fn trace\(name/{f=1} f&&/^  "[a-z0-9_]+" ->/{gsub(/"/,"",$1); print $1} f&&/^}/{exit}' "$golden/kernels.dawn" | tr '\n' ' ')"
-[ -n "$asm_names" ] || fail "kernels.dawn's trace has no kernel arms"
+asm_names="$(awk '/^fn trace(_after)?\(name/{f=1} f&&/^  "[a-z0-9_]+" ->/{gsub(/"/,"",$1); print $1} f&&/^}/{f=0}' "$golden/kernels.dawn" | tr '\n' ' ')"
+[ -n "$asm_names" ] || fail "kernels.dawn's trace dispatchers have no kernel arms"
 asm_proj="$work/proj-asm"
 mkdir -p "$asm_proj/src"
 cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
@@ -1109,6 +1109,7 @@ dyn_order=("${dyns[@]}" view_transpose)
 # list and not of this one.
 scalars=(scalar_scale scalar_len scalar_loop scalar_wide)
 entry_six=(entry6_dynamic entry6_project1 entry6_project3)
+read_layout_kernels=(read_layout_g3 read_layout_g1 read_layout_mqa read_repeat read_mask)
 
 # The rest of the view family (knife T13), in the order gsview_diff takes
 # them: the two views a grid view cannot spell (a strided one, whose
@@ -1207,7 +1208,7 @@ echo "      arch: ${#arch_ran[@]} of ${#arch_kernels[@]} architecture-gated kern
 for k in vadd vadd_bf16 vadd_f32 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
   "${shaped[@]}" "${dtypes[@]}" "${bitwise_kernels[@]}" "${shift_kernels[@]}" "${staged_kernels[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
-  "${hints[@]}" "${views[@]}" "${inbounds_ks[@]}" "${dyns[@]}" "${entry_six[@]}" "${scalars[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
+  "${hints[@]}" "${views[@]}" "${inbounds_ks[@]}" "${dyns[@]}" "${entry_six[@]}" "${read_layout_kernels[@]}" "${scalars[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
   "${sequenced[@]}" ${arch_ran[@]+"${arch_ran[@]}"}; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
@@ -1262,6 +1263,8 @@ gsview_cubins=()
 for k in "${gsview_order[@]}"; do gsview_cubins+=("$work/$k.cubin"); done
 scalar_cubins=()
 for k in "${scalars[@]}"; do scalar_cubins+=("$work/$k.cubin"); done
+read_layout_cubins=()
+for k in "${read_layout_kernels[@]}"; do read_layout_cubins+=("$work/$k.cubin"); done
 entry6_cubins=()
 for k in "${entry_six[@]}"; do entry6_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
@@ -2694,6 +2697,22 @@ esac
 
 # The fixed-six family is part of the normal device gate, sharing one real
 # handler across the complete runtime-length and projection replay.
+build_native "$root/std" "$work/read-layout.bin" "$here/read_layout_diff.dawn"
+device "$work/read-layout.bin" "${read_layout_cubins[@]}" > "$work/read-layout.out" 2> "$work/read-layout.err" || {
+  cat "$work/read-layout.out" "$work/read-layout.err" >&2
+  fail "read layout runtime reference or launch refused"
+}
+cat "$work/read-layout.out"
+[ "$(verdict_of "$work/read-layout.out")" = pass ] || fail "read layout reference differs"
+if [ -n "${READ_LAYOUT_EVIDENCE:-}" ]; then
+  mkdir -p "$READ_LAYOUT_EVIDENCE"
+  "$root/bin/dawn" run "$asm_proj" -- --read-layout-programs > "$READ_LAYOUT_EVIDENCE/programs.txt" || fail "read layout identity recording"
+  cp "$work/read-layout.out" "$work/read-layout.err" "$READ_LAYOUT_EVIDENCE/"
+  for k in "${read_layout_kernels[@]}"; do cp "$work/$k.cubin" "$golden/$k.tilebc" "$golden/$k.mlir" "$READ_LAYOUT_EVIDENCE/"; done
+  (cd "$READ_LAYOUT_EVIDENCE" && sha256sum programs.txt *.tilebc *.cubin) > "$READ_LAYOUT_EVIDENCE/SHA256SUMS"
+fi
+echo "PASS  native: read layout grouped coordinates, dynamic prefixes and BF16 score mask"
+
 build_native "$root/std" "$work/entry6.bin" "$here/entry6_diff.dawn"
 device "$work/entry6.bin" "${entry6_cubins[@]}" > "$work/entry6.out" 2> "$work/entry6.err" || {
   cat "$work/entry6.out" "$work/entry6.err" >&2
@@ -2869,6 +2888,80 @@ for m in entry6-n-constant entry6-view-capacity entry6-loop-floor; do
   echo "PASS  mutant: $m (valid cubin, launch and independent numerical oracle red)"
 done
 cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
+
+# Run the same persistent type, provenance, two-view and parser-span controls
+# in each device round. They cannot substitute for the actual launches below.
+ENTRY6_CONTROL_EVIDENCE="${READ_LAYOUT_EVIDENCE:-$work/read-source}/source-controls" \
+  python3 "$golden/entry6-source-controls.py" > "$work/read-source-controls.log" 2>&1 || {
+    cat "$work/read-source-controls.log" >&2; fail "read layout source or region controls";
+  }
+for m in read-group-axis read-group-zero read-group-div2 read-group-shift read-n-constant read-loop-floor read-view-capacity read-live-stride read-no-mask; do
+  variant="$work/$m-tree"
+  mkdir -p "$variant/scripts/tile-golden" "$variant/packages"
+  cp "$golden/kernels.dawn" "$variant/scripts/tile-golden/kernels.dawn"
+  cp -a "$root/packages/tileir" "$variant/packages/tileir"
+  python3 "$golden/mutate.py" "$m" "$variant"
+  proj="$variant/probe"
+  mkdir -p "$proj/src"
+  cp "$variant/scripts/tile-golden/kernels.dawn" "$proj/src/main.dawn"
+  cat > "$proj/dawn.toml" <<TOML
+schema = 1
+name = "read_layout_mutant"
+[deps]
+tileir = "$variant/packages/tileir"
+tileref = "$root/packages/tileref"
+TOML
+  k=read_layout_g3
+  if [ "$m" = read-no-mask ]; then k=read_mask; fi
+  "$root/bin/dawn" run "$proj" -- "$k" --bytecode "$work/$m.tilebc" > "$work/$m.record.out" 2> "$work/$m.record.err" || {
+    cat "$work/$m.record.err" >&2; fail "$m did not record";
+  }
+  assemble_golden "$k" "$work/$m.tilebc" "$work/$m.cubin"
+  if [ "$m" != read-no-mask ]; then
+    rc=0
+    "$root/bin/dawn" run "$proj" -- --read-layout-structure > "$work/$m.structure.out" 2> "$work/$m.structure.err" || rc=$?
+    case "$m" in
+      read-group-*) fragment='read layout: grouped axis2 division by three' ;;
+      read-loop-floor) fragment='read layout: effective loop bound' ;;
+      *) fragment='read layout: dynamicShape and capacity stride' ;;
+    esac
+    [ "$rc" != 0 ] && grep -Fq "$fragment" "$work/$m.structure.err" || fail "$m structure did not reject"
+  fi
+  # Division by two can leave the logical index space. Its assembled program
+  # is judged structurally, without treating an out-of-space launch as proof.
+  if [ "$m" != read-group-div2 ]; then
+    broken_cubins=()
+    for name in "${read_layout_kernels[@]}"; do
+      if [ "$name" = "$k" ]; then broken_cubins+=("$work/$m.cubin"); else broken_cubins+=("$work/$name.cubin"); fi
+    done
+    rc=0
+    device "$work/read-layout.bin" "${broken_cubins[@]}" > "$work/$m.device.out" 2> "$work/$m.device.err" || rc=$?
+    [ "$rc" != 0 ] && grep -q '^  raw-f32 ' "$work/$m.device.out" && grep -q '^  verdict differ:result$' "$work/$m.device.out" || {
+      cat "$work/$m.device.err" >&2; fail "$m did not reach its independent numerical oracle";
+    }
+    [ "$(grep -c '^  raw-f32 ' "$work/$m.device.out")" = 296 ] &&
+      grep -Eq '^probe read-layout modules=5 runtime-cases=296 failures=[1-9][0-9]* domain=refused$' "$work/$m.device.out" ||
+      fail "$m did not complete every launch and download before its reference rejection"
+    if [ "$m" = read-no-mask ]; then
+      python3 - "$work/$m.device.out" <<'PYMASK'
+from pathlib import Path
+import sys
+lines = Path(sys.argv[1]).read_text().splitlines()
+whole = [lines[i+2] for i, line in enumerate(lines) if line.startswith('kernel read_mask n=16 ')]
+assert len(whole) == 2 and all(x == '  verdict identical:reference' for x in whole), 'unmasked whole-tile control must stay green'
+tails = [lines[i+2] for i, line in enumerate(lines) if line.startswith('kernel read_mask n=') and ' n=16 ' not in line]
+assert tails and all(x == '  verdict differ:result' for x in tails), 'unmasked tail must fail the independent reference'
+PYMASK
+    fi
+  fi
+  if [ -n "${READ_LAYOUT_EVIDENCE:-}" ]; then
+    cp "$work/$m.tilebc" "$work/$m.cubin" "$READ_LAYOUT_EVIDENCE/"
+    for suffix in record.out record.err structure.out structure.err device.out device.err; do
+      if [ -f "$work/$m.$suffix" ]; then cp "$work/$m.$suffix" "$READ_LAYOUT_EVIDENCE/"; fi
+    done
+  fi
+  echo "PASS  mutant: $m (assembled; effective-domain structure or actual raw-download reference rejected)"
+done
 
 # A2 typed output witnesses use additional recordings from the same factory.
 "$root/bin/dawn" run "$asm_proj" -- --flash-output-record "$gpu_name" "$work" > "$work/a2-record.out" 2> "$work/a2-record.err" ||
@@ -3434,8 +3527,8 @@ mutant_ts_src="$work/kernels-transpose.dawn"
 cp "$golden/kernels.dawn" "$mutant_ts_src"
 before=$(digest "$mutant_ts_src")
 python3 "$here/mutate.py" "$mutant_ts_src" stride-row-major-swapped \
-  '  store(out, base_out, t, strides= Some(permute(row_major([TT_COLS, TT_ROWS]), [1, 0])), mask= Some(m))' \
-  '  store(out, base_out, t, strides= Some(permute(row_major([TT_ROWS, TT_COLS]), [1, 0])), mask= Some(m))'
+  '  store(out, base_out, t, strides = Some(permute(row_major([TT_COLS, TT_ROWS]), [1, 0])), mask = Some(m))' \
+  '  store(out, base_out, t, strides = Some(permute(row_major([TT_ROWS, TT_COLS]), [1, 0])), mask = Some(m))'
 after=$(digest "$mutant_ts_src")
 echo "      stride-row-major-swapped: scripts/tile-golden/kernels.dawn md5 $before -> $after"
 mkdir -p "$work/proj-transpose/src"
@@ -4022,8 +4115,8 @@ gath_kernel_check() { # name, kernel
 #     layer 1 accepts it (one index tile is as legal as another), and the
 #     device says 255 of 264 lanes hold the wrong value.
 gath_kernel_mutant scatter-unpermuted scatter_perm \
-  '  scatter(out, dst, load_cell(x), mask= Some(in_range(p, 0, SC_N)))' \
-  '  scatter(out, lanes(tile_at(block_id(0), SC_TILE), [SC_TILE]), load_cell(x), mask= Some(in_range(p, 0, SC_N)))'
+  '  scatter(out, dst, load_cell(x), mask = Some(in_range(p, 0, SC_N)))' \
+  '  scatter(out, lanes(tile_at(block_id(0), SC_TILE), [SC_TILE]), load_cell(x), mask = Some(in_range(p, 0, SC_N)))'
 gath_kernel_check scatter-unpermuted scatter_perm
 
 # 18. rank-scatter-in-lane-order: `sort_rank` still computes every rank and
@@ -4166,8 +4259,8 @@ fi
 #     different expression, which is why the red set is one kernel and not
 #     two.
 scan_kernel_mutant exclusive-scan-as-inclusive compact \
-  '  scatter(out, sub_i(incl, ones), t, mask= Some(keep))' \
-  '  scatter(out, incl, t, mask= Some(keep))'
+  '  scatter(out, sub_i(incl, ones), t, mask = Some(keep))' \
+  '  scatter(out, incl, t, mask = Some(keep))'
 scan_kernel_check exclusive-scan-as-inclusive compact
 
 # 21. atomic-as-plain-store: the PACKAGE's `atomic_add_masked` issues a
@@ -4302,8 +4395,8 @@ atom_kernel_check() { # name, kernel
 #     operands is which: `AllTypesMatch<["cmp", "val", "result"]>` is
 #     satisfied either way, which is why tileiras accepts it.
 atom_kernel_mutant cas-compare-ignored cas_swap \
-  '[CAS_TILE]), c, load_cell(val), mask= Some(active))' \
-  '[CAS_TILE]), load_cell(val), load_cell(val), mask= Some(active))'
+  '[CAS_TILE]), c, load_cell(val), mask = Some(active))' \
+  '[CAS_TILE]), load_cell(val), load_cell(val), mask = Some(active))'
 atom_kernel_check cas-compare-ignored cas_swap
 
 # The two mutants of the error function family (knife 15). Both live in the
@@ -6018,7 +6111,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/sym_diff.dawn \
   scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
-  scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn scripts/tile-gpu-diff/scalar_diff.dawn scripts/tile-gpu-diff/entry6_diff.dawn \
+  scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn scripts/tile-gpu-diff/scalar_diff.dawn scripts/tile-gpu-diff/entry6_diff.dawn scripts/tile-gpu-diff/read_layout_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
   scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py scripts/tile-gpu-diff/fold_verdict.sh)"
 [ -z "$dirty" ] ||
@@ -6035,6 +6128,7 @@ summary="$summary dyn=$dyn_shape_line $dyn_probe"
 summary="$summary gsview=$gsview_shape_line $gsview_probe"
 summary="$summary scalar=$scalar_shape_line $scalar_probe"
 summary="$summary $(sed -n 's/^probe entry6 /entry6=/p' "$work/entry6.out")"
+summary="$summary $(sed -n 's/^probe read-layout /read-layout=/p' "$work/read-layout.out")"
 summary="$summary bitwise:$(sed -n 's/^tiers //p' "$work/bitwise.out" | tail -n 1)"
 summary="$summary shift:$(sed -n 's/^tiers //p' "$work/shift.out" | tail -n 1)"
 summary="$summary staged:$(sed -n 's/^tiers //p' "$work/staged.out" | tail -n 1)"

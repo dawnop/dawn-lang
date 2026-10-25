@@ -18,7 +18,7 @@ use std/list
 use std/map
 use std/str
 use std/loc
-use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, with_gpu_fake, reference_kernels, launch_entry3, buffer_arg, arg_scalar, last_out_with, EntryArg, Entry1,
+use std/gpu.{CellAxis, Axis, Free, Grouped, Gpu, alloc, copy_from_host, copy_to_host, with_gpu_fake, reference_kernels, launch_entry3, buffer_arg, arg_scalar, last_out_with, EntryArg, Entry1,
   Entry2, Entry3, Entry4, Entry5, Entry6, entry1, entry2, entry3, entry4, entry5, entry6, arg_in, arg_in_whole, arg_out,
   arg_shared, entry_grid }
 use std/gpu
@@ -37,7 +37,7 @@ use dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, bits_dtype, shift
   float_to_float, sub, add_i, alloca_ptrs, d_fork2, select, lt, arange, mma, full, to, transpose, permute_tile, rounding_name, Overflow, Padding, PadZero, padding_name,
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
   retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, ByArch, EntryHints, PtrHints, ViewHints, wire_entry, wire_ptr, wire_view, for_arch, entry_hints, ptr_hints, view_hints, lit, idx_div,
-  idx_rem, idx_sub, extent_of, blocks_of, scalar, idx_as_tile, tile_shape }
+  idx_rem, idx_sub, extent_of, blocks_of, scalar, idx_as_tile, tile_shape, read_prefix, read_at, read_blocks }
 use std/narrow.{F32, F16, BF16, Rounding, bf16}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
@@ -1675,10 +1675,9 @@ pub fn trace_kernel(name: String, params: List[KParam], body: fn() -> Unit !Dev,
 # The markers issue no operation: a kernel recorded through `trace3` is the
 # program `trace_kernel` records for the same body, byte for byte.
 
-## The axis entry of a cut dimension that follows no grid axis: the kernel
-## picks that cell some other way (the `k` of a matrix product's loop). The
-## same number as std/gpu's.
-pub const FREE_AXIS: Int = 0 - 1
+# Both recording and typed launch use std/gpu's nominal CellAxis.
+fn axis_number(a: CellAxis) -> Int = match a { Axis(k) -> k, Grouped(k, _g) -> k, Free -> -1 }
+fn axis_group(a: CellAxis) -> Int = match a { Grouped(_k, g) -> g, _ -> 1 }
 
 ## How a kernel parameter's tensor is cut. `Whole` is not cut at all.
 ## `Grid` cuts a row-major tensor of `extent` into cells of `tile`:
@@ -1688,9 +1687,10 @@ pub const FREE_AXIS: Int = 0 - 1
 ##   cells then cover the tensor with no tail;
 ## - `pad` is what a read past the extent answers (the partition view's
 ##   `padding_value`, a float format's only for the four special ones);
-## - `along[j]` is the grid axis dimension `j` follows, or `FREE_AXIS`. A
-##   dimension that follows axis `k` has as many cells as the grid has
-##   blocks along `k`.
+## - `along[j]` is std/gpu's CellAxis. Axis(k) selects block_id(k),
+##   Free takes an explicit index, and Grouped(k,g) selects floor(block_id(k)/g).
+##   Grouped requires static In capacity, a positive i32 group and complete
+##   grid groups, with cell count == grid[k]/g. Source axes cannot repeat.
 ## - `squeeze` names singleton tile axes removed from values only. The
 ##   full storage geometry still determines the launch and ownership.
 ##
@@ -1698,22 +1698,23 @@ pub const FREE_AXIS: Int = 0 - 1
 ## values, for a match.
 pub type Cells =
   | Whole
-  | Grid(extent: List[Int], tile: List[Int], pad: Padding, along: List[Int], squeeze: List[Int])
+  | Grid(extent: List[Int], tile: List[Int], pad: Padding, along: List[CellAxis], squeeze: List[Int])
 derive Show
 
 ## `extent` cut into cells of `tile`, a read past the extent answering
 ## `pad`, dimension `k` following grid axis `k` (the first three; a fourth
 ## and later follow none). Pass `along` for a cut whose dimensions follow
 ## other axes, or none: the left operand of a matrix product follows axis 0
-## along its rows and `FREE_AXIS` along K. An `Out`'s dimensions each follow
+## along its rows and `Free` along K. An `Out`'s dimensions each follow
 ## an axis, no two the same one: a batched product's output cut
-## `along: [2, 0, 1]` keeps its batch on axis 2.
+## `along: [Axis(2), Axis(0), Axis(1)]` keeps its batch on axis 2.
+## In may repeat reads with Grouped(k,g); Out only accepts Axis.
 ## `squeeze` is an unordered set of storage axes whose tile length is 1.
 ## Repeated, negative, out-of-range or non-singleton axes are refused before
 ## the body runs. Remaining value axes keep their storage order; projecting
 ## every axis yields a rank-zero value. Extents and storage checks stay full.
 pub fn cells(extent: List[Int], tile: List[Int], pad: Padding = PadZero,
-  along: List[Int] = list.map(range(0, len(tile)), k => if k < 3 { k } else { FREE_AXIS }), squeeze: List[Int] = []) -> Cells =
+  along: List[CellAxis] = list.map(range(0, len(tile)), k => if k < 3 { Axis(k) } else { Free }), squeeze: List[Int] = []) -> Cells =
   Grid(extent, tile, pad, along, squeeze)
 
 ## One parameter of a kernel, for `trace1` to `trace6`: its format marker
@@ -1800,7 +1801,7 @@ fn access_word(a: Access) -> String = match a {
 # the cut axis by axis, a `1` where nothing follows). So block `b` writes
 # cell `(b[along[0]], ..)`, and two blocks that write one cell agree on
 # every followed axis and, having one block there, on every other: the
-# disjointness the identity gave, kept by an injection. `FREE_AXIS` is not
+# disjointness the identity gave, kept by an injection. `Free` is not
 # one: a dimension no axis decides is not the grid's.
 fn check_cells(name: Ctx, k: Int, s: Sig) -> Unit = match s.g {
   Whole -> ()
@@ -1825,11 +1826,14 @@ fn check_cells(name: Ctx, k: Int, s: Sig) -> Unit = match s.g {
     } else {
       ()
     }
+    if s.access != Reading && list.any(along, a => match a { Grouped(_k, _g) -> true, _ -> false }) {
+      refuse(name, "${who} has Grouped cells; Grouped is read-only and only In accepts it, while Out requires Axis in every dimension")
+    } else { () }
     # a rank past three is std/gpu's to refuse, in the launch's words
     if s.access == Owning && len(along) <= 3 {
-      if list.any(along, a => a == FREE_AXIS) {
+      if list.any(along, a => a == Free) {
         refuse(name, "${who} follows grid axes ${show(along)}; every dimension of an Out follows a grid axis, because its cells are the grid")
-      } else if list.any(along, a => a < 0 || a > 2) {
+      } else if list.any(along, a => match a { Axis(k) -> k < 0 || k > 2, _ -> true }) {
         refuse(name, "${who} follows grid axes ${show(along)}; a grid has axes 0, 1 and 2")
       } else if list.any(range(0, len(along)), j => list.any(range(0, j), i => along[i] == along[j])) {
         refuse(name, "${who} follows grid axes ${show(along)}; two of its dimensions follow one axis, so two blocks would write one cell")
@@ -1859,12 +1863,12 @@ fn entry_arg(s: Sig) -> EntryArg = match (s.access, s.g) {
 # it, or 1 and 1 where none does, the trailing ones dropped. The grid it
 # derives is the Out's, and the elements it reaches are as many. A cut of
 # rank past three passes as it is, for std/gpu to refuse.
-fn out_axes(extent: List[Int], tile: List[Int], along: List[Int]) -> (List[Int], List[Int]) =
-  if len(along) > 3 || along == range(0, len(along)) {
+fn out_axes(extent: List[Int], tile: List[Int], along: List[CellAxis]) -> (List[Int], List[Int]) =
+  if len(along) > 3 || along == list.map(range(0, len(along)), Axis) {
     (extent, tile)
   } else {
-    let top = list.fold(along, 0, (m, a) => if a + 1 > m { a + 1 } else { m })
-    let at = (k: Int) => list.find(range(0, len(along)), j => along[j] == k)
+    let top = list.fold(along, 0, (m, a) => if axis_number(a) + 1 > m { axis_number(a) + 1 } else { m })
+    let at = (k: Int) => list.find(range(0, len(along)), j => along[j] == Axis(k))
     let e = list.map(range(0, top), k => match at(k) {
       Some(j) -> extent[j]
       None -> 1
@@ -2361,7 +2365,7 @@ fn check_same_rows(name: Ctx, frames: List[Frame], ops: List[TileOp], held: Map[
 # for them: a parameter recorded without markers, a `Whole` one and a
 # `Shared` one have none.
 fn cells_of(name: Ctx, frames: List[Frame], ops: List[TileOp], geoms: List[Cells], roles: List[Access],
-  param: Int, op: String) -> (List[Int], List[Int], Padding, List[Int]) =
+  param: Int, op: String) -> (List[Int], List[Int], Padding, List[CellAxis]) =
   if len(geoms) == 0 {
     refuse_at(name, frames, ops, op, "parameter ${param} has no marker; cells are what an In or an Out marker of trace1 to trace6 says, and trace_kernel takes none")
   } else if param < 0 || param >= len(geoms) {
@@ -2401,7 +2405,7 @@ type Built = {
 # along one axis share one: vadd's three views are one `num_blocks` and one
 # product, not three.
 fn cell_view_ops(name: Ctx, next0: Int, param: Int, dtype: String, align: Int, extent: List[Int],
-  tile: List[Int], pad: Padding, along: List[Int], cut: List[Int], tv0: Int, exts0: Map[String, Int]) -> Built = {
+  tile: List[Int], pad: Padding, along: List[CellAxis], cut: List[Int], tv0: Int, exts0: Map[String, Int]) -> Built = {
   var next = next0
   var ops: List[TileOp] = []
   var tv = tv0
@@ -2420,7 +2424,7 @@ fn cell_view_ops(name: Ctx, next0: Int, param: Int, dtype: String, align: Int, e
             let c = next + 1
             let made = next + 2
             next = mint(name, next, 3)
-            ops = ops ++ [NumBlocks(nb, along[j]), IdxConst(c, tile[j]), IdxMul(made, nb, c)]
+            ops = ops ++ [NumBlocks(nb, axis_number(along[j])), IdxConst(c, tile[j]), IdxMul(made, nb, c)]
             exts = map.insert(exts, key, made)
             made
           }
@@ -2491,18 +2495,19 @@ fn visible_map(frames: List[Frame], ops: List[TileOp], m: Map[String, Int]) -> M
 # one `get_tile_block_id`; `block_id` itself is not memoised, which keeps
 # every program recorded before this the same.
 fn cell_index(name: Ctx, frames: List[Frame], here: List[TileOp], next0: Int, blocks0: Map[Int, Int],
-  along: List[Int], free: List[Int]) -> (List[Int], Int, List[TileOp], Map[Int, Int]) = {
+  along: List[CellAxis], free: List[Int]) -> (List[Int], Int, List[TileOp], Map[Int, Int]) = {
   var next = next0
   var ops: List[TileOp] = []
   var ix: List[Int] = []
   var blocks = blocks0
   var f = 0
   for j in range(0, len(along)) {
-    if along[j] == FREE_AXIS {
+    if along[j] == Free {
       ix = ix ++ [free[f]]
       f = f + 1
     } else {
-      let known = match map.get(blocks, along[j]) {
+      let source_axis = axis_number(along[j])
+      let known = match map.get(blocks, source_axis) {
         Some(b) -> if visible(frames, here ++ ops, b) { b } else { 0 - 1 }
         None -> 0 - 1
       }
@@ -2511,10 +2516,17 @@ fn cell_index(name: Ctx, frames: List[Frame], here: List[TileOp], next0: Int, bl
       } else {
         let b = next
         next = mint(name, next, 1)
-        ops = ops ++ [BlockId(b, along[j])]
-        blocks = map.insert(blocks, along[j], b)
+        ops = ops ++ [BlockId(b, source_axis)]
+        blocks = map.insert(blocks, source_axis, b)
         ix = ix ++ [b]
       }
+    }
+    if axis_group(along[j]) > 1 {
+      let c = next
+      let d = next + 1
+      next = mint(name, next, 2)
+      ops = ops ++ [IdxConst(c, axis_group(along[j])), BinaryI(d, "divi", "i32", [], ix[j], c)]
+      ix = list.take(ix, j) ++ [d]
     }
   }
   (ix, next, ops, blocks)
@@ -2528,6 +2540,7 @@ fn hold_indices(held: Map[Int, Held], more: List[TileOp]) -> Map[Int, Held] =
     NumBlocks(d, _axis) -> hold(m, d, "i32", [])
     IdxConst(d, _v) -> hold(m, d, "i32", [])
     IdxMul(d, _a, _b) -> hold(m, d, "i32", [])
+    BinaryI(d, _op, "i32", [], _a, _b) -> hold(m, d, "i32", [])
     _ -> m
   })
 
@@ -3663,14 +3676,14 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
           next = mint(name, next, 1)
           ops = ops ++ [IdxConst(d, n)]
           d
-        } else if along[dim] == FREE_AXIS {
+        } else if along[dim] == Free {
           # the markers refuse such a cut before a body runs (`check_cells`)
           refuse_at(name, frames, ops, asking, "dimension ${dim} of parameter ${param} is DYN_DIM and follows no grid axis, so nothing here knows its extent")
         } else {
           let nb = next
           held = hold(held, nb, "i32", [])
           next = mint(name, next, 1)
-          ops = ops ++ [NumBlocks(nb, along[dim])]
+          ops = ops ++ [NumBlocks(nb, axis_number(along[dim]))]
           if blocks {
             nb
           } else {
@@ -4356,7 +4369,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         ops = g.ops
         held = g.held
         spreads = g.spreads
-        let nfree = len(list.filter(along, a => a == FREE_AXIS))
+        let nfree = len(list.filter(along, a => a == Free))
         if len(free) != nfree {
           refuse_at(name, frames, ops, asking, "parameter ${param} has ${nfree} dimension(s) that follow no grid axis, and the call names ${len(free)} cell(s) for them")
         } else {
@@ -4395,6 +4408,56 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         held = hold_indices(held, more)
         cell_blocks = seen
         (view, ix)
+      }
+      t_read_prefix(param, dtype, dim, limit0) => {
+        let asking = writer(marks, calls, "read_prefix")
+        let (extent, tile, pad, along) = cells_of(name, frames, ops, geoms, roles, param, asking)
+        check_param(name, params, param, dtype, "read_prefix")
+        if roles[param] != Reading {
+          refuse_at(name, frames, ops, asking, "parameter ${param} is ${access_word(roles[param])}; read_prefix requires an In Grid")
+        } else if dim < 0 || dim >= len(extent) {
+          refuse_at(name, frames, ops, asking, "prefix dimension ${dim} is outside storage rank ${len(extent)} of parameter ${param}")
+        } else if list.any(extent, e => e == DYN_DIM) {
+          refuse_at(name, frames, ops, asking, "parameter ${param} has dynamic capacity; read_prefix requires all capacity extents static")
+        } else if along[dim] != Free {
+          refuse_at(name, frames, ops, asking, "storage dimension ${dim} of parameter ${param} is ${show(along[dim])}; read_prefix requires a Free dimension")
+        } else { () }
+        let (g, hs) = settle_all(name, frames, grown(next, ops, held, spreads, pending), [limit0])
+        next = g.next
+        ops = g.ops
+        held = g.held
+        spreads = g.spreads
+        let limit = hs[0]
+        check_rank0(name, frames, ops, held, asking, "prefix length", limit, "i32")
+        let shape = list.map(range(0, len(extent)), j => if j == dim { DYN_DIM } else { extent[j] })
+        let strides = list.map(range(0, len(extent)), j => list.fold(list.drop(extent, j + 1), 1, (a, b) => a * b))
+        let tv = next
+        let pv = next + 1
+        next = mint(name, next, 2)
+        ops = ops ++ [CellViewOf(tv, param, dtype, CELL_ALIGN, shape, strides, [limit], []), PartitionViewOf(pv, dtype, tv, tile, range(0, len(tile)), pad)]
+        held = hold_view(hold_view(held, tv, TensorViewRow, dtype, shape), pv, GridViewRow("partition view"), dtype, tile)
+        aims = map.insert(map.insert(aims, tv, param), pv, param)
+        pv
+      }
+      t_read_index(param, free0) => {
+        let asking = writer(marks, calls, "read_at")
+        let (_extent, _tile, _pad, along) = cells_of(name, frames, ops, geoms, roles, param, asking)
+        let (g, free) = settle_all(name, frames, grown(next, ops, held, spreads, pending), free0)
+        next = g.next
+        ops = g.ops
+        held = g.held
+        spreads = g.spreads
+        let nfree = len(list.filter(along, a => a == Free))
+        if len(free) != nfree {
+          refuse_at(name, frames, ops, asking, "parameter ${param} has ${nfree} Free dimension(s), and read_at names ${len(free)} cell(s)")
+        } else { () }
+        for f in free { check_rank0(name, frames, ops, held, asking, "cell index", f, "i32") }
+        let (ix, after, more, seen) = cell_index(name, frames, ops, next, cell_blocks, along, free)
+        next = after
+        ops = ops ++ more
+        held = hold_indices(held, more)
+        cell_blocks = seen
+        ix
       }
       t_cell_shape(param) => {
         let asking = writer(marks, calls, "cell_shape")
@@ -4529,7 +4592,7 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
         let claimed = len(roles) > param && roles[param] != Sharing
         let none: Map[String, Int] = map.empty()
         let built = cell_view_ops(name, next, param, dtype, if claimed { CELL_ALIGN } else { 0 }, extent, tile, pad,
-          list.map(tile, _t => FREE_AXIS), tile, 0 - 1, none)
+          list.map(tile, _t => Free), tile, 0 - 1, none)
         next = built.next
         ops = ops ++ built.ops
         held = hold_view(hold_view(held, built.tv, TensorViewRow, dtype, extent),
@@ -6360,7 +6423,7 @@ test "knife C2: cells that disagree with one another or with the grid are refuse
   assert str.starts_with(marked(() => trace2("g", In(F64, cells([1000], [128])), Out(F64, cells([2048], [128])), never_runs)),
     "tileir: kernel `g`: argument 0 (In) has 8 cell(s) in dimension 0, which follows grid axis 0, and the grid has 16 block(s) there")
   # a dynamic extent has to follow an axis: that is where its length comes from
-  assert str.starts_with(marked(() => trace2("g", In(F64, cells([DYN_DIM], [128], along = [FREE_AXIS])), Out(F64, cells([DYN_DIM], [128])), never_runs)),
+  assert str.starts_with(marked(() => trace2("g", In(F64, cells([DYN_DIM], [128], along = [Free])), Out(F64, cells([DYN_DIM], [128])), never_runs)),
     "tileir: kernel `g`: argument 0 (In) has a dynamic extent in dimension 0, which follows no grid axis, so nothing says how long it is")
   # an Out is cut, and cut along the grid's own axes
   assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, Whole), never_runs)),
@@ -6379,10 +6442,10 @@ fn grid_of(sigs: List[Sig]) -> Result[List[Int], String] = entry_grid(list.map(s
 
 test "0.8.1: an Out's dimensions follow grid axes one to one, any injection, and the grid is the Out's cells axis by axis" {
   # the batch on axis 2: [4, 64, 32] in [1, 32, 32] cells makes a 2x1x4 grid
-  let batched = Out(F64, cells([4, 64, 32], [1, 32, 32], along = [2, 0, 1]))
+  let batched = Out(F64, cells([4, 64, 32], [1, 32, 32], along = [Axis(2), Axis(0), Axis(1)]))
   assert grid_of([sig_of(batched)]) == Ok([2, 1, 4])
   # a head on axis 2 of a two-dimensional output: axis 1 is followed by none and has one block
-  assert grid_of([sig_of(Out(F64, cells([64, 128], [32, 32], along = [0, 2])))]) == Ok([2, 1, 4])
+  assert grid_of([sig_of(Out(F64, cells([64, 128], [32, 32], along = [Axis(0), Axis(2)])))]) == Ok([2, 1, 4])
   # the identity is what it was
   assert grid_of([sig_of(Out(F64, cells([64, 128], [32, 32])))]) == Ok([2, 4, 1])
   # the cell index is the block ids of the axes `along` names, in dimension order
@@ -6394,22 +6457,22 @@ test "0.8.1: an Out's dimensions follow grid axes one to one, any injection, and
     BlockId(_d, axis) -> axis
     _ -> 0 - 1
   }) == [2, 0, 1]
-  assert marked(() => trace2("t", In(F64, cells([64, 64], [8, 8], along = [1, 0])), Out(F64, cells([64, 64], [8, 8], along = [1, 0])),
+  assert marked(() => trace2("t", In(F64, cells([64, 64], [8, 8], along = [Axis(1), Axis(0)])), Out(F64, cells([64, 64], [8, 8], along = [Axis(1), Axis(0)])),
     (x, o) => store_cell(o, load_cell(x)))) == "accepted"
 }
 
 test "0.8.1: an Out that follows no axis in a dimension, one axis twice, an axis past the third, or an axis another Out leaves at one block, is refused" {
-  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([64, 64], [8, 8], along = [0, FREE_AXIS])), never_runs)),
-    "tileir: kernel `g`: argument 1 (Out) follows grid axes [0, -1]; every dimension of an Out follows a grid axis, because its cells are the grid")
-  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([64, 64], [8, 8], along = [1, 1])), never_runs)),
-    "tileir: kernel `g`: argument 1 (Out) follows grid axes [1, 1]; two of its dimensions follow one axis, so two blocks would write one cell")
-  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([64, 64], [8, 8], along = [0, 3])), never_runs)),
-    "tileir: kernel `g`: argument 1 (Out) follows grid axes [0, 3]; a grid has axes 0, 1 and 2")
+  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([64, 64], [8, 8], along = [Axis(0), Free])), never_runs)),
+    "tileir: kernel `g`: argument 1 (Out) follows grid axes [Axis(0), Free]; every dimension of an Out follows a grid axis, because its cells are the grid")
+  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([64, 64], [8, 8], along = [Axis(1), Axis(1)])), never_runs)),
+    "tileir: kernel `g`: argument 1 (Out) follows grid axes [Axis(1), Axis(1)]; two of its dimensions follow one axis, so two blocks would write one cell")
+  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([64, 64], [8, 8], along = [Axis(0), Axis(3)])), never_runs)),
+    "tileir: kernel `g`: argument 1 (Out) follows grid axes [Axis(0), Axis(3)]; a grid has axes 0, 1 and 2")
   # the first Out follows axis 0 alone, so axis 1 has one block; the second has eight there
-  assert str.starts_with(marked(() => trace2("g", Out(F64, cells([64], [8])), Out(F64, cells([8, 64], [8, 8], along = [0, 1])), never_runs)),
+  assert str.starts_with(marked(() => trace2("g", Out(F64, cells([64], [8])), Out(F64, cells([8, 64], [8, 8], along = [Axis(0), Axis(1)])), never_runs)),
     "tileir: kernel `g`: argument 0 (Out) is cut into a 8x1x1 grid and argument 1 (Out) into 1x8x1; one launch has one grid")
   # an In that follows an axis the Out leaves at one block
-  assert str.starts_with(marked(() => trace2("g", In(F64, cells([64], [8], along = [1])), Out(F64, cells([64], [8])), never_runs)),
+  assert str.starts_with(marked(() => trace2("g", In(F64, cells([64], [8], along = [Axis(1)])), Out(F64, cells([64], [8])), never_runs)),
     "tileir: kernel `g`: argument 0 (In) has 8 cell(s) in dimension 0, which follows grid axis 1, and the grid has 1 block(s) there")
 }
 
@@ -6417,13 +6480,13 @@ test "knife C2: a matrix product's inputs follow one grid axis each, and a dynam
   # A is [M, K] and follows axis 0 along M; B is [K, N] and follows axis 1
   # along N; K is the loop's, so it follows neither. K != N on purpose.
   assert marked(() => trace3("mm",
-    In(F64, cells([64, 32], [16, 8], along = [0, FREE_AXIS])),
-    In(F64, cells([32, 48], [8, 16], along = [FREE_AXIS, 1])),
+    In(F64, cells([64, 32], [16, 8], along = [Axis(0), Free])),
+    In(F64, cells([32, 48], [8, 16], along = [Free, Axis(1)])),
     Out(F64, cells([64, 48], [16, 16])), three)) == "accepted"
   # the same A read as if its K followed axis 1 has 4 cells where the grid has 3
   assert str.starts_with(marked(() => trace3("mm",
     In(F64, cells([64, 32], [16, 8])),
-    In(F64, cells([32, 48], [8, 16], along = [FREE_AXIS, 1])),
+    In(F64, cells([32, 48], [8, 16], along = [Free, Axis(1)])),
     Out(F64, cells([64, 48], [16, 16])), three)),
     "tileir: kernel `mm`: argument 0 (In) has 4 cell(s) in dimension 1, which follows grid axis 1, and the grid has 3 block(s) there")
   # extents the launch decides
@@ -6653,8 +6716,8 @@ fn mm_cells(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
 }
 
 test "PR-1: load_at names the cells of the dimensions that follow no axis, zeros is shaped like the cell, and a miscount is refused" {
-  let ga = cells([128, 64], [64, 32], along = [0, FREE_AXIS])
-  let gb = cells([64, 128], [32, 64], along = [FREE_AXIS, 1])
+  let ga = cells([128, 64], [64, 32], along = [Axis(0), Free])
+  let gb = cells([64, 128], [32, 64], along = [Free, Axis(1)])
   let gc = cells([128, 128], [64, 64])
   let (p, _e) = trace3("mm", In(F16, ga), In(F16, gb), Out(F16, gc), mm_cells)
   assert len(ops_where(p.ops, o => match o {
@@ -6745,7 +6808,7 @@ test "PR-1 (n9): a place that wants a rank-0 tile refuses a wider one while the 
     let acc = carry(broadcast(f_const(F64, 0.0), [8]))
     for _k in d_range(idx_of(arange(8)), idx_const(2), step = By(idx_const(1))) { acc.set(acc.get()) }
   })), "tileir: kernel `r`: op #5 `d_range`: lower bound is tile<8xi32>, and it must be the rank-0 tile<i32>")
-  let ga = cells([128, 64], [64, 32], along = [0, FREE_AXIS])
+  let ga = cells([128, 64], [64, 32], along = [Axis(0), Free])
   assert str.starts_with(marked(() => trace2("r", In(F16, ga), Out(F16, cells([128, 32], [64, 32])), (a, c) => {
     store_cell(c, load_at(a, [idx_of(arange(4))]))
   })), "tileir: kernel `r`: op #2 `load_at`: cell index is tile<4xi32>, and it must be the rank-0 tile<i32>")
@@ -6918,7 +6981,7 @@ test "D-4: a rank-0 value stored into a cell fills it, and store_sub writes one 
   })) == 1
   # a cell of [8, 64] written in four pieces of [8, 16]: one view of the
   # pieces, and piece k of the block's cell is index (b0, 4 * b1 + k)
-  let (q, _e2) = trace2("pieces", In(F64, cells([64, 256], [8, 16], along = [0, FREE_AXIS])),
+  let (q, _e2) = trace2("pieces", In(F64, cells([64, 256], [8, 16], along = [Axis(0), Free])),
     Out(F64, cells([64, 256], [8, 64])), (x, o) => {
       for k in range(0, 4) {
         store_sub(o, [0, k], load_at(x, [idx_const(k)]))
@@ -7371,7 +7434,7 @@ test "0.9.0: extent_of and blocks_of are host constants for a static dimension a
     IdxConst(_d, v) -> v
     _ -> 0
   })
-  let kv = cells([200, 32], [64, 32], along = [FREE_AXIS, 1])
+  let kv = cells([200, 32], [64, 32], along = [Free, Axis(1)])
   let (p, _e) = trace2("st", In(F64, kv), Out(F64, cells([64, 32], [64, 32])), (k, o) => {
     let _n = extent_of(k, 0)
     let _b = blocks_of(k, 0)
@@ -7388,7 +7451,7 @@ test "0.9.0: extent_of and blocks_of are host constants for a static dimension a
     _ -> false
   })) >= 2
   assert list.contains(consts(q), 128)
-  let fr = marked(() => trace2("fr", In(F64, cells([DYN_DIM, 32], [64, 32], along = [FREE_AXIS, 0])),
+  let fr = marked(() => trace2("fr", In(F64, cells([DYN_DIM, 32], [64, 32], along = [Free, Axis(0)])),
     Out(F64, cells([64, 32], [64, 32])), (k, o) => {
       let _b = blocks_of(k, 0)
       store_cell(o, zeros(o))
@@ -7889,21 +7952,21 @@ test "S3: an unknown conditional write target conflicts with a fork sibling" {
 
 # Singleton projection is a value contract, independent of the workload.
 test "S2: projected batched copy is exactly the explicit reshape program" {
-  let storage = cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1])
-  let projected = cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])
+  let storage = cells([2, 8, 4], [1, 4, 4], along = [Axis(2), Axis(0), Axis(1)])
+  let projected = cells([2, 8, 4], [1, 4, 4], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])
   let (a, ea) = trace2("copy", In(F64, projected), Out(F64, projected), (x, o) => store_cell(o, load_cell(x)))
   let (b, eb) = trace2("copy", In(F64, storage), Out(F64, storage), (x, o) =>
       store_cell(o, reshape(reshape(load_cell(x), [4, 4]), [1, 4, 4])))
   assert a == b
   assert ea == eb
-  let (empty, _e) = trace2("copy", In(F64, cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [])),
+  let (empty, _e) = trace2("copy", In(F64, cells([2, 8, 4], [1, 4, 4], along = [Axis(2), Axis(0), Axis(1)], squeeze = [])),
     Out(F64, storage), (x, o) => store_cell(o, load_cell(x)))
   let (old, _e2) = trace2("copy", In(F64, storage), Out(F64, storage), (x, o) => store_cell(o, load_cell(x)))
   assert empty == old
 }
 
 test "S2: unordered singleton axes, direct value constants and rank zero" {
-  let g = cells([2, 8, 3], [1, 4, 1], along = [2, 0, 1], squeeze = [2, 0])
+  let g = cells([2, 8, 3], [1, 4, 1], along = [Axis(2), Axis(0), Axis(1)], squeeze = [2, 0])
   let (p, _e) = trace2("project", In(F64, g), Out(F64, g), (x, o) => {
     assert tile_shape(load_cell(x)) == [4]
     assert tile_shape(zeros(o)) == [4]
@@ -7939,7 +8002,7 @@ test "S2: invalid projections refuse before the body and preserve argument ident
 }
 
 test "S2: projection cannot relax storage following, rank, dynamic extent or Out ownership" {
-  for along in [[FREE_AXIS, 0, 1], [2, 0, 0], [3, 0, 1]] {
+  for along in [[Free, Axis(0), Axis(1)], [Axis(2), Axis(0), Axis(0)], [Axis(3), Axis(0), Axis(1)]] {
     assert marked(() => trace1("bad", Out(F64, cells([2, 8, 4], [1, 4, 4], along = along, squeeze = [0])),
       _o => panic("body ran"))) != "accepted"
   }
@@ -7947,17 +8010,17 @@ test "S2: projection cannot relax storage following, rank, dynamic extent or Out
     _o => panic("body ran")))
   assert str.contains(rank4, "argument 0") && not str.contains(rank4, "body ran")
   assert str.contains(marked(() => trace2("follow",
-    In(F64, cells([3, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])),
-    Out(F64, cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])),
+    In(F64, cells([3, 8, 4], [1, 4, 4], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])),
+    Out(F64, cells([2, 8, 4], [1, 4, 4], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])),
     (_x, _o) => panic("body ran"))), "grid has 2 block(s)")
   assert str.contains(marked(() => trace1("dynamic",
-    In(F64, cells([DYN_DIM, 8], [1, 4], along = [FREE_AXIS, 0], squeeze = [0])),
+    In(F64, cells([DYN_DIM, 8], [1, 4], along = [Free, Axis(0)], squeeze = [0])),
     _x => panic("body ran"))), "dynamic")
 }
 
 test "S2: free indices and extent queries use storage dimensions" {
-  let g = cells([2, 8, 4], [1, 4, 4], along = [2, FREE_AXIS, 1], squeeze = [0])
-  let out = cells([2, 4, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])
+  let g = cells([2, 8, 4], [1, 4, 4], along = [Axis(2), Free, Axis(1)], squeeze = [0])
+  let out = cells([2, 4, 4], [1, 4, 4], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])
   let (p, _e) = trace2("free", In(F64, g), Out(F64, out), (x, o) => {
     let n = extent_of(x, 1)
     let blocks = blocks_of(x, 1)
@@ -7972,8 +8035,8 @@ test "S2: free indices and extent queries use storage dimensions" {
 }
 
 test "S2: store_sub inserts singleton shape and zero piece before the original proof" {
-  let projected = cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1], squeeze = [0])
-  let storage = cells([2, 8, 4], [1, 4, 4], along = [2, 0, 1])
+  let projected = cells([2, 8, 4], [1, 4, 4], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])
+  let storage = cells([2, 8, 4], [1, 4, 4], along = [Axis(2), Axis(0), Axis(1)])
   let (a, _ea) = trace1("piece", Out(F64, projected), o => store_sub(o, [1, 0], full([2, 4], 3.0)))
   let (b, _eb) = trace1("piece", Out(F64, storage), o => store_sub(o, [0, 1, 0], reshape(full([2, 4], 3.0), [1, 2, 4])))
   assert a == b
@@ -8012,7 +8075,7 @@ test "S2: tile_shape allocates no operation and retains its zero IR source call"
 # Six positions must retain the same marker checks and read-only token path
 # as the older arities, including when the last parameter is a buffer.
 test "K3-0: trace6 preserves positions hints calls projection and In tokens" {
-  let g = cells([3, 4, 4], [1, 2, 4], along = [2, 0, 1], squeeze = [0])
+  let g = cells([3, 4, 4], [1, 2, 4], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])
   let hs = [for_arch("sm_86", entry_hints(occupancy = Some(2)))]
   let body = (a: Param[F32], b: Param[F32], c: Param[F32], o: Param[F32], s: Param[F32], n: Param[I32]) => {
     let t = load_cell(a)
@@ -8060,4 +8123,90 @@ test "K3-0: sixth marker refuses before body and preserves caller" {
   let pointer = marked(() => trace6("six_pointer", Shared(F64), Shared(F64), Shared(F64), Shared(F64), Shared(F64), Shared(F64),
     (_a, _b, _c, _d, _e, f) => { let _v = scalar(f) }))
   assert str.contains(pointer, "scalar")
+}
+
+# Recorder and launch share CellAxis validation, but only the recorder knows
+# Out ownership and the projected tile shape.
+test "K3-G: invalid grouped markers refuse before the body" {
+  let output = cells([12], [1], along = [Axis(2)])
+  for bad in [Grouped(2, 0), Grouped(2, -2), Grouped(2, 2147483648), Grouped(3, 3), Axis(-1)] {
+    let why = marked(() => trace2("group", In(F32, cells([4], [1], along = [bad])), Out(F32, output),
+      (_x, _o) => panic("body ran")))
+    assert str.contains(why, "argument 0") && not str.contains(why, "body ran")
+  }
+  for out in [cells([4], [1], along = [Grouped(0, 1)]), cells([4], [1], along = [Grouped(0, 3)])] {
+    let why = marked(() => trace1("group_out", Out(F32, out), _o => panic("body ran")))
+    assert str.contains(why, "Grouped is read-only") && not str.contains(why, "body ran")
+  }
+  for input in [cells([DYN_DIM], [1], along = [Grouped(2, 3)]),
+    cells([4, 12], [1, 1], along = [Grouped(2, 3), Axis(2)]),
+    cells([5], [1], along = [Grouped(2, 3)])] {
+    let why = marked(() => trace2("group", In(F32, input), Out(F32, output), (_x, _o) => panic("body ran")))
+    assert str.contains(why, "argument 0") && not str.contains(why, "body ran")
+  }
+  let partial = marked(() => trace2("partial", In(F32, cells([4], [1], along = [Grouped(2, 3)])),
+    Out(F32, cells([10], [1], along = [Axis(2)])), (_x, _o) => panic("body ran")))
+  assert str.contains(partial, "complete groups") && not str.contains(partial, "body ran")
+}
+
+test "K3-G: Grouped one emits the Axis program and ordinary axis0 repetition divides by three" {
+  let record = (axis: CellAxis) => trace2("repeat", In(F32, cells([4], [1], along = [axis])),
+    Out(F32, cells([4], [1])), (x, o) => store_cell(o, load_cell(x)))
+  let (a, _ea) = record(Axis(0))
+  let (b, _eb) = record(Grouped(0, 1))
+  assert a == b
+  let (p, _e) = trace2("repeat", In(F32, cells([4], [1], along = [Grouped(0, 3)])),
+    Out(F32, cells([12], [1])), (x, o) => store_cell(o, load_cell(x)))
+  assert len(ops_where(p.ops, op => match op { BinaryI(_d, "divi", "i32", [], _a, _b) -> true, _ -> false })) == 1
+}
+
+test "K3-G: prefix requires static In Grid and a Free storage dimension" {
+  for marker in [Out(F32, cells([8], [4], along = [Axis(0)])), Shared(F32), Scalar(F32), In(F32, Whole),
+    In(F32, cells([DYN_DIM, 8], [1, 4], along = [Axis(0), Free]))] {
+    let why = marked(() => trace1("prefix", marker, p => { let _v = read_prefix(p, 0, idx_const(1)) }))
+    assert why != "accepted" && str.contains(why, "prefix")
+  }
+  let g = cells([4, 17, 4], [1, 4, 4], along = [Grouped(2, 3), Free, Axis(1)], squeeze = [0])
+  for dim in [-1, 0, 2, 3] {
+    let why = marked(() => trace1("prefix", In(F32, g), p => { let _v = read_prefix(p, dim, idx_const(1)) }))
+    assert str.contains(why, "read_prefix") && why != "accepted"
+  }
+  let rank = marked(() => trace1("prefix", In(F32, g), p => { let _v = read_prefix(p, 1, idx_of(arange(4))) }))
+  assert str.contains(rank, "prefix length is tile<4xi32>")
+}
+
+test "K3-G: distinct prefix views keep length stride squeeze tokens hints and source calls" {
+  let g = cells([4, 17, 4], [1, 4, 4], along = [Grouped(2, 3), Free, Axis(1)], squeeze = [0])
+  let out = cells([12, 1, 4], [1, 1, 4], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])
+  let body = (x: Param[F32], o: Param[F32], n: Param[I32]) => {
+    let short = read_prefix(x, 1, idx_const(1))
+    let long = read_prefix(x, 1, idx_of(scalar(n)))
+    let _capacity = blocks_of(x, 1)
+    let _extent = extent_of(x, 1)
+    var result: Tile[F32] = zeros(o)
+    if idx_eq(block_id(0), idx_const(0)) {
+      for j in d_range(idx_const(0), read_blocks(long, 1)) {
+        let t = read_at(long, [j], hints = [for_arch("sm_90", view_hints(latency = Some(3)))])
+        assert tile_shape(t) == [4, 4]
+        result = result + reduce_sum(t, dim = 0, keepdims = true)
+      }
+    }
+    result = result + reduce_sum(read_at(short, [idx_const(0)]), dim = 0, keepdims = true)
+    store_cell(o, result)
+  }
+  let (p, _e) = trace3("prefix", In(F32, g), Out(F32, out), Scalar(I32), body)
+  let (again, _e2) = trace3("prefix", In(F32, g), Out(F32, out), Scalar(I32), body)
+  let (q, calls) = trace_calls("prefix", [], () => body(param(F32, 0), param(F32, 1), param(I32, 2)),
+    markers = [erase(In(F32, g)), erase(Out(F32, out)), erase(Scalar(I32))])
+  assert p == again && p == q
+  let views = ops_where(p.ops, op => match op { CellViewOf(_d, 0, "f32", _a, sh, [68, 4, 1], [_n], []) -> sh == [4, DYN_DIM, 4], _ -> false })
+  assert len(views) == 2 && views[0] != views[1]
+  let loads = ops_where(p.ops, op => match op { LoadView(_d, _t, _dt, _v, _i, _tok, _in, _h) -> true, _ -> false })
+  assert list.all(loads, op => match op { LoadView(_d, _t, _dt, _v, _i, tok, ins, _h) -> tok == 0 && ins == [], _ -> false })
+  let used = list.map(loads, op => match op { LoadView(_d, _t, _dt, v, _i, _tok, _in, _h) -> v, _ -> -1 })
+  assert len(used) == 2 && used[0] != used[1]
+  for api in ["read_prefix", "read_blocks", "read_at", "tile_shape"] {
+    assert list.any(calls, c => c.name == api && c.at != None)
+  }
+  assert list.any(calls, c => c.name == "tile_shape" && c.ops_from == c.ops_to)
 }
