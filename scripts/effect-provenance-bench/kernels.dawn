@@ -1,0 +1,26 @@
+# Keep U0 dispatch forms separate so a change cannot hide behind a faster mean.
+use std/list
+
+pub trait Step[T] { fn step(value: T) -> Int }
+pub type Counter = { value: Int }
+impl Step[Counter] { fn step(value: Counter) -> Int = value.value * 1664525 + 1013904223 }
+
+pub fn direct(n: Int) -> Int = n * 1664525 + 1013904223
+pub fn higher(f: fn(Int) -> Int, n: Int) -> Int = f(n)
+fn generic[T: Step](n: T) -> Int = step(n)
+
+pub fn kernel(kind: Int, n: Int, seed: Int) -> Int = {
+  var value = seed
+  var i = 0
+  let f = direct
+  while i < n {
+    value = if kind == 0 { value * 1664525 + 1013904223 }
+    else if kind == 1 { direct(value) }
+    else if kind == 2 { f(value) }
+    else if kind == 3 { generic(Counter { value = value }) }
+    else if kind == 4 { higher(f, value) }
+    else { list.fold([value, i, seed], 0, (a, b) => a + b) }
+    i = i + 1
+  }
+  value
+}

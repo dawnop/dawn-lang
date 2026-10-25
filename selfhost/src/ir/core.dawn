@@ -35,7 +35,7 @@
 # loops), so flattening to a basic-block CFG would cost both backends work
 # and buy nothing at this stage.
 
-use check/tast.{TJavaCall}
+use check/tast.{TJavaCall, CallSource}
 use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyAdt,
   TyVar, TyList, TyMap, TySet, TyArray, TyTuple, TyFn, TyBytes, TyI64Buf, TyF64Buf, TyJava, TyAssoc,
@@ -110,12 +110,13 @@ pub type CJava = {
 ## `nlo` is where the callee's name starts (`f` in `m.f(x)`, `g` in
 ## `a.f().g()`), so a reader can underline one link of a method chain.
 ##
-## A call lowering synthesised -- a default argument's `f$default$k`, the
-## `Eq` behind `==`, a dictionary bridge -- has no written text and says so
-## with `CNoSite`. One written call gets at most one `CAt`.
+## `CSyntax` preserves the source construct and role of a synthetic call with
+## no written callee token. Legacy source maps list `CAt` only; `CSyntax` is
+## compiler metadata, and an actually unknown site stays `CNoSite`.
 pub type CSite =
   | CNoSite
-  | CAt(lo: Int, hi: Int, nlo: Int)
+  | CAt(lo: Int, hi: Int, nlo: Int, source: CallSource)
+  | CSyntax(lo: Int, hi: Int, nlo: Int, source: CallSource)
 
 pub type CExpr =
   | CInt(v: Int)
@@ -361,7 +362,15 @@ pub fn mode_owned(m: CMode) -> Bool =
 
 pub type CParam = { sym: Int, ty: Ty, mode: CMode }
 
+## Lexical identity stays independent of a lifted function's generated name.
+## Negative spans explicitly mark a wrapper with no written definition.
+pub type CDefinition = { lo: Int, hi: Int, role: String }
+
+pub fn synthetic_definition(role: String) -> CDefinition =
+  CDefinition { lo = -1, hi = -1, role = role }
+
 pub type CFun = {
+  definition: CDefinition,
   name: String,
   owner: String,
   # Captured variables, for a function produced by lambda lifting. They are
@@ -807,6 +816,7 @@ pub fn diverges(e: CExpr) -> Bool =
 
 test "the three kinds of body with one name are three keys" {
   let base = CFun {
+    definition = synthetic_definition("wrapper"),
     name = "eq",
     owner = "m",
     captures = [],

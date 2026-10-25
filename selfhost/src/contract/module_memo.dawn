@@ -31,7 +31,10 @@ use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use driver/checkdump
 use check/jsig.{jsig_refused}
 use ir/interp.{ct_default}
-use ir/core.{CValue, VInt}
+use ir/core.{CValue, VInt, CCall, CAt, CSyntax, CDefinition, CBinary}
+use ir/lower
+use check/tast.{XApply, XBinary}
+use check/types.{Sig}
 use front/parser
 use front/token.{mk_diag}
 use check/identity
@@ -901,5 +904,113 @@ test "module memo shows a watched module's diagnostics as final once its step is
       let (_, partial_ok) = placed_agree(first.session, input, set.from(["mid"]))
       assert partial_ok
     }
+  }))
+}
+
+test "module memo preserves operation keys and independent lambda definitions" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    let text = join([
+      "pub effect Ask { fn ask(n: Int) -> Int }",
+      "pub fn helper(n: Int) -> Int !Ask = ask(n)",
+      "pub fn factory() -> (fn(Int) -> Int, fn(Int) -> Int) = (n => n + 1, n => n + 1)",
+      ""
+    ], "\n")
+    let input = LoadResult { modules = [source("m", text)], diags = [] }
+    let fresh = incremental.new(std, ct_default(), jsig_refused(), 4)
+    let first = incremental.analyze(fresh, input)
+    assert first.program.diags == []
+    let warm = incremental.analyze(first.session, input)
+    assert warm.stats.reused_modules == 1
+    let moved = LoadResult { modules = [source("m", "# move\n\n" ++ text)], diags = [] }
+    let shifted = incremental.analyze(warm.session, moved)
+    let cold = analyze_program(moved, std, ct_default(), jsig_refused())
+    assert shifted.program.modules[0].tm == cold.modules[0].tm
+    let before = first.program.modules[0]
+    let after = shifted.program.modules[0]
+    match before.tm.fns[0].body {
+      XApply(_, _, _, lo, hi, nlo, _, source) -> {
+        assert source.role == "perform"
+        assert source.operation == Some(("m", identity.path_text([
+          identity.Named(identity.EffectDecl, "Ask"), identity.Named(identity.OperationDecl, "ask")])))
+        assert lo == nlo && source.nhi == lo + 3 && hi > source.nhi
+      }
+      _ -> panic("operation lost its identity")
+    }
+    let sigs: Map[(String, String), Sig] = map.empty()
+    let a = lower.lower_module("m", before.tm, before.cx.traits, before.cx.impl_table, before.cx.adts, sigs)
+    let b = lower.lower_module("m", after.tm, after.cx.traits, after.cx.impl_table, after.cx.adts, sigs)
+    assert a == b
+    match a.fns[0].body {
+      CCall(_, _, _, CAt(lo, _, _, source)) -> {
+        assert source.role == "perform" && source.nhi == lo + 3
+        assert source.operation != None
+      }
+      _ -> panic("Core lost the operation source")
+    }
+    var definitions: List[CDefinition] = []
+    for f in a.fns {
+      if f.definition.role == "lambda" {
+        assert f.origin == before.tm.fns[1].decl
+        assert f.definition.lo >= 0 && f.definition.hi > f.definition.lo
+        definitions = definitions ++ [f.definition]
+      }
+    }
+    assert len(definitions) == 2 && definitions[0] != definitions[1]
+  }))
+}
+
+test "operation keys distinguish equal slot indices behind imported aliases" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    let ops = "pub effect Ask { fn ask(n: Int) -> Int }\n"
+    let input = LoadResult { modules = [source("first", ops), source("second", ops),
+      source("user", "use first as a\nuse second as b\npub fn helper(n: Int) -> Int !a.Ask !b.Ask = a.ask(n) + b.ask(n)\n")], diags = [] }
+    let result = analyze_program(input, std, ct_default(), jsig_refused())
+    assert result.diags == []
+    let key = identity.path_text([identity.Named(identity.EffectDecl, "Ask"),
+      identity.Named(identity.OperationDecl, "ask")])
+    match result.modules[2].tm.fns[0].body {
+      XBinary(_, XApply(_, _, _, _, _, _, _, a), XApply(_, _, _, _, _, _, _, b), ..) -> {
+        assert a.operation == Some(("first", key))
+        assert b.operation == Some(("second", key))
+        assert a.operation != b.operation
+      }
+      _ -> panic("imported operations lost their identity")
+    }
+  }))
+}
+
+test "comparison calls retain their operator token and complete syntax span" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    let text = "pub type Box = { n: Int }\nimpl Eq[Box] { fn eq(a: Box, b: Box) -> Bool = a.n == b.n }\n" ++
+      "impl Hash[Box] { fn hash(a: Box) -> Int = a.n }\n" ++
+      "impl Ord[Box] { fn cmp(a: Box, b: Box) -> Int = if a.n < b.n { -1 } else if a.n == b.n { 0 } else { 1 } }\n" ++
+      "pub fn same(a: Box, b: Box) -> Bool = a == b\n" ++
+      "pub fn structural(a: (Int, Int), b: (Int, Int)) -> Bool = a == b\n" ++
+      "pub fn ordered(a: Box, b: Box) -> Bool = a < b\n"
+    let input = LoadResult { modules = [source("m", text)], diags = [] }
+    let result = analyze_program(input, std, ct_default(), jsig_refused())
+    assert result.diags == []
+    let cm = result.modules[0]
+    let sigs: Map[(String, String), Sig] = map.empty()
+    let core = lower.lower_module("m", cm.tm, cm.cx.traits, cm.cx.impl_table, cm.cx.adts, sigs)
+    var found = 0
+    for f in core.fns {
+      if f.name == "same" || f.name == "structural" || f.name == "ordered" {
+        let call = match f.body { CBinary(_, call, _, _) -> call, other -> other }
+        match call {
+          CCall(_, _, _, CSyntax(lo, hi, nlo, source)) -> {
+            assert source.role == "operator"
+            let width = if f.name == "ordered" { 1 } else { 2 }
+            assert lo < nlo && nlo + width == source.nhi && source.nhi < hi
+            found = found + 1
+          }
+          _ -> panic("comparison lost its source")
+        }
+      }
+    }
+    assert found == 3
   }))
 }

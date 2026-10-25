@@ -105,6 +105,7 @@ MUTATIONS = {
         LOWER,
         """  }, XCallBuiltin(name, args, no_wits, evid, 0, 0, NO_NAME, ret))
   let f = CFun {
+    definition = synthetic_definition("builtin-value"),
     name = lam,
     owner = st5.owner,
     captures = [],
@@ -117,6 +118,7 @@ MUTATIONS = {
   var raw: List[CExpr] = []
   for p in ps { raw = raw ++ [CLocal(p.sym, p.ty)] }
   let f = CFun {
+    definition = synthetic_definition("builtin-value"),
     name = lam,
     owner = st5.owner,
     captures = [],

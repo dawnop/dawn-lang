@@ -33,7 +33,7 @@ use check/types.{
   intrinsics,
   Impls, impl_at, sig_abi_eff
 }
-use check/tast.{TJavaCall, TModule, BEq, BNeq, BLt, BLe, BGt, BGe}
+use check/tast.{call_source, TJavaCall, TModule, BEq, BNeq, BLt, BLe, BGt, BGe}
 use ir/interp.{CtOut}
 use front/ast.{
   Decl, DFn, DImpl, DTrait, DTest, FnDecl, TraitMethod, TypeRef, TNamed, TQual, EUnit, VisPub
@@ -60,7 +60,7 @@ use jvm/help.{
   ldc_str, ldc_class, ldc_long, ldc_double, push_int, store_slot, pop_value, internal_of,
   emit_scalar_cmp, emit_div_zero_check, gen_equality, gen_ordering, adapt_java_arg, new_array
 }
-use ir/core.{
+use ir/core.{synthetic_definition,
   CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
   CExpr, CStmt, CCallee, CFun, CDictDef, CDictSlot,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
@@ -72,7 +72,7 @@ use ir/core.{
   CDirect, CDynamic, CMethod, CImpl, CDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
-  CBinOp, CUnOp, cex_ty, CSlotFn, CSlotDefault, CSite, CNoSite, CAt, CParam, COwned
+  CBinOp, CUnOp, cex_ty, CSlotFn, CSlotDefault, CSite, CNoSite, CSyntax, CAt, CParam, COwned
 }
 use ir/coresites.{callee_text}
 use ir/lower.{LMod, subst_subject, trait_method_sig}
@@ -385,8 +385,8 @@ fn visit_at(m: MethodVisitor, at: Option[Label]) -> Unit !io =
 ## labelled emission: the plain emission's visits are exactly the parent's.
 fn marking(gx: GenCtx, site: CSite) -> Bool =
   gx.mapping && match site {
-    CAt(_, _, _) -> true
-    CNoSite -> false
+    CAt(_, _, _, _) -> true
+    CNoSite | CSyntax(_, _, _, _) -> false
   }
 
 fn open_mark(g: Gen) -> Label !io = {
@@ -4034,9 +4034,10 @@ fn mapped_fixture(mapping: Bool) -> (Bytes, Gen) !io = {
     closures = [], sam_classes = [], const_fields = [], const_by_key = map.empty(), marks = [], jrows = [],
     jfns = []
   }
-  let inner = CCall(CDirect("m", "g"), [CLocal(1, TyInt)], TyInt, CAt(9, 13, 9))
-  let body = CCall(CDirect("m", "g"), [inner], TyInt, CAt(4, 14, 4))
+  let inner = CCall(CDirect("m", "g"), [CLocal(1, TyInt)], TyInt, CAt(9, 13, 9, call_source(-1, "call")))
+  let body = CCall(CDirect("m", "g"), [inner], TyInt, CAt(4, 14, 4, call_source(-1, "call")))
   let cf = CFun {
+    definition = synthetic_definition("wrapper"),
     name = "f", owner = "m", captures = [], params = [CParam { sym = 1, ty = TyInt, mode = COwned }], dicts = [],
     evs = [], ret = TyInt, body = body, is_test = false, impl_of = None, default_of = None, origin = "f"
   }
@@ -4061,7 +4062,7 @@ test "the labelled emission writes the same class, and the plain one records not
   assert len(rows) == 2
   assert (rows[0].what, rows[0].pclo, rows[0].pchi, rows[0].ipc) == ("direct m.g", 0, 4, 1)
   assert (rows[1].what, rows[1].pclo, rows[1].pchi, rows[1].ipc) == ("direct m.g", 0, 7, 4)
-  assert rows[1].site == CAt(4, 14, 4)
+  assert rows[1].site == CAt(4, 14, 4, call_source(-1, "call"))
   assert len(gl.jfns) == 1 && gl.jfns[0].end == 8 && gl.jfns[0].origin == "f"
   # the reader the side table measures `end` against
   let ms = classread.class_methods(plain)

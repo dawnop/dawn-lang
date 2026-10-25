@@ -7595,3 +7595,54 @@ test "staged if pairs both rewritten arms for navigation references rename and t
     }
   }))
 }
+
+test "origin bindings keep arm-local identity while rename retains its error refusal" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let text = join([
+      "ctl effect Ask {\n fn ask() -> Int\n fn query() -> Int\n}",
+      "fn f() -> Int = {",
+      "  let o = 7",
+      "  with handle Ask {",
+      "    ask() origin o resume k => { let first = o\n k(1) }",
+      "    query() origin o => { let second = o\n 2 }",
+      "  }",
+      "  ask() + o",
+      "}",
+      ""
+    ], "\n")
+    let (st, d) = untitled_state(std, "untitled:origin-binding", text)
+    let analysis = analysis_of(st, d).expect("origin analysis")
+    let qc = doc_qcx(st, d, analysis).expect("origin query context")
+    for pair in [("ask() origin o", "first = o"), ("query() origin o", "second = o")] {
+      let (head, read) = pair
+      let decl = probe_offset(text, head, len(head) - 1)
+      let read_at = probe_offset(text, read, len(read) - 1)
+      let target = def_probe_at(st, d, text, read, len(read) - 1)
+      assert target.def == Some((decl, decl + 1))
+      assert map(occurrences(qc, read_at, true), o => (o.lo, o.hi)) == [(decl, decl + 1), (read_at, read_at + 1)]
+      let hover = hover_probe_at(st, d, text, read, len(read) - 1)
+      assert str.contains(hover, "o: ?")
+      assert not str.contains(hover, "Origin")
+      assert def_probe_at(st, d, text, head, len(head) - 1).def == target.def
+      let params = rename_params(d, read, len(read) - 1, "source")
+      let expected = "`main` has errors; rename reads every name, so fix them first"
+      match handle_prepare_rename(st, params) {
+        (Err(why), _) -> { assert why == expected }
+        (Ok(_), _) -> panic("prepareRename accepted an unsupported origin")
+      }
+      match handle_rename(st, params) {
+        (Err(why), _) -> { assert why == expected }
+        (Ok(_), _) -> panic("rename accepted an unsupported origin")
+      }
+    }
+    let outer = probe_offset(text, "let o", 4)
+    let last = probe_offset(text, "ask() + o", 8)
+    assert map(occurrences(qc, last, true), o => o.lo) == [outer, last]
+    let resume = probe_offset(text, "resume k", 7)
+    assert def_probe_at(st, d, text, "k(1)", 0).def == Some((resume, resume + 1))
+  }))
+}

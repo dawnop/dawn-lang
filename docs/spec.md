@@ -1,6 +1,6 @@
 # Dawn 语言规范
 
-*[English](spec.en.md) —— 本文是正本；英文是它的译本，`scripts/doc-check.py` 盯着两者不脱节。*
+*[English](spec.en.md)：本文是正本；英文是译本，`scripts/doc-check.py` 校验翻译摘要。*
 
 > 状态：**normative（权威）**。适用版本：0.102.0（`selfhost/src/version.dawn` 的 `VERSION`）。<!-- doc-check: version -->
 > 实现与本文冲突时，以本文为准并把实现当 bug——除非本文某条被显式标注为「已被 X 取代」。
@@ -123,7 +123,7 @@ trait impl effect
 true false not
 ```
 
-关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有十四个，
+关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有十五个，
 它们只在各自唯一的语法位置有特殊含义，在别处仍是普通标识符（`let in = 1`、字段名 `test` 都合法）：
 
 | 词 | 唯一的语法位置 |
@@ -140,6 +140,7 @@ true false not
 | `handle` | `with` 之后且下一个 token 不是 `<-`（§6.5） |
 | `opaque` | 紧接 `type`，引入不透明类型（§2.7） |
 | `ctl` | 紧接 `effect`，声明可挂起的效果（§6.5） |
+| `origin` | handler 臂参数表之后、`resume` 之前：`op(a) origin o => …`（§6.5） |
 | `resume` | handler 臂的参数表之后：`op(a) resume k => …`（§6.5） |
 | `pkg` | 只在 `pub(` 之后：`pub(pkg)`（§10.4） |
 
@@ -2134,6 +2135,19 @@ handler 的作用域内，与 `with x <- f(…)` 完全同构，并继承它的�
   见下面的「控制臂」一节），`=>` 与 lambda 同记号（臂本来就是闭包），臂之间换行分隔。
   每个声明的操作**恰好一臂**：少臂、多臂、臂名不属于该效果都是编译错误。
   一个 handler 里两种臂可以并存。
+- 臂语法为 `HandlerArm ::= IDENT LambdaParams OriginClause? ResumeClause? "=>" Expr`，
+  其中 `OriginClause ::= contextual("origin") IDENT`，
+  `ResumeClause ::= contextual("resume") IDENT`。`origin` 仍可用作函数、局部变量、字段、
+  具名实参与操作名称。来源绑定只接受标识符，不接受模式、`_` 或类型注解，且必须在
+  `resume` 之前；重复、逆序、缺名与缺箭头分别诊断。`)` 至 `=>` 之间的既有逻辑换行规则
+  不变，`=>` 后允许换行。绑定与操作参数共享本臂参数域，拒绝重名，可遮蔽外层变量，
+  只在本臂身体可见。
+- **观察尚未支持。** 写出 `origin o` 就由 checker 拒绝，即使未使用 `o`。解析、格式化和
+  编辑器支持不代表观察可用。来源绑定有 definition、references 与 hover 身份；有诊断的模块
+  仍按既有规则拒绝 rename，W2 提供成功 rename 的正控。hover 可显示错误恢复类型，不伪造
+  已可用的 `Origin` 类型。后续观察 intrinsic 将引入 `io` 与不可逃逸的词法句柄
+  `TraceScope`；来源绑定需要该词法能力，并计入 `io`。不可变的 `Origin` 值届时可离开
+  作用域并传给纯函数。本刀没有观察 intrinsic、来源标准库模块或运行期 ABI。
 - 一个 `handle` 一个效果；同一效果重复 `handle` 是内层遮蔽外层，合法。
 - 允许 handle 一个块里实际没发出的效果（无害的死证据）。
 - **handler 局部状态（格子）**：臂表的开头可以声明若干 `var`，每个是**这次安装**私有的

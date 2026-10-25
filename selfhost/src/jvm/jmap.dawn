@@ -19,6 +19,7 @@
 # Every row kind is sorted by a total key, so the same classes and the same
 # sites give the same bytes.
 
+use check/tast.{call_source}
 use std/list
 use std/map
 use std/str
@@ -190,12 +191,12 @@ fn tiny_class() -> Bytes !io = {
 test "rows sort by method and pc, and an unsound method keeps its rows without pcs" {
   let bs = tiny_class()
   let r = JRow {
-    owner = "m", origin = "f", method = "f", desc = "(J)J", site = CAt(0, 3, 0), what = "direct m.g",
+    owner = "m", origin = "f", method = "f", desc = "(J)J", site = CAt(0, 3, 0, call_source(-1, "call")), what = "direct m.g",
     pclo = 0, pchi = 2, ipc = 1
   }
-  let outer = JRow { ..r, site = CAt(0, 9, 0), pchi = 3, ipc = 2, what = "direct m.h" }
-  let cast = JRow { ..r, site = CAt(5, 8, 5), pclo = 2, pchi = 3, ipc = -1, what = "intrinsic x" }
-  let lost = JRow { ..r, site = CAt(20, 23, 20), ipc = -1 }
+  let outer = JRow { ..r, site = CAt(0, 9, 0, call_source(-1, "call")), pchi = 3, ipc = 2, what = "direct m.h" }
+  let cast = JRow { ..r, site = CAt(5, 8, 5, call_source(-1, "call")), pclo = 2, pchi = 3, ipc = -1, what = "intrinsic x" }
+  let lost = JRow { ..r, site = CAt(20, 23, 20, call_source(-1, "call")), ipc = -1 }
   let f = JFn { owner = "m", origin = "f", method = "f", desc = "(J)J", end = 2 }
   let bases = map.insert(map.empty(), "m", map.insert(map.empty(), "f", 100))
   let srcs = map.insert(map.empty(), "m", "m.dawn")

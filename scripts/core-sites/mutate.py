@@ -38,8 +38,8 @@ DUMP = "selfhost/src/ir/coredump.dawn"
 MUTATIONS = {
     "absolute": ((
         LOWER,
-        "if st.base < 0 || nlo == NO_NAME { CNoSite } else { CAt(lo - st.base, hi - st.base, nlo - st.base) }",
-        "if st.base < 0 || nlo == NO_NAME { CNoSite } else { CAt(lo, hi, nlo) }",
+        "CAt(lo - st.base, hi - st.base, start - st.base,",
+        "CAt(lo, hi, start,",
     ),),
     "nlo": ((
         CHECKER,

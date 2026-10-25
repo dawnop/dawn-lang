@@ -21,9 +21,9 @@
 use std/list
 use std/map
 use check/types.{TyInt}
-use check/tast.{TModule}
-use ir/core.{
-  CModule, CFun, CExpr, CStmt, CCallee, CSite, CNoSite, CAt,
+use check/tast.{call_source, TModule}
+use ir/core.{synthetic_definition,
+  CModule, CFun, CExpr, CStmt, CCallee, CSite, CNoSite, CSyntax, CAt,
   CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure, CDictApply, CDictArg,
   CTuple, CTupleGet, CBox, CUnbox, CBinary, CUnary, CIf, CBlock, CListLit,
   CReturn, CExtern, extern_operands, CForeign, CDup, CSteal, CReset, CReuse, sam_ev_exprs, CUpdate, update_values,
@@ -35,8 +35,8 @@ use ir/core.{
 ## offset. None for a call lowering wrote itself.
 pub fn site_abs(base: Int, s: CSite) -> Option[(Int, Int, Int)] =
   match s {
-    CNoSite -> None
-    CAt(lo, hi, nlo) -> Some((base + lo, base + hi, base + nlo))
+    CNoSite | CSyntax(_, _, _, _) -> None
+    CAt(lo, hi, nlo, _) -> Some((base + lo, base + hi, base + nlo))
   }
 
 ## A typed module's declaration bases by declaration path: what a site's
@@ -96,8 +96,8 @@ fn callee_rows(acc: List[Row], c: CCallee) -> List[Row] =
 
 fn sited(acc: List[Row], what: String, s: CSite) -> List[Row] =
   match s {
-    CNoSite -> acc
-    CAt(_, _, _) -> acc ++ [(what, s)]
+    CNoSite | CSyntax(_, _, _, _) -> acc
+    CAt(_, _, _, _) -> acc ++ [(what, s)]
   }
 
 fn all_rows(acc: List[Row], es: List[CExpr]) -> List[Row] =
@@ -152,9 +152,10 @@ fn stmt_rows(acc: List[Row], s: CStmt) -> List[Row] =
 
 test "a site is listed in file coordinates, and a call with none is not" {
   let ty = TyInt
-  let inner = CCall(CDirect("m", "g"), [], ty, CAt(4, 7, 4))
+  let inner = CCall(CDirect("m", "g"), [], ty, CAt(4, 7, 4, call_source(-1, "call")))
   let outer = CIntrinsic("println", [inner], ty, CNoSite)
   let f = CFun {
+    definition = synthetic_definition("wrapper"),
     name = "main", owner = "m", captures = [], params = [], dicts = [], evs = [], ret = ty,
     body = outer, is_test = false, impl_of = None, default_of = None, origin = "main"
   }

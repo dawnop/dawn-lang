@@ -1,6 +1,6 @@
 # 效果来源：按观察作用域保留逻辑调用
 
-> 状态：**proposed**（P0，2026-10-25）。本文固定目标契约、语法候选与验收边界；语言设施尚未实现，表面语法待裁定，P1 实现并发布后才做 P2 包迁移。
+> 状态：**proposed**（P1 分期，2026-10-25）。表面语法已裁定为 A，W1 实现语法与静态身份底座；来源观察尚未实现，使用 `origin` 子句会明确报错。P1 实现并发布后才做 P2 包迁移。
 
 <!-- 为什么写这篇：设备字节相同不能证明源码归属相同。把客观调用来源交给编译器，
      把展示抽象留给观察器，才能退休散在库签名与用户 helper 中的第二套调用协议。 -->
@@ -53,10 +53,15 @@ handler 中调用 `loc.here()` 只会得到 handler 那一行。
 这是诊断政策；客观来源保存实际调用链。两者可并存，观察器不能改写 panic 的显式位置。
 `Loc` 不变成调用栈，函数值丢默认参数的既有规则不变。
 
-Core 已有 `CSite = CNoSite | CAt(lo, hi, nlo)`、`CFun.origin` 与
+W1 之前，Core 已有 `CSite = CNoSite | CAt(lo, hi, nlo)`、`CFun.origin` 与
 `ir/coresites.dawn` 的声明基址恢复；C/JVM `.dawnmap` 也已存在。
 [source-span-map-design.md](source-span-map-design.md) 的这些静态信息是底座，
 缺的是执行中的调用实例、结束状态及 perform 发起方来源，不能再用「Core 无 span」作前提。
+
+W1 为 `CAt` 增加 `CallSource`，用 `CSyntax` 显式保存合成语法的 span 与角色，
+用 `CFun.definition` 保存函数及闭包的定义 span 与角色。operation 身份在 evidence 擦除前
+记录模块与声明路径；位置保持声明内相对偏移。`CCall`、`CClosure` 的普通 ABI 与既有
+`.dawnmap` 输出不变，合成 site 不冒充原有书写调用。`CNoSite` 继续表示明确未知。
 
 编译器不认识 `Dev`、FlashAttention 或 helper 名字。同一设施必须适用于任意用户效果、
 构建器、IO/数据库诊断和 profiler。tileir 负责来源投影、设备 region 与 handle 的归属。
@@ -146,14 +151,15 @@ continuation 即使在安装帧返回后恢复，也不能复用失效 token；�
 试录的实例身份带 epoch，已外传快照可被识别为未提交，不能在 rewind 后与新提交节点重号混淆。
 P1 发布前须写死容量、截断标志、tail-edge 解码与日志所有权，本文不杜撰已测得的上限。
 
-## 六、表面语法候选与推荐
+## 六、表面语法裁定与候选记录
 
-以下均为**尚未实现的提案片段**，不是当前可编译样例。以 spec 的
+以下完整观察示例均**尚未实现**，不是当前可编译样例。W1 只建立静态身份与臂语法，
+`origin o` 仍由 checker 明确拒绝。以 spec 的
 `with x <- f(...)`、`with handle E { op(args) => ... }` 和 `resume k` 为基础，
 用普通用户效果 `Ask` 表达，不给 tileir 新增专用语法。`observe` 建观察根，
-`trace` 是受作用域约束的观察能力；具体类型与效果行是 P1 前的裁定项。
+`trace` 是受作用域约束的观察能力；已裁定观察入口引入 `io`，`TraceScope` 为不可逃逸的词法句柄；`Origin` 为可外传的不可变值。W1 的 `origin o` 一律由 checker 明确拒绝，W2 才提供观察能力。
 
-**候选 A（推荐）：在 handler 臂增加来源绑定子句。** 类似现有 `resume k`，
+**采纳 A：在 handler 臂增加来源绑定子句。** 类似现有 `resume k`，
 `origin o` 绑定本次 operation 的 envelope；两者同时出现时顺序为 `origin o resume k`。
 
 ```text
@@ -189,8 +195,9 @@ let answer = helper(1)
 
 它复用高阶调用与能力传参，parser 改动较少，但 `at_operation` 必须受 checker 限制在
 相应 handler 臂的动态激活内，不能被提到任意纯 helper 后读取环境；它仍是语言设施，
-不能假称 std 普通函数就能实现。推荐 A，因为绑定对象与作用域在臂上可见，
-也沿用现有控制臂子句的结构。P0 只提出选择，P1 在语法裁定后同步 spec、parser、checker、LSP 与 formatter。
+不能假称 std 普通函数就能实现。补裁已采纳 A，不提供 B 作为第二入口。W1 同步
+spec、parser、checker、LSP 与 formatter；来源绑定的 rename 继续遵守有诊断则拒绝的
+既有政策，W2 观察可用后再增加成功 rename 正控。
 
 ## 七、双后端成本测量计划
 
@@ -214,7 +221,55 @@ JVM 记录 JFR 分配/GC，native 记录分配/dup/drop、峰值活字节与 san
 静态 Site 表、运行帧、事件日志分别计量。容量测试须证明 TCO 不因无限历史而无限占空间，
 以及截断能使严格 map 红。复用 evidence 通路的独立 token 也有 ABI 成本，必须实际测。
 设备隔离以 TileProg/lower/MLIR/tilebc 相同为证据，宿主录制时间不写成 kernel 时间。
-性能门限在这套基线测量后裁定；不能填一个没有出处的百分比。
+2026-10-25 补裁在数据产生前锁定门限：U0 配对时间比的单侧 95% 上界不超过 1.02，
+U1 各负载不超过 1.05，编译与冷启动中位数回归不超过 5%；观察开启的 tile 录制总比值
+不超过 2.0、单例不超过 3.0，规模倍增不超过 2.5 倍。W1 冻结父编译器 A 与本分支 B
+的测量 harness，先做 A/A 盲控；噪声不可分辨时报告不确定，不放宽门限。
+
+补裁三明确 U0 的判定顺序：先比较实际被测产物的结构；产物相同即按结构同一性判定，
+只有产物不同时才使用上述时间门限。native 必须核对全部 allocated section 与 loadable segment，
+包括代码、常量、数据、relocation、unwind、TLS 及零填充大小；不得靠规范化抹掉执行差异。
+只允许剔除已说明且不加载的文件符号等构建信息，时间样本与超线记录仍完整保留。
+
+### 7.1 W1 冻结基线与结构判定（2026-10-25）
+
+harness 与结果位于 [effect-provenance-bench](../scripts/effect-provenance-bench/measure.py)，
+[baseline.json](../scripts/effect-provenance-bench/baseline.json) 保存环境、工具链、阈值、产物摘要及区间，
+[samples.jsonl](../scripts/effect-provenance-bench/samples.jsonl) 保存全部 507 个独立进程样本。
+A 是父提交 `26933caf` 的编译器，B 是 W1 草稿编译器；两者编译同一份输入与 std。
+计时期间没有并发构建或测试，固定 CPU affinity，使用 JDK 21.0.2 与 clang 18.1.3。
+每个热进程先预热 30 批，再测 50 批；以进程中位数配对，用 20000 次 bootstrap 给区间。
+JVM 热路径与冷启动各 31 轮，native 热路径先 15 轮再独立补测 31 轮，编译及完整 bootstrap 各 15 轮。
+先前 15 轮的 native trait A/A 上界为 1.054，未删除该组数据；下表使用 31 轮结果。
+
+| 热负载 | JVM B/A 中位数 / 单侧 95% 上界 | native B/A 中位数 / 单侧 95% 上界 | native A/A 上界 |
+|---|---:|---:|---:|
+| `arithmetic` | 1.0011 / 1.0087 | 0.9998 / 1.0020 | 1.0049 |
+| `direct` | 1.0002 / 1.0019 | 1.0001 / 1.0044 | 1.0048 |
+| `function` | 0.9977 / 1.0006 | 1.0026 / 1.0200 | 1.0107 |
+| `trait` | 0.9964 / 0.9997 | 1.0139 / 1.0338 | 1.0010 |
+| `higher` | 1.0014 / 1.0043 | 0.9996 / 1.0058 | 1.0065 |
+| `container` | 0.9955 / 1.0148 | 0.9906 / 0.9937 | 1.0063 |
+
+**原始时间记录：** native trait 的 B/A 上界为 1.0338，超过锁定的 1.02；
+该负载 A/A 上界为 1.0010。B/A 双侧 95% 区间为 [0.9717, 1.0460]，不能宣称已测出无回归。
+该结果已回报协调者，未放宽门限或删除慢样本。JVM 各负载上界均不超过 1.0149。
+补裁三要求先查产物结构，未为取得较好数字重测。
+
+编译、完整 bootstrap、JVM 冷启动、native 冷启动的配对中位数比分别为
+1.0176、1.0200、1.0164、1.0012；均在各自 5% 中位数门限内。
+完整 bootstrap 的双侧 95% 区间为 [0.9935, 1.0276]，A/A 为 [0.9802, 1.0098]。
+热输入的 130 个 JAR 条目及完整 C 源码在 A/B 之间逐字节相同，冷输入的 116 个条目及 C 亦相同，
+不需要剔除 build-info 才相等。热输入 JAR/C/native 大小分别为 110100/56335/144688 字节，
+冷输入为 87060/1392/113792 字节，两组 A/B 尺寸相同；native 二进制哈希不同，不宣称二进制同字节。
+[structure.py](../scripts/effect-provenance-bench/structure.py) 核对实际被测 ELF：热二进制只有
+偏移 133733 处的 `A.c`/`B.c` 一个字节不同，冷二进制只有偏移 105637 处的
+`A-cold.c`/`B-cold.c` 一个字节不同，均为无 allocated 标志的 `.strtab` 中 `STT_FILE` 名字。
+不存在 GNU build-id 差异，代码、数据、路径、时间戳与链接顺序没有造成加载内容差异。
+两组各 27 个 allocated section、四个 `PT_LOAD` segment 及全部 program header 原样相同，
+不需要规范化；只将非加载文件符号名置零后，整个 ELF 也逐字节相同。
+因此依补裁三，**U0 按结构同一性通过**。上面的 507 个样本及 1.0338 超线记录原样保存，
+不把该时间结果改写为门限通过。W1 没有 U1 或观察运行期，未测这些未来切片的成本。
 
 ## 八、分期与验收
 
