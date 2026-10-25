@@ -10,6 +10,8 @@ writes the `gates/maintainer` commit status). Every connection goes out from
 this machine; GitHub never connects back.
 
 What it refuses, before anything leaves this machine:
+  * a loaded gatesplan.py blob that differs from the target commit's; run
+    publish.py from a checkout of the target sha so its parser matches;
   * a bundle that `bundle.check` finds invalid (schema, leak, a table or
     multiset that is not the commit's), with this machine's own host and user
     names in the leak filter, as when the bundle was built;
@@ -96,6 +98,14 @@ def prepare(repo, sha, bundle, key, allowed_signers, identities=None):
     """-> the envelope text, after every refusal above. Writes nothing."""
     if not verify_note.HEX40.match(sha):
         sha = git(repo, "rev-parse", "--verify", f"{sha}^{{commit}}")
+    plan_path = "scripts/gates-external/gatesplan.py"
+    loaded_blob = git(repo, "hash-object", "--",
+                      str(Path(bundle_mod.gatesplan.__file__).resolve()))
+    target_blob = git(repo, "rev-parse", f"{sha}:{plan_path}")
+    if loaded_blob != target_blob:
+        raise Refused(f"loaded gates plan blob {loaded_blob} differs from target gates "
+                      f"plan blob {target_blob}; run publish.py from a checkout of "
+                      f"the target sha {sha}")
     plan, errors, complete, reasons = bundle_mod.check(bundle, repo, identities)
     if errors:
         raise Refused("the bundle is invalid:\n  " + "\n  ".join(errors))
@@ -382,6 +392,23 @@ def selftest():
     with tempfile.TemporaryDirectory() as tmp:
         repo, (sha, _sibling, _other) = verify_note.fixture_repo(tmp)
         env = verify_note._isolated_env()
+        # The publishing checkout and --repo may differ. Match parser content,
+        # even across commits, and refuse before interpreting a target bundle.
+        plan_path = "scripts/gates-external/gatesplan.py"
+        parser_file = repo / plan_path
+        parser_file.parent.mkdir(parents=True)
+        parser_file.write_bytes(Path(bundle_mod.gatesplan.__file__).read_bytes())
+        git(repo, "add", plan_path)
+        git(repo, "commit", "-q", "-m", "Add parser", env=env)
+        sha = git(repo, "rev-parse", "HEAD")
+        git(repo, "commit", "-q", "--allow-empty", "-m", "Same parser", env=env)
+        _sibling = git(repo, "rev-parse", "HEAD")
+        parser_file.write_bytes(parser_file.read_bytes() + b"\n# Changed parser.\n")
+        git(repo, "commit", "-q", "-am", "Change parser", env=env)
+        _other = git(repo, "rev-parse", "HEAD")
+        target_blob = git(repo, "rev-parse", f"{_other}:{plan_path}")
+        loaded_blob = git(repo, "rev-parse", f"{sha}:{plan_path}")
+        git(repo, "checkout", "-q", _sibling)
         bare = Path(tmp) / "remote.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, env=env)
         key = verify_note.make_key(tmp, "throwaway-signer")
@@ -410,6 +437,10 @@ def selftest():
         refused("a bundle for another commit", good, "is for", target=_sibling)
         refused("signed with a key not in allowed_signers", good, "does not verify",
                 signer=stranger)
+        refused("different parser blob", verify_note.fixture_bundle(repo, _other),
+                f"loaded gates plan blob {loaded_blob} differs from target gates plan "
+                f"blob {target_blob}; run publish.py from a checkout of the target "
+                f"sha {_other}", target=_other)
 
         # Green: the same bundle, the right key, pushed to the bare repository.
         # The dispatch is never run here.
