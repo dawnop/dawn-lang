@@ -101,6 +101,14 @@ pub type TJavaCall = {
   nhi: Int
 }
 
+## Static call facts survive evidence elaboration without changing its ABI.
+## Operation keys contain a module and a declaration path, never a record slot.
+## `nhi` uses the same coordinate system as the containing typed expression.
+pub type CallSource = { nhi: Int, role: String, operation: Option[(String, String)] }
+
+pub fn call_source(nhi: Int, role: String) -> CallSource =
+  CallSource { nhi = nhi, role = role, operation = None }
+
 pub type TExpr =
   | XInt(v: Int, lo: Int, hi: Int)
 # a character literal: an Int code point typed `Char`, so it needs its own node
@@ -184,7 +192,8 @@ pub type TExpr =
     lo: Int,
     hi: Int,
     nlo: Int,
-    ty: Ty
+    ty: Ty,
+    source: CallSource
   )
 # applying a non-name callee (pipe into lambda, fn-typed field). `evidence`
 # is XCallDyn's, for the same reason and with the same shape; an operation
@@ -198,7 +207,8 @@ pub type TExpr =
     lo: Int,
     hi: Int,
     nlo: Int,
-    ty: Ty
+    ty: Ty,
+    source: CallSource
   )
   | XJava(call: TJavaCall, lo: Int, hi: Int, nlo: Int, ty: Ty)
   | XLambda(
@@ -208,7 +218,8 @@ pub type TExpr =
     captures: List[Int],
     lo: Int,
     hi: Int,
-    ty: Ty
+    ty: Ty,
+    role: String
   )
 # a constructor build: written args in source order, slots map field index →
 # written-arg index (None = take the field from the spread base)
@@ -409,10 +420,10 @@ pub fn x_lo(e: TExpr) -> Int =
     XFnValue(_, _, _, _, lo, _) -> lo
     XCallDyn(_, _, _, _, lo, _, _, _) -> lo
     XCallBuiltin(_, _, _, _, lo, _, _, _) -> lo
-    XCallFn(_, _, _, _, _, _, lo, _, _, _) -> lo
-    XApply(_, _, _, lo, _, _, _) -> lo
+    XCallFn(_, _, _, _, _, _, lo, _, _, _, _) -> lo
+    XApply(_, _, _, lo, _, _, _, _) -> lo
     XJava(_, lo, _, _, _) -> lo
-    XLambda(_, _, _, _, lo, _, _) -> lo
+    XLambda(_, _, _, _, lo, _, _, _) -> lo
     XCtor(_, _, _, _, _, lo, _, _) -> lo
     XConstRef(_, _, lo, _, _) -> lo
     XCtorValue(_, _, lo, _, _) -> lo
@@ -448,10 +459,10 @@ pub fn x_hi(e: TExpr) -> Int =
     XFnValue(_, _, _, _, _, hi) -> hi
     XCallDyn(_, _, _, _, _, hi, _, _) -> hi
     XCallBuiltin(_, _, _, _, _, hi, _, _) -> hi
-    XCallFn(_, _, _, _, _, _, _, hi, _, _) -> hi
-    XApply(_, _, _, _, hi, _, _) -> hi
+    XCallFn(_, _, _, _, _, _, _, hi, _, _, _) -> hi
+    XApply(_, _, _, _, hi, _, _, _) -> hi
     XJava(_, _, hi, _, _) -> hi
-    XLambda(_, _, _, _, _, hi, _) -> hi
+    XLambda(_, _, _, _, _, hi, _, _) -> hi
     XCtor(_, _, _, _, _, _, hi, _) -> hi
     XConstRef(_, _, _, hi, _) -> hi
     XCtorValue(_, _, _, hi, _) -> hi
@@ -488,10 +499,10 @@ pub fn tex_ty(e: TExpr) -> Ty =
     XFnValue(_, _, _, ty, _, _) -> ty
     XCallDyn(_, _, _, _, _, _, _, ty) -> ty
     XCallBuiltin(_, _, _, _, _, _, _, ty) -> ty
-    XCallFn(_, _, _, _, _, _, _, _, _, ty) -> ty
-    XApply(_, _, _, _, _, _, ty) -> ty
+    XCallFn(_, _, _, _, _, _, _, _, _, ty, _) -> ty
+    XApply(_, _, _, _, _, _, ty, _) -> ty
     XJava(_, _, _, _, ty) -> ty
-    XLambda(_, _, _, _, _, _, ty) -> ty
+    XLambda(_, _, _, _, _, _, ty, _) -> ty
     XCtor(_, _, _, _, _, _, _, ty) -> ty
     XConstRef(_, _, _, _, ty) -> ty
     XCtorValue(_, _, _, _, ty) -> ty

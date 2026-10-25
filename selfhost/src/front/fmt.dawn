@@ -1947,3 +1947,16 @@ test "extern fallback aligns with its extern and preserves authored breaks" {
   let one = "fn f(x: Int) -> Int !io = extern c \"f\" else x\n"
   assert format(one) == Ok(one)
 }
+
+test "origin arm clauses preserve tokens and formatting is idempotent" {
+  for src in [
+    "fn f()->Int={\nwith handle Ask {ask(n) origin o=>n}\ng()\n}\n",
+    "fn f()->Int={\nwith handle Ask {ask(n) origin o resume k=> {\n# note\nk(n)\n}}\ng()\n}\n",
+    "fn f()->Int={\nwith handle Ask {ask(n) origin o=>\nn}\ng()\n}\n",
+    "fn f()->Int={\nwith handle Ask {ask(n) origin origin origin other=>n}\ng()\n}\n"
+  ] {
+    let once = fmt_of(src)
+    assert fmt_of(once) == once
+    assert str.contains(once, "origin ")
+  }
+}

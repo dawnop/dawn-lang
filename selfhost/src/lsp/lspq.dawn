@@ -31,7 +31,7 @@ use front/ast.{
   DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect,
   e_lo, e_hi, pat_lo, pat_hi, t_hi, module_fns, module_impls, module_traits
 }
-use check/tast.{
+use check/tast.{call_source,
   TExpr, TPat, TStmt, TStrPart, TArm, TFun,
   TSPText, TSPInterp,
   XStr, XLocal, XFnValue, XCallDyn, XCallBuiltin,
@@ -549,7 +549,7 @@ fn arranged(te: Option[TExpr]) -> (Option[TExpr], List[TExpr]) = {
   match te {
     Some(XBlock(stmts, Some(tail), _, _, _)) ->
       match tail {
-        XCallFn(_, _, _, _, _, _, _, _, _, _) -> {
+        XCallFn(_, _, _, _, _, _, _, _, _, _, _) -> {
           for st in stmts {
             match st {
               TSLet(_, _, init, _, _) -> { bound = bound ++ [init] }
@@ -570,9 +570,9 @@ fn arranged(te: Option[TExpr]) -> (Option[TExpr], List[TExpr]) = {
 ## so its signature is the operation's, found by name.
 fn call_sig(qc: QCx, callee: String, te: Option[TExpr]) -> Option[Sig] =
   match call_node(te) {
-    Some(XCallFn(owner, fname, _, _, _, trait_id, _, _, _, _)) -> sig_by_owner(qc, owner, fname, trait_id)
+    Some(XCallFn(owner, fname, _, _, _, trait_id, _, _, _, _, _)) -> sig_by_owner(qc, owner, fname, trait_id)
     Some(XCallBuiltin(bname, _, _, _, _, _, _, _)) -> map.get(qc.bins, bname)
-    Some(XApply(_, _, _, _, _, _, _)) ->
+    Some(XApply(_, _, _, _, _, _, _, _)) ->
       match sig_of(qc, callee) {
         Some(s) -> if s.op_of != None { Some(s) } else { None }
         None -> None
@@ -678,7 +678,7 @@ fn default_fill(s: Sig, te: Option[TExpr], pi: Int) -> Option[TExpr] = {
     None -> return None
   }
   match call {
-    XCallFn(_, _, targs, _, _, _, _, _, _, _) ->
+    XCallFn(_, _, targs, _, _, _, _, _, _, _, _) ->
       match get(targs, pi) {
         Some(a) -> fill_of(s, lets, a)
         None -> None
@@ -690,7 +690,7 @@ fn default_fill(s: Sig, te: Option[TExpr], pi: Int) -> Option[TExpr] = {
 ## A thunk call, or the local a call bound one to, as a closed-up thunk call.
 fn fill_of(s: Sig, lets: Map[Int, TExpr], a: TExpr) -> Option[TExpr] =
   match a {
-    XCallFn(owner, fname, prefix, wits, evid, tid, lo, hi, nlo, ty) ->
+    XCallFn(owner, fname, prefix, wits, evid, tid, lo, hi, nlo, ty, _) ->
       match default_index(fname, len(s.param_names)) {
         Some(k) -> {
           let text = match get(s.param_defaults, k) {
@@ -714,7 +714,7 @@ fn fill_of(s: Sig, lets: Map[Int, TExpr], a: TExpr) -> Option[TExpr] =
             }
             i = i + 1
           }
-          Some(XCallFn(owner, fname, out, wits, evid, tid, lo, hi, nlo, ty))
+          Some(XCallFn(owner, fname, out, wits, evid, tid, lo, hi, nlo, ty, call_source(-1, "call")))
         }
         None -> None
       }
@@ -809,7 +809,7 @@ fn receiver_slots(recv: Expr, targs: List[TExpr]) -> Int =
 
 fn is_default_fill(t: TExpr) -> Bool =
   match t {
-    XCallFn(_, fname, _, _, _, _, _, _, _, _) -> str.contains(fname, "\$default\$")
+    XCallFn(_, fname, _, _, _, _, _, _, _, _, _) -> str.contains(fname, "\$default\$")
     XLocal(_, name, _, _, _) -> str.starts_with(name, "default\$")
     _ -> false
   }
@@ -845,7 +845,7 @@ fn hint_method_call(
     None -> q
     Some(_) ->
       match call_node(te) {
-        Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _, _)) ->
+        Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _, _, _)) ->
           if fname != name {
             q
           } else {
@@ -2538,7 +2538,7 @@ fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
 ## own is somebody's real lambda and answers `None`.
 fn eta_target(body: TExpr) -> Option[(Option[String], String)] =
   match body {
-    XCallFn(owner, name, _, _, _, _, _, _, _, _) -> Some((owner, name))
+    XCallFn(owner, name, _, _, _, _, _, _, _, _, _) -> Some((owner, name))
     XCallBuiltin(name, _, _, _, _, _, _, _) -> {
       let no_owner: Option[String] = None
       Some((no_owner, name))
@@ -2586,7 +2586,8 @@ fn handle_parts(te: Option[TExpr]) -> (List[Option[TStmt]], Option[TExpr]) =
   match te {
     Some(XBlock(ts, tail, _, _, _)) -> {
       let trest: Option[TExpr] = match tail {
-        Some(XApply(target, _, _, _, _, _, _)) -> Some(target)
+        Some(XApply(target, _, _, _, _, _, _, _)) -> Some(target)
+        Some(XCallBuiltin("ctl_run", args, ..)) -> get(args, 1)
         _ -> None
       }
       (opt_stmts(ts), trest)
@@ -2614,6 +2615,7 @@ fn cell_init_of(ts: Option[TStmt]) -> Option[TExpr] =
 fn handle_arm_nodes(ts: Option[TStmt]) -> List[TExpr] =
   match ts {
     Some(TSLet(_, _, XCtor(_, _, written, _, _, _, _, _), _, _)) -> written
+    Some(TSLet(_, _, node, _, _)) -> [node]
     _ -> []
   }
 
@@ -2684,14 +2686,33 @@ fn offer_cell_decl(qc: QCx, q0: Q, ts: Option[TStmt], c: HandlerCell) -> Q =
 
 ## One arm against the closure the checker made of it: `op(a, b) => body` is a
 ## lambda in everything but spelling, so the pairing is `ELambda`'s.
+fn arm_bindings(arm: HandlerArm) -> List[LambdaParam] = {
+  var params = arm.params
+  match arm.origin {
+    Some(o) -> { params = params ++ [LambdaParam { name = o.name, ann = None, lo = o.nlo, hi = o.nhi }] }
+    None -> ()
+  }
+  match arm.binder {
+    Some(k) -> { params = params ++ [LambdaParam { name = k, ann = None, lo = arm.bhi - len(k), hi = arm.bhi }] }
+    None -> ()
+  }
+  params
+}
+
 fn walk_handler_arm(qc: QCx, q0: Q, arm: HandlerArm, ta: Option[TExpr]) -> Q =
   match ta {
-    Some(XLambda(psyms, _, tbody, _, _, _, _)) -> {
-      let q = offer_lambda_params(qc, q0, arm.params, psyms)
+    Some(XLambda(psyms, _, tbody, _, _, _, _, _)) -> {
+      let q = offer_lambda_params(qc, q0, arm_bindings(arm), psyms)
       walk_e(qc, q, arm.body, Some(tbody))
     }
     _ -> walk_e(qc, q0, arm.body, None)
   }
+
+fn all_handler_arm_nodes(ts: List[Option[TStmt]]) -> List[TExpr] = {
+  var out: List[TExpr] = []
+  for stmt in ts { out = out ++ handle_arm_nodes(stmt) }
+  out
+}
 
 ## The rest of the block. `ast.EHandle.rest` is the parameterless sugar lambda
 ## the parser packed the remaining statements into, and the checker checked it
@@ -2699,7 +2720,7 @@ fn walk_handler_arm(qc: QCx, q0: Q, arm: HandlerArm, ta: Option[TExpr]) -> Q =
 ## steps through both and pairs the bodies.
 fn walk_rest(qc: QCx, q0: Q, rest: Expr, trest: Option[TExpr]) -> Q = {
   let tbody: Option[TExpr] = match trest {
-    Some(XLambda(_, _, b, _, _, _, _)) -> Some(b)
+    Some(XLambda(_, _, b, _, _, _, _, _)) -> Some(b)
     _ -> None
   }
   match rest {
@@ -2732,7 +2753,7 @@ fn staged_for_parts(ts: Option[TStmt], pat: Pattern) -> Option[(TPat, TExpr, TEx
   }
   for st in stmts {
     match st {
-      TSExpr(XCallFn(_, _, [_, XLambda(psyms, _, tbody, _, _, _, _)], _, _, Some(tid), _, _, _, _), _, _) ->
+      TSExpr(XCallFn(_, _, [_, XLambda(psyms, _, tbody, _, _, _, _, _)], _, _, Some(tid), _, _, _, _, _), _, _) ->
         if tid == STAGED_ITER_ID {
           match pat {
             PBind(name, _, _) ->
@@ -2779,7 +2800,7 @@ fn staged_result_body(x: TExpr) -> TExpr =
 ## The cell a staged `var_get` or `var_set` goes through, if `x` is one.
 fn staged_cell_use(x: TExpr) -> Option[(Int, List[TExpr])] =
   match x {
-    XCallFn(_, _, args, _, _, Some(tid), _, _, _, _) ->
+    XCallFn(_, _, args, _, _, Some(tid), _, _, _, _, _) ->
       if tid == STAGED_VAR_ID {
         match get(args, 0) {
           Some(XLocal(sid, _, _, _, _)) -> Some((sid, args))
@@ -2841,7 +2862,7 @@ fn lit_atom_inner(pe: Expr) -> Option[(Bool, Expr)] =
 ## impl the checker folded into a comptime block (docs/literal-system-design.md D6).
 pub(pkg) fn lit_via_trait_node(te: TExpr) -> Bool =
   match te {
-    XComptime(XCallFn(_, _, _, _, _, Some(tid), _, _, _, _), _, _, _) -> is_lit_trait(tid)
+    XComptime(XCallFn(_, _, _, _, _, Some(tid), _, _, _, _, _), _, _, _) -> is_lit_trait(tid)
     _ -> false
   }
 
@@ -3067,7 +3088,7 @@ fn offer_operator(qc: QCx, q: Q, t: TExpr, olo: Int, ohi: Int) -> Q = {
       ([tl, tr2], v, st)
     }
     XUnary(_, o, _, _, _) -> ([o], "(primitive)", no_site())
-    XCallFn(_, _, xs, wits, _, Some(tid), _, _, _, _) -> {
+    XCallFn(_, _, xs, wits, _, Some(tid), _, _, _, _, _) -> {
       if len(xs) == 0 { return q }
       let (v, st) = match get(wits, 0) {
         Some(w) -> operator_via(qc, w, Some(tid), tex_ty(xs[0]), olo)
@@ -3254,7 +3275,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         # A bounded name is an eta expansion by the time it is typed, and the
         # reader still pointed at a function name. Only a synthesised wrapper
         # can be here: a lambda somebody wrote is an `ELambda`, not an `EVar`.
-        Some(XLambda(_, _, body, _, _, _, _)) ->
+        Some(XLambda(_, _, body, _, _, _, _, _)) ->
           match eta_target(body) {
             Some(t) -> {
               let (towner, fname) = t
@@ -3280,7 +3301,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           }
         }
         # a `var` a staged loop carries, read through its cell
-        Some(XCallFn(_, _, _, _, _, _, _, _, _, ty)) ->
+        Some(XCallFn(_, _, _, _, _, _, _, _, _, ty, _)) ->
           match staged_cell_use(te.unwrap_or(XUnit(0, 0))) {
             Some(cu) -> {
               let (sid, _) = cu
@@ -3296,7 +3317,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
     ELambda(params, body, _, _, _) -> {
       q = visit_lambda_param_types(qc, q, params)
       match te {
-        Some(XLambda(psyms, _, tbody, _, _, _, _)) -> {
+        Some(XLambda(psyms, _, tbody, _, _, _, _, _)) -> {
           q = offer_lambda_params(qc, q, params, psyms)
           q = hint_lambda_params(qc, q, params, psyms)
           q = walk_e(qc, q, body, Some(tbody))
@@ -3347,7 +3368,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
             # argument can wrap the call in a block, hence `call_node`.
             _ ->
               match call_node(te) {
-                Some(XCallFn(_, fname, _, _, _, _, _, _, _, _)) -> {
+                Some(XCallFn(_, fname, _, _, _, _, _, _, _, _, _)) -> {
                   q = offer_alias_receiver(qc, q, recv)
                   q = walk_named_call(qc, q, fname, flo, fhi, args, call_node(te))
                   q = hint_named_call(qc, q, fname, args0, fhi, ahi, te)
@@ -3492,7 +3513,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         # (docs/arith-operator-traits-design.md D6); its operands are still
         # this node's, or a name inside `v + w` would go missing from hover,
         # references and rename
-        Some(XCallFn(_, _, [tl, tr2], _, _, Some(_), _, _, _, _)) -> {
+        Some(XCallFn(_, _, [tl, tr2], _, _, Some(_), _, _, _, _, _)) -> {
           q = walk_e(qc, q, left, Some(tl))
           q = walk_e(qc, q, right, Some(tr2))
         }
@@ -3513,7 +3534,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           }
           match te {
             Some(XUnary(_, t, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
-            Some(XCallFn(_, _, [t], _, _, Some(_), _, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
+            Some(XCallFn(_, _, [t], _, _, Some(_), _, _, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
             _ -> { q = walk_e(qc, q, operand, None) }
           }
         }
@@ -3598,7 +3619,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         q = walk_e(qc, q, c.init, cell_init_of(tc))
         i = i + 1
       }
-      let tarms = handle_arm_nodes(opt_get3(tstmts, len(cells)))
+      let tarms = all_handler_arm_nodes(tstmts)
       for arm in arms {
         q = visit_lambda_param_types(qc, q, arm.params)
         q = walk_handler_arm(qc, q, arm, typed_at(tarms, arm.lo, arm.hi))
@@ -3650,7 +3671,7 @@ fn walk_method(
   # module-qualified (alias.fn) and UFCS calls carry the resolved sig
   match call {
     # `x.g()` where `g` is a renamed import (`use m.{f as g}`) calls `f`
-    Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _, _)) -> {
+    Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _, _, _)) -> {
       if fname == name || map.get(qc.entry.cx.import_renames, name) == Some(fname) {
         match sig_by_owner(qc, owner, fname, trait_id) {
           Some(s) -> {
@@ -3758,7 +3779,7 @@ fn walk_named_call(
   var q = q0
   let (call, bound) = arranged(te)
   match call {
-    Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _, _)) -> {
+    Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _, _, _)) -> {
       match sig_by_owner(qc, owner, fname, trait_id) {
         Some(s) -> {
           q = offer_sig_at(qc, q, clo, chi, s, site_of_sig(qc, s))
@@ -3862,7 +3883,7 @@ fn walk_ctor_call(
 fn walk_apply_value(qc: QCx, q0: Q, target: Expr, args: List[Expr], te: Option[TExpr]) -> Q = {
   var q = q0
   match te {
-    Some(XApply(tt, targs, _, _, _, _, _)) -> {
+    Some(XApply(tt, targs, _, _, _, _, _, _)) -> {
       q = walk_e(qc, q, target, Some(tt))
       q = walk_list(qc, q, args, opt_list(targs))
     }
@@ -4564,6 +4585,28 @@ fn collect_e(
         i = i + 1
       }
     }
+    EHandle(_, cells, arms, rest, _, _, _, _) -> {
+      let (stmts, trest) = handle_parts(te)
+      let hint: Option[String] = None
+      var i = 0
+      for cell in cells {
+        acc = collect_e(qc, acc, cell.init, cell_init_of(opt_get3(stmts, i)), before)
+        if cell.hi < before { acc = acc ++ [(cell.name, hint)] }
+        i = i + 1
+      }
+      let nodes = all_handler_arm_nodes(stmts)
+      for arm in arms {
+        if e_lo(arm.body) <= before && before <= arm.hi {
+          for p in arm_bindings(arm) { acc = acc ++ [(p.name, hint)] }
+          let tbody = match typed_at(nodes, arm.lo, arm.hi) {
+            Some(XLambda(_, _, body, ..)) -> Some(body)
+            _ -> no_texpr()
+          }
+          acc = collect_e(qc, acc, arm.body, tbody, before)
+        }
+      }
+      acc = collect_e(qc, acc, rest, trest, before)
+    }
     ELambda(params, body, _, lo, _) -> {
       if lo < before {
         for p in params {
@@ -4572,7 +4615,7 @@ fn collect_e(
         }
       }
       let tb: Option[TExpr] = match te {
-        Some(XLambda(_, _, b, _, _, _, _)) -> Some(b)
+        Some(XLambda(_, _, b, _, _, _, _, _)) -> Some(b)
         _ -> None
       }
       acc = collect_e(qc, acc, body, tb, before)
@@ -4580,7 +4623,7 @@ fn collect_e(
     EMethod(target, _, args0, _, _, _, _) -> {
       let args = arg_exprs(args0)
       let targs = match te {
-        Some(XCallFn(_, _, ts, _, _, _, _, _, _, _)) -> ts
+        Some(XCallFn(_, _, ts, _, _, _, _, _, _, _, _)) -> ts
         Some(XCallBuiltin(_, ts, _, _, _, _, _, _)) -> ts
         _ -> {
           let none: List[TExpr] = []
@@ -4605,8 +4648,8 @@ fn collect_e(
     EApply(target, args0, _, _) -> {
       let args = arg_exprs(args0)
       let (tt, targs) = match te {
-        Some(XApply(t, ts, _, _, _, _, _)) -> (Some(t), opt_list(ts))
-        Some(XCallFn(_, _, ts, _, _, _, _, _, _, _)) -> (no_texpr(), opt_list(ts))
+        Some(XApply(t, ts, _, _, _, _, _, _)) -> (Some(t), opt_list(ts))
+        Some(XCallFn(_, _, ts, _, _, _, _, _, _, _, _)) -> (no_texpr(), opt_list(ts))
         Some(XCallBuiltin(_, ts, _, _, _, _, _, _)) -> (no_texpr(), opt_list(ts))
         Some(XCallDyn(_, _, ts, _, _, _, _, _)) -> (no_texpr(), opt_list(ts))
         Some(XCtor(_, _, written, _, _, _, _, _)) -> (no_texpr(), opt_list(written))
@@ -4677,7 +4720,7 @@ fn collect_e(
     EBinary(_, left, right, _, _, _, _) -> {
       let (tl, tr2) = match te {
         Some(XBinary(_, l, r, _, _, _, _, _, _)) -> (Some(l), Some(r))
-        Some(XCallFn(_, _, [l, r], _, _, Some(_), _, _, _, _)) -> (Some(l), Some(r))
+        Some(XCallFn(_, _, [l, r], _, _, Some(_), _, _, _, _, _)) -> (Some(l), Some(r))
         _ -> {
           let n1: Option[TExpr] = None
           let n2: Option[TExpr] = None
@@ -4690,7 +4733,7 @@ fn collect_e(
     EUnary(_, operand, _, _) -> {
       let t: Option[TExpr] = match te {
         Some(XUnary(_, o, _, _, _)) -> Some(o)
-        Some(XCallFn(_, _, [o], _, _, Some(_), _, _, _, _)) -> Some(o)
+        Some(XCallFn(_, _, [o], _, _, Some(_), _, _, _, _, _)) -> Some(o)
         _ -> None
       }
       acc = collect_e(qc, acc, operand, t, before)

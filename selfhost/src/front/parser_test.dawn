@@ -8,7 +8,7 @@ use std/list
 use front/parser.{parse_module, parse_module_marked}
 use front/astdump.{render_module}
 use front/ast.{
-  Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambda, EMatch, EPropagate,
+  Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambda, EHandle, EMatch, EPropagate,
   EListLit, ListElem, LeExpr, LeSpread, LeIf,
   OpAdd, OpMul,
   PLit, POr, PCtor, PQual, PTuple, PList,
@@ -1833,11 +1833,11 @@ test "the binder clause is `resume` and a name, at most once, before the arrow" 
       "  g()\n}")
   assert len(d2) > 0
   assert str.contains(d2[0].msg, "a name for the continuation")
-  # one arm, one continuation: the second clause lands where the arrow belongs
+  # One arm binds at most one continuation; report the repeated clause itself.
   let (_, d3) = parse_module("fn f() -> Int = {\n" ++
       "  with handle Ask { ask(n) resume k resume j => n }\n  g()\n}")
   assert len(d3) > 0
-  assert str.contains(d3[0].msg, "expected `=>` (an arm is a closure)")
+  assert str.contains(d3[0].msg, "duplicate `resume` clause in handler arm")
 }
 
 test "`handle` is contextual: `with handle <-` is still a binder" {
@@ -2278,4 +2278,27 @@ test "marks run beside the declarations, one for each" {
     let (m, _, marks) = parse_module_marked(src)
     assert len(marks.damaged) == len(m.decls)
   }
+}
+
+test "origin has a clause span and a distinct local name span" {
+  let src = "fn f() -> Int = {\n  with handle Ask { ask(n) origin o resume k => k(n) }\n  g()\n}"
+  let (m, ds) = parse_module(src)
+  assert ds == []
+  match m.decls[0] {
+    DFn(f) -> match f.body {
+      EBlock(_, Some(EHandle(_, _, [arm], _, ..)), ..) -> {
+        let o = arm.origin.expect("origin binding")
+        assert o.name == "o"
+        assert o.nhi - o.nlo == 1
+        assert o.hi == o.nhi
+        assert o.lo < o.nlo
+        assert arm.binder == Some("k")
+      }
+      _ -> panic("handler body")
+    }
+    _ -> panic("function")
+  }
+  let out = rendered(src)
+  assert str.contains(out, "Arm ask origin o@")
+  assert str.contains(out, " resume k@")
 }

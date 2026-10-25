@@ -46,7 +46,7 @@ use check/types.{
   eff_assocs, key_is_label, key_effect_id, intrinsics, EV_PACK_ID, sig_abi_eff
 }
 use ir/core.{
-  CSite, CNoSite, CAt, CModule, CFun, CExpr, CStmt, CCallee, CDictDef, CSlotFn,
+  CSite, CNoSite, CSyntax, CAt, CModule, CFun, CExpr, CStmt, CCallee, CDictDef, CSlotFn,
   CInt, CLocal, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg,
   CTuple, CTupleGet, CBox, CUnbox,
@@ -397,13 +397,21 @@ fn check_expr(a: Acc, e: CExpr) -> Acc = {
 fn check_site(a: Acc, e: CExpr) -> Acc =
   match node_site(e) {
     CNoSite -> a
-    CAt(lo, hi, nlo) ->
+    CSyntax(lo, hi, nlo, source) ->
+      if a.origin == "" || lo < 0 || hi < lo || source.role == "" {
+        flag(a, "site", "a synthetic call needs a declaration, syntax span and role")
+      } else if nlo != -1 && (nlo < lo || source.nhi < nlo || source.nhi > hi) {
+        flag(a, "site", "a synthetic callee name must lie inside its syntax span")
+      } else { a }
+    CAt(lo, hi, nlo, source) ->
       if a.origin == "" {
         flag(a, "site", "a call site at " ++ to_string(lo) ++ ".." ++ to_string(hi) ++
             " in a function with no origin declaration to measure it from")
       } else if lo < 0 || lo > nlo || nlo >= hi {
         flag(a, "site", "a call site " ++ to_string(lo) ++ ".." ++ to_string(hi) ++
             " whose name starts at " ++ to_string(nlo) ++ "; it needs 0 <= lo <= nlo < hi")
+      } else if source.nhi != -1 && (source.nhi < nlo || source.nhi > hi) {
+        flag(a, "site", "a callee name must end inside its call span")
       } else {
         a
       }

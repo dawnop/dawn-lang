@@ -126,9 +126,9 @@ assert.ok(dflts, "default_inlay_opts not found in selfhost/src/lsp/lspinlay.dawn
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "../package.json"), "utf8"));
 const props = manifest.contributes.configuration.properties;
 for (const { key, default: dflt } of s.INLAY_HINT_SETTINGS) {
-  const read = optsOf[1].match(new RegExp(`(\\w+): json_flag\\(j, "${key}", d\\.\\1\\)`));
+  const read = optsOf[1].match(new RegExp(`(\\w+) = json_flag\\(j, "${key}", d\\.\\1\\)`));
   assert.ok(read, `the server does not read inlayHints.${key}`);
-  const field = dflts[1].match(new RegExp(`\\b${read[1]}: (true|false)`));
+  const field = dflts[1].match(new RegExp(`\\b${read[1]} = (true|false)`));
   assert.ok(field, `default_inlay_opts has no ${read[1]}`);
   assert.equal(dflt, field[1] === "true", `default of ${key}`);
   const prop = props[`dawn.inlayHints.${key}`];

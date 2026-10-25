@@ -41,7 +41,7 @@ use check/types.{
 }
 use check/identity
 use check/tast_positions
-use check/tast.{
+use check/tast.{CallSource, call_source,
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
   tex_ty, x_lo, x_hi, NO_NAME,
   XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn, XCallBuiltin,
@@ -57,8 +57,8 @@ use check/tast.{
   WitRef, WForward, WConcrete, WApply
 }
 use check/exhaustive.{LitV, LInt, LFloat, LBool, LStr}
-use ir/core.{
-  CSite, CNoSite, CAt, CExpr, CStmt, CCallee, CFun, CModule, CParam, CBinOp, CUnOp,
+use ir/core.{CDefinition, synthetic_definition,
+  CSite, CNoSite, CSyntax, CAt, CExpr, CStmt, CCallee, CFun, CModule, CParam, CBinOp, CUnOp,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue,
@@ -202,7 +202,42 @@ pub type SelfCtx = {
 ## nothing when no scheduler filed the tree: the offsets would be measured
 ## from nothing.
 fn site_at(st: LSt, lo: Int, hi: Int, nlo: Int) -> CSite =
-  if st.base < 0 || nlo == NO_NAME { CNoSite } else { CAt(lo - st.base, hi - st.base, nlo - st.base) }
+  source_site(st, lo, hi, nlo, call_source(NO_NAME, "call"))
+
+fn source_site(st: LSt, lo: Int, hi: Int, nlo: Int, source: CallSource) -> CSite = {
+  if st.base < 0 { return CNoSite }
+  if nlo == NO_NAME {
+    if source.role == "call" { return CNoSite }
+    return CSyntax(lo - st.base, hi - st.base, NO_NAME, CallSource { ..source,
+      nhi = if source.nhi == NO_NAME { NO_NAME } else { source.nhi - st.base } })
+  }
+  let start = nlo
+  CAt(lo - st.base, hi - st.base, start - st.base,
+    CallSource { ..source, nhi = if source.nhi == NO_NAME { NO_NAME } else { source.nhi - st.base } })
+}
+
+# A comparison has an operator token but no written `eq` or `cmp` callee.
+# Keep its source outside legacy call maps and preserve the clean C path.
+fn comparison_site(st: LSt, lo: Int, hi: Int, nlo: Int, nhi: Int) -> CSite =
+  if st.base < 0 { CNoSite }
+  else { CSyntax(lo - st.base, hi - st.base, nlo - st.base, call_source(nhi - st.base, "operator")) }
+
+# Structural relations may wrap their one lowered call in erasure or argument
+# temporaries. Only the result spine belongs to that call; operand sites stay
+# where they were evaluated.
+fn result_site(e: CExpr, site: CSite) -> CExpr =
+  match e {
+    CCall(callee, args, ty, _) -> CCall(callee, args, ty, site)
+    CIntrinsic(name, args, ty, _) -> CIntrinsic(name, args, ty, site)
+    CBox(value, ty) -> CBox(result_site(value, site), ty)
+    CUnbox(value, ty) -> CUnbox(result_site(value, site), ty)
+    CBlock(stmts, Some(tail), ty) -> CBlock(stmts, Some(result_site(tail, site)), ty)
+    _ -> e
+  }
+
+fn definition_at(st: LSt, lo: Int, hi: Int, role: String) -> CDefinition =
+  if st.base < 0 { synthetic_definition(role) }
+  else { CDefinition { lo = lo - st.base, hi = hi - st.base, role = role } }
 
 fn fresh_sym(st: LSt) -> (LSt, Int) =
   (LSt { ..st, next_sym = st.next_sym + 1 }, st.next_sym)
@@ -1799,6 +1834,7 @@ fn make_bridge(
     }
     let call = CCall(CImpl(iowner, tid, subject, method), args ++ ds ++ ies, psig.ret, CNoSite)
     let f = CFun {
+      definition = synthetic_definition("trait-bridge"),
       name = name,
       owner = st1.owner,
       captures = [],
@@ -1978,6 +2014,7 @@ fn make_prim_slot(
     evps = evps ++ [CParam { sym = esym, ty = erased_ev_ty(), mode = COwned }]
   }
   let f = CFun {
+    definition = synthetic_definition("primitive-slot"),
     name = name,
     owner = st4.owner,
     captures = [],
@@ -2263,6 +2300,7 @@ fn struct_rel_fn(st: LSt, rel: Rel, t: Ty) -> (LSt, String) = {
   # same function from inside itself, and without the reservation that
   # recurses until the stack ends
   let stub = CFun {
+    definition = synthetic_definition("derived-relation"),
     name = name,
     owner = stD.owner,
     captures = [],
@@ -3040,7 +3078,11 @@ fn lower_trait_call(
     # site -- no dictionary for the whole is ever built.
     let (st3, saved) = enter_wit_env(st1, ws[0])
     let (st4, e) = prim_relation(st3, tid, subject_of(ws[0]), vs)
-    return (LSt { ..st4, dict_env = saved }, e)
+    let value = match site {
+      CSyntax(_, _, _, _) -> result_site(e, site)
+      CAt(_, _, _, _) | CNoSite -> e
+    }
+    return (LSt { ..st4, dict_env = saved }, value)
   }
   match ws[0] {
     WForward(sym) -> {
@@ -3215,7 +3257,8 @@ fn lift_lambda(
   ty: Ty,
   # Some for a local named function: its own body may call it, and the
   # checker leaves that binding out of the capture list
-  self_sym: Option[Int]
+  self_sym: Option[Int],
+  definition: CDefinition
 ) -> (LSt, CExpr) = {
   let (st1, name) = fresh_lam(st)
   refuse_evidence_captures(st1, "a lifted lambda", captures)
@@ -3282,6 +3325,7 @@ fn lift_lambda(
   let cbody1 = adapt_in(cbody0, tex_ty(body), ret_of_fn_ty(ty))
   let cbody = wrap_self_loop(st2.self_tail, lid, cbody1, ret_of_fn_ty(ty))
   let f = CFun {
+    definition = definition,
     name = name,
     owner = st2.owner,
     captures = caps,
@@ -3330,6 +3374,7 @@ fn lift_ctor_value(st: LSt, adt: Int, ci: Int, ty: Ty) -> (LSt, CExpr) = {
   }
   let (st5, evps) = fn_value_evs(st2)
   let f = CFun {
+    definition = synthetic_definition("constructor-value"),
     name = lam,
     owner = st5.owner,
     captures = [],
@@ -3417,6 +3462,7 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
     None -> ret
   }
   let f = CFun {
+    definition = synthetic_definition("function-value"),
     name = lam,
     owner = st5.owner,
     captures = [],
@@ -3493,6 +3539,7 @@ fn lift_builtin_value(st: LSt, name: String, ty: Ty) -> (LSt, CExpr) = {
     ev_own = own
   }, XCallBuiltin(name, args, no_wits, evid, 0, 0, NO_NAME, ret))
   let f = CFun {
+    definition = synthetic_definition("builtin-value"),
     name = lam,
     owner = st5.owner,
     captures = [],
@@ -3637,20 +3684,20 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       let (st1, v) = lower_expr(st, operand)
       (st1, CUnary(un_op(op), v, ty))
     }
-    XBinary(op, l, r, ord, _, _, _, _, ty) ->
+    XBinary(op, l, r, ord, olo, ohi, lo, hi, ty) ->
       match ord {
         # An operator that is really a trait method. Lowering spells the call
         # out, so neither backend needs a witness on a comparison node:
         # `<` becomes `cmp(l, r) <op> 0`, `==` becomes `eq(l, r)`.
         Some(w) ->
           if is_eq_op(op) {
-            let (st1, c) = lower_trait_call(st, EQ_ID, "eq", [l, r], [w], no_texprs(), TyBool, CNoSite)
+            let (st1, c) = lower_trait_call(st, EQ_ID, "eq", [l, r], [w], no_texprs(), TyBool, comparison_site(st, lo, hi, olo, ohi))
             match op {
               BEq -> (st1, c)
               _ -> (st1, negated(c))
             }
           } else {
-            let (st1, c) = lower_trait_call(st, ORD_ID, "cmp", [l, r], [w], no_texprs(), TyInt, CNoSite)
+            let (st1, c) = lower_trait_call(st, ORD_ID, "cmp", [l, r], [w], no_texprs(), TyInt, comparison_site(st, lo, hi, olo, ohi))
             (st1, CBinary(bin_op(op), c, CInt(0), TyBool))
           }
         # No witness. For `==`/`!=` that is not "nothing to dispatch": the
@@ -3684,7 +3731,8 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
           } else if is_eq_op(op) && not is_eq_scalar(eq_subject(st, tex_ty(l))) {
             let (st1, lv) = lower_expr(st, l)
             let (st2, rv) = lower_expr(st1, r)
-            let (st3, c) = eq_at(st2, lv, rv, tex_ty(l))
+            let (st3, raw) = eq_at(st2, lv, rv, tex_ty(l))
+            let c = result_site(raw, comparison_site(st, lo, hi, olo, ohi))
             match op {
               BEq -> (st3, c)
               _ -> (st3, negated(c))
@@ -3762,7 +3810,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     }
     XListLit(elems, _, _, ty) -> lower_list_lit(st, elems, ty)
     XCallBuiltin(name, args, wits, evid, lo, hi, nlo, ty) -> {
-      let site = site_at(st, lo, hi, nlo)
+      let site = source_site(st, lo, hi, nlo, call_source(if nlo == NO_NAME { NO_NAME } else { nlo + len(name) }, "call"))
       # first, because its trailing argument is a line's head and not the
       # failure suffix `unsite` below would fold into a message
       if name == "dbg" {
@@ -3792,7 +3840,9 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       # signature the way an erased builtin's are: these names are internal
       # (`internal_intrinsics`), so `erased_builtin_sig` has nothing for them.
       if is_cell_intrinsic(name) {
-        return lower_cell(st, name, args, ty)
+        let (next, value) = lower_cell(st, name, args, ty)
+        let source = source_site(st, lo, hi, NO_NAME, call_source(NO_NAME, "var"))
+        return (next, result_site(value, source))
       }
       # one-shot resumption (docs/oneshot-design.md §11.3). Boxed and given the
       # wrapper's evidence slot here rather than in an emitter, for the reason
@@ -3873,8 +3923,8 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         }
       }
     }
-    XCallFn(owner, name, args, wits, evid, trait_id, lo, hi, nlo, ty) -> {
-      let site = site_at(st, lo, hi, nlo)
+    XCallFn(owner, name, args, wits, evid, trait_id, lo, hi, nlo, ty, source) -> {
+      let site = source_site(st, lo, hi, nlo, source)
       match trait_id {
         Some(tid) -> lower_trait_call(st, tid, name, args, wits, evid, ty, site)
         None -> {
@@ -3910,35 +3960,21 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     # subject is known (which for List and Map means `index_at` inline, since
     # the prelude impls have no body), dispatched through the dictionary where
     # it is a rigid `[C: Index]`.
-    XIndex(target, index, wit, _, _, ty) ->
-      lower_trait_call(st, INDEX_ID, "index", [target, index], [wit], no_texprs(), ty, CNoSite)
+    XIndex(target, index, wit, lo, hi, ty) ->
+      lower_trait_call(st, INDEX_ID, "index", [target, index], [wit], no_texprs(), ty,
+        source_site(st, lo, hi, NO_NAME, call_source(NO_NAME, "operator")))
     XCtorValue(adt, ci, _, _, ty) -> lift_ctor_value(st, adt, ci, ty)
-    XCallDyn(sym, _, args, evid, lo, hi, nlo, ty) ->
-      if is_self_sym(st, sym) {
-        if tl {
-          self_tail_jump(st, args)
-        } else {
-          # not a tail call, so the closure is rebuilt and called through
-          let (st1, vs) = lower_all(st, args)
-          let clo = self_value(st1, sym).expect("self closure")
-          let (st2, es) = dyn_evidence(st1, evid)
-          (st2, CCall(CDynamic(clo), vs ++ es, ty, site_at(st2, lo, hi, nlo)))
-        }
-      } else {
-        let (st1, vs) = lower_all(st, args)
-        let fty = sym_ty(st1, sym, TyError)
-        let (st2, es) = dyn_evidence(st1, evid)
-        (st2, CCall(CDynamic(CLocal(sym, fty)), vs ++ es, ty, site_at(st2, lo, hi, nlo)))
-      }
-    XApply(target, args, evid, lo, hi, nlo, ty) -> {
-      let site = site_at(st, lo, hi, nlo)
+    XCallDyn(sym, name, args, evid, lo, hi, nlo, ty) ->
+      lower_dynamic_call(st, sym, name, args, evid, lo, hi, nlo, ty, tl)
+    XApply(target, args, evid, lo, hi, nlo, ty, source) -> {
+      let site = source_site(st, lo, hi, nlo, source)
       let (st1, tv) = lower_expr(st, target)
       let (st2, vs) = lower_all(st1, args)
       let (st3, es) = dyn_evidence(st2, evid)
       (st3, CCall(CDynamic(tv), vs ++ es, ty, site))
     }
-    XLambda(params, _, body, captures, _, _, ty) ->
-      lift_lambda(st, params, body, captures, ty, None)
+    XLambda(params, _, body, captures, lo, hi, ty, role) ->
+      lift_lambda(st, params, body, captures, ty, None, definition_at(st, lo, hi, role))
     XFnValue(owner, name, is_builtin, ty, _, _) -> {
       # a builtin taken as a value gets the same wrapper as a declared
       # function; only its body differs, and both backends already know how
@@ -3946,9 +3982,30 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       let o = match owner { Some(x) -> x, None -> st.owner }
       lift_fn_value(st, o, name, is_builtin, ty)
     }
-    XJava(call, lo, hi, nlo, ty) -> lower_java(st, call, ty, site_at(st, lo, hi, nlo))
+    XJava(call, lo, hi, nlo, ty) -> lower_java(st, call, ty, source_site(st, lo, hi, nlo, call_source(call.nhi, "call")))
   }
 }
+
+# Keep the expression dispatcher below HotSpot's HugeMethodLimit. Static
+# source metadata does not change argument evaluation or the evidence pack.
+fn lower_dynamic_call(st: LSt, sym: Int, name: String, args: List[TExpr], evid: List[TExpr],
+  lo: Int, hi: Int, nlo: Int, ty: Ty, tail: Bool) -> (LSt, CExpr) =
+  if is_self_sym(st, sym) {
+    if tail {
+      self_tail_jump(st, args)
+    } else {
+      # not a tail call, so the closure is rebuilt and called through
+      let (st1, vs) = lower_all(st, args)
+      let clo = self_value(st1, sym).expect("self closure")
+      let (st2, es) = dyn_evidence(st1, evid)
+      (st2, CCall(CDynamic(clo), vs ++ es, ty, source_site(st2, lo, hi, nlo, call_source(if nlo == NO_NAME { NO_NAME } else { nlo + len(name) }, "call"))))
+    }
+  } else {
+    let (st1, vs) = lower_all(st, args)
+    let fty = sym_ty(st1, sym, TyError)
+    let (st2, es) = dyn_evidence(st1, evid)
+    (st2, CCall(CDynamic(CLocal(sym, fty)), vs ++ es, ty, source_site(st2, lo, hi, nlo, call_source(if nlo == NO_NAME { NO_NAME } else { nlo + len(name) }, "call"))))
+  }
 
 # Keep the expression dispatcher under HotSpot's HugeMethodLimit. Selecting
 # an implementation belongs to the backend; lowering still preserves both.
@@ -4870,7 +4927,7 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
         None, TyUnit)
       (LSt { ..st3, cur_loop = st.cur_loop }, [CSLoop(lid, inner, None)])
     }
-    TSFor(pat, item_ty, from, to, wit, body, _, _, _) -> {
+    TSFor(pat, item_ty, from, to, wit, body, _, flo, fhi) -> {
       match to {
         Some(hi) -> {
           let (st1, lid) = fresh_loop(st)
@@ -4904,7 +4961,8 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
             (st1, [CSDiscard(source)])
           } else {
             match wit {
-              Some(w) -> lower_for_iter(st, pat, item_ty, from, w, body)
+              Some(w) -> lower_for_iter(st, pat, item_ty, from, w, body,
+                source_site(st, flo, fhi, NO_NAME, call_source(NO_NAME, "for")))
               None -> panic("lower: for..in without an Iter witness")
             }
           }
@@ -4917,10 +4975,10 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
       let (st3, pattern_stmts) = lower_irrefutable_pattern(st2, CLocal(sym, it), pat, it)
       (st3, [CSLet(sym, it, v)] ++ pattern_stmts)
     }
-    TSLocalFn(sym, _, params, _, body, captures, _, _) -> {
+    TSLocalFn(sym, _, params, _, body, captures, lo, hi) -> {
       # a named local function is a lambda that also binds a name
       let fty = sym_ty(st, sym, TyError)
-      let (st1, clo) = lift_lambda(st, params, body, captures, fty, Some(sym))
+      let (st1, clo) = lift_lambda(st, params, body, captures, fty, Some(sym), definition_at(st, lo, hi, "local-function"))
       (st1, [CSLet(sym, fty, clo)])
     }
   }
@@ -4941,7 +4999,8 @@ fn lower_for_iter(
   item_ty: Ty,
   from: TExpr,
   w: WitRef,
-  body: TExpr
+  body: TExpr,
+  site: CSite
 ) -> (LSt, List[CStmt]) = {
   let ct = tex_ty(from)
   let cur_t = iter_cur_ty(st, w, ct)
@@ -4951,10 +5010,10 @@ fn lower_for_iter(
   let (st4, isym) = fresh_sym(st3)
   let cv: TExpr = XLocal(csym, "for$" ++ "xs", 0, 0, ct)
   let iv: TExpr = XLocal(isym, "for$" ++ "cur", 0, 0, cur_t)
-  let (st5, start_v) = lower_trait_call(st4, ITER_ID, "iter_start", [cv], [w], no_texprs(), cur_t, CNoSite)
-  let (st6, done_v) = lower_trait_call(st5, ITER_ID, "iter_done", [cv, iv], [w], no_texprs(), TyBool, CNoSite)
-  let (st7, get_v) = lower_trait_call(st6, ITER_ID, "iter_get", [cv, iv], [w], no_texprs(), item_ty, CNoSite)
-  let (st8, next_v) = lower_trait_call(st7, ITER_ID, "iter_next", [cv, iv], [w], no_texprs(), cur_t, CNoSite)
+  let (st5, start_v) = lower_trait_call(st4, ITER_ID, "iter_start", [cv], [w], no_texprs(), cur_t, site)
+  let (st6, done_v) = lower_trait_call(st5, ITER_ID, "iter_done", [cv, iv], [w], no_texprs(), TyBool, site)
+  let (st7, get_v) = lower_trait_call(st6, ITER_ID, "iter_get", [cv, iv], [w], no_texprs(), item_ty, site)
+  let (st8, next_v) = lower_trait_call(st7, ITER_ID, "iter_next", [cv, iv], [w], no_texprs(), cur_t, site)
   let (st9, item_sym) = fresh_sym(st8)
   let item = CLocal(item_sym, item_ty)
   let (st10, pattern_stmts) = lower_irrefutable_pattern(st9, item, pat, item_ty)
@@ -5214,6 +5273,7 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     base = st.base,
     origin = st.origin
   }, CFun {
+    definition = definition_at(st_in, f.base, x_hi(f.body), "function"),
     name = f.name,
     owner = owner,
     captures = [],
@@ -5755,6 +5815,7 @@ test "lowering numbers a module's names in the order the Core dump reads them" {
   let sym_named = (nm: String) => Sym { name = nm, ty = TyInt, mutable = false,
     dlo = 0, dhi = 0, dict_of = None, ev_of = None, cell_of = None }
   let lifted = CFun {
+    definition = synthetic_definition("test-builder"),
     name = "lambda\$0", owner = "m",
     captures = [p(4001)], params = [p(4002)], dicts = [p(4003)], evs = [p(4004)],
     ret = TyInt,
@@ -6036,7 +6097,7 @@ test "a written call's site is measured from its declaration, and a call nobody 
     inferring = false
   }
   let none_tid: Option[Int] = None
-  let call = (nm: String, lo: Int, hi: Int, nlo: Int) => XCallFn(Some("m"), nm, [], [], [], none_tid, lo, hi, nlo, TyInt)
+  let call = (nm: String, lo: Int, hi: Int, nlo: Int) => XCallFn(Some("m"), nm, [], [], [], none_tid, lo, hi, nlo, TyInt, call_source(-1, "call"))
   let body = XBinary(BAdd, call("g", 118, 125, 120), call("g\$default\$0", 130, 135, NO_NAME), None, 0, 0, 0, 0, TyInt)
   let f = TFun {
     name = "f",
@@ -6065,8 +6126,15 @@ test "a written call's site is measured from its declaration, and a call nobody 
   }
   let (origin, written, omitted) = sites_of(f)
   assert origin == "Nf:f"
-  assert written == CAt(18, 25, 20)
+  assert written == CAt(18, 25, 20, call_source(-1, "call"))
   assert omitted == CNoSite
+  for role in ["operator", "literal", "var", "for", "if"] {
+    let generated = XCallFn(Some("m"), "g", [], [], [], none_tid, 118, 125, NO_NAME, TyInt,
+      call_source(NO_NAME, role))
+    let (_, syntax, _) = sites_of(TFun { ..f, body = XBinary(BAdd, generated,
+      call("g\$default\$0", 130, 135, NO_NAME), None, 0, 0, 0, 0, TyInt) })
+    assert syntax == CSyntax(18, 25, NO_NAME, call_source(NO_NAME, role))
+  }
   # a tree no scheduler filed records nothing
   let (_, unfiled, _) = sites_of(TFun { ..f, decl = "", base = -1 })
   assert unfiled == CNoSite

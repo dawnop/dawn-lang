@@ -39,7 +39,7 @@ use std/list
 use std/map
 use std/str
 use check/types.{Sym, TyInt, TyNever, ty_loc}
-use check/tast.{
+use check/tast.{CallSource,
   NO_NAME, TExpr, TStmt, TFun, TDefault, TJavaCall, TStrPart, TArm, TListElem, TListIfArm, TConst,
   TSPText, TSPInterp, TLEExpr, TLESpread, TLEIf,
   XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue,
@@ -69,6 +69,9 @@ pub type Resolver = {
 }
 
 ## The resolver for a declaration the span view names.
+fn source_at(r: Resolver, source: CallSource) -> CallSource =
+  CallSource { ..source, nhi = name_at(r, source.nhi) }
+
 pub fn owned(lo: Int, hi: Int, path: Option[String], line_starts: List[Int], source: String) -> Resolver =
   Resolver { base = lo, span = Some(hi - lo), path = path, line_starts = line_starts, source = source }
 
@@ -315,13 +318,13 @@ pub fn expr(r: Resolver, e: TExpr) -> TExpr =
       XCallBuiltin(name, sited_call(r, name, exprs(r, args), start), wits, exprs(r, evs),
         start, at(r, hi), name_at(r, nlo), ty)
     }
-    XCallFn(owner, name, args, wits, evs, trait_id, lo, hi, nlo, ty) ->
-      XCallFn(owner, name, exprs(r, args), wits, exprs(r, evs), trait_id, at(r, lo), at(r, hi), name_at(r, nlo), ty)
-    XApply(target, args, evs, lo, hi, nlo, ty) ->
-      XApply(expr(r, target), exprs(r, args), exprs(r, evs), at(r, lo), at(r, hi), name_at(r, nlo), ty)
+    XCallFn(owner, name, args, wits, evs, trait_id, lo, hi, nlo, ty, source) ->
+      XCallFn(owner, name, exprs(r, args), wits, exprs(r, evs), trait_id, at(r, lo), at(r, hi), name_at(r, nlo), ty, source_at(r, source))
+    XApply(target, args, evs, lo, hi, nlo, ty, source) ->
+      XApply(expr(r, target), exprs(r, args), exprs(r, evs), at(r, lo), at(r, hi), name_at(r, nlo), ty, source_at(r, source))
     XJava(c, lo, hi, nlo, ty) -> XJava(java_call(r, c), at(r, lo), at(r, hi), name_at(r, nlo), ty)
-    XLambda(params, pnames, body, captures, lo, hi, ty) ->
-      XLambda(params, pnames, expr(r, body), captures, at(r, lo), at(r, hi), ty)
+    XLambda(params, pnames, body, captures, lo, hi, ty, role) ->
+      XLambda(params, pnames, expr(r, body), captures, at(r, lo), at(r, hi), ty, role)
     XCtor(adt, ci, written, slots, spread, lo, hi, ty) ->
       XCtor(adt, ci, exprs(r, written), slots, opt_expr(r, spread), at(r, lo), at(r, hi), ty)
     XConstRef(owner, name, lo, hi, ty) -> XConstRef(owner, name, at(r, lo), at(r, hi), ty)

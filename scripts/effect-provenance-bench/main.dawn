@@ -1,0 +1,20 @@
+# Time hot batches inside each process; process startup is measured separately.
+use std/io
+use std/io.{Clock, with_clock_real, now, elapsed_ns}
+use kernels.{kernel}
+
+fn batches(kind: Int, native: Bool) -> Unit !io !Clock = {
+  let count = if native && kind >= 2 { 200000 } else if kind == 5 { 600000 } else { 20000000 }
+  var seed = 17
+  for _warm in range(0, 30) { seed = kernel(kind, count, seed) }
+  for batch in range(0, 50) {
+    let start = now()
+    seed = kernel(kind, count, seed)
+    let duration = elapsed_ns(start, now())
+    io.println("${kind} ${batch} ${duration} ${seed}")
+  }
+}
+pub fn main() -> Unit !io = with_clock_real(() => {
+  let native = args() == ["native"]
+  for kind in range(0, 6) { batches(kind, native) }
+})

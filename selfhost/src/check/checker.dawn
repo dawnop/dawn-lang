@@ -32,7 +32,7 @@ use front/ast.{
   EHandle, HandlerArm, HandlerCell, module_effects,
   VisPub, VisPkg, vis_exported
 }
-use check/tast.{
+use check/tast.{CallSource, call_source,
   NO_NAME, TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn,
   XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
@@ -3836,7 +3836,12 @@ pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
     EHandle(_, cells, arms, rest, _, _, _, _) -> {
       var o = out
       for c in cells { o = name_refs(c.init, o, sc) }
-      for a in arms { o = name_refs(a.body, o, rs_params(sc, a.params)) }
+      for a in arms {
+        var inner = rs_params(sc, a.params)
+        match a.origin { Some(binding) -> { inner = rs_bind(inner, binding.name) }, None -> () }
+        match a.binder { Some(binding) -> { inner = rs_bind(inner, binding) }, None -> () }
+        o = name_refs(a.body, o, inner)
+      }
       name_refs(rest, o, sc)
     }
     _ -> out
@@ -3954,6 +3959,7 @@ test "a handler's arms and its remainder are both call positions" {
   # with handle Ask { get(n) => p(n, q) }  r()
   let no_binder: Option[String] = None
   let arm = HandlerArm {
+    origin = None,
     name = "get",
     params = [LambdaParam { name = "n", ann = None, lo = 0, hi = 1 }],
     binder = no_binder,
@@ -4561,9 +4567,9 @@ fn eta_bounded_fn_value(
     if f.is_builtin {
       XCallBuiltin(name, args, wits, evid, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, iret)
     } else {
-      XCallFn(f.owner, emitted_fn_name(f, name), args, wits, evid, f.trait_id, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, iret)
+      XCallFn(f.owner, emitted_fn_name(f, name), args, wits, evid, f.trait_id, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, iret, call_source(-1, "function-wrapper"))
     }
-  (cx1, wrapper_ty, XLambda(psyms, pnames, body, popped.captures, owner_off(cx, lo), owner_off(cx, hi), wrapper_ty))
+  (cx1, wrapper_ty, XLambda(psyms, pnames, body, popped.captures, owner_off(cx, lo), owner_off(cx, hi), wrapper_ty, "function-wrapper"))
 }
 
 ## `f` used as a value with nothing to instantiate it from (#428). What is
@@ -4667,7 +4673,7 @@ test "fn values instantiate from the expected type" {
   assert len(cx3.diags) == 0
   assert t3 == want
   match x3 {
-    XLambda(psyms, _, body, caps, _, _, _) -> {
+    XLambda(psyms, _, body, caps, _, _, _, _) -> {
       assert len(psyms) == 1
       # nothing to capture: the witness is settled at `Int`, not forwarded
       assert len(caps) == 0
@@ -4722,7 +4728,7 @@ test "bounded fn values read ordered evidence from the caller and expose ABI-onl
   assert actual == want
   assert cx2.frame.used_effects == cx1.frame.used_effects
   match value {
-    XLambda(_, _, XCallFn(_, _, _, wits, evid, _, _, _, _, _), captures, _, _, value_ty) -> {
+    XLambda(_, _, XCallFn(_, _, _, wits, evid, _, _, _, _, _, _), captures, _, _, value_ty, _) -> {
       # Existing evidence is outside the wrapper, so it must be read from the
       # caller's pack rather than captured at the value's creation point.
       assert captures == []
@@ -6098,7 +6104,8 @@ test "a literal at Int or Float is the literal it always was, and elsewhere its 
   }
   assert converted
   let folded = match arith_body(tm, "m") {
-    XComptime(XCallFn(_, _, [XInt(3, ..)], [_], _, Some(tid), ..), ..) -> tid == FROM_INT_ID
+    XComptime(XCallFn(_, _, [XInt(3, ..)], [_], _, Some(tid), _, hi, _, _, source), ..) ->
+      tid == FROM_INT_ID && source.role == "literal" && source.nhi == hi
     _ -> false
   }
   assert folded
@@ -6152,7 +6159,7 @@ fn lit_via_trait(cx: Cx, tid: Int, t: Ty, arg: TExpr, lo: Int, hi: Int) -> (Cx, 
       let cx4 = record_effect(cx3, eff_drop_assocs(eff_drop(charged, unanswered), adropped), lo,
         hi, mname)
       let call = XCallFn(s.owner, emitted_fn_name(s, mname), [arg], [wr], evs, Some(tid),
-        owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, lo), t)
+        owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, lo), t, call_source(owner_off(cx, hi), "literal"))
       if pure { (cx4, t, XComptime(call, owner_off(cx, lo), owner_off(cx, hi), t)) } else { (cx4, t, call) }
     }
   }
@@ -6269,7 +6276,7 @@ fn bitwise_finish(cx: Cx, tid: Int, lt: Ty, args: List[TExpr], rhs: Option[Ty], 
   let charged = eff_union([callee_eff] ++ vinsts)
   let cx2 = record_effect(cx1, eff_drop_assocs(eff_drop(charged, unanswered), adropped), olo, ohi, mn)
   (cx2, lt, XCallFn(ms.sig.owner, emitted_fn_name(ms.sig, mn), args, [wr], evs, Some(tid),
-    owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, olo), lt))
+    owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, olo), lt, call_source(owner_off(cx, ohi), "operator")))
 }
 
 fn bitwise_no_impl(cx: Cx, tid: Int, t: Ty, lo: Int, hi: Int) -> Cx = {
@@ -6387,7 +6394,7 @@ fn arith_call(cx: Cx, tid: Int, lt: Ty, lx: TExpr, rhs: Option[(Ty, TExpr)], olo
         olo, ohi, mname)
       # The operator is the call the author wrote, named where it starts.
       (cx4, lt, XCallFn(s.owner, emitted_fn_name(s, mname), args, [wr], evs, Some(tid),
-        owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, olo), lt))
+        owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, olo), lt, call_source(owner_off(cx, ohi), "operator")))
     }
   }
 }
@@ -6432,10 +6439,12 @@ test "an operator on Int or Float stays native, and on a type of its own calls t
   }
   assert negated
   let routed = match arith_body(tm, "v") {
-    XCallFn(_, _, [XLocal(..), XCallFn(_, _, [_], [_], _, Some(nid), _, _, inner, _)], [_], _, Some(aid),
-      _, _, outer, _) ->
+    XCallFn(_, _, [XLocal(..), XCallFn(_, _, [_], [_], _, Some(nid), _, _, inner, _, inner_source)], [_], _, Some(aid),
+      _, _, outer, _, outer_source) ->
       # each operator is a written call: sited, named at its token
-      aid == ADD_ID && nid == NEG_ID && inner != NO_NAME && outer != NO_NAME
+      aid == ADD_ID && nid == NEG_ID && inner != NO_NAME && outer != NO_NAME &&
+      inner_source.role == "operator" && outer_source.role == "operator" &&
+      inner_source.nhi == inner + 1 && outer_source.nhi == outer + 1
     _ -> false
   }
   assert routed
@@ -7214,7 +7223,7 @@ fn check_lambda(
       match get(eps, i) {
         Some(et) -> {
           let concrete = is_concrete(cx1, et)
-          if concrete || is_tyvar(et) {
+          if concrete || is_tyvar(et) || et == TyError {
             t = et
             have = true
           }
@@ -7280,7 +7289,7 @@ fn check_lambda(
   let lam_eff = eff_union(cx3.frame.used_effects)
   cx3 = Cx { ..cx3, frame = Frame { ..cx3.frame, used_effects = saved_used, eff_witness = saved_wit } }
   let t = TyFn(ptys, bt, lam_eff)
-  (cx3, t, XLambda(psyms, pnames, bx, popped.captures, owner_off(cx, lo), owner_off(cx, hi), t))
+  (cx3, t, XLambda(psyms, pnames, bx, popped.captures, owner_off(cx, lo), owner_off(cx, hi), t, if arm { "handler" } else if sugar { "with" } else { "lambda" }))
 }
 
 fn fn_ty_parts(t: Ty) -> (List[Ty], Ty, Eff) =
@@ -7689,6 +7698,13 @@ fn check_handle(
   expected: Option[Ty]
 ) -> (Cx, Ty, TExpr) !io = {
   var cx1 = cx
+  for arm in arms {
+    match arm.origin {
+      Some(o) -> { cx1 = cerr_h(cx1, "origin observation is not supported yet", o.lo, o.hi,
+        "the origin clause is reserved for scoped observation in a later compiler cut") }
+      None -> ()
+    }
+  }
   if cx1.frame.isolated {
     cx1 = cerr_h(cx1, "`with handle` is not available at compile time", lo, hi,
       "comptime blocks and const initializers are pure in v1 " ++
@@ -7721,7 +7737,7 @@ fn check_handle(
       cxr0 = cxr
       let (_, rret, reff0) = fn_ty_parts(rt)
       let (cxr1, revs0, _) = evidence_pack(cxr0, reff0, false, lo, hi)
-      let rcall = XApply(rx, [], [revs0], owner_off(cx, lo), owner_off(cx, hi), NO_NAME, rret)
+      let rcall = XApply(rx, [], [revs0], owner_off(cx, lo), owner_off(cx, hi), NO_NAME, rret, call_source(-1, "handler-rest"))
       return (pop_scope(cxr1), rret, XBlock(cstmts, Some(rcall), owner_off(cx, lo), owner_off(cx, hi), rret))
     }
   }
@@ -7884,7 +7900,7 @@ fn check_handle(
       XCallBuiltin("ctl_run", [XInt(hid, owner_off(cx, lo), owner_off(cx, hi)), rx, revs], ctl_wits(), ctl_evs(),
         owner_off(cx, lo), owner_off(cx, hi), NO_NAME, rret)
     } else {
-      XApply(rx, [], [revs], owner_off(cx, lo), owner_off(cx, hi), NO_NAME, rret)
+      XApply(rx, [], [revs], owner_off(cx, lo), owner_off(cx, hi), NO_NAME, rret, call_source(-1, "handler-rest"))
     }
   # the slots are made before the record that holds the arms: an arm closes
   # over the cells, so they have to exist before the closure does. A control
@@ -7965,6 +7981,22 @@ fn check_handle_remainder(
 ##
 ## The fifth result is the `TSLet` a control arm needs: `ctl_wrapper` says why
 ## the arm is bound to a local instead of being nested inside the wrapper.
+# Recovery gives the rejected origin a local identity so editor queries still
+# resolve its uses. No well-typed program can lower this extra parameter.
+fn origin_params(a: HandlerArm) -> List[LambdaParam] =
+  match a.origin {
+    None -> a.params
+    Some(o) -> a.params ++ [LambdaParam { name = o.name, ann = None, lo = o.nlo, hi = o.nhi }]
+  }
+
+fn origin_types(a: HandlerArm, ts: List[Ty]) -> List[Ty] =
+  match a.origin { None -> ts, Some(_) -> ts ++ [TyError] }
+
+fn origin_arm_type(a: HandlerArm, t: Ty) -> Ty = {
+  let (ps, ret, row) = fn_ty_parts(t)
+  TyFn(origin_types(a, ps), ret, row)
+}
+
 fn check_handle_arms(
   cx: Cx,
   info: EffectI,
@@ -7987,7 +8019,7 @@ fn check_handle_arms(
     let (fptys, fret, _) = fn_ty_parts(field.ty)
     let node = match chosen[k] {
       None -> XError(owner_off(cx, nlo), owner_off(cx, nhi))
-      Some(a) ->
+      Some(a) -> {
         if arm_is_control(a) {
           let (aty, reff) = answer_parts(answer)
           let (cxc, wrap, alet, aeff) =
@@ -8006,8 +8038,8 @@ fn check_handle_arms(
                 to_string(len(fptys)), a.nlo, a.nhi,
               "the arm is the operation's body: " ++ text)
           }
-          let (cxb, at, ax) = check_lambda(cxa, a.params, a.body, true, true, false,
-            Some(hid), None, Some(field.ty), a.lo, a.hi)
+          let (cxb, at, ax) = check_lambda(cxa, origin_params(a), a.body, true, true, false,
+            Some(hid), None, Some(origin_arm_type(a, field.ty)), a.lo, a.hi)
           cxa = cxb
           let (_, aret, aeff) = fn_ty_parts(at)
           if not assignable(cxa, aret, fret) {
@@ -8022,6 +8054,7 @@ fn check_handle_arms(
           cx1 = cxa
           ax
         }
+      }
     }
     arm_nodes = arm_nodes ++ [node]
     slots = slots ++ [Some(k)]
@@ -8112,9 +8145,9 @@ fn check_control_arm(
       "the binder is the continuation, not a parameter: " ++ text)
   }
   let k_ty = TyFn([fret], answer, cont_row(reff))
-  let kp = LambdaParam { name = kname, ann = None, lo = a.blo, hi = a.bhi }
-  let (cxb, at, ax) = check_lambda(cx1, a.params ++ [kp], a.body, true, true, true,
-    Some(hid), None, Some(TyFn(fptys ++ [k_ty], answer, EPure)), a.lo, a.hi)
+  let kp = LambdaParam { name = kname, ann = None, lo = a.bhi - len(kname), hi = a.bhi }
+  let (cxb, at, ax) = check_lambda(cx1, origin_params(a) ++ [kp], a.body, true, true, true,
+    Some(hid), None, Some(TyFn(origin_types(a, fptys) ++ [k_ty], answer, EPure)), a.lo, a.hi)
   cx1 = cxb
   let (_, aret, aeff) = fn_ty_parts(at)
   if not assignable(cx1, aret, answer) {
@@ -8184,7 +8217,7 @@ fn ctl_wrapper(
   let body = XCallBuiltin("ctl_yield",
     [XInt(hid, owner_off(cx, lo), owner_off(cx, hi)), XLocal(arm_sym, arm_name, owner_off(cx, lo), owner_off(cx, hi), arm_ty)] ++ pargs,
     ctl_wits(), ctl_evs(), owner_off(cx, lo), owner_off(cx, hi), NO_NAME, fret)
-  (cx1, XLambda(psyms, pnames, body, [arm_sym], owner_off(cx, lo), owner_off(cx, hi), TyFn(fptys, fret, EPure)))
+  (cx1, XLambda(psyms, pnames, body, [arm_sym], owner_off(cx, lo), owner_off(cx, hi), TyFn(fptys, fret, EPure), "control-wrapper"))
 }
 
 ## A row without one label. `eff_drop` takes a list; this is its one-label
@@ -8500,7 +8533,7 @@ fn check_apply(
   cx1 = cxe
   cx1 = record_effect(cx1, eff_drop(feff, unanswered), e_lo(target), e_hi(target),
     "the applied function")
-  (cx1, fret, XApply(fx, txs, evs, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, e_lo(target)), fret))
+  (cx1, fret, XApply(fx, txs, evs, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, e_lo(target)), fret, call_source(owner_off(cx, e_hi(target)), "call")))
 }
 
 # ---- blocks and statements ----
@@ -9161,7 +9194,8 @@ fn staged_call(cx: Cx, tid: Int, mname: String, subject: Ty, args: List[TExpr], 
   let cx2 = record_effect(cx1, eff_drop_assocs(eff_drop(charged, unanswered), adropped), lo, hi,
     mname)
   (cx2, XCallFn(s.owner, emitted_fn_name(s, mname), args, [w], evs, Some(tid), owner_off(cx, lo),
-    owner_off(cx, hi), nlo, ret))
+    owner_off(cx, hi), nlo, ret, call_source(if nlo == NO_NAME { NO_NAME } else { nlo + len(if tid == STAGED_ITER_ID { "for" } else { "if" }) },
+      if tid == STAGED_ITER_ID { "for" } else if tid == STAGED_COND_ID || tid == STAGED_RESULT_ID { "if" } else { "var" })))
 }
 
 ## A read of a carried `var`: `var_get` on its cell, at the `var`'s type.
@@ -9278,7 +9312,7 @@ fn check_staged_body(cx: Cx, pat: Pattern, item: Ty, body: Expr, lo: Int,
   let bx2 = if len(pre) == 0 { bx } else { XBlock(pre, Some(bx), x_lo(bx), x_hi(bx), TyUnit) }
   let t = TyFn([item], TyUnit, lam_eff)
   (cx3, XLambda([psym], [pname], bx2, popped.captures, owner_off(cx, e_lo(body)),
-    owner_off(cx, e_hi(body)), t), lam_eff, popped.staged)
+    owner_off(cx, e_hi(body)), t, "for-body"), lam_eff, popped.staged)
 }
 
 ## The cells a staged body minted that this loop opens: those no enclosing
@@ -9412,7 +9446,7 @@ fn check_staged_arm(cx: Cx, body: Expr, cells: Map[Int, StagedCell], expected: O
     lambda_stack = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1),
     used_effects = saved_used, eff_witness = saved_wit } }
   (cx1, bt, XLambda([], [], bx, popped.captures, owner_off(cx, e_lo(body)), owner_off(cx, e_hi(body)),
-    TyFn([], bt, row)), row, popped.staged)
+    TyFn([], bt, row), "if-body"), row, popped.staged)
 }
 
 ## A branch may infer its result from its sibling. Only the result tail is
@@ -9428,7 +9462,7 @@ fn staged_arm_waits(cx: Cx, e: Expr) -> Bool =
 fn staged_result_arm(cx: Cx, lam: TExpr, t: Ty, slot: Int, wit: WitRef, lo: Int,
   hi: Int) -> (Cx, TExpr, Eff) = {
   let (body, caps, llo, lhi, used) = match lam {
-    XLambda([], [], b, cs, a, z, TyFn([], _, e)) -> (b, cs, a, z, e)
+    XLambda([], [], b, cs, a, z, TyFn([], _, e), _) -> (b, cs, a, z, e)
     _ -> panic("staged_result_arm: expected a generated branch closure")
   }
   let saved_used = cx.frame.used_effects
@@ -9450,7 +9484,7 @@ fn staged_result_arm(cx: Cx, lam: TExpr, t: Ty, slot: Int, wit: WitRef, lo: Int,
   let restored = Cx { ..charged, frame = Frame { ..charged.frame, used_effects = saved_used,
     eff_witness = saved_wit,
     lambda_stack = list.take(charged.frame.lambda_stack, len(charged.frame.lambda_stack) - 1) } }
-  (restored, XLambda([], [], store, popped.captures ++ [slot], llo, lhi, TyFn([], TyUnit, row)), row)
+  (restored, XLambda([], [], store, popped.captures ++ [slot], llo, lhi, TyFn([], TyUnit, row), "if-result"), row)
 }
 
 ## Evaluate the condition once. Typed result slots are opened empty, written
@@ -9587,10 +9621,12 @@ fn staged_shape(tm: TModule) -> (List[String], Bool, List[String]) = {
       TSExpr(XBlock(inner, None, ..), ..) -> {
         for s2 in inner {
           match s2 {
-            TSLet(Some(_), n, XCallFn(_, "var_open", [XLocal(..)], _, _, Some(_), ..), ..) -> {
+            TSLet(Some(_), n, XCallFn(_, "var_open", [XLocal(..)], _, _, Some(_), _, _, _, _, source), ..) -> {
+              if source.role != "var" { panic("staged var source lost its role") }
               opens = opens ++ [n]
             }
-            TSExpr(XCallFn(_, "staged_for", [XLocal(..), XLambda(..)], _, _, Some(_), ..), ..) -> {
+            TSExpr(XCallFn(_, "staged_for", [XLocal(..), XLambda(..)], _, _, Some(_), _, _, nlo, _, source), ..) -> {
+              if source.role != "for" || source.nhi != nlo + 3 { panic("staged for source lost its keyword span") }
               called = true
             }
             TSAssign(_, n, XCallFn(_, "var_get", [XLocal(..)], _, _, Some(_), ..), ..) -> {
@@ -9718,7 +9754,8 @@ test "staged if arms share canonical cells and open and write back in declaratio
       }
       TSAssign(_, name, XCallFn(_, "var_get", ..), ..) -> { backs = backs ++ [name] }
       TSExpr(XCallFn(_, "staged_if", [XLocal(..), XLambda([], [], _, tcap, ..),
-        XLambda([], [], _, fcap, ..)], _, evs, Some(tid), clo, chi, nlo, TyUnit), ..) -> {
+        XLambda([], [], _, fcap, ..)], _, evs, Some(tid), clo, chi, nlo, TyUnit, source), ..) -> {
+        assert source.role == "if" && source.nhi == nlo + 2
         assert tid == STAGED_COND_ID
         assert len(evs) == 1
         assert clo >= 0
@@ -9767,7 +9804,7 @@ test "a staged value stores both arm results and reads its hidden slot after the
       for arm in [yes, no] {
         match arm {
           XLambda([], [], XCallFn(_, "result_set", [XLocal(id, ..), XBlock(_, Some(XLocal(_, name, ..)), ..)],
-            _, evs, Some(tid), ..), caps, _, _, TyFn([], TyUnit, _)) -> {
+            _, evs, Some(tid), ..), caps, _, _, TyFn([], TyUnit, _), _) -> {
             assert id == slot && tid == STAGED_RESULT_ID && len(evs) == 1
             assert list.contains(caps, slot)
             assert name == "a" || name == "b"
@@ -10059,7 +10096,7 @@ fn default_call(
   let none_tid: Option[Int] = None
   let pty = reduce_instantiated(cx, subst(s.param_tys[idx], m, em), m)
   XCallFn(s.owner, emitted_fn_name(s, callee) ++ "\$default\$" ++ to_string(idx), prefix, wits, [], none_tid,
-    owner_off(cx, lo), owner_off(cx, hi), NO_NAME, pty)
+    owner_off(cx, lo), owner_off(cx, hi), NO_NAME, pty, call_source(-1, "default-argument"))
 }
 
 ## The arguments of a signature call in parameter order, and the `let`s that
@@ -10614,9 +10651,12 @@ fn check_call(
         let env_idx = ev_arity - 1
         let env = XField(recv, env_idx, owner_off(cx, clo), owner_off(cx, chi), erased_ev_ty())
         XApply(XField(recv, idx, owner_off(cx, clo), owner_off(cx, chi), TyFn(s.param_tys, s.ret, EPure)), txs2,
-          [env], owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, clo), ret)
+          [env], owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, clo), ret,
+          CallSource { nhi = owner_off(cx, chi), role = "perform", operation = Some((s.owner.unwrap_or(cx.owner_class.unwrap_or("")),
+            identity.path_text([identity.Named(identity.EffectDecl, effect_of(cx1, eid).name),
+              identity.Named(identity.OperationDecl, s.name)]))) })
       }
-      None -> XCallFn(s.owner, emitted_fn_name(s, callee), txs2, wits, evs, s.trait_id, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, clo), ret)
+      None -> XCallFn(s.owner, emitted_fn_name(s, callee), txs2, wits, evs, s.trait_id, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, clo), ret, call_source(owner_off(cx, chi), "call"))
     }
   }
   let out = if len(arg_lets) > 0 { XBlock(arg_lets, Some(node), owner_off(cx, lo), owner_off(cx, hi), ret) } else { node }
@@ -13396,7 +13436,7 @@ fn check_method_call(
               let (cxe, evs, unanswered) = dyn_evidence_args(cx1, feff, nlo, nhi)
               cx1 = cxe
               cx1 = record_effect(cx1, eff_drop(feff, unanswered), nlo, nhi, name)
-              return (cx1, fret, XApply(fx, txs, evs, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, nlo), fret))
+              return (cx1, fret, XApply(fx, txs, evs, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, nlo), fret, call_source(owner_off(cx, nhi), "call")))
             }
             _ -> ()
           }
@@ -13931,7 +13971,7 @@ test "named arguments land on a signature's parameters, and evaluate in written 
     XCallFn(_, _, gargs, gwits, ..) -> {
       assert gwits == [WConcrete(EQ_ID, TyInt)]
       match gargs[0] {
-        XCallFn(_, dn2, dargs2, dwits2, _, _, _, _, _, dty2) -> {
+        XCallFn(_, dn2, dargs2, dwits2, _, _, _, _, _, dty2, _) -> {
           assert dn2 == "hold\$default\$0"
           assert len(dargs2) == 0
           assert dwits2 == [WConcrete(EQ_ID, TyInt)]
@@ -17079,7 +17119,7 @@ test "in main the same diagnostic offers the handler alone" {
 ## The evidence arguments of the single named call a test function's body is.
 fn ev_args_of(f: TFun) -> List[TExpr] =
   match f.body {
-    XCallFn(_, _, _, _, evs, _, _, _, _, _) -> evs
+    XCallFn(_, _, _, _, evs, _, _, _, _, _, _) -> evs
     _ -> []
   }
 
@@ -17391,7 +17431,7 @@ fn tast_prims(e: TExpr) -> List[String] =
         None -> out
       }
     }
-    XLambda(_, _, body, _, _, _, _) -> tast_prims(body)
+    XLambda(_, _, body, _, _, _, _, _) -> tast_prims(body)
     XCtor(_, _, written, _, _, _, _, _) -> {
       var out: List[String] = []
       for a in written { out = out ++ tast_prims(a) }
@@ -17402,12 +17442,12 @@ fn tast_prims(e: TExpr) -> List[String] =
       for a in args { out = out ++ tast_prims(a) }
       out
     }
-    XApply(t, args, _, _, _, _, _) -> {
+    XApply(t, args, _, _, _, _, _, _) -> {
       var out = tast_prims(t)
       for a in args { out = out ++ tast_prims(a) }
       out
     }
-    XCallFn(_, _, args, _, _, _, _, _, _, _) -> {
+    XCallFn(_, _, args, _, _, _, _, _, _, _, _) -> {
       var out: List[String] = []
       for a in args { out = out ++ tast_prims(a) }
       out
@@ -17465,8 +17505,8 @@ fn tast_lets(e: TExpr) -> List[String] =
         None -> out
       }
     }
-    XLambda(_, _, body, _, _, _, _) -> tast_lets(body)
-    XApply(t, args, _, _, _, _, _) -> {
+    XLambda(_, _, body, _, _, _, _, _) -> tast_lets(body)
+    XApply(t, args, _, _, _, _, _, _) -> {
       var out = tast_lets(t)
       for a in args { out = out ++ tast_lets(a) }
       out
@@ -17501,12 +17541,12 @@ fn ctl_wrapper_captures(e: TExpr) -> List[Int] =
       for a in written { out = out ++ ctl_wrapper_captures(a) }
       out
     }
-    XLambda(_, _, body, caps, _, _, _) ->
+    XLambda(_, _, body, caps, _, _, _, _) ->
       match body {
         XCallBuiltin(n, _, _, _, _, _, _, _) -> if n == "ctl_yield" { caps } else { [] }
         _ -> ctl_wrapper_captures(body)
       }
-    XApply(t, args, _, _, _, _, _) -> {
+    XApply(t, args, _, _, _, _, _, _) -> {
       var out = ctl_wrapper_captures(t)
       for a in args { out = out ++ ctl_wrapper_captures(a) }
       out
@@ -18468,7 +18508,7 @@ test "a local declaration shadows a prelude trait method rather than colliding" 
     for tf in tm.fns {
       if tf.name == "f" {
         match tf.body {
-          XCallFn(_, cn, _, _, _, tid, _, _, _, _) -> {
+          XCallFn(_, cn, _, _, _, tid, _, _, _, _, _) -> {
             assert cn == n
             assert tid == None
           }

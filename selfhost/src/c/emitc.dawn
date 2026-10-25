@@ -19,6 +19,7 @@
 # whole self-hosting bootstrap, because `scripts/doc-check.py` reads `docs/`
 # and nothing reads the claims at the top of a source file.
 
+use check/tast.{call_source}
 use std/char
 use std/str
 use std/bytes
@@ -41,8 +42,8 @@ use ir/reach.{TableUse, Live, LIST_MOD, LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CON
 use embed/unicode_case
 use embed/rtsrc
 use embed/unicode_class
-use ir/core.{
-  CSite, CNoSite, CAt, CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict, VCursor,
+use ir/core.{synthetic_definition,
+  CSite, CNoSite, CSyntax, CAt, CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict, VCursor,
   diverges,
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned, callee_mode_key, impl_mode_name,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
@@ -245,8 +246,8 @@ fn note_intrinsic(st: CSt, a: Int, name: String, s: CSite, v: String) -> CSt =
 ## written while it was emitted; or nothing at all, a row with no place.
 fn noted(st: CSt, a: Int, what: String, s: CSite, v: String) -> CSt = {
   let sited = match s {
-    CNoSite -> false
-    CAt(_, _, _) -> true
+    CNoSite | CSyntax(_, _, _, _) -> false
+    CAt(_, _, _, _) -> true
   }
   let n = len(st.out)
   let row = MapRow {
@@ -1438,6 +1439,7 @@ test "a view is a plain C local, not a slot of the frame's cleanup array" {
     TyInt
   )
   let f = CFun {
+    definition = synthetic_definition("backend-trait-bridge"),
     name = "f", owner = "t", captures = [],
     params = [CParam { sym = 1, ty = node, mode = CBorrowed }], dicts = [], evs = [],
     ret = TyInt, body = body, is_test = false, impl_of = None, default_of = None, origin = ""
@@ -3474,12 +3476,12 @@ test "Int minimum uses the C standard boundary macro" {
 # ---- --map: where a call's C landed (docs/source-span-map-design.md section 12) ----
 
 fn map_test_row(lo: Int, hi: Int) -> MapRow =
-  MapRow { owner = "", origin = "", what = "direct t.h", site = CAt(lo, hi, lo), first = -1, last = -1, clo = -1, chi = -1 }
+  MapRow { owner = "", origin = "", what = "direct t.h", site = CAt(lo, hi, lo, call_source(-1, "call")), first = -1, last = -1, clo = -1, chi = -1 }
 
 fn map_test_lo(s: CSite) -> Int =
   match s {
-    CAt(lo, _, _) -> lo
-    CNoSite -> -1
+    CAt(lo, _, _, _) -> lo
+    CNoSite | CSyntax(_, _, _, _) -> -1
   }
 
 ## (source lo, clo, chi) of each row, in the order they were claimed.
@@ -3536,8 +3538,8 @@ test "a call whose text starts its enclosing call's text is found where it is" {
 }
 
 test "emitting with --map writes the same C, and without it records nothing" {
-  let inner = CCall(CDirect("t", "h"), [CInt(1)], TyInt, CAt(2, 6, 2))
-  let outer = CCall(CDirect("t", "h"), [inner], TyInt, CAt(0, 7, 0))
+  let inner = CCall(CDirect("t", "h"), [CInt(1)], TyInt, CAt(2, 6, 2, call_source(-1, "call")))
+  let outer = CCall(CDirect("t", "h"), [inner], TyInt, CAt(0, 7, 0, call_source(-1, "call")))
   let (sp, vp) = emit_expr(bin_test_st(), outer, true)
   let plain = line(sp, "return " ++ vp ++ ";")
   let (sm, vm) = emit_expr(CSt { ..bin_test_st(), mapping = true }, outer, true)

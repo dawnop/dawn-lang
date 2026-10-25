@@ -23,6 +23,7 @@
 # give the same bytes; the emitter itself is deterministic (the fixpoint
 # depends on it), and this is one more function of what it emitted.
 
+use check/tast.{call_source}
 use std/list
 use std/map
 use std/str
@@ -132,10 +133,10 @@ fn call_order(x: (MapRow, (Int, Int, Int)), y: (MapRow, (Int, Int, Int))) -> Int
 }
 
 test "rows sort by place, the enclosing call first, the placeless last" {
-  let r = MapRow { owner = "m", origin = "f", what = "direct m.g", site = CAt(0, 3, 0), first = 5, last = 5, clo = 4, chi = 9 }
-  let outer = MapRow { ..r, site = CAt(0, 10, 0), clo = 2, chi = 12, what = "direct m.h" }
-  let lost = MapRow { ..r, site = CAt(20, 23, 20), first = -1, last = -1, clo = -1, chi = -1 }
-  let early = MapRow { ..r, site = CAt(30, 33, 30), first = 2, last = 3, clo = -1, chi = -1, what = "intrinsic x" }
+  let r = MapRow { owner = "m", origin = "f", what = "direct m.g", site = CAt(0, 3, 0, call_source(-1, "call")), first = 5, last = 5, clo = 4, chi = 9 }
+  let outer = MapRow { ..r, site = CAt(0, 10, 0, call_source(-1, "call")), clo = 2, chi = 12, what = "direct m.h" }
+  let lost = MapRow { ..r, site = CAt(20, 23, 20, call_source(-1, "call")), first = -1, last = -1, clo = -1, chi = -1 }
+  let early = MapRow { ..r, site = CAt(30, 33, 30, call_source(-1, "call")), first = 2, last = 3, clo = -1, chi = -1, what = "intrinsic x" }
   let bases = map.insert(map.empty(), "m", map.insert(map.empty(), "f", 100))
   let fns = [FnRow { owner = "m", origin = "f", symbol = "dawn_m__f", first = 2, last = 7 }]
   let text = render(9, [(0, "tu00.c", 2, 9)], [lost, r, outer, early], fns,

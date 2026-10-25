@@ -1,8 +1,8 @@
-<!-- doc-check: translation-of docs/spec.md @ 4206de7251dad06f -->
+<!-- doc-check: translation-of docs/spec.md @ 3732d3fccea4e1fb -->
 
 # Dawn Language Specification
 
-*[中文](spec.md) — the Chinese text is the original; this is its translation, and `scripts/doc-check.py` watches the two for drift.*
+*[Chinese original](spec.md). This English specification is its translation; `scripts/doc-check.py` checks the translation pin.*
 
 > Status: **normative**. Applies to version: 0.102.0 (the `VERSION` in `selfhost/src/version.dawn`).<!-- doc-check: version -->
 > When the implementation conflicts with this document, this document wins and the implementation
@@ -159,7 +159,7 @@ true false not
 ```
 
 Keywords cannot be used as identifiers. `panic` and `todo` are built-in functions, not keywords.
-There are fourteen further **contextual keywords**. Each has a special meaning in exactly one
+There are fifteen further **contextual keywords**. Each has a special meaning in exactly one
 syntactic position and remains an ordinary identifier everywhere else (`let in = 1` and a field
 named `test` are both legal):
 
@@ -177,6 +177,7 @@ named `test` are both legal):
 | `handle` | after `with`, when the next token is not `<-` (§6.5) |
 | `opaque` | directly before `type`, introducing an opaque type (§2.7) |
 | `ctl` | directly before `effect`, declaring a suspendable effect (§6.5) |
+| `origin` | after a handler arm's parameter list and before `resume`: `op(a) origin o => …` (§6.5) |
 | `resume` | after a handler arm's parameter list: `op(a) resume k => …` (§6.5) |
 | `pkg` | only after `pub(`: `pub(pkg)` (§10.4) |
 
@@ -2698,6 +2699,24 @@ of its discipline — legal only inside a block, the rest is a real closure, `re
   Every declared operation gets **exactly one arm**: too few arms, too many arms, and an arm whose
   name does not belong to the effect are all compile errors. Both kinds of arm may sit in one
   handler.
+- The arm grammar is `HandlerArm ::= IDENT LambdaParams OriginClause? ResumeClause? "=>" Expr`,
+  where `OriginClause ::= contextual("origin") IDENT` and
+  `ResumeClause ::= contextual("resume") IDENT`. `origin` remains an ordinary identifier in
+  function, local, field, named argument and operation names. The origin binder accepts only an
+  identifier, without a pattern, `_` or a type annotation. It precedes `resume`; duplicate,
+  reversed, missing-name and missing-arrow clauses have dedicated diagnostics. The existing
+  logical newline boundary between `)` and `=>` is unchanged; a newline after `=>` is allowed.
+  Binders share the arm's parameter scope, reject duplicates, may shadow outer locals and are
+  visible only in that arm's body.
+- **Observation is not supported yet.** A written `origin o` is a checker error even if `o` is
+  unused. Parsing, formatting and editor support do not enable observation. The binding has
+  definition, references and hover identity. Rename still refuses modules with diagnostics;
+  successful rename is tested in W2. Hover may show the recovery type and must not invent an
+  available `Origin` type. The planned scoped
+  observation intrinsic will introduce `io` and a lexical, nonescaping `TraceScope`; binding an
+  origin will require that lexical capability and count as `io`. The immutable `Origin` value
+  may then outlive the scope and be passed to pure functions. This cut provides neither the
+  intrinsic nor a provenance standard module or runtime ABI.
 - One `handle`, one effect; handling the same effect again is inner shadowing outer, which is legal.
 - Handling an effect the block never actually performs is allowed (harmless dead evidence).
 - **Handler-local state (cells)**: the head of the arm table may declare any number of `var`s, each
