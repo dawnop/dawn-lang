@@ -1979,7 +1979,8 @@ A matrix product, one 64 by 64 tile of `c` per block, walking along K:
 use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range}
-use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
+use std/gpu.{Axis, Free}
+use tileir/prog.{trace3, cells, In, Out}
 use tileir/render.{render}
 
 fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
@@ -1989,8 +1990,8 @@ fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
 }
 
 pub fn main() -> Unit !io = {
-  let a = In(F64, cells([256, 256], [64, 32], along = [0, FREE_AXIS]))
-  let b = In(F64, cells([256, 256], [32, 64], along = [FREE_AXIS, 1]))
+  let a = In(F64, cells([256, 256], [64, 32], along = [Axis(0), Free]))
+  let b = In(F64, cells([256, 256], [32, 64], along = [Free, Axis(1)]))
   let c = Out(F64, cells([256, 256], [64, 64]))     # the grid: 4 by 4 blocks
   let (prog, _entry) = trace3("matmul", a, b, c, matmul)
   # eight trips along K, and one loop with one mmaf in the record
@@ -2009,7 +2010,7 @@ continue %24 : tile<64x64xf64>
 ```
 
 `along` says which grid axis each dimension of a cell follows. Dimension 0 of `a` (its
-rows) follows grid axis 0, and dimension 1 (along K) follows none: `FREE_AXIS` means the
+rows) follows grid axis 0, and dimension 1 (along K) follows none: `Free` means the
 kernel picks that cell itself, and `load_at(a, [k])` is how. `b` is the other way round,
 and the cells of `c`, the `Out`, are the grid. `for k in d_range(0, 8) { .. }` is a loop of
 eight trips. The accumulator is a `var`, carried through the loop: `var acc = zeros(c)` makes it,

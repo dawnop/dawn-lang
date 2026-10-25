@@ -149,3 +149,13 @@ gpu.grid_mismatch: gpu.launch_entry: kernel `vadd`: the Out cells make 2 block(s
 | `gpu.no_driver` | device | the real device: there is no `libcuda` to load | run on a machine with an NVIDIA driver, or use the fake device |
 | `gpu.unsupported_backend` | device | any operation of the real device on a backend with no device runtime: the JVM, and WebAssembly | build with the C backend (`dawnc build`) |
 | `cuda.CUDA_ERROR_NOT_FOUND` | device | the driver, unchanged. One example of a family: `cuda.` followed by the `CUresult` name, for everything the driver refuses; this one is a global a module does not export | read the CUDA driver documentation for the name |
+
+
+K3-G rejects invalid CellAxis values before recording the body when possible:
+Grouped requires a positive i32 group, a valid axis, static In capacity and
+complete groups. Typed launch checks unknown grid relationships after resolving
+the actual grid and keeps full-capacity reach and alias checks. Out requires
+Axis in every dimension. read_prefix requires In Grid, static capacities and
+a Free storage dimension; its length must be a rank-0 i32. Dynamic length
+bounds remain the caller's host precondition. A ReadView passed to store_view
+is a compiler type error, independently of recorder In write protection.

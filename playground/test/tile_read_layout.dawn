@@ -1,0 +1,27 @@
+# Independent editable six-argument fixture for prefix API source pairing.
+use std/io
+use std/gpu.{Axis, Free, Grouped}
+use std/narrow.{F32}
+use std/int/i32.{I32}
+use tileir/dev.{Dev, Param, read_prefix, read_blocks, read_at, idx_of, scalar, idx_const, d_range, load_cell, store_cell, reduce_sum, tile_shape, f_const}
+use tileir/prog.{trace6, cells, In, Out, Scalar}
+use tileir/render.{render}
+
+fn six(q: Param[F32], k: Param[F32], v: Param[F32], out: Param[F32], scale: Param[F32], n: Param[I32]) -> Unit !Dev = {
+  let keys = read_prefix(k, 1, idx_of(scalar(n)))
+  let values = read_prefix(v, 1, idx_of(scalar(n)))
+  var total = load_cell(q)
+  for j in d_range(idx_const(0), read_blocks(keys, 1)) {
+    let key = read_at(keys, [j])
+    let _shape = tile_shape(key)
+    total = total + reduce_sum(key + read_at(values, [j]) * f_const(F32, 2.0), dim = 0, keepdims = true)
+  }
+  store_cell(out, total * scalar(scale))
+}
+
+pub fn main() -> Unit !io = {
+  let qo = cells([12, 2, 4], [1, 1, 4], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])
+  let kv = cells([4, 17, 4], [1, 4, 4], along = [Grouped(2, 3), Free, Axis(1)], squeeze = [0])
+  let (p, _e) = trace6("six_read", In(F32, qo), In(F32, kv), In(F32, kv), Out(F32, qo), Scalar(F32), Scalar(I32), six)
+  io.print(render(p))
+}

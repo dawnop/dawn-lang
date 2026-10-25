@@ -141,7 +141,7 @@ what it looks like and how to fix it. Both are checked against the source.
   launch grid: dimension `j` of an `Out` follows grid axis `along[j]`, each
   axis at most once (the identity unless `along` says otherwise), and an
   axis no dimension follows has one block. A batched product keeps its
-  batch on axis 2 with `cells([B, M, N], [1, T, T], along = [2, 0, 1])`.
+  batch on axis 2 with `cells([B, M, N], [1, T, T], along = [Axis(2), Axis(0), Axis(1)])`.
 - `Shared(d)` is the escape hatch: atomics, scatters, a block that writes two
   regions, a write through pointers. `grep Shared(` finds every one.
 - `Scalar(d)` is a value the launch passes by value (`i32`, `i64`, `f32` or
@@ -149,7 +149,7 @@ what it looks like and how to fix it. Both are checked against the source.
   passed with `std/gpu`'s `scalar_arg(v)`.
 - `cells(extent, tile, pad: PadZero, along: ..)` cuts the tensor. An extent
   of `DYN_DIM` is the grid's to decide; `pad` is what a read past the extent
-  answers; `along[j]` is the grid axis dimension `j` follows, or `FREE_AXIS`
+  answers; `along[j]` is the grid axis dimension `j` follows, or `Free`
   when the kernel picks that cell itself.
 
 `trace_kernel(name, params, body)` records a body over `param(d, pos)`
@@ -168,7 +168,8 @@ from their operands, and a matrix product's from its two factors:
 
 ```dawn
 use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range}
-use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
+use std/gpu.{Axis, Free}
+use tileir/prog.{trace3, cells, In, Out}
 
 fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
   var acc = zeros(c)
@@ -177,13 +178,13 @@ fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
 }
 
 let (prog, entry) = trace3("matmul",
-  In(F64, cells([256, 256], [64, 32], along = [0, FREE_AXIS])),
-  In(F64, cells([256, 256], [32, 64], along = [FREE_AXIS, 1])),
+  In(F64, cells([256, 256], [64, 32], along = [Axis(0), Free])),
+  In(F64, cells([256, 256], [32, 64], along = [Free, Axis(1)])),
   Out(F64, cells([256, 256], [64, 64])), matmul)
 ```
 
 - `load_cell(p)` reads this block's cell; `load_at(p, [k])` names the cell
-  along each `FREE_AXIS` dimension. Lanes past the extent read the marker's
+  along each `Free` dimension. Lanes past the extent read the marker's
   `pad`, so a tail needs no mask.
 - `store_cell(o, t)` writes this block's cell of an `Out`;
   `store_sub(o, [i, j], t)` writes one piece of it, shaped like `t`. These
@@ -464,3 +465,29 @@ Changes between versions: [CHANGELOG.md](CHANGELOG.md). Design, measurements
 and the bytecode format:
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
+
+
+## Read layouts (0.28.0)
+
+`cells(..., along = ...)` now takes the single nominal `std/gpu.CellAxis`
+type. Import `Axis`, `Free` and `Grouped` from `std/gpu`. Integer axis lists
+and the old integer sentinel have been removed. Axis(k) preserves one-to-one
+cell/grid mapping; Free takes an explicit index. Grouped(k,g) reads
+floor(block_id(k)/g), only for In with static capacity. Require a positive
+i32 group, complete grid groups, and cell count == grid[k]/g. Duplicate source
+axes, Grouped with DYN_DIM, and Grouped in Out (including g=1) are refused.
+
+`read_prefix(p, dim, length)` creates a separate `ReadView[D]` of an In Grid.
+Only one Free storage dimension's zero-based prefix is narrowed. All capacity
+extents, physical strides, tile, padding, axes and squeeze stay the marker's.
+`read_at(view, free)` reads legal cells; `read_blocks(view, dim)` queries its
+effective index space. `blocks_of(p, dim)` and `extent_of(p, dim)` still query
+capacity. ReadView has no writes and cannot be passed to `store_view`.
+
+The length operand must be a rank-0 i32. Before conversion and launch, the
+caller must validate 1 <= length <= capacity, positive dimensions, complete
+HQ/HKV groups, and I32 offset products. Entry6 validates roles and capacity;
+it does not know which scalar is a prefix length. PadZero protects tail K/V
+loads; an attention algorithm must explicitly mask invalid scores before
+max, exp and sum. This release adds small semantic probes, not production
+fused GQA or a wider domain for the ordinary BF16 flash example.

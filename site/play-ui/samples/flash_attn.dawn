@@ -4,11 +4,11 @@
 # Two query tiles each visit four key tiles, retaining online softmax state.
 use std/dtype.{Dtype}
 use std/io
-use std/gpu.{ScalarDtype}
+use std/gpu.{Axis, Free, ScalarDtype}
 use std/float.{INFINITY}
 use std/list
 use tileir/dev.{Dev, Param, Tile, FloatDtype, host_float, idx_const, tile_shape, blocks_of, t_call_enter, t_call_exit, t_body_enter, t_body_exit, load_cell, store_cell, load_at, full, zeros, mma, transpose, scalar, max, exp, exp2, div, to, reduce_max, reduce_sum, d_range}
-use tileir/prog.{trace5, cells, In, Out, Scalar, FREE_AXIS}
+use tileir/prog.{trace5, cells, In, Out, Scalar}
 use tileinterp/interp.{interp_ref}
 use std/math.{exp as host_exp}
 
@@ -45,10 +45,10 @@ const PLAIN_MARGIN: Float = 0.00001
 const PLAIN_RTOL: Float = 0.00001
 
 pub fn main() -> Unit !io = {
-  let kv = cells([1, ATT_N, ATT_D], [1, FA_BK, ATT_D], along = [2, FREE_AXIS, 1], squeeze = [0])
+  let kv = cells([1, ATT_N, ATT_D], [1, FA_BK, ATT_D], along = [Axis(2), Free, Axis(1)], squeeze = [0])
   let (prog, _e) = trace5("flash_attn_bf16_demo",
-    In(BF16, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [2, 0, 1], squeeze = [0])), In(BF16, kv), In(BF16, kv),
-    Out(F32, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [2, 0, 1], squeeze = [0])), Scalar(F32), fa_kernel(BF16, fa_bf16_math()))
+    In(BF16, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])), In(BF16, kv), In(BF16, kv),
+    Out(F32, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])), Scalar(F32), fa_kernel(BF16, fa_bf16_math()))
   let q = wave(ATT_M * ATT_D, 1)
   let k = wave(ATT_N * ATT_D, 2)
   let v = wave(ATT_N * ATT_D, 3)

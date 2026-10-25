@@ -574,24 +574,31 @@ const ROLE_OUT: Int = 1
 const ROLE_SHARED: Int = 2
 const ROLE_SCALAR: Int = 3
 
-# A dimension whose extent the launch decides, and a cut dimension that
-# follows no grid axis. Both are -1; packages/tileir's `DYN_DIM` and
-# `FREE_AXIS` are the same numbers.
+# A dimension whose extent the launch decides, matching tileir DYN_DIM.
 const DYNAMIC: Int = 0 - 1
 
-## One argument of an entry: what the kernel does to a buffer and, when it
-## cuts the buffer into cells, how, or that the argument is a scalar passed
-## by value. Made by [`arg_in`], [`arg_in_whole`], [`arg_out`],
-## [`arg_shared`] and [`arg_scalar`].
-pub opaque type EntryArg = (Int, List[Int], List[Int], List[Int])
+## How one storage dimension selects a cell. `Axis(k)` follows grid axis
+## k one to one, `Free` takes an explicit cell index, and `Grouped(k, g)`
+## reads cell floor(block_id(k) / g). Grouped is In-only, with static
+## capacity and complete groups; g is a positive i32, not a tile width.
+pub type CellAxis =
+  | Axis(axis: Int)
+  | Free
+  | Grouped(axis: Int, group: Int)
+derive Show
 
-## An argument the kernel only reads, cut into cells of `tile` over a tensor
-## of `extent` (row major). `along[j]` is the grid axis dimension `j` of the
-## cells follows, or -1 for a dimension the kernel indexes some other way;
-## a dimension that follows an axis has as many cells as the grid has
-## blocks there. An extent of -1 is dynamic: `grid[along[j]] * tile[j]`,
-## which is why a dynamic dimension must follow an axis.
-pub fn arg_in(extent: List[Int], tile: List[Int], along: List[Int]) -> EntryArg = {
+fn axis_number(a: CellAxis) -> Int = match a { Axis(k) -> k, Grouped(k, _g) -> k, Free -> -1 }
+fn axis_group(a: CellAxis) -> Int = match a { Grouped(_k, g) -> g, _ -> 1 }
+
+## One argument's role and full storage capacity. Made by `arg_in`,
+## `arg_in_whole`, `arg_out`, `arg_shared` and `arg_scalar`.
+pub opaque type EntryArg = (Int, List[Int], List[Int], List[CellAxis])
+
+## A read-only row-major buffer cut into cells. `along[j]` selects its
+## cell coordinate using `CellAxis`. Axis requires equal cell/grid counts;
+## Grouped requires grid[k] % g == 0 and cells == grid[k] / g. An extent
+## of -1 is dynamic and requires Axis(k), meaning grid[k] * tile[j].
+pub fn arg_in(extent: List[Int], tile: List[Int], along: List[CellAxis]) -> EntryArg = {
   let a: EntryArg = (ROLE_IN, extent, tile, along)
   a
 }
@@ -607,7 +614,7 @@ pub fn arg_in_whole() -> EntryArg = {
 ## tensor of `extent`, dimension `k` along grid axis `k`. The cells of the
 ## Out arguments ARE the grid; an extent of -1 makes that axis dynamic.
 pub fn arg_out(extent: List[Int], tile: List[Int]) -> EntryArg = {
-  let a: EntryArg = (ROLE_OUT, extent, tile, range(0, len(tile)))
+  let a: EntryArg = (ROLE_OUT, extent, tile, list.map(range(0, len(tile)), Axis))
   a
 }
 
@@ -627,8 +634,8 @@ pub fn arg_scalar() -> EntryArg = {
   a
 }
 
-fn arg_parts(a: EntryArg) -> (Int, List[Int], List[Int], List[Int]) = {
-  let p: (Int, List[Int], List[Int], List[Int]) = a
+fn arg_parts(a: EntryArg) -> (Int, List[Int], List[Int], List[CellAxis]) = {
+  let p: (Int, List[Int], List[Int], List[CellAxis]) = a
   p
 }
 
@@ -657,7 +664,7 @@ fn arg_problem(args: List[EntryArg], i: Int) -> Option[String] = {
   let (role, extent, tile, along) = arg_parts(args[i])
   let who = arg_word(args, i)
   let r = len(tile)
-  let axes = list.filter(along, k => k != DYNAMIC)
+  let axes = list.map(list.filter(along, a => a != Free), axis_number)
   if r == 0 {
     if role == ROLE_OUT { Some("${who} has no cells; the cells of the Out arguments are the grid") } else { None }
   } else if len(extent) != r || len(along) != r {
@@ -668,13 +675,16 @@ fn arg_problem(args: List[EntryArg], i: Int) -> Option[String] = {
     Some("${who} has a tile of ${dims_text(tile)}; every tile dimension is at least 1")
   } else if list.any(extent, n => n < 1 && n != DYNAMIC) {
     Some("${who} has an extent of ${dims_text(extent)}; every extent is at least 1, or -1 for a dynamic one")
-  } else if list.any(along, k => k != DYNAMIC && (k < 0 || k > 2)) {
-    Some("${who} follows grid axes ${show(along)}; a grid has axes 0, 1 and 2, and -1 follows none")
+  } else if list.any(along, a => a != Free && (axis_number(a) < 0 || axis_number(a) > 2 || axis_group(a) < 1 || axis_group(a) > 2147483647)) {
+    Some("${who} follows grid axes ${show(along)}; axes are 0, 1 and 2 and Grouped requires a group in 1..2147483647")
   } else if list.any(range(0, len(axes)), x => list.any(range(0, x), y => axes[x] == axes[y])) {
     Some("${who} follows grid axes ${show(along)}; two dimensions cannot follow one axis")
   } else {
-    match list.find(range(0, r), j => extent[j] == DYNAMIC && along[j] == DYNAMIC) {
-      Some(j) -> Some("${who} has a dynamic extent in dimension ${j}, which follows no grid axis, so nothing says how long it is")
+    match list.find(range(0, r), j => extent[j] == DYNAMIC && match along[j] { Axis(_k) -> false, _ -> true }) {
+      Some(j) -> match along[j] {
+        Grouped(_k, _g) -> Some("${who} has Grouped in dynamic dimension ${j}; Grouped requires static capacity")
+        _ -> Some("${who} has a dynamic extent in dimension ${j}, which follows no grid axis, so nothing says how long it is")
+      }
       None -> None
     }
   }
@@ -705,8 +715,8 @@ fn out_grid(args: List[EntryArg]) -> Result[List[Int], String] = {
   Ok(grid)
 }
 
-# Whether every In dimension that follows a grid axis has as many cells as
-# the grid has blocks there, where both numbers are known. `grid` is [] when
+# Whether each In dimension matches its known grid: Axis has one cell per
+# block, Grouped has one per complete group of blocks. `grid` is [] when
 # the caller decides it: nothing to hold the dimensions to yet.
 fn follow_problem(args: List[EntryArg], grid: List[Int]) -> Option[String] =
   if len(grid) == 0 {
@@ -721,11 +731,15 @@ fn follow_problem(args: List[EntryArg], grid: List[Int]) -> Option[String] =
           None
         } else {
           match list.find(range(0, len(tile)), j => {
-            let k = along[j]
+            let k = axis_number(along[j])
+            let g = axis_group(along[j])
             let n = cell_count(extent[j], tile[j])
-            k != DYNAMIC && n != DYNAMIC && grid[k] != DYNAMIC && n != grid[k]
+            k != DYNAMIC && n != DYNAMIC && grid[k] != DYNAMIC && (grid[k] % g != 0 || n != grid[k] / g)
           }) {
-            Some(j) -> Some("${arg_word(args, i)} has ${cell_count(extent[j], tile[j])} cell(s) in dimension ${j}, which follows grid axis ${along[j]}, and the grid has ${grid[along[j]]} block(s) there")
+            Some(j) -> match along[j] {
+              Grouped(k, g) -> Some("${arg_word(args, i)} has ${cell_count(extent[j], tile[j])} cell(s) in dimension ${j} with Grouped(${k}, ${g}), but grid axis ${k} has ${grid[k]} block(s); require complete groups and cells == grid / group")
+              _ -> Some("${arg_word(args, i)} has ${cell_count(extent[j], tile[j])} cell(s) in dimension ${j}, which follows grid axis ${axis_number(along[j])}, and the grid has ${grid[axis_number(along[j])]} block(s) there")
+            }
             None -> None
           }
         }
@@ -735,8 +749,8 @@ fn follow_problem(args: List[EntryArg], grid: List[Int]) -> Option[String] =
 
 ## The grid an entry's arguments make, checked: each argument well formed,
 ## the Out arguments agreeing on one grid, and every In dimension that
-## follows a grid axis cut into as many cells as the grid has blocks there,
-## wherever both are known before the launch. Three axes, -1 on an axis an
+## uses Axis cut into as many cells as the grid has blocks there, and each
+## Grouped dimension matching complete groups, wherever known before launch. Three axes, -1 on an axis an
 ## Out extent leaves to the launch; `[]` when no argument is an Out and the
 ## grid is the caller's. `Err` says what is wrong, naming the argument.
 ## packages/tileir calls this when it records a kernel, and every
@@ -788,7 +802,7 @@ fn reach(a: EntryArg, grid: List[Int]) -> Int = {
     0
   } else {
     list.fold(range(0, len(tile)), 1, (n, j) =>
-        n * if extent[j] == DYNAMIC { grid[along[j]] * tile[j] } else { extent[j] })
+        n * if extent[j] == DYNAMIC { grid[axis_number(along[j])] * tile[j] } else { extent[j] })
   }
 }
 
@@ -2575,12 +2589,12 @@ fn entry_launches(launches: fn() -> List[Result[Unit, ForeignError]] !Gpu) -> Li
 
 fn dynamic_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
   # vadd with no extent: the grid is the launch's, the cells cover it
-  let e: Entry3[Float, Float, Float] = entry3("vadd", arg_in([0 - 1], [128], [0]), arg_in([0 - 1], [128], [0]),
+  let e: Entry3[Float, Float, Float] = entry3("vadd", arg_in([0 - 1], [128], [Axis(0)]), arg_in([0 - 1], [128], [Axis(0)]),
     arg_out([0 - 1], [128]))
   # a kernel with no Out: the grid is the caller's alone
   let s: Entry2[Float, I32] = entry2("hist", arg_in_whole(), arg_shared())
   # an In with a static extent along a dynamic axis is held at the launch
-  let f: Entry2[Float, Float] = entry2("fixed", arg_in([512], [128], [0]), arg_out([0 - 1], [128]))
+  let f: Entry2[Float, Float] = entry2("fixed", arg_in([512], [128], [Axis(0)]), arg_out([0 - 1], [128]))
   match (alloc(F64, 512), alloc(F64, 512), alloc(F64, 500), alloc(I32, 4)) {
     (Ok(a), Ok(b), Ok(short), Ok(h)) -> [
       launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(a), grid = [4]),
@@ -2616,22 +2630,22 @@ test "an entry's launch takes its dynamic axes from the caller and holds the buf
 }
 
 test "entry_grid is the Out cells' grid, checked argument by argument and against one another" {
-  assert entry_grid([arg_in([1000], [128], [0]), arg_out([1000], [128])]) == Ok([8, 1, 1])
-  assert entry_grid([arg_in([64, 32], [16, 8], [0, 0 - 1]), arg_out([64, 48], [16, 16])]) == Ok([4, 3, 1])
+  assert entry_grid([arg_in([1000], [128], [Axis(0)]), arg_out([1000], [128])]) == Ok([8, 1, 1])
+  assert entry_grid([arg_in([64, 32], [16, 8], [Axis(0), Free]), arg_out([64, 48], [16, 16])]) == Ok([4, 3, 1])
   assert entry_grid([arg_in_whole(), arg_shared()]) == Ok([])
   assert entry_grid([arg_out([0 - 1, 64], [128, 16])]) == Ok([0 - 1, 4, 1])
   assert entry_grid([arg_out([64], [8]), arg_out([64], [16])])
     == Err("argument 0 (Out) is cut into a 8x1x1 grid and argument 1 (Out) into 4x1x1; one launch has one grid")
-  assert entry_grid([arg_in([64], [8], [0, 1]), arg_out([64], [8])])
+  assert entry_grid([arg_in([64], [8], [Axis(0), Axis(1)]), arg_out([64], [8])])
     == Err("argument 0 (In) has 1 extent(s), 1 tile dimension(s) and 2 axis entries; they are one per dimension")
-  assert entry_grid([arg_in([64], [0], [0])])
+  assert entry_grid([arg_in([64], [0], [Axis(0)])])
     == Err("argument 0 (In) has a tile of 0; every tile dimension is at least 1")
-  assert entry_grid([arg_in([0], [8], [0])])
+  assert entry_grid([arg_in([0], [8], [Axis(0)])])
     == Err("argument 0 (In) has an extent of 0; every extent is at least 1, or -1 for a dynamic one")
-  assert entry_grid([arg_in([64, 64], [8, 8], [0, 0])])
-    == Err("argument 0 (In) follows grid axes [0, 0]; two dimensions cannot follow one axis")
-  assert entry_grid([arg_in([64], [8], [3])])
-    == Err("argument 0 (In) follows grid axes [3]; a grid has axes 0, 1 and 2, and -1 follows none")
+  assert entry_grid([arg_in([64, 64], [8, 8], [Axis(0), Axis(0)])])
+    == Err("argument 0 (In) follows grid axes [Axis(0), Axis(0)]; two dimensions cannot follow one axis")
+  assert entry_grid([arg_in([64], [8], [Axis(3)])])
+    == Err("argument 0 (In) follows grid axes [Axis(3)]; axes are 0, 1 and 2 and Grouped requires a group in 1..2147483647")
   assert entry_grid([arg_out([], [])])
     == Err("argument 0 (Out) has no cells; the cells of the Out arguments are the grid")
 }
@@ -2648,7 +2662,7 @@ test "a scalar is the bit pattern of its value in the width its format has" {
 }
 
 fn scale_entry() -> Entry4[Float, Float, Float, Float] =
-  entry4("vadd_scaled", arg_in([4], [4], [0]), arg_in([4], [4], [0]), arg_scalar(), arg_out([4], [4]))
+  entry4("vadd_scaled", arg_in([4], [4], [Axis(0)]), arg_in([4], [4], [Axis(0)]), arg_scalar(), arg_out([4], [4]))
 
 fn scaled_kernels() -> Map[String, (Int, WideRefFn)] =
   map.from([("vadd_scaled", (3, last_out_with((dts, ins, ss) =>
@@ -2936,7 +2950,7 @@ fn six_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
     Err(_e) -> return [] }
   let short = match alloc(F64, 47) { Ok(v) -> v
     Err(_e) -> return [] }
-  let input = arg_in([3, 4, 4], [1, 2, 4], [2, 0, 1])
+  let input = arg_in([3, 4, 4], [1, 2, 4], [Axis(2), Axis(0), Axis(1)])
   let out = arg_out([4, 4, 3], [2, 4, 1])
   let e: Entry6[Float, Float, Float, Float, Float, Float] =
     entry6("six_scalar", input, input, input, out, arg_scalar(), arg_scalar())
@@ -2977,4 +2991,59 @@ test "K3-0: six typed launch positions and sixth-role refusals precede handlers"
   assert str.starts_with(rs[9], "gpu.short_tensor:") && str.contains(rs[9], "argument 5 (Out)")
   assert rs[10] == "test.launch: six_shared 2 1 3 [1, 2, 4, 3] scalars [2.0, 3.0]"
   assert str.starts_with(rs[11], "gpu.aliased_argument:") && str.contains(rs[11], "argument 5 (Shared)")
+}
+
+fn grouped_problem(args: List[EntryArg], grid: List[Int], size: Int = 272) -> String =
+  match launch_plan(args, list.map(range(0, len(args)), k => (Buffer(k + 1), size)), grid) {
+    Err((_kind, why)) -> why
+    Ok(_p) -> "accepted"
+  }
+
+test "K3-G: Grouped validates actual grids before launch and preserves full capacity reach" {
+  let kv = arg_in([4, 17, 4], [1, 4, 4], [Grouped(2, 3), Free, Axis(1)])
+  assert entry_grid([kv]) == Ok([])
+  assert grouped_problem([kv], [2, 1, 12]) == "accepted"
+  assert str.contains(grouped_problem([kv], [2, 1, 10]), "complete groups")
+  assert str.contains(grouped_problem([kv], [2, 1, 15]), "cells == grid / group")
+  assert str.contains(grouped_problem([kv], [2, 1, 12], size = 271), "272")
+  let out = arg_out([2, 4, DYNAMIC], [1, 4, 1])
+  assert entry_grid([kv, out]) == Ok([2, 1, DYNAMIC])
+  assert grouped_problem([kv, out], [2, 1, 12]) == "accepted"
+  assert str.contains(grouped_problem([kv, out], [2, 1, 10]), "complete groups")
+  for bad in [Grouped(2, 0), Grouped(2, -1), Grouped(2, 2147483648), Grouped(3, 3), Axis(-1), Axis(3)] {
+    assert str.contains(grouped_problem([arg_in([4], [1], [bad])], [1, 1, 12]), "axes are")
+  }
+  assert str.contains(grouped_problem([arg_in([DYNAMIC], [1], [Grouped(2, 3)])], [1, 1, 12]), "static capacity")
+  assert str.contains(grouped_problem([arg_in([4, 12], [1, 1], [Grouped(2, 3), Axis(2)])], [1, 1, 12]), "two dimensions")
+  assert grouped_problem([arg_in([4], [1], [Grouped(0, 1)])], [4]) == "accepted"
+}
+
+fn grouped_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
+  let kv = match alloc(narrow.F32, 272) { Ok(b) -> b, Err(_) -> return [] }
+  let short = match alloc(narrow.F32, 271) { Ok(b) -> b, Err(_) -> return [] }
+  let out = match alloc(narrow.F32, 96) { Ok(b) -> b, Err(_) -> return [] }
+  let input = arg_in([4, 17, 4], [1, 4, 4], [Grouped(2, 3), Free, Axis(1)])
+  let read: Entry1[narrow.F32] = entry1("repeat", input)
+  let dynamic: Entry2[narrow.F32, narrow.F32] = entry2("repeat_dynamic", input, arg_out([2, 4, DYNAMIC], [1, 4, 1]))
+  [launch_entry1(read, buffer_arg(kv), grid = [2, 1, 12]),
+    launch_entry1(read, buffer_arg(kv), grid = [2, 1, 10]),
+    launch_entry1(read, buffer_arg(kv), grid = [2, 1, 15]),
+    launch_entry1(read, buffer_arg(short), grid = [2, 1, 12]),
+    launch_entry1(read, scalar_arg(narrow.f32(1.0)), grid = [2, 1, 12]),
+    launch_entry2(dynamic, buffer_arg(kv), buffer_arg(out), grid = [2, 1, 12]),
+    launch_entry2(dynamic, buffer_arg(kv), buffer_arg(out), grid = [2, 1, 10]),
+    launch_entry2(dynamic, buffer_arg(kv), buffer_arg(kv), grid = [2, 1, 12])]
+}
+
+test "K3-G: typed Grouped launches refuse unknown grids short capacity kinds and alias before handlers" {
+  let seen = entry_launches(grouped_launches)
+  assert len(seen) == 8
+  assert str.starts_with(seen[0], "test.launch: repeat ")
+  assert str.contains(seen[1], "complete groups")
+  assert str.contains(seen[2], "cells == grid / group")
+  assert str.contains(seen[3], "gpu.short_tensor")
+  assert str.contains(seen[4], "gpu.bad_entry")
+  assert str.starts_with(seen[5], "test.launch: repeat_dynamic ")
+  assert str.contains(seen[6], "complete groups")
+  assert str.contains(seen[7], "gpu.aliased_argument")
 }

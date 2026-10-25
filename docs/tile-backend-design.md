@@ -4377,10 +4377,10 @@ softmax 不再需要 `tail_mask`、两个 pad 常量与 `select`。
 ```dawn
 pub type Cells =
   | Whole
-  | Grid(extent: List[Int], tile: List[Int], pad: Padding, along: List[Int])
+  | Grid(extent: List[Int], tile: List[Int], pad: Padding, along: List[CellAxis], squeeze: List[Int])
 
 pub fn cells(extent: List[Int], tile: List[Int], pad: Padding = PadZero,
-  along: List[Int] = list.map(range(0, len(tile)), k => if k < 3 { k } else { FREE_AXIS })) -> Cells
+  along: List[CellAxis] = list.map(range(0, len(tile)), k => if k < 3 { Axis(k) } else { Free }), squeeze: List[Int] = []) -> Cells
 
 pub type Arg[D] =
   | In(d: D, g: Cells)
@@ -4390,7 +4390,7 @@ pub type Arg[D] =
 
 - `Cells` 是宿主侧的纯值：一个按行主序排的张量，`extent` 是它每一维的长度，按 `tile` 切成格子。
   `pad` 是读越过 extent 时那些 lane 的值（partition view 的 `padding_value`），`along[j]` 是第 `j` 维跟随的网格轴，
-  或 `FREE_AXIS`（-1）表示这一维的格子由 kernel 自己挑（matmul 循环里的 `k`）。默认第 `k` 维跟第 `k` 轴。
+  或 `Free`表示这一维的格子由 kernel 自己挑（matmul 循环里的 `k`）。默认第 `k` 维跟第 `k` 轴。
 - `In(d, g)`：只读。`In(d, Whole)` 是整块读的输入（gather 的表、stencil 的邻居）。
 - `Out(d, g)`：每个 tile block 写自己的一格；所有 `Out` 的格子**就是**发射网格。可以读（原地 kernel 先读自己那一格）。
 - `Shared(d)`：读写方式不是「一块一格」的（原子、scatter、stencil），即今天 `trace_kernel` 下每个参数的身份。
@@ -4463,7 +4463,7 @@ tileir 的 `check_cells` 只做 Tile IR 才有的要求。
 同一份报告 §4.1 的 matmul 范例本身就是反例：`A` 切成 `[M/TM, K/TK]`、网格是 `[M/TM, N/TN]`，K ≠ N 时第 1 轴块数
 不等，可那是正确的 kernel（`A` 的第 1 维由循环的 `k` 挑，不跟网格）。所以「一致」只能对**跟随某一轴**的维说，
 而「跟不跟」只有写 kernel 的人知道，于是有了 `along`：默认恒等（逐元素一类，占多数）；matmul 写
-`cells([M, K], [TM, TK], along = [0, FREE_AXIS])` 与 `cells([K, N], [TK, TN], along = [FREE_AXIS, 1])`。这与 Pallas 的
+`cells([M, K], [TM, TK], along = [Axis(0), Free])` 与 `cells([K, N], [TK, TN], along = [Free, Axis(1)])`。这与 Pallas 的
 `BlockSpec.index_map` 是同一件事，只收它最常见的那种（投影），D-4 的 `load_cell` 正好按 `along` 取块号、`load_at`
 只为自由维收下标。照录：
 
@@ -4489,7 +4489,7 @@ extent（softmax 的 1000）。这样 D-4 降低时视图的动态 extent 有体
 **五、类型化的入口与 `launch_entryN`（借-9、D-5 的发射期一半）。** 在 `std/gpu`：
 
 ```dawn
-pub opaque type EntryArg = (Int, List[Int], List[Int], List[Int])     # 角色码、extent、tile、along
+pub opaque type EntryArg = (Int, List[Int], List[Int], List[CellAxis])     # 角色码、extent、tile、along
 pub fn arg_in(extent, tile, along) / arg_in_whole() / arg_out(extent, tile) / arg_shared() -> EntryArg
 pub opaque type Entry3[A, B, C] = (String, List[EntryArg])           # Entry1..Entry5
 pub fn entry3[A, B, C](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg) -> Entry3[A, B, C]
@@ -4498,9 +4498,9 @@ pub fn launch_entry3[A, B, C](e: Entry3[A, B, C], a: Tensor[A], b: Tensor[B], c:
   grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu
 ```
 
-- 入口只是名字加几个整数，`std/gpu` 仍不认识 `TileProg`（§5.3 守住），依赖方向仍是 tileir → std/gpu。角色是
+- 入口保存名字、角色码、容量及 CellAxis，`std/gpu` 仍不认识 `TileProg`（§5.3 守住），依赖方向仍是 tileir → std/gpu。角色是
   藏在 opaque 后面的整数码而不是一个和类型：JVM 后端给每个程序都带上 std 里每个类型的类（#356 的 `Base64`
-  加了五个类，每个 emit 语料都要声明），一个没人发射也要付的类型不值得。
+  加了五个类，每个 emit 语料都要声明）。沿轴现在使用共享的名义 CellAxis 类型。
 - 格式与元数在类型里：`launch_entry3` 给一个 `Tensor[BF16]`，或少给一个张量，是编译错误；`trace2` 配一个三参数的体、
   标记的格式与体的 `Param` 不符，也是编译错误（诊断照录在报告里）。`handle_of` 从调用处消失。
 - 参数形状按 K5 写：张量按位置，`grid: List[Int] = []` 在最后（默认形参放在没有默认的形参之后，同 `launch`
@@ -4551,7 +4551,7 @@ gpu.grid_mismatch: gpu.launch_entry: kernel `fixed`: argument 0 (In) has 4 cell(
 - 墙钟：`trace_kernel` 路径不碰角色表（空表时 `check_write` 第一句返回），新增的只有 `aims` 在指针 / 视图操作上的
   一次 map 插入；golden 单价由编译主导，规划值不动。
 
-**七、版本。** `tileir` 0.5.0 → 0.5.1：只加名字（`trace1`…`trace5`、`Arg`、`Cells`、`cells`、`FREE_AXIS`），
+**七、版本。** `tileir` 0.5.0 → 0.5.1：只加名字（`trace1`…`trace5`、`Arg`、`Cells`、`cells`、`Free`），
 `trace_kernel` / `trace_calls` 的签名与记录结果不变，私有的 `Write.Whole` 改名 `AnyOf` 只为把 `Whole` 让给公开面；
 按 Cargo 的 0.x 规则（§6.3「0.x 与兼容类」）是同一兼容类内的补丁版本，依赖 0.5.0 的不必改任何东西。`std/gpu`
 只加名字，`launch` 不变，没有迁移。
@@ -4592,7 +4592,7 @@ gpu.grid_mismatch: gpu.launch_entry: kernel `fixed`: argument 0 (In) has 4 cell(
 | 名字 | 做什么 |
 |---|---|
 | `load_cell(p)` | 读本块在 `p` 的格子里那一格：经 `p` 的格子视图（`cells` 的 extent、tile、pad），下标是各维跟随的网格轴的块号。越过 extent 的 lane 读 `pad`，所以 `cells([1000], [1024], pad = PadNegInf)` 读整行不要 mask |
-| `load_at(p, free)` | 同上，`along` 里是 `FREE_AXIS` 的维由 `free` 依次给出格子号（matmul 的 `k`）；个数不符在记录期拒 |
+| `load_at(p, free)` | 同上，`along` 里是 `Free` 的维由 `free` 依次给出格子号（matmul 的 `k`）；个数不符在记录期拒 |
 | `store_cell(o, t)` | 写本块那一格；越过 extent 的 lane 不写。**不收 `d`**（D-4 扩大） |
 | `zeros(p)` / `fill(p, v)` | 形状是 `p` 的一格、格式是 `p` 的格式的常量 tile；整数格式的 `v` 必须是整数 |
 | `reduce_sum` / `reduce_max` / `reduce_min(t, dim = -1, keepdims = false)` | 不收 `d` 与 shape（从句柄表读），identity 内置（和 0，max 取 -inf 或整数最小值，min 取 +inf 或整数最大值），`keepdims` 把被归约的维留成长度 1：`[BQ, BK]` 的行最大值是 `[BQ, 1]` |
@@ -5042,7 +5042,7 @@ kernel 因此加 hint；降低不替 kernel 定这件事（6.25 十四），理�
 - **格子的 extent 就是边界。** 边界 kernel（`vadd_tail` 等）不再构造 mask，尾部 lane 由视图的 extent 挡住：读到
   `pad`、写不出去。`token_embed` 的输出格子必须是 `DYN_DIM`：网格是 13 块 × 8，最后一块有 4 行在 `TOK_N` 之外，
   旧核不带 mask 照写，`TOK_N` 作 extent 会让这 4 行停在哨兵上（第 2 层实测 64 个 lane 不同，改 `DYN_DIM` 后通过）。
-- **要整块读的向量**（layer_norm 的 gamma、kmeans 的中心）标 `along: [FREE_AXIS]` 再 `load_at(p, [0])`；标成一格
+- **要整块读的向量**（layer_norm 的 gamma、kmeans 的中心）标 `along: [Free]` 再 `load_at(p, [0])`；标成一格
   而跟网格轴 0 走，网格大于 1 时第二块的下标越界，读到的是 padding。
 - **不同网格复用的 kernel** 用 `DYN_DIM`：`attn_softmax` 在七个序列里以七种行数启动，`vadd` 在 GPT / Llama 序列里
   按向量长度启动。
@@ -5107,7 +5107,7 @@ tileir: kernel `bad`: every tile dimension is a power of two, got 3 in [3, 32]
 迁成 `cells([B, M, N], [1, T, T])`，批就得从轴 2 挪到轴 0。sm_86、f16、B=8、M=N=K=1024、TK=32，31 样本交错，
 各版输出逐字节相同（单位 µs）：
 
-| tile | 今天（指针写，批在轴 2） | 指针写，批挪到轴 0 | 格子写，批在轴 0 | 格子写 + `along: [2, 0, 1]`（批留在轴 2） |
+| tile | 今天（指针写，批在轴 2） | 指针写，批挪到轴 0 | 格子写，批在轴 0 | 格子写 + `along: [Axis(2), Axis(0), Axis(1)]`（批留在轴 2） |
 |---|---|---|---|---|
 | 32 | 1283 / 1299 | 2037 | 2059 / 2084（+60%） | 1288 / 1296（+0.4% / −0.3%） |
 | 64 | 525 / 533 | 768 | 778 / 779（+46%～+48%） | 524 / 533（−0.3% / 0.0%） |
@@ -5122,7 +5122,7 @@ T128 不带 hint 时格子写仍是 PR-3 量过的占用率问题（约 531 µs�
 **三、修法：`Out` 收已有的 `along`。** `cells(extent, tile, pad, along)` 的 `along` 本来就有，`In` 用它说「维 j 跟网格轴
 along[j]」；`Out` 过去只许恒等，`check_cells` 主动拒。现在的规则：
 
-- `Out` 的 `along` 单射到 {0, 1, 2}，不含 `FREE_AXIS`；
+- `Out` 的 `along` 单射到 {0, 1, 2}，不含 `Free`；
 - 没被任何维跟随的轴只有 1 块：网格由 `Out` 推出，这一轴本来就是 1；若另一个 `Out` 或跟随它的 `In` 在这一轴上要更多块，
   照旧由 `entry_grid` 拒。
 
@@ -5154,10 +5154,10 @@ block id 当格子下标」。这件事在 Tile IR 里没有属性，全在 kern
 
 | 做法 | kernel |
 |---|---|
-| `reshape` 进高一秩的格子，批 / 头留在轴 2（`along: [2, 0, 1]`） | batched_matmul、batched_matmul_f16、mha_scores、xattn_scores |
+| `reshape` 进高一秩的格子，批 / 头留在轴 2（`along: [Axis(2), Axis(0), Axis(1)]`） | batched_matmul、batched_matmul_f16、mha_scores、xattn_scores |
 | 混合进制拆维 `[HKV, G·S, …]`，kv 跟轴 2、g 跟轴 0 | gqa_scores、gqa_context、llama_scores |
 | 一个平面一格，extent 代替写侧 mask | conv3d |
-| 段是同一格的片，段数补到 2 的幂、extent 截掉多余的行；列跟轴 0、行跟只有 1 块的轴 1（`along: [1, 0]`） | trig_sweep、dtype_i16/i64/tf32/e4m3/e5m2/e8m0/i4/e2m1、pack_roundtrip |
+| 段是同一格的片，段数补到 2 的幂、extent 截掉多余的行；列跟轴 0、行跟只有 1 块的轴 1（`along: [Axis(1), Axis(0)]`） | trig_sweep、dtype_i16/i64/tf32/e4m3/e5m2/e8m0/i4/e2m1、pack_roundtrip |
 | 同上，块优先 `[DYN_DIM, segs, 128]` | attr_round（6 → 8）、attr_overflow（3 → 4）、attr_ftof（11 → 16） |
 | 头留在原来的轴，`along` 把输出那一维指过去 | mha_context、xattn_context、gpt_scores、gpt_context（`[0, 2]` / `[2, 0]`）、llama_qkv、llama_rope（`[1, 0]`） |
 
@@ -5174,7 +5174,7 @@ block id 当格子下标」。这件事在 Tile IR 里没有属性，全在 kern
 变异体（全部按名红）：
 
 - 新增 `out-along-twice-accepted`（tile-golden）：去掉单射检查。golden 里没有一个 kernel 两维跟同一轴，所以由 golden 之外的
-  探针 `out_along_twice`（`along: [0, 0]`）把守：干净时按名拒，变异后记录并渲染。`dawn test packages/tileir` 里对应的拒绝测试
+  探针 `out_along_twice`（`along: [Axis(0), Axis(0)]`）把守：干净时按名拒，变异后记录并渲染。`dawn test packages/tileir` 里对应的拒绝测试
   在变异下也红（负控）。
 - 重钉 `mask-all-true`：5 → 4 红，conv3d 的写由 extent 管住，转绿。
 - 重钉 `ladder-strides-reversed`：5 → 6 红，conv3d 的读侧交换不再被指针写抵消；只剩 transpose_tail 被方 tile 藏住。
@@ -5190,7 +5190,7 @@ block id 当格子下标」。这件事在 Tile IR 里没有属性，全在 kern
 - Triton 式 `can_reorder`：乱序会悄悄弄错成对使用的值与下标（triton#12099），第 2 层判词假定同一程序同一答案。
 - `store_cell` / `store_sub` 隐式补前导 1：0 秩以外的隐式改秩，C3′ 不许；显式写一行 `reshape`。
 - `cells(.., order:)` 或 `Out.permute`：见三，它们转置 tile，不改格子下标；另起名字只会让人去找它和 `along` 的区别。
-- `Out` 的 `FREE_AXIS`：那一维就不由网格决定，块到格子不再是单射，不相交证明失效。
+- `Out` 的 `Free`：那一维就不由网格决定，块到格子不再是单射，不相交证明失效。
 - 改 `std/gpu` 的 `arg_out` 让它收 `along`：在 tileir 里按轴重排得到同样的网格与 `reach`，免了 std 的 Emit-Change。
 - 分组光栅 / swizzle：要对 block id 做整除，`Idx` 没有整除；单 GEMM 的 L2 成为瓶颈时再作为入口级发射策略考虑。
 - 网格 y / z 轴超过 65535 的发射前检查：与本节无关、今天就存在，另开 issue。
@@ -5438,7 +5438,7 @@ pub fn d_if(cond: Tile[I1], on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !
 - `Dev` 加 `t_carry_new` / `t_carry_get` / `t_carry_set` / `t_trial_begin` / `t_trial_end`，外部 handler 要补臂，所以是 minor。
 - `extent_of(p, dim)` / `blocks_of(p, dim)` 随 K2 落地（任务单把它们列在 K1，但它们要读参数标记，只能是新的 `Dev` 操作
   `t_extent_of`，按 CHANGELOG 头的规则不能进补丁版本）：静态维发 `idx_const`，`DYN_DIM` 维是网格沿它所跟的轴的块数
-  （乘 tile 即 extent），与 `cells` 对动态 extent 的定义同一；跟 `FREE_AXIS` 的动态维在标记期就被拒。调研写的
+  （乘 tile 即 extent），与 `cells` 对动态 extent 的定义同一；跟 `Free` 的动态维在标记期就被拒。调研写的
   `get_tensor_shape` 不需要：动态 extent 本来就定义成「块数 × tile」，`num_blocks` 是同一个数。
 
 **二、命名归一。** 浮点 `addf → add`、`maxf → max`、`minf → min`，与 `sub/mul/div/neg/abs` 成一套；整数族（`add_i`
@@ -5452,7 +5452,7 @@ Tile IR 的操作名不变。
 grid_stride 是协调者裁的第三处：不再写一个原样答回的 `set` 去保字节，循环不再带那个 0 秩 f64 常量。flash_attn
 去掉了 4 个显式 `broadcast`（同秩规则补上的 `broadcast` 落在原位，6.29 第 4 条的实测）。attr_ucmp、view 的两层嵌套
 循环、foldif 的 `d_if` 都逐字节不变。新增覆盖 golden `carry_extent`：
-`for` 带两个 Carry，其中一个是循环体里一个只有一支 `set` 的 `if` 的结果，上界来自 `blocks_of`（静态 `FREE_AXIS` 维，
+`for` 带两个 Carry，其中一个是循环体里一个只有一支 `set` 的 `if` 的结果，上界来自 `blocks_of`（静态 `Free` 维，
 常量），除数来自 `extent_of`（`Out` 的 `DYN_DIM` 维，网格块数乘 tile）。
 
 **不做的（理由）：**
@@ -6669,3 +6669,24 @@ squeeze、storage 几何、角色、hints 与 caller 均透传。`Scalar` 没有
 不参与别名比较。第六位类型由 `Launch[G]` 固定，kind、容量、grid 和 alias
 仍在 handler 前校验。Playground 的普通位置调用支持 tap6，仍拒绝具名 hints
 与未知 source 控制流。实现与验证契约见 [固定六参设计](gpu-k3-entry6-design.md)。
+
+
+### K3-G：Grouped 与只读有效前缀
+
+详见 [只读布局设计](tile-read-layout-design.md)。唯一沿轴类型位于 std/gpu：
+`CellAxis = Axis(Int) | Free | Grouped(Int, Int)`。所有 cells、Grid、arg_in 与
+EntryArg 共用它；整数列表已删除。Grouped(k,g) 仅用于 In，静态容量的 cell 坐标为
+floor(block_id(k)/g)。g 为正 i32，可为 3；grid 必须整除 g，且 cell 数等于 grid/g。
+不同非 Free 维不能消费同一 source axis。Grouped 与 DYN_DIM、Out 的组合均拒绝。
+
+`ReadView[D]` 仅由 `read_prefix(p, dim, length)` 从静态容量 In Grid 创建。
+dim 按 storage 编号且必须为 Free。`read_at(view, free)` 继承 pad、along、squeeze，
+`read_blocks(view, dim)` 查询有效 index space；原 Param 的 extent_of/blocks_of
+继续查询容量。逻辑 shape 收窄，物理容量 strides 保留。它无写 API，不转换为 GridView。
+同一个 Param 的不同 length 产生不同 view，沿用 recorder 区域可见性与 In 入口 token。
+
+length 是 rank-0 i32，宿主必须在转换和 launch 前验证 1 <= n <= Ncap，以及正尺寸、
+HQ%HKV==0 和 I32 容量乘积；Entry6 不能从第六标量自动推导这些领域前置条件。
+K/V 的 PadZero 只保护合法尾 tile 内的读取，score 必须由算法显式 select 为负无穷，
+再进入 max/exp/sum。本次 BF16 mask probe 是小语义消费者，普通 flash 的整块 M=N 域
+和五参 BF16 读者面保持原契约；生产融合 GQA 属于后续任务。

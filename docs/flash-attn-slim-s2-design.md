@@ -10,8 +10,8 @@
 ## 设计契约
 
 普通 MHA 的 head 由三维存储和 grid axis 2 表达。Q/O 使用
-`cells([heads,n,d],[1,bq,d],along=[2,0,1],squeeze=[0])`，K/V 使用
-`along=[2,FREE_AXIS,1]`，grid 为 `[n/bq,1,heads]`。单头同样走三维布局。
+`cells([heads,n,d],[1,bq,d],along=[Axis(2), Axis(0), Axis(1)],squeeze=[0])`，K/V 使用
+`along=[Axis(2), Free, Axis(1)]`，grid 为 `[n/bq,1,heads]`。单头同样走三维布局。
 共享算法与五参闭包工厂只捕获 dtype 见证和具名数值实例；删除算法侧
 FaShape/FaTiles、fa_kv_index、单头分支及 acc_from_out 初始化开关。
 录制侧保留 S1 的正数、M=N、整块与 I32 元素偏移检查，以及原 plan/hints。
@@ -22,7 +22,7 @@ FaShape/FaTiles、fa_kv_index、单头分支及 acc_from_out 初始化开关。
 全轴投影得到 rank-0。空投影不改变旧 TileProg、lower、MLIR 或 tilebc。
 
 storage extent/tile/pad/along、EntryArg、grid、reach、alias、In 跟随及 Out
-单射证明均使用完整几何。extent_of/blocks_of 和 load_at 的 FREE_AXIS
+单射证明均使用完整几何。extent_of/blocks_of 和 load_at 的 Free
 下标保持 storage 编号。投影不修复非法 Out 或 along。
 load 在原 view load 后通过现有 reshape 投影，zeros/fill 直接生成值形状常量。
 store_cell 先精确验证值形状，保留 scalar 广播，再逆投影并走原 view store

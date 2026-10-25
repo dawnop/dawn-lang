@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ c92b74a4fc20adf1 -->
+<!-- doc-check: translation-of docs/tutorial.md @ c92f213f5c124c2c -->
 
 # Dawn 教程
 
@@ -1842,7 +1842,8 @@ Ok([0.09003057317038043, 0.24472847105479767, 0.6652409557748218, 9.0])
 use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range}
-use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
+use std/gpu.{Axis, Free}
+use tileir/prog.{trace3, cells, In, Out}
 use tileir/render.{render}
 
 fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
@@ -1852,8 +1853,8 @@ fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
 }
 
 pub fn main() -> Unit !io = {
-  let a = In(F64, cells([256, 256], [64, 32], along = [0, FREE_AXIS]))
-  let b = In(F64, cells([256, 256], [32, 64], along = [FREE_AXIS, 1]))
+  let a = In(F64, cells([256, 256], [64, 32], along = [Axis(0), Free]))
+  let b = In(F64, cells([256, 256], [32, 64], along = [Free, Axis(1)]))
   let c = Out(F64, cells([256, 256], [64, 64]))     # 网格：4×4 个块
   let (prog, _entry) = trace3("matmul", a, b, c, matmul)
   # 沿 K 走八趟，记录里却只有一个循环、一个 mmaf
@@ -1872,7 +1873,7 @@ continue %24 : tile<64x64xf64>
 ```
 
 `along` 说格子的每一维跟网格的哪个轴走。`a` 的第 0 维（行）跟网格轴 0，第 1 维（沿 K）不跟任何
-轴：`FREE_AXIS` 的意思是这一维由 kernel 自己挑格子，挑法就是 `load_at(a, [k])`。`b` 正好反过来，
+轴：`Free` 的意思是这一维由 kernel 自己挑格子，挑法就是 `load_at(a, [k])`。`b` 正好反过来，
 `c` 是 `Out`，它的格子就是网格。`for k in d_range(0, 8) { .. }` 是走八趟的循环。累加器是一个
 `var`，循环替它携带：`var acc = zeros(c)` 造出它，体里的 `acc = ..` 把它换成同形状的另一个
 tile。`zeros(c)` 是一个形状和 `c` 的一格相同的 tile，所以累加器的形状从头到尾不用写；`mma` 从

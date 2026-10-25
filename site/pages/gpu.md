@@ -81,7 +81,7 @@ Writes go through `Out`
 
 ## api-out
 
-`store_cell` and `store_sub` are the only writes an `Out` takes, and an accumulator starts from `zeros` of it. `FREE_AXIS` leaves a dimension for the kernel to pick, here the loop's `k`.
+`store_cell` and `store_sub` are the only writes an `Out` takes, and an accumulator starts from `zeros` of it. `Free` leaves a dimension for the kernel to pick, here the loop's `k`.
 
 ## api-shared-title
 

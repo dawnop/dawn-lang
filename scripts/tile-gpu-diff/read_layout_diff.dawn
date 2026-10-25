@@ -1,0 +1,210 @@
+# One loaded module per static geometry, replayed over dynamic lengths and
+# scales. Raw F32 downloads include four external guard words.
+use std/io
+use std/io.{with_fs_real, read_bytes}
+use std/list
+use std/map
+use std/math.{abs}
+use std/bytes
+use std/gpu
+use std/gpu.{Axis, Free, Grouped, Gpu, Entry6, DeviceBuffer, WideRefFn, with_gpu_real, with_gpu_fake}
+use std/narrow.{F32, BF16, f32, bf16}
+use std/int/i32
+use std/int/i32.{I32}
+use tileref/ref.{read_layout_ref, read_mask_ref}
+
+type Case = { kernel: String, n: Int, scale: Float, tail: Float, changed: Int, nonzero: Bool }
+
+fn heads(name: String) -> (Int, Int) =
+  if name == "read_layout_g1" { (2, 2) } else if name == "read_layout_mqa" { (3, 1) } else { (6, 2) }
+
+fn domain(b: Int, hq: Int, hkv: Int, capacity: Int, d: Int, n: Int) -> Result[Unit, ForeignError] = {
+  let limit = 2147483647
+  if b < 1 || hq < 1 || hkv < 1 || capacity < 1 || d < 1 || n < 1 || n > capacity {
+    return Err(ForeignError { kind = "read.bad_domain", message = "positive dimensions and 1 <= n <= capacity are required", cause = None })
+  }
+  if hq % hkv != 0 || d > limit || capacity > limit / d || b > limit / (capacity * d)
+    || hq > limit / (b * capacity * d) || hkv > limit / (b * capacity * d) {
+    Err(ForeignError { kind = "read.bad_domain", message = "complete head groups and I32 capacity products are required", cause = None })
+  } else { Ok(()) }
+}
+
+fn entry(name: String) -> Entry6[F32, F32, F32, F32, F32, I32] = {
+  let (hq, hkv) = heads(name)
+  let axis = if name == "read_repeat" { 0 } else { 2 }
+  let q = gpu.arg_in([2 * hq, 2, 4], [1, 1, 4], [Axis(axis), Axis(2 - axis), Axis(1)])
+  let kv = gpu.arg_in([2 * hkv, 17, 4], [1, 4, 4], [Grouped(axis, hq / hkv), Free, Axis(1)])
+  let out = if axis == 2 { gpu.arg_out([2, 4, 2 * hq], [1, 4, 1]) } else { gpu.arg_out([2 * hq, 4, 2], [1, 4, 1]) }
+  gpu.entry6(name, q, kv, kv, out, gpu.arg_scalar(), gpu.arg_scalar())
+}
+
+fn mask_entry() -> Entry6[BF16, BF16, BF16, F32, F32, I32] = {
+  let q = gpu.arg_in([12, 16, 16], [1, 16, 16], [Axis(2), Axis(0), Axis(1)])
+  let kv = gpu.arg_in([4, 35, 16], [1, 16, 16], [Grouped(2, 3), Free, Axis(1)])
+  gpu.entry6("read_mask", q, kv, kv, gpu.arg_out([16, 16, 12], [16, 16, 1]), gpu.arg_scalar(), gpu.arg_scalar())
+}
+
+fn corpus(c: Case) -> List[List[Float]] = {
+  let mask = c.kernel == "read_mask"
+  let (hq, hkv) = heads(c.kernel)
+  let rows = if mask { 16 } else { 2 }
+  let cap = if mask { 35 } else { 17 }
+  let d = if mask { 16 } else { 4 }
+  let q = list.map(range(0, 2 * hq * rows * d), i =>
+      if mask { if c.nonzero { 0.25 } else { 0.0 } }
+      else { to_float(i % 29 - 14) / 8.0 + (if c.changed == 0 { 8.0 } else { 0.0 }) })
+  let kv = list.map(range(1, 3), which => list.map(range(0, 2 * hkv * cap * d), i => {
+    let head = i / (cap * d)
+    let key = i / d % cap
+    if key >= c.n { c.tail + to_float(which) }
+    else if mask {
+      let value = if which == 1 { if c.nonzero { to_float(key / 16) / 4.0 } else { 1.0 } }
+      else { to_float(head + 1) + (if c.nonzero { to_float(key % 3 + i % d) / 16.0 + (if key == cap - 1 { 2.0 } else { 0.0 }) } else { 0.0 }) }
+      value + (if c.changed == which && key == c.n - 1 { if which == 1 { 0.25 } else { 8.0 } } else { 0.0 })
+    } else {
+      to_float(head * 8 + key % 7 + i % d + which) / 8.0 + (if c.changed == which && key == c.n - 1 { 8.0 } else { 0.0 })
+    }
+  }))
+  [q, kv[0], kv[1], list.map(range(0, len(q) + 4), _i => -4096.0)]
+}
+
+fn launch_layout(c: Case, q: DeviceBuffer[F32], k: DeviceBuffer[F32], v: DeviceBuffer[F32], o: DeviceBuffer[F32]) -> Result[Unit, ForeignError] !Gpu = {
+  let (hq, hkv) = heads(c.kernel)
+  domain(2, hq, hkv, 17, 4, c.n)?
+  gpu.launch_entry6(entry(c.kernel), gpu.buffer_arg(q), gpu.buffer_arg(k), gpu.buffer_arg(v), gpu.buffer_arg(o),
+    gpu.scalar_arg(f32(c.scale)), gpu.scalar_arg(i32.wrap(c.n)))
+}
+
+fn launch_mask(c: Case, q: DeviceBuffer[BF16], k: DeviceBuffer[BF16], v: DeviceBuffer[BF16], o: DeviceBuffer[F32]) -> Result[Unit, ForeignError] !Gpu = {
+  domain(2, 6, 2, 35, 16, c.n)?
+  gpu.launch_entry6(mask_entry(), gpu.buffer_arg(q), gpu.buffer_arg(k), gpu.buffer_arg(v), gpu.buffer_arg(o),
+    gpu.scalar_arg(f32(c.scale)), gpu.scalar_arg(i32.wrap(c.n)))
+}
+
+fn one(c: Case) -> Result[Bytes, ForeignError] !Gpu = {
+  let ins = corpus(c)
+  let o = gpu.alloc(F32, len(ins[3]))?
+  gpu.copy_from_host(o, list.map(ins[3], f32))?
+  if c.kernel == "read_mask" {
+    domain(2, 6, 2, 35, 16, c.n)?
+    let q = gpu.alloc(BF16, len(ins[0]))?
+    let k = gpu.alloc(BF16, len(ins[1]))?
+    let v = gpu.alloc(BF16, len(ins[2]))?
+    gpu.copy_from_host(q, list.map(ins[0], bf16))?
+    gpu.copy_from_host(k, list.map(ins[1], bf16))?
+    gpu.copy_from_host(v, list.map(ins[2], bf16))?
+    launch_mask(c, q, k, v, o)?
+    gpu.free(q)?
+    gpu.free(k)?
+    gpu.free(v)?
+  } else {
+    let q = gpu.alloc(F32, len(ins[0]))?
+    let k = gpu.alloc(F32, len(ins[1]))?
+    let v = gpu.alloc(F32, len(ins[2]))?
+    gpu.copy_from_host(q, list.map(ins[0], f32))?
+    gpu.copy_from_host(k, list.map(ins[1], f32))?
+    gpu.copy_from_host(v, list.map(ins[2], f32))?
+    launch_layout(c, q, k, v, o)?
+    gpu.free(q)?
+    gpu.free(k)?
+    gpu.free(v)?
+  }
+  gpu.gpu_sync()?
+  let raw = gpu.gpu_copy_to_host(gpu.handle_of(o))?
+  if len(raw) != 4 * len(ins[3]) { panic("read layout: four-byte F32 raw download") }
+  gpu.free(o)?
+  Ok(raw)
+}
+
+fn reference(c: Case) -> List[Float] = {
+  let (hq, hkv) = heads(c.kernel)
+  if c.kernel == "read_mask" { read_mask_ref(corpus(c), c.scale, c.n) }
+  else { read_layout_ref(hq, hkv, corpus(c), c.scale, c.n) }
+}
+
+fn cases() -> List[Case] = {
+  var cs: List[Case] = []
+  for name in ["read_layout_g3", "read_layout_g1", "read_layout_mqa", "read_repeat"] {
+    for scale in [0.5, -0.25] {
+      for n in [1, 3, 4, 5, 11, 17, 1] {
+        for control in [-2, -1, 0, 1, 2] {
+          cs = cs ++ [Case { kernel = name, n = n, scale = scale, tail = if control == -2 { 128.0 } else { -256.0 }, changed = control, nonzero = false }]
+        }
+      }
+    }
+  }
+  for n in [1, 15, 16, 17, 35, 1] {
+    for control in [-2, -1] {
+      cs = cs ++ [Case { kernel = "read_mask", n = n, scale = 1.0, tail = if control == -2 { 128.0 } else { -256.0 }, changed = control, nonzero = false }]
+    }
+  }
+  for control in [-2, -1, 1, 2] {
+    cs = cs ++ [Case { kernel = "read_mask", n = 35, scale = 1.0, tail = if control == -2 { 128.0 } else { -256.0 }, changed = control, nonzero = true }]
+  }
+  cs
+}
+
+# Pure checks are deliberately inside a handler that refuses every request.
+fn rejected() -> Unit = {
+  let refs: Map[String, (Int, WideRefFn)] = map.empty()
+  let b = match with_gpu_fake(refs, () => gpu.alloc(F32, 272)) { Ok(b) -> b, Err(e) -> panic(e.message) }
+  let b16 = match with_gpu_fake(refs, () => gpu.alloc(BF16, 272)) { Ok(b) -> b, Err(e) -> panic(e.message) }
+  let checked = {
+    with handle Gpu {
+      gpu_alloc(_d, _n) => panic("read layout: invalid domain reached handler")
+      gpu_copy_from_host(_h, _b) => panic("read layout: invalid domain reached handler")
+      gpu_copy_to_host(_h) => panic("read layout: invalid domain reached handler")
+      gpu_launch(_k, _gx, _gy, _gz, _as) => panic("read layout: invalid domain reached handler")
+      gpu_module_global(_k, _n, _d) => panic("read layout: invalid domain reached handler")
+      gpu_free(_h) => panic("read layout: invalid domain reached handler")
+      gpu_sync() => panic("read layout: invalid domain reached handler")
+    }
+    for n in [-1, 0, 18, 2147483648] {
+      let c = Case { kernel = "read_layout_g3", n = n, scale = 1.0, tail = 0.0, changed = -1, nonzero = false }
+      match launch_layout(c, b, b, b, b) { Err(e) -> { if e.kind != "read.bad_domain" { panic("wrong domain refusal") } }, Ok(_) -> panic("invalid n accepted") }
+    }
+    for n in [-1, 0, 36, 2147483648] {
+      let c = Case { kernel = "read_mask", n = n, scale = 1.0, tail = 0.0, changed = -1, nonzero = false }
+      match launch_mask(c, b16, b16, b16, b) { Err(e) -> { if e.kind != "read.bad_domain" { panic("wrong domain refusal") } }, Ok(_) -> panic("invalid mask n accepted") }
+    }
+    for shape in [(0, 6, 2, 17, 4), (2, 5, 2, 17, 4), (2, 6, 0, 17, 4), (2147483647, 6, 2, 17, 4)] {
+      let (b, hq, hkv, cap, d) = shape
+      match domain(b, hq, hkv, cap, d, 1) { Err(e) -> { if e.kind != "read.bad_domain" { panic("wrong domain refusal") } }, Ok(_) -> panic("invalid shape accepted") }
+    }
+    true
+  }
+  if not checked { panic("domain control failed") }
+}
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let paths = args()
+  let names = ["read_layout_g3", "read_layout_g1", "read_layout_mqa", "read_repeat", "read_mask"]
+  if len(paths) != len(names) { panic("usage: read_layout_diff <g3.cubin> <g1.cubin> <mqa.cubin> <repeat.cubin> <mask.cubin>") }
+  rejected()
+  let cubins = map.from(list.map(range(0, len(names)), i => (names[i], with_fs_real(() => match read_bytes(paths[i]) { Ok(raw) -> raw, Err(e) -> panic(e.message) }))))
+  let cs = cases()
+  let runs = with_gpu_real(cubins, () => list.map(cs, one))
+  var failures = 0
+  for i in range(0, len(cs)) {
+    let c = cs[i]
+    io.println("kernel ${c.kernel} n=${c.n} scale=${c.scale} tail=${c.tail} changed=${c.changed} nonzero=${show(c.nonzero)}")
+    match runs[i] {
+      Err(e) -> panic("read layout: device refusal ${e.kind}: ${e.message}")
+      Ok(raw) -> {
+        io.println("  raw-f32 ${show(bytes.unpack_ints(raw, 4, false))}")
+        let want = reference(c)
+        let got = gpu.decode_floats("f32", raw)
+        let exact = c.kernel != "read_mask"
+        let good = len(got) == len(want) && list.all(range(0, len(want)), j =>
+            if j >= len(want) - 4 { got[j] == want[j] }
+            else if exact { got[j] == want[j] }
+            else { abs(got[j] - want[j]) <= 0.00001 + 0.00001 * abs(want[j]) })
+        if not good { failures = failures + 1 }
+        io.println(if good { "  verdict identical:reference" } else { "  verdict differ:result" })
+      }
+    }
+  }
+  io.println("probe read-layout modules=5 runtime-cases=${len(cs)} failures=${failures} domain=refused")
+  io.println(if failures == 0 { "tile-gpu-diff: pass" } else { "tile-gpu-diff: fail" })
+  if failures != 0 { io.exit(1) }
+})

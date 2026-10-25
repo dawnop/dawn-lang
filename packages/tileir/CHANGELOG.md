@@ -1,5 +1,14 @@
 # tileir changelog
 
+## 0.28.0
+
+- Replace integer cell axes with the shared std/gpu CellAxis ADT. Grouped
+  supports complete read-only groups, including group three.
+- Add ReadView and read_prefix/read_at/read_blocks for effective prefixes
+  with unchanged capacity strides and explicit algorithm score masks.
+- Preserve all inherited Tile IR text and bytecode; no new opcode or ABI.
+
+
 Newest first. A 0.x minor is its own compatibility class
 (`docs/package-design.md` §6.3), and a new `Dev` operation moves the minor:
 a handler written outside the package does not compile until it answers it.
