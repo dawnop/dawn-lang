@@ -3,6 +3,7 @@
 
     python3 site/gpu-map/record.py            # check flash_attn.map against a fresh recording
     python3 site/gpu-map/record.py --record   # rewrite flash_attn.map
+    python3 site/gpu-map/record.py --check-call-origin  # real deletion control
 
 The cuTile page (site/src/gen/gpu.dawn) shows one kernel, scripts/tile-golden's
 `flash_attn`, with every call in its source beside the Tile IR lines that call
@@ -60,6 +61,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
@@ -178,7 +180,7 @@ RENDER_IMPORT = re.compile(r"^use tileir/render\.\{([^}]*)\}\n", re.M)
 PROG_IMPORT = re.compile(r"^use tileir/prog\.\{([^}]*)\}\n", re.M)
 
 
-def harness_source(src: str) -> str:
+def harness_source(src: str, *, with_bytecode: bool = False) -> str:
     # The render import grows when kernels.dawn starts using another name from
     # the module (text_debug, knife T14b), so it is matched as a list and
     # `line_map` appended, not as one spelling. Absent or repeated still fails.
@@ -198,6 +200,10 @@ def harness_source(src: str) -> str:
     for old, new, times in EDITS:
         if src.count(old) != times:
             fail(f"kernels.dawn has {src.count(old)} of {old.strip()!r}, expected {times}")
+        if with_bytecode and old.startswith("use tileir/bytecode."):
+            new = "use tileir/bytecode.{encode}\n"
+        elif with_bytecode and old.startswith("use std/io."):
+            new = "use std/bytes\n"
         src = src.replace(old, new)
     if src.count(CUT_AT) != 1:
         fail(f"kernels.dawn has {src.count(CUT_AT)} of {CUT_AT.strip()!r}, expected 1")
@@ -231,7 +237,11 @@ def harness_source(src: str) -> str:
     params = ", ".join(f"param({d}, {k})" for k, d in enumerate(formats))
     erased = ", ".join(f"erase({k})" for k in markers)
     traced = f'trace_calls("{NAME}", [], () => ({args[-1]})({params}), markers = [{erased}])'
-    return src + MAIN.replace("%TRACE%", traced).replace("%NAME%", NAME)
+    main = MAIN.replace("%TRACE%", traced).replace("%NAME%", NAME)
+    if with_bytecode:
+        main = main.replace("  match line_map(p, calls) {",
+                            '  println("@@bytes ${bytes.to_hex(encode(p))}")\n  match line_map(p, calls) {')
+    return src + main
 
 
 def split_args(s: str) -> list:
@@ -667,11 +677,12 @@ def strategy_controls(src, body, dev, policy, static, rows, paired):
 
 
 
-def record() -> str:
-    src = KERNELS.read_text(encoding="utf-8")
+def record(*, source_path: Path = KERNELS, recording: str | None = None,
+           compiler: str | None = None) -> str:
+    src = source_path.read_text(encoding="utf-8")
     dev = set(re.findall(r'called\("([a-z_0-9]+)"', DEV.read_text(encoding="utf-8")))
-    ran = run_harness(src)
-    p = subprocess.run([dawnc(), "parse", str(KERNELS)],
+    ran = run_harness(src) if recording is None else recording
+    p = subprocess.run([compiler or dawnc(), "parse", str(source_path)],
                        capture_output=True, text=True, cwd=ROOT)
     if p.returncode != 0:
         fail("`dawnc parse` failed:\n" + (p.stderr or p.stdout)[-2000:])
@@ -736,10 +747,101 @@ def record() -> str:
     return "\n".join(out) + "\n"
 
 
+def without_helper_marks(src: str) -> str:
+    """Edit only a copy, retaining line numbers and both numerical branches."""
+    for name in ("fa_exp", "fa_divide"):
+        pattern = re.compile(r"^fn " + name + r"\[.*?^\}\n", re.M | re.S)
+        helpers = list(pattern.finditer(src))
+        if len(helpers) != 1:
+            fail(f"{name}: expected 1 helper definition, got {len(helpers)}")
+        helper = helpers[0].group()
+        changed = helper
+        for mark in (f't_call_enter("{name}", Some(at))', "t_body_enter()",
+                     "t_body_exit()", "t_call_exit()"):
+            line = "  " + mark + "\n"
+            if changed.count(line) != 1:
+                fail(f"{name}: {mark}: expected 1 match")
+            changed = changed.replace(line, "\n")
+        src = src[:helpers[0].start()] + changed + src[helpers[0].end():]
+    # These imports are used only by the eight deleted calls. Removing their
+    # names preserves the line count, so an unused-import error is not a red.
+    imports = ", t_call_enter, t_call_exit, t_body_enter, t_body_exit"
+    if src.count(imports) != 1:
+        fail("helper mark imports: expected 1 match")
+    return src.replace(imports, "")
+
+
+def call_origin_control() -> None:
+    """Device equivalence must not conceal loss of the helper call edges.
+
+    Both programs really compile and run. The parser and strict pairing stay
+    unchanged; only their source path and already-executed recording differ.
+    JVM projects avoid a second cold native site build in this docs control.
+    """
+    started = time.monotonic()
+    compiler = str(ROOT / "bin" / "dawn")
+    source = KERNELS.read_text(encoding="utf-8")
+    products = []
+    counts = []
+    with tempfile.TemporaryDirectory(prefix="tile-call-origin.") as work:
+        for variant, text in (("baseline", source), ("deleted", without_helper_marks(source))):
+            project = Path(work) / variant
+            (project / "src").mkdir(parents=True)
+            (project / "dawn.toml").write_text(
+                'schema = 1\nname = "call_origin_control"\n[deps]\n'
+                f'tileir = "{ROOT / "packages/tileir"}"\n'
+                f'tileref = "{ROOT / "packages/tileref"}"\n', encoding="utf-8")
+            copied = project / "kernels.dawn"
+            copied.write_text(text, encoding="utf-8")
+            (project / "src/main.dawn").write_text(
+                harness_source(text, with_bytecode=True), encoding="utf-8")
+            ran = subprocess.run([compiler, "run", str(project)], cwd=ROOT,
+                                 capture_output=True, text=True)
+            if ran.returncode != 0:
+                fail(f"{variant} must compile and record successfully:\n" + ran.stderr[-4000:])
+            mlir = ran.stdout.split("@@ir\n", 1)[1].split("@@end\n", 1)[0]
+            encoded = [line[8:] for line in ran.stdout.splitlines() if line.startswith("@@bytes ")]
+            if len(encoded) != 1:
+                fail(f"{variant} did not emit exactly one bytecode record")
+            wire = bytes.fromhex(encoded[0])
+            products.append((mlir, wire))
+            counts.append(len(re.findall(r"^call ", ran.stdout, re.M)))
+            if mlir != (GOLDEN / f"{NAME}.mlir").read_text(encoding="utf-8"):
+                fail(f"{variant} changed the MLIR golden")
+            if wire != (GOLDEN / f"{NAME}.tilebc").read_bytes():
+                fail(f"{variant} changed the bytecode golden")
+            errors = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(errors):
+                    mapped = record(source_path=copied, recording=ran.stdout, compiler=compiler)
+            except SystemExit as error:
+                diagnostic = errors.getvalue()
+                if (variant != "deleted" or error.code != 1
+                        or "source calls" not in diagnostic or "recording ran" not in diagnostic
+                        or "fa_divide" not in diagnostic or "'div'" not in diagnostic):
+                    fail(f"{variant} failed for the wrong reason:\n{diagnostic}")
+                print("PASS deleted marks: compilation and recording succeeded; strict pairing REJECTED")
+                print(diagnostic.strip())
+            else:
+                if variant == "deleted":
+                    fail("deleting the helper marks escaped strict source pairing")
+                if mapped != OUT.read_text(encoding="utf-8"):
+                    fail("baseline does not reproduce the checked-in source map")
+                print("PASS baseline: strict pairing and checked-in map")
+    if products[0] != products[1] or counts != [45, 42]:
+        fail(f"expected identical device products and calls 45 -> 42, got {counts}")
+    print("PASS identical MLIR and bytecode; calls 45 -> 42")
+    print(f"call-origin control wall time: {time.monotonic() - started:.2f}s")
+
+
 def main() -> None:
+    if sys.argv[1:] == ["--check-call-origin"]:
+        selftest()
+        call_origin_control()
+        return
     write = sys.argv[1:] == ["--record"]
     if sys.argv[1:] not in ([], ["--record"]):
-        fail("usage: record.py [--record]")
+        fail("usage: record.py [--record | --check-call-origin]")
     selftest()
     fresh = record()
     calls = fresh.count("\ncall ")

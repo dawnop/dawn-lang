@@ -31,6 +31,8 @@ prints how many there are on every run.
 
 只读布局与有效前缀：[tile-read-layout-design.md](tile-read-layout-design.md)。
 
+效果来源提案：[effect-provenance-design.md](effect-provenance-design.md)，按观察作用域保留逻辑调用，含来源负控与分期验收；语言机制尚未实现。
+
 ## 当前全仓审查（v2）
 
 SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
