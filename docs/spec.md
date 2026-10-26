@@ -2142,12 +2142,45 @@ handler 的作用域内，与 `with x <- f(…)` 完全同构，并继承它的�
   `resume` 之前；重复、逆序、缺名与缺箭头分别诊断。`)` 至 `=>` 之间的既有逻辑换行规则
   不变，`=>` 后允许换行。绑定与操作参数共享本臂参数域，拒绝重名，可遮蔽外层变量，
   只在本臂身体可见。
-- **观察尚未支持。** 写出 `origin o` 就由 checker 拒绝，即使未使用 `o`。解析、格式化和
-  编辑器支持不代表观察可用。来源绑定有 definition、references 与 hover 身份；有诊断的模块
-  仍按既有规则拒绝 rename，W2 提供成功 rename 的正控。hover 可显示错误恢复类型，不伪造
-  已可用的 `Origin` 类型。后续观察 intrinsic 将引入 `io` 与不可逃逸的词法句柄
-  `TraceScope`；来源绑定需要该词法能力，并计入 `io`。不可变的 `Origin` 值届时可离开
-  作用域并传给纯函数。本刀没有观察 intrinsic、来源标准库模块或运行期 ABI。
+- **普通观察（W2）。** `std/provenance.observe[T, !e](body: fn(TraceScope) -> T !e) -> T !io !e`
+  是按已解析的标准声明身份识别的具名 intrinsic。同名用户函数没有特权；入口不能取为函数值，
+  身体须为字面 lambda 或 `with` 生成的结构化身体。每次调用建立独立观察根。`TraceScope`
+  是不可逃逸的词法句柄，只能将该绑定直接用于 `note`、`completed`、`checkpoint`、`rewind`。
+  checker 拒绝别名、容器、返回、任意函数实参、计算所得句柄及逃逸闭包捕获；编译器掌握的
+  observer 与 handler 结构化区域可使用它。运行期另核对作用域、执行上下文与 checkpoint 世代。
+  `origin o` 只在词法观察能力内合法，读取计入 `io`；有 `io` 本身不产生该能力。绑定是本臂
+  普通局部名，definition、references、hover 与成功 rename 走既有路径；有诊断的模块仍拒绝 rename。
+- **不可变来源 API。** `Origin` 可离开观察作用域、放入容器并传给纯函数。纯访问器
+  `operation`、`parent`、`scope`、`epoch`、`instance`、`site`、`definition` 只读快照；`parent`
+  返回 `Option[Origin]`，根为 `None`。`site` 返回 `Option[Site]`，根为 `None`；字段为
+  `id, module, file, declaration, start, end, name_start, name_end, role, operation`，其中
+  `operation: Option[String]`，坐标均在声明内相对定位。`file` 使用稳定的源单元身份，不含构建机
+  路径。`definition` 返回 `Option[Definition]`，字段为 `id, module, declaration, start, end, role`。
+  operation envelope 不将 handler 定义冒充发起方定义；其父链保存真正的调用定义。
+  真实未知的坐标为负数，不编造位置。
+- **观察日志。** `note(scope, origin) -> Unit !io` 添加不可变操作快照；
+  `completed(scope) -> String !io` 复制包括活跃调用在内的当前日志前缀。二者不修改来源快照。
+  同 Site、同定义的两次调用具有不同实例身份；零 perform、零输出调用也保留。静态 Site 与定义
+  身份不随 Plain/Observed 入口改变。调用进入、正常返回、`return`、`?` 与 panic 展开维护逻辑帧，
+  实参先在调用者内完成求值。metadata 与 effect evidence 分开，handler 的词法选择不变。
+  直接调用、Fn 桥、trait 动态/default/去虚拟化、跨模块/包与库回调遵守同一观察协议；
+  普通入口保持既有 ABI。共享 Core 在会删除逻辑调用的优化前求 Plain/Observed 可达掩码，
+  仅发射可达入口，动态目标按调用者模式选择；内部目标缺观察入口是编译错误，不回落普通入口。
+  解释器与 comptime 明确拒绝观察。W2 在观察下明确拒绝控制臂的 resume/discard/suspend、
+  实际执行的自递归尾边与不支持的外部 ABI 边界，不产生看似完整的缺边树。TCO 压缩与有界日志属于 W3。
+- **观察 checkpoint。** `checkpoint(scope) -> Checkpoint !io` 保存本域日志与 note 边界；
+  `rewind(scope, c) -> Unit !io` 回退后保留目标 `c` 及所有更早建立的 checkpoint，允许反复回退
+  同一目标，并使之后建立的 checkpoint 全部失效。顺序按建立次序，不能用相同日志边界合并。
+  每次成功回退推进 epoch，新调用实例不与丢弃的试探实例重号；已外传试探 `Origin` 保持不可变，
+  可用 scope/epoch/instance 与保留日志判定是否提交。不能仅因旧 epoch 就认定未提交，因为保留祖先
+  可以来自较早 epoch。没有 release/commit 操作，退出使本域全部 checkpoint 失效。
+  checkpoint 同时绑定建立时的逻辑调用实例 `F`。回退时当前实例须恰为 `F`，不只比较深度或 Site。
+  `F` 返回、`?` 或 panic 展开完成后，其中建立的全部 checkpoint 失效，`F` 外更早的标记仍有效。
+  两后端使用相同精确错误：失效标记为 `provenance: checkpoint has been invalidated`，跨域为
+  `provenance: checkpoint belongs to another scope`，已退出域为 `provenance: scope has exited`，
+  已结束建立帧为 `provenance: creating frame has finished`，仍活跃的更深帧为
+  `provenance: not in the creating frame`，不同执行上下文为 `provenance: different execution context`。
+  续延越域属于 W3，W2 明确拒绝。
 - 一个 `handle` 一个效果；同一效果重复 `handle` 是内层遮蔽外层，合法。
 - 允许 handle 一个块里实际没发出的效果（无害的死证据）。
 - **handler 局部状态（格子）**：臂表的开头可以声明若干 `var`，每个是**这次安装**私有的
@@ -3473,6 +3506,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - `std/char`：字符 `Char`
 - `std/fmt`：数字的渲染与解析（见下）
 - `std/loc`：调用点位置 `Loc` 的读法与 `here()`（§8.4）
+- `std/provenance`：词法观察、不可变来源与 checkpoint（§6.5）
 - `std/dtype`：设备元素格式 `Dtype[T]` 与 `HasDtype`，定宽整数与内建三种格式的见证住这里或各自的模块
 - `std/narrow`：窄二进制浮点 bf16、binary16、binary32，逐运算正确舍入（§11「数学内建」）
 - `std/int/i8`：有符号 8 位整数 `I8`，`Int` 上的不透明类型，回绕算术（§11「定宽整数」）

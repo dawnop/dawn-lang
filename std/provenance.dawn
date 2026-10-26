@@ -1,0 +1,114 @@
+## Scoped observations expose execution facts without changing lexical effect
+## selection. The compiler recognizes these declarations by resolved identity;
+## TraceScope is a lexical capability, whereas Origin owns immutable data.
+# Checkpoints use reusable savepoints and belong to their creating call instance.
+# The five entry bodies are intrinsic declaration sentinels. Both backends
+# lower their resolved identities; an older compiler cannot execute them.
+## A lexical observation capability. It is not a first-class value.
+pub opaque type TraceScope = Int
+
+## An immutable operation snapshot and logical parent chain.
+pub opaque type Origin = String
+
+## A reusable savepoint bound to its creating logical call instance.
+pub opaque type Checkpoint = String
+
+## Run a literal callback under a fresh observation root. The callback may
+## return immutable Origins, but the TraceScope itself cannot escape.
+pub fn observe[T, !e](body: fn(TraceScope) -> T !e) -> T !io !e = todo()
+
+## Append an immutable operation snapshot to this observation's notes.
+pub fn note(scope: TraceScope, origin: Origin) -> Unit !io = todo()
+
+## Copy the current prefix, including active calls. Scope exit happens later.
+pub fn completed(scope: TraceScope) -> String !io = todo()
+
+## Save the log boundary in the current logical call instance.
+pub fn checkpoint(scope: TraceScope) -> Checkpoint !io = todo()
+
+## Restore a boundary in its still-active creating frame. Later markers expire;
+## the target and earlier markers remain reusable, and the epoch advances.
+pub fn rewind(scope: TraceScope, checkpoint: Checkpoint) -> Unit !io = todo()
+
+## Declaration-relative coordinates. `file` is the stable source-unit identity,
+## not a build-machine path. Negative coordinates denote an explicit unknown.
+pub type Site = {
+  id: Int,
+  module: String,
+  file: String,
+  declaration: String,
+  start: Int,
+  end: Int,
+  name_start: Int,
+  name_end: Int,
+  role: String,
+  operation: Option[String]
+}
+
+## A function, lambda or runtime primitive's stable definition identity.
+pub type Definition = {
+  id: Int,
+  module: String,
+  declaration: String,
+  start: Int,
+  end: Int,
+  role: String
+}
+
+## The operation's resolved identity, independent of handler installation.
+pub fn operation(origin: Origin) -> String = origin_field(origin, -1)
+
+## The immutable parent snapshot. The observation root has no parent.
+pub fn parent(origin: Origin) -> Option[Origin] = {
+  let value = origin_parent(origin)
+  if value == "" { None } else { Some(value) }
+}
+
+## These identities survive scope exit and rewind. A tentative Origin is not
+## rewritten to a later epoch or a different instance.
+pub fn scope(origin: Origin) -> Int = origin_number(origin, 1)
+## The epoch in which this immutable instance was created.
+pub fn epoch(origin: Origin) -> Int = origin_number(origin, 2)
+## The instance identity, never reused after rewind.
+pub fn instance(origin: Origin) -> Int = origin_number(origin, 3)
+
+## The current call's static Site, or None at the observation root.
+pub fn site(origin: Origin) -> Option[Site] = {
+  let id = origin_number(origin, 6)
+  if id == 0 { return None }
+  let op = origin_field(origin, 14)
+  Some(Site {
+    id = id,
+    module = origin_field(origin, 7),
+    file = origin_field(origin, 7),
+    declaration = origin_field(origin, 8),
+    start = origin_number(origin, 9),
+    end = origin_number(origin, 10),
+    name_start = origin_number(origin, 11),
+    name_end = origin_number(origin, 12),
+    role = origin_field(origin, 13),
+    operation = if op == "" { None } else { Some(op) }
+  })
+}
+
+## Operations have an operation identity; their Origin never claims that the
+## handler body was the issuing definition. Ordinary parent calls have one.
+pub fn definition(origin: Origin) -> Option[Definition] = {
+  let owner = origin_field(origin, 15)
+  if owner == "" { return None }
+  Some(Definition {
+    id = origin_number(origin, 20),
+    module = owner,
+    declaration = origin_field(origin, 16),
+    start = origin_number(origin, 17),
+    end = origin_number(origin, 18),
+    role = if owner == "intrinsic" { "intrinsic" } else { origin_field(origin, 19) }
+  })
+}
+
+# Private named intrinsics inspect only immutable snapshot bytes. Their
+# sentinels remain readable by the bootstrap seed and are never called by
+# emitted code. They do not read a current scope or grant observation access.
+fn origin_field(origin: Origin, index: Int) -> String = todo()
+fn origin_number(origin: Origin, index: Int) -> Int = todo()
+fn origin_parent(origin: Origin) -> String = todo()

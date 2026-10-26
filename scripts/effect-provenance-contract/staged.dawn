@@ -1,0 +1,59 @@
+# Synthetic syntax roles remain distinct from written function calls.
+use std/io.{println}
+use std/provenance
+
+type Value = { n: Int }
+type Cell = { id: Int }
+type Choice = { yes: Bool }
+type Once = { n: Int }
+effect Store {
+  fn open(n: Int) -> Cell
+  fn read(cell: Cell) -> Value
+  fn write(cell: Cell, value: Value) -> Unit
+}
+impl FromInt[Value] {
+  fn from_int(n: Int) -> Value = Value { n = n }
+}
+impl Add[Value] {
+  fn add(a: Value, b: Value) -> Value = Value { n = a.n + b.n }
+}
+impl StagedVar[Value] {
+  type Cell = Cell
+  effect StagedVar = !Store
+  fn var_open(value: Value) -> Cell !Store = open(value.n)
+  fn var_get(cell: Cell) -> Value !Store = read(cell)
+  fn var_set(cell: Cell, value: Value) -> Unit !Store = write(cell, value)
+}
+impl StagedCond[Choice] {
+  effect StagedCond = !Store
+  fn staged_if(choice: Choice, yes: fn() -> Unit !Store, no: fn() -> Unit !Store) -> Unit !Store = {
+    if choice.yes { yes() } else { no() }
+  }
+}
+impl StagedIter[Once] {
+  type Item = Int
+  effect StagedIter = !Store
+  fn staged_for(once: Once, body: fn(Int) -> Unit !Store) -> Unit !Store = body(once.n)
+}
+fn literal[T: FromInt]() -> T !T.FromInt = 1
+fn program() -> Int !Store = {
+  var value: Value = literal()
+  if (Choice { yes = true }) { value = value + 2 } else { value = value + 3 }
+  for n in (Once { n = 4 }) { value = value + Value { n = n } }
+  value.n
+}
+pub fn main() -> Unit !io = {
+  let (answer, tree) = provenance.observe(scope => {
+    with handle Store {
+      var value: Int = 0
+      open(n) => { value = n
+        Cell { id = 1 } }
+      read(cell) => Value { n = value }
+      write(cell, v) => { value = v.n }
+    }
+    let answer = program()
+    (answer, provenance.completed(scope))
+  })
+  println("${answer}")
+  println(tree)
+}

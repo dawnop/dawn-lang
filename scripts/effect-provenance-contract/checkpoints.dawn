@@ -1,0 +1,33 @@
+# Savepoints are reusable within the same logical frame. Tentative snapshots
+# survive rollback without being relabelled as committed executions.
+use std/io.{println}
+use std/provenance
+use std/provenance.{Origin}
+
+effect Query {
+  fn ask(n: Int) -> (Int, Origin)
+}
+fn helper(n: Int) -> (Int, Origin) !Query = ask(n)
+pub fn main() -> Unit !io = {
+  let (data, tree) = provenance.observe(scope => {
+    with handle Query {
+      ask(n) origin source => {
+        provenance.note(scope, source)
+        (n + 1, source)
+      }
+    }
+    let saved = provenance.checkpoint(scope)
+    let first = helper(2)
+    provenance.rewind(scope, saved)
+    let second = helper(3)
+    provenance.rewind(scope, saved)
+    let final = helper(4)
+    ((first, second, final), provenance.completed(scope))
+  })
+  let ((a, tentative), (b, discarded), (c, committed)) = data
+  println("${(a, b, c)}")
+  println("${(provenance.scope(tentative), provenance.epoch(tentative), provenance.instance(tentative))}")
+  println("${(provenance.scope(discarded), provenance.epoch(discarded), provenance.instance(discarded))}")
+  println("${(provenance.scope(committed), provenance.epoch(committed), provenance.instance(committed))}")
+  println(tree)
+}

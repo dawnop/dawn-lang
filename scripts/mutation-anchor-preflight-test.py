@@ -343,10 +343,10 @@ class PreflightTests(unittest.TestCase):
         emit = "selfhost/src/jvm/emit.dawn"
         self.assert_registry_drift_is_red("classfile-verify", "omit-closure-bottom", emit,
                                           "  if is_bottom(b.fret) {", "  if is_bottom(b.ret) {")
-        # The second edit of a two-edit mutant is reached and held too.
+        # Hold the actual wide-pop instruction independently of its import.
         self.assert_registry_drift_is_red("classfile-verify", "use-pop-for-wide-bottom", emit,
-                                          "OP_NEW, OP_POP, OP_POP2, OP_PUTFIELD",
-                                          "OP_NEW, OP_POP2, OP_POP, OP_PUTFIELD")
+                                          "    CallTwo -> { m.visitInsn(OP_POP2) }",
+                                          "    CallTwo -> { m.visitInsn(OP_POP) }")
         self.assert_registry_drift_is_red("classfile-verify", "reject-wide-sam-bottom",
                                           "selfhost/src/check/checker.dawn",
                                           "    r == TyInt || r == TyNever",

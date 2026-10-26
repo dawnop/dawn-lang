@@ -1,0 +1,31 @@
+# Observation privileges follow the resolved declaration, never an import
+# spelling. Keeping this list below checking and lowering gives both consumers
+# one identity test without making metadata part of lexical effect evidence.
+use check/types.{Sig, Ty, TyOpaque, TyInt, ty_origin}
+use check/identity
+
+pub fn action(s: Sig) -> Bool =
+  s.owner == Some("std/provenance") && s.trait_id == None &&
+  (s.name == "note" || s.name == "completed" || s.name == "checkpoint" || s.name == "rewind")
+
+pub fn entry(s: Sig) -> Bool =
+  s.owner == Some("std/provenance") && s.trait_id == None && s.name == "observe"
+
+pub fn trace(t: Ty) -> Bool =
+  match t { TyOpaque(id, _, _, _, _) -> id == 5026688370391, _ -> false }
+
+pub fn primitive(owner: String, name: String) -> Option[String] =
+  if owner == "std/provenance" && (name == "origin_field" || name == "origin_number" || name == "origin_parent") {
+    Some(if name == "origin_field" { "provenance_field" }
+    else if name == "origin_number" { "provenance_number" } else { "provenance_parent" })
+  } else if owner == "std/provenance" &&
+    (name == "observe" || name == "note" || name == "completed" || name == "checkpoint" || name == "rewind") {
+    Some("provenance_" ++ name)
+  } else { None }
+
+test "observation nominal identities come from their standard declarations" {
+  let origin = identity.derive(identity.minted("std/provenance", identity.TypeDecl, "Origin"))
+  match ty_origin() { TyOpaque(id, _, _, _, _) -> { assert id == origin }, _ -> { assert false } }
+  let scope = identity.derive(identity.minted("std/provenance", identity.TypeDecl, "TraceScope"))
+  assert trace(TyOpaque(scope, "TraceScope", "std/provenance", [], TyInt))
+}

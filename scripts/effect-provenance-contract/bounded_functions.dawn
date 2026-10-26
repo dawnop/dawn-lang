@@ -1,0 +1,16 @@
+# An implicit dictionary adapter is transparent to logical function identity.
+use std/io.{println}
+use std/provenance
+trait Step[T] { fn step(value: T) -> Int }
+type Value = { n: Int }
+impl Step[Value] { fn step(value: Value) -> Int = value.n + 1 }
+fn generic[T: Step](value: T) -> Int = step(value)
+pub fn main() -> Unit !io = {
+  let function: fn(Value) -> Int = generic
+  let (answer, tree) = provenance.observe(scope => {
+    let value = function(Value { n = 41 })
+    (value, provenance.completed(scope))
+  })
+  println("${answer}")
+  println(tree)
+}

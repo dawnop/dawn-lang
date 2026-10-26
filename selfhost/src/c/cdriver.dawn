@@ -10,8 +10,9 @@
 use std/io
 use std/io.{Env, Fs, Proc}
 use std/map
+use std/set
 use std/str
-use ir/core.{CValue, CFun, CModule, CParam, CMode, COwned, CBorrowed, mode_owned}
+use ir/core.{fn_key, CValue, CFun, CModule, CParam, CMode, COwned, CBorrowed, mode_owned}
 use check/types.{Adts, Traits, Impls, Sig, prelude_adts}
 use check/cx.{Cx}
 use ir/interp.{CtOut, ct_default}
@@ -20,6 +21,7 @@ use driver/analyze.{CheckedMod, Program, analyze_program, load_target}
 use check/jsig.{jsig_refused}
 use ir/externs
 use ir/lower
+use ir/tail as call_tail
 use ir/lint
 use c/rc
 use c/unalias
@@ -379,8 +381,14 @@ fn build_units(
   prog: Program,
   with_tests: Bool,
   std_tests: Bool
-) -> (List[EmitMod], String, Adts, Map[(String, String), List[CMode]]) !Env = {
+) -> (List[EmitMod], String, Adts, Map[(String, String), List[CMode]], Option[Live]) !Env = {
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
+  var preserve = false
+  for item in std.mods {
+    let (_, cx, _, _) = item
+    preserve = preserve || cx.observation_used
+  }
+  for cm in prog.modules { preserve = preserve || cm.cx.observation_used }
   # `flips` is the mutant harness's injection channel (see ModeFlip above)
   # and is empty on every compile that did not set DAWN_RC_MODE_FLIPS.
   let flips = mode_flips_from_env()
@@ -406,20 +414,20 @@ fn build_units(
   var found: List[lint.Violation] = []
   for sm in std.mods {
     let (cls, cx, tm, ct) = sm
-    let lm = externs.select_lowered(lower.lower_module_full(cls, tm, traits, impl_table, adts, prog_fns, std_tests), true)
+    let lm = externs.select_lowered(lower.lower_module_full(cls, tm, traits, impl_table, adts, prog_fns, std_tests, preserve), true)
     if linting { found = found ++ lint.check_module(cls, tm, lm) }
     let core = if std_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [
-      EmitMod { m = core, consts = merged_consts(cx, ct, const_vals), blocks = ct.blocks }
+      EmitMod { logical = map.empty(), m = core, consts = merged_consts(cx, ct, const_vals), blocks = ct.blocks }
     ]
   }
   for cm in prog.modules {
     let lm = externs.select_lowered(lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns,
-      with_tests), true)
+      with_tests, preserve), true)
     if linting { found = found ++ lint.check_module(cm.class_name, cm.tm, lm) }
     let core = if with_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [
-      EmitMod { m = core, consts = merged_consts(cm.cx, cm.ct, const_vals), blocks = cm.ct.blocks }
+      EmitMod { logical = map.empty(), m = core, consts = merged_consts(cm.cx, cm.ct, const_vals), blocks = cm.ct.blocks }
     ]
     # only the entry module's `main` is the entry point (spec §10.5)
     if entry == "" && cm.cx.is_entry_module {
@@ -427,6 +435,17 @@ fn build_units(
         if tf.name == "main" { entry = cm.class_name }
       }
     }
+  }
+
+  let lv = live(pre, prog, std_tests)
+  if preserve {
+    var plain: List[EmitMod] = []
+    for unit in pre {
+      var logical: Map[String, CFun] = map.empty()
+      for f in unit.m.fns { logical = map.insert(logical, fn_key(f), f) }
+      plain = plain ++ [EmitMod { ..unit, m = call_tail.plain_module(unit.m), logical = logical }]
+    }
+    pre = plain
   }
 
   # The inference stamps both halves of the contract from one fixpoint
@@ -475,11 +494,35 @@ fn build_units(
     if not (fl.callee_side && fl.callsite_side) { singles = singles ++ [fl] }
   }
   let modes = flip_table(inferred, singles)
+  var logical_cores: List[CModule] = []
+  for unit in pre {
+    var fs: List[CFun] = []
+    for item in map.entries(unit.logical) {
+      let (_, f) = item
+      fs = fs ++ [f]
+    }
+    # Dictionary captures keep the declaring function's symbol identity.
+    # Ownership and unaliasing need the complete module dictionary union,
+    # including Plain-only factories whose closures run under observation.
+    # Filter physical entries after those passes, rather than losing that
+    # ownership fact along with an unneeded function body.
+    logical_cores = logical_cores ++ [unalias.elim_module(CModule { ..unit.m, fns = fs })]
+  }
+  let logical_modes = infer.infer_modes(logical_cores)
+  var logical_index = 0
   var units: List[EmitMod] = []
   for u2 in pre {
+    let core = rc.rc_module(infer.stamp_modes(logical_cores[logical_index], logical_modes), logical_modes)
+    var logical: Map[String, CFun] = map.empty()
+    for f in core.fns {
+      if match lv { Some(l) -> set.has(l.observed, fn_key(f)), None -> false } {
+        logical = map.insert(logical, fn_key(f), f)
+      }
+    }
+    logical_index = logical_index + 1
     units = units ++ [
       EmitMod {
-        ..u2,
+        ..u2, logical = logical,
         m = rc.rc_module(flip_callee(infer.stamp_modes(u2.m, inferred), singles), modes)
       }
     ]
@@ -487,7 +530,7 @@ fn build_units(
   # `adts` rides back out: the emitter needs it to rebuild a structured
   # comptime constant, and recomputing `program_tables` at the call site would
   # be a second answer to a question already answered here
-  (units, entry, adts, modes)
+  (units, entry, adts, modes, lv)
 }
 
 ## What this program can reach: which Unicode tables ride, and which std
@@ -546,9 +589,8 @@ fn tables(live: Option[Live]) -> TableUse =
 ## everything it calls, and after S3 the collections *are* std -- `[1, 2]`
 ## calls `std/pvec.from_array`.
 pub(pkg) fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !Env = {
-  let (units, entry, adts, modes) = build_units(std, prog, false, false)
+  let (units, entry, adts, modes, lv) = build_units(std, prog, false, false)
   if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
-  let lv = live(units, prog, false)
   Ok(emitc.emit_program(units, frame_quiet(units), entry, tables(lv), lv, adts, modes))
 }
 
@@ -556,9 +598,8 @@ pub(pkg) fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !Env = 
 ## section 12): the same text, from the same `emitc.program_st`, and the
 ## `.dawnmap` that says where each written call landed in it.
 pub(pkg) fn c_text_mapped(std: StdCtx, prog: Program) -> Result[(String, String), String] !Env = {
-  let (units, entry, adts, modes) = build_units(std, prog, false, false)
+  let (units, entry, adts, modes, lv) = build_units(std, prog, false, false)
   if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
-  let lv = live(units, prog, false)
   let (text, rows, fns) = emitc.emit_program_mapped(units, frame_quiet(units), entry, tables(lv), lv, adts, modes)
   var srcs: Map[String, String] = map.empty()
   var bases: Map[String, Map[String, Int]] = map.empty()
@@ -640,8 +681,7 @@ pub(pkg) fn c_test_text(
   tests: List[(String, Int, String)],
   std_tests: Bool
 ) -> Result[String, String] !Env = {
-  let (units, _entry, adts, modes) = build_units(std, prog, true, std_tests)
-  let lv = live(units, prog, std_tests)
+  let (units, _entry, adts, modes, lv) = build_units(std, prog, true, std_tests)
   Ok(emitc.emit_headless(units, frame_quiet(units), tables(lv), lv, adts, modes) ++
       ctestrun.runner(tests))
 }
@@ -738,7 +778,7 @@ test "the embedded C runtime matches runtime/c on disk" {
   io.with_fs_real(() => {
     # the staleness gate for the generated rtsrc.dawn, same shape as the
     # embedded-std one in stdlib.dawn
-    for f in ["dawn_rt.c", "dawn_rt.h", "dawn_ffi.h", "dawn_rt_wasi_eh.cc", "dawn_rt_wasi_tag.c"] {
+    for f in ["dawn_provenance.h", "dawn_provenance.c", "dawn_rt.c", "dawn_rt.h", "dawn_ffi.h", "dawn_rt_wasi_eh.cc", "dawn_rt_wasi_tag.c"] {
       let disk = match io.read_file("runtime/c/${f}") {
         Ok(t) -> t
         Err(e) -> panic("runtime/c/" ++ f ++ ": " ++ e.message)

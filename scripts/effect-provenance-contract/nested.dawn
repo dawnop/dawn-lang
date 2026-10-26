@@ -1,0 +1,26 @@
+# The handler's lexical capability selects the outer root even when the
+# operation executes under a nested observation with its own instance space.
+use std/io.{println}
+use std/provenance
+use std/provenance.{Origin}
+effect Ask { fn ask() -> Origin }
+fn helper() -> Origin !Ask = ask()
+pub fn main() -> Unit !io = {
+  let (origin, inner_tree, outer_tree) = provenance.observe(outer => {
+    with handle Ask {
+      ask() origin source => {
+        provenance.note(outer, source)
+        source
+      }
+    }
+    let (origin, inner_tree) = provenance.observe(inner => {
+      let origin = helper()
+      (origin, provenance.completed(inner))
+    })
+    (origin, inner_tree, provenance.completed(outer))
+  })
+  println("${(provenance.scope(origin), provenance.epoch(origin), provenance.instance(origin))}")
+  println(inner_tree)
+  println("OUTER")
+  println(outer_tree)
+}

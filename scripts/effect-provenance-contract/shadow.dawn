@@ -1,0 +1,18 @@
+# Implicit origin capability follows its resolved symbol, including while an
+# ordinary inner local shadows the observe parameter's spelling.
+use std/io.{println}
+use std/provenance
+use std/provenance.{Origin}
+effect Ask { fn ask() -> Origin }
+pub fn main() -> Unit !io = {
+  let ((origin, value), tree) = provenance.observe(scope => {
+    let data = {
+      let scope = 41
+      with handle Ask { ask() origin source => source }
+      (ask(), scope + 1)
+    }
+    (data, provenance.completed(scope))
+  })
+  println("${(value, provenance.scope(origin), provenance.instance(origin))}")
+  println(tree)
+}

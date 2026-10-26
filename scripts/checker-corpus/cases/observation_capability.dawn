@@ -1,0 +1,45 @@
+# Capability diagnostics pin the refusal sites independently of the execution
+# controls and exact-origin trees in effect-provenance-contract.
+use std/provenance
+use std/provenance.{TraceScope, Origin}
+
+effect Ask { fn ask() -> Origin }
+ctl effect Tell { fn tell() -> Int }
+fn take(scope: TraceScope) -> Int = 42
+fn alias_scope() -> Int !io = provenance.observe(scope => {
+  let copy = scope
+  42
+})
+fn capture() -> Int !io = provenance.observe(scope => {
+  let escaped = () => provenance.completed(scope)
+  42
+})
+fn implicit_capture() -> Int !io = provenance.observe(scope => {
+  let escaped = () => {
+    let scope = 0
+    with handle Ask { ask() origin value => value }
+    ask()
+  }
+  42
+})
+fn control() -> Int !io = provenance.observe(scope => {
+  with handle Tell { tell() resume k => k(42) }
+  tell()
+})
+fn nonliteral() -> Int !io = {
+  let body: fn(TraceScope) -> Int = scope => 42
+  provenance.observe(body)
+}
+fn value() -> Int !io = {
+  let entry = provenance.observe
+  42
+}
+fn isolated() -> Int = comptime { provenance.observe(scope => 42) }
+fn computed() -> Int !io = provenance.observe(scope => {
+  let text = provenance.completed(if true { scope } else { scope })
+  42
+})
+fn arbitrary() -> Int !io = provenance.observe(scope => {
+  let text = provenance.completed(scope.take())
+  42
+})

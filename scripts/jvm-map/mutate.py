@@ -60,8 +60,8 @@ MUTATIONS = {
         "    CDirect(owner, name) -> {\n      visit_at(g.mv, at)\n      let g1 = gen_cargs(gx, g, args)\n",
     ), (
         EMIT,
-        "      visit_at(g1.mv, at)\n      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name, d, false)\n",
-        "      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name, d, false)\n",
+        "      call_entry(gx, g1.mv, owner, name, d, at)\n",
+        "      call_entry(gx, g1.mv, owner, name, d)\n",
     ),),
     "hi-is-lo": ((
         EMIT,

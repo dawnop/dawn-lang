@@ -1,0 +1,126 @@
+# Mode reachability consumes pristine calls first. Only the Plain branch may
+# replace self calls with parameter assignment and a loop; Observed retains
+# the call and its source identity for the W2 refusal and future tail edges.
+use ir/core.{CFun, CModule, CExpr, CStmt, CSite, CLocal, CCall,
+  CDirect, CDynamic, CClosure, CIf, CBlock, CReturn, CContinue,
+  CSLet, CSAssign, CSLoop, fn_key }
+use ir/lower.{LMod, emitted_core}
+use ir/walk
+use check/types.{TyNever}
+use std/map
+use std/list
+use std/str
+
+fn self_call(f: CFun, e: CExpr) -> Bool = match e {
+  CCall(CDirect(owner, name), _, _, _) ->
+    f.impl_of == None && f.default_of == None && owner == f.owner && name == f.name
+  CCall(CDynamic(CClosure(name, owner, _, _)), _, _, _) ->
+    owner == f.owner && name == f.name
+  _ -> false
+}
+
+fn tail_branch(f: CFun, e: CExpr) -> List[CSite] = match e {
+  CCall(_, _, _, site) -> if self_call(f, e) { [site] } else { [] }
+  CReturn(Some(value)) -> tail_branch(f, value)
+  CIf(_, yes, no, _) -> tail_branch(f, yes) ++ match no {
+    Some(value) -> tail_branch(f, value), None -> [] }
+  CBlock(_, result, _) -> match result {
+    Some(value) -> tail_branch(f, value), None -> [] }
+  _ -> []
+}
+
+## Logical tail edges are refused only when executed in W2. The base case
+## remains an ordinary call, and explicit returns retain their tail position.
+pub fn tail_sites(f: CFun) -> List[CSite] = {
+  let sites = walk.fold_expr(f.body, tail_branch(f, f.body), (acc, e) => match e {
+    CReturn(Some(value)) -> acc ++ tail_branch(f, value)
+    _ -> acc
+  }, (acc, _statement) => acc)
+  list.fold(sites, [], (acc, site) => if list.contains(acc, site) { acc } else { acc ++ [site] })
+}
+
+fn rewrite(f: CFun, banks: Map[CSite, Int], loop_id: Int, e: CExpr, tail: Bool) -> CExpr = {
+  match e {
+    CCall(_, args, _, site) -> if tail && self_call(f, e) {
+      let first = map.get(banks, site).expect("tail call temporary bank")
+      var statements: List[CStmt] = []
+      var i = 0
+      for p in f.params {
+        statements = statements ++ [CSLet(first + i, p.ty, rewrite(f, banks, loop_id, args[i], false))]
+        i = i + 1
+      }
+      i = 0
+      for p in f.params {
+        statements = statements ++ [CSAssign(p.sym, CLocal(first + i, p.ty))]
+        i = i + 1
+      }
+      return CBlock(statements, Some(CContinue(loop_id)), TyNever)
+    }
+    CReturn(Some(value)) -> return CReturn(Some(rewrite(f, banks, loop_id, value, true)))
+    CIf(condition, yes, no, ty) -> return CIf(rewrite(f, banks, loop_id, condition, false),
+      rewrite(f, banks, loop_id, yes, tail),
+      walk.map_opt(no, x => rewrite(f, banks, loop_id, x, tail)), ty)
+    CBlock(statements, result, ty) -> return CBlock(
+      list.map(statements, s => walk.map_stmt(s, x => rewrite(f, banks, loop_id, x, false))),
+      walk.map_opt(result, x => rewrite(f, banks, loop_id, x, tail)), ty)
+    _ -> ()
+  }
+  walk.map_kids(e, x => rewrite(f, banks, loop_id, x, false))
+}
+
+fn plain_fn(f: CFun, first: Int) -> (CFun, Int) = {
+  if not str.ends_with(f.definition.role, "-tail") { return (f, first) }
+  let empty: List[CSite] = []
+  let sites = walk.fold_expr(f.body, empty, (acc, e) => {
+    if self_call(f, e) {
+      match e {
+        CCall(_, _, _, site) -> if not list.contains(acc, site) { return acc ++ [site] }
+        _ -> ()
+      }
+    }
+    acc
+  }, (acc, _statement) => acc)
+  var banks: Map[CSite, Int] = map.empty()
+  var next = first
+  for site in sites { banks = map.insert(banks, site, next)
+    next = next + len(f.params) }
+  let loop_id = walk.fold_expr(f.body, -1, (acc, _expression) => acc,
+    (acc, s) => match s { CSLoop(id, _, _) -> if id > acc { id } else { acc }, _ -> acc }) + 1
+  let body = rewrite(f, banks, loop_id, f.body, true)
+  (CFun { ..f, body = CBlock([CSLoop(loop_id, CReturn(Some(body)), None)], None, f.ret) }, next)
+}
+
+## Called after mode analysis, before ownership or backend optimization.
+## Grouping and raw layouts survive separately because TCO can change locals.
+pub fn plain(lm: LMod) -> LMod = {
+  var logical: Map[String, CFun] = map.empty()
+  var transformed: Map[String, CFun] = map.empty()
+  var next = lm.next_sym
+  for f in emitted_core(lm).fns {
+    logical = map.insert(logical, fn_key(f), f)
+    let (body, after) = plain_fn(f, next)
+    transformed = map.insert(transformed, fn_key(f), body)
+    next = after
+  }
+  let entries = transformed
+  let replace = (f: CFun) => map.get(entries, fn_key(f)).expect("plain entry")
+  let group = (entry: (CFun, List[CFun])) => {
+    let (f, lifts) = entry
+    (replace(f), list.map(lifts, replace))
+  }
+  LMod { ..lm, logical = logical, m = CModule { ..lm.m,
+    fns = list.map(lm.m.fns, replace), next_sym = next },
+    fns = list.map(lm.fns, group), tests = list.map(lm.tests, group), next_sym = next }
+}
+
+## Native units are already flat; use the same rewrite and temporary banks.
+pub fn plain_module(m: CModule) -> CModule = {
+  var fns: List[CFun] = []
+  var next = m.next_sym
+  for f in m.fns {
+    let (body, after) = plain_fn(f, next)
+    fns = fns ++ [body]
+    next = after
+  }
+  CModule { ..m, fns = fns, next_sym = next }
+}

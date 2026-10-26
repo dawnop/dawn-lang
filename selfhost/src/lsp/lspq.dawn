@@ -2702,8 +2702,16 @@ fn arm_bindings(arm: HandlerArm) -> List[LambdaParam] = {
 fn walk_handler_arm(qc: QCx, q0: Q, arm: HandlerArm, ta: Option[TExpr]) -> Q =
   match ta {
     Some(XLambda(psyms, _, tbody, _, _, _, _, _)) -> {
-      let q = offer_lambda_params(qc, q0, arm_bindings(arm), psyms)
-      walk_e(qc, q, arm.body, Some(tbody))
+      # An observed origin is a lexical initializer, not an ABI parameter.
+      # Pair the source binder with its ordinary local symbol, then walk the
+      # user body without exposing that compiler-owned initializer.
+      let (bindings, body) = match tbody {
+        XBlock([TSLet(Some(sid), _, XCallBuiltin("provenance_origin", ..), _, _)], Some(inner), _, _, _) ->
+          (list.take(psyms, len(arm.params)) ++ [sid] ++ list.drop(psyms, len(arm.params)), inner)
+        _ -> (psyms, tbody)
+      }
+      let q = offer_lambda_params(qc, q0, arm_bindings(arm), bindings)
+      walk_e(qc, q, arm.body, Some(body))
     }
     _ -> walk_e(qc, q0, arm.body, None)
   }

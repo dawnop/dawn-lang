@@ -92,12 +92,17 @@ pub const SHOW_CLASS: String = "dawn/rt/Show"
 ## answers merge points, and these three classes have no branch in them at all
 ## (an all-abstract interface, and two straight-line constructors). Handing
 ## them a table would be plumbing for a callback that cannot fire.
-pub fn gen_fn_interface(arity: Int) -> Bytes !io = {
+pub fn gen_fn_interface(arity: Int, observed: Bool = false) -> Bytes !io = {
   let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, fn_iface(arity), obj())
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, "apply", erased_apply_desc(arity))
     .expect("mv")
   m.visitEnd()
+  if observed {
+    let om = Asm.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, "applyObserved",
+      str.replace(erased_apply_desc(arity), ")", "J)")).expect("observed apply")
+    om.visitEnd()
+  }
   if arity == 2 { gen_fn2_discard_default(cw) }
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
@@ -5942,6 +5947,53 @@ pub fn rt_ctl_yield() -> RtMethod = rt(CTL_CLASS, "yield", ctl_yield_desc())
 ## Every hand-written runtime call, for the test that reads them against the
 ## generated classes. A new `rt_*` above that is not added here is caught by
 ## scripts/intrinsic-parity.py, which reads both.
+# Optional observation payloads obey the same checked runtime-call contract
+# as the generated core runtime. Plain programs do not carry these classes.
+pub fn rt_provenance_before() -> RtMethod =
+  rt("dawn/rt/Provenance", "beforeAt", "(JLjava/lang/String;JLjava/lang/String;)J")
+
+pub fn rt_provenance_arrive() -> RtMethod =
+  rt("dawn/rt/Provenance", "arrive", "(Ljava/lang/String;)J")
+
+pub fn rt_provenance_finish() -> RtMethod =
+  rt("dawn/rt/Provenance", "finish", "(JZ)V")
+
+pub fn rt_provenance_unsupported() -> RtMethod =
+  rt("dawn/rt/Provenance", "unsupported", "(Ljava/lang/String;)V")
+
+pub fn rt_provenance_check_function() -> RtMethod =
+  rt("dawn/rt/Provenance", "checkFunction", "(Ljava/lang/Object;)V")
+
+pub fn rt_provenance_callback() -> RtMethod =
+  rt("dawn/rt/Provenance", "callback", "(Ljava/lang/Object;JJLjava/lang/String;)Ljava/lang/Object;")
+
+pub fn rt_provenance_observe() -> RtMethod =
+  rt("dawn/rt/Provenance", "observe", "(Ljava/lang/Object;Ljava/lang/Object;JLjava/lang/String;)Ljava/lang/Object;")
+
+pub fn rt_provenance_note() -> RtMethod =
+  rt("dawn/rt/Provenance", "note", "(JLjava/lang/String;)V")
+
+pub fn rt_provenance_completed() -> RtMethod =
+  rt("dawn/rt/Provenance", "completed", "(J)Ljava/lang/String;")
+
+pub fn rt_provenance_checkpoint() -> RtMethod =
+  rt("dawn/rt/Provenance", "checkpoint", "(J)Ljava/lang/String;")
+
+pub fn rt_provenance_rewind() -> RtMethod =
+  rt("dawn/rt/Provenance", "rewind", "(JLjava/lang/String;)V")
+
+pub fn rt_provenance_origin() -> RtMethod =
+  rt("dawn/rt/Provenance", "origin", "(J)Ljava/lang/String;")
+
+pub fn rt_provenance_field() -> RtMethod =
+  rt("dawn/rt/Provenance", "field", "(Ljava/lang/String;J)Ljava/lang/String;")
+
+pub fn rt_provenance_number() -> RtMethod =
+  rt("dawn/rt/Provenance", "number", "(Ljava/lang/String;J)J")
+
+pub fn rt_provenance_parent() -> RtMethod =
+  rt("dawn/rt/Provenance", "parent", "(Ljava/lang/String;)Ljava/lang/String;")
+
 pub fn emitter_rt_methods() -> List[RtMethod] = [
   rt_strings_cmp(),
   rt_strings_join(),
@@ -5959,5 +6011,20 @@ pub fn emitter_rt_methods() -> List[RtMethod] = [
   rt_io_run(),
   rt_io_cast(),
   rt_ctl_enter(),
-  rt_ctl_yield()
+  rt_ctl_yield(),
+  rt_provenance_before(),
+  rt_provenance_arrive(),
+  rt_provenance_finish(),
+  rt_provenance_unsupported(),
+  rt_provenance_check_function(),
+  rt_provenance_callback(),
+  rt_provenance_observe(),
+  rt_provenance_note(),
+  rt_provenance_completed(),
+  rt_provenance_checkpoint(),
+  rt_provenance_rewind(),
+  rt_provenance_origin(),
+  rt_provenance_field(),
+  rt_provenance_number(),
+  rt_provenance_parent()
 ]

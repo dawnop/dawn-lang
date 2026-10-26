@@ -1,0 +1,28 @@
+# Explicit return, Option propagation and ordinary recursive calls all close
+# the correct frame. Nested eager arguments execute before their callee opens.
+use std/io.{println}
+use std/provenance
+
+type Counter = { n: Int }
+fn bump(value: Counter) -> Counter = Counter { n = value.n + 1 }
+fn early(n: Int) -> Int = {
+  if n == 0 { return 7 }
+  9
+}
+fn maybe(n: Int) -> Option[Int] = {
+  let option: Option[Int] = if n == 0 { None } else { Some(n) }
+  let value = option?
+  Some(value + 1)
+}
+fn depth(n: Int) -> Int = if n == 0 { 0 } else { depth(n - 1) + 1 }
+pub fn main() -> Unit !io = {
+  let (answer, tree) = provenance.observe(scope => {
+    let a = early(0)
+    let b = maybe(0)
+    let c = depth(2)
+    let d = (Counter { n = 1 }).bump().bump()
+    ((a, b, c, d.n), provenance.completed(scope))
+  })
+  println("${answer}")
+  println(tree)
+}

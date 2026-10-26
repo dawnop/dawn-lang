@@ -1,29 +1,10 @@
-# Whole-tree walks over Core, spelled once for the passes that sit beside the
-# reference-counting rewrite: alias elimination (c/alias) before it, the view
-# analysis (c/views) before and after it.
-#
-# Why a file of its own. `rc.dawn` and `infer.dawn` each carry their own
-# enumerated traversal, and they have to: each one answers a different
-# question about every node (consuming or borrowing position, which symbols
-# are live), so a shared walker would be a lambda per question and would hide
-# the one thing those walks exist to show, which is that no Core node is
-# skipped. The two passes added here ask structural questions that do not
-# depend on the position -- "which symbols are assigned anywhere", "which
-# expressions define this binding", "rebuild this tree with a symbol
-# renamed" -- so the walk is the same for all of them, and one enumeration
-# is one place a node added later has to be taught to.
-#
-# The leaves are listed rather than swept up by a wildcard, for
-# `rc.fv_expr`'s reason: a node a walker silently skips is a symbol it never
-# saw, and for these passes that is a rename applied to half a tree.
-#
-# A `CForeign` is read but never rebuilt. The native backend refuses it
-# outright, so a function that holds one cannot be compiled to C and the
-# passes leave such a function alone (`fold_expr` reaches the node, so a
-# caller can notice it).
+# Structural Core traversal shared by execution-mode transforms and ownership
+# passes. Parent-specific meaning stays with each pass; this module only
+# enumerates children, including foreign callback evidence and source sites.
+# Rebuilding a foreign node preserves its selected ABI and all other fields.
 
 use ir/core.{
-  CExpr, CStmt, CUpdField,
+  CExpr, CStmt, CUpdField, CJava,
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
@@ -177,8 +158,10 @@ pub fn map_kids(e: CExpr, f: fn(CExpr) -> CExpr) -> CExpr =
     CSteal(inner, ty) -> CSteal(f(inner), ty)
     CReset(inner, stolen, ty) -> CReset(f(inner), stolen, ty)
     CReuse(tok, ctor, ty) -> CReuse(f(tok), f(ctor), ty)
-    # never rebuilt: see the header
-    CForeign(_, _, _) -> e
+    CForeign(j, ty, site) -> CForeign(CJava { ..j,
+      target = map_opt(j.target, f), args = list.map(j.args, f),
+      sam_evs = list.map(j.sam_evs, entry => { let (index, value) = entry
+        (index, f(value)) }) }, ty, site)
     CInt(_) -> e
     CFloat(_) -> e
     CBool(_) -> e

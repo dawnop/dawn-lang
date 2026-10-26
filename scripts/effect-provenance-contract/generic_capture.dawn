@@ -1,0 +1,20 @@
+# The factory runs only Plain. Its escaped closure keeps a dictionary whose
+# owner must remain known when the closure runs in an Observed entry.
+use std/io.{println}
+use std/provenance
+
+trait Step[T] { fn step(value: T) -> Int }
+type Value = { n: Int }
+type Box = { run: fn() -> Int }
+impl Step[Value] { fn step(value: Value) -> Int = value.n + 1 }
+fn make[T: Step](value: T) -> fn() -> Int = () => step(value)
+
+pub fn main() -> Unit !io = {
+  let before = Box { run = make(Value { n = 41 }) }
+  let (answer, tree) = provenance.observe(scope => {
+    let answer = before.run()
+    (answer, provenance.completed(scope))
+  })
+  println("${answer}")
+  println(tree)
+}

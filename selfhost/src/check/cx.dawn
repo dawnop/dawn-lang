@@ -147,7 +147,12 @@ pub(pkg) type Frame = {
   # an isolated body starts again at zero: on `Cx`, a loop inside a comptime
   # block read the enclosing loop's mark as its own and removed it (#204).
   # Nothing downstream reads has_jumps today, so the wrong answer was silent.
-  loop_jumps: Set[Int]
+  loop_jumps: Set[Int],
+  # Authority belongs to a lexical callback, never to the effect evidence row.
+  observation_scopes: List[Int],
+  observation_entry: Bool,
+  origin_scope: Option[Int],
+  trace_read: Bool
 }
 
 ## The checker state: every mutable member of the Kotlin Checker class.
@@ -296,6 +301,9 @@ pub(pkg) type Cx = {
   current_tparam_bounds: Map[Int, List[Int]],
   # frame-triage: declaration-scoped: a comptime block inside a test block is still in a test
   in_test: Bool,
+  # A resolved observe call, not the mere availability of std/provenance.
+  # frame-triage: module scope, an entry use in any body enables mode analysis
+  observation_used: Bool,
   # frame-triage: module identity
   is_std_module: Bool,
   # The module is the embedded std, loaded by a command that does not run its
@@ -432,6 +440,7 @@ pub(pkg) type LambdaCx =
     expected_ret: Option[Ty],
     captures: List[Int],
     sugar: Bool,
+    observes: Bool,
     # `settled` / `unsettled` used to sit here: which of the labels this
     # closure raised had been answered by a `with handle` in the body it was
     # written in, so that its row could be rewritten at the point it was
@@ -541,13 +550,15 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
       loop_stack = [],
       isolated = false,
       initializing = set.empty(),
-      loop_jumps = set.empty()
+      loop_jumps = set.empty(),
+      observation_scopes = [], observation_entry = false, origin_scope = None, trace_read = false
     },
     syms = map.empty(),
     current_eff_vars = map.empty(),
     current_tparams = map.empty(),
     current_tparam_bounds = map.empty(),
     in_test = false,
+    observation_used = false,
     is_std_module = is_std,
     std_trusted = false,
     is_entry_module = false,

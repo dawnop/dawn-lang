@@ -1,0 +1,162 @@
+# Static metadata uses declaration-relative coordinates and artifact-local IDs.
+# Both emitters consume this spelling; neither has to reconstruct an operation
+# from an evidence slot or substitute a handler's installation location.
+use check/tast.{CallSource}
+use check/identity
+use ir/core.{CSite, CAt, CSyntax, CNoSite, CFun, CModule, CCall, CIntrinsic, fn_key}
+use ir/reach.{Live}
+use ir/reach
+use ir/walk
+use std/map
+use std/set
+use std/str
+
+# A full standard-library build has no reachability root but still emits
+# the Origin readers, which require their optional runtime declarations.
+pub fn has_data(modules: List[CModule]) -> Bool = {
+  for module in modules {
+    for f in module.fns {
+      let used = walk.fold_expr(f.body, false, (found, e) => match e {
+        CIntrinsic(name, _, _, _) -> found || str.starts_with(name, "provenance_")
+        _ -> found
+      }, (found, _statement) => found)
+      if used { return true }
+    }
+  }
+  false
+}
+
+pub fn enabled(live: Option[Live]) -> Bool =
+  match live { Some(value) -> value.observation || value.provenance_data, None -> false }
+
+# Delimiter escaping is injective, including test descriptions and source-unit
+# names containing control characters. It prevents metadata from inventing a
+# record, an operation role, or another declaration's identity.
+pub fn escape(text: String) -> String =
+  str.replace(str.replace(str.replace(str.replace(str.replace(text, "%", "%25"), "\t", "%09"), "\n", "%0A"), "\r", "%0D"), "\u{0}", "%00")
+
+pub fn unescape(text: String) -> String =
+  str.replace(str.replace(str.replace(str.replace(str.replace(text, "%09", "\t"), "%0A", "\n"), "%0D", "\r"), "%00", "\u{0}"), "%25", "%")
+
+pub fn metadata(owner: String, declaration: String, site: CSite) -> String = {
+  let prefix = escape(owner) ++ "\t" ++ escape(declaration) ++ "\t"
+  match site {
+    CAt(lo, hi, nlo, source) | CSyntax(lo, hi, nlo, source) -> {
+      let operation = match source.operation {
+        Some((module, path)) -> module ++ ":" ++ path
+        None -> ""
+      }
+      prefix ++ "${lo}\t${hi}\t${nlo}\t${source.nhi}\t${source.role}\t" ++ escape(operation)
+    }
+    CNoSite -> prefix ++ "-1\t-1\t-1\t-1\tgenerated\t"
+  }
+}
+
+pub fn site_id(metadata: String) -> Int = identity.derive_text(metadata)
+
+pub fn definition(f: CFun) -> String = {
+  let role = if str.ends_with(f.definition.role, "-tail") {
+    str.slice(f.definition.role, 0, len(f.definition.role) - 5)
+  } else { f.definition.role }
+  escape(f.owner) ++ "\t" ++ escape(f.origin) ++ "\t${f.definition.lo}\t${f.definition.hi}\t" ++ escape(role) ++ "\t${definition_id(f)}"
+}
+
+## Entry families retain one Core identity even for synthetic bodies with
+## no source span. An optimization entry name never participates in this ID.
+pub fn definition_id(f: CFun) -> Int = identity.derive_text("definition\t" ++ fn_key(f))
+
+pub fn intrinsic_definition(name: String) -> String =
+  "intrinsic\t" ++ escape(name) ++ "\t-1\t-1\tintrinsic\t${identity.derive_text("intrinsic\t" ++ name)}"
+
+fn add_definition(table: Map[Int, String], spelling: String) -> Map[Int, String] = {
+  let id = identity.derive_text(spelling)
+  match map.get(table, id) {
+    Some(previous) -> if previous != spelling { panic("provenance: definition ID collision") }
+    None -> ()
+  }
+  map.insert(table, id, spelling)
+}
+
+pub fn transparent(f: CFun) -> Bool =
+  f.definition.role == "backend-trait-bridge" || f.definition.role == "trait-bridge" ||
+  f.definition.role == "function-value" || str.starts_with(f.definition.role, "builtin-value")
+
+# Builtin value adapters keep the identity of the primitive they invoke.
+# Adapters delegating to a Dawn definition let that observed entry arrive.
+pub fn frame_definition(f: CFun) -> Option[String] = {
+  if str.starts_with(f.definition.role, "builtin-value:") {
+    let delegates = walk.fold_expr(f.body, false, (found, e) => match e {
+      CCall(_, _, _, _) -> true
+      _ -> found
+    }, (found, _statement) => found)
+    if delegates { return None }
+    return Some(intrinsic_definition(str.drop(f.definition.role, len("builtin-value:"))))
+  }
+  if transparent(f) { None } else { Some(definition(f)) }
+}
+
+pub fn callback_site(site: CSite) -> CSite = match site {
+  CAt(lo, hi, nlo, source) | CSyntax(lo, hi, nlo, source) ->
+    CSyntax(lo, hi, nlo, CallSource { ..source, role = "library-callback" })
+  CNoSite -> CNoSite
+}
+
+fn add_site(table: Map[Int, String], owner: String, declaration: String, site: CSite) -> Map[Int, String] = {
+  let text = metadata(owner, declaration, site)
+  let id = site_id(text)
+  match map.get(table, id) {
+    Some(previous) -> if previous != text { panic("provenance: static Site ID collision") }
+    None -> ()
+  }
+  map.insert(table, id, text)
+}
+
+## Static metadata is checked once, before emission; IDs never index a live
+## activation or a handler evidence slot. Plain roots contribute observe
+## boundaries only. Observed roots retain all logical and synthetic sites.
+pub fn site_table(modules: List[CModule], live: Option[Live]) -> Map[Int, String] = {
+  var table: Map[Int, String] = map.empty()
+  var definitions: Map[Int, String] = map.empty()
+  if not enabled(live) { return table }
+  for module in modules {
+    for f in module.fns {
+      let observed = match live { Some(l) -> set.has(l.observed, fn_key(f)), None -> false }
+      let plain = match live { Some(l) -> set.has(l.plain, fn_key(f)), None -> false }
+      if not observed && not plain { continue }
+      if observed {
+        definitions = add_definition(definitions, "definition\t" ++ fn_key(f))
+        definitions = walk.fold_expr(f.body, definitions, (acc, e) => match e {
+          CIntrinsic(name, _, _, _) -> add_definition(acc, "intrinsic\t" ++ name)
+          _ -> acc
+        }, (acc, _statement) => acc)
+      }
+      table = walk.fold_expr(f.body, table, (acc, e) => match e {
+        CCall(_, _, _, site) -> if observed {
+          add_site(add_site(acc, f.owner, f.origin, site), f.owner, f.origin, callback_site(site))
+        } else { acc }
+        CIntrinsic(name, _, _, site) -> {
+          var next = acc
+          if name == "provenance_observe" || (observed && not str.starts_with(name, "provenance_") && site != CNoSite) {
+            next = add_site(next, f.owner, f.origin, site)
+            if observed { next = add_site(next, f.owner, f.origin, callback_site(site)) }
+          }
+          if observed && len(reach.runtime_callbacks(name)) > 0 {
+            next = add_site(next, f.owner, f.origin, callback_site(site))
+          }
+          next
+        }
+        _ -> acc
+      }, (acc, _statement) => acc)
+    }
+  }
+  table
+}
+
+pub fn table_class(owner: String) -> String = owner ++ "\$provenance_sites"
+pub fn table_method(id: Int) -> String = "site\$${id}"
+
+test "metadata fields round trip delimiters and literal escape spellings" {
+  let text = "a%09\tperform\n\r\u{0}"
+  assert unescape(escape(text)) == text
+  assert escape(text) == "a%2509%09perform%0A%0D%00"
+}

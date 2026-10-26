@@ -59,6 +59,8 @@ use check/types.{
   TyTuple, TyFn, ELabeled, EPure, eff_labels
 }
 use std/map
+use ir/walk as core_walk
+use std/list as lists
 use std/set
 use std/str
 
@@ -121,6 +123,7 @@ type Idx = {
   by_default: Map[(String, String), List[Int]],
   # the slots of the copy the C emitter keeps, per key (see `dict_owners`)
   dicts: Map[String, List[CDictSlot]],
+  dict_traits: Map[String, Int],
   # the slots of every module's own copy, per (module, key), which is what
   # the JVM emitter writes into that module's dictionary class
   own_dicts: Map[(String, String), List[CDictSlot]]
@@ -129,7 +132,10 @@ type Idx = {
 type Rch = {
   idx: Idx,
   seen: Set[Int],
-  work: List[Int],
+  mode_seen: Set[(Int, Int)],
+  work: List[(Int, Int)],
+  mode: Int,
+  mode_analysis: Bool,
   # the module whose body is being walked, for the per-module half of
   # `dict_edge`. Set once per work item rather than threaded through `walk`.
   cur: String,
@@ -139,7 +145,10 @@ type Rch = {
   adts: Set[Int],
   java_classes: Set[String],
   ctl: Bool,
+  observation: Bool,
+  provenance_data: Bool,
   lists: Bool,
+  list_modes: Set[Int],
   u: TableUse
 }
 
@@ -153,6 +162,9 @@ pub type Live = {
   tables: TableUse,
   ## `core.fn_key` of every function a chain of calls from the roots reaches
   fns: Set[String],
+  ## Execution modes share identities; only these entries may be emitted.
+  plain: Set[String],
+  observed: Set[String],
   ## the dictionary keys reached, for the C emitter's one-per-program table
   dicts: Set[String],
   ## `<owner>\n<key>` for each module's own copy, for the JVM's dictionary
@@ -164,6 +176,8 @@ pub type Live = {
   java_classes: Set[String],
   ## A live one-shot operation/handler needs the control driving loop.
   ctl: Bool,
+  observation: Bool,
+  provenance_data: Bool,
   ## A live `List` anywhere means the emitters can spell a `std/pvec` call.
   ## The JVM emitter reads it at every such call (`emit.call_pvec`): a call
   ## written into a program this says has no List is a pruned method, so it
@@ -225,6 +239,7 @@ fn build_idx(mods: List[CModule]) -> Idx = {
   var by_impl: Map[(String, Int, String, String), Int] = map.empty()
   var by_default: Map[(String, String), List[Int]] = map.empty()
   var dicts: Map[String, List[CDictSlot]] = map.empty()
+  var dict_traits: Map[String, Int] = map.empty()
   var own_dicts: Map[(String, String), List[CDictSlot]] = map.empty()
   let owners = dict_owners(mods)
   var i = 0
@@ -261,6 +276,7 @@ fn build_idx(mods: List[CModule]) -> Idx = {
       i = i + 1
     }
     for d in m.dicts {
+      dict_traits = map.insert(dict_traits, d.key, d.trait_id)
       # the same key in two modules is the same shape (emitc dedupes program
       # dictionaries on exactly that), so which copy this records changes only
       # the owner the slot symbols are mangled from -- and the C emitter has
@@ -277,7 +293,7 @@ fn build_idx(mods: List[CModule]) -> Idx = {
     by_name = by_name,
     by_impl = by_impl,
     by_default = by_default,
-    dicts = dicts,
+    dicts = dicts, dict_traits = dict_traits,
     own_dicts = own_dicts
   }
 }
@@ -285,19 +301,30 @@ fn build_idx(mods: List[CModule]) -> Idx = {
 fn touch(st: Rch, oi: Option[Int]) -> Rch =
   match oi {
     Some(i) ->
-      if set.has(st.seen, i) {
+      if set.has(st.mode_seen, (i, st.mode)) {
         st
       } else {
-        Rch { ..st, seen = set.insert(st.seen, i), work = st.work ++ [i] }
+        Rch { ..st, seen = set.insert(st.seen, i),
+          mode_seen = set.insert(st.mode_seen, (i, st.mode)), work = st.work ++ [(i, st.mode)] }
       }
     None -> st
   }
 
-fn direct(st: Rch, owner: String, name: String) -> Rch =
-  touch(st, map.get(st.idx.by_name, (owner, name)))
+fn direct(st: Rch, owner: String, name: String) -> Rch = {
+  let target = map.get(st.idx.by_name, (owner, name))
+  if st.mode_analysis && st.mode == 2 && target == None {
+    panic("provenance: missing internal observed entry for " ++ owner ++ "." ++ name)
+  }
+  touch(st, target)
+}
 
-fn impl_edge(st: Rch, owner: String, tid: Int, subj: Ty, method: String) -> Rch =
-  touch(st, map.get(st.idx.by_impl, (owner, tid, subject_key(subj), method)))
+fn impl_edge(st: Rch, owner: String, tid: Int, subj: Ty, method: String) -> Rch = {
+  let target = map.get(st.idx.by_impl, (owner, tid, subject_key(subj), method))
+  if st.mode_analysis && st.mode == 2 && target == None {
+    panic("provenance: missing internal observed impl for " ++ owner ++ "." ++ method)
+  }
+  touch(st, target)
+}
 
 fn default_edge(st0: Rch, owner: String, method: String) -> Rch = {
   var st = st0
@@ -305,7 +332,9 @@ fn default_edge(st0: Rch, owner: String, method: String) -> Rch = {
     Some(l) -> {
       for i in l { st = touch(st, Some(i)) }
     }
-    None -> ()
+    None -> if st.mode_analysis && st.mode == 2 {
+      panic("provenance: missing internal observed default for " ++ owner ++ "." ++ method)
+    }
   }
   st
 }
@@ -313,6 +342,15 @@ fn default_edge(st0: Rch, owner: String, method: String) -> Rch = {
 fn mark_slots(st0: Rch, slots: List[CDictSlot]) -> Rch = {
   var st = st0
   for s in slots {
+    let mode = st.mode
+    if st.mode_analysis {
+      let plain = Rch { ..st, mode = 1 }
+      st = match s {
+        CSlotFn(owner, name) -> direct(plain, owner, name)
+        CSlotDefault(owner, method) -> default_edge(plain, owner, method)
+      }
+      st = Rch { ..st, mode = mode }
+    }
     st = match s {
       CSlotFn(owner, name) -> direct(st, owner, name)
       CSlotDefault(owner, method) -> default_edge(st, owner, method)
@@ -334,7 +372,7 @@ fn mark_slots(st0: Rch, slots: List[CDictSlot]) -> Rch = {
 ## idempotent.
 fn dict_edge(st0: Rch, key: String) -> Rch = {
   var st = st0
-  if not set.has(st.seen_dicts, key) {
+  if st.mode_analysis || not set.has(st.seen_dicts, key) {
     st = Rch {
       ..st,
       seen_dicts = set.insert(st.seen_dicts, key),
@@ -346,7 +384,7 @@ fn dict_edge(st0: Rch, key: String) -> Rch = {
     }
   }
   let ok = own_dict_key(st.cur, key)
-  if not set.has(st.seen_own_dicts, ok) {
+  if st.mode_analysis || not set.has(st.seen_own_dicts, ok) {
     st = Rch { ..st, seen_own_dicts = set.insert(st.seen_own_dicts, ok) }
     st = match map.get(st.idx.own_dicts, (st.cur, key)) {
       Some(slots) -> mark_slots(st, slots)
@@ -459,7 +497,7 @@ fn java_class_use(st: Rch, name: String) -> Rch = {
 ## carry an erased pack, but their labelled rows keep the evidence classes
 ## conservatively too; a label and its record share the same ADT id.
 fn type_use(st0: Rch, ty: Ty) -> Rch = {
-  let st = if mentions_list(ty) { Rch { ..st0, lists = true } } else { st0 }
+  let st = if mentions_list(ty) { Rch { ..st0, lists = true, list_modes = set.insert(st0.list_modes, st0.mode) } } else { st0 }
   let s = type_adts(st, ty)
   # Containers and function values erase their children in JVM descriptors.
   # Their labels still keep evidence conservatively, but merely mentioning
@@ -507,7 +545,7 @@ fn types_use(st0: Rch, ts: List[Ty]) -> Rch = {
 }
 
 fn folded_use(st: Rch, ty: Ty) -> Rch =
-  if folded_may_hold_list(ty) { Rch { ..st, lists = true } } else { st }
+  if folded_may_hold_list(ty) { Rch { ..st, lists = true, list_modes = set.insert(st.list_modes, st.mode) } } else { st }
 
 fn walk_stmt(st0: Rch, s: CStmt) -> Rch =
   match s {
@@ -553,10 +591,51 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
       var st =
         match callee {
           CDirect(owner, name) -> direct(st0, owner, name)
-          CDynamic(target) -> walk(st0, target)
+          CDynamic(target) -> {
+            var next = walk(st0, target)
+            if st0.mode_analysis {
+              var i = 0
+              for f in st0.idx.fns {
+                if str.starts_with(f.name, "lambda$") && len(f.params) + len(f.evs) == len(args) {
+                  next = touch(next, Some(i))
+                }
+                i = i + 1
+              }
+            }
+            next
+          }
           # the dictionary value routes the call; its slots were charged where
           # the dictionary was referenced (dict_edge)
-          CMethod(dict, _, _, _, _) -> walk(st0, dict)
+          CMethod(dict, tid, _, slot, _) -> {
+            var next = walk(st0, dict)
+            if st0.mode_analysis {
+              for entry in map.entries(st0.idx.dicts) {
+                let (key, slots) = entry
+                if map.get(st0.idx.dict_traits, key) == Some(tid) && slot < len(slots) {
+                  next = mark_slots(next, [slots[slot]])
+                }
+              }
+              # JVM dictionaries retain a class per referencing module. A
+              # dictionary created in Plain can be passed across modules to
+              # this Observed call, so each retained copy needs its slot.
+              for entry in map.entries(st0.idx.own_dicts) {
+                let ((_, key), slots) = entry
+                if map.get(st0.idx.dict_traits, key) == Some(tid) && slot < len(slots) {
+                  next = mark_slots(next, [slots[slot]])
+                }
+              }
+              var i = 0
+              for f in st0.idx.fns {
+                match f.impl_of {
+                  Some((id, _)) -> if id == tid { next = touch(next, Some(i)) }
+                  None -> ()
+                }
+                if f.default_of == Some(tid) { next = touch(next, Some(i)) }
+                i = i + 1
+              }
+            }
+            next
+          }
           CImpl(owner, tid, subj, method) -> impl_edge(st0, owner, tid, subj, method)
           CDefault(owner, _, method) -> default_edge(st0, owner, method)
         }
@@ -564,8 +643,26 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
     }
     CIntrinsic(name, args, _, _) -> {
       let st = Rch { ..st0, u = mark(st0.u, name),
-        ctl = st0.ctl || name == "ctl_run" || name == "ctl_yield" }
-      walk_list(st, args)
+        ctl = st0.ctl || name == "ctl_run" || name == "ctl_yield",
+        observation = st0.observation || name == "provenance_observe",
+        provenance_data = st0.provenance_data || name == "provenance_field" || name == "provenance_number" || name == "provenance_parent" }
+      var called = st
+      if st.mode_analysis {
+        for callback in runtime_callbacks(name) {
+          let (_, arity) = callback
+          var i = 0
+          for f in st.idx.fns {
+            if str.starts_with(f.name, "lambda$") && len(f.params) + len(f.evs) == arity {
+              called = touch(called, Some(i))
+            }
+            i = i + 1
+          }
+        }
+      }
+      if st.mode_analysis && name == "provenance_observe" && len(args) > 0 {
+        let next = walk(Rch { ..called, mode = 2 }, args[0])
+        walk_list(Rch { ..next, mode = st.mode }, lists.drop(args, 1))
+      } else { walk_list(called, args) }
     }
     CCtor(aid, _, args, _) -> walk_list(type_use(st0, TyAdt(aid, [])), args)
     # a kept field is a read of the base at its declared type, exactly as the
@@ -583,8 +680,12 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
     CField(target, aid, _, _, _) -> walk(type_use(st0, TyAdt(aid, [])), target)
     CIsCtor(target, aid, _) -> walk(type_use(st0, TyAdt(aid, [])), target)
     CTagOf(target, aid) -> walk(type_use(st0, TyAdt(aid, [])), target)
-    CClosure(fn_name, owner, captures, _) ->
-      walk_list(direct(st0, owner, fn_name), captures)
+    CClosure(fn_name, owner, captures, _) -> {
+      let next = direct(st0, owner, fn_name)
+      # Function values keep the canonical plain entry and can cross scopes.
+      let canonical = if st0.mode_analysis { direct(Rch { ..next, mode = 1 }, owner, fn_name) } else { next }
+      walk_list(Rch { ..canonical, mode = st0.mode }, captures)
+    }
     CDictRef(key, _, _, _) -> dict_edge(st0, key)
     CDictApply(key, args, _) -> walk_list(dict_edge(st0, key), args)
     CDictArg(dict, _, _, _, _) -> walk(st0, dict)
@@ -668,29 +769,30 @@ pub fn live_set(
   list_roots: List[(String, String)],
   # Descriptors of structures an emitter always keeps, even when no live
   # function mentions them (ordinary JVM ADTs and trait interfaces).
-  extra_types: List[Ty] = []
+  extra_types: List[Ty] = [],
+  mode_analysis: Bool = false
 ) -> Live = {
   let idx = build_idx(mods)
   var rootset: Set[String] = set.empty()
   for r in roots { rootset = set.insert(rootset, r) }
   var st = Rch {
     idx = idx,
-    seen = set.empty(),
-    work = [],
+    seen = set.empty(), mode_seen = set.empty(),
+    work = [], mode = 1, mode_analysis = mode_analysis,
     cur = "",
     seen_dicts = set.empty(),
     seen_own_dicts = set.empty(),
     live_dicts = set.empty(),
     adts = set.empty(),
     java_classes = set.empty(),
-    ctl = false,
-    lists = false,
+    ctl = false, observation = false, provenance_data = false,
+    lists = false, list_modes = set.empty(),
     u = no_tables()
   }
   st = types_use(st, extra_types)
   var i = 0
   for f in idx.fns {
-    if set.has(rootset, f.owner) {
+    if set.has(rootset, f.owner) && (not mode_analysis || not str.starts_with(f.name, "lambda$")) {
       st = touch(st, Some(i))
     }
     i = i + 1
@@ -702,18 +804,19 @@ pub fn live_set(
   # thirty edges in. Seeding them mid-walk rather than up front is the whole
   # difference from an unconditional root: everything they reach is queued
   # behind them and the fixed point is the same one either way.
-  var list_rooted = false
+  var list_rooted: Set[Int] = set.empty()
   var qi = 0
-  while qi < len(st.work) || (st.lists && not list_rooted) {
-    if st.lists && not list_rooted {
-      list_rooted = true
+  while qi < len(st.work) || (set.has(st.list_modes, st.mode) && not set.has(list_rooted, st.mode)) {
+    if set.has(st.list_modes, st.mode) && not set.has(list_rooted, st.mode) {
+      list_rooted = set.insert(list_rooted, st.mode)
       for pr in list_roots {
         let (owner, name) = pr
         st = direct(st, owner, name)
       }
     }
     if qi < len(st.work) {
-      let fi = st.work[qi]
+      let (fi, mode) = st.work[qi]
+      st = Rch { ..st, mode = mode }
       qi = qi + 1
       let f = st.idx.fns[fi]
       st = type_use(st, f.ret)
@@ -727,16 +830,128 @@ pub fn live_set(
     if set.has(st.seen, li) { live = set.insert(live, fn_key(f)) }
     li = li + 1
   }
+  if st.observation && not mode_analysis {
+    var kept: List[CModule] = []
+    let owners = dict_owners(mods)
+    for m in mods {
+      var fns: List[CFun] = []
+      for f in m.fns { if set.has(live, fn_key(f)) { fns = fns ++ [f] } }
+      var dicts: List[CDictDef] = []
+      for d in m.dicts {
+        let canonical = set.has(st.live_dicts, d.key) && map.get(owners, d.key) == Some(m.owner)
+        if canonical || set.has(st.seen_own_dicts, own_dict_key(m.owner, d.key)) { dicts = dicts ++ [d] }
+      }
+      kept = kept ++ [CModule { ..m, fns = fns, dicts = dicts }]
+    }
+    return live_set(kept, roots, list_roots, extra_types, true)
+  }
+  var plain: Set[String] = set.empty()
+  var observed: Set[String] = set.empty()
+  var mi = 0
+  for f in st.idx.fns {
+    if set.has(st.mode_seen, (mi, 1)) { plain = set.insert(plain, fn_key(f)) }
+    if set.has(st.mode_seen, (mi, 2)) { observed = set.insert(observed, fn_key(f)) }
+    mi = mi + 1
+  }
+  if mode_analysis {
+    match validate_observed(idx, observed) {
+      Some(error) -> panic(error)
+      None -> ()
+    }
+  }
   Live {
-    tables = st.u,
+    tables = st.u, plain = plain, observed = observed,
     fns = live,
     dicts = st.live_dicts,
     own_dicts = st.seen_own_dicts,
     adts = st.adts,
     java_classes = st.java_classes,
-    ctl = st.ctl,
+    ctl = st.ctl, observation = st.observation, provenance_data = st.provenance_data,
     lists = st.lists
   }
+}
+
+## Validate the emitted mode contract separately from marking. A dropped mask
+## must fail compilation, including on the JVM where a missing method would
+## otherwise become a late linkage error. No runtime fallback is permitted.
+fn missing_observed(idx: Idx, observed: Set[String], target: Option[Int]) -> Option[String] =
+  match target {
+    Some(i) -> if set.has(observed, fn_key(idx.fns[i])) { None }
+    else { Some("provenance: missing internal observed entry for " ++ idx.fns[i].owner ++ "." ++ idx.fns[i].name) }
+    None -> Some("provenance: missing internal observed target")
+  }
+
+fn missing_slot(idx: Idx, observed: Set[String], slot: CDictSlot) -> Option[String] = match slot {
+  CSlotFn(owner, name) -> missing_observed(idx, observed, map.get(idx.by_name, (owner, name)))
+  CSlotDefault(owner, method) -> {
+    let targets = map.get(idx.by_default, (owner, method)).unwrap_or([])
+    if len(targets) == 0 { return Some("provenance: missing internal observed default for " ++ owner ++ "." ++ method) }
+    for target in targets {
+      let error = missing_observed(idx, observed, Some(target))
+      if error != None { return error }
+    }
+    None
+  }
+}
+
+fn missing_dynamic(idx: Idx, observed: Set[String], arity: Int) -> Option[String] = {
+  var i = 0
+  for f in idx.fns {
+    if str.starts_with(f.name, "lambda$") && len(f.params) + len(f.evs) == arity {
+      let error = missing_observed(idx, observed, Some(i))
+      if error != None { return error }
+    }
+    i = i + 1
+  }
+  None
+}
+
+fn missing_node(idx: Idx, observed: Set[String], e: CExpr) -> Option[String] = match e {
+  CClosure(name, owner, _, _) -> missing_observed(idx, observed, map.get(idx.by_name, (owner, name)))
+  CCall(callee, args, _, _) -> match callee {
+    CDirect(owner, name) -> missing_observed(idx, observed, map.get(idx.by_name, (owner, name)))
+    CImpl(owner, tid, subject, method) -> missing_observed(idx, observed,
+      map.get(idx.by_impl, (owner, tid, subject_key(subject), method)))
+    CDefault(owner, _, method) -> missing_slot(idx, observed, CSlotDefault(owner, method))
+    CDynamic(_) -> missing_dynamic(idx, observed, len(args))
+    CMethod(_, tid, _, slot, _) -> {
+      for entry in map.entries(idx.own_dicts) {
+        let ((_, key), slots) = entry
+        if map.get(idx.dict_traits, key) == Some(tid) && slot < len(slots) {
+          let error = missing_slot(idx, observed, slots[slot])
+          if error != None { return error }
+        }
+      }
+      None
+    }
+  }
+  CIntrinsic(name, _, _, _) -> {
+    for callback in runtime_callbacks(name) {
+      let (_, arity) = callback
+      let error = missing_dynamic(idx, observed, arity)
+      if error != None { return error }
+    }
+    None
+  }
+  _ -> None
+}
+
+fn validate_observed(idx: Idx, observed: Set[String]) -> Option[String] = {
+  for f in idx.fns {
+    let active = set.has(observed, fn_key(f))
+    let empty: Option[String] = None
+    let error = core_walk.fold_expr(f.body, empty, (previous, e) => {
+      if previous != None { return previous }
+      if active { return missing_node(idx, observed, e) }
+      match e {
+        CIntrinsic("provenance_observe", args, _, _) -> if len(args) > 0 { missing_node(idx, observed, args[0]) }
+        else { Some("provenance: observation entry has no callback") }
+        _ -> None
+      }
+    }, (previous, _statement) => previous)
+    if error != None { return error }
+  }
+  None
 }
 
 ## The Unicode half under its old name, so the freight question reads the way
@@ -1197,4 +1412,39 @@ test "a test's description never shadows a function of the same name" {
   ])
   let u = table_use([app, std_str, other], ["app2"])
   assert u.str_lower
+}
+
+test "execution modes share definition identity and follow observation roots" {
+  let call = (name: String) => CCall(CDirect("app", name), [], TyUnit, CNoSite)
+  let observed = CIntrinsic("provenance_observe", [CClosure("lambda$0", "app", [], TyFn([], TyUnit, EPure))], TyUnit, CNoSite)
+  let helper = tfn("app", "helper", CUnit)
+  let cold = tfn("app", "cold", CUnit)
+  let callback = tfn("app", "lambda$0", call("helper"))
+  let main = tfn("app", "main", CBlock([CSDiscard(call("helper"))], Some(observed), TyUnit))
+  let live = live_set([tmod("app", [main, helper, cold, callback])], ["app"], [])
+  assert set.has(live.plain, fn_key(helper))
+  assert set.has(live.observed, fn_key(helper))
+  assert set.has(live.plain, fn_key(cold))
+  assert not set.has(live.observed, fn_key(cold))
+  assert set.has(live.observed, fn_key(callback))
+  # A canonical entry exists for an address-taken callback even when its
+  # actual invocation is observed. It never captures its creation mode.
+  assert set.has(live.plain, fn_key(callback))
+  assert not set.has(live.observed, fn_key(main))
+}
+
+## Runtime callbacks are synchronous boundaries with a known function ABI.
+## Every other internal dynamic edge is represented by CCall in Core.
+pub fn runtime_callbacks(name: String) -> List[(Int, Int)] =
+  if name == "catch_panic" || name == "catch_fault" { [(0, 1)] }
+  else if name == "bracket" { [(1, 2), (2, 2)] }
+  else { [] }
+
+test "a missing internal observed entry is a compile error before either backend emits" {
+  let helper = tfn("app", "helper", CUnit)
+  let callback = tfn("app", "lambda$0", CCall(CDirect("app", "helper"), [], TyUnit, CNoSite))
+  let idx = build_idx([tmod("app", [helper, callback])])
+  let mask = set.insert(set.empty(), fn_key(callback))
+  assert validate_observed(idx, mask) == Some("provenance: missing internal observed entry for app.helper")
+  assert validate_observed(idx, set.insert(mask, fn_key(helper))) == None
 }

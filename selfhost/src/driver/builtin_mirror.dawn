@@ -33,6 +33,7 @@ use check/identity.{path_table_get}
 use check/passes.{pass_fn_signatures, seed_prelude}
 use check/types.{intrinsics, intr_owned_table, prelude_adts, prelude_traits, sig_render_fqn}
 use front/parser.{parse_module}
+use front/fmt as source_fmt
 use ir/lower.{internal_intrinsics}
 
 ## The one signature whose rendering is deliberately not Dawn source, and so
@@ -47,6 +48,14 @@ use ir/lower.{internal_intrinsics}
 ## contract's checker holds the skip set equal to this one name, so a second
 ## signature that stops parsing is red rather than absorbed.
 fn roundtrip_skips() -> List[String] = ["cast"]
+
+# The mirror is source text, so its declaration layout follows the formatter.
+# The contract still compares every character and independently rereads it.
+fn declaration_layout(text: String) -> String =
+  match source_fmt.format(text) {
+    Ok(value) -> str.trim(value)
+    Err(_) -> panic("builtin signature cannot be formatted")
+  }
 
 ## Every entry of `intrinsics()`, each followed by its read-back record, then
 ## lowering's internal names, then the owned-argument table
@@ -66,7 +75,7 @@ pub fn builtin_mirror_lines() -> List[String] !io = {
   for name in list.sort(map.keys(it)) {
     let i = map.get(it, name).expect("intrinsic listed")
     let vis = if i.internal { "internal" } else { "pub" }
-    let sig = sig_render_fqn(adts, traits, i.sig)
+    let sig = declaration_layout(sig_render_fqn(adts, traits, i.sig))
     # A tab or a newline inside a rendering would make the line format lie
     # about how many fields it has. Neither can occur -- a signature is built
     # from identifiers, punctuation and single spaces -- so this is a guard
@@ -116,7 +125,7 @@ fn reread(base: Cx, sig: String) -> String !io = {
   if len(sigs.paths) != 1 {
     return "<parsed " ++ to_string(len(sigs.paths)) ++ " declarations>"
   }
-  sig_render_fqn(cx1.adts, cx1.traits, path_table_get(sigs, sigs.paths[0]).expect("the declaration's own header"))
+  declaration_layout(sig_render_fqn(cx1.adts, cx1.traits, path_table_get(sigs, sigs.paths[0]).expect("the declaration's own header")))
 }
 
 test "every owned-argument entry names an intrinsic" {
