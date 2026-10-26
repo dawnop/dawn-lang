@@ -11,6 +11,7 @@ use std/str
 use std/list
 use std/map
 use std/set
+use check/provenance as observation
 use front/ast.{
   TypeRef, TNamed, Module,
   module_fns, module_types, module_consts, module_traits,
@@ -57,7 +58,7 @@ use check/types.{
   sig_abi_eff, ty_eff_vars_all, label_key, var_key, assoc_key,
   EvidenceRole, LabelSlot, VariableSlot, AssociatedSlot, evidence_role_key,
   ev_label_name, ev_assoc_name, ev_var_name,
-  EV_PACK_ID, ev_pack_ty, ty_loc,
+  EV_PACK_ID, ev_pack_ty, ty_loc, ty_origin,
   AdtI, CtorI, FieldI, EffectI, TraitI, ImplI, Sym, Sig,
   ty_show, ctor_render, fn_return_show, eff_ctl_labels, buffer_reach, ty_has_any_var, is_mem_effect, eff_names_mem, adt_of, trait_of, sig_render, subst, subst_eff, eff_show,
   assoc_effect_advice,
@@ -394,7 +395,7 @@ fn ev_expr(
 
 test "evidence reads preserve distinct origins behind the same runtime key" {
   let base = push_scope(test_cx())
-  let closure = LambdaCx { boundary = len(base.frame.scopes), expected_ret = None,
+  let closure = LambdaCx { observes = false, boundary = len(base.frame.scopes), expected_ret = None,
     captures = [], sugar = false, arm = false, ctl = false, local_fn = None, handler_of = None,
     staged_kind = OrdinaryClosure, staged = map.empty() }
   let origins: List[EvidenceRole] = [LabelSlot(71), VariableSlot(72),
@@ -2637,7 +2638,7 @@ test "loop jumps respect lambda boundaries" {
     ..cx,
     frame = Frame {
       ..cx.frame,
-      lambda_stack = [LambdaCx {
+      lambda_stack = [LambdaCx { observes = false,
         boundary = 0,
         expected_ret = None,
         captures = [],
@@ -4024,7 +4025,8 @@ pub(pkg) fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
       initializing = set.empty(),
       # keyed by depth in `loop_stack`, which starts again at zero here, so an
       # outer loop's mark would be read as the first inner loop's (#204)
-      loop_jumps = set.empty()
+      loop_jumps = set.empty(),
+      observation_scopes = [], observation_entry = false, origin_scope = None, trace_read = false
     }
   }, cx.frame)
 }
@@ -4065,6 +4067,7 @@ test "an isolated context reports its own effects, then restores all ten fields"
   cx = Cx {
     ..cx,
     frame = Frame {
+      observation_scopes = [], observation_entry = false, origin_scope = None, trace_read = false,
       scopes = [outer_scope],
       # not EIo: the body below records EIo, and an outer record that already
       # held it could not tell restoring from keeping the body's
@@ -4078,7 +4081,7 @@ test "an isolated context reports its own effects, then restores all ten fields"
         owner = None, trait_id = None, op_of = None, inferring = false
       }),
       dict_syms = outer_dicts,
-      lambda_stack = [LambdaCx {
+      lambda_stack = [LambdaCx { observes = false,
         boundary = 3, expected_ret = None, captures = [], sugar = false, arm = false,
         ctl = false, local_fn = None, handler_of = None,
         staged_kind = OrdinaryClosure,
@@ -4343,6 +4346,11 @@ pub(pkg) fn check_fn_value(
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
   var cx = used_signature(initial, f)
+  if observation.entry(f) {
+    return (cerr_h(cx, "observe cannot be used as a function value", lo, hi,
+      "call provenance.observe with a literal callback or structured with body"),
+      TyError, XError(owner_off(initial, lo), owner_off(initial, hi)))
+  }
   # A declared effect used to be refused here: a function value's wrapper is a
   # lambda, a lambda captured its evidence where it was written, and a
   # synthesised wrapper would have captured whatever handler was in scope at
@@ -4500,7 +4508,7 @@ fn eta_bounded_fn_value(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
-  let ctx = LambdaCx {
+  let ctx = LambdaCx { observes = false,
     boundary = len(cx.frame.scopes),
     expected_ret = None,
     captures = [],
@@ -6918,7 +6926,11 @@ pub(pkg) fn resolve_local(
         var stack: List[LambdaCx] = []
         for lc in cx1.frame.lambda_stack {
           if i < lc.boundary {
-            if cell_hid(sym) != None {
+            if observation.trace(sym.ty) && not cx1.is_std_module && not lc.observes && lc.handler_of == None {
+              cx1 = cerr_h(cx1, "TraceScope cannot be captured by an escaping closure", lo, hi,
+                "use it only in its observe callback or structured handler region")
+              stack = stack ++ [lc]
+            } else if cell_hid(sym) != None {
               # a state cell: captured like an ordinary `let` into the closures
               # of its own installation and through any handler's block
               # remainder, refused everywhere else. The licence is checked one
@@ -7091,6 +7103,12 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
   match found {
     Some(id) -> {
       let sym = sym_of(cx1, id)
+      if observation.trace(sym.ty) && not cx1.is_std_module &&
+        (not cx1.frame.trace_read || not list.contains(cx1.frame.observation_scopes, id)) {
+        return (cerr_h(cx1, "TraceScope is a lexical handle", lo, hi,
+          "use the observe parameter directly with provenance.note, completed, checkpoint or rewind"),
+          TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+      }
       match staged_cell_of(cx1, id) {
         Some(sc) -> return staged_read(cx1, sc, name, lo, hi)
         None -> ()
@@ -7160,6 +7178,30 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
 ## row, and is non-`None` only on the call from `check_local_fn`. Nothing here reads it
 ## either: it is written into the frame for `local_fn_missing_evidence`, which
 ## is the one question a lifted body has to answer differently from a closure.
+## Implicit origin authority refers to a resolved symbol even if its spelling
+## is shadowed. Looking the name up again could capture a different local.
+fn capture_observation(cx: Cx, sid: Int, lo: Int, hi: Int) -> Cx = {
+  var depth = -1
+  var i = 0
+  for scope in cx.frame.scopes {
+    if list.contains(map.values(scope), sid) { depth = i }
+    i = i + 1
+  }
+  if depth < 0 { panic("checker: missing lexical observation binding") }
+  var next = cx
+  var stack: List[LambdaCx] = []
+  for lc in cx.frame.lambda_stack {
+    if depth < lc.boundary {
+      if not cx.is_std_module && not lc.observes && lc.handler_of == None {
+        next = cerr_h(next, "TraceScope cannot be captured by an escaping closure", lo, hi,
+          "use it only in its observe callback or structured handler region")
+        stack = stack ++ [lc]
+      } else { stack = stack ++ [capture_into(lc, sid)] }
+    } else { stack = stack ++ [lc] }
+  }
+  Cx { ..next, frame = Frame { ..next.frame, lambda_stack = stack } }
+}
+
 fn check_lambda(
   cx: Cx,
   params: List[LambdaParam],
@@ -7174,6 +7216,10 @@ fn check_lambda(
   hi: Int
 ) -> (Cx, Ty, TExpr) !io = {
   var cx1 = cx
+  let observes = cx.frame.observation_entry
+  let saved_scopes = cx.frame.observation_scopes
+  let origin_scope: Option[Int] = if arm { cx.frame.origin_scope } else { None }
+  cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, observation_entry = false, origin_scope = None, trace_read = false } }
   var have_exp = false
   if not arm { cx1 = check_value_arity(cx1, len(params), lo, hi) }
   var eps: List[Ty] = []
@@ -7246,7 +7292,7 @@ fn check_lambda(
   let exp_ret: Option[Ty] =
     if have_exp && is_concrete(cx1, eret) { Some(eret) } else { None }
   let ctx =
-    LambdaCx {
+    LambdaCx { observes = observes,
       boundary = len(cx1.frame.scopes),
       expected_ret = exp_ret,
       captures = [],
@@ -7278,7 +7324,32 @@ fn check_lambda(
     pnames = pnames ++ [p.name]
     j = j + 1
   }
-  let (cx2, bt, bx) = check_expr(cx1, body, exp_ret)
+  if observes && len(psyms) == 1 && observation.trace(ptys[0]) {
+    cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, observation_scopes = saved_scopes ++ [psyms[0]] } }
+  }
+  var origin_read: Option[TExpr] = None
+  match origin_scope {
+    Some(sid) -> {
+      let scope = sym_of(cx1, sid)
+      let captured = capture_observation(cx1, sid, lo, hi)
+      cx1 = record_effect(captured, EIo, lo, hi, "origin")
+      origin_read = Some(XCallBuiltin("provenance_origin",
+        [XLocal(sid, scope.name, owner_off(cx, lo), owner_off(cx, hi), scope.ty)], [], [],
+        owner_off(cx, lo), owner_off(cx, hi), NO_NAME, ty_origin()))
+    }
+    None -> ()
+  }
+  let (cx2, bt, bx0) = check_expr(cx1, body, exp_ret)
+  let bx = match origin_read {
+    Some(read) -> XBlock([TSLet(Some(psyms[len(psyms) - 1]), pnames[len(pnames) - 1], read,
+      owner_off(cx, lo), owner_off(cx, hi))], Some(bx0), owner_off(cx, lo), owner_off(cx, hi), bt)
+    None -> bx0
+  }
+  if origin_read != None {
+    psyms = list.take(psyms, len(psyms) - 1)
+    pnames = list.take(pnames, len(pnames) - 1)
+    ptys = list.take(ptys, len(ptys) - 1)
+  }
   var cx3 = pop_scope(cx2)
   let popped = cx3.frame.lambda_stack[len(cx3.frame.lambda_stack) - 1]
   let outer_lams = list.take(cx3.frame.lambda_stack, len(cx3.frame.lambda_stack) - 1)
@@ -7287,7 +7358,7 @@ fn check_lambda(
   # resolved can take a label off, because nothing this body resolved is
   # travelling with the closure
   let lam_eff = eff_union(cx3.frame.used_effects)
-  cx3 = Cx { ..cx3, frame = Frame { ..cx3.frame, used_effects = saved_used, eff_witness = saved_wit } }
+  cx3 = Cx { ..cx3, frame = Frame { ..cx3.frame, used_effects = saved_used, eff_witness = saved_wit, observation_scopes = saved_scopes } }
   let t = TyFn(ptys, bt, lam_eff)
   (cx3, t, XLambda(psyms, pnames, bx, popped.captures, owner_off(cx, lo), owner_off(cx, hi), t, if arm { "handler" } else if sugar { "with" } else { "lambda" }))
 }
@@ -7699,9 +7770,14 @@ fn check_handle(
 ) -> (Cx, Ty, TExpr) !io = {
   var cx1 = cx
   for arm in arms {
+    if arm.binder != None && len(cx1.frame.observation_scopes) > 0 {
+      cx1 = cerr(cx1, "control arms under observation are not supported in W2", arm.lo, arm.hi)
+    }
     match arm.origin {
-      Some(o) -> { cx1 = cerr_h(cx1, "origin observation is not supported yet", o.lo, o.hi,
-        "the origin clause is reserved for scoped observation in a later compiler cut") }
+      Some(o) -> if len(cx1.frame.observation_scopes) == 0 {
+        cx1 = cerr_h(cx1, "origin requires a lexical observation scope", o.lo, o.hi,
+          "install this handler inside provenance.observe")
+      }
       None -> ()
     }
   }
@@ -7981,8 +8057,8 @@ fn check_handle_remainder(
 ##
 ## The fifth result is the `TSLet` a control arm needs: `ctl_wrapper` says why
 ## the arm is bound to a local instead of being nested inside the wrapper.
-# Recovery gives the rejected origin a local identity so editor queries still
-# resolve its uses. No well-typed program can lower this extra parameter.
+# Origin is declared with the arm parameters for ordinary name resolution.
+# Checking replaces it with a lexical initializer before constructing the ABI.
 fn origin_params(a: HandlerArm) -> List[LambdaParam] =
   match a.origin {
     None -> a.params
@@ -7990,7 +8066,7 @@ fn origin_params(a: HandlerArm) -> List[LambdaParam] =
   }
 
 fn origin_types(a: HandlerArm, ts: List[Ty]) -> List[Ty] =
-  match a.origin { None -> ts, Some(_) -> ts ++ [TyError] }
+  match a.origin { None -> ts, Some(_) -> ts ++ [ty_origin()] }
 
 fn origin_arm_type(a: HandlerArm, t: Ty) -> Ty = {
   let (ps, ret, row) = fn_ty_parts(t)
@@ -8038,6 +8114,10 @@ fn check_handle_arms(
                 to_string(len(fptys)), a.nlo, a.nhi,
               "the arm is the operation's body: " ++ text)
           }
+          let authority: Option[Int] = if a.origin != None && len(cxa.frame.observation_scopes) > 0 {
+            Some(cxa.frame.observation_scopes[len(cxa.frame.observation_scopes) - 1])
+          } else { None }
+          cxa = Cx { ..cxa, frame = Frame { ..cxa.frame, origin_scope = authority } }
           let (cxb, at, ax) = check_lambda(cxa, origin_params(a), a.body, true, true, false,
             Some(hid), None, Some(origin_arm_type(a, field.ty)), a.lo, a.hi)
           cxa = cxb
@@ -9246,7 +9326,7 @@ fn check_staged_body(cx: Cx, pat: Pattern, item: Ty, body: Expr, lo: Int,
   let saved_wit = cx1.frame.eff_witness
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   let d = len(cx1.frame.loop_stack)
-  let ctx = LambdaCx {
+  let ctx = LambdaCx { observes = false,
     boundary = len(cx1.frame.scopes),
     expected_ret = Some(TyUnit),
     captures = [],
@@ -9431,7 +9511,7 @@ fn check_staged_arm(cx: Cx, body: Expr, cells: Map[Int, StagedCell], expected: O
   let saved_used = cx.frame.used_effects
   let saved_wit = cx.frame.eff_witness
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
-  let ctx = LambdaCx {
+  let ctx = LambdaCx { observes = false,
     boundary = len(cx.frame.scopes), expected_ret = Some(TyUnit), captures = [],
     sugar = false, arm = false, ctl = false, local_fn = None, handler_of = None,
     staged_kind = StagedBranch(lo, hi), staged = cells
@@ -9468,7 +9548,7 @@ fn staged_result_arm(cx: Cx, lam: TExpr, t: Ty, slot: Int, wit: WitRef, lo: Int,
   let saved_used = cx.frame.used_effects
   let saved_wit = cx.frame.eff_witness
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
-  let ctx = LambdaCx {
+  let ctx = LambdaCx { observes = false,
     boundary = len(cx.frame.scopes), expected_ret = Some(TyUnit), captures = caps,
     sugar = false, arm = false, ctl = false, local_fn = None, handler_of = None,
     staged_kind = StagedBranch(lo, hi), staged = map.empty()
@@ -10387,6 +10467,23 @@ fn check_call(
     }
   }
   cx1 = used_signature(cx1, s)
+  if observation.entry(s) { cx1 = Cx { ..cx1, observation_used = true } }
+  if observation.entry(s) && not cx1.is_std_module {
+    let literal = len(args) == 1 && match args[0] { ELambda(_, _, _, _, _) -> true, _ -> false }
+    if not literal {
+      cx1 = cerr_h(cx1, "observe requires a literal callback", lo, hi,
+        "the lexical TraceScope must be established at this call")
+    }
+    if cx1.frame.isolated {
+      cx1 = cerr(cx1, "observation is not supported by the interpreter or at compile time", lo, hi)
+    }
+  }
+  match pre0 {
+    Some((t, _)) -> if observation.trace(t) && not observation.action(s) && not cx1.is_std_module {
+      cx1 = cerr(cx1, "TraceScope cannot be passed to an arbitrary function", clo, chi)
+    }
+    None -> ()
+  }
   # Arity first when every argument is positional -- the historical wording,
   # order and early return. A call with names resolves slots first, so its
   # report can name the parameter rather than count to the wrong number
@@ -11100,8 +11197,24 @@ fn infer_call_arg(
   # piecewise — a partially concrete expected type still helps
   let accepts = is_concrete(cx1, substd) || accepts_partial_expected(cx1, a)
   let exp2: Option[Ty] = if accepts { Some(substd) } else { None }
+  let saved_read = cx1.frame.trace_read
+  let saved_entry = cx1.frame.observation_entry
+  let literal_entry = observation.entry(s) && pidx[i] == 0
+  let read = observation.action(s) && pidx[i] == 0
+  if saved_read != read || saved_entry != literal_entry {
+    cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, trace_read = read, observation_entry = literal_entry } }
+  }
   let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, exp2)
-  cx1 = cxa
+  let lexical = match ax {
+    XLocal(id, _, _, _, _) -> list.contains(cxa.frame.observation_scopes, id)
+    _ -> false
+  }
+  let checked = if read && not cxa.is_std_module && not lexical {
+    cerr_h(cxa, "TraceScope argument must be its lexical binding", e_lo(a), e_hi(a),
+      "aliases, containers and computed TraceScope values are not allowed")
+  } else { cxa }
+  cx1 = if cxa.frame.trace_read == saved_read && cxa.frame.observation_entry == saved_entry { checked }
+  else { Cx { ..checked, frame = Frame { ..cxa.frame, trace_read = saved_read, observation_entry = saved_entry } } }
   # A function value's row is answered here and nowhere else, so this is
   # where the leftover `!(e|R)` leaves for `e` is computed (#350). The
   # binding is offered to `unify_into` rather than made after it: the
@@ -13318,8 +13431,10 @@ fn check_method_call(
     }
     _ -> ()
   }
-  let (cx2, tt, tx) = check_expr(cx1, target, no_expected())
-  cx1 = cx2
+  let allow_receiver = match target { EVar(_, _, _) -> true, _ -> false }
+  let receiver_cx = Cx { ..cx1, frame = Frame { ..cx1.frame, trace_read = allow_receiver } }
+  let (cx2, tt, tx) = check_expr(receiver_cx, target, no_expected())
+  cx1 = Cx { ..cx2, frame = Frame { ..cx2.frame, trace_read = cx1.frame.trace_read } }
   match tt {
     TyJava(fq, _) -> {
       match first_named(args0) {
@@ -14602,6 +14717,7 @@ fn enter_fn(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
       eff_witness = empty_w,
       lambda_stack = [],
       loop_stack = [],
+      observation_scopes = [], observation_entry = false, origin_scope = None, trace_read = false,
       scopes = []
     }
   }
@@ -15365,6 +15481,7 @@ pub(pkg) fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
       eff_witness = empty_w,
       lambda_stack = [],
       loop_stack = [],
+      observation_scopes = [], observation_entry = false, origin_scope = None, trace_read = false,
       scopes = []
     },
     in_test = true
@@ -17973,7 +18090,7 @@ fn arm_cx() -> Cx =
       ..cx,
       frame = Frame {
         ..cx.frame,
-        lambda_stack = [LambdaCx {
+        lambda_stack = [LambdaCx { observes = false,
           boundary = 0,
           expected_ret = None,
           captures = [],

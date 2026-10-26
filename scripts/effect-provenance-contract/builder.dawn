@@ -1,0 +1,36 @@
+# A query emits no output, and a pure helper performs no operation. Their
+# logical calls must survive recording independently of generated output.
+use std/io
+use std/provenance
+use std/provenance.{note, completed}
+
+effect Builder {
+  fn query(n: Int) -> Int
+  fn output(n: Int) -> Unit
+}
+fn pure(n: Int) -> Int = n * 2
+fn helper(n: Int) -> Int !Builder = {
+  let value = pure(n)
+  let answer = query(value)
+  output(answer)
+  answer
+}
+pub fn main() -> Unit !io = {
+  let (answer, rows) = provenance.observe(trace => {
+    with handle Builder {
+      query(n) origin source => {
+        trace.note(source)
+        n + 1
+      }
+      output(n) origin source => {
+        trace.note(source)
+        ()
+      }
+    }
+    let first = helper(1)
+    let second = helper(2)
+    ((first, second), trace.completed())
+  })
+  io.println("${answer}")
+  io.println(rows)
+}

@@ -19,6 +19,7 @@
 # emit now (K-A4). scripts/constpool-scan.py keeps the pool clear of them.
 
 use std/str
+use std/set
 use std/list
 use std/map
 use check/types.{
@@ -45,6 +46,7 @@ use jvm/codegen.{
   dict_arg_field, dict_ctor_desc, EqOverride, singleton_scaffold, subject_name, impl_symbol, wide_ctor
 }
 use jvm/rtclasses.{
+  rt_provenance_before, rt_provenance_arrive, rt_provenance_finish, rt_provenance_unsupported, rt_provenance_check_function, rt_provenance_callback, rt_provenance_observe, rt_provenance_note, rt_provenance_completed, rt_provenance_checkpoint, rt_provenance_rewind, rt_provenance_origin, rt_provenance_field, rt_provenance_number, rt_provenance_parent,
   obj, fn_iface, tuple_class, erased_apply_desc, push_unit, tr_iface, close_mv,
   PANIC_CLASS, UNIT_CLASS, SB, BYTES_CLASS, MEM_CLASS, IO_CLASS, GPU_CLASS, STRINGS_CLASS,
   HAMT_CLASS,
@@ -60,7 +62,7 @@ use jvm/help.{
   ldc_str, ldc_class, ldc_long, ldc_double, push_int, store_slot, pop_value, internal_of,
   emit_scalar_cmp, emit_div_zero_check, gen_equality, gen_ordering, adapt_java_arg, new_array
 }
-use ir/core.{synthetic_definition,
+use ir/core.{fn_key, synthetic_definition,
   CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
   CExpr, CStmt, CCallee, CFun, CDictDef, CDictSlot,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
@@ -77,6 +79,9 @@ use ir/core.{synthetic_definition,
 use ir/coresites.{callee_text}
 use ir/lower.{LMod, subst_subject, trait_method_sig}
 use ir/reach
+use ir/provenance
+use ir/tail as call_tail
+use embed/provenance_rt
 use ir/reach.{Live, LIST_MOD, LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT}
 use jvm/jreflect
 use jvm/classread
@@ -221,6 +226,9 @@ pub type JModMap = { owner: String, rows: List[JRow], fns: List[JFn], same: Bool
 pub type GenCtx = {
   # Lowering's unabridged symbol ceiling, for JVM-only operand temporaries.
   next_sym: Int,
+  observation: Bool,
+  observed_mode: Bool,
+  logical: Map[String, CFun],
   class_name: String,
   # The class whose JVM wrapper receives this program's argv. `args()` is a
   # process input, not state owned by the module containing the call, so every
@@ -282,6 +290,9 @@ pub type Gen = {
   slots: Map[Int, Int],
   next_slot: Int,
   method_ret: Ty,
+  prov_callback: Int,
+  prov_declaration: String,
+  prov_tail: List[CSite],
   rets_null: Bool,
   # Core names its loops, so leaving a non-innermost one is ordinary rather
   # than impossible
@@ -830,6 +841,11 @@ fn gen_const_fields(gx: GenCtx, g: Gen, cw: ClassWriter) -> Unit !io = {
 ## returns void -- a new variant would silently emit a method that drops its
 ## own result (S0.3, and an opaque type is how that was found).
 fn emit_method_return(g: Gen) -> Unit !io = {
+  if g.prov_callback >= 0 {
+    g.mv.visitVarInsn(OP_LLOAD, g.prov_callback)
+    g.mv.visitInsn(OP_ICONST_1)
+    invoke_rt(g.mv, rt_provenance_finish())
+  }
   match jvm_repr(g.method_ret) {
     RLong -> { g.mv.visitInsn(OP_LRETURN) }
     RDouble -> { g.mv.visitInsn(OP_DRETURN) }
@@ -1453,6 +1469,73 @@ fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
 ## lowering hoisted while lowering it -- ordinary static methods beside it.
 ## Everything about a method except its body -- class, name, descriptor,
 ## parameter slots -- is set up here.
+## Per-module constant metadata tables need no generated initialization or allocation code.
+## Getters are compiler runtime code; they never introduce user call frames.
+pub fn gen_provenance_sites(table: Map[Int, String]) -> List[(String, Bytes)] !io = {
+  var owners: Map[String, List[(Int, String)]] = map.empty()
+  for item in map.entries(table) {
+    let (id, metadata) = item
+    let owner = provenance.unescape(str.split(metadata, "\t")[0])
+    owners = map.insert(owners, owner, map.get(owners, owner).unwrap_or([]) ++ [(id, metadata)])
+  }
+  var classes: List[(String, Bytes)] = []
+  for entry in map.entries(owners) {
+    let (owner, sites) = entry
+    if len(sites) > 16000 { panic("provenance: static Site table exceeds the JVM classfile limit") }
+    let cls = provenance.table_class(owner)
+    let cw = Asm.plain(COMPUTE_FRAMES).expect("Site table writer")
+    Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, cls, obj())
+    for item in sites {
+      let (id, metadata) = item
+      let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, provenance.table_method(id),
+        "()Ljava/lang/String;").expect("Site table entry")
+      m.visitCode()
+      ldc_str(m, metadata)
+      m.visitInsn(OP_ARETURN)
+      close_mv(m)
+    }
+    cw.visitEnd()
+    classes = classes ++ [(cls, cw.toByteArray().expect("Site table bytes"))]
+  }
+  classes
+}
+
+fn static_metadata(gx: GenCtx, m: MethodVisitor, id: Int) -> Unit !io =
+  m.visitMethodInsn(OP_INVOKESTATIC, provenance.table_class(gx.class_name),
+    provenance.table_method(id), "()Ljava/lang/String;", false)
+
+fn observed_desc(desc: String) -> String = str.replace(desc, ")", "J)")
+
+fn entry_name(name: String, observed: Bool) -> String =
+  name ++ (if observed { "\$observed" } else { "" })
+
+fn entry_desc(desc: String, observed: Bool) -> String =
+  if observed { observed_desc(desc) } else { desc }
+
+fn call_entry(gx: GenCtx, m: MethodVisitor, owner: String, name: String, desc: String, at: Option[Label] = None) -> Unit !io = {
+  if gx.observed_mode { ldc_long(m, 0) }
+  visit_at(m, at)
+  m.visitMethodInsn(OP_INVOKESTATIC, owner, entry_name(name, gx.observed_mode), entry_desc(desc, gx.observed_mode), false)
+}
+
+fn mode_kept(gx: GenCtx, f: CFun, observed: Bool) -> Bool =
+  match gx.live {
+    None -> not observed
+    Some(l) -> set.has(if observed { l.observed } else { l.plain }, fn_key(f))
+  }
+
+fn gen_entry_family(gx: GenCtx, g: Gen, cw: ClassWriter, cf: CFun, name: String, desc: String, lifted: Bool) -> Gen !io = {
+  var out = g
+  for observed in [false, true] {
+    if mode_kept(gx, cf, observed) {
+      let body = if observed { map.get(gx.logical, fn_key(cf)).expect("provenance: missing pristine observed entry for " ++ cf.owner ++ "." ++ cf.name) } else { cf }
+      out = gen_cbody(GenCtx { ..gx, observed_mode = observed }, out, cw, body,
+        entry_name(name, observed), entry_desc(desc, observed), lifted)
+    }
+  }
+  out
+}
+
 fn gen_fn(
   gx: GenCtx,
   g: Gen,
@@ -1467,10 +1550,10 @@ fn gen_fn(
   # the dictionary, and the dictionary can outlive that function. Dropping a
   # bridge with its parent is how the dictionary class would come to forward
   # to a method that is not there.
-  var g0 = if kept(gx, cf) { gen_cbody(gx, g, cw, cf, name, desc, false) } else { g }
+  var g0 = if kept(gx, cf) { gen_entry_family(gx, g, cw, cf, name, desc, false) } else { g }
   for lf in lifts {
     if kept(gx, lf) {
-      g0 = gen_cbody(gx, g0, cw, lf, lf.name, lifted_desc(gx, g0, lf.name), true)
+      g0 = gen_entry_family(gx, g0, cw, lf, lf.name, lifted_desc(gx, g0, lf.name), true)
     }
   }
   g0
@@ -1493,11 +1576,19 @@ fn check_fn_slots(
 ) -> Unit !Fs !Exit !Console !io = {
   if kept(gx, cf) {
     check_arg_slots(gx.class_name, "`" ++ cf.name ++ "`", name, desc, false, src, sites)
+    if mode_kept(gx, cf, true) {
+      check_arg_slots(gx.class_name, "observed `" ++ cf.name ++ "`", entry_name(name, true),
+        observed_desc(desc), false, src, sites)
+    }
   }
   for lf in lifts {
     if kept(gx, lf) {
       check_arg_slots(gx.class_name, "a closure in `" ++ cf.name ++ "`", lf.name,
         lifted_desc(gx, g, lf.name), false, src, sites)
+      if mode_kept(gx, lf, true) {
+        check_arg_slots(gx.class_name, "an observed closure in `" ++ cf.name ++ "`", entry_name(lf.name, true),
+          observed_desc(lifted_desc(gx, g, lf.name)), false, src, sites)
+      }
     }
   }
 }
@@ -1574,7 +1665,10 @@ fn gen_cbody(
   desc: String,
   lifted: Bool
 ) -> Gen !io = {
-  let slot_body = lifted && is_slot_target(gx, name)
+  let frame_definition: Option[String] = if gx.observed_mode { provenance.frame_definition(cf) } else { None }
+  let observed = gx.observed_mode && frame_definition != None
+  let body_gx = GenCtx { ..gx, observation = observed }
+  let slot_body = lifted && is_slot_target(gx, cf.name)
   # A hoisted body used to be able to stay private: LambdaMetafactory was
   # handed a Lookup with private access, so the class it spun could reach it.
   # The closure class this compiler writes instead is an ordinary class in
@@ -1597,6 +1691,8 @@ fn gen_cbody(
     # type still has to hand back a reference. A dictionary slot body does
     # not: it is called against the trait's own descriptor.
     rets_null = lifted && not slot_body,
+    prov_callback = -1, prov_declaration = cf.origin,
+    prov_tail = if observed { call_tail.tail_sites(cf) } else { [] },
     cloops = [],
     marks = []
   }
@@ -1618,8 +1714,34 @@ fn gen_cbody(
     let (g2, slot) = alloc(g1, slots_of(e.ty))
     g1 = cbind(g2, e.sym, e.ty, slot)
   }
-  let (g3, falls) = gen_cexpr(gx, g1, operands.prepare(cf.body, gx.next_sym), false)
+  if gx.observed_mode { let (reserved, _) = alloc(g1, 2)
+    g1 = reserved
+  }
+  let start = Label.new()
+  let prov_end_label = Label.new()
+  let handler = Label.new()
+  if observed {
+    let (allocated, slot) = alloc(g1, 2)
+    g1 = Gen { ..allocated, prov_callback = slot }
+    ldc_str(m, frame_definition.expect("provenance frame definition"))
+    invoke_rt(m, rt_provenance_arrive())
+    m.visitVarInsn(OP_LSTORE, slot)
+    m.visitLabel(start)
+  }
+  let prepared = if observed { operands.prepare_observed(cf.body, gx.next_sym) } else { operands.prepare(cf.body, gx.next_sym) }
+  let (g3, falls) = gen_cexpr(body_gx, g1, prepared, false)
   if falls { emit_method_return(g3) }
+  if observed {
+    # Inner invocation handlers must precede the enclosing method handler in
+    # the JVM exception table, so unwinding closes logical calls inside out.
+    m.visitTryCatchBlock(start, prov_end_label, handler, "java/lang/Throwable")
+    m.visitLabel(prov_end_label)
+    m.visitLabel(handler)
+    m.visitVarInsn(OP_LLOAD, g3.prov_callback)
+    m.visitInsn(OP_ICONST_0)
+    invoke_rt(m, rt_provenance_finish())
+    m.visitInsn(OP_ATHROW)
+  }
   if not gx.mapping {
     close_mv(m)
     return g3
@@ -1687,7 +1809,7 @@ fn gen_jvm_main(gx: GenCtx, cw: ClassWriter) -> Unit !io = {
 }
 
 ## The per-trait dictionary interface: one erased method per trait method.
-pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Bytes !Fs !Exit !Console !io = {
+pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI, observed: Bool = false) -> Bytes !Fs !Exit !Console !io = {
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
     tr_iface(tr.owner, tr.name), obj())
@@ -1696,6 +1818,11 @@ pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Byte
     let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, mn,
       trait_iface_desc(adts, ms.sig)).expect("mv")
     m.visitEnd()
+    if observed {
+      let om = Asm.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, entry_name(mn, true),
+        observed_desc(trait_iface_desc(adts, ms.sig))).expect("observed trait method")
+      om.visitEnd()
+    }
   }
   cw.visitEnd()
   class_bytes(() => cw.toByteArray(), tr_iface(tr.owner, tr.name))
@@ -2131,7 +2258,7 @@ fn emit_module_with(
       check_arg_slots(class_name, "`" ++ tr.name ++ "." ++ mn ++ "`", trait_site_key(tr.name),
         trait_iface_desc(adts, ms.sig), true, src, sites)
     }
-    out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(supers, adts, tr))]
+    out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(supers, adts, tr, provenance.enabled(live)))]
   }
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, class_name, obj())
@@ -2140,6 +2267,7 @@ fn emit_module_with(
   let no_ckey: Map[String, String] = map.empty()
   let gx = GenCtx {
     next_sym = lm.next_sym,
+    observation = provenance.enabled(live), observed_mode = false, logical = lm.logical,
     class_name = class_name,
     args_owner = args_owner,
     adts = adts,
@@ -2156,7 +2284,7 @@ fn emit_module_with(
     blocks = ct.blocks,
     mapping = mapping
   }
-  var g = Gen {
+  var g = Gen { prov_callback = -1, prov_declaration = "", prov_tail = [],
     mv = scratch_mv(),
     lift_descs = map.empty(),
     # the table lowering renumbered, not the checker's: the Core below names
@@ -2296,42 +2424,54 @@ fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, By
   var i = 0
   for entry in tr.methods {
     let (mname, ms) = entry
-    let m = Asm.methodOn(cw, ACC_PUBLIC, mname,
-      trait_iface_desc(gx.adts, ms.sig)).expect("mv")
-    m.visitCode()
-    var slot = 1
-    for declared in ms.sig.param_tys {
-      load_slot(m, declared, slot)
-      slot = slot + slots_of(declared)
+    let target_key = match dd.slots[i] {
+      CSlotFn(owner, name) -> owner ++ "\nfn\n" ++ name
+      CSlotDefault(owner, method) -> owner ++ "\ndefault\$${dd.trait_id}\n" ++ method
     }
-    # The dictionary itself sits between the method's own arguments and the
-    # evidence: the target static's shape is (params, dicts, evs), the
-    # interface method's is (params, evs) with the dictionary as receiver --
-    # so load `this` here and the incoming evidence slots after it. Evidence
-    # is one reference each (a record or an erased Object), so the walk is
-    # the same slot walk.
-    m.visitVarInsn(OP_ALOAD, 0)
-    let mabi = sig_abi_eff(ms.sig)
-    for l in eff_labels(mabi) {
-      let (eid, _) = l
-      load_slot(m, TyAdt(eid, []), slot)
-      slot = slot + 1
+    for observed in [false, true] {
+      let reachable = match gx.live {
+        None -> not observed
+        Some(l) -> set.has(if observed { l.observed } else { l.plain }, target_key)
+      }
+      if reachable {
+        let m = Asm.methodOn(cw, ACC_PUBLIC, entry_name(mname, observed),
+          entry_desc(trait_iface_desc(gx.adts, ms.sig), observed)).expect("mv")
+        m.visitCode()
+        var slot = 1
+        for declared in ms.sig.param_tys {
+          load_slot(m, declared, slot)
+          slot = slot + slots_of(declared)
+        }
+        # The dictionary itself sits between the method's own arguments and the
+        # evidence: the target static's shape is (params, dicts, evs), the
+        # interface method's is (params, evs) with the dictionary as receiver --
+        # so load `this` here and the incoming evidence slots after it. Evidence
+        # is one reference each (a record or an erased Object), so the walk is
+        # the same slot walk.
+        m.visitVarInsn(OP_ALOAD, 0)
+        let mabi = sig_abi_eff(ms.sig)
+        for l in eff_labels(mabi) {
+          let (eid, _) = l
+          load_slot(m, TyAdt(eid, []), slot)
+          slot = slot + 1
+        }
+        # the erased slots -- rule 丁's variables and rule 丙's projections -- are
+        # one reference each and pass through without a cast
+        for _k in 0..(nev(mabi) - len(eff_labels(mabi))) {
+          m.visitVarInsn(OP_ALOAD, slot)
+          slot = slot + 1
+        }
+        let (owner, target) = slot_target(tr, dd.slots[i])
+        let target_desc = sig_desc_with_dicts(gx.adts, ms.sig)
+        call_entry(GenCtx { ..gx, observed_mode = observed }, m, owner, target, target_desc)
+        if is_bottom(ms.sig.ret) {
+          terminate_bottom(m, call_result_of_desc(target_desc))
+        } else {
+          emit_return_of(m, ms.sig.ret)
+        }
+        close_mv(m)
+      }
     }
-    # the erased slots -- rule 丁's variables and rule 丙's projections -- are
-    # one reference each and pass through without a cast
-    for _k in 0..(nev(mabi) - len(eff_labels(mabi))) {
-      m.visitVarInsn(OP_ALOAD, slot)
-      slot = slot + 1
-    }
-    let (owner, target) = slot_target(tr, dd.slots[i])
-    let target_desc = sig_desc_with_dicts(gx.adts, ms.sig)
-    m.visitMethodInsn(OP_INVOKESTATIC, owner, target, target_desc, false)
-    if is_bottom(ms.sig.ret) {
-      terminate_bottom(m, call_result_of_desc(target_desc))
-    } else {
-      emit_return_of(m, ms.sig.ret)
-    }
-    close_mv(m)
     i = i + 1
   }
   cw.visitEnd()
@@ -2405,8 +2545,7 @@ fn gen_ccall(
         Some(x) -> x
         None -> fn_desc_with_dicts(gx, sig_of_call(gx, owner, name))
       }
-      visit_at(g1.mv, at)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name, d, false)
+      call_entry(gx, g1.mv, owner, name, d, at)
       finish_call(g1, ty, call_result_of_desc(d))
     }
     CImpl(owner, tid, subject, method) -> {
@@ -2438,18 +2577,14 @@ fn gen_ccall(
       }
       ptys = ptys ++ evtys
       let d = method_desc(gx.adts, ptys, psig.ret)
-      visit_at(g1.mv, at)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        impl_method_name(gx, owner, tr, subject, method), d, false)
+      call_entry(gx, g1.mv, owner, impl_method_name(gx, owner, tr, subject, method), d, at)
       finish_call(g1, ty, call_result_of_desc(d))
     }
     CDefault(owner, tid, method) -> {
       let g1 = gen_cargs(gx, g, args)
       let tr = trait_of(gx.traits, tid)
       let d = fn_desc_with_dicts(gx, trait_method_sig(tr, method))
-      visit_at(g1.mv, at)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        default_method_name(tr.name, method), d, false)
+      call_entry(gx, g1.mv, owner, default_method_name(tr.name, method), d, at)
       finish_call(g1, ty, call_result_of_desc(d))
     }
     CMethod(dict, tid, method, _idx, _nev) -> {
@@ -2460,14 +2595,19 @@ fn gen_ccall(
       g0.mv.visitTypeInsn(OP_CHECKCAST, tr_iface(tr.owner, tr.name))
       let g1 = gen_cargs(gx, g0, args)
       let d = trait_method_desc(gx, trait_method_sig(tr, method))
+      if gx.observed_mode { ldc_long(g1.mv, 0) }
       visit_at(g1.mv, at)
-      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), method,
-        d, true)
+      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), entry_name(method, gx.observed_mode),
+        entry_desc(d, gx.observed_mode), true)
       finish_call(g1, ty, call_result_of_desc(d))
     }
     CDynamic(target) -> {
       let (g1, falls) = gen_cexpr(gx, g, target, false)
       if not falls { return (g1, false) }
+      if gx.observed_mode {
+        g1.mv.visitInsn(OP_DUP)
+        invoke_rt(g1.mv, rt_provenance_check_function())
+      }
       gen_cdynamic(gx, g1, args, ty, at)
     }
   }
@@ -2498,9 +2638,11 @@ fn gen_cdynamic(
   }
   # the evidence pack lowering appended is part of the arity, and `len(args)`
   # is the total by construction -- which is why `CDynamic` carries no `nev`
+  if gx.observed_mode { ldc_long(g1.mv, 0) }
   visit_at(g1.mv, at)
-  g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(len(args)), "apply",
-    erased_apply_desc(len(args)), true)
+  g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(len(args)),
+    if gx.observed_mode { "applyObserved" } else { "apply" },
+    entry_desc(erased_apply_desc(len(args)), gx.observed_mode), true)
   if is_bottom(ret_static) {
     return finish_call(g1, ret_static, CallOne)
   }
@@ -2606,37 +2748,46 @@ fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (Str
     init.visitInsn(OP_RETURN)
     close_mv(init)
   }
-  let m = Asm.methodOn(cw, ACC_PUBLIC, "apply", erased_apply_desc(b.arity)).expect("mv")
-  m.visitCode()
-  var k = 0
-  for ct in b.cap_tys {
-    m.visitVarInsn(OP_ALOAD, 0)
-    m.visitFieldInsn(OP_GETFIELD, b.cls, capture_field(k), desc_of(gx.adts, ct))
-    k = k + 1
+  for observed in [false, true] {
+    let reachable = match gx.live {
+      None -> not observed
+      Some(l) -> set.has(if observed { l.observed } else { l.plain }, b.owner ++ "\nfn\n" ++ b.target)
+    }
+    if reachable {
+      let m = Asm.methodOn(cw, ACC_PUBLIC, if observed { "applyObserved" } else { "apply" }, entry_desc(erased_apply_desc(b.arity), observed))
+        .expect("mv")
+      m.visitCode()
+      var k = 0
+      for ct in b.cap_tys {
+        m.visitVarInsn(OP_ALOAD, 0)
+        m.visitFieldInsn(OP_GETFIELD, b.cls, capture_field(k), desc_of(gx.adts, ct))
+        k = k + 1
+      }
+      # the erased apply takes Objects, so every parameter is one word and sits
+      # at 1 + its index whatever the Dawn type underneath is
+      var p = 0
+      let mg = Gen { ..g, mv = m }
+      for pt in b.fps {
+        m.visitVarInsn(OP_ALOAD, p + 1)
+        unerase(gx, mg, pt)
+        p = p + 1
+      }
+      # the evidence slot sits behind the written parameters and is erased on both
+      # sides of the boundary, so it is loaded and passed as it is
+      for _i in 0..b.nev {
+        m.visitVarInsn(OP_ALOAD, p + 1)
+        p = p + 1
+      }
+      call_entry(GenCtx { ..gx, observed_mode = observed }, m, b.owner, b.target, b.impl_desc)
+      if is_bottom(b.fret) {
+        terminate_bottom(m, call_result_of_desc(b.impl_desc))
+      } else {
+        box_ty(m, b.fret)
+        m.visitInsn(OP_ARETURN)
+      }
+      close_mv(m)
+    }
   }
-  # the erased apply takes Objects, so every parameter is one word and sits
-  # at 1 + its index whatever the Dawn type underneath is
-  var p = 0
-  let mg = Gen { ..g, mv = m }
-  for pt in b.fps {
-    m.visitVarInsn(OP_ALOAD, p + 1)
-    unerase(gx, mg, pt)
-    p = p + 1
-  }
-  # the evidence slot sits behind the written parameters and is erased on both
-  # sides of the boundary, so it is loaded and passed as it is
-  for _i in 0..b.nev {
-    m.visitVarInsn(OP_ALOAD, p + 1)
-    p = p + 1
-  }
-  m.visitMethodInsn(OP_INVOKESTATIC, b.owner, b.target, b.impl_desc, false)
-  if is_bottom(b.fret) {
-    terminate_bottom(m, call_result_of_desc(b.impl_desc))
-  } else {
-    box_ty(m, b.fret)
-    m.visitInsn(OP_ARETURN)
-  }
-  close_mv(m)
   cw.visitEnd()
   (b.cls, class_bytes(() => cw.toByteArray(), b.cls))
 }
@@ -2775,11 +2926,11 @@ pub fn gen_cexpr(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
     }
     CCall(callee, args, ty, site) ->
       if not marking(gx, site) {
-        gen_ccall(gx, g, callee, args, ty, None)
+        gen_call_protocol(gx, g, callee, args, ty, site, None)
       } else {
         let lo = open_mark(g)
         let inv = Label.new()
-        let (g1, falls) = gen_ccall(gx, g, callee, args, ty, Some(inv))
+        let (g1, falls) = gen_call_protocol(gx, g, callee, args, ty, site, Some(inv))
         (close_mark(g1, site, callee_text(callee), lo, Some(inv)), falls)
       }
     CClosure(name, owner, caps, ty) -> (gen_cclosure(gx, g, name, owner, caps, ty), true)
@@ -2848,14 +2999,18 @@ pub fn gen_cexpr(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
     CListLit(elems, _) -> gen_clistlit(gx, g, elems)
     CIntrinsic(name, args, ty, site) ->
       if not marking(gx, site) {
-        gen_cintrinsic(gx, g, name, args, ty)
+        gen_intrinsic_protocol(gx, g, name, args, ty, site)
       } else {
         let lo = open_mark(g)
-        let (g1, falls) = gen_cintrinsic(gx, g, name, args, ty)
+        let (g1, falls) = gen_intrinsic_protocol(gx, g, name, args, ty, site)
         (close_mark(g1, site, "intrinsic " ++ name, lo, None), falls)
       }
     CExtern(_, _, _, _, _) -> panic("emit: an unselected C extern reached the JVM backend")
-    CForeign(call, ty, site) ->
+    CForeign(call, ty, site) -> {
+      if gx.observed_mode {
+        ldc_str(g.mv, "external ABI boundary")
+        invoke_rt(g.mv, rt_provenance_unsupported())
+      }
       if not marking(gx, site) {
         gen_cforeign(gx, g, call, ty, None)
       } else {
@@ -2864,6 +3019,7 @@ pub fn gen_cexpr(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
         let (g1, falls) = gen_cforeign(gx, g, call, ty, Some(inv))
         (close_mark(g1, site, "java " ++ call.call.method, lo, Some(inv)), falls)
       }
+    }
     # the JVM has a collector; a count is a fact about the C runtime only
     CDup(inner, _) -> gen_cexpr(gx, g, inner, false)
     CSteal(_, _) -> panic("emit: CSteal is C-only and reached the JVM backend")
@@ -3259,7 +3415,7 @@ fn call_pvec(gx: GenCtx, m: MethodVisitor, name: String, desc: String) -> Unit !
     }
     None -> ()
   }
-  m.visitMethodInsn(OP_INVOKESTATIC, LIST_MOD, name, desc, false)
+  call_entry(gx, m, LIST_MOD, name, desc)
 }
 
 ## A Dawn List handed to Java (spec §9.6). Since S3 a List is a Dawn vector,
@@ -3903,7 +4059,7 @@ fn generated_rt_statics() -> List[String] !io = {
     (IO_CLASS, gen_io_class(sup)),
     (GPU_CLASS, gen_gpu_class(sup)),
     (CTL_CLASS, gen_ctl_class(sup))
-  ]
+  ] ++ provenance_rt.classes()
   var out: List[String] = []
   for pr in classes {
     let (cls, b) = pr
@@ -4023,12 +4179,12 @@ fn mapped_fixture(mapping: Bool) -> (Bytes, Gen) !io = {
     ret = TyInt, eff = EPure, is_builtin = false, tparams = [], constraints = [], eparams = [],
     owner = None, trait_id = None, op_of = None, inferring = false
   }
-  let gx = GenCtx {
+  let gx = GenCtx { observation = false, observed_mode = false, logical = map.empty(),
     next_sym = 10, class_name = "m", args_owner = "", adts = prelude_adts(), traits = map.empty(),
     impl_table = map.empty(), prog_fns = map.insert(map.empty(), ("m", "g"), base), intrs = intrinsics(),
     dicts = [], live = None, consts = map.empty(), blocks = map.empty(), mapping = mapping
   }
-  let g = Gen {
+  let g = Gen { prov_callback = -1, prov_declaration = "", prov_tail = [],
     mv = scratch_mv(), lift_descs = map.empty(), syms = map.empty(), slots = map.empty(), next_slot = 0,
     method_ret = TyUnit, rets_null = false, cloops = [], sam_ctr = 0, pending_sam = [], clos_ctr = 0,
     closures = [], sam_classes = [], const_fields = [], const_by_key = map.empty(), marks = [], jrows = [],
@@ -4067,4 +4223,151 @@ test "the labelled emission writes the same class, and the plain one records not
   # the reader the side table measures `end` against
   let ms = classread.class_methods(plain)
   assert len(ms) == 1 && ms[0].name == "f" && ms[0].code_length == 8
+}
+
+# Spill eager operands before opening an invocation. This preserves f(g()):
+# g executes in the caller, and never becomes a child of f.
+fn prov_operands(gx: GenCtx, g: Gen, args: List[CExpr]) -> (Gen, List[CExpr]) !io = {
+  var next = g
+  var out: List[CExpr] = []
+  for arg in args {
+    let (emitted, falls) = gen_cexpr(gx, next, arg, false)
+    if not falls { return (emitted, out) }
+    let ty = match arg { CBox(_, _) -> TyVar("provenance", 0), _ -> cex_ty(arg) }
+    let (allocated, slot) = alloc(emitted, slots_of(ty))
+    # Operand preparation mints positive Core IDs. JVM-only spills occupy
+    # their own negative namespace, so neither pass overwrites the other.
+    let sym = 0 - slot - 1
+    next = cbind(allocated, sym, ty, slot)
+    store_slot(next.mv, ty, slot)
+    out = out ++ [CLocal(sym, ty)]
+  }
+  (next, out)
+}
+
+type ProvGuard = { slot: Int, end: Label, handler: Label, done: Label }
+
+fn prov_begin(gx: GenCtx, g: Gen, site: CSite, intrinsic: String) -> (Gen, ProvGuard) !io = {
+  let (next, slot) = alloc(g, 2)
+  let metadata = provenance.metadata(gx.class_name, g.prov_declaration, site)
+  ldc_long(next.mv, provenance.site_id(metadata))
+  static_metadata(gx, next.mv, provenance.site_id(metadata))
+  let callback = provenance.metadata(gx.class_name, g.prov_declaration, provenance.callback_site(site))
+  ldc_long(next.mv, provenance.site_id(callback))
+  static_metadata(gx, next.mv, provenance.site_id(callback))
+  invoke_rt(next.mv, rt_provenance_before())
+  next.mv.visitVarInsn(OP_LSTORE, slot)
+  if intrinsic != "" {
+    ldc_str(next.mv, provenance.intrinsic_definition(intrinsic))
+    invoke_rt(next.mv, rt_provenance_arrive())
+    next.mv.visitInsn(OP_POP2)
+  }
+  let start = Label.new()
+  let guard = ProvGuard { slot = slot, end = Label.new(), handler = Label.new(), done = Label.new() }
+  next.mv.visitTryCatchBlock(start, guard.end, guard.handler, "java/lang/Throwable")
+  next.mv.visitLabel(start)
+  (next, guard)
+}
+
+fn prov_end(g: Gen, guard: ProvGuard, falls: Bool) -> Unit !io = {
+  let m = g.mv
+  m.visitLabel(guard.end)
+  if falls {
+    m.visitVarInsn(OP_LLOAD, guard.slot)
+    m.visitInsn(OP_ICONST_1)
+    invoke_rt(m, rt_provenance_finish())
+    m.visitJumpInsn(OP_GOTO, guard.done)
+  }
+  m.visitLabel(guard.handler)
+  m.visitVarInsn(OP_LLOAD, guard.slot)
+  m.visitInsn(OP_ICONST_0)
+  invoke_rt(m, rt_provenance_finish())
+  m.visitInsn(OP_ATHROW)
+  if falls { m.visitLabel(guard.done) }
+}
+
+fn gen_call_protocol(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty, site: CSite, at: Option[Label]) -> (Gen, Bool) !io = {
+  if not gx.observation { return gen_ccall(gx, g, callee, args, ty, at) }
+  let head: List[CExpr] = match callee { CDynamic(t) -> [t], CMethod(d, _, _, _, _) -> [d], _ -> [] }
+  let (staged, values) = prov_operands(gx, g, head ++ args)
+  if len(values) != len(head) + len(args) { return (staged, false) }
+  let target = match callee {
+    CDynamic(_) -> CDynamic(values[0])
+    CMethod(_, tid, name, idx, nev) -> CMethod(values[0], tid, name, idx, nev)
+    _ -> callee
+  }
+  if list.contains(g.prov_tail, site) {
+    ldc_str(staged.mv, "tail calls")
+    invoke_rt(staged.mv, rt_provenance_unsupported())
+  }
+  let (opened, guard) = prov_begin(gx, staged, site, "")
+  let (called, falls) = gen_ccall(gx, opened, target, list.drop(values, len(head)), ty, at)
+  prov_end(called, guard, falls)
+  (called, falls)
+}
+
+fn prov_callbacks(gx: GenCtx, g: Gen, name: String, values: List[CExpr], site: CSite) -> Gen !io = {
+  let metadata = provenance.metadata(gx.class_name, g.prov_declaration, provenance.callback_site(site))
+  for callback in reach.runtime_callbacks(name) {
+    let (index, arity) = callback
+    let sym = match values[index] { CLocal(id, _) -> id, _ -> panic("provenance: callback operand was not staged") }
+    load_var(g, sym)
+    ldc_long(g.mv, arity)
+    if site == CNoSite { ldc_long(g.mv, -1)
+      g.mv.visitInsn(OP_ACONST_NULL)
+    } else {
+      ldc_long(g.mv, provenance.site_id(metadata))
+      static_metadata(gx, g.mv, provenance.site_id(metadata))
+    }
+    invoke_rt(g.mv, rt_provenance_callback())
+    g.mv.visitTypeInsn(OP_CHECKCAST, fn_iface(arity))
+    g.mv.visitVarInsn(OP_ASTORE, slot_of(g, sym))
+  }
+  g
+}
+
+fn provenance_method(name: String) -> RtMethod = match name {
+  "provenance_observe" -> rt_provenance_observe()
+  "provenance_note" -> rt_provenance_note()
+  "provenance_completed" -> rt_provenance_completed()
+  "provenance_checkpoint" -> rt_provenance_checkpoint()
+  "provenance_rewind" -> rt_provenance_rewind()
+  "provenance_origin" -> rt_provenance_origin()
+  "provenance_field" -> rt_provenance_field()
+  "provenance_number" -> rt_provenance_number()
+  "provenance_parent" -> rt_provenance_parent()
+  _ -> panic("codegen: unknown provenance primitive " ++ name)
+}
+
+fn gen_intrinsic_protocol(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty, site: CSite) -> (Gen, Bool) !io = {
+  if str.starts_with(name, "provenance_") {
+    let staged = gen_cargs(gx, g, args)
+    if name == "provenance_observe" {
+      let metadata = provenance.metadata(gx.class_name, g.prov_declaration, site)
+      ldc_long(staged.mv, provenance.site_id(metadata))
+      static_metadata(gx, staged.mv, provenance.site_id(metadata))
+      invoke_rt(staged.mv, provenance_method(name))
+      return (staged, true)
+    }
+    invoke_rt(staged.mv, provenance_method(name))
+    if peel_opaque(ty) == TyUnit { push_unit(staged.mv) }
+    return (staged, true)
+  }
+  if gx.observed_mode && (str.starts_with(name, "ctl_") || name == "discard") {
+    ldc_str(g.mv, "control operations")
+    invoke_rt(g.mv, rt_provenance_unsupported())
+  }
+  let recording = gx.observation && site != CNoSite
+  let callbacks = gx.observed_mode && len(reach.runtime_callbacks(name)) > 0
+  if not recording && not callbacks { return gen_cintrinsic(gx, g, name, args, ty) }
+  let (staged, values) = prov_operands(gx, g, args)
+  if len(values) != len(args) { return (staged, false) }
+  if not recording {
+    return gen_cintrinsic(gx, prov_callbacks(gx, staged, name, values, site), name, values, ty)
+  }
+  let (opened, guard) = prov_begin(gx, staged, site, name)
+  let wrapped = if callbacks { prov_callbacks(gx, opened, name, values, site) } else { opened }
+  let (called, falls) = gen_cintrinsic(gx, wrapped, name, values, ty)
+  prov_end(called, guard, falls)
+  (called, falls)
 }

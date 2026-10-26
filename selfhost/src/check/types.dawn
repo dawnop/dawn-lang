@@ -817,6 +817,11 @@ pub const LOC_OPAQUE_ID: Int = -4
 
 pub fn ty_loc() -> Ty = TyOpaque(LOC_OPAQUE_ID, "Loc", "std/loc", [], TyString)
 
+# The origin binder is typed before its body is checked. This is the stable
+# identity of std/provenance's ordinary opaque declaration, not a new prelude
+# name. check/provenance tests it against the declaration-key derivation.
+pub fn ty_origin() -> Ty = TyOpaque(123946331297243, "Origin", "std/provenance", [], TyString)
+
 ## Who may write a compiler-owned type name. This is surface policy, including
 ## the distinct return-only access used by Never.
 pub type BuiltinTypeAccess =
@@ -3666,6 +3671,24 @@ fn buffer_sigs() -> List[Sig] = [
 ]
 
 ## The builtin function table (port of Types.kt BUILTINS, same order).
+# Keep each table factory below the JVM JIT method-size limit.
+fn provenance_builtins() -> List[Sig] = {
+  let t = TyVar("T", -1)
+  let e = EffVar("e", -1)
+  [
+    Sig { ..tp1(bsig("provenance_observe", [TyFn([TyInt], t, e)], ["body"], t), t),
+      eff = eff_union([EIo, e]), eparams = [e] },
+    eff1(bsig("provenance_note", [TyInt, TyString], ["scope", "origin"], TyUnit), EIo),
+    eff1(bsig("provenance_completed", [TyInt], ["scope"], TyString), EIo),
+    eff1(bsig("provenance_checkpoint", [TyInt], ["scope"], TyString), EIo),
+    eff1(bsig("provenance_rewind", [TyInt, TyString], ["scope", "checkpoint"], TyUnit), EIo),
+    eff1(bsig("provenance_origin", [TyInt], ["scope"], TyString), EIo),
+    bsig("provenance_field", [TyString, TyInt], ["origin", "index"], TyString),
+    bsig("provenance_number", [TyString, TyInt], ["origin", "index"], TyInt),
+    bsig("provenance_parent", [TyString], ["origin"], TyString),
+  ]
+}
+
 pub fn builtins() -> Map[String, Sig] = {
   let t = TyVar("T", -1)
   let u = TyVar("U", -2)
@@ -4289,6 +4312,7 @@ pub fn builtins() -> Map[String, Sig] = {
     # every target has the instruction (docs/runtime-intrinsics-design.md §5).
     bsig("popcount", [TyInt], ["n"], TyInt)
   ]
+  sigs = sigs ++ provenance_builtins()
   for s in sigs { out = map.insert(out, s.name, s) }
   out
 }
@@ -4510,6 +4534,10 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # a backend -- lowering replaces the call with its argument.
   internal = set.insert(internal, "char_unchecked")
 
+  for op in ["observe", "note", "completed", "checkpoint", "rewind", "origin", "field", "number", "parent"] {
+    internal = set.insert(internal, "provenance_" ++ op)
+  }
+  erased = set.insert(erased, "provenance_observe")
   var out: Map[String, Intr] = map.empty()
   for n in map.keys(bs) {
     let s = map.get(bs, n).expect("builtin listed")
@@ -5338,7 +5366,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 152
+  assert map_size2(bs) == 161
 }
 
 test "the reclaim's failure is a value, under the one name left" {

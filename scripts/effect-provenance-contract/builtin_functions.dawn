@@ -1,0 +1,17 @@
+# A builtin value adapter has the primitive's identity. Runtime callbacks
+# use the invoking call site, even when the adapter was created Plain.
+use std/io.{println}
+use std/provenance
+
+fn fail() -> Int = panic("function value failure")
+pub fn main() -> Unit !io = {
+  let convert: fn(Int) -> Float = to_float
+  let capture: fn(fn() -> Int) -> Result[Int, ForeignError] = catch_panic
+  let (answer, tree) = provenance.observe(scope => {
+    let a = convert(42)
+    let b = capture(() => fail())
+    ((a, match b { Err(_) -> true, Ok(_) -> false }), provenance.completed(scope))
+  })
+  println("${answer}")
+  println(tree)
+}

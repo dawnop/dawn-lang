@@ -61,6 +61,7 @@ use std/memfs
 use jvm/codegen.{
   no_override, gen_adt
 }
+use embed/provenance_rt
 use jvm/rtclasses.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class, gen_unit_class,
   gen_bytes_class, gen_mem_class, gen_io_class, gen_gpu_class, gen_fn_comparator, gen_ord_interface,
@@ -79,13 +80,15 @@ use check/types.{
   prelude_trait_ids, bounds_of, fn_interface_arities,
   Ty, TyFn, TyUnit, Sig, Traits, Adts, Impls, sig_abi_eff
 }
-use jvm/emit.{emit_module, emit_module_mapped, gen_trait_interface, JModMap}
+use jvm/emit.{emit_module, emit_module_mapped, gen_trait_interface, gen_provenance_sites, JModMap}
 use jvm/jmap
 use ir/core.{CModule, CValue, CMode}
 use ir/reach
+use ir/provenance
 use ir/reach.{Live}
 use ir/externs
 use ir/lower
+use ir/tail as call_tail
 use ir/lint
 use c/rc
 use c/unalias
@@ -313,6 +316,106 @@ fn collect_program_roots(
 ## (`__emit --map`, docs/source-span-map-design.md section 13); "" otherwise.
 ## The classes are the same either way: `emit_module_mapped` writes the plain
 ## emission's and reads the map off a second one.
+# Lower and analyze pristine calls before selecting Plain optimization.
+# Keeping this phase separate also keeps the driver below HugeMethodLimit.
+fn lower_program_modes(
+  std_mods: List[(String, Cx, TModule, CtOut)], mods: List[CheckedMod],
+  traits: Traits, impl_table: Impls, adts: Adts, prog_fns: Map[(String, String), Sig],
+  std_tests: Bool, target: String
+) -> (List[lower.LMod], List[lower.LMod], Option[Live], Map[Int, String]) !Fs !Proc !Env !Exit !Console !io = {
+  var preserve_calls = false
+  for item in std_mods {
+    let (_, cx, _, _) = item
+    preserve_calls = preserve_calls || cx.observation_used
+  }
+  for cm in mods { preserve_calls = preserve_calls || cm.cx.observation_used }
+  var std_lm: List[lower.LMod] = []
+  for sm in std_mods {
+    let (cls, _cx2, tm2, _ct2) = sm
+    std_lm = std_lm ++
+      [externs.select_lowered(lower.lower_module_full(cls, tm2, traits, impl_table, adts, prog_fns, std_tests, preserve_calls), false)]
+  }
+  var user_lm: List[lower.LMod] = []
+  for cm in mods {
+    user_lm = user_lm ++
+      [externs.select_lowered(lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns, true, preserve_calls), false)]
+  }
+  # `DAWN_CORE_LINT=1`: hold the Core both lists hold to the invariants
+  # lowering owes a backend (ir/lint.dawn), before anything reads it.
+  if lint.enabled() {
+    var found: List[lint.Violation] = []
+    var linted: List[CModule] = []
+    var si = 0
+    for sm in std_mods {
+      let (cls, _cx3, tm3, _ct3) = sm
+      found = found ++ lint.check_module(cls, tm3, std_lm[si])
+      linted = linted ++ [lower.emitted_core(std_lm[si])]
+      si = si + 1
+    }
+    var ui = 0
+    for cm in mods {
+      found = found ++ lint.check_module(cm.class_name, cm.tm, user_lm[ui])
+      linted = linted ++ [lower.emitted_core(user_lm[ui])]
+      ui = ui + 1
+    }
+    lint.enforce(found ++ lint.lint_program(adts, linted) ++ lint.check_slots(traits, linted))
+  }
+
+  # What the user's modules can reach (reach.dawn), which answers two
+  # questions at once: which Unicode tables dawn/rt/Strings carries, and which
+  # std methods are worth writing into the artifact. Without a target there is
+  # no program to reason from, so the runtime-only jar carries everything --
+  # and so does `dawn test --stdlib`, whose program is std itself.
+  #
+  # `emitted_core`, not `.m`: this path emits the test blocks too, and a table
+  # a test alone reaches has to ride or that test dies on a missing method.
+  #
+  # The ten `std/pvec` names the emitters spell directly (a list literal, `++`,
+  # the list primitives, the Array host boundary) are roots of their own: those
+  # calls are written by the emitter, so no chain in Core reaches them. They
+  # ride only for a program a List can turn up in, which reach decides.
+  var live: Option[Live] = None
+  if target != "" {
+    var cmods: List[CModule] = []
+    var reach_roots: List[String] = []
+    for l in std_lm { cmods = cmods ++ [lower.emitted_core(l)] }
+    for l in user_lm {
+      cmods = cmods ++ [lower.emitted_core(l)]
+      reach_roots = reach_roots ++ [l.m.owner]
+    }
+    # Ordinary ADTs and trait interfaces are emitted even with no live
+    # constructor/call. Their descriptors can name Java classes or evidence
+    # records, so those types are roots of the same freight walk as bodies.
+    var extra_types: List[Ty] = []
+    for pr in map.entries(adts) {
+      let (_, a) = pr
+      if not str.starts_with(a.name, "ev\$") {
+        for c in a.ctors {
+          for field in c.fields { extra_types = extra_types ++ [field.ty] }
+        }
+      }
+    }
+    for pr in map.entries(traits) {
+      let (_, tr) = pr
+      for method in tr.methods {
+        let (_, ms) = method
+        extra_types = extra_types ++ ms.sig.param_tys ++ [ms.sig.ret,
+          TyFn([], TyUnit, sig_abi_eff(ms.sig))]
+      }
+    }
+    live = Some(reach.live_set(cmods, reach_roots, reach.list_roots(), extra_types))
+  }
+  var source_core: List[CModule] = []
+  for l in std_lm { source_core = source_core ++ [lower.emitted_core(l)] }
+  for l in user_lm { source_core = source_core ++ [lower.emitted_core(l)] }
+  let provenance_sites = provenance.site_table(source_core, live)
+  if preserve_calls {
+    std_lm = map(std_lm, l => call_tail.plain(l))
+    user_lm = map(user_lm, l => call_tail.plain(l))
+  }
+  (std_lm, user_lm, live, provenance_sites)
+}
+
 fn collect_program_full(
   target: String,
   std_flag: Option[String],
@@ -514,82 +617,8 @@ fn collect_program_full(
   # ride along for the user's modules only, because only those are emitted --
   # unless `dawn test --stdlib` asked for std's, in which case there is no
   # user module and std's are the whole program.
-  var std_lm: List[lower.LMod] = []
-  for sm in std_mods {
-    let (cls, _cx2, tm2, _ct2) = sm
-    std_lm = std_lm ++
-      [externs.select_lowered(lower.lower_module_full(cls, tm2, traits, impl_table, adts, prog_fns, std_tests), false)]
-  }
-  var user_lm: List[lower.LMod] = []
-  for cm in mods {
-    user_lm = user_lm ++
-      [externs.select_lowered(lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns, true), false)]
-  }
-  # `DAWN_CORE_LINT=1`: hold the Core both lists hold to the invariants
-  # lowering owes a backend (ir/lint.dawn), before anything reads it.
-  if lint.enabled() {
-    var found: List[lint.Violation] = []
-    var linted: List[CModule] = []
-    var si = 0
-    for sm in std_mods {
-      let (cls, _cx3, tm3, _ct3) = sm
-      found = found ++ lint.check_module(cls, tm3, std_lm[si])
-      linted = linted ++ [lower.emitted_core(std_lm[si])]
-      si = si + 1
-    }
-    var ui = 0
-    for cm in mods {
-      found = found ++ lint.check_module(cm.class_name, cm.tm, user_lm[ui])
-      linted = linted ++ [lower.emitted_core(user_lm[ui])]
-      ui = ui + 1
-    }
-    lint.enforce(found ++ lint.lint_program(adts, linted) ++ lint.check_slots(traits, linted))
-  }
-
-  # What the user's modules can reach (reach.dawn), which answers two
-  # questions at once: which Unicode tables dawn/rt/Strings carries, and which
-  # std methods are worth writing into the artifact. Without a target there is
-  # no program to reason from, so the runtime-only jar carries everything --
-  # and so does `dawn test --stdlib`, whose program is std itself.
-  #
-  # `emitted_core`, not `.m`: this path emits the test blocks too, and a table
-  # a test alone reaches has to ride or that test dies on a missing method.
-  #
-  # The ten `std/pvec` names the emitters spell directly (a list literal, `++`,
-  # the list primitives, the Array host boundary) are roots of their own: those
-  # calls are written by the emitter, so no chain in Core reaches them. They
-  # ride only for a program a List can turn up in, which reach decides.
-  var live: Option[Live] = None
-  if target != "" {
-    var cmods: List[CModule] = []
-    var reach_roots: List[String] = []
-    for l in std_lm { cmods = cmods ++ [lower.emitted_core(l)] }
-    for l in user_lm {
-      cmods = cmods ++ [lower.emitted_core(l)]
-      reach_roots = reach_roots ++ [l.m.owner]
-    }
-    # Ordinary ADTs and trait interfaces are emitted even with no live
-    # constructor/call. Their descriptors can name Java classes or evidence
-    # records, so those types are roots of the same freight walk as bodies.
-    var extra_types: List[Ty] = []
-    for pr in map.entries(adts) {
-      let (_, a) = pr
-      if not str.starts_with(a.name, "ev\$") {
-        for c in a.ctors {
-          for field in c.fields { extra_types = extra_types ++ [field.ty] }
-        }
-      }
-    }
-    for pr in map.entries(traits) {
-      let (_, tr) = pr
-      for method in tr.methods {
-        let (_, ms) = method
-        extra_types = extra_types ++ ms.sig.param_tys ++ [ms.sig.ret,
-          TyFn([], TyUnit, sig_abi_eff(ms.sig))]
-      }
-    }
-    live = Some(reach.live_set(cmods, reach_roots, reach.list_roots(), extra_types))
-  }
+  let (std_lm, user_lm, live, provenance_sites) = lower_program_modes(
+    std_mods, mods, traits, impl_table, adts, prog_fns, std_tests, target)
   let tuse =
     match live {
       None -> reach.all_tables()
@@ -601,6 +630,33 @@ fn collect_program_full(
   let needs_ctl = match live {
     None -> program_has_ctl(std_mods, mods)
     Some(l) -> l.ctl
+  }
+  var payload_core: List[CModule] = []
+  for l in std_lm { payload_core = payload_core ++ [lower.emitted_core(l)] }
+  for l in user_lm { payload_core = payload_core ++ [lower.emitted_core(l)] }
+  let needs_observation = match live {
+    Some(value) -> value.observation || value.provenance_data
+    None -> provenance.has_data(payload_core)
+  }
+  if needs_observation {
+    var plain_classes: List[(String, Bytes)] = []
+    for item in classes {
+      let (name, _) = item
+      var replace = false
+      for k in fn_interface_arities() { if name == fn_iface(k) { replace = true } }
+      for tid in wants {
+        let tr = trait_of(traits, tid)
+        if name == tr_iface(None, tr.name) { replace = true }
+      }
+      if not replace { plain_classes = plain_classes ++ [item] }
+    }
+    classes = plain_classes
+    for k in fn_interface_arities() { classes = classes ++ [(fn_iface(k), gen_fn_interface(k, true))] }
+    for tid in wants {
+      let tr = trait_of(traits, tid)
+      classes = classes ++ [(tr_iface(None, tr.name), gen_trait_interface(sup, adts, tr, true))]
+    }
+    classes = classes ++ provenance_rt.classes() ++ gen_provenance_sites(provenance_sites)
   }
   if needs_ctl {
     classes = classes ++ [(CTL_CLASS, gen_ctl_class(sup))]

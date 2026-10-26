@@ -7625,8 +7625,7 @@ test "origin bindings keep arm-local identity while rename retains its error ref
       assert target.def == Some((decl, decl + 1))
       assert map(occurrences(qc, read_at, true), o => (o.lo, o.hi)) == [(decl, decl + 1), (read_at, read_at + 1)]
       let hover = hover_probe_at(st, d, text, read, len(read) - 1)
-      assert str.contains(hover, "o: ?")
-      assert not str.contains(hover, "Origin")
+      assert str.contains(hover, "Origin")
       assert def_probe_at(st, d, text, head, len(head) - 1).def == target.def
       let params = rename_params(d, read, len(read) - 1, "source")
       let expected = "`main` has errors; rename reads every name, so fix them first"
@@ -7644,5 +7643,50 @@ test "origin bindings keep arm-local identity while rename retains its error ref
     assert map(occurrences(qc, last, true), o => o.lo) == [outer, last]
     let resume = probe_offset(text, "resume k", 7)
     assert def_probe_at(st, d, text, "k(1)", 0).def == Some((resume, resume + 1))
+  }))
+}
+
+test "origin bindings support definition hover references and rename under observation" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let text = join([
+      "use std/provenance",
+      "effect Ask { fn ask() -> Int }",
+      "fn f() -> Int !io = provenance.observe(scope => {",
+      "  with handle Ask { ask() origin source => {",
+      "    let saved = source",
+      "    7",
+      "  } }",
+      "  ask()",
+      "})",
+      ""
+    ], "\n")
+    let (st, d) = untitled_state(std, "untitled:origin-rename-ok", text)
+    let analysis = analysis_of(st, d).expect("origin analysis")
+    let qc = doc_qcx(st, d, analysis).expect("origin query context")
+    let decl = probe_offset(text, "origin source", 7)
+    let read = probe_offset(text, "saved = source", 8)
+    assert def_probe_at(st, d, text, "saved = source", 8).def == Some((decl, decl + 6))
+    assert map(occurrences(qc, read, true), o => (o.lo, o.hi)) == [(decl, decl + 6), (read, read + 6)]
+    assert str.contains(hover_probe_at(st, d, text, "saved = source", 8), "Origin")
+    let params = rename_params(d, "saved = source", 8, "event")
+    match handle_prepare_rename(st, params) {
+      (Ok(r), _) -> { assert ostr(r, "placeholder") == "source" }
+      (Err(why), _) -> panic("origin prepareRename refused: ${why}")
+    }
+    match handle_rename(st, params) {
+      (Ok(r), _) -> {
+        let edits = match oget(get_or_null(r, "changes"), d.uri) {
+          Some(JArr(es)) -> es
+          _ -> panic("no origin rename edits")
+        }
+        assert len(edits) == 2
+        for e in edits { assert ostr(e, "newText") == "event" }
+      }
+      (Err(why), _) -> panic("origin rename refused: ${why}")
+    }
   }))
 }

@@ -1,0 +1,47 @@
+# Snapshot inspection is pure and remains valid after observation exits.
+use std/io.{println}
+use std/provenance
+use std/provenance.{Origin}
+
+effect Read {
+  fn ask(n: Int) -> Origin
+}
+fn describe(origin: Origin) -> String = provenance.operation(origin)
+fn helper(n: Int) -> Origin !Read = ask(n)
+fn depth(origin: Origin) -> Int = {
+  var current = Some(origin)
+  var count = 0
+  while true {
+    match current {
+      None -> return count
+      Some(value) -> {
+        count = count + 1
+        current = provenance.parent(value)
+      }
+    }
+  }
+  count
+}
+pub fn main() -> Unit !io = {
+  let (origin, tree) = provenance.observe(scope => {
+    with handle Read {
+      ask(n) origin source => {
+        if n != 7 { panic("wrong query argument") }
+        let _description = describe(source)
+        source
+      }
+    }
+    let answer = helper(7)
+    (answer, provenance.completed(scope))
+  })
+  let location = provenance.site(origin).expect("missing operation Site")
+  let parent = provenance.parent(origin).expect("missing parent")
+  let definition = provenance.definition(parent).expect("missing helper definition")
+  let answer = (provenance.scope(origin), provenance.epoch(origin), provenance.instance(origin),
+    provenance.instance(parent), depth(origin), provenance.definition(origin) == None)
+  println("${answer}")
+  println(describe(origin))
+  println("${(location.module, location.file, location.declaration, location.role, location.id > 0)}")
+  println("${(definition.module, definition.declaration, definition.role)}")
+  println(tree)
+}

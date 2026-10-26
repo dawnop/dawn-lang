@@ -1,0 +1,18 @@
+# Runtime barriers invoke user callbacks in the current observation mode.
+use std/io.{println}
+use std/provenance
+
+fn direct(n: Int) -> Int = n + 1
+fn fail() -> Int !io = panic("callback failure")
+fn release(n: Int) -> Unit = ()
+
+pub fn main() -> Unit !io = {
+  let (answer, tree) = provenance.observe(scope => {
+    let result = catch_panic(() => fail())
+    let value = bracket(7, release, n => direct(n))
+    let sibling = direct(value)
+    ((match result { Err(_) -> true, Ok(_) -> false }, sibling), provenance.completed(scope))
+  })
+  println("${answer}")
+  println(tree)
+}

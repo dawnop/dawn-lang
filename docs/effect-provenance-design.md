@@ -1,6 +1,6 @@
 # 效果来源：按观察作用域保留逻辑调用
 
-> 状态：**proposed**（P1 分期，2026-10-25）。表面语法已裁定为 A，W1 实现语法与静态身份底座；来源观察尚未实现，使用 `origin` 子句会明确报错。P1 实现并发布后才做 P2 包迁移。
+> 状态：**W2 普通观察已实现，待 P1 发布收口**（P1 分期，2026-10-25）。W1 提供语法与静态身份，W2 提供普通观察及双后端逻辑调用 ABI；控制续延、TCO 压缩与有界日志留给 W3。P1 发布后才做 P2 包迁移。
 
 <!-- 为什么写这篇：设备字节相同不能证明源码归属相同。把客观调用来源交给编译器，
      把展示抽象留给观察器，才能退休散在库签名与用户 helper 中的第二套调用协议。 -->
@@ -151,13 +151,36 @@ continuation 即使在安装帧返回后恢复，也不能复用失效 token；�
 试录的实例身份带 epoch，已外传快照可被识别为未提交，不能在 rewind 后与新提交节点重号混淆。
 P1 发布前须写死容量、截断标志、tail-edge 解码与日志所有权，本文不杜撰已测得的上限。
 
+### 5.1 checkpoint 的重用与失效
+
+补裁四采用 SQL savepoint 的栈纪律。`checkpoint()` 保存本作用域的日志边界与活跃父上下文；
+`rewind(c)` 回到该边界，目标 `c` 仍有效且可反复使用。所有在 `c` 之后建立的 checkpoint
+同时失效，`c` 及更早建立的保持有效。因此回退内层后仍可回退外层，回退外层后不能再用内层标记。
+标记的建立先后次序独立于日志长度，即使两个 checkpoint 之间没有记录，也必须区分。
+
+使用已失效、属于其他 `TraceScope` 或已退出作用域的 checkpoint，必须给出确定性的运行期错误；
+两后端使用完全相同的精确文案，不静默忽略，也不改用最近边界。每次成功 rewind 都推进 epoch，
+之后的新调用实例不得与被丢弃的试探实例重号。已外传的试探 `Origin` 及其父链保持不可变，
+并保留足以识别未提交身份的 scope/epoch 信息。checkpoint 的有效性不能只由当前 epoch 是否相等决定，
+否则合法的目标重用和更早标记会被误拒。
+
+不提供 release 或 commit 操作。观察作用域退出时，该作用域的所有 checkpoint 随句柄一起失效。
+
+补裁五进一步把 checkpoint 绑定到建立时的逻辑调用实例 `F`，比较实例身份而非深度或 Site。
+`rewind(c)` 只在当前实例恰为 `F` 时合法；仍在执行的更深调用中使用它，报
+`not in the creating frame`。`F` 因正常返回、`?` 或 panic 展开而结束后，其建立的全部
+checkpoint 失效，再用时报 `creating frame has finished`。这两类错误的完整文案必须在
+JVM 与 native C 一致，并相互区分。`F` 外更早的 checkpoint 不因 `F` 结束而失效。
+这与前述标记栈规则同时成立：同一仍活跃的建立帧可反复回退，但不能借 rewind 删除仍在
+执行的后代帧或复活已经结束的建立帧。续延越域属于 W3，W2 观察下明确拒绝。
+双后端以独立手写期望树检查目标重用、嵌套失效、跨域和退出后拒绝、epoch 不重号及快照不变。
+
 ## 六、表面语法裁定与候选记录
 
-以下完整观察示例均**尚未实现**，不是当前可编译样例。W1 只建立静态身份与臂语法，
-`origin o` 仍由 checker 明确拒绝。以 spec 的
+W2 采用以下 A 方案的普通观察入口。W1 的统一拒绝由词法能力检查替代。以 spec 的
 `with x <- f(...)`、`with handle E { op(args) => ... }` 和 `resume k` 为基础，
 用普通用户效果 `Ask` 表达，不给 tileir 新增专用语法。`observe` 建观察根，
-`trace` 是受作用域约束的观察能力；已裁定观察入口引入 `io`，`TraceScope` 为不可逃逸的词法句柄；`Origin` 为可外传的不可变值。W1 的 `origin o` 一律由 checker 明确拒绝，W2 才提供观察能力。
+`trace` 是受作用域约束的观察能力；已裁定观察入口引入 `io`，`TraceScope` 为不可逃逸的词法句柄；`Origin` 为可外传的不可变值。W2 在词法观察域内支持 `origin o`，域外仍明确拒绝。
 
 **采纳 A：在 handler 臂增加来源绑定子句。** 类似现有 `resume k`，
 `origin o` 绑定本次 operation 的 envelope；两者同时出现时顺序为 `origin o resume k`。
@@ -197,7 +220,7 @@ let answer = helper(1)
 相应 handler 臂的动态激活内，不能被提到任意纯 helper 后读取环境；它仍是语言设施，
 不能假称 std 普通函数就能实现。补裁已采纳 A，不提供 B 作为第二入口。W1 同步
 spec、parser、checker、LSP 与 formatter；来源绑定的 rename 继续遵守有诊断则拒绝的
-既有政策，W2 观察可用后再增加成功 rename 正控。
+既有政策，W2 增加成功 rename 正控。
 
 ## 七、双后端成本测量计划
 
@@ -339,3 +362,74 @@ P0 的删除标记负控在 P2 迁移为「新来源边被删时，设备仍同�
 - 不用通用值来源追踪保住 DRange 构造位置，不把普通函数体当设备 region。
 - 不把行号写进普通 TileProg/golden，不声称自动来源零成本，不拿宿主录制时间冒充 GPU 性能。
 - 不恢复已退休的 Explorer 页，不把 P1/P2 当作 K3 读者切片的前置条件：当前消费者是 GPU 页与 Playground。
+
+## 补裁六的实现约束
+
+普通与观察执行使用同一定义的编译期双入口，不增加源签名或用户参数。共享 Core 在任何
+可能删除逻辑调用的优化前计算 Plain/Observed 两位可达掩码，并保存唯一 definition 和 Site 身份。
+普通入口沿用既有 ABI 和优化，不含观察检查；观察入口完整维护进入、退出、checkpoint 与 epoch。
+仅发射可达的入口。观察的 callback 是 Observed 根，普通入口是 Plain 根，调用沿当前模式传播。
+
+闭包、trait slot、Fn 桥和库回调按调用者模式路由，不按值的创建位置路由。C 保持 canonical
+plain 指针与原闭包布局，观察路径使用非线性的 canonical 到 observed 索引；地址具有语义，
+禁止将不同定义入口折叠，并检查唯一性。JVM 的 observed 方法使用独立描述符，普通 apply 不变。
+内部 Dawn 目标缺 observed 入口为编译错误，不能回落到 Plain；真正未知的外部 ABI 按既定边界处理。
+桥不创造用户帧，词法 effect evidence 及 handler 安装能力不受入口选择影响。
+
+原生 U1 草稿的 trait/container 超线证据保留。门限及协议不变，正式重测前冻结新增共享热函数
+夹具，原六负载保留；跨模式闭包、trait 三形态、库回调及同 Site 不同实例均须手写预期与负控。
+版本化不是兼容层，不是 W3 的 TCO 压缩或 continuation 支持，不能省略纯 helper 或零 perform 调用。
+
+## W2 接口与记录格式
+
+最小标准模块为 `std/provenance`。入口 `observe` 与 `note`、`completed`、`checkpoint`、
+`rewind` 按已解析声明身份降低；同名用户函数没有观察特权。`TraceScope` 为词法能力，
+只允许直接绑定作为四个操作的实参；别名、容器、返回、任意传参、计算所得句柄及逃逸闭包捕获
+均拒绝。`Origin` 与 `Checkpoint` 是可外传的不可变值，后者使用时仍受运行期生命期规则约束。
+
+此前未固定的只读字段名称采用普通英语：`operation`、`parent`、`scope`、`epoch`、`instance`、
+`site`、`definition`。`Site` 字段为 `id, module, file, declaration, start, end, name_start,
+name_end, role, operation`，`Definition` 字段为 `id, module, declaration, start, end, role`。
+`parent`、`site`、`definition` 返回 Option；根无父和调用点，operation envelope 不伪称 handler
+为发起方定义。`file` 使用稳定源单元身份而非机器路径；未知坐标为负数。
+
+`completed` 返回不可变 String 前缀，包含尚活跃根及调用，不声称 scope 已结束。实现编码的
+`S` 行保存 scope/当前 epoch，`F` 行保存 scope、该实例 epoch、instance、parent、状态、Site ID、
+Site 元数据及 definition 元数据；状态 0/1/2 分别为活跃/正常结束/panic 展开。空根明确没有 Site
+和 definition。note 以空行分隔的 `O` envelope 及不可变父链附后。元数据中的百分号、tab、换行、
+回车与 NUL 分别编码为 `%25/%09/%0A/%0D/%00`，避免声明或测试名伪造记录分隔。两个入口共用
+一份静态 Site/definition 身份，动态 instance 不从静态 ID 推导。试探 Origin 的提交归属应与保留日志
+的完整身份比较，不能把所有旧 epoch 一概判为未提交。
+
+C/JVM 都将已知同步 runtime 回调适配到 Observed 入口，桥本身不制造用户帧。静态表只建一次，
+普通入口没有观察检查。C 将观察入口和来源 runtime 放在独立可执行 `dawn_observed` 段，使普通函数与基础 runtime
+保持连续布局；不用会被链接脚本合并到普通 text 前方的 `.text.unlikely` 子段。只有观察产物使用该放置，U0 不受影响。观察帧、记录、checkpoint 与 note 由 scope 持有，退出回收。外传 Origin
+拥有快照字节，不引用 C 栈或已释放 scope。W2 不提供容量上限选项；W3 的控制臂、实际递归尾边和
+未知外部 ABI 在观察下明确拒绝。已有 tile marks 保持原样，观察成本先在通用构建器上测量。
+
+C 的含观察产物中，闭包/trait 入口及无循环间接分派边界按 64 字节对齐，减少冷代码增量对间接调用
+指令缓存边界的扰动。循环体和无观察产物保留后端默认对齐，入口对齐不增加调用边执行的指令，
+也不改变 ABI 或身份。
+
+含观察产物的 native 静态字典模板按只读 C 对象发射，显式保留模板的不可变事实，使普通路径
+在分配之后仍可解析恒定 slot。动态绑定字典仍由 runtime 复制模板；调用参数沿用原来的
+`dawn_dict*` ABI，编译器不向静态模板写入。Observed 分派仍经过 canonical 映射并执行完整协议。
+
+JVM 序列化在写入前按不可变字段长度预估字符容量，一次分配 Origin 与 completed 的构建缓冲区，
+减少几何扩容复制和 GC 周期中的临时存活数据。实际内容仍按相同记录格式逐字段写出；容量预估
+只决定初始分配，不裁剪日志或父链，也不引入 W3 的容量上限。
+
+
+### 双入口的源码映射
+
+C 的 Observed 身体在函数边界持有一个展开 guard，调用点正常返回时结束对应记录；panic
+展开按该函数进入时的逻辑边界结束尚活跃子调用，避免为每条源码调用注册独立 cleanup。
+观察状态通过线程的惰性私有状态保存，最后一个 scope 退出且没有活跃调用时回收；普通入口
+不分配或读取该状态。内建函数值与字典适配器是透明桥，保留实际定义身份；同步库回调从
+发起调用取得静态 callback Site，不能把适配器的构造位置当作执行调用点。
+
+静态 Site 与 definition 不因入口模式改变；同一源码调用可分别落在 Plain 与 Observed
+的物理方法或 C 函数中。既有 dawnmap 格式保留源码身份，使用容纳该行的物理入口区分两种
+放置；不把重复的源码坐标误判为两个逻辑 Site。映射判词从容纳入口读取模式，并据此核对
+精确的目标符号、Fn 接口或 canonical 选择调用，不能把任意一侧目标都当作正确。
+有观察能力的 builder 与 trait/Fn 夹具同时验证两后端的源码配对、物理位置和开关 map 不改产物。

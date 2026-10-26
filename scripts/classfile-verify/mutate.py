@@ -86,27 +86,21 @@ MUTATIONS = {
         (EMIT,
          "    CallTwo -> { m.visitInsn(OP_POP2) }",
          "    CallTwo -> { m.visitInsn(OP_POP) }"),
-        # OP_POP2's import goes with its only use: an unused import is an error
-        (EMIT,
-         "OP_NEW, OP_POP, OP_POP2, OP_PUTFIELD",
-         "OP_NEW, OP_POP, OP_PUTFIELD"),
     ),
     "omit-direct-bottom": call_bottom(
-        "      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name, d, false)"),
+        "      call_entry(gx, g1.mv, owner, name, d, at)"),
     "omit-dynamic-bottom": ((
         EMIT,
         "  if is_bottom(ret_static) {",
         "  if false {",
     ),),
     "omit-impl-bottom": call_bottom(
-        """      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        impl_method_name(gx, owner, tr, subject, method), d, false)"""),
+        """      call_entry(gx, g1.mv, owner, impl_method_name(gx, owner, tr, subject, method), d, at)"""),
     "omit-default-bottom": call_bottom(
-        """      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        default_method_name(tr.name, method), d, false)"""),
+        """      call_entry(gx, g1.mv, owner, default_method_name(tr.name, method), d, at)"""),
     "omit-trait-bottom": call_bottom(
-        """      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), method,
-        d, true)"""),
+        """      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), entry_name(method, gx.observed_mode),
+        entry_desc(d, gx.observed_mode), true)"""),
     "omit-dictionary-bottom": ((
         EMIT,
         "    if is_bottom(ms.sig.ret) {",

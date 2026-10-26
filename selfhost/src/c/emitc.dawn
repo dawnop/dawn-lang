@@ -34,15 +34,17 @@ use check/types.{
   ev_pack_adt, EV_MISS_MSG
 }
 use ir/reach
+use ir/provenance
+use ir/tail as call_tail
 use c/views
 use c/quiet
 use ir/coresites
-use c/cwalk
+use ir/walk as cwalk
 use ir/reach.{TableUse, Live, LIST_MOD, LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT}
 use embed/unicode_case
 use embed/rtsrc
 use embed/unicode_class
-use ir/core.{synthetic_definition,
+use ir/core.{fn_key, mode_key, synthetic_definition,
   CSite, CNoSite, CSyntax, CAt, CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict, VCursor,
   diverges,
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned, callee_mode_key, impl_mode_name,
@@ -65,6 +67,7 @@ use ir/core.{synthetic_definition,
 ## the two maps belong to a module rather than to the unit -- std/pvec's MASK
 ## and std/hamt's MASK are two constants that happen to agree.
 pub type EmitMod = {
+  logical: Map[String, CFun],
   m: CModule,
   consts: Map[String, CValue],
   blocks: Map[(Int, Int), CValue]
@@ -156,6 +159,14 @@ pub type CSt = {
   # written down, in the order they were emitted; the first line containing
   # one claims it. `rows` is where each sited call landed, as chunk indices
   # into the current transcript, relocated as transcripts are spliced.
+  observation: Bool,
+  observed_mode: Bool,
+  observed_symbols: Set[String],
+  observed_modes: Map[(String, String), List[CMode]],
+  sites: Map[Int, Int],
+  declaration: String,
+  prov_guards: Int,
+  prov_tail: List[CSite],
   mapping: Bool,
   pend: List[Pend],
   rows: List[MapRow]
@@ -725,7 +736,7 @@ fn emit_const_value(st: CSt, v: CValue) -> (CSt, String) =
         st1 = line(st2,
           tmp ++ " = dawn_array_push_own(" ++ tmp ++ ", " ++ cv_box(ev, el) ++ ");")
       }
-      (st1, pvec_call(LIST_FROM_ARRAY) ++ "(" ++ tmp ++ ")")
+      (st1, mode_symbol(st1, pvec_call(LIST_FROM_ARRAY)) ++ "(" ++ tmp ++ ")")
     }
     # A tuple erases every element, exactly as `emit_alloc(erased = true)`
     # does: `Tuple2` holds two Objects on the JVM whatever it was built from,
@@ -968,16 +979,20 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
     }
     CCall(callee, args, ty, s) -> {
       let (st1, v) = emit_call(st, callee, args, ty)
-      (note_call(st1, len(st.out), callee, s, v), v)
+      let (st2, value) = observed_value(st1, v, ty, s, "")
+      (note_call(st2, len(st.out), callee, s, value), value)
     }
     CExtern(sym, args, _, _, site) -> {
+      let st = if st.observed_mode { line(st, "dawn_prov_unsupported(\"external ABI boundary\");") } else { st }
       let borrowed = list.map(args, _a => false)
       let (st1, cargs) = emit_ordered(st, args, borrowed)
       let v = "DAWN_EXTERN(" ++ sym ++ ")(" ++ join(cargs, ", ") ++ ")"
       (if st.mapping { noted(st1, len(st.out), "extern c " ++ sym, site, v) } else { st1 }, v)
     }
     CIntrinsic(name, args, ty, s) -> {
-      let (st1, v) = emit_intrinsic(st, name, args, ty)
+      let (st1, v) = if str.starts_with(name, "provenance_") {
+        emit_provenance(st, name, args, ty, s)
+      } else { emit_intrinsic_protocol(st, name, args, ty, s) }
       (note_intrinsic(st1, len(st.out), name, s, v), v)
     }
     CCtor(_, ci, args, _) -> emit_alloc(st, ci, args, false, None)
@@ -1057,7 +1072,8 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
       # CFnRef reaching here means the lowering missed a case
       panic("emitc: bare CFnRef survived lowering (" ++ name ++ ")")
     CClosure(name, owner, caps, _) -> emit_closure(st, name, owner, caps)
-    CDictRef(key, _tid, _subj, _) -> (st, "(&" ++ dict_symbol(key) ++ ")")
+    CDictRef(key, _tid, _subj, _) ->
+      (st, (if len(st.observed_symbols) > 0 { "((dawn_dict*)&" } else { "(&" }) ++ dict_symbol(key) ++ ")")
     # A dictionary with arguments is the static one's slots plus a binding,
     # so the static stays exactly what it was and this copies it. The JVM
     # calls a constructor for the same reason.
@@ -1119,7 +1135,7 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
         st1 = line(st2,
           tmp ++ " = dawn_array_push_own(" ++ tmp ++ ", " ++ box_call(v, cex_ty(el)) ++ ");")
       }
-      (st1, pvec_call(LIST_FROM_ARRAY) ++ "(" ++ tmp ++ ")")
+      (st1, mode_symbol(st1, pvec_call(LIST_FROM_ARRAY)) ++ "(" ++ tmp ++ ")")
     }
     CForeign(_, _, _) ->
       # Not a gap: `use java` is the half of FFI that does not port, and
@@ -1318,7 +1334,7 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
       # `std/pvec.concat` is a Dawn function and takes both sides owned; the
       # other two are runtime primitives and borrow. See `own_args`.
       TyList(_) ->
-        (st2, pvec_call(LIST_CONCAT) ++ "(" ++ dup_expr(lv, lt) ++ ", " ++
+        (st2, mode_symbol(st2, pvec_call(LIST_CONCAT)) ++ "(" ++ dup_expr(lv, lt) ++ ", " ++
             dup_expr(rv, lt) ++ ")")
       TyBytes -> (st2, "dawn_bytes_concat(" ++ lv ++ ", " ++ rv ++ ")")
       _ -> (st2, "dawn_str_concat(" ++ lv ++ ", " ++ rv ++ ")")
@@ -1380,7 +1396,7 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
 ## argument positions) and the temp counter; none of the rest, so empty is
 ## the honest value everywhere else.
 fn bin_test_st() -> CSt =
-  CSt {
+  CSt { observation = false, observed_mode = false, observed_symbols = set.empty(), observed_modes = map.empty(), sites = map.empty(), declaration = "", prov_guards = 0, prov_tail = [],
     out = [],
     tmp = 0,
     ind = 0,
@@ -1722,7 +1738,7 @@ fn emit_row(st: CSt, es: List[CExpr], ks: List[Bool], alloc: Bool) -> (CSt, List
       out = out ++ [if v == "DAWN_UNIT" { v } else { c_zero(cex_ty(e)) }]
     } else if atom_expr(st1, e, ks[i]) || no_value(e) {
       out = out ++ [v]
-    } else if nontrivial < 2 && not (alloc && inline_raises(e)) {
+    } else if nontrivial < 2 && not st.observed_mode && not (alloc && inline_raises(e)) {
       out = out ++ [v]
     } else if ks[i] && i < last_run && tracked_local(st1, e) {
       # already in a slot: the `dawn_take` it emitted is the transfer, and
@@ -1762,11 +1778,11 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
   let cargs = list.drop(row, len(head))
   match callee {
     CDirect(owner, name) ->
-      (st1, mangle(owner, name) ++ "(" ++ join(cargs, ", ") ++ ")")
+      (st1, mode_symbol(st, mangle(owner, name)) ++ "(" ++ join(cargs, ", ") ++ ")")
     CImpl(owner, tid, subject, method) ->
-      (st1, impl_symbol(owner, tid, subject, method) ++ "(" ++ join(cargs, ", ") ++ ")")
+      (st1, mode_symbol(st, impl_symbol(owner, tid, subject, method)) ++ "(" ++ join(cargs, ", ") ++ ")")
     CDefault(owner, tid, method) ->
-      (st1, default_symbol(owner, tid, method) ++ "(" ++ join(cargs, ", ") ++ ")")
+      (st1, mode_symbol(st, default_symbol(owner, tid, method)) ++ "(" ++ join(cargs, ", ") ++ ")")
     CMethod(dict, _tid, _m, idx, nev) -> {
       let dv0 = row[0]
       # A dictionary reaches here as whatever its position carries -- a
@@ -1791,7 +1807,9 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
       if nev == 0 { sigp = sigp ++ ["dawn_dict*"] }
       let cast = "(" ++ c_type(ty) ++ "(*)(" ++ join(sigp, ", ") ++ "))"
       let row2 = list.take(cargs, nargs) ++ [dv] ++ list.drop(cargs, nargs)
-      (st3, "((" ++ cast ++ "(" ++ dv ++ ")->slots[" ++ to_string(idx) ++ "])(" ++
+      let target = "(" ++ dv ++ ")->slots[" ++ to_string(idx) ++ "]"
+      let routed = if st.observed_mode { "dawn_prov_select(" ++ target ++ ")" } else { target }
+      (st3, "((" ++ cast ++ routed ++ ")(" ++
           join(row2, ", ") ++ "))")
     }
     CDynamic(target) -> {
@@ -1816,8 +1834,10 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
         i = i + 1
       }
       let cast = "(void*(*)(" ++ join(sigp, ", ") ++ "))"
+      let target = "(" ++ cv ++ ")->fn"
+      let routed = if st.observed_mode { "dawn_prov_select_closure(" ++ cv ++ ")" } else { target }
       let call =
-        "((" ++ cast ++ "(" ++ cv ++ ")->fn)(" ++ join([cv] ++ boxed, ", ") ++ "))"
+        "((" ++ cast ++ routed ++ ")(" ++ join([cv] ++ boxed, ", ") ++ "))"
       # the result box is the callee's gift and nobody else will free it
       (st3, unbox_own_expr(call, ty))
     }
@@ -1854,7 +1874,7 @@ fn slot_shape(d: CDictDef) -> String = {
 ## declaration order. The JVM backend uses an interface and a singleton
 ## instead; that difference stays inside the two emitters because Core
 ## already resolved which function fills each slot.
-fn dict_line(d: CDictDef) -> String = {
+fn dict_line(d: CDictDef, immutable: Bool) -> String = {
   var parts: List[String] = []
   for slot in d.slots {
     parts = parts ++ [
@@ -1868,7 +1888,10 @@ fn dict_line(d: CDictDef) -> String = {
   # initialisation: the C backend builds with -Werror=missing-field-initializers
   # external linkage, like the constant builders: one unit defines it, every
   # unit sees the `extern` declaration in the shared head
-  "dawn_dict " ++ dict_symbol(d.key) ++ " = { " ++
+  # Static templates never change. In mode-specialized programs expose that
+  # fact to C so Plain callers can resolve constant slots after allocation.
+  # The pointer ABI stays mutable-shaped for runtime-bound dictionary copies.
+  (if immutable { "const " } else { "" }) ++ "dawn_dict " ++ dict_symbol(d.key) ++ " = { " ++
     to_string(len(parts)) ++ ", { " ++ join(parts, ", ") ++ " }, 0, { 0 } };"
 }
 
@@ -1983,9 +2006,9 @@ fn rt_symbol(intrs: Map[String, Intr], name: String) -> Option[String] =
 ## The four primitives that traffic in lists cross through Array for the same
 ## reason the JVM backend does: it is the shape both sides can name, and it
 ## keeps the list's representation std's business (collections-dejava §5.1).
-fn to_host(v: String) -> String = pvec_call(LIST_TO_ARRAY) ++ "(" ++ v ++ ")"
+fn to_host(st: CSt, v: String) -> String = mode_symbol(st, pvec_call(LIST_TO_ARRAY)) ++ "(" ++ v ++ ")"
 
-fn of_host(v: String) -> String = pvec_call(LIST_FROM_ARRAY) ++ "(" ++ v ++ ")"
+fn of_host(st: CSt, v: String) -> String = mode_symbol(st, pvec_call(LIST_FROM_ARRAY)) ++ "(" ++ v ++ ")"
 
 ## Arguments for a Dawn function this emitter calls where Core wrote something
 ## else -- the list operations live in `std/pvec`, and `++` on a list is one of
@@ -2071,6 +2094,11 @@ pub(pkg) fn extern_c_type(t: Ty) -> String = match t {
 }
 
 fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
+  if st.observed_mode && (str.starts_with(name, "ctl_") || name == "discard") {
+    let checked = line(st, "dawn_prov_unsupported(\"control operations\");")
+    let (next, value) = emit_intrinsic(CSt { ..checked, observation = false, observed_mode = false }, name, args, ty)
+    return (CSt { ..next, observation = st.observation, observed_mode = st.observed_mode }, value)
+  }
   # an intrinsic borrows its arguments except at the owned positions the
   # reuse analysis lists -- the same classification chk_walk reads
   let owned = intr_owned_args(name)
@@ -2081,6 +2109,10 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     ai = ai + 1
   }
   let (st1, cargs) = emit_ordered(st, args, ks)
+  emit_intrinsic_values(st1, name, args, ty, owned, cargs)
+}
+
+fn emit_intrinsic_values(st1: CSt, name: String, args: List[CExpr], ty: Ty, owned: List[Int], cargs: List[String]) -> (CSt, String) = {
   let a0 = if len(cargs) > 0 { cargs[0] } else { "" }
   if name == "panic" {
     (line(st1, "dawn_panic(" ++ a0 ++ ");"), "DAWN_UNIT")
@@ -2242,19 +2274,19 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     }
     let (key_owner, key_name) = reach.list_root_key(target)
     let flags = arg_flags(st1, CDirect(key_owner, key_name), len(args))
-    (st1, callee ++ "(" ++ join(list_call_args(args, cargs, owned, flags), ", ") ++ ")")
+    (st1, mode_symbol(st1, callee) ++ "(" ++ join(list_call_args(args, cargs, owned, flags), ", ") ++ ")")
   } else if name == "join" {
-    (st1, "dawn_join(" ++ to_host(own0(args, a0)) ++ ", " ++ cargs[1] ++ ")")
+    (st1, "dawn_join(" ++ to_host(st1, own0(args, a0)) ++ ", " ++ cargs[1] ++ ")")
   } else if name == "from_code_points" {
-    (st1, "dawn_from_code_points(" ++ to_host(own0(args, a0)) ++ ")")
+    (st1, "dawn_from_code_points(" ++ to_host(st1, own0(args, a0)) ++ ")")
   } else if name == "code_points" {
-    (st1, of_host("dawn_code_points(" ++ a0 ++ ")"))
+    (st1, of_host(st1, "dawn_code_points(" ++ a0 ++ ")"))
   } else if name == "io_list_names" {
-    (st1, of_host("dawn_io_list_names(" ++ a0 ++ ")"))
+    (st1, of_host(st1, "dawn_io_list_names(" ++ a0 ++ ")"))
   } else if name == "io_run" {
-    (st1, "dawn_io_run(" ++ to_host(own0(args, a0)) ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ")")
+    (st1, "dawn_io_run(" ++ to_host(st1, own0(args, a0)) ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ")")
   } else if name == "args" {
-    (st1, of_host("dawn_args()"))
+    (st1, of_host(st1, "dawn_args()"))
   } else if name == "cursor_slice" {
     # Out of the table on both backends, for opposite reasons: the JVM's
     # runtime returns null for a range that splits a character and the
@@ -2432,7 +2464,7 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
 
 # ---- functions and program ----
 
-fn fn_signature(f: CFun) -> String = {
+fn fn_signature(f: CFun, observed: Bool = false) -> String = {
   var ps: List[String] = []
   # captures are ordinary leading parameters of the lifted function; only
   # the adapter knows they came from an environment
@@ -2452,14 +2484,14 @@ fn fn_signature(f: CFun) -> String = {
     ps = ps ++ [c_type(e.ty) ++ " " ++ local_name(e.sym)]
   }
   let plist = if len(ps) == 0 { "void" } else { join(ps, ", ") }
-  c_type(f.ret) ++ " " ++ fn_symbol(f) ++ "(" ++ plist ++ ")"
+  c_type(f.ret) ++ " " ++ entry_symbol(f, observed) ++ "(" ++ plist ++ ")"
 }
 
 ## The definition's signature: the owned parameters (emit_fn's shadow set)
 ## arrive under `pN` so the body's `vN` can be their DAWN_OWNED shadow. The
 ## prototypes keep `fn_signature` -- C ignores a prototype's parameter names,
 ## and renaming only where the shadow exists keeps the two visibly paired.
-fn fn_signature_def(f: CFun, shadowed: Set[Int]) -> String = {
+fn fn_signature_def(f: CFun, shadowed: Set[Int], observed: Bool = false) -> String = {
   var ps: List[String] = []
   for p in f.captures ++ f.params {
     let n = if set.has(shadowed, p.sym) { param_name(p.sym) } else { local_name(p.sym) }
@@ -2473,7 +2505,7 @@ fn fn_signature_def(f: CFun, shadowed: Set[Int]) -> String = {
     ps = ps ++ [c_type(e.ty) ++ " " ++ n]
   }
   let plist = if len(ps) == 0 { "void" } else { join(ps, ", ") }
-  c_type(f.ret) ++ " " ++ fn_symbol(f) ++ "(" ++ plist ++ ")"
+  c_type(f.ret) ++ " " ++ entry_symbol(f, observed) ++ "(" ++ plist ++ ")"
 }
 
 ## An impl method body and a trait default body are ordinary functions with
@@ -2490,6 +2522,17 @@ fn fn_symbol(f: CFun) -> String =
         None -> mangle(f.owner, f.name)
       }
   }
+
+fn mode_symbol(st: CSt, canonical: String) -> String = {
+  if not st.observed_mode { return canonical }
+  if not set.has(st.observed_symbols, canonical) {
+    panic("provenance: missing internal observed entry for " ++ canonical)
+  }
+  canonical ++ "_observed"
+}
+
+fn entry_symbol(f: CFun, observed: Bool) -> String =
+  fn_symbol(f) ++ (if observed { "_observed" } else { "" })
 
 ## Whether a closure can be built over this function. Lowering only ever
 ## names lifted bodies in a CClosure, and it names them `lambda$N`.
@@ -2510,7 +2553,7 @@ fn is_lifted(f: CFun) -> Bool = str.starts_with(f.name, "lambda$")
 ## Giving the adapter the lambda's concrete types instead compiles -- C casts
 ## the pointer without complaint -- and then `map` over a `List[Unit]` reads an
 ## `int64_t` return as a pointer. That is the crash show_containers had.
-fn adapter_signature(f: CFun) -> String = {
+fn adapter_signature(f: CFun, observed: Bool = false) -> String = {
   var ps: List[String] = ["dawn_clo* env"]
   for p in f.params {
     ps = ps ++ ["void* ${local_name(p.sym)}"]
@@ -2521,11 +2564,36 @@ fn adapter_signature(f: CFun) -> String = {
   for e in f.evs {
     ps = ps ++ ["void* ${local_name(e.sym)}"]
   }
-  "void* " ++ adapter_name(f.owner, f.name) ++ "(" ++ join(ps, ", ") ++ ")"
+  "void* " ++ adapter_name(f.owner, f.name) ++ (if observed { "_observed" } else { "" }) ++ "(" ++ join(ps, ", ") ++ ")"
+}
+
+fn indirect_boundary(f: CFun) -> Bool = {
+  if f.definition.role == "trait-bridge" || f.definition.role == "primitive-slot" { return true }
+  let (indirect, looped) = cwalk.fold_expr(f.body, (false, false), (at, e) => {
+    let (_, looped) = at
+    match e {
+      CCall(CDynamic(_), _, _, _) -> (true, looped)
+      CCall(CMethod(_, _, _, _, _), _, _, _) -> (true, looped)
+      _ -> at
+    }
+  }, (at, s) => {
+    let (indirect, _) = at
+    match s { CSLoop(_, _, _) -> (indirect, true), _ -> at }
+  })
+  indirect && not looped
+}
+
+# Indirect entry and dispatch boundaries keep a cache-line boundary when a
+# second entry changes code layout. Loop bodies keep the default alignment;
+# programs without observation retain their existing placement throughout.
+fn entry_attribute(st: CSt, f: CFun, adapter: Bool) -> String = {
+  if st.observed_mode { "DAWN_PROV_CODE " }
+  else if len(st.observed_symbols) > 0 && (adapter || indirect_boundary(f)) { "DAWN_PROV_ENTRY " }
+  else { "" }
 }
 
 fn emit_adapter(st: CSt, f: CFun) -> CSt = {
-  let st1 = push(line(st, "${adapter_signature(f)} {"))
+  let st1 = push(line(st, entry_attribute(st, f, true) ++ adapter_signature(f, st.observed_mode) ++ " {"))
   var args: List[String] = []
   var i = 0
   # The closure keeps its captures; the function it forwards to takes them
@@ -2547,7 +2615,7 @@ fn emit_adapter(st: CSt, f: CFun) -> CSt = {
   for e in f.evs {
     args = args ++ [unbox_own_expr(local_name(e.sym), e.ty)]
   }
-  let call = fn_symbol(f) ++ "(" ++ join(args, ", ") ++ ")"
+  let call = mode_symbol(st, fn_symbol(f)) ++ "(" ++ join(args, ", ") ++ ")"
   # a Unit-returning lambda still owes the caller a slot
   let ret = box_call(call, f.ret)
   let st2 =
@@ -2568,8 +2636,10 @@ fn emit_adapter(st: CSt, f: CFun) -> CSt = {
 ## a `return` written before the frame's first slot appeared stays a plain one,
 ## which is slower but not wrong: there was no frame to disarm at that point
 ## in the text, and none of it can be reached holding a slot.
-fn ret_stmt(st: CSt, v: String) -> String =
-  if st.nslots > 0 { "DAWN_RETURN(" ++ v ++ ");" } else { "return " ++ v ++ ";" }
+fn ret_stmt(st: CSt, v: String) -> String = {
+  let value = if st.observation { "DAWN_PROV_RESULT(" ++ v ++ ")" } else { v }
+  if st.nslots > 0 { "DAWN_RETURN(" ++ value ++ ");" } else { "return " ++ value ++ ";" }
+}
 
 fn emit_fn(st: CSt, f: CFun) -> CSt = {
   # The owned parameters -- captures, params and evidence that arrive as
@@ -2582,6 +2652,8 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
   # it gets no slot, no shadow, and the unwinder never sees it -- it stays
   # the plain C parameter the signature declares. Unreachable while
   # lowering stamps every parameter COwned.
+  let frame_definition: Option[String] = if st.observed_mode { provenance.frame_definition(f) } else { None }
+  let observed = st.observed_mode && frame_definition != None
   var shadows: List[CParam] = []
   var slots: Map[Int, Int] = map.empty()
   var shadowed: Set[Int] = set.empty()
@@ -2600,8 +2672,9 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
   # labels, and jumping past a cleanup variable's initializer is undefined.
   let st1 = CSt {
     ..st,
-    tmp = 0, slots = slots, nslots = n, views = views.view_syms(st.dict_syms, f),
-    out = [], ind = 1, pend = [], rows = []
+    tmp = 0, observation = observed, slots = slots, nslots = n, views = views.view_syms(st.dict_syms, f),
+    out = [], ind = 1, pend = [], rows = [], declaration = f.origin, prov_guards = 0,
+    prov_tail = if observed { call_tail.tail_sites(f) } else { [] }
   }
   let (st2, v) = emit_expr(st1, f.body, true)
   let st3 =
@@ -2621,7 +2694,13 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     } else {
       line(st2, ret_stmt(st2, v))
     }
-  var head: List[String] = ["${fn_signature_def(f, shadowed)} {\n"]
+  var head: List[String] = [entry_attribute(st, f, false) ++ fn_signature_def(f, shadowed, st.observed_mode) ++ " {\n"]
+  if observed {
+    head = head ++ [pad(1) ++ "DAWN_CLEANUP(dawn_prov_function_cleanup) dawn_prov_function_guard dawn_prov_callback = dawn_prov_enter_function(\"" ++ c_escape(frame_definition.expect("provenance frame definition")) ++ "\");\n"]
+    for i in 0..st3.prov_guards {
+      head = head ++ [pad(1) ++ "dawn_prov_guard dawn_prov_g${i} = {0};\n"]
+    }
+  }
   if st3.nslots > 0 {
     # one macro, two expansions (dawn_rt.h): natively the cleanup-carrying
     # array declaration this line used to spell out (slot 0 the count, the
@@ -2629,7 +2708,7 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     # shadow cleanup stack a raise walks in place of the missing unwinder
     # A quiet function (c/quiet) keeps the array, which the slots need as
     # storage, and loses the cleanup that would scan it
-    let frame = if set.has(st.quiet, quiet.key(f.owner, f.name)) { "DAWN_QUIET_FRAME(" } else { "DAWN_OWN_FRAME(" }
+    let frame = if not st.observed_mode && set.has(st.quiet, quiet.key(f.owner, f.name)) { "DAWN_QUIET_FRAME(" } else { "DAWN_OWN_FRAME(" }
     head = head ++ [pad(1) ++ frame ++ to_string(st3.nslots) ++ ");\n"]
   }
   for p in shadows {
@@ -2641,6 +2720,7 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     ..st3,
     out = st.out ++ head ++ st3.out ++ ["}\n"],
     ind = st.ind,
+    observation = st.observation,
     slots = map.empty(),
     nslots = 0,
     views = set.empty(),
@@ -2754,6 +2834,12 @@ pub fn test_symbol(owner: String, idx: Int) -> String = mangle(owner, test_name(
 ## `None` prunes nothing, which is what `dawn test --stdlib` hands over --
 ## there is no user module to root a walk at, and std's own tests are the
 ## program.
+fn entry_kept(live: Option[Live], f: CFun, observed: Bool) -> Bool =
+  match live {
+    None -> not observed
+    Some(l) -> if observed { set.has(l.observed, fn_key(f)) } else { set.has(l.plain, fn_key(f)) }
+  }
+
 fn fn_kept(live: Option[Live], f: CFun) -> Bool =
   match live {
     None -> true
@@ -2831,7 +2917,7 @@ fn emit_units(
   modes: Map[(String, String), List[CMode]],
   mapping: Bool
 ) -> (CSt, List[FnRow]) = {
-  var st = CSt {
+  var st = CSt { observation = false, observed_mode = false, observed_symbols = set.empty(), observed_modes = map.empty(), sites = map.empty(), declaration = "", prov_guards = 0, prov_tail = [],
     out = [],
     tmp = 0,
     ind = 0,
@@ -2852,11 +2938,32 @@ fn emit_units(
     pend = [],
     rows = []
   }
+  st = CSt { ..st, observation = provenance.enabled(live) }
+  var site_modules: List[CModule] = []
+  for unit in units {
+    var fns: List[CFun] = []
+    for f in unit.m.fns { fns = fns ++ [map.get(unit.logical, fn_key(f)).unwrap_or(f)] }
+    site_modules = site_modules ++ [CModule { ..unit.m, fns = fns }]
+  }
+  if live == None && provenance.has_data(site_modules) { st = CSt { ..st, observation = true } }
+  let site_table = provenance.site_table(site_modules, live)
+  var sites: Map[Int, Int] = map.empty()
+  var site_index = 0
+  for item in map.entries(site_table) {
+    let (id, _) = item
+    sites = map.insert(sites, id, site_index)
+    site_index = site_index + 1
+  }
+  st = CSt { ..st, sites = sites }
   st = line(st, "/* generated by dawn __emitc -- Core IR -> C */")
   st = line(st, "#include \"dawn_rt.h\"")
   # `fmod`, for Float `%`. Without the declaration C would assume it returns
   # int and truncate the answer -- a wrong result, and only a warning.
   st = line(st, "#include <math.h>")
+  if st.observation {
+    st = line(st, "#define DAWN_PROV_EMBEDDED 1")
+    st = line(st, rtsrc.source("dawn_provenance.h").expect("provenance declarations"))
+  }
   st = line(st, "")
   let preamble = st.out
   st = CSt { ..st, out = [] }
@@ -2878,6 +2985,22 @@ fn emit_units(
     let (name, rs, want) = e
     st = emit_cp_table(st, name, rs, want)
     st = line(st, "")
+  }
+  # Defining runtime functions or taking observed addresses before the Plain
+  # bodies also fixes LLVM's function order, even with later C definitions.
+  # Keep those cold references in the final unit, after every function body.
+  let provenance_runtime: List[String] = if st.observation {
+    [rtsrc.source("dawn_provenance.c").expect("provenance runtime") ++ "\n"]
+  } else { [] }
+  if st.observation {
+    st = line(st, "const dawn_prov_site dawn_prov_sites[] = {")
+    for item in map.entries(site_table) {
+      let (id, metadata) = item
+      st = line(st, "  {${id}, \"" ++ c_escape(metadata) ++ "\"},")
+    }
+    if len(site_table) == 0 { st = line(st, "  {0, NULL},") }
+    st = line(st, "};")
+    st = line(st, "const size_t dawn_prov_sites_n = ${len(site_table)};")
   }
   let tables = st.out
   st = CSt { ..st, out = [] }
@@ -2907,19 +3030,65 @@ fn emit_units(
     }
   }
 
+  var observed_symbols: Set[String] = set.empty()
+  for unit in units {
+    for f in unit.m.fns {
+      if entry_kept(live, f, true) {
+        observed_symbols = set.insert(observed_symbols, fn_symbol(f))
+        if is_lifted(f) { observed_symbols = set.insert(observed_symbols, adapter_name(f.owner, f.name)) }
+      }
+    }
+  }
+  var observed_modes: Map[(String, String), List[CMode]] = map.empty()
+  for unit in units {
+    for item in map.entries(unit.logical) {
+      let (_, f) = item
+      match mode_key(f) {
+        Some(key) -> { observed_modes = map.insert(observed_modes, key,
+          list.map(f.params ++ f.dicts ++ f.evs, p => p.mode)) }
+        None -> ()
+      }
+    }
+  }
+  st = CSt { ..st, observed_symbols = observed_symbols, observed_modes = observed_modes }
+
   # C needs declarations before use; Dawn does not order top-level functions
   for u in units {
     for f in u.m.fns {
       if not f.is_test && fn_kept(live, f) {
-        st = line(st, "${fn_signature(f)};")
-        if is_lifted(f) {
-          st = line(st, "${adapter_signature(f)};")
+        for observed in [false, true] {
+          if entry_kept(live, f, observed) {
+            st = line(st, fn_signature(f, observed) ++ ";")
+            if is_lifted(f) {
+              st = line(st, adapter_signature(f, observed) ++ ";")
+            }
+          }
         }
       }
     }
   }
   st = line(st, "")
-  let protos = st.out
+  let entry_at = len(st.out)
+  if st.observation {
+    st = line(st, "const dawn_prov_target dawn_prov_entries[] = {")
+    var count = 0
+    for unit in units {
+      for f in unit.m.fns {
+        if entry_kept(live, f, true) && entry_kept(live, f, false) {
+          let symbols = if is_lifted(f) { [fn_symbol(f), adapter_name(f.owner, f.name)] } else { [fn_symbol(f)] }
+          for symbol in symbols {
+            st = line(st, "  {(void*)" ++ symbol ++ ", (void*)" ++ symbol ++ "_observed},")
+            count = count + 1
+          }
+        }
+      }
+    }
+    if count == 0 { st = line(st, "  {NULL, NULL},") }
+    st = line(st, "};")
+    st = line(st, "const size_t dawn_prov_entries_n = ${count};")
+  }
+  let protos = list.take(st.out, entry_at)
+  let entry_defs = list.drop(st.out, entry_at)
   st = CSt { ..st, out = [] }
 
   # One program, so a dictionary two modules both need would be defined twice
@@ -2972,8 +3141,9 @@ fn emit_units(
     if dict_kept(live, k) {
       match map.get(chosen, k) {
         Some(d) -> {
-          st = line(st, dict_line(d))
-          dict_decls = dict_decls ++ ["extern dawn_dict " ++ dict_symbol(d.key) ++ ";\n"]
+          let immutable = len(st.observed_symbols) > 0
+          st = line(st, dict_line(d, immutable))
+          dict_decls = dict_decls ++ ["extern " ++ (if immutable { "const " } else { "" }) ++ "dawn_dict " ++ dict_symbol(d.key) ++ ";\n"]
         }
         None -> ()
       }
@@ -2989,47 +3159,57 @@ fn emit_units(
   # of every body below. The alternative -- a pre-pass over every Core body to
   # find the constants first -- would walk the program twice to learn what
   # emitting it already says.
+  let plain_modes = st.modes
   var bodies: List[List[String]] = []
   var sizes: List[Int] = []
   var total = 0
   # `--map` only: each body's rows, and its function's line count and row
   var body_rows: List[List[MapRow]] = []
   var body_fns: List[FnRow] = []
-  for u in units {
-    # a const is resolved in its declaring module, so the maps travel with it;
-    # the dictionary symbols are unioned unit-wide because a lifted lambda's
-    # captures reuse the enclosing function's symbol ids
-    var udicts: Set[Int] = set.empty()
-    for f in u.m.fns {
-      for d in f.dicts { udicts = set.insert(udicts, d.sym) }
-    }
-    st = CSt {
-      ..st,
-      consts = u.consts,
-      blocks = u.blocks,
-      dict_syms = udicts,
-      cur_owner = u.m.owner
-    }
-    for f in u.m.fns {
-      if not f.is_test && fn_kept(live, f) {
-        st = CSt { ..st, out = [], rows = [] }
-        st = emit_fn(st, f)
-        if mapping {
-          body_fns = body_fns ++ [FnRow {
-            owner = f.owner, origin = f.origin, symbol = mangle(f.owner, f.name),
-            first = 0, last = len(st.out) - 1
-          }]
-          body_rows = body_rows ++ [st.rows]
+  # Keep observed code cold without interleaving it into the Plain layout.
+  for observed in [false, true] {
+    for u in units {
+      # a const is resolved in its declaring module, so the maps travel with it;
+      # the dictionary symbols are unioned unit-wide because a lifted lambda's
+      # captures reuse the enclosing function's symbol ids
+      var udicts: Set[Int] = set.empty()
+      for f in u.m.fns {
+        for d in f.dicts { udicts = set.insert(udicts, d.sym) }
+      }
+      st = CSt {
+        ..st,
+        consts = u.consts,
+        blocks = u.blocks,
+        dict_syms = udicts,
+        cur_owner = u.m.owner
+      }
+      for f in u.m.fns {
+        if not f.is_test && fn_kept(live, f) {
+          if entry_kept(live, f, observed) {
+            st = CSt { ..st, out = [], rows = [], observed_mode = observed, observation = observed, modes = if observed { st.observed_modes } else { plain_modes } }
+            let entry = if observed {
+              map.get(u.logical, fn_key(f))
+                .expect("provenance: missing pristine observed entry for " ++ fn_symbol(f))
+            } else { f }
+            st = emit_fn(st, entry)
+            if mapping {
+              body_fns = body_fns ++ [FnRow {
+                owner = f.owner, origin = f.origin, symbol = entry_symbol(f, observed),
+                first = 0, last = len(st.out) - 1
+              }]
+              body_rows = body_rows ++ [st.rows]
+            }
+            st = line(st, "")
+            if is_lifted(f) {
+              st = emit_adapter(st, f)
+              st = line(st, "")
+            }
+            let n = out_bytes(st.out)
+            bodies = bodies ++ [st.out]
+            sizes = sizes ++ [n]
+            total = total + n
+          }
         }
-        st = line(st, "")
-        if is_lifted(f) {
-          st = emit_adapter(st, f)
-          st = line(st, "")
-        }
-        let n = out_bytes(st.out)
-        bodies = bodies ++ [st.out]
-        sizes = sizes ++ [n]
-        total = total + n
       }
     }
   }
@@ -3071,6 +3251,7 @@ fn emit_units(
     seg = seg + 1
     out = out ++ [tu_marker(seg, nunits) ++ "\n"]
   }
+  out = out ++ entry_defs ++ provenance_runtime
   (CSt { ..st, out = out, rows = rows }, fns)
 }
 
@@ -3552,4 +3733,97 @@ test "emitting with --map writes the same C, and without it records nothing" {
   assert map_test_claims(mapped) == [(2, 17, 38), (0, 7, 39)]
   assert mapped.rows[0].first == 0
   assert mapped.rows[0].last == 0
+}
+
+# Operand evaluation is already staged by emit_call. The record opens only
+# around the invocation itself and the cleanup owns the exceptional close.
+fn static_metadata(st: CSt, metadata: String) -> String = {
+  let index = map.get(st.sites, provenance.site_id(metadata))
+    .expect("provenance: Site is missing from the static table")
+  "dawn_prov_sites[${index}].metadata"
+}
+
+fn prov_open(st: CSt, site: CSite, intrinsic: String) -> (CSt, String) = {
+  let metadata = provenance.metadata(st.cur_owner, st.declaration, site)
+  let guard = "dawn_prov_g${st.prov_guards}"
+  let callback = provenance.metadata(st.cur_owner, st.declaration, provenance.callback_site(site))
+  var next = line(CSt { ..st, prov_guards = st.prov_guards + 1 },
+    guard ++ ".token = DAWN_PROV_BEFORE(${provenance.site_id(metadata)}, " ++ static_metadata(st, metadata) ++
+      ", ${provenance.site_id(callback)}, " ++ static_metadata(st, callback) ++ ");")
+  if intrinsic != "" {
+    next = line(next, "if (" ++ guard ++ ".token) dawn_prov_arrive(\"" ++ c_escape(provenance.intrinsic_definition(intrinsic)) ++ "\");")
+  }
+  (next, guard)
+}
+
+fn prov_value(st: CSt, value: String, ty: Ty, guard: String) -> (CSt, String) = {
+  let (named, temp) = fresh(st)
+  var next = line(named, c_type(ty) ++ " " ++ temp ++ " = " ++ value ++ ";")
+  next = line(next, "if (" ++ guard ++ ".token) { dawn_prov_finish(" ++ guard ++ ".token, 1); " ++ guard ++ ".token = 0; }")
+  (next, temp)
+}
+
+fn observed_value(st: CSt, value: String, ty: Ty, site: CSite, intrinsic: String) -> (CSt, String) = {
+  if not st.observation { return (st, value) }
+  let checked = if list.contains(st.prov_tail, site) {
+    line(st, "dawn_prov_unsupported(\"tail calls\");")
+  } else { st }
+  let (next, guard) = prov_open(checked, site, intrinsic)
+  prov_value(next, value, ty, guard)
+}
+
+fn emit_intrinsic_protocol(st: CSt, name: String, args: List[CExpr], ty: Ty, site: CSite) -> (CSt, String) = {
+  let callbacks = reach.runtime_callbacks(name)
+  let recording = st.observation && site != CNoSite
+  if not recording && (not st.observed_mode || len(callbacks) == 0) {
+    return emit_intrinsic(st, name, args, ty)
+  }
+  let owned = intr_owned_args(name)
+  var ks: List[Bool] = []
+  for i in 0..len(args) { ks = ks ++ [list.contains(owned, i)] }
+  let (staged, values) = emit_ordered(st, args, ks)
+  let (opened, guard) = if recording { prov_open(staged, site, name) } else { (staged, "") }
+  var next = opened
+  var cargs = values
+  var proxies: List[Int] = []
+  let metadata = provenance.metadata(st.cur_owner, st.declaration, provenance.callback_site(site))
+  for callback in callbacks {
+    let (index, arity) = callback
+    let slot = next.nslots + 1
+    next = line(CSt { ..next, nslots = slot }, slot_lv(slot) ++ " = dawn_prov_wrap((dawn_clo*)(" ++ cargs[index] ++ "), ${arity}, " ++
+        (if site == CNoSite { "-1, NULL" } else { "${provenance.site_id(metadata)}, " ++ static_metadata(st, metadata) }) ++ ");")
+    proxies = proxies ++ [slot]
+    cargs = list.take(cargs, index) ++ ["((dawn_clo*)" ++ slot_lv(slot) ++ ")"] ++ list.drop(cargs, index + 1)
+  }
+  let (emitted, value) = emit_intrinsic_values(next, name, args, ty, owned, cargs)
+  let (finished, result) = if recording { prov_value(emitted, value, ty, guard) }
+  else { let (freshened, temp) = fresh(emitted)
+    (line(freshened, c_type(ty) ++ " " ++ temp ++ " = " ++ value ++ ";"), temp) }
+  next = finished
+  for slot in proxies { next = line(next, "dawn_drop(" ++ slot_lv(slot) ++ "); " ++ slot_lv(slot) ++ " = NULL;") }
+  (next, result)
+}
+
+fn provenance_target(name: String) -> String = match name {
+  "provenance_observe" -> "dawn_prov_observe"
+  "provenance_note" -> "dawn_prov_note"
+  "provenance_completed" -> "dawn_prov_completed"
+  "provenance_checkpoint" -> "dawn_prov_checkpoint"
+  "provenance_rewind" -> "dawn_prov_rewind"
+  "provenance_origin" -> "dawn_prov_origin"
+  "provenance_field" -> "dawn_prov_field"
+  "provenance_number" -> "dawn_prov_number"
+  "provenance_parent" -> "dawn_prov_parent"
+  _ -> panic("emitc: unknown provenance primitive " ++ name)
+}
+
+fn emit_provenance(st: CSt, name: String, args: List[CExpr], ty: Ty, site: CSite) -> (CSt, String) = {
+  let (next, values) = emit_ordered(st, args, all_flags(len(args), false))
+  if name == "provenance_observe" {
+    let metadata = provenance.metadata(st.cur_owner, st.declaration, site)
+    return (next, provenance_target(name) ++ "(" ++ join(values, ", ") ++ ", ${provenance.site_id(metadata)}, " ++ static_metadata(st, metadata) ++ ")")
+  }
+  let call = provenance_target(name) ++ "(" ++ join(values, ", ") ++ ")"
+  if peel_opaque(ty) == TyUnit { (line(next, call ++ ";"), "DAWN_UNIT") }
+  else { (next, call) }
 }

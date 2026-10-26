@@ -1,0 +1,34 @@
+# Values cross observation boundaries; dispatch follows the caller's mode.
+use std/io.{println}
+use std/provenance
+
+trait Step[T] {
+  fn step(value: T) -> Int
+  fn twice(value: T) -> Int = step(value) * 2
+}
+type Counter = { value: Int }
+impl Step[Counter] {
+  fn step(value: Counter) -> Int = value.value + 1
+}
+
+fn direct(n: Int) -> Int = n * 2
+fn make(offset: Int) -> fn(Int) -> Int = n => direct(n) + offset
+fn library(f: fn(Int) -> Int, n: Int) -> Int = f(n)
+fn through[T: Step](value: T) -> Int = step(value)
+fn defaults[T: Step](value: T) -> Int = twice(value)
+
+pub fn main() -> Unit !io = {
+  let before = make(1)
+  let (data, tree) = provenance.observe(scope => {
+    let a = library(before, 3)
+    let b = through(Counter { value = 3 })
+    let c = defaults(Counter { value = 3 })
+    let d = step(Counter { value = 3 })
+    let after = make(2)
+    ((a, b, c, d, after), provenance.completed(scope))
+  })
+  let (a, b, c, d, after) = data
+  let answer = (a, b, c, d, after(3))
+  println("${answer}")
+  println(tree)
+}

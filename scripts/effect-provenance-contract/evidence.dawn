@@ -1,0 +1,27 @@
+# A handler arm's helper uses the outer lexical evidence even though its
+# metadata parent is the dynamically invoking inner operation.
+use std/io.{println}
+use std/provenance
+
+effect Ask { fn ask(n: Int) -> Int }
+fn helper(n: Int) -> Int !Ask = ask(n)
+pub fn main() -> Unit !io = {
+  let (answer, tree) = provenance.observe(scope => {
+    with handle Ask {
+      ask(n) origin source => {
+        provenance.note(scope, source)
+        n + 100
+      }
+    }
+    with handle Ask {
+      ask(n) origin source => {
+        provenance.note(scope, source)
+        helper(n + 10)
+      }
+    }
+    let answer = helper(1)
+    (answer, provenance.completed(scope))
+  })
+  println("${answer}")
+  println(tree)
+}

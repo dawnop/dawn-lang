@@ -19,7 +19,8 @@ runs the same compiler four ways -- `__emitc -o` alone, `__emitc -o --map
   paired     each row's source site is one row of `__lower --sites` for its
              module (M2's oracle already ties those to the parser's call
              nodes), and every site of a function the C kept is a row exactly
-             once; a row with no place, or with no declaration base, is red;
+             once per execution mode; the containing physical entry selects
+             that mode. A row with no place or declaration base is red;
   named      the C a row points at is that call: a direct call's range holds
              its mangled symbol (spelled here independently of the compiler),
              an impl or default method's holds its escaped name, a trait
@@ -70,7 +71,7 @@ DAWN_BIN = os.environ.get("DAWN_BIN", str(ROOT / "bin" / "dawn"))
 DAWN = (["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx4g", "-jar", DAWN_BIN] if DAWN_BIN.endswith(".jar") else [DAWN_BIN])
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
 
-CASES = ["corpus", "kernels", "nmain"]
+CASES = ["corpus", "kernels", "nmain", "observed-builder", "observed-modes"]
 
 # what the rules looked at, printed per case so that a rule that saw nothing shows
 STATS = {"kept sites": 0, "same-line pairs": 0, "identical texts on one line": 0}
@@ -110,6 +111,8 @@ def run(cmd):
 
 
 def target(name, work):
+    if name.startswith("observed-"):
+        return ROOT / "scripts/effect-provenance-contract" / (name[9:]+".dawn")
     if name == "corpus":
         return HERE / "corpus.dawn"
     if name == "nmain":
@@ -152,19 +155,19 @@ def fn_at(fns, line):
     return None
 
 
-def named(c, text, lines):
+def named(c, text, lines, observed=False):
     """None when the C a row points at is its call, else why not."""
     what = c["what"]
     kind, _, rest = what.partition(" ")
     if kind == "direct":
         owner, _, name = rest.rpartition(".")
-        want = mangle(owner, name) + "("
+        want = mangle(owner, name) + ("_observed(" if observed else "(")
     elif kind in ("impl", "default"):
-        want = "_3" + esc(rest) + "("
+        want = "_3" + esc(rest) + ("_observed(" if observed else "(")
     elif kind == "method":
-        want = "->slots["
+        want = "dawn_prov_select(" if observed else "->slots["
     elif kind == "dynamic":
-        want = "->fn)"
+        want = "dawn_prov_select_closure(" if observed else "->fn)"
     else:
         want = ""
     if c["clo"] is None:
@@ -191,6 +194,8 @@ def check_map(name, m, lines, sites, split_dir):
     fns = sorted(m["fns"], key=lambda f: f["first"])
     kept = {(f["module"], f["origin"]) for f in fns}
     by_site = {}
+    # One source identity may have separate Plain and Observed placements.
+    source_keys = set()
     for c in m["calls"]:
         where = f"{name}: {c['what']} at {c['module']} {c['lo']}..{c['hi']}"
         if None in (c["lo"], c["hi"], c["nlo"]):
@@ -199,7 +204,11 @@ def check_map(name, m, lines, sites, split_dir):
         if c["line"] is None:
             problems.append(f"{where} has no place in the C")
             continue
-        key = (c["module"], c["lo"], c["hi"], c["nlo"])
+        fi = fn_at(fns, c["line"])
+        observed = fi is not None and fns[fi]["symbol"].endswith("_observed")
+        source = (c["module"], c["lo"], c["hi"], c["nlo"])
+        source_keys.add(source)
+        key = source + (observed,)
         if key in by_site:
             problems.append(f"{where} is two rows")
         by_site[key] = c
@@ -213,7 +222,7 @@ def check_map(name, m, lines, sites, split_dir):
                 problems.append(f"{where} has columns {c['clo']}..{c['chi']} outside its line")
                 continue
             text = ln[c["clo"]:c["chi"]]
-        why = named(c, text, lines)
+        why = named(c, text, lines, observed)
         if why:
             problems.append(f"{where}: its C {text[:80]!r} {why}")
         fi = fn_at(fns, c["line"])
@@ -236,11 +245,11 @@ def check_map(name, m, lines, sites, split_dir):
             if not site_kept(kept, mod, s):
                 continue
             STATS["kept sites"] += 1
-            if (mod, s["lo"], s["hi"], s["nlo"]) not in by_site:
+            if (mod, s["lo"], s["hi"], s["nlo"]) not in source_keys:
                 problems.append(f"{name}: site {mod} {s['lo']}..{s['hi']} ({s['what']} in {s['fn']}) has no row")
     site_keys = {(mod, s["lo"], s["hi"], s["nlo"]) for mod, rows in sites.items() for s in rows}
     for key, c in by_site.items():
-        if key not in site_keys:
+        if key[:4] not in site_keys:
             problems.append(f"{name}: row {c['what']} at {key} is no site of `__lower --sites`")
     problems += occurrence_rules(name, [c for c in by_site.values() if c["clo"] is not None])
     return problems
@@ -365,6 +374,14 @@ def self_test():
     # the symbol spelling, against two symbols the emitter wrote
     assert mangle("dawn$pkg$tileir/dev", "load_cell") == "dawn_dawn_3pkg_3tileir_2dev__load_1cell"
     assert mangle("std/io", "println") == "dawn_std_2io__println"
+    # Mode is determined by the containing entry, never by the desired target.
+    direct = {"what": "direct m.h", "clo": 0, "first": 1, "line": 1}
+    assert named(direct, "dawn_m__h_observed(v)", [], True) is None
+    assert named(direct, "dawn_m__h(v)", [], True) is not None
+    assert named(direct, "dawn_m__h_observed(v)", [], False) is not None
+    dynamic = dict(direct, what="dynamic")
+    assert named(dynamic, "dawn_prov_select_closure(c)", [], True) is None
+    assert named(dynamic, "c->fn)", [], True) is not None
     print(f"OK: {len(cases)} self-test case(s)")
 
 

@@ -16,6 +16,7 @@
 use std/list
 use std/map
 use std/str
+use check/provenance as observation
 use check/types.{
   Intr,
   intrinsics,
@@ -165,7 +166,9 @@ pub type LSt = {
   # function reached from another module, or before the walk reached its
   # own blocks, would look its block up in the wrong table (#563). The body
   # is pure, so running it again gives the value the table holds.
-  ct_inline: Bool
+  ct_inline: Bool,
+  # Preserve logical calls until execution-mode reachability has been fixed.
+  keep_calls: Bool
 }
 
 ## The function currently being lowered, as its own body sees it. Two things
@@ -1291,7 +1294,12 @@ pub fn inline_intrinsics() -> List[String] = [
   "ctl_yield", "ctl_run",
   # a `dbg` line, which is the io runtime's stderr write on both backends
   # under a name of its own (the comptime interpreter's reason, above)
-  "dbg_line"
+  "dbg_line",
+  # Named observation primitives and immutable Origin readers are optional
+  # runtime facilities with a backend-specific representation.
+  "provenance_observe", "provenance_note", "provenance_completed",
+  "provenance_checkpoint", "provenance_rewind", "provenance_origin",
+  "provenance_field", "provenance_number", "provenance_parent"
 ]
 
 ## The primitives only the JVM owes an arm for.
@@ -1411,12 +1419,12 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
   # 3. the sizes the comments above quote. A count written in prose is what
   #    went wrong in `internal_intrinsics`, whose comment gave two different
   #    answers for the same list in the same paragraph.
-  assert len(inline) == 47
+  assert len(inline) == 56
   assert len(host) == 2
   assert len(gone) == 23
   assert len(staged) == 0
   # and the five groups account for all declared names, with none left over
-  assert len(map.keys(it)) == 152
+  assert len(map.keys(it)) == 161
   assert len(internal) == 23
 }
 
@@ -3249,6 +3257,17 @@ fn self_tail_jump(st: LSt, args: List[TExpr]) -> (LSt, CExpr) = {
     CBlock(stmts, Some(CContinue(sc.loop_id)), TyNever))
 }
 
+# Eta expansion is a bridge, not another user lambda activation.
+fn lambda_definition(st: LSt, lo: Int, hi: Int, role: String, body: TExpr) -> CDefinition = {
+  if role == "function-wrapper" {
+    return match body {
+      XCallBuiltin(name, _, _, _, _, _, _, _) -> synthetic_definition("builtin-value:" ++ name)
+      _ -> definition_at(st, lo, hi, "function-value")
+    }
+  }
+  definition_at(st, lo, hi, role)
+}
+
 fn lift_lambda(
   st: LSt,
   params: List[Int],
@@ -3323,9 +3342,9 @@ fn lift_lambda(
     ev_own = own
   }, body)
   let cbody1 = adapt_in(cbody0, tex_ty(body), ret_of_fn_ty(ty))
-  let cbody = wrap_self_loop(st2.self_tail, lid, cbody1, ret_of_fn_ty(ty))
+  let cbody = wrap_self_loop(st2.self_tail && not st.keep_calls, lid, cbody1, ret_of_fn_ty(ty))
   let f = CFun {
-    definition = definition,
+    definition = CDefinition { ..definition, role = if st2.self_tail { definition.role ++ "-tail" } else { definition.role } },
     name = name,
     owner = st2.owner,
     captures = caps,
@@ -3539,7 +3558,7 @@ fn lift_builtin_value(st: LSt, name: String, ty: Ty) -> (LSt, CExpr) = {
     ev_own = own
   }, XCallBuiltin(name, args, no_wits, evid, 0, 0, NO_NAME, ret))
   let f = CFun {
-    definition = synthetic_definition("builtin-value"),
+    definition = synthetic_definition("builtin-value:" ++ name),
     name = lam,
     owner = st5.owner,
     captures = [],
@@ -3609,7 +3628,7 @@ test "a builtin taken as a value lowers as the call it wraps" {
     self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false
+    ct_inline = false, keep_calls = false
   }
   for n in lowered_intrinsics() {
     let sg = map.get(it, n).expect("a lowered name is an intrinsic").sig
@@ -3649,6 +3668,52 @@ test "a builtin taken as a value lowers as the call it wraps" {
 }
 
 # ---- expressions ----
+
+# Named dispatch is shared by every lowering descent; keep its logic out of
+# the large expression dispatcher so both functions remain JIT eligible.
+fn lower_named_call(st: LSt, e: TExpr, tl: Bool) -> (LSt, CExpr) = match e {
+  XCallFn(owner, name, args, wits, evid, trait_id, lo, hi, nlo, ty, source) -> {
+    let site = source_site(st, lo, hi, nlo, source)
+    match trait_id {
+      Some(tid) -> lower_trait_call(st, tid, name, args, wits, evid, ty, site)
+      None -> {
+        let o = match owner { Some(x) -> x, None -> st.owner }
+        match observation.primitive(o, name) {
+          Some(primitive) -> {
+            let (next, call) = lower_expr(st, XCallBuiltin(primitive, args, wits, evid, lo, hi, nlo, ty))
+            return (next, result_site(call, site))
+          }
+          None -> ()
+        }
+        if tl && is_self_fn(st, o, name) && not st.keep_calls {
+          # neither dictionaries nor evidence are re-passed: a self call is
+          # the same instantiation under the same handlers, so what is
+          # already in scope still holds
+          return self_tail_jump(st, args)
+        }
+        let call_st = if tl && is_self_fn(st, o, name) { LSt { ..st, self_tail = true } } else { st }
+        match sig_of(call_st, o, name) {
+          Some(sg) -> {
+            let (st1, vs) = lower_args_to(call_st, args, sg.param_tys)
+            # a generic function takes its dictionaries as hidden trailing
+            # arguments, in bound order -- the order the callee declares --
+            # and an effectful one its evidence, right behind them
+            let (st2, ds) = witness_values(st1, wits)
+            let (st3, es) = lower_evidence(st2, evid)
+            (st3, adapt_out(CCall(CDirect(o, name), vs ++ ds ++ es, sg.ret, site), sg.ret, ty))
+          }
+          None -> {
+            let (st1, vs) = lower_all(call_st, args)
+            let (st2, ds) = witness_values(st1, wits)
+            let (st3, es) = lower_evidence(st2, evid)
+            (st3, CCall(CDirect(o, name), vs ++ ds ++ es, ty, site))
+          }
+        }
+      }
+    }
+  }
+  _ -> panic("lower: expected a named call")
+}
 
 pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
   # tail position is consumed here and re-established only by the arms that
@@ -3923,38 +3988,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         }
       }
     }
-    XCallFn(owner, name, args, wits, evid, trait_id, lo, hi, nlo, ty, source) -> {
-      let site = source_site(st, lo, hi, nlo, source)
-      match trait_id {
-        Some(tid) -> lower_trait_call(st, tid, name, args, wits, evid, ty, site)
-        None -> {
-          let o = match owner { Some(x) -> x, None -> st.owner }
-          if tl && is_self_fn(st, o, name) {
-            # neither dictionaries nor evidence are re-passed: a self call is
-            # the same instantiation under the same handlers, so what is
-            # already in scope still holds
-            return self_tail_jump(st, args)
-          }
-          match sig_of(st, o, name) {
-            Some(sg) -> {
-              let (st1, vs) = lower_args_to(st, args, sg.param_tys)
-              # a generic function takes its dictionaries as hidden trailing
-              # arguments, in bound order -- the order the callee declares --
-              # and an effectful one its evidence, right behind them
-              let (st2, ds) = witness_values(st1, wits)
-              let (st3, es) = lower_evidence(st2, evid)
-              (st3, adapt_out(CCall(CDirect(o, name), vs ++ ds ++ es, sg.ret, site), sg.ret, ty))
-            }
-            None -> {
-              let (st1, vs) = lower_all(st, args)
-              let (st2, ds) = witness_values(st1, wits)
-              let (st3, es) = lower_evidence(st2, evid)
-              (st3, CCall(CDirect(o, name), vs ++ ds ++ es, ty, site))
-            }
-          }
-        }
-      }
-    }
+    XCallFn(_, _, _, _, _, _, _, _, _, _, _) -> lower_named_call(st, e, tl)
     XConstRef(owner, name, _, _, ty) -> (st, CConstRef(owner, name, ty))
     # `c[i]` is a trait method call like any other: devirtualised where the
     # subject is known (which for List and Map means `index_at` inline, since
@@ -3974,7 +4008,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       (st3, CCall(CDynamic(tv), vs ++ es, ty, site))
     }
     XLambda(params, _, body, captures, lo, hi, ty, role) ->
-      lift_lambda(st, params, body, captures, ty, None, definition_at(st, lo, hi, role))
+      lift_lambda(st, params, body, captures, ty, None, lambda_definition(st, lo, hi, role, body))
     XFnValue(owner, name, is_builtin, ty, _, _) -> {
       # a builtin taken as a value gets the same wrapper as a declared
       # function; only its body differs, and both backends already know how
@@ -3991,11 +4025,11 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
 fn lower_dynamic_call(st: LSt, sym: Int, name: String, args: List[TExpr], evid: List[TExpr],
   lo: Int, hi: Int, nlo: Int, ty: Ty, tail: Bool) -> (LSt, CExpr) =
   if is_self_sym(st, sym) {
-    if tail {
+    if tail && not st.keep_calls {
       self_tail_jump(st, args)
     } else {
       # not a tail call, so the closure is rebuilt and called through
-      let (st1, vs) = lower_all(st, args)
+      let (st1, vs) = lower_all(LSt { ..st, self_tail = st.self_tail || tail }, args)
       let clo = self_value(st1, sym).expect("self closure")
       let (st2, es) = dyn_evidence(st1, evid)
       (st2, CCall(CDynamic(clo), vs ++ es, ty, source_site(st2, lo, hi, nlo, call_source(if nlo == NO_NAME { NO_NAME } else { nlo + len(name) }, "call"))))
@@ -4380,7 +4414,7 @@ test "dictionary constructors and slots keep their argument shape in either requ
     self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false
+    ct_inline = false, keep_calls = false
   }
   for bridge in [false, true] {
     # Exercise both slot producers directly. The explicit implementation is
@@ -4457,7 +4491,7 @@ test "a tuple literal scrutinee is matched by component unless an arm needs the 
     self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false
+    ct_inline = false, keep_calls = false
   }
   let tt = TyTuple([TyInt, TyInt])
   let lit = XTupleLit([XInt(1, 0, 0), XInt(2, 0, 0)], 0, 0, tt)
@@ -5261,7 +5295,7 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   let (st1, body0) = lower_expr(st_in, f.body)
   # the tail value is a return too
   let body1 = adapt_in(body0, tex_ty(f.body), f.sig.ret)
-  let body = wrap_self_loop(st1.self_tail, lid, body1, f.sig.ret)
+  let body = wrap_self_loop(st1.self_tail && not st.keep_calls, lid, body1, f.sig.ret)
   (LSt {
     ..st1,
     ret_ty = st.ret_ty,
@@ -5273,7 +5307,7 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     base = st.base,
     origin = st.origin
   }, CFun {
-    definition = definition_at(st_in, f.base, x_hi(f.body), "function"),
+    definition = definition_at(st_in, f.base, x_hi(f.body), if st1.self_tail { "function-tail" } else { "function" }),
     name = f.name,
     owner = owner,
     captures = [],
@@ -5351,7 +5385,7 @@ pub fn lower_expr_in(
     ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false
+    ct_inline = false, keep_calls = false
   }
   let (st1, ce) = lower_expr(st, e)
   (ce, st1.lifted, st1.dicts, st1.next_lam)
@@ -5403,7 +5437,7 @@ pub fn lower_fn_only(
     ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = true
+    ct_inline = true, keep_calls = false
   }
   let (st1, cf) = lower_fn(st, owner, f)
   (cf, st1.lifted, st1.dicts, st1.next_lam)
@@ -5423,6 +5457,8 @@ pub fn lower_fn_only(
 ## included, and `emitted_core` below puts the two halves back together for a
 ## JVM artifact or the native test runner.
 pub type LMod = {
+  # Pristine Core retained before TCO; the plain branch keeps its old rewrite.
+  logical: Map[String, CFun],
   m: CModule,
   fns: List[(CFun, List[CFun])],
   tests: List[(CFun, List[CFun])],
@@ -5451,7 +5487,8 @@ pub fn lower_module_full(
   impls: Impls,
   adts: Adts,
   prog_fns: Map[(String, String), Sig],
-  include_tests: Bool
+  include_tests: Bool,
+  keep_calls: Bool = false
 ) -> LMod = {
   # Temporaries continue above every checker-minted id in this module. That
   # used to be found by scanning the module's symbol table for its largest
@@ -5481,7 +5518,7 @@ pub fn lower_module_full(
     ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false
+    ct_inline = false, keep_calls = keep_calls
   }
   var fns: List[(CFun, List[CFun])] = []
   var flat: List[CFun] = []
@@ -5518,7 +5555,7 @@ pub fn lower_module_full(
     dicts = prod_dicts,
     next_sym = prod_next_sym
   }
-  densify(LMod { m = m, fns = fns, tests = tests, dicts = st.dicts, syms = tm.syms,
+  densify(LMod { logical = map.empty(), m = m, fns = fns, tests = tests, dicts = st.dicts, syms = tm.syms,
     next_sym = st.next_sym }, tm.syms)
 }
 
@@ -5788,6 +5825,7 @@ fn densify(l: LMod, syms: Map[Int, Sym]) -> LMod = {
     }
   }
   LMod {
+    logical = l.logical,
     m = CModule { ..l.m, fns = fns, next_sym = d.next },
     fns = moved_group(d, l.fns),
     tests = moved_group(d, l.tests),
@@ -5826,7 +5864,7 @@ test "lowering numbers a module's names in the order the Core dump reads them" {
   var syms: Map[Int, Sym] = map.empty()
   syms = map.insert(syms, 4002, sym_named("x"))
   syms = map.insert(syms, 9999, sym_named("unmentioned"))
-  let l = LMod { m = CModule { owner = "m", fns = [lifted], dicts = [], next_sym = 4006 },
+  let l = LMod { logical = map.empty(), m = CModule { owner = "m", fns = [lifted], dicts = [], next_sym = 4006 },
     fns = [(lifted, [])], tests = [], dicts = [], syms = syms, next_sym = 4006 }
   let dense = densify(l, syms)
   let out = dense.m.fns[0]

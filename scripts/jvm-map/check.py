@@ -83,7 +83,7 @@ JAVAP = os.environ.get("JAVAP", "javap")
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
 READ_CLASS = runpy.run_path(str(ROOT / "scripts" / "method-size-gate.py"))["read_class"]
 
-CASES = ["corpus", "kernels", "dead", "selfhost"]
+CASES = ["corpus", "kernels", "dead", "selfhost", "observed-builder", "observed-modes"]
 
 INVOKES = {"invokestatic", "invokevirtual", "invokeinterface", "invokespecial"}
 
@@ -101,6 +101,8 @@ def run(cmd, cwd=ROOT):
 
 
 def target(name, work):
+    if name.startswith("observed-"):
+        return ROOT / "scripts/effect-provenance-contract" / (name[9:]+".dawn")
     if name == "corpus":
         return ROOT / "scripts" / "core-sites" / "corpus.dawn"
     if name == "dead":
@@ -201,7 +203,7 @@ def split_symbol(symbol):
     return owner, name, desc
 
 
-def called(c, insn):
+def called(c, insn, observed=False):
     """None when the instruction at `ipc` is the call the row names, else why not."""
     op, owner, member = insn
     kind, _, rest = c["what"].partition(" ")
@@ -209,19 +211,20 @@ def called(c, insn):
         return f"is `{op}`, not an invoke"
     if kind == "direct":
         o, _, n = rest.rpartition(".")
+        n += "$observed" if observed else ""
         if op != "invokestatic" or owner != o or member != n:
             return f"is `{op} {owner}.{member}`, not `invokestatic {o}.{n}`"
     elif kind == "impl":
-        if op != "invokestatic" or not (member.startswith("dawn$impl$") and member.endswith("$" + rest)):
+        if op != "invokestatic" or not (member.startswith("dawn$impl$") and member.endswith("$" + rest + ("$observed" if observed else ""))):
             return f"is `{op} {owner}.{member}`, not an impl method `{rest}`"
     elif kind == "default":
-        if op != "invokestatic" or not (member.startswith("dawn$default$") and member.endswith("$" + rest)):
+        if op != "invokestatic" or not (member.startswith("dawn$default$") and member.endswith("$" + rest + ("$observed" if observed else ""))):
             return f"is `{op} {owner}.{member}`, not a default method `{rest}`"
     elif kind == "method":
-        if op != "invokeinterface" or member != rest:
+        if op != "invokeinterface" or member != rest + ("$observed" if observed else ""):
             return f"is `{op} {owner}.{member}`, not `invokeinterface ..{rest}`"
     elif kind == "dynamic":
-        if op != "invokeinterface" or member != "apply" or not re.fullmatch(r"dawn/rt/Fn\d+", owner or ""):
+        if op != "invokeinterface" or member != ("applyObserved" if observed else "apply") or not re.fullmatch(r"dawn/rt/Fn\d+", owner or ""):
             return f"is `{op} {owner}.{member}`, not a function value's `apply`"
     elif kind == "java":
         if member != rest and not (member == "<init>" and rest in ("<init>", "new")):
@@ -250,6 +253,8 @@ def check_map(name, m, listing, lengths, sites, lost=frozenset(), may_lose=froze
         fns[f["k"]] = (f, code)
     origins = {(f["module"], f["origin"]) for f in m["fns"]}
     by_site = {}
+    # Physical entry mode selects both placement identity and exact target.
+    source_keys = set()
     by_ipc = {}
     placed_by_fn = {}
     for c in m["calls"]:
@@ -258,7 +263,11 @@ def check_map(name, m, listing, lengths, sites, lost=frozenset(), may_lose=froze
         if None in (c["lo"], c["hi"], c["nlo"]):
             problems.append(f"{where} has no declaration base")
             continue
-        key = (c["module"], c["lo"], c["hi"], c["nlo"])
+        source = (c["module"], c["lo"], c["hi"], c["nlo"])
+        source_keys.add(source)
+        symbol = fns.get(c["k"], ({"symbol": ""}, None))[0]["symbol"]
+        observed = split_symbol(symbol)[1].endswith("$observed") if symbol else False
+        key = source + (observed,)
         if key in by_site:
             problems.append(f"{where} is two rows")
         by_site[key] = c
@@ -292,7 +301,7 @@ def check_map(name, m, listing, lengths, sites, lost=frozenset(), may_lose=froze
             if ipc not in starts:
                 problems.append(f"{where} has its call instruction at {ipc}, which starts no instruction")
                 continue
-            why = called(c, code[ipc])
+            why = called(c, code[ipc], observed)
             if why:
                 problems.append(f"{where}: the instruction at {ipc} of {f['symbol']} {why}")
             k = (c["k"], ipc)
@@ -307,7 +316,7 @@ def check_map(name, m, listing, lengths, sites, lost=frozenset(), may_lose=froze
         for s in rows:
             if (mod, s["origin"]) not in origins:
                 continue
-            if (mod, s["lo"], s["hi"], s["nlo"]) not in by_site:
+            if (mod, s["lo"], s["hi"], s["nlo"]) not in source_keys:
                 problems.append(f"{name}: site {mod} {s['lo']}..{s['hi']} ({s['what']} in {s['fn']}) has no row")
     site_keys = {(mod, s["lo"], s["hi"], s["nlo"]) for mod, rows in sites.items() for s in rows}
     for key, c in by_site.items():
@@ -318,7 +327,7 @@ def check_map(name, m, listing, lengths, sites, lost=frozenset(), may_lose=froze
         if fns.get(c["k"], ({"origin": ""}, None))[0]["origin"].startswith("Ns"):
             stats["test rows"] = stats.get("test rows", 0) + 1
             continue
-        if key not in site_keys:
+        if key[:4] not in site_keys:
             problems.append(f"{name}: row {c['what']} at {key} is no site of `__lower --sites`")
     return problems, stats
 
@@ -488,6 +497,12 @@ def self_test():
     assert called({"what": "dynamic"}, ("invokeinterface", "dawn/rt/Fn2", "apply")) is None
     assert called({"what": "impl show"}, ("invokestatic", "m", "dawn$impl$Show$Foo$show")) is None
     assert called({"what": "impl show"}, ("invokestatic", "m", "dawn$impl$Show$Foo$shows")) is not None
+    # An observed caller must name the observed physical method exactly.
+    assert called({"what": "direct m.g"}, ("invokestatic", "m", "g$observed"), True) is None
+    assert called({"what": "direct m.g"}, ("invokestatic", "m", "g"), True) is not None
+    assert called({"what": "direct m.g"}, ("invokestatic", "m", "g$observed"), False) is not None
+    assert called({"what": "dynamic"}, ("invokeinterface", "dawn/rt/Fn2", "applyObserved"), True) is None
+    assert called({"what": "dynamic"}, ("invokeinterface", "dawn/rt/Fn2", "apply"), True) is not None
     if bad:
         for b_ in bad:
             print("FAIL: " + b_)

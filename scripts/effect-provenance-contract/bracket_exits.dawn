@@ -1,0 +1,21 @@
+# Release runs in the same logical parent after a failed body. A failing
+# release replaces the body failure, then the next sibling starts cleanly.
+use std/io.{println}
+use std/provenance
+
+fn fail(n: Int) -> Int !io = panic("body failure")
+fn release(n: Int) -> Unit !io = if n == 2 { panic("release failure") } else { () }
+fn sibling(n: Int) -> Int = n + 1
+
+pub fn main() -> Unit !io = {
+  let (answer, tree) = provenance.observe(scope => {
+    let a = catch_panic(() => bracket(1, release, fail))
+    let b = catch_panic(() => bracket(2, release, fail))
+    let first = match a { Err(error) -> error.message, Ok(_) -> "missing body failure" }
+    let second = match b { Err(error) -> error.message, Ok(_) -> "missing release failure" }
+    let next = sibling(9)
+    ((first, second, next), provenance.completed(scope))
+  })
+  println("${answer}")
+  println(tree)
+}

@@ -184,6 +184,8 @@ def jvm_arms():
             "arms in gen_cintrinsic",
         )
     )
+    arms |= set(names(body(lines, "fn provenance_method(", "emit.dawn"),
+                      r'"(provenance_[A-Za-z_0-9]+)" ->', "emit.dawn", "provenance method references"))
     return arms
 
 
@@ -191,7 +193,7 @@ def c_arms():
     lines = read("c/emitc.dawn")
     arms = set(
         names(
-            body(lines, "fn emit_intrinsic(", "emitc.dawn"),
+            body(lines, "fn emit_intrinsic_values(", "emitc.dawn"),
             r'name == "([A-Za-z_0-9]+)"',
             "emitc.dawn",
             "arms in emit_intrinsic",
@@ -204,7 +206,11 @@ def c_arms():
             "emitc.dawn: is_list_primitive no longer reads reach.list_primitive_fn; "
             "the list primitives' arms are read from reach's table on that premise."
         )
+    if "emit_intrinsic_values(" not in "\n".join(body(lines, "fn emit_intrinsic(", "emitc.dawn")):
+        fail("emitc.dawn: the primitive wrapper no longer dispatches to emit_intrinsic_values")
     arms |= list_primitives()
+    arms |= set(names(body(lines, "fn provenance_target(", "emitc.dawn"),
+                      r'"(provenance_[A-Za-z_0-9]+)" ->', "emitc.dawn", "provenance targets"))
     return arms
 
 

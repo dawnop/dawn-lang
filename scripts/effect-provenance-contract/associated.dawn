@@ -1,0 +1,26 @@
+# Projected evidence and provenance travel independently through the same Fn.
+use std/io.{println}
+use std/provenance
+effect Ask { fn ask() -> Int }
+trait Runner[T] {
+  effect E
+  fn run(value: T) -> Int !T.E
+  fn twice(value: T) -> Int !T.E = run(value) + run(value)
+}
+type Value = { n: Int }
+impl Runner[Value] {
+  effect E = !Ask
+  fn run(value: Value) -> Int !Ask = value.n + ask()
+}
+fn relay[T: Runner](value: T, f: fn() -> Int !T.E) -> Int !T.E = run(value) + f()
+fn defaults[T: Runner](value: T) -> Int !T.E = twice(value)
+pub fn main() -> Unit !io = {
+  let (answer, tree) = provenance.observe(scope => {
+    with handle Ask { ask() => 21 }
+    let first = relay(Value { n = 0 }, () => ask())
+    let second = defaults(Value { n = 0 })
+    ((first, second), provenance.completed(scope))
+  })
+  println("${answer}")
+  println(tree)
+}

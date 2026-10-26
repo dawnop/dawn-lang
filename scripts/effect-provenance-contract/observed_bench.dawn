@@ -1,0 +1,64 @@
+# Generic recording cost is measured separately from the frozen six workloads.
+# The timer surrounds scope entry through exit; parsing and reporting happen
+# outside observation. The plain and observed branches compute n squared.
+use std/io
+use std/io.{now, elapsed_ns, with_clock_real}
+use std/fmt
+use std/provenance
+
+effect Builder {
+  fn query(n: Int) -> Int
+  fn output(n: Int) -> Unit
+}
+fn pure(n: Int) -> Int = n * 2
+fn helper(n: Int) -> Int !Builder = {
+  let value = pure(n)
+  let answer = query(value)
+  output(answer)
+  answer
+}
+fn work(n: Int) -> Int !Builder = {
+  var answer = 0
+  var i = 0
+  while i < n {
+    answer = answer + helper(i)
+    i = i + 1
+  }
+  answer
+}
+fn plain(n: Int) -> (Int, String) = {
+  with handle Builder { query(n) => n + 1
+    output(n) => () }
+  (work(n), "")
+}
+fn observed(n: Int) -> (Int, String) !io = provenance.observe(scope => {
+  with handle Builder {
+    query(n) origin source => { provenance.note(scope, source)
+      n + 1 }
+    output(n) origin source => { provenance.note(scope, source) }
+  }
+  let answer = work(n)
+  (answer, provenance.completed(scope))
+})
+pub fn main() -> Unit !io = with_clock_real(() => {
+  let argv = args()
+  let n = fmt.parse_int(argv[1]).expect("iteration count")
+  if argv[0] == "tree" {
+    let (answer, tree) = observed(n)
+    io.println("${answer}")
+    io.println(tree)
+  } else {
+    let observe = argv[0] == "observed"
+    for _warm in range(0, 30) {
+      let (answer, _) = if observe { observed(n) } else { plain(n) }
+      if answer != n * n { panic("wrong builder result") }
+    }
+    for batch in range(0, 50) {
+      let start = now()
+      let (answer, tree) = if observe { observed(n) } else { plain(n) }
+      let duration = elapsed_ns(start, now())
+      if answer != n * n { panic("wrong builder result") }
+      io.println("${batch} ${duration} ${answer} ${len(tree)}")
+    }
+  }
+})
