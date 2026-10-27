@@ -37,6 +37,7 @@ ADAPTERS = {
     "imm-contract": ("runtime/c",),
     "delete-contract": (".",),
     "dict-owner-contract": (".",),
+    "dependency-test-contract": (".",),
     "dependency-heap-contract": ("selfhost/src/main.dawn",),
     "display-layering-contract": (".",),
     "export-surface-contract": (".",),

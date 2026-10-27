@@ -1206,18 +1206,24 @@ fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !Fs !Env 
 pub(pkg) fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Fs !Env !io =
   analyze_observed(loaded, std, opts, js, None)
 
+## Ordinary products skip dependency tests in the checker. Keep their syntax:
+## the unused-import walk still needs references made only by tests. Test
+## commands, documentation and the editor use the complete analysis instead.
+pub(pkg) fn analyze_product(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Fs !Env !io =
+  analyze_observed(loaded, std, opts, js, None, false)
+
 ## The cold path remains the production entry. Observation is opt-in and
 ## cannot add diagnostics, change the wire protocol, or turn an error into a
 ## cached success. The caller owns any timing and counter state.
 pub(pkg) fn analyze_observed(
   loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig,
-  observer: Option[AnalysisObserver]
+  observer: Option[AnalysisObserver], dependency_tests: Bool = true
 ) -> Program !Fs !Env !io = {
   var diags = loaded.diags
   var carry = initial_carry(std)
   var out: List[CheckedMod] = []
   for mf in loaded.modules {
-    let step = analyze_module_step(mf, carry, std, opts, js, observer)
+    let step = analyze_module_step(mf, carry, std, opts, js, observer, dependency_tests)
     carry = step.after
     diags = diags ++ step.diags
     out = out ++ [step.checked]
@@ -1252,8 +1258,8 @@ fn intact_recovery(mf: LoadedModule) -> Bool =
 ## whole-module checks that need the complete text. What a repaired
 ## declaration's header reports is dropped with the rest of what is reported
 ## inside it, because both describe the parser's guess.
-fn check_recovered(cx: Cx, mf: LoadedModule, env: Map[String, ModExports]) -> (Cx, TModule) !io = {
-  let headers = check_module_headers(cx, mf.m, env)
+fn check_recovered(cx: Cx, mf: LoadedModule, env: Map[String, ModExports], tests: Bool) -> (Cx, TModule) !io = {
+  let headers = check_module_headers(cx, mf.m, env, tests)
   var damaged: Set[String] = set.empty()
   var spans: List[identity.Span] = []
   for l in identity.located(mf.m) {
@@ -1283,7 +1289,7 @@ fn check_recovered(cx: Cx, mf: LoadedModule, env: Map[String, ModExports]) -> (C
 ## alone is not a proven delta for prelude registration or std rechecking.
 pub(pkg) fn analyze_module_step(
   mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
-  js: Jsig, observer: Option[AnalysisObserver]
+  js: Jsig, observer: Option[AnalysisObserver], dependency_tests: Bool = true
 ) -> ModuleStep !Fs !Env !io = {
   var diags: List[LocDiag] = []
   # The one place a module's identity is settled, and the reason it is here
@@ -1294,6 +1300,7 @@ pub(pkg) fn analyze_module_step(
   # for the bundled library's own sources, and wrong in the direction that
   # takes the std-only surface away from the code that defines it.
   let (mf, is_std) = std_identity(std, mf0)
+  let tests = dependency_tests || mf.pkg == None
   # Built on the cold path too: one code path is worth more than the fraction
   # of a percent it costs, and a renderer cannot ask for a view that only the
   # session mode builds. It names no analysis owner, so the same revision
@@ -1356,7 +1363,7 @@ pub(pkg) fn analyze_module_step(
   let recovered = parse_failed && intact_recovery(mf)
   if recovered {
     analysis_event(observer, mf.mod_path, AnalyzeCheck, true)
-    let (cx1, tm1) = check_recovered(cx, mf, before.exports)
+    let (cx1, tm1) = check_recovered(cx, mf, before.exports, tests)
     check_runs = 1
     analysis_event(observer, mf.mod_path, AnalyzeCheck, false)
     cx = cx1
@@ -1364,7 +1371,7 @@ pub(pkg) fn analyze_module_step(
     for d in cx.diags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
   } else if not parse_failed {
     analysis_event(observer, mf.mod_path, AnalyzeCheck, true)
-    let (cx1, tm1) = check_module(cx, mf.m, before.exports)
+    let (cx1, tm1) = check_module(cx, mf.m, before.exports, tests)
     check_runs = 1
     analysis_event(observer, mf.mod_path, AnalyzeCheck, false)
     cx = cx1
@@ -1391,7 +1398,7 @@ pub(pkg) fn analyze_module_step(
     # so the file reports its parse errors and nothing else. It is a function of the text and the
     # carry, the cold path runs it too, and so a session still agrees with a
     # cold analysis; no body ran, so it counts as no check.
-    let headers = check_module_headers(cx, mf.m, before.exports)
+    let headers = check_module_headers(cx, mf.m, before.exports, tests)
     cx = Cx { ..headers.cx, diags = [] }
   }
   var impls = before.impls

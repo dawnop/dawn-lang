@@ -41,7 +41,7 @@ use driver/stdlib.{
 use ir/interp.{CtOpts, ct_default, ct_fuel, ct_lsp, ct_world_empty, ct_fuel_value, take_ct_fuel, DEFAULT_FUEL}
 use check/jsig.{JsigLease, jsig_refused, jsig_refused_lease}
 use driver/analyze.{
-  Program, LocDiag, LoadResult, load_target, load_target_unstd, syntax_failure_diags, analyze_program,
+  Program, LocDiag, LoadResult, load_target, load_target_unstd, syntax_failure_diags, analyze_program, analyze_product,
   rendered_diags, dawn_files_under, std_imports, union_imports,
   own_module_paths
 }
@@ -529,17 +529,18 @@ fn load_or_die_pruned(std_flag: Option[String], loaded: LoadResult) -> StdCtx !F
 fn analyzed_for(
   std_flag: Option[String],
   target: String,
-  opts: CtOpts
+  opts: CtOpts,
+  dependency_tests: Bool = false
 ) -> (StdCtx, LoadResult, Program) !Fs !Proc !Env !Exit !Console !io = {
   if cli_std_choice(std_flag) != None {
     let std = load_or_die_lean(std_flag)
-    let (loaded, prog) = analyzed_load(std, target, opts)
+    let (loaded, prog) = analyzed_load(std, target, opts, dependency_tests)
     return (std, loaded, prog)
   }
   require_target(target)
   let loaded = load_target_unstd(target)
   let std = load_or_die_pruned(std_flag, loaded)
-  (std, loaded, analyzed_loaded(std, loaded, opts))
+  (std, loaded, analyzed_loaded(std, loaded, opts, dependency_tests))
 }
 
 fn analyzed(std: StdCtx, target: String, opts: CtOpts) -> Program !Fs !Proc !Env !Exit !Console !io = {
@@ -552,11 +553,12 @@ fn analyzed(std: StdCtx, target: String, opts: CtOpts) -> Program !Fs !Proc !Env
 fn analyzed_load(
   std: StdCtx,
   target: String,
-  opts: CtOpts
+  opts: CtOpts,
+  dependency_tests: Bool = false
 ) -> (LoadResult, Program) !Fs !Proc !Env !Exit !Console !io = {
   require_target(target)
   let loaded = load_target(std, target)
-  (loaded, analyzed_loaded(std, loaded, opts))
+  (loaded, analyzed_loaded(std, loaded, opts, dependency_tests))
 }
 
 fn require_target(target: String) -> Unit !Fs !Exit !Console !io = {
@@ -568,8 +570,11 @@ fn require_target(target: String) -> Unit !Fs !Exit !Console !io = {
   }
 }
 
-fn analyzed_loaded(std: StdCtx, loaded: LoadResult, opts: CtOpts) -> Program !Fs !Proc !Env !Exit !Console !io = {
-  let prog = analyze_program(loaded, std, opts, jsig_refused())
+fn analyzed_loaded(
+  std: StdCtx, loaded: LoadResult, opts: CtOpts, dependency_tests: Bool = false
+) -> Program !Fs !Proc !Env !Exit !Console !io = {
+  let prog = if dependency_tests { analyze_program(loaded, std, opts, jsig_refused()) }
+  else { analyze_product(loaded, std, opts, jsig_refused()) }
   if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
   prog
 }
@@ -1029,7 +1034,7 @@ fn cmd_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       match syn {
         Some(ds) -> { all = all ++ ds }
         None -> {
-          let prog = analyze_program(loaded, std.expect("std loaded for a target that needs it"), opts, jsig_refused())
+          let prog = analyze_product(loaded, std.expect("std loaded for a target that needs it"), opts, jsig_refused())
           all = all ++ rendered_diags(prog)
         }
       }
@@ -1038,7 +1043,7 @@ fn cmd_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     let std = load_or_die(std_flag)
     for target in targets {
       let loaded = load_target(std, target)
-      let prog = analyze_program(loaded, std, opts, jsig_refused())
+      let prog = analyze_product(loaded, std, opts, jsig_refused())
       all = all ++ rendered_diags(prog)
     }
   }
@@ -1352,7 +1357,7 @@ fn cmd_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     let empty_packages: List[NativePackage] = []
     (load_or_die(std_flag), empty_prog, empty_packages)
   } else {
-    let (sc, loaded, pg) = analyzed_for(std_flag, target, opts)
+    let (sc, loaded, pg) = analyzed_for(std_flag, target, opts, true)
     (sc, pg, native_packages(target, loaded, pg))
   }
   # the modules whose test blocks are being run: the target's, or std's own

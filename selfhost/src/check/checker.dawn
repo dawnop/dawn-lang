@@ -15549,8 +15549,8 @@ fn no_tfun() -> Option[TFun] = None
 ## passes 0–4 register declarations, pass 5 checks bodies — inferred functions
 ## first in call-dependency order, then consts, annotated fns, impl methods,
 ## trait defaults, tests.
-pub(pkg) fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TModule) !io =
-  check_module_bodies(check_module_headers(cx, m, env))
+pub(pkg) fn check_module(cx: Cx, m: Module, env: Map[String, ModExports], tests: Bool = true) -> (Cx, TModule) !io =
+  check_module_bodies(check_module_headers(cx, m, env, tests))
 
 ## A same-revision stage product. Syntax and the header tables travel
 ## together; this is not permission to reuse headers in a different environment.
@@ -15572,11 +15572,13 @@ pub(pkg) type ModuleHeaders = {
   sigs: PathTable[Sig],
   impl_sigs: PathTable[Option[Sig]],
   const_tys: PathTable[Option[Ty]],
+  # Keep test syntax for import usage, but schedule bodies only when asked.
+  check_tests: Bool,
   recovered: Bool,
   damaged: Set[String]
 }
 
-pub(pkg) fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]) -> ModuleHeaders !io = {
+pub(pkg) fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports], tests: Bool = true) -> ModuleHeaders !io = {
   var cx1 = seed_prelude(cx)
   # the header passes below record where each written type reference sat, so
   # the public surface validator can blame the innermost token the author
@@ -15606,7 +15608,7 @@ pub(pkg) fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]
   let (cxd, const_tys) = pass_const_decls(cx1, m)
   cx1 = cxd
   cx1 = pass_main_check(cx1, m, sigs)
-  cx1 = decltests.pass_decl_tests(cx1, m)
+  if tests { cx1 = decltests.pass_decl_tests(cx1, m) }
   # SEM-07: the public surface is settled once the headers are, and it is
   # validated here rather than after the bodies on purpose (design §三). A
   # public contract's error then lands on its declaration whatever an
@@ -15619,7 +15621,7 @@ pub(pkg) fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]
   # be captured across the whole of it.
   cx1 = leave_decl_owner(Cx { ..cx1, record_ty_spans = false, ty_spans = no_spans })
   ModuleHeaders { syntax = m, cx = cx1, sigs = sigs, impl_sigs = impl_sigs, const_tys = const_tys,
-    recovered = false, damaged = set.empty() }
+    check_tests = tests, recovered = false, damaged = set.empty() }
 }
 
 ## Keep checking order separate from emission order: bodies are checked in
@@ -16250,7 +16252,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   var ttests: List[TFun] = []
   let all_tests = module_tests(m)
   let no_tests: List[TestView] = []
-  let tests_to_check = if cx1.std_trusted { no_tests } else { all_tests }
+  let tests_to_check = if cx1.std_trusted || not headers.check_tests { no_tests } else { all_tests }
   for t in tests_to_check {
     if not body_skipped(headers, [identity.Named(identity.TestDecl, t.name)]) {
       let owner = enter_decl(cx1, view, [identity.Named(identity.TestDecl, t.name)])

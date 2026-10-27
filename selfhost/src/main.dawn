@@ -35,7 +35,7 @@ use driver/stdlib.{
 use driver/analyze.{
   CheckedMod, LocDiag, LoadResult, Program, ProjectPlan,
   load_file, load_target, load_planned, project_plan_for_load, std_dir_target,
-  analyze_program, rendered_diags, dawn_files_under, planner_diags, own_module_paths,
+  analyze_program, analyze_product, rendered_diags, dawn_files_under, planner_diags, own_module_paths,
   std_imports, union_imports
 }
 use driver/clifail.{fail_compile, fail_planner}
@@ -288,10 +288,11 @@ fn collect_program(
   std_flag: Option[String],
   opts: CtOpts,
   closure: Bool,
-  std_tests: Bool
+  std_tests: Bool,
+  dependency_tests: Bool = false
 ) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !Fs !Proc !Env !Exit !Console !io = {
   let (classes, entry, tests_info, _) =
-    collect_program_roots(target, std_flag, opts, closure, std_tests)
+    collect_program_roots(target, std_flag, opts, closure, std_tests, dependency_tests)
   (classes, entry, tests_info)
 }
 
@@ -305,10 +306,11 @@ fn collect_program_roots(
   std_flag: Option[String],
   opts: CtOpts,
   closure: Bool,
-  std_tests: Bool
+  std_tests: Bool,
+  dependency_tests: Bool = false
 ) -> (List[(String, Bytes)], String, List[(String, String, List[String])], List[(String, String)]) !Fs !Proc !Env !Exit !Console !io = {
   let (classes, entry, tests_info, root_files, _) =
-    collect_program_full(target, std_flag, opts, closure, std_tests, false)
+    collect_program_full(target, std_flag, opts, closure, std_tests, false, dependency_tests)
   (classes, entry, tests_info, root_files)
 }
 
@@ -422,7 +424,8 @@ fn collect_program_full(
   opts: CtOpts,
   closure: Bool,
   std_tests: Bool,
-  mapping: Bool
+  mapping: Bool,
+  dependency_tests: Bool = false
 ) -> (List[(String, Bytes)], String, List[(String, String, List[String])], List[(String, String)], String) !Fs !Proc !Env !Exit !Console !io = {
   var jmods: List[JModMap] = []
   var root_files: List[(String, String)] = []
@@ -469,7 +472,8 @@ fn collect_program_full(
           Some(_) -> ()
         }
       }
-      let prog = analyze_program(loaded, std, opts, jsig_real())
+      let prog = if dependency_tests { analyze_program(loaded, std, opts, jsig_real()) }
+      else { analyze_product(loaded, std, opts, jsig_real()) }
       if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
       mods = prog.modules
     }
@@ -1277,7 +1281,8 @@ fn analyze_target_scoped(
   plan: ProjectPlan,
   loaded: LoadResult,
   std: StdCtx,
-  opts: CtOpts
+  opts: CtOpts,
+  product: Bool = false
 ) -> Result[Program, String] !Fs !Env !io = {
   let no_jars: List[String] = []
   let jars = if len(plan.source.diags) > 0 {
@@ -1296,7 +1301,8 @@ fn analyze_target_scoped(
   Ok(bracket(
     lease,
     held => held.close(),
-    held => analyze_program(loaded, std, opts, held.jsig)
+    held => if product { analyze_product(loaded, std, opts, held.jsig) }
+    else { analyze_program(loaded, std, opts, held.jsig) }
   ))
 }
 
@@ -1496,7 +1502,7 @@ fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     "usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib",
     (if target != "" { 1 } else { 0 }) + (if std_tests { 1 } else { 0 })
   )
-  let (classes, _, tests_info) = collect_program(target, std_flag, opts, closure2, std_tests)
+  let (classes, _, tests_info) = collect_program(target, std_flag, opts, closure2, std_tests, true)
   if len(tests_info) == 0 {
     return cli_error(if std_tests { "${std_choice_text(cli_std_choice(std_flag))} has no test blocks" }
     else { "${target} has no test blocks" })
@@ -2388,7 +2394,7 @@ fn run_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   }
   let t = target
   let loaded = load_target(std, t)
-  let prog = analyze_program(loaded, std, opts, jsig_real())
+  let prog = analyze_product(loaded, std, opts, jsig_real())
   if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
   let emitted = if map_out != "" { cdriver.c_text_mapped(std, prog) } else {
     let r: Result[(String, String), String] = match cdriver.c_text(std, prog) {
@@ -2515,7 +2521,7 @@ fn run_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       }
       for item in planned {
         let (plan, loaded) = item
-        match analyze_target_scoped(plan, loaded, std, opts) {
+        match analyze_target_scoped(plan, loaded, std, opts, true) {
           Ok(prog) -> { all = all ++ rendered_diags(prog) }
           Err(e) -> return fail_target_setup(e)
         }
@@ -2534,7 +2540,7 @@ fn run_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
             Err(rejected) -> { all = all ++ rejected.diags }
             Ok(plan) -> {
               let loaded = load_planned(plan)
-              match analyze_target_scoped(plan, loaded, std, opts) {
+              match analyze_target_scoped(plan, loaded, std, opts, true) {
                 Ok(prog) -> { all = all ++ rendered_diags(prog) }
                 Err(e) -> return fail_target_setup(e)
               }
