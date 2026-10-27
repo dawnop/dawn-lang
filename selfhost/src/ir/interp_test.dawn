@@ -1307,3 +1307,31 @@ test "a lowering panic inside an editor fold comes back as an Err" {
   # and the entry is still usable afterwards: nothing was kept
   assert fold_closed(c, "m", body_of(c.tm, "value"), hover) == Ok(VInt(17))
 }
+
+test "G01 baseline separates rejected result types from byte primitive evaluation" {
+  for ann in ["Bytes", "List[Bytes]", "Option[Bytes]", "fn(Int) -> Int"] {
+    let src = "const BAD: " ++ ann ++ " = panic(\"unused\")\n"
+    let (m, pd) = parser.parse_module(src)
+    assert len(pd) == 0
+    let env: Map[String, ModExports] = map.empty()
+    let (cx1, _) = check_module(cx_new(Some("std/g01"), Some("boundary.dawn")), m, env)
+    var refused = false
+    for d in cx1.diags {
+      if str.contains(d.msg, "not a constant-serializable type") { refused = true }
+    }
+    assert refused
+  }
+  let src = "const N: Int = bytes_len(bytes_utf8(\"abc\"))\n"
+  let (m, pd) = parser.parse_module(src)
+  assert len(pd) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("std/g01"), Some("byte-work.dawn")), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let owners: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, owners, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "std/g01", ct_default())
+  assert len(out.diags) == 1
+  assert str.contains(out.diags[0].msg, "bytes_utf8")
+  assert map.get(out.consts, "N") == None
+}
