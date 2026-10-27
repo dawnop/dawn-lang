@@ -1122,7 +1122,7 @@ def mutate_p5_move_marker(mirror, dump, interp, lower, header, export):
     """Take the marker off a name that is refused and put it on one that is
     not: one edit, both directions of P5."""
     lines = mirror.split("\n")
-    off = _index_of(lines, "fn bytes_utf8(s: String) -> Bytes" + MARKER)
+    off = _index_of(lines, "fn popcount(n: Int) -> Int" + MARKER)
     on = _index_of(lines, "pub fn parse_float(s: String) -> Option[Float]")
     lines[off] = lines[off][: -len(MARKER)]
     lines[on] = lines[on] + MARKER
@@ -1202,7 +1202,7 @@ def mutate_p7_drop_list_push(mirror, dump, interp, lower, header, export):
 
 def mutate_p7_drop_array_with_marker(mirror, dump, interp, lower, header, export):
     return (
-        _sub(mirror, "-> Array[T] # owned: 0, 2 # comptime: rejected", "-> Array[T] # comptime: rejected"),
+        _sub(mirror, "-> Array[T] # owned: 0, 2", "-> Array[T]"),
         dump,
         interp,
         lower,
@@ -1263,10 +1263,9 @@ def _flip_export(export, group, name, flag):
 
 
 def mutate_p9_flip_bytes_utf8(mirror, dump, interp, lower, header, export):
-    """The issue's negative control, in memory: the export says a `const` may
-    call `bytes_utf8`, and nothing else moves. P5 is green -- the marker and
-    the interpreter still agree -- so P9 is the only judgement that reads it."""
-    return mirror, dump, interp, lower, header, _flip_export(export, None, "bytes_utf8", "ok")
+    """The export refuses a supported byte primitive while the mirror and
+    evaluator still agree. P9 is the judgement that reads that public flag."""
+    return mirror, dump, interp, lower, header, _flip_export(export, None, "bytes_utf8", "refused")
 
 
 def mutate_p9_drop_get_s_flag(mirror, dump, interp, lower, header, export):

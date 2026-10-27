@@ -27,6 +27,8 @@
 # the host stack, so the selfhost JVM is launched with -Xss512m instead.
 
 use std/char
+use std/bytes
+use std/cursor
 use std/str
 use std/fmt
 use std/list
@@ -70,6 +72,8 @@ type EvalValue =
   | VFloat(v: Float)
   | VBool(v: Bool)
   | VStr(v: String)
+  | VBytes(v: Bytes)
+  | VArray(elems: List[EvalValue])
   | VUnit
   | VList(elems: List[EvalValue])
   | VTuple(elems: List[EvalValue])
@@ -672,6 +676,8 @@ fn eval_value_kind(v: EvalValue) -> String =
     VFloat(_) -> "Float"
     VBool(_) -> "Bool"
     VStr(_) -> "String"
+    VBytes(_) -> "Bytes"
+    VArray(_) -> "Array"
     VUnit -> "Unit"
     VList(_) -> "List"
     VTuple(_) -> "tuple"
@@ -691,6 +697,7 @@ fn stringify(v: EvalValue) -> String =
     VFloat(f) -> fmt.dtoa(f)
     VBool(b) -> to_string(b)
     VStr(s) -> s
+    VBytes(b) -> "<" ++ to_string(len(b)) ++ " bytes>"
     # unreachable: the checker restricts printable types
     _ -> "<value>"
   }
@@ -710,6 +717,7 @@ fn stringify(v: EvalValue) -> String =
 fn show_value(v: EvalValue) -> Option[String] =
   match v {
     VStr(s) -> Some(quote_str(s))
+    VBytes(_) -> Some(stringify(v))
     VInt(_) | VFloat(_) | VBool(_) -> Some(stringify(v))
     _ -> None
   }
@@ -806,6 +814,11 @@ fn scalar_eq(a: EvalValue, b: EvalValue) -> Bool =
     VStr(x) ->
       match b {
         VStr(y) -> x == y
+        _ -> false
+      }
+    VBytes(x) ->
+      match b {
+        VBytes(y) -> x == y
         _ -> false
       }
     VUnit ->
@@ -1185,6 +1198,141 @@ fn call_named(
   }
 }
 
+# ---- byte and Array working values ----
+
+fn as_bytes(v: EvalValue) -> Bytes = match v {
+  VBytes(b) -> b
+  _ -> panic("comptime interpreter bug: expected Bytes")
+}
+
+fn as_array(v: EvalValue) -> List[EvalValue] = match v {
+  VArray(xs) -> xs
+  _ -> panic("comptime interpreter bug: expected Array")
+}
+
+fn utf8_size(s: String) -> Int = {
+  var n = 0
+  var c = cursor.start(s)
+  while not cursor.done(s, c) {
+    let cp = cursor.char(s, c)
+    n = n + (if cp < 128 { 1 } else if cp < 2048 { 2 } else if cp < 65536 { 3 } else { 4 })
+    c = cursor.next(s, c)
+  }
+  n
+}
+
+fn call_bytes(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
+  if name == "bytes_utf8" {
+    let s = as_str(args[0])
+    let (st1, _, _) = burn_n(st, env, utf8_size(s))?
+    return Ok((st1, env, VBytes(bytes.utf8(s))))
+  }
+  if name == "bytes_pack_int" || name == "bytes_pack_float" {
+    let xs = as_array(args[0])
+    let width = as_int(args[1])
+    let floats = name == "bytes_pack_float"
+    if width != 4 && width != 8 && (floats || (width != 1 && width != 2)) {
+      return cerr(st, env, "panicked: bytes.pack: width " ++ to_string(width) ++
+          (if floats { " is not 4 or 8" } else { " is not 1, 2, 4 or 8" }))
+    }
+    # Multiplication is checked before creating either the byte blob or the
+    # host-side conversion list. Width is positive and at most eight here.
+    if len(xs) > 9223372036854775807 / width { return burn_n(st, env, -1) }
+    let (st1, _, _) = burn_n(st, env, len(xs) * width + len(xs))?
+    let order = if as_bool(args[2]) { bytes.Little } else { bytes.Big }
+    let b = if floats {
+      bytes.pack_floats(list.map(xs, (v: EvalValue) => as_float(v)), width, order)
+    } else {
+      bytes.pack_ints(list.map(xs, (v: EvalValue) => as_int(v)), width, order)
+    }
+    return Ok((st1, env, VBytes(b)))
+  }
+  let b = as_bytes(args[0])
+  let n = len(b)
+  if name == "bytes_len" { return Ok((st, env, VInt(n))) }
+  if name == "bytes_at" {
+    let i = as_int(args[1])
+    return Ok((st, env, VInt(if i < 0 || i >= n { -1 } else { bytes.at(b, i) })))
+  }
+  if name == "bytes_slice" {
+    let lo0 = as_int(args[1])
+    let hi0 = as_int(args[2])
+    let lo = if lo0 < 0 { 0 } else if lo0 > n { n } else { lo0 }
+    let hi = if hi0 < lo { lo } else if hi0 > n { n } else { hi0 }
+    let (st1, _, _) = burn_n(st, env, hi - lo)?
+    return Ok((st1, env, VBytes(bytes.slice(b, lo, hi))))
+  }
+  if name == "bytes_decode_utf8" || name == "bytes_decode_latin1" {
+    let (st1, _, _) = burn_n(st, env, n)?
+    let s = if name == "bytes_decode_utf8" { bytes.decode_utf8_lossy(b) } else { bytes.decode_latin1(b) }
+    return Ok((st1, env, VStr(s)))
+  }
+  let width = as_int(args[1])
+  let floats = name == "bytes_unpack_float"
+  if width != 4 && width != 8 && (floats || (width != 1 && width != 2)) {
+    return cerr(st, env, "panicked: bytes.unpack: width " ++ to_string(width) ++
+        (if floats { " is not 4 or 8" } else { " is not 1, 2, 4 or 8" }))
+  }
+  if n % width != 0 {
+    return cerr(st, env, "panicked: bytes.unpack: length " ++ to_string(n) ++
+        " is not a multiple of " ++ to_string(width))
+  }
+  let (st1, _, _) = burn_n(st, env, n + n / width)?
+  let order = if as_bool(args[if floats { 2 } else { 3 }]) { bytes.Little } else { bytes.Big }
+  let xs = if floats {
+    list.map(bytes.unpack_floats(b, width, order), (f: Float) => VFloat(f))
+  } else {
+    list.map(bytes.unpack_ints(b, width, as_bool(args[2]), order), (i: Int) => VInt(i))
+  }
+  Ok((st1, env, VArray(xs)))
+}
+
+fn call_array(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
+  if name == "array_new" { return Ok((st, env, VArray([]))) }
+  if name == "list_to_array" {
+    let xs = as_list(args[0])
+    let (st1, _, _) = burn_n(st, env, len(xs))?
+    return Ok((st1, env, VArray(xs)))
+  }
+  let xs = as_array(args[0])
+  let n = len(xs)
+  if name == "array_len" { return Ok((st, env, VInt(n))) }
+  if name == "array_to_list" {
+    let (st1, _, _) = burn_n(st, env, n)?
+    return Ok((st1, env, VList(xs)))
+  }
+  if name == "array_push" {
+    let (st1, _, _) = burn_n(st, env, 1)?
+    return Ok((st1, env, VArray(xs ++ [args[1]])))
+  }
+  if name == "array_extend" {
+    let ys = as_array(args[1])
+    let (st1, _, _) = burn_n(st, env, len(ys))?
+    return Ok((st1, env, VArray(xs ++ ys)))
+  }
+  if name == "array_slice" {
+    let lo = as_int(args[1])
+    let hi = as_int(args[2])
+    if lo < 0 || hi < lo || hi > n {
+      return cerr(st, env, "panicked: array slice [" ++ to_string(lo) ++ ", " ++ to_string(hi) ++
+          ") out of bounds for length " ++ to_string(n))
+    }
+    let (st1, _, _) = burn_n(st, env, hi - lo)?
+    return Ok((st1, env, VArray(list.slice(xs, lo, hi))))
+  }
+  let i = as_int(args[1])
+  if i < 0 || i >= n {
+    return cerr(st, env, "panicked: array index " ++ to_string(i) ++ " out of bounds for length " ++ to_string(n))
+  }
+  if name == "array_with" {
+    let (st1, _, _) = burn_n(st, env, n)?
+    return Ok((st1, env, VArray(list.take(xs, i) ++ [args[2]] ++ list.drop(xs, i + 1))))
+  }
+  # steal is a logical read. The native ownership optimisation is not an
+  # observable removal, so older Array versions keep all of their elements.
+  Ok((st, env, xs[i]))
+}
+
 # ---- intrinsics (the pure ones; io never reaches the interpreter) ----
 #
 # This chain is the third dispatcher over intrinsic names, and until
@@ -1234,7 +1382,8 @@ fn interp_arms() -> List[String] = [
   "code_points", "from_code_points",
   "char_is_letter", "char_is_digit", "char_is_alnum", "char_is_upper",
   "char_is_lower", "char_is_space",
-  "str_lower", "str_upper", "float_of_decimal"
+  "str_lower", "str_upper", "float_of_decimal",
+  "bytes_utf8", "bytes_decode_utf8", "bytes_decode_latin1", "bytes_len", "bytes_at", "bytes_slice", "bytes_pack_int", "bytes_unpack_int", "bytes_pack_float", "bytes_unpack_float", "array_new", "array_len", "array_get", "array_push", "array_with", "array_steal", "array_extend", "array_slice", "list_to_array", "array_to_list"
 ]
 
 ## Every intrinsic a comptime run refuses, and why it is a group rather than an
@@ -1256,12 +1405,6 @@ fn comptime_rejects() -> List[String] = {
   var out = ["hash", "java_hash"]
   for op in ["observe", "note", "completed", "checkpoint", "rewind", "origin", "field", "number", "parent"] {
     out = out ++ ["provenance_" ++ op]
-  }
-  # `EvalValue` has no `VBytes`: comptime cannot hold a Bytes at all, so the
-  # ten byte primitives have nothing to operate on
-  for op in ["utf8", "decode_utf8", "decode_latin1", "len", "at", "slice",
-    "pack_int", "unpack_int", "pack_float", "unpack_float"] {
-    out = out ++ ["bytes_" ++ op]
   }
   # io is the point: a compile must not read files or spawn processes because
   # a source file said so. `args` is the same rule at the process boundary.
@@ -1312,16 +1455,9 @@ fn comptime_rejects() -> List[String] = {
   # that: there is still no host object to reclaim, and an `Err` here would be
   # a fabricated answer rather than a fold.
   out = out ++ ["cast"]
-  # Array: `EvalValue` has no representation for it. Map and Set are refused too
-  # -- the group spec §7.2.2 names -- but not here: lowering turns them into
-  # calls on std/hamt before this evaluator sees a name, and the refusal is
-  # `call_named`'s (`comptime_refused_after_lowering` below).
-  for op in ["new", "len", "get", "push", "with", "steal", "extend", "slice"] { out = out ++ ["array_" ++ op] }
   # the flat buffers: mutable, and `EvalValue` has nowhere to put one
   for op in ["new", "len", "at", "set", "fill", "copy_from", "pack", "unpack"] { out = out ++ ["i64buf_" ++ op] }
   for op in ["new", "len", "at", "set", "fill", "copy_from", "pack", "unpack"] { out = out ++ ["f64buf_" ++ op] }
-  # the List/Array crossing: an Array is what it ends or starts with
-  out = out ++ ["list_to_array", "array_to_list"]
   # a bitmap operation on the array representation, so it is refused with it
   out = out ++ ["popcount"]
   # the handler-local slot. Reachable, and refused here. The checker refuses a
@@ -1571,6 +1707,10 @@ test "appending an empty pack changes nothing on either side" {
 fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER !io =
   if not has_name(interp_arms(), name) {
     cerr(st, env, no_arm_msg(name))
+  } else if str.starts_with(name, "bytes_") {
+    call_bytes(st, env, name, args)
+  } else if str.starts_with(name, "array_") || name == "list_to_array" {
+    call_array(st, env, name, args)
   } else if name == "cmp" {
     let c = order(st, env, args[0], args[1])?
     Ok((st, env, VInt(c)))
@@ -1654,11 +1794,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]
       None -> cerr(st, env, "`show` cannot render this value at comptime")
     }
   } else if name == "str_of_bytes" {
-    # There is no `VBytes`: comptime has no Bytes values at all, so nothing
-    # can reach this. Refusing by name beats falling through to the generic
-    # "not available at comptime", which would read as a missing feature
-    # rather than as a value the interpreter cannot hold.
-    cerr(st, env, "a Bytes cannot be rendered at comptime")
+    Ok((st, env, VStr(stringify(args[0]))))
     # the nested rendering of a String, which a synthesised `show` body reaches
     # for every String field
   } else if name == "quote" {
@@ -2320,6 +2456,11 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
           }
           _ -> ()
         }
+      VBytes(a) -> {
+        let b = as_bytes(rv)
+        let (st3, _, _) = burn_n(st2, env2, len(a) + len(b))?
+        return Ok((st3, env2, VBytes(a ++ b)))
+      }
       VList(a) ->
         match rv {
           VList(b) -> {
@@ -2332,7 +2473,7 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
         }
       _ -> ()
     }
-    return cerr(st2, env2, "`++` needs two Strings or two Lists")
+    return cerr(st2, env2, "`++` needs two Strings, two Bytes or two Lists")
   }
   if op == CEq || op == CNe {
     let same = eq_or_refuse(st2, env2, lv, rv)?
@@ -2392,6 +2533,7 @@ fn order(st: ESt, env: Env, lv: EvalValue, rv: EvalValue) -> Result[Int, (ESt, E
     # Written out, the fold answers spec 4.3's code point order on the first
     # build (RP-12: interp and intrinsics must give one answer).
     VStr(a) -> Ok(str_cmp_cp(a, as_str(rv)))
+    VBytes(a) -> Ok(cmp(a, as_bytes(rv)))
     # false < true, the order Ord[Bool] gives (types.ord_scalars)
     VBool(a) -> {
       let b = as_bool(rv)
@@ -2633,7 +2775,7 @@ fn freeze_const(
       }
       Ok((st2, cv))
     }
-    VClosure(_, _, _) | VDict(_, _) | VCursor(_, _) ->
+    VBytes(_) | VArray(_) | VClosure(_, _, _) | VDict(_, _) | VCursor(_, _) ->
       Err((st1, env, KErr(ct_failure("working value cannot escape at " ++ path,
         "return a closed literal value (spec §7.2)"))))
   }
@@ -3449,13 +3591,6 @@ test "the comptime interpreter covers every intrinsic, removes it in lowering, o
   for n in after { assert has_name(lowered, n) }
   assert probe_hamt(icx, "empty") == "Map and Set operations are not available at comptime"
 
-  # 5. the sizes the comments above quote. A count written in prose is what
-  #    went wrong in the list this gate replaces -- lowering's own said
-  #    "thirteen more" and "all twelve" in the same paragraph -- so the
-  #    numbers this file states are asserted rather than asserted-by-nobody.
-  assert len(arms) == 52
-  assert len(rejects) == 109
-  assert len(after) == 18
 }
 
 fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =

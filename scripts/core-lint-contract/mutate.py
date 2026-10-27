@@ -86,10 +86,10 @@ MUTATIONS = {
         INTERP_ARM,
         (
             INTERP,
-            """  "str_lower", "str_upper", "float_of_decimal"
-]""",
-            """  "str_lower", "str_upper", "float_of_decimal", "parse_float"
-]""",
+            """  "str_lower", "str_upper", "float_of_decimal",
+""",
+            """  "str_lower", "str_upper", "float_of_decimal", "parse_float",
+""",
         ),
     ),
     # #205: the emitter calls a runtime method under a descriptor rtclasses
