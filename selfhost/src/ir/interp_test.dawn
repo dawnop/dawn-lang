@@ -22,7 +22,7 @@ use check/checker.{check_module, exports_of}
 use check/tast.{TExpr, TFun, TModule, XError}
 use check/types.{Ty, TyInt, TyError, TyAdt, TyMap, TySet, Sig, EPure}
 use ir/core.{
-  CValue, VInt, VBool, VStr, VList, VAdt, CCall, CDirect, CImpl, CDefault,
+  ConstValue, CVInt, CVBool, CVStr, CVList, CVAdt, CCall, CDirect, CImpl, CDefault,
   CExpr, CBlock, CUpdate, CLocal, CSLet, CIntrinsic, CFun
 }
 use ir/lower
@@ -104,9 +104,9 @@ test "an empty user impl calls its default; explicit methods still call their bo
   let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
   assert len(out.diags) == 0
-  assert map.get(out.consts, "A") == Some(VInt(42))
-  assert map.get(out.consts, "B") == Some(VInt(41))
-  assert map.get(out.consts, "C") == Some(VInt(43))
+  assert map.get(out.consts, "A") == Some(CVInt(42))
+  assert map.get(out.consts, "B") == Some(CVInt(41))
+  assert map.get(out.consts, "C") == Some(CVInt(43))
 
   let sigs = program_sigs(no_owner, tm, "m")
   let lowered = (i: Int) => {
@@ -196,7 +196,7 @@ test "interpreter identity tables keep direct, impl, and default spellings separ
   let direct_out = eval_comptime(tm, defs_direct, defs_owners, all_impls, set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "same_impl", ct_fuel(1000000))
   assert len(direct_out.diags) == 0
-  assert map.get(direct_out.consts, "DIRECT") == Some(VInt(42))
+  assert map.get(direct_out.consts, "DIRECT") == Some(CVInt(42))
 
   # A third, ordinary source module imports the trait method and the two
   # subjects, so the checker -- not this test -- produces the CImpl/CDefault
@@ -219,8 +219,8 @@ test "interpreter identity tables keep direct, impl, and default spellings separ
   let out = eval_comptime(caller_tm, prior_direct, owners, all_impls, set.empty(), caller_cx.adts,
     caller_cx.traits, caller_cx.impl_table, "caller", ct_fuel(1000000))
   assert len(out.diags) == 0
-  assert map.get(out.consts, "IMPL") == Some(VInt(7))
-  assert map.get(out.consts, "DEFAULT") == Some(VInt(9))
+  assert map.get(out.consts, "IMPL") == Some(CVInt(7))
+  assert map.get(out.consts, "DEFAULT") == Some(CVInt(9))
 
   let direct_sigs = program_sigs(defs_owners, tm, "same_impl")
   assert map.get(direct_sigs, ("defs", "same")) == None
@@ -502,7 +502,7 @@ test "a handler a const reaches through a call folds without state and stops at 
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
   let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
-  assert map.get(out.consts, "S") == Some(VInt(42))
+  assert map.get(out.consts, "S") == Some(CVInt(42))
   assert len(out.diags) == 2
   assert out.diags[0].msg == "comptime: builtin `cell_new` is not available at comptime"
   assert out.diags[1].msg == "comptime: builtin `ctl_run` is not available at comptime"
@@ -524,9 +524,9 @@ test "consts evaluate in declaration order and fold across references" {
   let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
   assert len(out.diags) == 0
-  assert map.get(out.consts, "A") == Some(VInt(3))
-  assert map.get(out.consts, "B") == Some(VList([VInt(3), VInt(4)]))
-  assert map.get(out.consts, "C") == Some(VStr("x3"))
+  assert map.get(out.consts, "A") == Some(CVInt(3))
+  assert map.get(out.consts, "B") == Some(CVList([CVInt(3), CVInt(4)]))
+  assert map.get(out.consts, "C") == Some(CVStr("x3"))
 }
 
 test "a default that reads earlier parameters folds at comptime" {
@@ -552,11 +552,11 @@ test "a default that reads earlier parameters folds at comptime" {
   let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
   assert len(out.diags) == 0
-  assert map.get(out.consts, "A") == Some(VInt(5))
-  assert map.get(out.consts, "B") == Some(VInt(3))
-  assert map.get(out.consts, "C") == Some(VInt(7))
-  assert map.get(out.consts, "D") == Some(VInt(42))
-  assert map.get(out.consts, "E") == Some(VList([VStr("x"), VStr("x")]))
+  assert map.get(out.consts, "A") == Some(CVInt(5))
+  assert map.get(out.consts, "B") == Some(CVInt(3))
+  assert map.get(out.consts, "C") == Some(CVInt(7))
+  assert map.get(out.consts, "D") == Some(CVInt(42))
+  assert map.get(out.consts, "E") == Some(CVList([CVStr("x"), CVStr("x")]))
 }
 
 test "one module's lowering cache outlives the expression that filled it" {
@@ -584,10 +584,10 @@ test "one module's lowering cache outlives the expression that filled it" {
   let run = eval_module(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
   assert len(run.out.diags) == 0
-  assert map.get(run.out.consts, "A") == Some(VInt(2))
-  assert map.get(run.out.consts, "B") == Some(VInt(11))
-  assert map.get(run.out.consts, "C") == Some(VInt(6))
-  assert map.get(run.out.consts, "D") == Some(VInt(12))
+  assert map.get(run.out.consts, "A") == Some(CVInt(2))
+  assert map.get(run.out.consts, "B") == Some(CVInt(11))
+  assert map.get(run.out.consts, "C") == Some(CVInt(6))
+  assert map.get(run.out.consts, "D") == Some(CVInt(12))
 
   let cached = (k: String) =>
     match map.get(run.cache.fns, k) {
@@ -630,9 +630,9 @@ test "const initializers run blocks, local fns, matches and loops" {
   let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
   assert len(out.diags) == 0
-  assert map.get(out.consts, "D") == Some(VInt(55))
-  assert map.get(out.consts, "G") == Some(VInt(21))
-  assert map.get(out.consts, "H") == Some(VInt(7))
+  assert map.get(out.consts, "D") == Some(CVInt(55))
+  assert map.get(out.consts, "G") == Some(CVInt(21))
+  assert map.get(out.consts, "H") == Some(CVInt(7))
 }
 
 ## A record type with `n` Int fields `f0`..`f(n-1)`, and a value of it whose
@@ -670,17 +670,17 @@ test "a record update folds at comptime: written fields replaced, the rest kept"
   let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
   assert len(out.diags) == 0
-  assert map.get(out.consts, "S") == Some(VInt(200 + 700 + 5 + 37))
+  assert map.get(out.consts, "S") == Some(CVInt(200 + 700 + 5 + 37))
   match map.get(out.consts, "U") {
-    Some(VAdt(_, 0, fs)) -> {
+    Some(CVAdt(_, 0, fs)) -> {
       assert len(fs) == 40
-      assert fs[2] == VInt(200) && fs[37] == VInt(700)
-      assert fs[0] == VInt(0) && fs[36] == VInt(36) && fs[39] == VInt(39)
+      assert fs[2] == CVInt(200) && fs[37] == CVInt(700)
+      assert fs[0] == CVInt(0) && fs[36] == CVInt(36) && fs[39] == CVInt(39)
     }
     _ -> panic("expected the updated record")
   }
   match map.get(out.consts, "M") {
-    Some(VAdt(_, 0, [VInt(1), VStr("y")])) -> ()
+    Some(CVAdt(_, 0, [CVInt(1), CVStr("y")])) -> ()
     _ -> panic("expected the narrow update to keep `a` and replace `b`")
   }
 }
@@ -798,7 +798,7 @@ test "a self tail call in a const folds without growing the interpreter stack" {
   let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", ct_default())
   assert len(out.diags) == 0
-  assert map.get(out.consts, "T") == Some(VInt(200000))
+  assert map.get(out.consts, "T") == Some(CVInt(200000))
 }
 
 test "comptime failures become diagnostics; blocks in bodies fold" {
@@ -816,11 +816,11 @@ test "comptime failures become diagnostics; blocks in bodies fold" {
   assert len(out.diags) == 1
   assert out.diags[0].msg == "comptime: panicked: Int division by zero"
   assert len(out.blocks) == 1
-  var vals: List[CValue] = []
+  var vals: List[ConstValue] = []
   for k in map.keys(out.blocks) {
     vals = vals ++ [map.get(out.blocks, k).expect("block")]
   }
-  assert vals == [VInt(42)]
+  assert vals == [CVInt(42)]
 }
 
 test "a comptime failure names its call site, in the words the program would print" {
@@ -871,7 +871,7 @@ test "a caller() default folds at compile time to the site of the call" {
     "comptime: panicked: too big at src/m.dawn:4:27",
     "comptime: a nested comptime block did not fold"
   ]
-  assert map.get(out.consts, "A") == Some(VStr("src/m.dawn:3:27"))
+  assert map.get(out.consts, "A") == Some(CVStr("src/m.dawn:3:27"))
 }
 
 test "dbg is the identity in a const, and writes nothing" {
@@ -893,8 +893,8 @@ test "dbg is the identity in a const, and writes nothing" {
   let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
   assert len(out.diags) == 0
-  assert map.get(out.consts, "A") == Some(VInt(7))
-  assert map.get(out.consts, "B") == Some(VStr("s"))
+  assert map.get(out.consts, "A") == Some(CVInt(7))
+  assert map.get(out.consts, "B") == Some(CVStr("s"))
 }
 
 test "float folds agree with the backends on signed zero and NaN" {
@@ -917,12 +917,12 @@ test "float folds agree with the backends on signed zero and NaN" {
   let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
   assert len(out.diags) == 0
-  assert map.get(out.consts, "A") == Some(VBool(false))
-  assert map.get(out.consts, "B") == Some(VBool(true))
-  assert map.get(out.consts, "C") == Some(VBool(true))
-  assert map.get(out.consts, "D") == Some(VBool(false))
-  assert map.get(out.consts, "E") == Some(VBool(false))
-  assert map.get(out.consts, "F") == Some(VBool(true))
+  assert map.get(out.consts, "A") == Some(CVBool(false))
+  assert map.get(out.consts, "B") == Some(CVBool(true))
+  assert map.get(out.consts, "C") == Some(CVBool(true))
+  assert map.get(out.consts, "D") == Some(CVBool(false))
+  assert map.get(out.consts, "E") == Some(CVBool(false))
+  assert map.get(out.consts, "F") == Some(CVBool(true))
 }
 
 ## The depth a run may reach is the caller's to say: the compilers take
@@ -990,7 +990,7 @@ test "fuel exhaustion becomes a diagnostic" {
 ## The context has the List `Len` impl a fixture without std lacks, so `len`
 ## resolves. The call must reach the `len` primitive lowering collapses it to,
 ## which these tests assert through the lengths and the fuel they charge.
-fn fold_src(name: String, src: String, fuel: Int) -> (List[String], Map[String, CValue]) !io = {
+fn fold_src(name: String, src: String, fuel: Int) -> (List[String], Map[String, ConstValue]) !io = {
   let (m, pdiags) = parser.parse_module(src)
   let env: Map[String, ModExports] = map.empty()
   let (cx1, tm) = check_module(with_list_len(cx_new(Some(name), Some("size.dawn"))), m, env)
@@ -1044,7 +1044,7 @@ fn charged(name: String, setup: String, op: String, want: Int) -> Bool !io = {
   let (short, _) = fold_src(name, src, 20000)
   let (msgs, consts) = fold_src(name, src, 200000)
   len(short) == 1 && exhausted(short[0]) && len(msgs) == 0 &&
-    map.get(consts, "V") == Some(VInt(want))
+    map.get(consts, "V") == Some(CVInt(want))
 }
 
 test "doubling a String or a List runs out of fuel instead of memory" {
@@ -1075,7 +1075,7 @@ test "doubling a String or a List runs out of fuel instead of memory" {
   assert len(msgs) == 2
   assert exhausted(msgs[0])
   assert exhausted(msgs[1])
-  assert map.get(consts, "SMALL") == Some(VInt(6 + 512))
+  assert map.get(consts, "SMALL") == Some(CVInt(6 + 512))
 }
 
 test "a String concat pays for its result, a List concat for its right side" {
@@ -1085,23 +1085,22 @@ test "a String concat pays for its result, a List concat for its right side" {
   # list to a long one stays cheap
   let (msgs, consts) = fold_src("m", size_src("", "len(xs ++ [1, 2]) - 1024"), 20000)
   assert len(msgs) == 0
-  assert map.get(consts, "V") == Some(VInt(40 * 2))
+  assert map.get(consts, "V") == Some(CVInt(40 * 2))
 }
 
 ## `len` became the prelude `Len` trait's method, and lowering collapses it at a
 ## List to the same primitive the builtin was. The fuel a fold spends is the
-## observable proof: 40 steps are enough for `len(xs ++ xs)` over sixteen
-## elements and 39 are not, the figures the builtin had before the trait
-## (measured on the parent commit, 2026-10-10). A call that went through the
-## impl instead would charge a user call and move the boundary.
+## observable proof: evaluation takes 40 steps for `len(xs ++ xs)` over sixteen
+## elements (measured before the trait, 2026-10-10), and freezing the Int
+## result adds one node. A call through the impl would add a user call.
 test "a List's len spends the fuel the builtin did" {
   let src = "fn dbl(xs: List[Int]) -> Int = len(xs ++ xs)\n" ++
     "const V: Int = dbl(range(0, 16))\n"
-  let (short, _) = fold_src("m", src, 39)
+  let (short, _) = fold_src("m", src, 40)
   assert len(short) == 1 && exhausted(short[0])
-  let (msgs, consts) = fold_src("m", src, 40)
+  let (msgs, consts) = fold_src("m", src, 41)
   assert len(msgs) == 0
-  assert map.get(consts, "V") == Some(VInt(32))
+  assert map.get(consts, "V") == Some(CVInt(32))
 }
 
 test "list slices, joins and code point conversions pay for what they produce" {
@@ -1132,7 +1131,7 @@ test "a constant read before it is folded is named as declared later, not as fai
     "comptime: index 3 out of bounds for length 1",
     "comptime: const `D` failed to evaluate"
   ]
-  assert map.get(consts, "B") == Some(VInt(2))
+  assert map.get(consts, "B") == Some(CVInt(2))
 }
 
 ## A range's length is `to - from`, and that subtraction wraps when the
@@ -1150,9 +1149,9 @@ test "a range too long for an Int runs out of fuel instead of memory" {
   assert exhausted(msgs[0])
   assert exhausted(msgs[1])
   # an empty or reversed range is free, and a short one folds as before
-  assert map.get(consts, "E") == Some(VInt(0))
-  assert map.get(consts, "F") == Some(VInt(0))
-  assert map.get(consts, "G") == Some(VInt(7))
+  assert map.get(consts, "E") == Some(CVInt(0))
+  assert map.get(consts, "F") == Some(CVInt(0))
+  assert map.get(consts, "G") == Some(CVInt(7))
 }
 
 test "case mapping, slicing and quoting a String pay for what they produce" {
@@ -1209,7 +1208,7 @@ fn body_of(tm: TModule, name: String) -> TExpr = {
   panic("no function `" ++ name ++ "` in the test module")
 }
 
-fn fold_closed(c: Closed, owner: String, e: TExpr, opts: CtOpts) -> Result[CValue, String] !io = {
+fn fold_closed(c: Closed, owner: String, e: TExpr, opts: CtOpts) -> Result[ConstValue, String] !io = {
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
   eval_closed(c.tm, c.world, c.scope, c.ct, no_fns, no_owner, no_impls(), set.empty(), c.cx.adts,
@@ -1246,9 +1245,9 @@ test "an editor fold answers what a comptime block in the module would" {
   let c = closed_mod("m", CLOSED_SRC, map.empty(), ct_world_empty())
   let hover = ct_hover(ct_default())
   # a call into the module and a const the module's run folded
-  assert fold_closed(c, "m", body_of(c.tm, "value"), hover) == Ok(VInt(17))
+  assert fold_closed(c, "m", body_of(c.tm, "value"), hover) == Ok(CVInt(17))
   # a comptime block inside the expression reads the value the run kept
-  assert fold_closed(c, "m", body_of(c.tm, "block"), hover) == Ok(VInt(6))
+  assert fold_closed(c, "m", body_of(c.tm, "block"), hover) == Ok(CVInt(6))
 }
 
 test "an editor fold that runs out of fuel or depth is an Err, not a diagnostic" {
@@ -1258,10 +1257,10 @@ test "an editor fold that runs out of fuel or depth is an Err, not a diagnostic"
   assert fold_closed(c, "m", busy, hover) ==
     Err("fuel exhausted — evaluation did not finish within the step budget")
   # the same expression with more fuel: it was the budget, not the expression
-  assert fold_closed(c, "m", busy, CtOpts { ..hover, fuel = 10000000 }) == Ok(VInt(50000))
+  assert fold_closed(c, "m", busy, CtOpts { ..hover, fuel = 10000000 }) == Ok(CVInt(50000))
   let deep = body_of(c.tm, "deep")
   assert fold_closed(c, "m", deep, hover) == Err("call depth limit (1500) exceeded")
-  assert fold_closed(c, "m", deep, CtOpts { ..hover, depth = 1700 }) == Ok(VInt(1600))
+  assert fold_closed(c, "m", deep, CtOpts { ..hover, depth = 1700 }) == Ok(CVInt(1600))
 }
 
 test "an editor fold calls another module's pure function through the world" {
@@ -1271,7 +1270,7 @@ test "an editor fold calls another module's pure function through the world" {
   let c = closed_mod("app", "use lib\nfn probe() -> Int = lib.doubled(21)\n",
     map.from([("lib", lib.exp)]), world)
   let e = body_of(c.tm, "probe")
-  assert fold_closed(c, "app", e, ct_hover(ct_default())) == Ok(VInt(42))
+  assert fold_closed(c, "app", e, ct_hover(ct_default())) == Ok(CVInt(42))
   # without the world the call has nowhere to go, and says so as an Err
   let alone = Closed { ..c, world = ct_world_empty() }
   match fold_closed(alone, "app", e, ct_hover(ct_default())) {
@@ -1280,7 +1279,7 @@ test "an editor fold calls another module's pure function through the world" {
   }
 }
 
-fn lowering_panic(r: Result[CValue, String]) -> Bool =
+fn lowering_panic(r: Result[ConstValue, String]) -> Bool =
   match r {
     Ok(_) -> false
     Err(reason) ->
@@ -1305,7 +1304,7 @@ test "a lowering panic inside an editor fold comes back as an Err" {
   let poisoned = Closed { ..c, tm = TModule { ..c.tm, fns = fns } }
   assert lowering_panic(fold_closed(poisoned, "m", body_of(c.tm, "calls_bad"), hover))
   # and the entry is still usable afterwards: nothing was kept
-  assert fold_closed(c, "m", body_of(c.tm, "value"), hover) == Ok(VInt(17))
+  assert fold_closed(c, "m", body_of(c.tm, "value"), hover) == Ok(CVInt(17))
 }
 
 test "G01 baseline separates rejected result types from byte primitive evaluation" {
@@ -1334,4 +1333,28 @@ test "G01 baseline separates rejected result types from byte primitive evaluatio
   assert len(out.diags) == 1
   assert str.contains(out.diags[0].msg, "bytes_utf8")
   assert map.get(out.consts, "N") == None
+}
+
+test "constant eligibility checks recursive type arguments before the cycle shortcut" {
+  let good = "type Rose[T] = Leaf(value: T) | Branch(children: List[Rose[T]])\n" ++
+    "opaque type Count = Int\n" ++
+    "const A: Rose[Int] = Branch([Leaf(7)])\n" ++
+    "const B: Count = 42\n"
+  let (msgs, vals) = fold_src("m", good, 10000)
+  if msgs != [] { panic(join(msgs, "; ")) }
+  assert map.get(vals, "B") == Some(CVInt(42))
+  for src in [
+    "type Bad[T] = Last(value: T) | Next(next: Bad[fn(Int) -> Int])\nconst A: Bad[Int] = Last(1)\n",
+    "type Phantom[T] = Empty\nconst A: Phantom[fn(Int) -> Int] = Empty\n"
+  ] {
+    let (m, pd) = parser.parse_module(src)
+    assert len(pd) == 0
+    let env: Map[String, ModExports] = map.empty()
+    let (cx1, _) = check_module(cx_new(Some("m"), Some("recursive.dawn")), m, env)
+    var refused = false
+    for d in cx1.diags {
+      if str.contains(d.msg, "not a constant-serializable type") { refused = true }
+    }
+    assert refused
+  }
 }

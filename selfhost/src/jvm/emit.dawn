@@ -63,7 +63,7 @@ use jvm/help.{
   emit_scalar_cmp, emit_div_zero_check, gen_equality, gen_ordering, adapt_java_arg, new_array
 }
 use ir/core.{fn_key, synthetic_definition,
-  CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
+  ConstValue, CVInt, CVFloat, CVBool, CVStr, CVUnit, CVList, CVTuple, CVAdt,
   CExpr, CStmt, CCallee, CFun, CDictDef, CDictSlot,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
@@ -178,7 +178,7 @@ pub type SamC = {
   bottom: Bool
 }
 
-pub type ConstF = { fname: String, v: CValue, ty: Ty }
+pub type ConstF = { fname: String, v: ConstValue, ty: Ty }
 
 # ---- the side table `__emit --map` reads (docs/source-span-map-design.md 13) ----
 
@@ -261,8 +261,8 @@ pub type GenCtx = {
   # every user module's function is a root and only std can actually lose
   # anything here.
   live: Option[Live],
-  consts: Map[String, CValue],
-  blocks: Map[(Int, Int), CValue],
+  consts: Map[String, ConstValue],
+  blocks: Map[(Int, Int), ConstValue],
   # Whether this is the labelled emission `--map` runs beside the plain one
   # (docs/source-span-map-design.md 13.4). The classes a build writes always
   # come from an emission with this false: a label can change ASM's output, so
@@ -689,27 +689,27 @@ fn impl_of(gx: GenCtx, tid: Int, subject: Ty) -> ImplI =
     None -> panic("codegen: no impl for trait ${tid}")
   }
 
-fn gen_load_const(gx: GenCtx, g: Gen, v: CValue, t: Ty, key: String) -> Gen !io = {
+fn gen_load_const(gx: GenCtx, g: Gen, v: ConstValue, t: Ty, key: String) -> Gen !io = {
   match v {
-    VInt(x) -> {
+    CVInt(x) -> {
       ldc_long(g.mv, x)
       g
     }
-    VFloat(x) -> {
+    CVFloat(x) -> {
       ldc_double(g.mv, x)
       g
     }
-    VBool(x) -> {
+    CVBool(x) -> {
       g.mv.visitInsn(if x { OP_ICONST_1 } else { OP_ICONST_0 })
       g
     }
-    VStr(x) -> {
+    CVStr(x) -> {
       ldc_str(g.mv, x)
       g
     }
     # inline like the other scalars rather than through a static field: there
     # is one Unit, so the singleton *is* the constant
-    VUnit -> {
+    CVUnit -> {
       push_unit(g.mv)
       g
     }
@@ -740,33 +740,33 @@ fn gen_load_const(gx: GenCtx, g: Gen, v: CValue, t: Ty, key: String) -> Gen !io 
 fn erased_slot(adts: Adts, t: Ty) -> Bool = desc_of(adts, t) == "Ljava/lang/Object;"
 
 ## Emit bytecode that rebuilds a comptime value (boxed = erased position).
-fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit !io = {
+fn construct_value(gx: GenCtx, m: MethodVisitor, v: ConstValue, boxed: Bool) -> Unit !io = {
   match v {
-    VInt(x) -> {
+    CVInt(x) -> {
       ldc_long(m, x)
       if boxed {
         m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf",
           "(J)Ljava/lang/Long;", false)
       }
     }
-    VFloat(x) -> {
+    CVFloat(x) -> {
       ldc_double(m, x)
       if boxed {
         m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
           "(D)Ljava/lang/Double;", false)
       }
     }
-    VBool(x) -> {
+    CVBool(x) -> {
       m.visitInsn(if x { OP_ICONST_1 } else { OP_ICONST_0 })
       if boxed {
         m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
           "(Z)Ljava/lang/Boolean;", false)
       }
     }
-    VStr(x) -> { ldc_str(m, x) }
+    CVStr(x) -> { ldc_str(m, x) }
     # boxed or not, a Unit is the singleton -- there is nothing to widen
-    VUnit -> push_unit(m)
-    VList(elems) -> {
+    CVUnit -> push_unit(m)
+    CVList(elems) -> {
       # a comptime list is materialised the way a list literal is: pushed
       # onto an `Array` and handed to the vector
       invoke_rt(m, rt_array_new())
@@ -776,7 +776,7 @@ fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit
       }
       call_pvec(gx, m, LIST_FROM_ARRAY, "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";")
     }
-    VTuple(elems) -> {
+    CVTuple(elems) -> {
       let cls = tuple_class(len(elems))
       m.visitTypeInsn(OP_NEW, cls)
       m.visitInsn(OP_DUP)
@@ -785,7 +785,7 @@ fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit
       for _i in 0..len(elems) { ps = ps ++ "Ljava/lang/Object;" }
       m.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "(" ++ ps ++ ")V", false)
     }
-    VAdt(aid, cidx, fields) -> {
+    CVAdt(aid, cidx, fields) -> {
       let a = adt_of(gx.adts, aid)
       let ci = a.ctors[cidx]
       let sub = ctor_jvm_name(gx.adts, ci)
@@ -814,7 +814,6 @@ fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit
         }
       }
     }
-    _ -> panic("a function value cannot be a constant (checker bug)")
   }
   ()
 }
@@ -2152,7 +2151,7 @@ pub fn emit_module(
   lm: LMod,
   live: Option[Live],
   ct: CtOut,
-  all_consts: Map[String, CValue],
+  all_consts: Map[String, ConstValue],
   src: String,
   decls: List[Decl]
 ) -> List[(String, Bytes)] !Fs !Exit !Console !io = {
@@ -2180,7 +2179,7 @@ pub fn emit_module_mapped(
   lm: LMod,
   live: Option[Live],
   ct: CtOut,
-  all_consts: Map[String, CValue],
+  all_consts: Map[String, ConstValue],
   src: String,
   decls: List[Decl]
 ) -> (List[(String, Bytes)], JModMap) !Fs !Exit !Console !io = {
@@ -2226,7 +2225,7 @@ fn emit_module_with(
   ct: CtOut,
   # this module's const-name → comptime value view, imported consts included
   # (their values live in the declaring module's CtOut)
-  all_consts: Map[String, CValue],
+  all_consts: Map[String, ConstValue],
   # the module's source file and its declarations, for a class file that
   # cannot hold what was compiled to point at the declaration it came from.
   # Empty for a module the driver kept no AST for, which is every std module

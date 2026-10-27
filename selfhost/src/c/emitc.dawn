@@ -45,7 +45,7 @@ use embed/unicode_case
 use embed/rtsrc
 use embed/unicode_class
 use ir/core.{fn_key, mode_key, synthetic_definition,
-  CSite, CNoSite, CSyntax, CAt, CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict, VCursor,
+  CSite, CNoSite, CSyntax, CAt, ConstValue, CVInt, CVFloat, CVBool, CVStr, CVUnit, CVList, CVTuple, CVAdt,
   diverges,
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned, callee_mode_key, impl_mode_name,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
@@ -69,8 +69,8 @@ use ir/core.{fn_key, mode_key, synthetic_definition,
 pub type EmitMod = {
   logical: Map[String, CFun],
   m: CModule,
-  consts: Map[String, CValue],
-  blocks: Map[(Int, Int), CValue]
+  consts: Map[String, ConstValue],
+  blocks: Map[(Int, Int), ConstValue]
 }
 
 pub type CSt = {
@@ -89,8 +89,8 @@ pub type CSt = {
   out: List[String],
   tmp: Int,
   ind: Int,
-  consts: Map[String, CValue],
-  blocks: Map[(Int, Int), CValue],
+  consts: Map[String, ConstValue],
+  blocks: Map[(Int, Int), ConstValue],
   # every dictionary-parameter symbol of the unit being emitted. A lifted
   # lambda keeps its captures' original symbol ids, so this is how a capture
   # of an enclosing function's dictionary is recognised -- its recorded type
@@ -99,7 +99,7 @@ pub type CSt = {
   # makes the same module-wide union for the same reason.
   dict_syms: Set[Int],
   # Every ADT in the program, for the one job Core cannot do without a table:
-  # rebuilding a folded `VAdt` needs its constructor's *declared* field types,
+  # rebuilding a folded `CVAdt` needs its constructor's *declared* field types,
   # which decide the slot member and whether the value goes in boxed. A value
   # is data, not a Core expression, so there is no `CBox` for lowering to have
   # inserted and no `cex_ty` to read -- the JVM's `construct_value` reads
@@ -675,40 +675,36 @@ fn int_lit(v: Int) -> String =
 ## <clinit> to fill one in. `const_builder` is this backend's answer -- a
 ## generated function with a static pointer, so the constant is still built
 ## once and shared by every reference that names it.
-fn const_literal(v: CValue, ty: Ty, what: String) -> String =
+fn const_literal(v: ConstValue, ty: Ty, what: String) -> String =
   match v {
-    VInt(x) -> int_lit(x)
-    VFloat(x) -> float_lit(x)
-    VBool(x) -> if x { "true" } else { "false" }
-    # both callers peel VStr off to `emit_str_static` first -- a stored
+    CVInt(x) -> int_lit(x)
+    CVFloat(x) -> float_lit(x)
+    CVBool(x) -> if x { "true" } else { "false" }
+    # both callers peel CVStr off to `emit_str_static` first -- a stored
     # literal needs static storage, which this signature cannot emit
-    VStr(_) -> panic("emitc: " ++ what ++ " -- a string const belongs to emit_str_static")
-    VUnit -> "DAWN_UNIT"
-    # VList/VTuple/VAdt go to `const_builder`, which needs a CSt this signature
-    # does not carry; a function value is refused by the checker's
-    # const-serializability rule, so reaching here is a checker bug and the
-    # JVM's `construct_value` says the same thing at the same point.
-    _ -> panic("emitc: " ++ what ++ " -- a function value cannot be a constant (checker bug)")
+    CVStr(_) -> panic("emitc: " ++ what ++ " -- a string const belongs to emit_str_static")
+    CVUnit -> "DAWN_UNIT"
+    # Structured values require the storage carried by `const_builder`.
+    _ -> panic("emitc: " ++ what ++ " -- a structured constant needs storage")
   }
 
 ## Is this folded value a scalar -- something `const_literal` writes as a C
 ## literal, with no storage of its own?
-fn cv_scalar(v: CValue) -> Bool =
+fn cv_scalar(v: ConstValue) -> Bool =
   match v {
-    VInt(_) | VFloat(_) | VBool(_) | VUnit -> true
-    VStr(_) | VList(_) | VTuple(_) | VAdt(_, _, _) -> false
-    VClosure(_, _, _) | VDict(_, _) | VCursor(_, _) -> false
+    CVInt(_) | CVFloat(_) | CVBool(_) | CVUnit -> true
+    CVStr(_) | CVList(_) | CVTuple(_) | CVAdt(_, _, _) -> false
   }
 
 ## A folded value on its way into an erased (`void*`) slot. The mirror of
 ## `box_call`, asking the value instead of a Core type: a folded value has no
 ## `CBox` around it, because lowering never saw it.
-fn cv_box(cexpr: String, v: CValue) -> String =
+fn cv_box(cexpr: String, v: ConstValue) -> String =
   match v {
-    VInt(_) -> "dawn_box_int(" ++ cexpr ++ ")"
-    VFloat(_) -> "dawn_box_float(" ++ cexpr ++ ")"
-    VBool(_) -> "dawn_box_bool(" ++ cexpr ++ ")"
-    VUnit -> "dawn_box_unit(" ++ cexpr ++ ")"
+    CVInt(_) -> "dawn_box_int(" ++ cexpr ++ ")"
+    CVFloat(_) -> "dawn_box_float(" ++ cexpr ++ ")"
+    CVBool(_) -> "dawn_box_bool(" ++ cexpr ++ ")"
+    CVUnit -> "dawn_box_unit(" ++ cexpr ++ ")"
     # a reference is already a pointer, strings included -- they stopped
     # needing a box when they joined the ledger
     _ -> "((void*)(" ++ cexpr ++ "))"
@@ -724,10 +720,10 @@ fn cv_box(cexpr: String, v: CValue) -> String =
 ## constant: comptime evaluation already inlined every one it read, so the
 ## result is a closed tree of literals and the builders need no ordering
 ## between them.
-fn emit_const_value(st: CSt, v: CValue) -> (CSt, String) =
+fn emit_const_value(st: CSt, v: ConstValue) -> (CSt, String) =
   match v {
-    VStr(x) -> emit_str_static(st, x)
-    VList(elems) -> {
+    CVStr(x) -> emit_str_static(st, x)
+    CVList(elems) -> {
       var st1 = st
       let (sta, tmp) = fresh(st1)
       st1 = line(sta, "dawn_array* " ++ tmp ++ " = dawn_array_new();")
@@ -741,7 +737,7 @@ fn emit_const_value(st: CSt, v: CValue) -> (CSt, String) =
     # A tuple erases every element, exactly as `emit_alloc(erased = true)`
     # does: `Tuple2` holds two Objects on the JVM whatever it was built from,
     # and Core records nothing about it either way.
-    VTuple(elems) -> {
+    CVTuple(elems) -> {
       var st1 = st
       var parts: List[String] = []
       var slots: List[String] = []
@@ -755,7 +751,7 @@ fn emit_const_value(st: CSt, v: CValue) -> (CSt, String) =
       }
       emit_const_adt(st1, 0, parts, slots, bits)
     }
-    VAdt(aid, ci, fields) -> {
+    CVAdt(aid, ci, fields) -> {
       let ctor = adt_of(st.adts, aid).ctors[ci]
       var st1 = st
       var parts: List[String] = []
@@ -836,7 +832,7 @@ fn emit_const_adt(
 ## inside it -- the same standing string literals have had since they joined
 ## the ledger. rc.dawn's `lit_immortal` is the other half of this decision and
 ## has to agree with it.
-fn const_builder(st: CSt, cache_key: String, v: CValue, ty: Ty) -> (CSt, String) = {
+fn const_builder(st: CSt, cache_key: String, v: ConstValue, ty: Ty) -> (CSt, String) = {
   let full = st.cur_owner ++ "|" ++ cache_key
   match map.get(st.cmap, full) {
     Some(sym) -> return (st, "((" ++ c_type(ty) ++ ")" ++ sym ++ "())")
@@ -1096,7 +1092,7 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
       let key = if owner == "" { name } else { owner ++ "." ++ name }
       match map.get(st.consts, key) {
         # a folded string is storable like any literal, so it gets the static
-        Some(VStr(x)) -> emit_str_static(st, x)
+        Some(CVStr(x)) -> emit_str_static(st, x)
         Some(v) ->
           if cv_scalar(v) {
             (st, const_literal(v, ty, "const `" ++ key ++ "`"))
@@ -1108,7 +1104,7 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
     }
     CComptime(lo, hi, ty) ->
       match map.get(st.blocks, (lo, hi)) {
-        Some(VStr(x)) -> emit_str_static(st, x)
+        Some(CVStr(x)) -> emit_str_static(st, x)
         Some(v) ->
           if cv_scalar(v) {
             (st, const_literal(v, ty, "comptime block"))
@@ -3641,17 +3637,17 @@ test "a non-finite Float is written as C, not as its spelling" {
   assert float_lit(4.9e-324) == "4.9E-324"
 
   # both paths that print a Float share the rewrite: the inlined `CFloat` and
-  # the interpreter's folded `VFloat`
-  assert const_literal(VFloat(inf), TyFloat, "c") == "(1.0/0.0)"
-  assert const_literal(VFloat(0.0 / 0.0), TyFloat, "c") == "(0.0/0.0)"
-  assert const_literal(VFloat(-0.0), TyFloat, "c") == "-0.0"
+  # the interpreter's folded `CVFloat`
+  assert const_literal(CVFloat(inf), TyFloat, "c") == "(1.0/0.0)"
+  assert const_literal(CVFloat(0.0 / 0.0), TyFloat, "c") == "(0.0/0.0)"
+  assert const_literal(CVFloat(-0.0), TyFloat, "c") == "-0.0"
 }
 
 test "Int minimum uses the C standard boundary macro" {
   let min = -9223372036854775807 - 1
   assert int_lit(min) == "INT64_MIN"
   assert int_lit(-1) == "INT64_C(-1)"
-  assert const_literal(VInt(min), TyInt, "test") == "INT64_MIN"
+  assert const_literal(CVInt(min), TyInt, "test") == "INT64_MIN"
 }
 
 # ---- --map: where a call's C landed (docs/source-span-map-design.md section 12) ----

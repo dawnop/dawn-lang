@@ -19,7 +19,8 @@ List、tuple、record、ADT、opaque 递归组合。Bytes 表示长度与 0..255
 拆除混合的 `CValue`，以 `EvalValue` 承载解释器工作值，以 `ConstValue` 承载后端可见的
 封闭树。`freeze_const` 在每个 const/comptime 的边界检查并转换，失败携带字段或元素路径。
 常量侧表只保存 `ConstValue`，解释器再次读取时显式还原工作值。两个 emitter 不接受工作值。
-冻结也受步数、深度与大小预算约束，不把错误推迟到 codegen。
+冻结逐节点计步并检查深度；K3 增加大小预算，不把错误推迟到 codegen。
+递归 ADT 的类型参数在循环捷径之前检查，覆盖非正则递归和 phantom 参数。
 
 Bytes 叶子直接持有紧凑的不可变 Bytes，不将每个字节装箱为 Int。解释器实现十个字节原语、
 拼接、比较、渲染与 Array 操作及 List 转换；`array_steal` 按现有值语义契约读取。
@@ -58,8 +59,8 @@ CRC32("123456789") 为 `0xCBF43926`。另测 SHA padding 55/56/63/64/65、编码
 
 | 刀 | 范围 | 状态 |
 |---|---|---|
-| K0 | 后端无关规则、trait 文档纠正、现状负例 | 单元测试通过，1183 项 |
-| K1 | EvalValue/ConstValue 与冻结边界 | 待做 |
+| K0 | 后端无关规则、trait 文档纠正、现状负例 | `f8b4b9f9`；1183 项单元测试及文档、锚点子集通过 |
+| K1 | EvalValue/ConstValue 与冻结边界 | 1185 项单元测试通过；冻结逐节点计步 |
 | K2 | Bytes 与 Array 完整构造路径 | 待做 |
 | K3 | 双后端产物、预算、预览边界 | 待做 |
 | K4 | 生产 const、契约、文档与干净自举闭环 | 待做 |

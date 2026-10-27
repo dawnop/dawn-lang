@@ -110,7 +110,7 @@ fn seg_ok(s: String) -> Bool = {
   }
   true
 }
-use ir/core.{CValue, VInt, VBool, VStr, VList}
+use ir/core.{ConstValue, CVInt, CVBool, CVStr, CVList}
 
 ## The segments of a module path that are not legal path segments, in order.
 ##
@@ -1173,8 +1173,8 @@ fn empty_tmodule() -> TModule = {
 }
 
 fn empty_ctout() -> CtOut = {
-  let no_c: Map[String, CValue] = map.empty()
-  let no_b: Map[(Int, Int), CValue] = map.empty()
+  let no_c: Map[String, ConstValue] = map.empty()
+  let no_b: Map[(Int, Int), ConstValue] = map.empty()
   CtOut { diags = [], consts = no_c, blocks = no_b, reads = set.empty(), missed = false }
 }
 
@@ -1795,7 +1795,7 @@ test "a program that does not parse is answered without std, with the words anal
 }
 
 ## The folded value of `name` in the module at `mod_path`.
-fn folded(prog: Program, mod_path: String, name: String) -> Option[CValue] = {
+fn folded(prog: Program, mod_path: String, name: String) -> Option[ConstValue] = {
   for cm in prog.modules {
     if cm.mod_path == mod_path { return map.get(cm.ct.consts, name) }
   }
@@ -1847,15 +1847,15 @@ test "comptime calls the functions of the modules before it" {
     let prog = analyze_program(load_directory("${base}/app"), std, ct_default(), jsig_refused())
     assert len(prog.diags) == 0
     # c's BASE inside c's body, b's inside b's: two modules deep
-    assert folded(prog, "main", "CHAIN") == Some(VInt(108))
-    assert folded(prog, "main", "IMPL") == Some(VInt(16))
-    assert folded(prog, "main", "DEFAULT") == Some(VInt(18))
-    assert folded(prog, "main", "QUALIFIED") == Some(VInt(4))
+    assert folded(prog, "main", "CHAIN") == Some(CVInt(108))
+    assert folded(prog, "main", "IMPL") == Some(CVInt(16))
+    assert folded(prog, "main", "DEFAULT") == Some(CVInt(18))
+    assert folded(prog, "main", "QUALIFIED") == Some(CVInt(4))
     # a path dependency's functions, lambdas lifted from its bodies included
-    assert folded(prog, "main", "PKG") == Some(VInt(54))
+    assert folded(prog, "main", "PKG") == Some(CVInt(54))
     # `K` is shape's renamed import and `LIMIT` its own, not main's
-    assert folded(prog, "main", "SCOPED") == Some(VInt(23))
-    assert folded(prog, "main", "BLOCK") == Some(VInt(100))
+    assert folded(prog, "main", "SCOPED") == Some(CVInt(23))
+    assert folded(prog, "main", "BLOCK") == Some(CVInt(100))
     let main_ct = prog.modules[len(prog.modules) - 1].ct
     assert set.has(main_ct.reads, "deep/c")
     assert set.has(main_ct.reads, "pk/arith")
@@ -1892,8 +1892,8 @@ test "a comptime block in another module's function keeps its own value when the
   assert str.index_of(b_src, "comptime") == str.index_of(main_src, "comptime")
   let prog = fold_project("/tmp/dawn-selfhost-analyze/comptime-block-collide",
     [("b.dawn", b_src), ("main.dawn", main_src)])
-  assert folded(prog, "main", "S") == Some(VInt(7))
-  assert folded(prog, "main", "A") == Some(VInt(5))
+  assert folded(prog, "main", "S") == Some(CVInt(7))
+  assert folded(prog, "main", "A") == Some(CVInt(5))
   assert len(prog.diags) == 0
 }
 
@@ -1908,8 +1908,8 @@ test "a comptime block folds in a function a const reaches before the walk does"
   let prog = fold_project("/tmp/dawn-selfhost-analyze/comptime-block-reach",
     [("c.dawn", c_src), ("main.dawn", main_src)])
   assert map(prog.diags, ld => ld.d.msg) == []
-  assert folded(prog, "main", "C") == Some(VInt(16))
-  assert folded(prog, "main", "L") == Some(VInt(43))
+  assert folded(prog, "main", "C") == Some(CVInt(16))
+  assert folded(prog, "main", "L") == Some(CVInt(43))
 }
 
 test "comptime still refuses another module's effectful function" {
@@ -2013,12 +2013,12 @@ test "comptime refuses a cursor used on another string and still walks one strin
     }
     assert refused == 4
     assert len(prog.diags) == 4
-    assert folded(prog, "main", "SAME") == Some(VBool(true))
+    assert folded(prog, "main", "SAME") == Some(CVBool(true))
     # `&&` stops at the first false, as it does at run time, so the probe is
     # never reached and there is nothing to refuse
-    assert folded(prog, "main", "DIFF") == Some(VBool(false))
-    assert folded(prog, "main", "WALK") == Some(VInt(2))
-    assert folded(prog, "main", "LEN") == Some(VInt(3))
+    assert folded(prog, "main", "DIFF") == Some(CVBool(false))
+    assert folded(prog, "main", "WALK") == Some(CVInt(2))
+    assert folded(prog, "main", "LEN") == Some(CVInt(3))
   })
 }
 
@@ -2050,17 +2050,17 @@ test "comptime orders values through the prelude Ord, not only through `<` on sc
     }
     let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
     assert len(prog.diags) == 0
-    assert folded(prog, "main", "SORTED") == Some(VList([VInt(1), VInt(2), VInt(3)]))
+    assert folded(prog, "main", "SORTED") == Some(CVList([CVInt(1), CVInt(2), CVInt(3)]))
     # code point order: U+FF5E sorts below U+10000, where UTF-16 would not
     assert folded(prog, "main", "WORDS") ==
-      Some(VList([VStr("a"), VStr("b"), VStr("\u{FF5E}"), VStr("\u{10000}")]))
-    assert folded(prog, "main", "MAX") == Some(VInt(3))
-    assert folded(prog, "main", "REC") == Some(VBool(true))
-    assert folded(prog, "main", "TUP") == Some(VBool(false))
-    assert folded(prog, "main", "LST") == Some(VBool(true))
-    assert folded(prog, "main", "BOOLS") == Some(VList([VBool(false), VBool(true)]))
-    assert folded(prog, "main", "TAGS") == Some(VBool(true))
-    assert folded(prog, "main", "INNER") == Some(VBool(true))
+      Some(CVList([CVStr("a"), CVStr("b"), CVStr("\u{FF5E}"), CVStr("\u{10000}")]))
+    assert folded(prog, "main", "MAX") == Some(CVInt(3))
+    assert folded(prog, "main", "REC") == Some(CVBool(true))
+    assert folded(prog, "main", "TUP") == Some(CVBool(false))
+    assert folded(prog, "main", "LST") == Some(CVBool(true))
+    assert folded(prog, "main", "BOOLS") == Some(CVList([CVBool(false), CVBool(true)]))
+    assert folded(prog, "main", "TAGS") == Some(CVBool(true))
+    assert folded(prog, "main", "INNER") == Some(CVBool(true))
   })
 }
 
