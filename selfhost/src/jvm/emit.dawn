@@ -19,6 +19,7 @@
 # emit now (K-A4). scripts/constpool-scan.py keeps the pool clear of them.
 
 use std/str
+use std/bytes
 use std/set
 use std/list
 use std/map
@@ -54,7 +55,7 @@ use jvm/rtclasses.{
   SHOW_CLASS, CTL_CLASS, supers_of, gen_show_class, gen_strings_class, gen_bytes_class,
   gen_array_class, gen_mem_class, gen_io_class, gen_gpu_class, gen_ctl_class, emitter_rt_methods,
   RtMethod, invoke_rt, rt_array_new, rt_array_push, rt_array_to_java, rt_array_of_java,
-  rt_bytes_concat, rt_ctl_enter, rt_ctl_yield, rt_io_cast, rt_io_list_names, rt_io_run,
+  rt_bytes_concat, rt_bytes_literal, rt_ctl_enter, rt_ctl_yield, rt_io_cast, rt_io_list_names, rt_io_run,
   rt_show_quote, rt_show_show, rt_strings_code_points, rt_strings_cursor_slice,
   rt_strings_from_code_points, rt_strings_join
 }
@@ -63,7 +64,7 @@ use jvm/help.{
   emit_scalar_cmp, emit_div_zero_check, gen_equality, gen_ordering, adapt_java_arg, new_array
 }
 use ir/core.{fn_key, synthetic_definition,
-  ConstValue, CVInt, CVFloat, CVBool, CVStr, CVUnit, CVList, CVTuple, CVAdt,
+  ConstValue, CVInt, CVFloat, CVBool, CVStr, CVBytes, CVUnit, CVList, CVTuple, CVAdt,
   CExpr, CStmt, CCallee, CFun, CDictDef, CDictSlot,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
@@ -307,7 +308,7 @@ pub type Gen = {
   closures: List[ClosB],
   sam_classes: List[SamC],
   const_fields: List[ConstF],
-  const_by_key: Map[String, String],
+  const_by_key: Map[String, Int],
   # the labelled emission's marks for the method being written, and its rows
   # and methods so far; all three stay empty unless `GenCtx.mapping`
   marks: List[JMark],
@@ -714,18 +715,17 @@ fn gen_load_const(gx: GenCtx, g: Gen, v: ConstValue, t: Ty, key: String) -> Gen 
       g
     }
     _ -> {
-      let (g1, fname) = match map.get(g.const_by_key, key) {
-        Some(f) -> (g, f)
+      let (g1, id) = match map.get(g.const_by_key, key) {
+        Some(i) -> (g, i)
         None -> {
-          let f = "dawn\$const\$${to_string(len(g.const_fields))}"
-          (Gen {
-            ..g,
-            const_fields = g.const_fields ++ [ConstF { fname = f, v = v, ty = t }],
-            const_by_key = map.insert(g.const_by_key, key, f)
-          }, f)
+          let i = len(g.const_fields)
+          let f = "dawn\$const\$${to_string(i)}"
+          (Gen { ..g, const_fields = g.const_fields ++ [ConstF { fname = f, v = v, ty = t }],
+            const_by_key = map.insert(g.const_by_key, key, i) }, i)
         }
       }
-      g1.mv.visitFieldInsn(OP_GETSTATIC, gx.class_name, fname, desc_of(gx.adts, t))
+      g1.mv.visitFieldInsn(OP_GETSTATIC, gx.class_name ++ "\$consts\$" ++ to_string(id / 64),
+        g1.const_fields[id].fname, desc_of(gx.adts, t))
       g1
     }
   }
@@ -739,99 +739,231 @@ fn gen_load_const(gx: GenCtx, g: Gen, v: ConstValue, t: Ty, key: String) -> Gen 
 ## and pushed a raw long where the constructor wanted an Object (VerifyError).
 fn erased_slot(adts: Adts, t: Ty) -> Bool = desc_of(adts, t) == "Ljava/lang/Object;"
 
-## Emit bytecode that rebuilds a comptime value (boxed = erased position).
-fn construct_value(gx: GenCtx, m: MethodVisitor, v: ConstValue, boxed: Bool) -> Unit !io = {
+# Constant builders live in bounded holder classes. A large list is appended
+# in 64-element methods, and builders reserve pool space in units of 64 refs.
+# This bounds both Code length and constant pools, including many small blobs.
+fn constant_supers() -> List[String] = []
+
+type ConstEmit = { writers: List[(String, ClassWriter)], next: Int, blobs: Map[Bytes, Int] }
+
+fn const_method(gx: GenCtx, st: ConstEmit, desc: String, refs: Int) -> (ConstEmit, String, String, MethodVisitor) !io = {
+  let weight0 = (refs + 63) / 64
+  let weight = if weight0 < 1 { 1 } else if weight0 > 64 { 64 } else { weight0 }
+  let id = if st.next % 64 + weight > 64 { (st.next / 64 + 1) * 64 } else { st.next }
+  let group = id / 64
+  var writers = st.writers
+  if group == len(writers) {
+    let cls = gx.class_name ++ "\$const_tree\$" ++ to_string(group)
+    let cw = AsmWriter.of(COMPUTE_FRAMES, constant_supers()).expect("constant writer")
+    Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, cls, obj())
+    writers = writers ++ [(cls, cw)]
+  }
+  let (cls, cw) = writers[group]
+  let name = "c" ++ to_string(id)
+  let mv = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, name, desc).expect("constant builder")
+  mv.visitCode()
+  (ConstEmit { ..st, writers = writers, next = id + weight }, cls, name, mv)
+}
+
+fn const_ref_desc(gx: GenCtx, v: ConstValue) -> String = match v {
+  CVList(_) -> "L" ++ PVEC_CLASS ++ ";"
+  CVTuple(xs) -> "L" ++ tuple_class(len(xs)) ++ ";"
+  CVAdt(a, _, _) -> desc_of(gx.adts, TyAdt(a, []))
+  _ -> panic("constant builder requires a structured value")
+}
+
+fn construct_value(gx: GenCtx, st: ConstEmit, m: MethodVisitor, v: ConstValue, boxed: Bool) -> ConstEmit !io = {
   match v {
     CVInt(x) -> {
       ldc_long(m, x)
-      if boxed {
-        m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf",
-          "(J)Ljava/lang/Long;", false)
-      }
+      if boxed { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false) }
     }
     CVFloat(x) -> {
       ldc_double(m, x)
-      if boxed {
-        m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
-          "(D)Ljava/lang/Double;", false)
-      }
+      if boxed { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false) }
     }
     CVBool(x) -> {
       m.visitInsn(if x { OP_ICONST_1 } else { OP_ICONST_0 })
-      if boxed {
-        m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
-          "(Z)Ljava/lang/Boolean;", false)
-      }
+      if boxed { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false) }
     }
-    CVStr(x) -> { ldc_str(m, x) }
-    # boxed or not, a Unit is the singleton -- there is nothing to widen
+    CVStr(x) -> ldc_str(m, x)
+    CVBytes(b) -> {
+      let id = map.get(st.blobs, b).expect("frozen byte literal")
+      m.visitFieldInsn(OP_GETSTATIC, gx.class_name ++ "\$bytes\$" ++ to_string(id / 64), "b" ++ to_string(id), "[B")
+    }
     CVUnit -> push_unit(m)
-    CVList(elems) -> {
-      # a comptime list is materialised the way a list literal is: pushed
-      # onto an `Array` and handed to the vector
+    CVList(_) | CVTuple(_) | CVAdt(_, _, _) -> {
+      let (st1, cls, name) = construct_tree(gx, st, v)
+      m.visitMethodInsn(OP_INVOKESTATIC, cls, name, "()" ++ const_ref_desc(gx, v), false)
+      return st1
+    }
+  }
+  st
+}
+
+fn construct_tree(gx: GenCtx, st: ConstEmit, v: ConstValue) -> (ConstEmit, String, String) !io = {
+  let refs = match v {
+    CVList(xs) -> (len(xs) + 63) / 64
+    CVTuple(xs) | CVAdt(_, _, xs) -> len(xs)
+    _ -> 1
+  }
+  let (st0, cls, name, m) = const_method(gx, st, "()" ++ const_ref_desc(gx, v), refs)
+  var next = st0
+  match v {
+    CVList(xs) -> {
       invoke_rt(m, rt_array_new())
-      for el in elems {
-        construct_value(gx, m, el, true)
-        invoke_rt(m, rt_array_push())
+      var i = 0
+      while i < len(xs) {
+        let desc = "(L" ++ ARRAY_CLASS ++ ";)L" ++ ARRAY_CLASS ++ ";"
+        let (st1, part_cls, part_name, part) = const_method(gx, next, desc, 64)
+        next = st1
+        part.visitVarInsn(OP_ALOAD, 0)
+        let end = if i + 64 < len(xs) { i + 64 } else { len(xs) }
+        while i < end {
+          next = construct_value(gx, next, part, xs[i], true)
+          invoke_rt(part, rt_array_push())
+          i = i + 1
+        }
+        part.visitInsn(OP_ARETURN)
+        close_mv(part)
+        m.visitMethodInsn(OP_INVOKESTATIC, part_cls, part_name, desc, false)
       }
       call_pvec(gx, m, LIST_FROM_ARRAY, "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";")
     }
-    CVTuple(elems) -> {
-      let cls = tuple_class(len(elems))
-      m.visitTypeInsn(OP_NEW, cls)
+    CVTuple(xs) -> {
+      let tuple = tuple_class(len(xs))
+      m.visitTypeInsn(OP_NEW, tuple)
       m.visitInsn(OP_DUP)
-      for el in elems { construct_value(gx, m, el, true) }
       var ps = ""
-      for _i in 0..len(elems) { ps = ps ++ "Ljava/lang/Object;" }
-      m.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "(" ++ ps ++ ")V", false)
+      for x in xs {
+        next = construct_value(gx, next, m, x, true)
+        ps = ps ++ "Ljava/lang/Object;"
+      }
+      m.visitMethodInsn(OP_INVOKESPECIAL, tuple, "<init>", "(" ++ ps ++ ")V", false)
     }
-    CVAdt(aid, cidx, fields) -> {
-      let a = adt_of(gx.adts, aid)
-      let ci = a.ctors[cidx]
-      let sub = ctor_jvm_name(gx.adts, ci)
-      if len(ci.fields) == 0 {
-        m.visitFieldInsn(OP_GETSTATIC, sub, "INSTANCE", "L" ++ sub ++ ";")
-      } else {
+    CVAdt(a, ci, fs) -> {
+      let ctor = adt_of(gx.adts, a).ctors[ci]
+      let sub = ctor_jvm_name(gx.adts, ctor)
+      if len(fs) == 0 { m.visitFieldInsn(OP_GETSTATIC, sub, "INSTANCE", "L" ++ sub ++ ";") }
+      else {
         m.visitTypeInsn(OP_NEW, sub)
         m.visitInsn(OP_DUP)
-        # a wide constructor has no full-arity <init> (codegen.wide_ctor)
-        let wide = wide_ctor(ci)
+        let wide = wide_ctor(ctor)
         if wide { m.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "()V", false) }
         var i = 0
-        for f in fields {
-          let boxed2 = erased_slot(gx.adts, ci.fields[i].ty)
+        var ps = ""
+        for f in fs {
           if wide { m.visitInsn(OP_DUP) }
-          construct_value(gx, m, f, boxed2)
-          if wide {
-            m.visitFieldInsn(OP_PUTFIELD, sub, ci.fields[i].name, desc_of(gx.adts, ci.fields[i].ty))
-          }
+          next = construct_value(gx, next, m, f, erased_slot(gx.adts, ctor.fields[i].ty))
+          if wide { m.visitFieldInsn(OP_PUTFIELD, sub, ctor.fields[i].name, desc_of(gx.adts, ctor.fields[i].ty)) }
+          ps = ps ++ desc_of(gx.adts, ctor.fields[i].ty)
           i = i + 1
         }
-        if not wide {
-          var ps = ""
-          for fd in ci.fields { ps = ps ++ desc_of(gx.adts, fd.ty) }
-          m.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "(" ++ ps ++ ")V", false)
-        }
+        if not wide { m.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "(" ++ ps ++ ")V", false) }
       }
     }
+    _ -> panic("constant builder lost its shape")
   }
-  ()
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+  (next, cls, name)
 }
 
-fn gen_const_fields(gx: GenCtx, g: Gen, cw: ClassWriter) -> Unit !io = {
-  if len(g.const_fields) == 0 { return () }
-  for f in g.const_fields {
-    Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, f.fname, desc_of(gx.adts, f.ty))
+fn collect_blobs(v: ConstValue, ids: Map[Bytes, Int], blobs: List[Bytes]) -> (Map[Bytes, Int], List[Bytes]) = match v {
+  CVBytes(b) -> if map.has(ids, b) { (ids, blobs) } else { (map.insert(ids, b, len(blobs)), blobs ++ [b]) }
+  CVList(xs) | CVTuple(xs) | CVAdt(_, _, xs) -> {
+    var next_ids = ids
+    var next_blobs = blobs
+    for x in xs {
+      let (a, b) = collect_blobs(x, next_ids, next_blobs)
+      next_ids = a
+      next_blobs = b
+    }
+    (next_ids, next_blobs)
   }
-  let cl = Asm.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
-  cl.visitCode()
-  for f in g.const_fields {
-    construct_value(gx, cl, f.v, false)
-    cl.visitFieldInsn(OP_PUTSTATIC, gx.class_name, f.fname, desc_of(gx.adts, f.ty))
+  _ -> (ids, blobs)
+}
+
+fn gen_blob_holders(gx: GenCtx, blobs: List[Bytes]) -> List[(String, Bytes)] !io = {
+  var out: List[(String, Bytes)] = []
+  var i = 0
+  while i < len(blobs) {
+    let cls = gx.class_name ++ "\$bytes\$" ++ to_string(i / 64)
+    let cw = AsmWriter.of(COMPUTE_FRAMES, constant_supers()).expect("byte literal writer")
+    Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, cls, obj())
+    let cl = Asm.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("byte clinit")
+    cl.visitCode()
+    let end = if i + 64 < len(blobs) { i + 64 } else { len(blobs) }
+    while i < end {
+      let b = blobs[i]
+      let field = "b" ++ to_string(i)
+      let helper = "load" ++ to_string(i)
+      Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, field, "[B")
+      let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, helper, "()[B").expect("byte builder")
+      m.visitCode()
+      let chunks = (len(b) + 16383) / 16384
+      push_int(m, chunks)
+      m.visitTypeInsn(OP_ANEWARRAY, "java/lang/String")
+      var k = 0
+      while k < chunks {
+        m.visitInsn(OP_DUP)
+        push_int(m, k)
+        ldc_str(m, bytes.to_hex(bytes.slice(b, k * 16384, (k + 1) * 16384)))
+        m.visitInsn(OP_AASTORE)
+        k = k + 1
+      }
+      push_int(m, len(b))
+      invoke_rt(m, rt_bytes_literal())
+      m.visitInsn(OP_ARETURN)
+      close_mv(m)
+      cl.visitMethodInsn(OP_INVOKESTATIC, cls, helper, "()[B", false)
+      cl.visitFieldInsn(OP_PUTSTATIC, cls, field, "[B")
+      i = i + 1
+    }
+    cl.visitInsn(OP_RETURN)
+    close_mv(cl)
+    cw.visitEnd()
+    out = out ++ [(cls, cw.toByteArray().expect("constant class bytes"))]
   }
-  cl.visitInsn(OP_RETURN)
-  close_mv(cl)
-  ()
+  out
+}
+
+fn gen_const_fields(gx: GenCtx, g: Gen) -> List[(String, Bytes)] !io = {
+  var ids: Map[Bytes, Int] = map.empty()
+  var blobs: List[Bytes] = []
+  for f in g.const_fields {
+    let (a, b) = collect_blobs(f.v, ids, blobs)
+    ids = a
+    blobs = b
+  }
+  var st = ConstEmit { writers = [], next = 0, blobs = ids }
+  var out = gen_blob_holders(gx, blobs)
+  var i = 0
+  while i < len(g.const_fields) {
+    let cls = gx.class_name ++ "\$consts\$" ++ to_string(i / 64)
+    let cw = AsmWriter.of(COMPUTE_FRAMES, constant_supers()).expect("constant holder")
+    Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, cls, obj())
+    let cl = Asm.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("constant clinit")
+    cl.visitCode()
+    let end = if i + 64 < len(g.const_fields) { i + 64 } else { len(g.const_fields) }
+    while i < end {
+      let f = g.const_fields[i]
+      Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, f.fname, desc_of(gx.adts, f.ty))
+      st = construct_value(gx, st, cl, f.v, false)
+      cl.visitFieldInsn(OP_PUTSTATIC, cls, f.fname, desc_of(gx.adts, f.ty))
+      i = i + 1
+    }
+    cl.visitInsn(OP_RETURN)
+    close_mv(cl)
+    cw.visitEnd()
+    out = out ++ [(cls, cw.toByteArray().expect("constant class bytes"))]
+  }
+  for pr in st.writers {
+    let (cls, cw) = pr
+    cw.visitEnd()
+    out = out ++ [(cls, cw.toByteArray().expect("constant class bytes"))]
+  }
+  out
 }
 
 ## The return instruction follows the *representation*, so this asks the one
@@ -2263,7 +2395,7 @@ fn emit_module_with(
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, class_name, obj())
   Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;")
   let no_slots: Map[Int, Int] = map.empty()
-  let no_ckey: Map[String, String] = map.empty()
+  let no_ckey: Map[String, Int] = map.empty()
   let gx = GenCtx {
     next_sym = lm.next_sym,
     observation = provenance.enabled(live), observed_mode = false, logical = lm.logical,
@@ -2367,7 +2499,7 @@ fn emit_module_with(
     ti = ti + 1
   }
   if has_main { gen_jvm_main(gx, cw) }
-  gen_const_fields(gx, g, cw)
+  out = out ++ gen_const_fields(gx, g)
   cw.visitEnd()
   # exactly the dictionaries this module's Core asked for. A bound that is
   # never forwarded builds none, which is why a program with no `[T: Eq]`

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 922698e3341f0d4b -->
+<!-- doc-check: translation-of docs/spec.md @ 614fba5330c1ebe5 -->
 
 # Dawn Language Specification
 
@@ -3386,7 +3386,7 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
    structured literal representation without host addresses, resource identity, mutable external
    state or backend-private measures. Reconstruction on each backend preserves observable Dawn
    behaviour. This result domain differs from the evaluator working domain and is not defined
-   by a user Serialize trait. The current result domain is: `Int`/`Float`/`Bool`/`String`/`Unit`, plus
+   by a user Serialize trait. The current result domain is: `Int`/`Float`/`Bool`/`String`/`Bytes`/`Unit`, plus
    `List`/tuples/records/ADTs made only of those. Functions, dictionaries and cursors may be working values; functions and dictionaries cannot
    be results.
    **An opaque type is as serialisable as its target** (§2.7), with one exception:
@@ -3402,9 +3402,9 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
    currency.
    `Array` is a value-semantic working value only, never a result. `Map`/`Set` remain refused:
    the evaluator explicitly rejects HAMT operations, so Array support does not imply collection
-   support. Byte primitives may be used in intermediate computations; Bytes result representation
-   and reconstruction on both backends are not yet enabled, so Bytes and nested Bytes results
-   remain refused. Hash is independently limited; foldability depends on the actual call chain.
+   support. A Bytes literal represents its length and a sequence of values in 0..255. NUL,
+   isolated 0x80/0xFF and malformed UTF-8 are valid bytes; there is no encoding prerequisite.
+   Hash remains independently limited; foldability depends on the actual call chain.
 
 3. Evaluation has a step budget (10⁸ steps by default, tunable with `--comptime-fuel`);
    exceeding it is an error — which guarantees compilation always terminates. A
@@ -3417,6 +3417,19 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
    length of its result each time, not a few steps. A count too large for an `Int` (a
    `range` whose ends are further apart than an `Int` can say, for instance) is over any
    budget, not zero.
+   Deterministic logical size budgets also apply, in language bytes and nodes, independently
+   of host object headers: one Bytes blob is at most 1 MiB, retained results per module
+   (including blocks) at most 16 MiB, cumulative logical allocation per fold at most 64 MiB,
+   and retained results across all modules of one analysis at most 64 MiB. Core steps and
+   structural slots cost 16 bytes; byte payload costs its actual length. Copies, Array
+   conversions and reconstruction pay before allocation. Each frozen node costs 16 bytes,
+   plus UTF-8 byte length for String or byte length for Bytes. Repeated side-table results
+   are charged separately, even when physically deduplicated. Results have at most 256
+   nesting levels and 4096 fields per constructor, bounding freezing and reconstruction.
+   The four limits for LSP analysis are 256 KiB, 4 MiB, 8 MiB and 16 MiB; for hover they
+   are 16 KiB, 64 KiB, 1 MiB and 2 MiB, capped by the caller's limits. Size limits are fixed
+   in this first version; `--comptime-fuel` adjusts steps only. Refusals report the request
+   and remaining budget at the source location, without silently falling back to runtime.
 4. There is no Java interop and no io inside comptime (constraint 1 guarantees this
    automatically).
 5. Pure does not mean foldable: some pure builtins are refused at comptime too, because the
@@ -3928,8 +3941,8 @@ wrapping at 32 bits, see §3.5 — the same shape as the composite rule there), 
 with `==` on content, so `Bytes` **can** be a Map/Set key. (It was once forbidden because
 the JVM `hashCode` of `byte[]` is reference identity; after both ends were changed to
 content the ban did not get withdrawn along with them, and was withdrawn on 2026-07-27.)
-`Bytes` does not take part in comptime constant folding, and cannot be a bare first-class
-function value either (wrap it in a lambda).
+`Bytes` may be a comptime result, including nested and opaque wrappers (§7.2). Pure
+`std/bytes` functions compose through ordinary Dawn evaluation.
 
 **An erased `Object` may be claimed only explicitly.** The return of an erased generic
 (§9.2) lands as an opaque `Object`. Overload resolution uses that static type only through

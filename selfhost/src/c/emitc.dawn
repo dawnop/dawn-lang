@@ -23,6 +23,7 @@ use check/tast.{call_source}
 use std/char
 use std/str
 use std/bytes
+use std/narrow
 use std/list
 use std/map
 use std/set
@@ -45,7 +46,7 @@ use embed/unicode_case
 use embed/rtsrc
 use embed/unicode_class
 use ir/core.{fn_key, mode_key, synthetic_definition,
-  CSite, CNoSite, CSyntax, CAt, ConstValue, CVInt, CVFloat, CVBool, CVStr, CVUnit, CVList, CVTuple, CVAdt,
+  CSite, CNoSite, CSyntax, CAt, ConstValue, CVInt, CVFloat, CVBool, CVStr, CVBytes, CVUnit, CVList, CVTuple, CVAdt,
   diverges,
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned, callee_mode_key, impl_mode_name,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
@@ -663,6 +664,22 @@ fn emit_str_static(st: CSt, v: String) -> (CSt, String) = {
   (st2, "(&" ++ t ++ "_lit)")
 }
 
+## The existing lazy constant builder decodes a static hex payload once.
+## Runtime owns allocation and immortal marking, including the empty case;
+## encoding in chunks avoids a compiler-side string object for every byte.
+fn emit_bytes_static(st: CSt, b: Bytes) -> (CSt, String) = {
+  let (st1, t) = fresh(st)
+  var parts: List[String] = []
+  var i = 0
+  while i < len(b) {
+    parts = parts ++ ["\"" ++ bytes.to_hex(bytes.slice(b, i, i + 16384)) ++ "\""]
+    i = i + 16384
+  }
+  let data = if len(b) == 0 { "\"\"" } else { join(parts, "\n") }
+  let st2 = line(st1, "static const char " ++ t ++ "_hex[] = " ++ data ++ ";")
+  (st2, "dawn_bytes_literal(" ++ t ++ "_hex, " ++ to_string(len(b)) ++ ")")
+}
+
 fn int_lit(v: Int) -> String =
   if v == -9223372036854775807 - 1 { "INT64_MIN" }
   else { "INT64_C(" ++ to_string(v) ++ ")" }
@@ -693,7 +710,7 @@ fn const_literal(v: ConstValue, ty: Ty, what: String) -> String =
 fn cv_scalar(v: ConstValue) -> Bool =
   match v {
     CVInt(_) | CVFloat(_) | CVBool(_) | CVUnit -> true
-    CVStr(_) | CVList(_) | CVTuple(_) | CVAdt(_, _, _) -> false
+    CVStr(_) | CVBytes(_) | CVList(_) | CVTuple(_) | CVAdt(_, _, _) -> false
   }
 
 ## A folded value on its way into an erased (`void*`) slot. The mirror of
@@ -723,6 +740,7 @@ fn cv_box(cexpr: String, v: ConstValue) -> String =
 fn emit_const_value(st: CSt, v: ConstValue) -> (CSt, String) =
   match v {
     CVStr(x) -> emit_str_static(st, x)
+    CVBytes(b) -> emit_bytes_static(st, b)
     CVList(elems) -> {
       var st1 = st
       let (sta, tmp) = fresh(st1)
@@ -880,7 +898,9 @@ fn float_lit(v: Float) -> String = {
   # NaN compares false against the infinities too, and would fall through to
   # `to_string` and out as a bare `NaN`.
   if v != v {
-    "(0.0/0.0)"
+    # A frozen NaN can have come from unpacking a byte literal. Preserve its
+    # sign and payload so width-eight packing after reconstruction is exact.
+    "dawn_float_of_bits(" ++ int_lit(narrow.f64_bits(v)) ++ ")"
   } else if v == inf {
     "(1.0/0.0)"
   } else if v == -1.0 / 0.0 {
@@ -3623,10 +3643,10 @@ test "a non-finite Float is written as C, not as its spelling" {
   let inf = 1.0 / 0.0
   assert float_lit(inf) == "(1.0/0.0)"
   assert float_lit(-1.0 / 0.0) == "(-1.0/0.0)"
-  assert float_lit(0.0 / 0.0) == "(0.0/0.0)"
+  assert str.starts_with(float_lit(0.0 / 0.0), "dawn_float_of_bits(")
   # NaN is unequal to the infinities as well, so its arm has to come first --
   # last, it would fall through to `to_string` and out as a bare `NaN`.
-  assert float_lit(inf - inf) == "(0.0/0.0)"
+  assert str.starts_with(float_lit(inf - inf), "dawn_float_of_bits(")
 
   # every finite value, signed zero included, is already a literal C reads
   # back bit for bit, so the rewrite must not touch it
@@ -3639,7 +3659,8 @@ test "a non-finite Float is written as C, not as its spelling" {
   # both paths that print a Float share the rewrite: the inlined `CFloat` and
   # the interpreter's folded `CVFloat`
   assert const_literal(CVFloat(inf), TyFloat, "c") == "(1.0/0.0)"
-  assert const_literal(CVFloat(0.0 / 0.0), TyFloat, "c") == "(0.0/0.0)"
+  assert const_literal(CVFloat(narrow.f64_of_bits(0x7ff8000000001234)), TyFloat, "c") ==
+    "dawn_float_of_bits(INT64_C(9221120237041095220))"
   assert const_literal(CVFloat(-0.0), TyFloat, "c") == "-0.0"
 }
 

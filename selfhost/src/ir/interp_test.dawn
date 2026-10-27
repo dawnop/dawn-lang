@@ -22,13 +22,13 @@ use check/checker.{check_module, exports_of}
 use check/tast.{TExpr, TFun, TModule, XError}
 use check/types.{Ty, TyInt, TyError, TyAdt, TyMap, TySet, Sig, EPure}
 use ir/core.{
-  ConstValue, CVInt, CVBool, CVStr, CVList, CVAdt, CCall, CDirect, CImpl, CDefault,
+  ConstValue, CVInt, CVBool, CVStr, CVBytes, CVList, CVAdt, CCall, CDirect, CImpl, CDefault,
   CExpr, CBlock, CUpdate, CLocal, CSLet, CIntrinsic, CFun
 }
 use ir/lower
 use ir/interp.{
   eval_comptime, eval_module, program_sigs, note_direct_fn, note_trait_fn, ct_fuel, ct_default,
-  eval_closed, ct_hover, ct_lsp, LSP_DEPTH, DEFAULT_FUEL, HOVER_FUEL, HOVER_DEPTH, CtOpts, CtOut,
+  eval_closed, ct_hover, ct_lsp, LSP_DEPTH, HOVER_FUEL, HOVER_DEPTH, CtOpts, CtOut,
   CtWorld, ConstScope,
   ct_world_empty, ct_world_add, eval_comptime_in,
 }
@@ -957,7 +957,7 @@ test "the compilers' call depth limit is 11,000" {
 ## the editor budget is the same whichever of the two it starts from.
 test "the language server budget is a build's fuel at 5,000 calls" {
   assert LSP_DEPTH == 5000
-  assert ct_lsp() == CtOpts { fuel = DEFAULT_FUEL, depth = LSP_DEPTH }
+  assert ct_lsp() == CtOpts { ..ct_default(), depth = LSP_DEPTH, blob_limit = 262144, module_limit = 4194304, alloc_limit = 8388608, session_limit = 16777216 }
   assert ct_lsp().depth < ct_default().depth
   assert ct_hover(ct_lsp()) == ct_hover(ct_default())
 }
@@ -990,7 +990,10 @@ test "fuel exhaustion becomes a diagnostic" {
 ## The context has the List `Len` impl a fixture without std lacks, so `len`
 ## resolves. The call must reach the `len` primitive lowering collapses it to,
 ## which these tests assert through the lengths and the fuel they charge.
-fn fold_src(name: String, src: String, fuel: Int) -> (List[String], Map[String, ConstValue]) !io = {
+fn fold_src(name: String, src: String, fuel: Int) -> (List[String], Map[String, ConstValue]) !io =
+  fold_opts(name, src, ct_fuel(fuel))
+
+fn fold_opts(name: String, src: String, opts: CtOpts) -> (List[String], Map[String, ConstValue]) !io = {
   let (m, pdiags) = parser.parse_module(src)
   let env: Map[String, ModExports] = map.empty()
   let (cx1, tm) = check_module(with_list_len(cx_new(Some(name), Some("size.dawn"))), m, env)
@@ -999,7 +1002,7 @@ fn fold_src(name: String, src: String, fuel: Int) -> (List[String], Map[String, 
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
   let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
-    cx1.traits, cx1.impl_table, name, ct_fuel(fuel))
+    cx1.traits, cx1.impl_table, name, opts)
   var msgs: List[String] = []
   for d in out.diags { msgs = msgs ++ [d.msg] }
   (msgs, out.consts)
@@ -1238,7 +1241,7 @@ test "the editor budget is one answer on both compilers, under the host's depth"
   # the compilers' own limit bounds the editor's
   assert HOVER_DEPTH <= ct_default().depth
   # and a host shallower than the editor budget keeps its own limit
-  assert ct_hover(CtOpts { fuel = 5, depth = 10 }) == CtOpts { fuel = HOVER_FUEL, depth = 10 }
+  assert ct_hover(CtOpts { ..ct_default(), fuel = 5, depth = 10 }) == CtOpts { ..ct_hover(ct_default()), depth = 10 }
 }
 
 test "an editor fold answers what a comptime block in the module would" {
@@ -1254,10 +1257,14 @@ test "an editor fold that runs out of fuel or depth is an Err, not a diagnostic"
   let c = closed_mod("m", CLOSED_SRC, map.empty(), ct_world_empty())
   let hover = ct_hover(ct_default())
   let busy = body_of(c.tm, "busy")
-  assert fold_closed(c, "m", busy, hover) ==
+  match fold_closed(c, "m", busy, hover) {
+    Err(reason) -> { assert str.contains(reason, "logical allocation limit") }
+    _ -> { assert false }
+  }
+  assert fold_closed(c, "m", busy, CtOpts { ..hover, alloc_limit = ct_default().alloc_limit }) ==
     Err("fuel exhausted — evaluation did not finish within the step budget")
   # the same expression with more fuel: it was the budget, not the expression
-  assert fold_closed(c, "m", busy, CtOpts { ..hover, fuel = 10000000 }) == Ok(CVInt(50000))
+  assert fold_closed(c, "m", busy, CtOpts { ..hover, fuel = 10000000, alloc_limit = ct_default().alloc_limit }) == Ok(CVInt(50000))
   let deep = body_of(c.tm, "deep")
   assert fold_closed(c, "m", deep, hover) == Err("call depth limit (1500) exceeded")
   assert fold_closed(c, "m", deep, CtOpts { ..hover, depth = 1700 }) == Ok(CVInt(1600))
@@ -1266,7 +1273,7 @@ test "an editor fold that runs out of fuel or depth is an Err, not a diagnostic"
 test "an editor fold calls another module's pure function through the world" {
   let lib = closed_mod("lib", "pub fn doubled(n: Int) -> Int = n * 2\n", map.empty(),
     ct_world_empty())
-  let world = ct_world_add(ct_world_empty(), "lib", no_imports("lib"), lib.tm, lib.ct.consts, true)
+  let world = ct_world_add(ct_world_empty(), "lib", no_imports("lib"), lib.tm, lib.ct, true)
   let c = closed_mod("app", "use lib\nfn probe() -> Int = lib.doubled(21)\n",
     map.from([("lib", lib.exp)]), world)
   let e = body_of(c.tm, "probe")
@@ -1308,7 +1315,7 @@ test "a lowering panic inside an editor fold comes back as an Err" {
 }
 
 test "G01 keeps result eligibility separate from byte working values" {
-  for ann in ["Bytes", "List[Bytes]", "Option[Bytes]", "fn(Int) -> Int"] {
+  for ann in ["Array[Int]", "List[Array[Int]]", "fn(Int) -> Int"] {
     let src = "const BAD: " ++ ann ++ " = panic(\"unused\")\n"
     let (m, pd) = parser.parse_module(src)
     assert len(pd) == 0
@@ -1373,4 +1380,39 @@ test "byte working values compose through Array versions and keep raw octets" {
   assert map.get(vals, "N") == Some(CVInt(128 + 255 + 127 + 255))
   assert map.get(vals, "S") == Some(CVStr("abc"))
   assert map.get(vals, "R") == Some(CVStr("<3 bytes>"))
+}
+
+test "byte limits reject N plus one before allocating and retain N exactly" {
+  let opts = CtOpts { ..ct_default(), blob_limit = 4 }
+  for n in [3, 4, 5] {
+    let src = "const B: Bytes = bytes_utf8(\"" ++ str.slice("abcde", 0, n) ++ "\")\n"
+    let (msgs, vals) = fold_opts("std/g01", src, opts)
+    if n <= 4 { assert msgs == [] && map.has(vals, "B") }
+    else {
+      assert len(msgs) == 1
+      assert str.contains(msgs[0], "Bytes size limit: requested 5 bytes (limit 4)")
+      assert not map.has(vals, "B")
+    }
+  }
+  let src = "const A: Bytes = bytes_utf8(\"abcd\")\nconst B: Bytes = bytes_utf8(\"abcd\")\n"
+  for n in [39, 40, 41] {
+    let (msgs, vals) = fold_opts("std/g01", src, CtOpts { ..opts, module_limit = n })
+    if n >= 40 { assert msgs == [] && len(vals) == 2 }
+    else { assert len(msgs) == 1 && str.contains(msgs[0], "module result size limit") }
+  }
+}
+
+test "nested byte results freeze as bytes and Array results remain refused" {
+  let src = "type Packet = { data: Bytes }\n" ++
+    "opaque type Token = Bytes\n" ++
+    "const RAW: Bytes = bytes_pack_int(list_to_array([0, 127, 128, 255]), 1, true)\n" ++
+    "const TOKEN: Token = RAW\n" ++
+    "const NESTED: (Packet, List[Bytes], Option[Bytes]) = (Packet { data = RAW }, [RAW], Some(RAW))\n"
+  let (msgs, vals) = fold_src("std/g01", src, 100000)
+  assert msgs == []
+  match map.get(vals, "RAW") {
+    Some(CVBytes(b)) -> { assert len(b) == 4 }
+    _ -> { assert false }
+  }
+  assert map.get(vals, "TOKEN") == map.get(vals, "RAW")
 }

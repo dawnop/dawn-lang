@@ -4226,6 +4226,24 @@ bool dawn_bytes_eq(const dawn_bytes *a, const dawn_bytes *b) {
   return memcmp(a->p, b->p, (size_t)a->len) == 0;
 }
 
+/* Decode the compiler's one literal format into an owned byte payload once.
+ * Reuse the ordinary constructor and immortal helper rather than exposing
+ * heap-header conventions to the emitter. No byte-sized heap objects. */
+dawn_bytes *dawn_bytes_literal(const char *hex, int64_t len) {
+  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)len + 1);
+  for (int64_t i = 0; i < len; i++) {
+    unsigned char hi = (unsigned char)hex[2 * i];
+    unsigned char lo = (unsigned char)hex[2 * i + 1];
+    hi = hi <= '9' ? hi - '0' : hi - 'a' + 10;
+    lo = lo <= '9' ? lo - '0' : lo - 'a' + 10;
+    buf[i] = (unsigned char)((hi << 4) | lo);
+  }
+  buf[len] = 0;
+  dawn_bytes *b = dawn_bytes_of(buf, len);
+  dawn_immortal(b);
+  return b;
+}
+
 dawn_bytes *dawn_bytes_utf8(dawn_str *s) {
   unsigned char *buf = (unsigned char *)dawn_alloc((size_t)s->len + 1);
   if (s->len > 0) memcpy(buf, s->p, (size_t)s->len);

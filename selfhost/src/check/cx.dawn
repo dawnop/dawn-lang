@@ -2013,18 +2013,18 @@ pub fn const_refusal_hint(t: Ty) -> String =
   }
 
 fn const_hint_default() -> String =
-  "constants hold Int/Float/Bool/String/Unit and List/tuple/record/ADT values " ++
+  "constants hold Int/Float/Bool/String/Bytes/Unit and List/tuple/record/ADT values " ++
   "built from them (spec §7.2)"
 
-## Can the compiler rebuild this value at class-init time? Int/Float/Bool/
-## String/Unit and List/tuple/record/ADT built from them, plus an opaque type
+## Can both backends reconstruct a closed literal for this value? Int/Float/Bool/
+## String/Bytes/Unit and List/tuple/record/ADT built from them, plus an opaque type
 ## wherever its target qualifies (spec §7.2).
 ##
 ## Not a caller of `types.ty_map_children`/`ty_any_child`, and deliberately so:
 ## every other walk over a type asks the same question of the children and
 ## answers `true` where there are none, which is what makes the kernel's leaf
-## arms right for all of them. This one is a whitelist. `Bytes`, `Map`, `Set`
-## and `Array` are refused because no class-init literal can rebuild them, not
+## arms right for all of them. This one is a whitelist. `Map`, `Set`
+## and `Array` are refused because they have no approved result codec, not
 ## because of anything in them -- a structural walk would clear `Map[Int, Int]`
 ## on the grounds that both children are fine. So the arms below are the answer
 ## rather than a recursion rule, and the `_ -> false` at the bottom is the
@@ -2037,7 +2037,7 @@ pub(pkg) fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
 ## its builtin tables again for each frozen literal just to ask this rule.
 pub(pkg) fn is_const_literal_type(adts: Adts, t: Ty, visited: Set[Int]) -> Bool =
   match t {
-    TyInt | TyFloat | TyBool | TyString -> true
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> true
     # One value, so the constant is the singleton. Refusing it was a
     # representation objection, and #51 removed the representation.
     TyUnit -> true
