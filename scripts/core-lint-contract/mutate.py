@@ -37,9 +37,9 @@ RTCLASSES = "selfhost/src/jvm/rtclasses.dawn"
 # `parse_int` arm, spelled with the one such name left.
 INTERP_ARM = (
     INTERP,
-    """    Ok((st, env, VBool(same)))
+    """    Ok((st1, env, VBool(same)))
   } else if name == "ev_get" {""",
-    """    Ok((st, env, VBool(same)))
+    """    Ok((st1, env, VBool(same)))
   } else if name == "parse_float" {
     Ok((st, env, VUnit))
   } else if name == "ev_get" {""",

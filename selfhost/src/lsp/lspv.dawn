@@ -26,14 +26,16 @@
 # exact expansion of a double and this file does not write one.
 
 use std/map
+use std/list
 use std/str
+use std/bytes
 use std/char
 use check/types.{
   Ty, Eff, Adts, TyInt, TyFloat, TyBool, TyString, TyUnit, TyVar, TyAdt, TyList,
   TyTuple, TyOpaque, TyError, CHAR_OPAQUE_ID, adt_of, peel_opaque, subst, cut_balanced,
   AdtI, CtorI, FieldI, OPTION_ID, ty_char
 }
-use ir/core.{ConstValue, CVInt, CVFloat, CVBool, CVStr, CVUnit, CVList, CVTuple, CVAdt}
+use ir/core.{ConstValue, CVInt, CVFloat, CVBool, CVStr, CVBytes, CVUnit, CVList, CVTuple, CVAdt}
 
 ## The widest a value renders, in code points, before its suffix. A default
 ## (`DEFAULT_SHOWN`, 40) shares its line with every other parameter of the
@@ -65,13 +67,10 @@ pub(pkg) fn value_text(adts: Adts, t: Ty, v: ConstValue) -> Option[String] =
 ## `10`, not hover's `10  (0xA)`. `None` past `width` code points rather than
 ## a cut, since a cut value is not one a reader could write there, and for the
 ## values `value_text` has no text for.
-pub(pkg) fn value_source(adts: Adts, t: Ty, v: ConstValue, width: Int) -> Option[String] =
-  match v {
-    _ -> {
-      let full = render(adts, t, v, width + 1)
-      if len(full) > width { None } else { Some(full) }
-    }
-  }
+pub(pkg) fn value_source(adts: Adts, t: Ty, v: ConstValue, width: Int) -> Option[String] = {
+  let full = render(adts, t, v, width + 1)
+  if len(full) > width { None } else if has_byte_leaf(v) { None } else { Some(full) }
+}
 
 ## Whether `v` is written exactly as `src` already says it, spaces aside: the
 ## value of `Some(Plus)` or `[1, 2, 3]` repeats its own source, and a hover that
@@ -83,6 +82,12 @@ pub(pkg) fn value_echoes(adts: Adts, t: Ty, v: ConstValue, src: String) -> Bool 
   match v {
     _ -> squeezed(render(adts, t, v, len(src) + 1)) == squeezed(src)
   }
+
+fn has_byte_leaf(v: ConstValue) -> Bool = match v {
+  CVBytes(_) -> true
+  CVList(xs) | CVTuple(xs) | CVAdt(_, _, xs) -> list.any(xs, (x: ConstValue) => has_byte_leaf(x))
+  _ -> false
+}
 
 fn squeezed(s: String) -> String =
   str.replace(str.replace(str.replace(str.replace(s, " ", ""), "\n", ""), "\t", ""), "\r", "")
@@ -129,6 +134,8 @@ fn render(adts: Adts, t: Ty, v: ConstValue, room: Int) -> String =
     CVFloat(f) -> to_string(f)
     CVBool(b) -> to_string(b)
     CVStr(s) -> str_lit(s, room)
+    CVBytes(b) -> "<" ++ to_string(len(b)) ++ " bytes: " ++ bytes.to_hex(bytes.slice(b, 0, 24)) ++
+      (if len(b) > 24 { "...>" } else { ">" })
     CVUnit -> "()"
     CVList(es) -> {
       let et = match peel_opaque(t) {
@@ -303,13 +310,13 @@ pub(pkg) fn float_literal_text(spelling: String, v: Float) -> String = {
 ## wire). Both always: the counts are the point of hovering, not a cut's mark.
 pub(pkg) fn string_literal_text(s: String) -> String = {
   var cps = 0
-  var bytes = 0
+  var byte_count = 0
   for c in code_points(s) {
     cps = cps + 1
-    bytes = bytes + len(utf8_bytes(char.code(c)))
+    byte_count = byte_count + len(utf8_bytes(char.code(c)))
   }
   cut_balanced(str_lit(s, VALUE_SHOWN + 1), VALUE_SHOWN) ++
-    "  (" ++ counted(cps, "code point") ++ ", " ++ counted(bytes, "UTF-8 byte") ++ ")"
+    "  (" ++ counted(cps, "code point") ++ ", " ++ counted(byte_count, "UTF-8 byte") ++ ")"
 }
 
 fn counted(n: Int, what: String) -> String =
@@ -627,4 +634,17 @@ test "a String literal shows its code points and UTF-8 bytes" {
   assert str.starts_with(long, "\"abab")
   assert str.ends_with(long, "…\"  (200 code points, 200 UTF-8 bytes)")
   assert len(long) == VALUE_SHOWN + len("  (200 code points, 200 UTF-8 bytes)")
+}
+
+test "byte previews show a bounded hex prefix and length without inventing source" {
+  let small = CVBytes(bytes.pack_ints([0, 127, 128, 255], 1))
+  assert value_text(prelude_adts(), TyError, small) == Some("<4 bytes: 007f80ff>")
+  assert value_source(prelude_adts(), TyError, small, 80) == None
+  var text = "x"
+  for _i in 0..16 { text = text ++ text }
+  let large = CVBytes(bytes.utf8(text))
+  let shown = value_text(prelude_adts(), TyError, large).expect("byte preview")
+  assert len(shown) <= 80
+  assert str.contains(shown, "65536 bytes")
+  assert str.contains(shown, "...")
 }

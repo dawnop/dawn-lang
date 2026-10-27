@@ -51,7 +51,7 @@ use check/types.{
   EV_PACK_ID, EV_MISS_MSG, FROM_INT_ID, FROM_FLOAT_ID, ty_show
 }
 use ir/core.{
-  ConstValue, CVInt, CVFloat, CVBool, CVStr, CVUnit, CVList, CVTuple, CVAdt,
+  ConstValue, CVInt, CVFloat, CVBool, CVStr, CVBytes, CVUnit, CVList, CVTuple, CVAdt,
   CNoSite, CExpr, CStmt, CFun, CDictDef, CSlotFn, CSlotDefault, ty_key, ty_key_inst,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
@@ -165,7 +165,10 @@ type ESt = {
   fuel: Int,
   depth: Int,
   cache: LowerCache,
-  texts: Texts
+  texts: Texts,
+  limits: CtOpts,
+  allocated: Int,
+  frozen: Int
 }
 
 ## The strings a fold has taken a cursor on, each decoded to code points once.
@@ -209,13 +212,17 @@ alias SR = Result[(ESt, Env), (ESt, Env, Ctl)]
 ## `ct_hover`. The compilers themselves take `ct_default`, the JVM and the
 ## native one alike, so one program gets one answer from both (see
 ## MAX_CALL_DEPTH).
-pub type CtOpts = { fuel: Int, depth: Int }
+pub type CtOpts = {
+  fuel: Int, depth: Int,
+  blob_limit: Int, module_limit: Int, alloc_limit: Int, session_limit: Int
+}
 
 pub const DEFAULT_FUEL: Int = 100000000
 
 ## Defaults: all the fuel and all the depth a real compile gets, on either
 ## compiler.
-pub fn ct_default() -> CtOpts = CtOpts { fuel = DEFAULT_FUEL, depth = MAX_CALL_DEPTH }
+pub fn ct_default() -> CtOpts = CtOpts { fuel = DEFAULT_FUEL, depth = MAX_CALL_DEPTH,
+  blob_limit = 1048576, module_limit = 16777216, alloc_limit = 67108864, session_limit = 67108864 }
 
 ## Defaults with the fuel dialled down (the fuel tests, and callers that want
 ## a comptime run bounded well below a real compile's).
@@ -287,7 +294,11 @@ pub(pkg) const HOVER_DEPTH: Int = 1500
 ## The editor budget on a given host. The depth also stays under the host's
 ## own, should a host ever pass a smaller one.
 pub(pkg) fn ct_hover(host: CtOpts) -> CtOpts =
-  CtOpts { fuel = HOVER_FUEL, depth = if host.depth < HOVER_DEPTH { host.depth } else { HOVER_DEPTH } }
+  CtOpts { ..host, fuel = HOVER_FUEL, depth = if host.depth < HOVER_DEPTH { host.depth } else { HOVER_DEPTH },
+    blob_limit = smaller(host.blob_limit, 16384), module_limit = smaller(host.module_limit, 65536),
+    alloc_limit = smaller(host.alloc_limit, 1048576), session_limit = smaller(host.session_limit, 2097152) }
+
+fn smaller(a: Int, b: Int) -> Int = if a < b { a } else { b }
 
 ## 5,000 nested calls: what a language server's own analysis (the comptime
 ## behind its diagnostics) may reach, below MAX_CALL_DEPTH because a
@@ -297,14 +308,16 @@ pub(pkg) fn ct_hover(host: CtOpts) -> CtOpts =
 ## recursion that holds a list per level (`match xs { [h, ..t] -> ...` over a
 ## range) is 254 MB at 4,999 and is killed at 10,990. This bounds what depth
 ## alone costs, not what a session may allocate: a const can exhaust the cap
-## at any depth, and then the cgroup ends that one session.
+## at any depth. The logical allocation and retained-result budgets below
+## bound those independently; they are not measurements of host heap size.
 pub(pkg) const LSP_DEPTH: Int = 5000
 
 ## The budget behind a language server's diagnostics, on either compiler: a
 ## build's fuel, the smaller depth. Both servers take it, so VS Code and the
 ## Playground refuse the same program; between 5,000 and MAX_CALL_DEPTH that
 ## is a program `check` folds.
-pub(pkg) fn ct_lsp() -> CtOpts = CtOpts { ..ct_default(), depth = LSP_DEPTH }
+pub(pkg) fn ct_lsp() -> CtOpts = CtOpts { ..ct_default(), depth = LSP_DEPTH,
+  blob_limit = 262144, module_limit = 4194304, alloc_limit = 8388608, session_limit = 16777216 }
 
 ## The interpreter's static context: how to find a function body, the tables
 ## lowering needs, and the results already folded.
@@ -345,6 +358,7 @@ pub(pkg) type ICx = {
   body: String,
   # how many calls may nest (CtOpts.depth)
   max_depth: Int,
+  limits: CtOpts,
   # The folding module's constants not reached yet, and the one being folded
   # ("" outside a module's constant run). A body that reads one of them
   # finds nothing, and these are what let the refusal say why rather than
@@ -390,7 +404,8 @@ pub type CtWorld = {
   # owner → how its bodies name constants
   scopes: Map[String, ConstScope],
   # module path → its folded constants
-  consts: Map[String, Map[String, ConstValue]]
+  consts: Map[String, Map[String, ConstValue]],
+  payload: Int
 }
 
 pub fn ct_world_empty() -> CtWorld = {
@@ -400,7 +415,7 @@ pub fn ct_world_empty() -> CtWorld = {
   let no_consts: Map[String, Map[String, ConstValue]] = map.empty()
   let no_sigs: Map[(String, String), Sig] = map.empty()
   CtWorld { owners = no_owners, impl_fns = no_impls(), sigs = no_sigs, syms = no_syms,
-    scopes = no_scopes, consts = no_consts }
+    scopes = no_scopes, consts = no_consts, payload = 0 }
 }
 
 ## A module joins the world once it has folded. `bodies` is false for a std
@@ -410,15 +425,17 @@ pub fn ct_world_add(
   owner: String,
   scope: ConstScope,
   tm: TModule,
-  consts: Map[String, ConstValue],
+  ct: CtOut,
   bodies: Bool
 ) -> CtWorld = {
+  let consts = ct.consts
   var sigs = w.sigs
   for f in tm.fns {
     if is_direct_fn(f) { sigs = map.insert(sigs, (owner, f.name), f.sig) }
   }
   var out = CtWorld { ..w,
     sigs = sigs,
+    payload = w.payload + ct_size(ct),
     scopes = map.insert(w.scopes, owner, scope),
     consts = map.insert(w.consts, scope.path, consts) }
   if bodies {
@@ -545,7 +562,7 @@ fn burn(st: ESt, env: Env) -> ER =
     cerrh(st, env, "fuel exhausted — evaluation did not finish within the step budget",
       "raise it with --comptime-fuel, or simplify the computation")
   } else {
-    Ok((ESt { ..st, fuel = st.fuel - 1 }, env, VUnit))
+    alloc_n(ESt { ..st, fuel = st.fuel - 1 }, env, 16)
   }
 
 ## Charge `n` steps at once: what a primitive that produces `n` elements or
@@ -579,13 +596,106 @@ fn burn_n(st: ESt, env: Env, n: Int) -> ER = {
 }
 
 ## The number this fold gives `s`, decoding it the first time it is seen.
+## Logical bytes, independent of object headers and sharing on the host.
+## Core steps and structural slots cost sixteen, byte payload costs one.
+fn alloc_n(st: ESt, env: Env, n: Int) -> ER = {
+  let left = st.limits.alloc_limit - st.allocated
+  if n < 0 || n > left {
+    return cerrh(st, env, "logical allocation limit: requested " ++ to_string(n) ++
+        " bytes with " ++ to_string(left) ++ " remaining (limit " ++ to_string(st.limits.alloc_limit) ++ ")",
+      "reduce the computation (spec §7.2)")
+  }
+  Ok((ESt { ..st, allocated = st.allocated + n }, env, VUnit))
+}
+
+fn grow_n(st: ESt, env: Env, n: Int) -> ER = {
+  let (st1, _, _) = burn_n(st, env, n)?
+  if n > 9223372036854775807 / 16 { return alloc_n(st1, env, -1) }
+  alloc_n(st1, env, n * 16)
+}
+
+fn grow_bytes(st: ESt, env: Env, n: Int) -> ER = {
+  if n < 0 || n > st.limits.blob_limit {
+    return cerrh(st, env, "Bytes size limit: requested " ++ to_string(n) ++
+        " bytes (limit " ++ to_string(st.limits.blob_limit) ++ ")", "reduce the byte sequence (spec §7.2)")
+  }
+  let (st1, _, _) = burn_n(st, env, n)?
+  if n > 9223372036854775807 - 16 { return alloc_n(st1, env, -1) }
+  alloc_n(st1, env, n + 16)
+}
+
+fn freeze_size(st: ESt, env: Env, n: Int, path: String) -> Result[ESt, (ESt, Env, Ctl)] = {
+  if n < 0 || n > st.limits.module_limit - st.frozen {
+    return Err((st, env, KErr(ct_failure("result size limit at " ++ path ++ ": requested " ++
+        to_string(n) ++ " bytes with " ++ to_string(st.limits.module_limit - st.frozen) ++ " remaining",
+      "reduce the constant result (spec §7.2)"))))
+  }
+  Ok(ESt { ..st, frozen = st.frozen + n })
+}
+
+fn const_size(v: ConstValue) -> Int = {
+  var n = 16
+  match v {
+    CVStr(s) -> { n = n + utf8_size(s) }
+    CVBytes(b) -> { n = n + len(b) }
+    CVList(xs) | CVTuple(xs) | CVAdt(_, _, xs) -> {
+      for x in xs { n = n + const_size(x) }
+    }
+    _ -> ()
+  }
+  n
+}
+
+fn const_nodes(v: ConstValue) -> Int = {
+  var n = 1
+  match v {
+    CVList(xs) | CVTuple(xs) | CVAdt(_, _, xs) -> {
+      for x in xs { n = n + const_nodes(x) }
+    }
+    _ -> ()
+  }
+  n
+}
+
+fn ct_size(ct: CtOut) -> Int = {
+  var n = 0
+  for k in map.keys(ct.consts) { n = n + const_size(map.get(ct.consts, k).expect("const key")) }
+  for k in map.keys(ct.blocks) { n = n + const_size(map.get(ct.blocks, k).expect("block key")) }
+  n
+}
+
+fn retain_result(icx: ICx, run: CtRun, v: ConstValue, lo: Int, hi: Int) -> (CtRun, Bool) = {
+  let n = const_size(v)
+  let module_left = icx.limits.module_limit - run.payload
+  let session_left = icx.limits.session_limit - icx.world.payload - run.payload
+  if n > module_left || n > session_left {
+    let what = if n > module_left { "module" } else { "session" }
+    let left = if n > module_left { module_left } else { session_left }
+    let d = failure_diag(ct_failure(what ++ " result size limit: requested " ++ to_string(n) ++
+        " bytes with " ++ to_string(left) ++ " remaining", "reduce retained constant results (spec §7.2)"), lo, hi)
+    return (CtRun { ..run, out = CtOut { ..run.out, diags = run.out.diags ++ [d] } }, false)
+  }
+  (CtRun { ..run, payload = run.payload + n }, true)
+}
+
+fn keep_block(icx: ICx, run: CtRun, v: ConstValue, lo: Int, hi: Int) -> CtRun = {
+  let (next, ok) = retain_result(icx, run, v, lo, hi)
+  if ok { CtRun { ..next, out = CtOut { ..next.out, blocks = map.insert(next.out.blocks, (lo, hi), v) } } }
+  else { next }
+}
+
+fn scan_bytes(v: EvalValue) -> Int = match v {
+  VBytes(b) -> len(b)
+  _ -> 0
+}
+
 fn text_id(st: ESt, env: Env, s: String) -> Result[(ESt, Int), (ESt, Env, Ctl)] = {
   let t = st.texts
   if t.last >= 0 && t.strs[t.last] == s { return Ok((st, t.last)) }
   match map.get(t.ids, s) {
     Some(id) -> Ok((ESt { ..st, texts = Texts { ..t, last = id } }, id))
     None -> {
-      let (st1, _, _) = burn_n(st, env, len(s))?
+      let (st1, _, _) = grow_n(st, env, len(s))?
       let id = len(t.strs)
       let texts = Texts {
         ids = map.insert(t.ids, s, id),
@@ -1224,7 +1334,7 @@ fn utf8_size(s: String) -> Int = {
 fn call_bytes(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
   if name == "bytes_utf8" {
     let s = as_str(args[0])
-    let (st1, _, _) = burn_n(st, env, utf8_size(s))?
+    let (st1, _, _) = grow_bytes(st, env, utf8_size(s))?
     return Ok((st1, env, VBytes(bytes.utf8(s))))
   }
   if name == "bytes_pack_int" || name == "bytes_pack_float" {
@@ -1238,7 +1348,8 @@ fn call_bytes(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
     # Multiplication is checked before creating either the byte blob or the
     # host-side conversion list. Width is positive and at most eight here.
     if len(xs) > 9223372036854775807 / width { return burn_n(st, env, -1) }
-    let (st1, _, _) = burn_n(st, env, len(xs) * width + len(xs))?
+    let (stb, _, _) = grow_bytes(st, env, len(xs) * width)?
+    let (st1, _, _) = grow_n(stb, env, len(xs))?
     let order = if as_bool(args[2]) { bytes.Little } else { bytes.Big }
     let b = if floats {
       bytes.pack_floats(list.map(xs, (v: EvalValue) => as_float(v)), width, order)
@@ -1259,11 +1370,11 @@ fn call_bytes(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
     let hi0 = as_int(args[2])
     let lo = if lo0 < 0 { 0 } else if lo0 > n { n } else { lo0 }
     let hi = if hi0 < lo { lo } else if hi0 > n { n } else { hi0 }
-    let (st1, _, _) = burn_n(st, env, hi - lo)?
+    let (st1, _, _) = grow_bytes(st, env, hi - lo)?
     return Ok((st1, env, VBytes(bytes.slice(b, lo, hi))))
   }
   if name == "bytes_decode_utf8" || name == "bytes_decode_latin1" {
-    let (st1, _, _) = burn_n(st, env, n)?
+    let (st1, _, _) = grow_n(st, env, n)?
     let s = if name == "bytes_decode_utf8" { bytes.decode_utf8_lossy(b) } else { bytes.decode_latin1(b) }
     return Ok((st1, env, VStr(s)))
   }
@@ -1277,7 +1388,8 @@ fn call_bytes(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
     return cerr(st, env, "panicked: bytes.unpack: length " ++ to_string(n) ++
         " is not a multiple of " ++ to_string(width))
   }
-  let (st1, _, _) = burn_n(st, env, n + n / width)?
+  let (stb, _, _) = burn_n(st, env, n)?
+  let (st1, _, _) = grow_n(stb, env, n / width)?
   let order = if as_bool(args[if floats { 2 } else { 3 }]) { bytes.Little } else { bytes.Big }
   let xs = if floats {
     list.map(bytes.unpack_floats(b, width, order), (f: Float) => VFloat(f))
@@ -1291,23 +1403,23 @@ fn call_array(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
   if name == "array_new" { return Ok((st, env, VArray([]))) }
   if name == "list_to_array" {
     let xs = as_list(args[0])
-    let (st1, _, _) = burn_n(st, env, len(xs))?
+    let (st1, _, _) = grow_n(st, env, len(xs))?
     return Ok((st1, env, VArray(xs)))
   }
   let xs = as_array(args[0])
   let n = len(xs)
   if name == "array_len" { return Ok((st, env, VInt(n))) }
   if name == "array_to_list" {
-    let (st1, _, _) = burn_n(st, env, n)?
+    let (st1, _, _) = grow_n(st, env, n)?
     return Ok((st1, env, VList(xs)))
   }
   if name == "array_push" {
-    let (st1, _, _) = burn_n(st, env, 1)?
+    let (st1, _, _) = grow_n(st, env, 1)?
     return Ok((st1, env, VArray(xs ++ [args[1]])))
   }
   if name == "array_extend" {
     let ys = as_array(args[1])
-    let (st1, _, _) = burn_n(st, env, len(ys))?
+    let (st1, _, _) = grow_n(st, env, len(ys))?
     return Ok((st1, env, VArray(xs ++ ys)))
   }
   if name == "array_slice" {
@@ -1317,7 +1429,7 @@ fn call_array(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
       return cerr(st, env, "panicked: array slice [" ++ to_string(lo) ++ ", " ++ to_string(hi) ++
           ") out of bounds for length " ++ to_string(n))
     }
-    let (st1, _, _) = burn_n(st, env, hi - lo)?
+    let (st1, _, _) = grow_n(st, env, hi - lo)?
     return Ok((st1, env, VArray(list.slice(xs, lo, hi))))
   }
   let i = as_int(args[1])
@@ -1325,7 +1437,7 @@ fn call_array(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
     return cerr(st, env, "panicked: array index " ++ to_string(i) ++ " out of bounds for length " ++ to_string(n))
   }
   if name == "array_with" {
-    let (st1, _, _) = burn_n(st, env, n)?
+    let (st1, _, _) = grow_n(st, env, n)?
     return Ok((st1, env, VArray(list.take(xs, i) ++ [args[2]] ++ list.drop(xs, i + 1))))
   }
   # steal is a logical read. The native ownership optimisation is not an
@@ -1712,14 +1824,16 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]
   } else if str.starts_with(name, "array_") || name == "list_to_array" {
     call_array(st, env, name, args)
   } else if name == "cmp" {
-    let c = order(st, env, args[0], args[1])?
-    Ok((st, env, VInt(c)))
+    let (st1, _, _) = burn_n(st, env, scan_bytes(args[0]) + scan_bytes(args[1]))?
+    let c = order(st1, env, args[0], args[1])?
+    Ok((st1, env, VInt(c)))
   } else if name == "java_eq" {
     # equality of a host value (semantics-closure-design.md 3). Comptime never
     # reaches a real Java object -- `use java` is not foldable -- so this is
     # the interpreter's own value equality, kept so the arm is not a hole.
-    let same = eq_or_refuse(st, env, args[0], args[1])?
-    Ok((st, env, VBool(same)))
+    let (st1, _, _) = burn_n(st, env, scan_bytes(args[0]) + scan_bytes(args[1]))?
+    let same = eq_or_refuse(st1, env, args[0], args[1])?
+    Ok((st1, env, VBool(same)))
   } else if name == "ev_get" {
     # An arm rather than a refusal, so that a `const` whose body reaches a
     # function value keeps folding once lowering starts emitting reads.
@@ -1799,7 +1913,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]
     # for every String field
   } else if name == "quote" {
     let s = as_str(args[0])
-    let (st1, _, _) = burn_n(st, env, len(s))?
+    let (st1, _, _) = grow_n(st, env, len(s))?
     Ok((st1, env, VStr(quote_str(s))))
   } else if name == "len" {
     Ok((st, env, VInt(len(as_list(args[0])))))
@@ -1833,7 +1947,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]
     # elements produced and cannot wrap
     let lo = if from < 0 { 0 } else if from > len(xs) { len(xs) } else { from }
     let hi = if to < lo { lo } else if to > len(xs) { len(xs) } else { to }
-    let (st1, _, _) = burn_n(st, env, hi - lo)?
+    let (st1, _, _) = grow_n(st, env, hi - lo)?
     Ok((st1, env, VList(list.take(list.drop(xs, lo), hi - lo))))
     # the placeholder a match or if result slot is declared with; every path
     # assigns before reading, so its value is never observed
@@ -1845,7 +1959,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]
     # An empty range costs nothing. Otherwise `to - from` is the count, and it
     # is negative exactly when the length does not fit in an Int, which
     # `burn_n` treats as over any budget.
-    let (st1, _, _) = burn_n(st, env, if to <= from { 0 } else { to - from })?
+    let (st1, _, _) = grow_n(st, env, if to <= from { 0 } else { to - from })?
     var out: List[EvalValue] = []
     var i = from
     while i < to {
@@ -1865,7 +1979,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]
       size = size + len(p) + (if len(parts) > 0 { len(sep) } else { 0 })
       parts = parts ++ [p]
     }
-    let (st1, _, _) = burn_n(st, env, size)?
+    let (st1, _, _) = grow_n(st, env, size)?
     Ok((st1, env, VStr(join(parts, sep))))
     # ---- the cursor family ----
     #
@@ -1921,7 +2035,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]
     if from < 0 || to > len(cps) || from > to {
       cerr(st, env, "panicked: cursor_slice: invalid cursor range")
     } else {
-      let (st1, _, _) = burn_n(st, env, to - from)?
+      let (st1, _, _) = grow_n(st, env, to - from)?
       var out: List[Char] = []
       var i = from
       while i < to {
@@ -1941,13 +2055,13 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]
     # intrinsics is what asked the question.
   } else if name == "code_points" {
     let s = as_str(args[0])
-    let (st1, _, _) = burn_n(st, env, len(s))?
+    let (st1, _, _) = grow_n(st, env, len(s))?
     var out: List[EvalValue] = []
     for cp in code_points(s) { out = out ++ [VInt(char.code(cp))] }
     Ok((st1, env, VList(out)))
   } else if name == "from_code_points" {
     let vs = as_list(args[0])
-    let (st1, _, _) = burn_n(st, env, len(vs))?
+    let (st1, _, _) = grow_n(st, env, len(vs))?
     var cps: List[Char] = []
     for v in vs { cps = cps ++ [as_char(v)] }
     Ok((st1, env, VStr(from_code_points(cps))))
@@ -1965,11 +2079,11 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]
     Ok((st, env, VBool(char_is_space(as_char(args[0])))))
   } else if name == "str_lower" {
     let s = as_str(args[0])
-    let (st1, _, _) = burn_n(st, env, len(s))?
+    let (st1, _, _) = grow_n(st, env, len(s))?
     Ok((st1, env, VStr(str.to_lower(s))))
   } else if name == "str_upper" {
     let s = as_str(args[0])
-    let (st1, _, _) = burn_n(st, env, len(s))?
+    let (st1, _, _) = grow_n(st, env, len(s))?
     Ok((st1, env, VStr(str.to_upper(s))))
   } else if name == "float_of_decimal" {
     # std/fmt.atod's raw conversion, reached through the program's own std
@@ -2347,7 +2461,8 @@ fn ceval_const_ref(icx: ICx, st: ESt, env: Env, owner: String, name: String) -> 
   match const_lookup(icx, owner, name) {
     Some(pr) -> {
       let (path, v) = pr
-      Ok((note_read(icx, st, path), env, thaw_const(v)))
+      let (st1, _, _) = grow_n(note_read(icx, st, path), env, const_nodes(v))?
+      Ok((st1, env, thaw_const(v)))
     }
     None -> cerr(note_miss(st), env, const_miss(icx, owner, name))
   }
@@ -2375,7 +2490,10 @@ fn const_miss(icx: ICx, owner: String, name: String) -> String = {
 ## first, exactly as codegen would have
 fn ceval_comptime(icx: ICx, st: ESt, env: Env, lo: Int, hi: Int) -> ER =
   match map.get(icx.blocks, (lo, hi)) {
-    Some(v) -> Ok((st, env, thaw_const(v)))
+    Some(v) -> {
+      let (st1, _, _) = grow_n(st, env, const_nodes(v))?
+      Ok((st1, env, thaw_const(v)))
+    }
     None -> cerr(st, env, "a nested comptime block did not fold")
   }
 
@@ -2451,14 +2569,14 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
         match rv {
           VStr(b) -> {
             # a String concat copies both sides, so it pays for the result
-            let (st3, _, _) = burn_n(st2, env2, len(a) + len(b))?
+            let (st3, _, _) = grow_n(st2, env2, len(a) + len(b))?
             return Ok((st3, env2, VStr(a ++ b)))
           }
           _ -> ()
         }
       VBytes(a) -> {
         let b = as_bytes(rv)
-        let (st3, _, _) = burn_n(st2, env2, len(a) + len(b))?
+        let (st3, _, _) = grow_bytes(st2, env2, len(a) + len(b))?
         return Ok((st3, env2, VBytes(a ++ b)))
       }
       VList(a) ->
@@ -2466,7 +2584,7 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
           VList(b) -> {
             # a List concat appends the right side onto the shared left one
             # (spec §2.2), so the right side is what it allocates
-            let (st3, _, _) = burn_n(st2, env2, len(b))?
+            let (st3, _, _) = grow_n(st2, env2, len(b))?
             return Ok((st3, env2, VList(a ++ b)))
           }
           _ -> ()
@@ -2475,9 +2593,10 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
     }
     return cerr(st2, env2, "`++` needs two Strings, two Bytes or two Lists")
   }
+  let (st_cmp, _, _) = burn_n(st2, env2, scan_bytes(lv) + scan_bytes(rv))?
   if op == CEq || op == CNe {
-    let same = eq_or_refuse(st2, env2, lv, rv)?
-    return Ok((st2, env2, VBool(if op == CEq { same } else { not same })))
+    let same = eq_or_refuse(st_cmp, env2, lv, rv)?
+    return Ok((st_cmp, env2, VBool(if op == CEq { same } else { not same })))
   }
   # Ordered comparisons. A Float is the one operand handled here rather than
   # in `order`: it is not Ord (types.ord_scalars), so only these operators
@@ -2491,16 +2610,16 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
       }
       # NaN: every ordered comparison is false (spec §4.3). `x != x` is the
       # IEEE NaN test, and Dawn's Float `!=` is IEEE.
-      if a != a || b != b { return Ok((st2, env2, VBool(false))) }
+      if a != a || b != b { return Ok((st_cmp, env2, VBool(false))) }
       # IEEE ordering, not Double.compare: the latter puts -0.0 below 0.0,
       # which folded `-0.0 < 0.0` to true while both backends answer false
       let c = if a < b { -1 } else if a > b { 1 } else { 0 }
-      return Ok((st2, env2, VBool(holds(op, c))))
+      return Ok((st_cmp, env2, VBool(holds(op, c))))
     }
     _ -> ()
   }
-  let c = order(st2, env2, lv, rv)?
-  Ok((st2, env2, VBool(holds(op, c))))
+  let c = order(st_cmp, env2, lv, rv)?
+  Ok((st_cmp, env2, VBool(holds(op, c))))
 }
 
 fn holds(op: CBinOp, c: Int) -> Bool =
@@ -2732,6 +2851,7 @@ fn thaw_const(v: ConstValue) -> EvalValue =
     CVFloat(x) -> VFloat(x)
     CVBool(x) -> VBool(x)
     CVStr(x) -> VStr(x)
+    CVBytes(b) -> VBytes(b)
     CVUnit -> VUnit
     CVList(xs) -> VList(list.map(xs, (x: ConstValue) => thaw_const(x)))
     CVTuple(xs) -> VTuple(list.map(xs, (x: ConstValue) => thaw_const(x)))
@@ -2743,15 +2863,27 @@ fn thaw_const(v: ConstValue) -> EvalValue =
 fn freeze_const(
   icx: ICx, st: ESt, env: Env, v: EvalValue, path: String, depth: Int
 ) -> Result[(ESt, ConstValue), (ESt, Env, Ctl)] = {
-  if depth >= icx.max_depth {
+  if depth >= icx.max_depth || depth >= 256 {
     return Err((st, env, KErr(ct_failure("constant nesting limit at " ++ path, "simplify the result"))))
   }
-  let (st1, _, _) = burn_n(st, env, 1)?
+  let payload = match v { VStr(x) -> utf8_size(x), VBytes(b) -> len(b), _ -> 0 }
+  match v {
+    VBytes(_) -> if payload > st.limits.blob_limit { return Err((st, env, KErr(ct_failure(
+      "Bytes size limit at " ++ path ++ ": requested " ++ to_string(payload) ++
+        " bytes (limit " ++ to_string(st.limits.blob_limit) ++ ")", "reduce the byte sequence (spec §7.2)")))) }
+    VAdt(_, _, xs) -> if len(xs) > 4096 { return Err((st, env, KErr(ct_failure(
+      "constant field limit at " ++ path, "return at most 4096 fields per constructor")))) }
+    _ -> ()
+  }
+  let (st_node, _, _) = grow_n(st, env, 1)?
+  let (st_scan, _, _) = burn_n(st_node, env, match v { VStr(x) -> len(x), _ -> 0 })?
+  let st1 = freeze_size(st_scan, env, 16 + payload, path)?
   match v {
     VInt(x) -> Ok((st1, CVInt(x)))
     VFloat(x) -> Ok((st1, CVFloat(x)))
     VBool(x) -> Ok((st1, CVBool(x)))
     VStr(x) -> Ok((st1, CVStr(x)))
+    VBytes(b) -> Ok((st1, CVBytes(b)))
     VUnit -> Ok((st1, CVUnit))
     VList(xs) | VTuple(xs) | VAdt(_, _, xs) -> {
       var st2 = st1
@@ -2775,7 +2907,7 @@ fn freeze_const(
       }
       Ok((st2, cv))
     }
-    VBytes(_) | VArray(_) | VClosure(_, _, _) | VDict(_, _) | VCursor(_, _) ->
+    VArray(_) | VClosure(_, _, _) | VDict(_, _) | VCursor(_, _) ->
       Err((st1, env, KErr(ct_failure("working value cannot escape at " ++ path,
         "return a closed literal value (spec §7.2)"))))
   }
@@ -2806,7 +2938,8 @@ pub type CtOut = {
 ## bodies would ride along there for no reader.
 pub(pkg) type CtRun = {
   out: CtOut,
-  cache: LowerCache
+  cache: LowerCache,
+  payload: Int
 }
 
 fn empty_cache() -> LowerCache = {
@@ -2821,7 +2954,7 @@ fn empty_cache() -> LowerCache = {
 ## depth start over here and nowhere else, which is what keeps one const's
 ## budget from being spent by the one before it.
 fn st_from(fuel: Int, cache: LowerCache) -> ESt =
-  ESt { fuel = fuel, depth = 0, cache = cache, texts = no_texts() }
+  ESt { fuel = fuel, depth = 0, cache = cache, texts = no_texts(), limits = ct_default(), allocated = 0, frozen = 0 }
 
 fn fresh_st(fuel: Int) -> ESt = st_from(fuel, empty_cache())
 
@@ -2846,7 +2979,8 @@ fn fold_expr(
   for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
   var dts = cache.dicts
   for d in dicts { dts = map.insert(dts, d.key, d) }
-  let st = st_from(fuel, LowerCache { ..cache, fns = tbl, dicts = dts, next_lam = next })
+  let st0 = st_from(fuel, LowerCache { ..cache, fns = tbl, dicts = dts, next_lam = next })
+  let st = ESt { ..st0, limits = icx.limits }
   let result_ty = tex_ty(e)
   if not is_const_literal_type(icx.adts, result_ty, set.empty()) {
     return (st.cache, Err(failure_diag(ct_failure("result at $ has no constant representation: " ++
@@ -2902,7 +3036,7 @@ fn eval_block(icx: ICx, fuel: Int, body: TExpr, run: CtRun, lo: Int, hi: Int) ->
   match key {
     Some(k) ->
       match map.get(run.cache.lits, k) {
-        Some(v) -> return CtRun { ..run, out = CtOut { ..run.out, blocks = map.insert(run.out.blocks, (lo, hi), v) } }
+        Some(v) -> return keep_block(icx, run, v, lo, hi)
         None -> ()
       }
     None -> ()
@@ -2925,13 +3059,9 @@ fn fold_block(icx: ICx, fuel: Int, body: TExpr, run: CtRun, lo: Int, hi: Int) ->
   let icx1 = ICx { ..icx, blocks = run1.out.blocks }
   let (cache, r) = fold_expr(icx1, fuel, run1.cache, body, lo, hi)
   match r {
-    Ok(v) ->
-      CtRun {
-        out = CtOut { ..run1.out, blocks = map.insert(run1.out.blocks, (lo, hi), v) },
-        cache = cache
-      }
+    Ok(v) -> keep_block(icx, CtRun { ..run1, cache = cache }, v, lo, hi)
     Err(d) ->
-      CtRun { out = CtOut { ..run1.out, diags = run1.out.diags ++ [lit_fold_diag(icx, body, d)] },
+      CtRun { ..run1, out = CtOut { ..run1.out, diags = run1.out.diags ++ [lit_fold_diag(icx, body, d)] },
         cache = cache }
   }
 }
@@ -3207,7 +3337,7 @@ fn module_icx(
   traits: Traits,
   impls: Impls,
   owner: String,
-  depth: Int
+  opts: CtOpts
 ) -> ICx = {
   # std is implicitly visible, so a const may call it; a local definition
   # still shadows it, matching the checker's local → std → builtin order
@@ -3263,7 +3393,8 @@ fn module_icx(
     world = world,
     scope = scope,
     body = owner,
-    max_depth = depth,
+    max_depth = opts.depth,
+    limits = opts,
     pending = set.empty(),
     folding = "",
     intrs = intrinsics()
@@ -3288,11 +3419,12 @@ fn eval_module_in(
   let empty_c: Map[String, ConstValue] = map.empty()
   let empty_b: Map[(Int, Int), ConstValue] = map.empty()
   var run = CtRun {
+    payload = 0,
     out = CtOut { diags = [], consts = empty_c, blocks = empty_b, reads = set.empty(), missed = false },
     cache = empty_cache()
   }
   let base = module_icx(tm, world, scope, std_fns, std_owners, std_impl_fns, std_names, adts,
-    traits, impls, owner, opts.depth)
+    traits, impls, owner, opts)
   var pending: Set[String] = set.empty()
   for c in tm.consts { pending = set.insert(pending, c.name) }
   for c in tm.consts {
@@ -3305,13 +3437,12 @@ fn eval_module_in(
     let (cache, r) = fold_expr(icx, fuel, run.cache, c.init, c.lo, c.hi)
     match r {
       Ok(v) -> {
-        run = CtRun {
-          out = CtOut { ..run.out, consts = map.insert(run.out.consts, c.name, v) },
-          cache = cache
-        }
+        let (next, ok) = retain_result(icx, CtRun { ..run, cache = cache }, v, c.lo, c.hi)
+        run = if ok { CtRun { ..next, out = CtOut { ..next.out, consts = map.insert(next.out.consts, c.name, v) } } }
+        else { next }
       }
       Err(d) -> {
-        run = CtRun { out = CtOut { ..run.out, diags = run.out.diags ++ [d] }, cache = cache }
+        run = CtRun { ..run, out = CtOut { ..run.out, diags = run.out.diags ++ [d] }, cache = cache }
       }
     }
   }
@@ -3389,7 +3520,7 @@ pub(pkg) fn closed_icx(
   opts: CtOpts
 ) -> ICx = {
   let base = module_icx(tm, world, scope, std_fns, std_owners, std_impl_fns, std_names, adts,
-    traits, impls, owner, opts.depth)
+    traits, impls, owner, opts)
   ICx { ..base, consts = ct.consts, blocks = ct.blocks }
 }
 
@@ -3459,6 +3590,7 @@ fn probe_icx() -> ICx = {
     scope = alone("probe"),
     body = "probe",
     max_depth = MAX_CALL_DEPTH,
+    limits = ct_default(),
     pending = set.empty(),
     folding = "",
     intrs = intrinsics()
@@ -3693,7 +3825,7 @@ test "freeze and thaw preserve closed data and charge every node" {
   let v = VTuple([VInt(42), VList([VStr("abc"), VBool(true)]), VUnit])
   match freeze_const(icx, st_from(100, empty_cache()), env, v, "$", 0) {
     Ok((st, cv)) -> {
-      assert st.fuel == 94
+      assert st.fuel == 91
       assert cv == CVTuple([CVInt(42), CVList([CVStr("abc"), CVBool(true)]), CVUnit])
       assert thaw_const(cv) == v
     }
@@ -3703,4 +3835,37 @@ test "freeze and thaw preserve closed data and charge every node" {
     Err((_, _, KErr(f))) -> { assert str.contains(f.msg, "fuel exhausted") }
     _ -> { assert false }
   }
+}
+
+test "logical allocation and arithmetic overflow fail before host allocation" {
+  let env: Env = map.empty()
+  let small = ESt { ..fresh_st(1000), limits = CtOpts { ..ct_default(), alloc_limit = 32 } }
+  for n in [31, 32, 33] {
+    match alloc_n(small, env, n) {
+      Ok(_) -> { assert n <= 32 }
+      Err((_, _, KErr(f))) -> { assert n == 33 && str.contains(f.msg, "logical allocation limit") }
+      _ -> { assert false }
+    }
+  }
+  match grow_n(small, env, 9223372036854775807) {
+    Err((_, _, KErr(_))) -> ()
+    _ -> { assert false }
+  }
+  match grow_bytes(small, env, -1) {
+    Err((_, _, KErr(f))) -> { assert str.contains(f.msg, "Bytes size limit") }
+    _ -> { assert false }
+  }
+}
+
+test "retained results share a session budget across module boundaries" {
+  let limits = CtOpts { ..ct_default(), module_limit = 100, session_limit = 39 }
+  let base = probe_icx()
+  let icx = ICx { ..base, limits = limits, world = CtWorld { ..base.world, payload = 20 } }
+  let out = CtOut { diags = [], consts = map.empty(), blocks = map.empty(), reads = set.empty(), missed = false }
+  let run = CtRun { out = out, cache = empty_cache(), payload = 0 }
+  let (next, ok) = retain_result(icx, run, CVBytes(bytes.utf8("abcd")), 12, 34)
+  assert not ok
+  assert len(next.out.diags) == 1
+  assert next.out.diags[0].lo == 12 && next.out.diags[0].hi == 34
+  assert str.contains(next.out.diags[0].msg, "session result size limit")
 }

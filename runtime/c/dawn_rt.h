@@ -169,6 +169,10 @@ typedef struct {
   int64_t len;
 } dawn_bytes;
 
+/* Compiler-only literal transport. The caller caches the returned immortal
+ * Bytes. Hex uses lowercase ASCII and exactly two digits per payload byte. */
+dawn_bytes *dawn_bytes_literal(const char *hex, int64_t len);
+
 /* Every ADT value, tuple included. `tag` is the constructor index, which is
  * exactly what CIsCtor tests -- the JVM backend uses class identity instead,
  * and that difference is confined to the two emitters. */

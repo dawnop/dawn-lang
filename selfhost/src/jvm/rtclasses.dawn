@@ -26,7 +26,7 @@ use jvm/ops.{
   COMPUTE_FRAMES,
   OP_AALOAD,
   OP_AASTORE, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
-  OP_ATHROW, OP_BALOAD, OP_BIPUSH, OP_D2F, OP_F2D, OP_CHECKCAST, OP_DUP, OP_GETFIELD, OP_GETSTATIC,
+  OP_ATHROW, OP_BASTORE, OP_BALOAD, OP_BIPUSH, OP_D2F, OP_F2D, OP_CHECKCAST, OP_DUP, OP_GETFIELD, OP_GETSTATIC,
   OP_GOTO, OP_I2B, OP_I2L, OP_I2S, OP_IADD, OP_IALOAD, OP_IASTORE, OP_ICONST_0, OP_ICONST_1, OP_ICONST_2,
   OP_ICONST_3, OP_ICONST_M1, OP_IDIV, OP_IFEQ, OP_IFGE, OP_IFGT, OP_IFLE, OP_IFLT, OP_IFNE,
   OP_IFNONNULL, OP_IFNULL, OP_IF_ACMPEQ, OP_IF_ICMPEQ, OP_IF_ICMPGE, OP_IF_ICMPLE, OP_IF_ICMPLT,
@@ -658,9 +658,71 @@ pub const FN_CMP_CLASS: String = "dawn/rt/FnComparator"
 ## retire the handwritten dawn.rt.StdBytes; index_of stays pure Dawn over len/at.
 ## Byte values are unsigned 0..255 on the Dawn side, so -1 is a free out-of-range
 ## sentinel for bytes_at (std turns it into a panic).
+## Only literal holders call this. Hex is the sole transport encoding and
+## every chunk is ASCII. Decode into one byte array without per-byte objects.
+fn gen_bytes_literal(cw: ClassWriter) -> Unit !io = {
+  let m = open_static(cw, "literal", "([Ljava/lang/String;I)[B")
+  m.visitVarInsn(OP_ILOAD, 1)
+  m.visitIntInsn(OP_NEWARRAY, T_BYTE)
+  m.visitVarInsn(OP_ASTORE, 2)
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ISTORE, 3)
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ISTORE, 4)
+  let outer = Label.new()
+  let done = Label.new()
+  let inner = Label.new()
+  let next = Label.new()
+  m.visitLabel(outer)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitJumpInsn(OP_IF_ICMPGE, done)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_AALOAD)
+  m.visitVarInsn(OP_ASTORE, 5)
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ISTORE, 6)
+  m.visitLabel(inner)
+  m.visitVarInsn(OP_ILOAD, 6)
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "length", "()I", false)
+  m.visitJumpInsn(OP_IF_ICMPGE, next)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitVarInsn(OP_ILOAD, 6)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false)
+  m.visitIntInsn(OP_BIPUSH, 16)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Character", "digit", "(CI)I", false)
+  m.visitIntInsn(OP_BIPUSH, 16)
+  m.visitInsn(OP_IMUL)
+  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitVarInsn(OP_ILOAD, 6)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IADD)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false)
+  m.visitIntInsn(OP_BIPUSH, 16)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Character", "digit", "(CI)I", false)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_BASTORE)
+  m.visitIincInsn(3, 1)
+  m.visitIincInsn(6, 2)
+  m.visitJumpInsn(OP_GOTO, inner)
+  m.visitLabel(next)
+  m.visitIincInsn(4, 1)
+  m.visitJumpInsn(OP_GOTO, outer)
+  m.visitLabel(done)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+}
+
 pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, BYTES_CLASS, obj())
+  gen_bytes_literal(cw)
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "concat", "([B[B)[B").expect("mv")
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
@@ -5919,6 +5981,8 @@ pub fn rt_show_show() -> RtMethod =
 pub fn rt_show_quote() -> RtMethod =
   rt(SHOW_CLASS, "quote", "(" ++ string_desc() ++ ")" ++ string_desc())
 
+pub fn rt_bytes_literal() -> RtMethod = rt(BYTES_CLASS, "literal", "([Ljava/lang/String;I)[B")
+
 pub fn rt_bytes_concat() -> RtMethod = rt(BYTES_CLASS, "concat", "([B[B)[B")
 
 pub fn rt_array_new() -> RtMethod = rt(ARRAY_CLASS, "array_new", "()" ++ array_desc())
@@ -6003,6 +6067,7 @@ pub fn emitter_rt_methods() -> List[RtMethod] = [
   rt_show_show(),
   rt_show_quote(),
   rt_bytes_concat(),
+  rt_bytes_literal(),
   rt_array_new(),
   rt_array_push(),
   rt_array_to_java(),

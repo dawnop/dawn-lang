@@ -6,6 +6,7 @@
 #   C <name> <esc value | !failed>            each const's comptime value
 
 use std/map
+use std/bytes
 use std/str
 use check/types.{Adts, adt_of, sig_render}
 use check/identity
@@ -24,6 +25,8 @@ pub fn cv_show(adts: Adts, v: ConstValue) -> String =
     CVFloat(f) -> to_string(f)
     CVBool(b) -> to_string(b)
     CVStr(s) -> "\"" ++ lexdump.esc(s) ++ "\""
+    CVBytes(b) -> "<" ++ to_string(len(b)) ++ " bytes: " ++
+      bytes.to_hex(bytes.slice(b, 0, 32)) ++ (if len(b) > 32 { "...>" } else { ">" })
     CVUnit -> "()"
     CVList(elems) -> {
       var parts: List[String] = []
@@ -78,7 +81,7 @@ pub(pkg) fn render(prog: Program) -> String = {
   }
   out
 }
-use ir/core.{ConstValue, CVInt, CVFloat, CVBool, CVStr, CVUnit, CVList, CVTuple, CVAdt}
+use ir/core.{ConstValue, CVInt, CVFloat, CVBool, CVStr, CVBytes, CVUnit, CVList, CVTuple, CVAdt}
 
 test "the dump prints where a diagnostic sits in the revision it dumps" {
   # A diagnostic raised inside `g` is recorded as an offset from `g`, so a

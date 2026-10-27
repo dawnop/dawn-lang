@@ -4,7 +4,7 @@
 
 ## 问题与语义
 
-`std/bytes` 的纯函数目前不能参与常量计算，连最终返回 `Int` 的字节长度也受阻。
+K0 基线中，`std/bytes` 的纯函数不能参与常量计算，连最终返回 `Int` 的字节长度也受阻。
 `Buf` 通过值语义 `Array` 保存块与尾部，所以只支持 UTF-8、索引与切片不能让
 `from_hex`、Base64 和 `packages/sha2` 的原有算法组合起来。
 
@@ -33,16 +33,39 @@ JVM 选定 ASCII hex 一种运输编码，原始字节每块至多 16 KiB。runt
 decoder，静态字段在初始化时构造一次 byte[]。必要时以 helper/holder 分片，避免每字节
 BASTORE、单方法 65,535 字节上限及常量池上限；验收直接检查 classfile。
 
-native 选静态 payload 加 runtime 公共 literal helper 管理的 immortal 描述对象，零长度
-使用合法非零长 C 数组声明。对象头初始化留在 runtime，emitter 不复制 RC 魔数。
-两后端共享内容而非对象布局。常量的 FFI 行为沿用现有契约。
+native 沿用按常量 key 缓存的惰性 builder，从静态 ASCII hex 分块解码一次，调用 runtime
+公共 `dawn_bytes_literal`。helper 通过普通 Bytes 构造器取得独占 payload，再经
+`dawn_immortal` 脱离 RC；空值也是合法的普通零长 Bytes。不改普通 Bytes 的 owned-payload
+契约，也不把静态指针的释放/COW 例外扩散到 FFI。代价是首次使用分配描述对象与 payload，
+并作一次线性解码；这里不宣称零分配或零复制。没有第二种运输编码。
 
-## 预算提案与验收
+JVM 按内容去重 blob，每 64 项一个 holder，单项装载方法只建立固定数量的编码块。
+常量字段也按 64 项分 holder；List 每 64 个元素一个 builder，结构 builder 按直接引用量
+分配常量池空间，避免很多短 Bytes 把单个类的池或初始化方法撑爆。native 按已有常量 key
+复用 builder；不同 key 的相同内容不承诺物理去重。两后端共享内容而非对象布局，FFI
+行为沿用现有契约。Float 常量的 native NaN 重建保留原始 bits，保证宽 8 的再打包不丢 payload。
 
-待边界测试验证的默认值：单 blob 1 MiB、每模块结果 16 MiB、每 fold 逻辑分配 64 MiB；
-另设 LSP 会话总预算与较小 hover 预算。计费用逻辑字节和节点，不依赖宿主对象头、共享或
-分配器。分配前检查长度与加乘溢出；扫描、复制、冻结与结果累积都须计费。超限在源位置
-给出请求量与限额诊断，不能依靠 OOM 或 classfile 报错。定值与配置方式在 K3 回填。
+## 预算与验收
+
+K3 定值采用保守逻辑上限，不是性能最优点：
+
+| 上下文 | 单 Bytes | 模块结果 | fold 累计逻辑分配 | 所有模块保留结果 |
+|---|---:|---:|---:|---:|
+| 编译 | 1 MiB | 16 MiB | 64 MiB | 64 MiB |
+| LSP 分析 | 256 KiB | 4 MiB | 8 MiB | 16 MiB |
+| hover | 16 KiB | 64 KiB | 1 MiB | 2 MiB |
+
+Core 步与结构槽计 16 个逻辑字节，Bytes 的 payload 按实际长度计；冻结每节点计 16，
+String 再计 UTF-8 字节数、Bytes 再计长度。结果深度上限 256，每构造器字段上限 4096。
+工作分配与结果保留是两套账；后者跨模块累加，物理共享或去重不抵扣重复侧表结果。
+读取冻结树也为重建工作节点计费。扫描扣 fuel；长度加乘和额度用减法比较，分配前检查。
+大小额度首版固定，`--comptime-fuel` 只调整步数，编译器选项允许测试降限。
+超限携带源位置、请求量与限额/余量，不回退为运行时计算。
+
+已用降低的配置测单 blob 3/4/5、模块 39/40/41 字节、分配 31/32/33 字节及跨模块
+会话保留边界；1 MiB blob、130 个小常量、5000 个嵌套 Bytes 的两后端产物均已逐值验证，
+206 个 classfile 全部链接与访问检查通过，native 的 ASan 检查通过。数字是验收样本，
+不是性能数据。K4 再把固定向量与负控接入常驻门禁。
 
 固定验收包括空、00/7f/80/ff、全 256 字节、非法与非 BMP UTF-8、clamping、嵌套与
 opaque Bytes、跨模块引用、Buf 4095/4096/4097 与旧值分叉、整数及浮点端序和特殊值。
@@ -61,8 +84,8 @@ CRC32("123456789") 为 `0xCBF43926`。另测 SHA padding 55/56/63/64/65、编码
 |---|---|---|
 | K0 | 后端无关规则、trait 文档纠正、现状负例 | `f8b4b9f9`；1183 项单元测试及文档、锚点子集通过 |
 | K1 | EvalValue/ConstValue 与冻结边界 | `9876ccfb`；1185 项单元测试通过；冻结逐节点计步 |
-| K2 | Bytes 与 Array 完整构造路径 | 1186 项单元测试及 builtin 合约通过；原版 SHA、hex、Base64 已可折叠 |
-| K3 | 双后端产物、预算、预览边界 | 待做 |
+| K2 | Bytes 与 Array 完整构造路径 | `13356888`；1186 项单元测试及 builtin 合约通过；原版 SHA、hex、Base64 已可折叠 |
+| K3 | 双后端产物、预算、预览边界 | 1191 项单元测试、206 个 classfile 与 native ASan 通过 |
 | K4 | 生产 const、契约、文档与干净自举闭环 | 待做 |
 
 ## 不做的（理由）
@@ -70,4 +93,4 @@ CRC32("123456789") 为 `0xCBF43926`。另测 SHA padding 55/56/63/64/65、编码
 不交付 Map/Set 常量、文件 embed、完整 tile 编码与 Unicode 大表迁移；它们需要独立的
 逻辑表示、输入依赖或成本裁决。不会加入 Serialize trait、comptime IO、宿主临时程序、
 `is_comptime` 分支、专用 SHA、Bytes 伪装 List/String、旧 CValue 别名或两种 literal codec。
-本文不声称性能收益；预算数字是待验证的限制提案，不是性能测量。
+本文不声称性能收益；预算是经边界用例验证的保守限制，不是性能测量。
