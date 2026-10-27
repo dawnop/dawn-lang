@@ -58,3 +58,6 @@ echo "== selfhost tests, native backend =="
 # 55 tests that target ran (front/lexer, front/effect_name, check/identity)
 # appear with the same labels among nmain's, so the second target only paid
 # another emitc and cc for tests already run (2026-09-30).
+
+# Repeat the byte vectors after folding on this native compiler host.
+DAWNC_BIN="$DAWNC" "$ROOT/scripts/comptime-bytes-contract/run.sh" --native-host

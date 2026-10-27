@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 614fba5330c1ebe5 -->
+<!-- doc-check: translation-of docs/spec.md @ 4c97436f3f3e9fe8 -->
 
 # Dawn Language Specification
 
@@ -3395,11 +3395,12 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
    and a constant is folded once and written into the Core both backends read, so a folded
    position holds for at most one of them. To compute a position at compile time, hold the
    string and walk to it where it is used. This exception is a corollary of §11's "the
-   measure never becomes an observable value", not the whole of it: rendering is shut off
-   too, or `const S: String = to_string(c)` would go around this clause and fold the
-   measure into the artefact as a string (and the interpreter counts code points, so that
-   would be a third answer again). The exception comes off once cursors have a single
-   currency.
+   measure never becomes an observable value", not the whole of it: primitives that render
+   the position measure are refused too, or the backend measure would escape as a String
+   (and the interpreter counts code points, giving a third answer). The `Show` impl in
+   `std/cursor` returns a fixed `<cursor>` summary without reading that measure and remains
+   evaluable as an ordinary pure function. The exception comes off once cursors have a
+   single currency.
    `Array` is a value-semantic working value only, never a result. `Map`/`Set` remain refused:
    the evaluator explicitly rejects HAMT operations, so Array support does not imply collection
    support. A Bytes literal represents its length and a sequence of values in 0..255. NUL,
@@ -3428,7 +3429,10 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
    nesting levels and 4096 fields per constructor, bounding freezing and reconstruction.
    The four limits for LSP analysis are 256 KiB, 4 MiB, 8 MiB and 16 MiB; for hover they
    are 16 KiB, 64 KiB, 1 MiB and 2 MiB, capped by the caller's limits. Size limits are fixed
-   in this first version; `--comptime-fuel` adjusts steps only. Refusals report the request
+   in this first version; `--comptime-fuel` adjusts steps only. The LSP's 16 MiB is shared
+   across standalone documents, workspace diagnostic Programs and references Programs.
+   Shared std counts once; replacing or closing a Program releases its old allowance.
+   A changed allowance cannot reuse successful folds from the old allowance. Refusals report the request
    and remaining budget at the source location, without silently falling back to runtime.
 4. There is no Java interop and no io inside comptime (constraint 1 guarantees this
    automatically).

@@ -753,6 +753,52 @@ type DocMemo = { text: String, src: DocSrc }
 ## tracking recency, which is all a cache this cheap to refill needs.
 const DOC_MEMO_FILES: Int = 32
 
+type ResultOwner = StandaloneResults(uri: String) | WorkspaceResults(key: String) | ReferencesResults(key: String)
+
+fn user_results(st: LspState, prog: Option[Program]) -> Int =
+  match prog {
+    Some(p) -> if p.ct_world.payload > st.std.ct_world.payload {
+      p.ct_world.payload - st.std.ct_world.payload
+    } else { 0 }
+    None -> 0
+  }
+
+fn result_room(left: Int, used: Int) -> Int = if used >= left { 0 } else { left - used }
+
+## Every retained query Program shares one session allowance. The bundled
+## std is shared once, while independent diagnostic and references Programs
+## each retain their own user results. Replace only the named owner's share.
+fn result_limit(st: LspState, owner: ResultOwner) -> Int = {
+  var left = st.host.ct.session_limit
+  for pr in map.entries(st.docs) {
+    let (uri, d) = pr
+    let skip = match owner { StandaloneResults(u) -> u == uri, _ -> false }
+    if skip { continue }
+    match d.analysis {
+      Standalone(p, _, _) -> { left = result_room(left, user_results(st, Some(p))) }
+      WorkspaceMember(_) -> ()
+    }
+  }
+  for pr in map.entries(st.workspaces) {
+    let (key, slot) = pr
+    match slot {
+      Unavailable(_) -> ()
+      Ready(ws) -> {
+        let skip_main = match owner { WorkspaceResults(k) -> k == key, _ -> false }
+        let skip_refs = match owner { ReferencesResults(k) -> k == key, _ -> false }
+        if not skip_main { left = result_room(left, user_results(st, ws.prog)) }
+        if not skip_refs {
+          match ws.world {
+            Some(w) -> { left = result_room(left, user_results(st, w.prog)) }
+            None -> ()
+          }
+        }
+      }
+    }
+  }
+  left
+}
+
 ## The comment table of `text`, filed under `key` (which file it is), reused
 ## when the text is the one the kept table was lexed from.
 fn doc_src_memo(st: LspState, key: String, text: String) -> (DocSrc, LspState) = {
@@ -1891,7 +1937,9 @@ fn refs_world(st: LspState, ws: Workspace, verify: Bool) -> Option[RefsWorld] !F
       # the open documents first, then the rest of the tree; the loader reads
       # a file reached twice once
       let read = load_entries_reusing(ws.plan, entries ++ w0.seeds, overlay, w0.parses)
-      let checked = incremental.analyze(w0.cache, read.loaded)
+      let key = workspace_identity(ws.plan).lookup_key
+      let cache = incremental.limit_results(w0.cache, result_limit(st, ReferencesResults(key)))
+      let checked = incremental.analyze(cache, read.loaded)
       var texts: Map[String, String] = map.empty()
       for lm in read.loaded.modules { texts = map.insert(texts, lm.mod_path, lm.text) }
       # an index entry lives exactly as long as the step it was read from
@@ -2174,7 +2222,9 @@ fn rebuild_snapshot(
         Some(_) -> (set.from(map.values(entry_by_uri)), workspace_walk_diags(ws0.plan))
         None -> (set.empty(), no_walk)
       }
-      let placed = incremental.analyze_placing(ws0.cache, loaded, watch, none_sent,
+      let owner = WorkspaceResults(workspace_identity(ws0.plan).lookup_key)
+      let cache = incremental.limit_results(ws0.cache, result_limit(st, owner))
+      let placed = incremental.analyze_placing(cache, loaded, watch, none_sent,
         (sent0, mod_path, part) => publish_placed(st, ws0, key, entry_by_uri, walk, sent0, mod_path, part))
       let (update, sent) = placed
       let prog = update.program
@@ -2357,9 +2407,10 @@ fn install_workspace_after(
 
 ## A standalone buffer borrows the shared oracle and is analysed cold on
 ## every revision; it owns no session a close of another URI could replace.
-fn standalone_analysis(st: LspState, source_path: String, text: String) -> Program !Fs !Env !io = {
+fn standalone_analysis(st: LspState, uri: String, source_path: String, text: String) -> Program !Fs !Env !io = {
   let lease = st.standalone.expect("standalone LSP lease used after shutdown")
-  analyze_standalone(source_path, text, st.std, st.host.ct, lease.jsig)
+  let opts = CtOpts { ..st.host.ct, session_limit = result_limit(st, StandaloneResults(uri)) }
+  analyze_standalone(source_path, text, st.std, opts, lease.jsig)
 }
 
 fn standalone_doc(
@@ -2375,7 +2426,7 @@ fn standalone_doc(
     Some(found) -> found
     None -> "<lsp>"
   }
-  let prog = standalone_analysis(st, source_path, text)
+  let prog = standalone_analysis(st, uri, source_path, text)
   Doc {
     uri = uri,
     version = version,
@@ -2466,7 +2517,7 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
         Some(found) -> found
         None -> "<lsp>"
       }
-      let prog = standalone_analysis(st0, source_path, text)
+      let prog = standalone_analysis(st0, old.uri, source_path, text)
       # re-read rather than carry the old one: the identity is settled by the
       # analysis, and an edit re-runs the analysis
       let d = Doc {
@@ -2879,7 +2930,7 @@ fn dot_items_of(st: LspState, d: Doc, cut: (Int, Int)) -> List[CItem] !Fs !Proc 
         Some(found) -> found
         None -> "<lsp>"
       }
-      let prog = standalone_analysis(st, source_path, text2)
+      let prog = standalone_analysis(st, d.uri, source_path, text2)
       let d3 = Doc { ..d2, analysis = Standalone(prog, standalone_entry(prog), modules) }
       Some(LspState { ..st, docs = map.insert(st.docs, d.uri, d3) })
     }
@@ -3654,7 +3705,7 @@ fn local_rename(st: LspState, d: Doc, lr: LocalRename, new: String) -> Result[Js
     Some(p) -> p
     None -> "<lsp>"
   }
-  let after = standalone_analysis(st, source_path, text2)
+  let after = standalone_analysis(st, d.uri, source_path, text2)
   var shown = ""
   for ld in rendered_diags(after) {
     if shown == "" {
@@ -3850,7 +3901,8 @@ fn handle_rename(st: LspState, params: Json) -> (Result[Json, String], LspState)
         if map.has(by_path, id) { over = map.insert(over, p, map.get(after_texts, id).expect("edited text")) }
       }
       let read = load_entries_reusing(rs.ws.plan, entries ++ rs.world.seeds, over, rs.world.parses)
-      incremental.analyze(rs.world.cache, read.loaded).program
+      let cache = incremental.limit_results(rs.world.cache, result_limit(st1, ReferencesResults(rs.lookup)))
+      incremental.analyze(cache, read.loaded).program
     }
   }
   # no error the program did not have
@@ -4595,6 +4647,119 @@ test "LSP analysis configuration keeps legacy defaults and rejects negative limi
   assert legacy.mode == Legacy && legacy.max_modules == 128
   let negative = LspAnalysisConfig { ..legacy, max_modules = -1 }
   assert match catch_panic(() => validate_analysis_config(negative)) { Err(_) -> true, Ok(_) -> false }
+}
+
+test "standalone documents share a result budget and replacement releases its old share" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_for_probe()
+    let base = def_probe_state(std)
+    let opts = CtOpts { ..base.host.ct, session_limit = std.ct_world.payload + 40 }
+    let st0 = LspState { ..base, host = LspLeaseHost { ..base.host, ct = opts } }
+    let text = "use std/bytes\nconst VALUE: Bytes = bytes.pack_ints([0, 127, 128, 255], 1)\n"
+    let a = standalone_doc(st0, "untitled:a", None, None, text, 1, None)
+    let st1 = LspState { ..st0, docs = map.insert(st0.docs, a.uri, a) }
+    let b = standalone_doc(st1, "untitled:b", None, None, text, 1, None)
+    let st2 = LspState { ..st1, docs = map.insert(st1.docs, b.uri, b) }
+    assert result_limit(st2, StandaloneResults("untitled:c")) == std.ct_world.payload
+    let denied = standalone_analysis(st2, "untitled:c", "<lsp>", text)
+    assert list.any(rendered_diags(denied), ld => str.contains(ld.d.msg, "session result size limit"))
+    let replaced = standalone_analysis(st2, a.uri, "<lsp>", text)
+    assert len(rendered_diags(replaced)) == 0
+    assert user_results(st2, Some(replaced)) == 20
+    let closed = LspState { ..st2, docs = map.remove(st2.docs, a.uri) }
+    let admitted = standalone_analysis(closed, "untitled:c", "<lsp>", text)
+    assert len(rendered_diags(admitted)) == 0
+    assert user_results(closed, Some(admitted)) == 20
+  }))
+}
+
+test "workspace and references results share the session and a changed quota invalidates memoized folds" {
+  let root = memfs.BASE ++ "/bytes-budget"
+  let path = root ++ "/src/main.dawn"
+  let uri = "file://" ++ path
+  let text = "use std/bytes\npub const VALUE: Bytes = bytes.pack_ints([0, 127, 128, 255], 1)\n"
+  var files = fsmem.mem_std(memfs.BASE)
+  files = memfs.put(files, root ++ "/dawn.toml", "schema = 1\nname = \"bytes_budget\"\n")
+  files = memfs.put(files, path, text)
+  let _ = memfs.with_fs(files, () => io.with_proc_real(() =>
+      envmem.with_env_table(memfs.BASE, [], () => {
+        let std = match load_std(fsmem.mem_std_dir(memfs.BASE)) {
+          Ok(s) -> s
+          Err(e) -> panic(std_load_error_text(e))
+        }
+        let base = def_probe_state(std)
+        let opts = CtOpts { ..base.host.ct, session_limit = std.ct_world.payload + 40 }
+        let st0 = LspState { ..base, host = LspLeaseHost { ..base.host, ct = opts } }
+        let plan = project_plan(source.SourceFile(path))
+        let identity = workspace_identity(plan)
+        let doc = Doc {
+          uri = uri, version = 1, path = Some(path), canonical_path = Some(path),
+          text = text, view = view_of(text), ls = line_starts_of(text),
+          analysis = WorkspaceMember(identity)
+        }
+        let st1 = LspState { ..st0, docs = map.insert(st0.docs, uri, doc) }
+        let lease = jsig_refused_lease()
+        let empty = Workspace {
+          plan = plan, path_by_uri = map.insert(map.empty(), uri, path),
+          prog = None, entry_by_uri = map.empty(), lease = lease,
+          cache = analysis_session(st1, lease.jsig),
+          analysis_stats = None, parses = no_parses(), diag_by_uri = map.empty(),
+          refresh_problem = None, world = None
+        }
+        let first = rebuild_workspace(st1, empty)
+        assert len(rendered_diags(first.prog.expect("first Program"))) == 0
+        assert user_results(st1, first.prog) == 20
+        let st2 = LspState { ..st1, workspaces = map.insert(st1.workspaces, identity.lookup_key, Ready(first)) }
+        let refs = refs_world(st2, first, false).expect("references Program")
+        assert user_results(st2, refs.prog) == 20
+        let both = Workspace { ..first, world = Some(refs) }
+        let st3 = LspState { ..st2, workspaces = map.insert(st2.workspaces, identity.lookup_key, Ready(both)) }
+        assert result_limit(st3, StandaloneResults("untitled:extra")) == std.ct_world.payload
+        # The old main Program succeeded under a larger allowance. Reusing
+        # that success here would retain 40 bytes under a 39-byte budget.
+        let tighter = CtOpts { ..opts, session_limit = std.ct_world.payload + 39 }
+        let st4 = LspState { ..st3, host = LspLeaseHost { ..st3.host, ct = tighter } }
+        let rebuilt = rebuild_workspace(st4, both)
+        assert rebuilt.analysis_stats.expect("new world").checked_modules == 1
+        assert user_results(st4, rebuilt.prog) == 0
+        assert list.any(rendered_diags(rebuilt.prog.expect("denied Program")),
+          ld => str.contains(ld.d.msg, "session result size limit"))
+      })))
+}
+
+test "module memo observes result growth and shrinking in an unrelated earlier module" {
+  let root = memfs.BASE ++ "/bytes-prefix-budget"
+  let a = root ++ "/src/a.dawn"
+  let b = root ++ "/src/b.dawn"
+  let text = "use std/bytes\npub const VALUE: Bytes = bytes.utf8(\"abcd\")\n"
+  var files = fsmem.mem_std(memfs.BASE)
+  files = memfs.put(files, root ++ "/dawn.toml", "schema = 1\nname = \"bytes_prefix_budget\"\n")
+  files = memfs.put(files, a, text)
+  files = memfs.put(files, b, text)
+  let _ = memfs.with_fs(files, () => io.with_proc_real(() =>
+      envmem.with_env_table(memfs.BASE, [], () => {
+        let std = match load_std(fsmem.mem_std_dir(memfs.BASE)) {
+          Ok(s) -> s
+          Err(e) -> panic(std_load_error_text(e))
+        }
+        let opts = CtOpts { ..ct_default(), session_limit = std.ct_world.payload + 40 }
+        let plan = project_plan(source.SourceFile(a))
+        let overlay: Map[String, String] = map.empty()
+        let loaded = load_entries_reusing(plan, [a, b], overlay, no_parses()).loaded
+        let first = incremental.analyze(incremental.new(std, opts, jsig_refused_lease().jsig, 128), loaded)
+        assert len(rendered_diags(first.program)) == 0
+        let changed = str.replace(text, "abcd", "abcde")
+        let grown = load_entries_reusing(plan, [a, b], map.insert(overlay, a, changed), no_parses()).loaded
+        let second = incremental.analyze(first.session, grown)
+        assert second.stats.checked_modules == 2
+        assert list.any(rendered_diags(second.program), ld => str.contains(ld.d.msg, "session result size limit"))
+        let third = incremental.analyze(second.session, loaded)
+        assert third.stats.checked_modules == 2
+        assert len(rendered_diags(third.program)) == 0
+        assert third.program.ct_world.payload == std.ct_world.payload + 40
+        let warm = incremental.analyze(third.session, loaded)
+        assert warm.stats.reused_modules == 2
+      })))
 }
 
 test "a dot in a workspace member whose imported type it uses completes instead of crashing" {

@@ -27,6 +27,7 @@ ADAPTERS = {
     "bootstrap-input-manifest-contract": ("compiler-plan/src/source.dawn",),
     "builtin-type-contract": (".",),
     "classfile-verify": (".",),
+    "comptime-bytes-contract": (".",),
     "core-lint-contract": (".",),
     "c-map": (".",),
     "jvm-map": (".",),

@@ -61,3 +61,5 @@ if ! diff -u "$here/expected.txt" "$work/native.out"; then
 fi
 
 echo "PASS  bytes_pack/unpack int and float: $(wc -l < "$here/expected.txt") lines, JVM and native"
+
+"$root/scripts/comptime-bytes-contract/run.sh"
