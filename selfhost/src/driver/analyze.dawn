@@ -21,7 +21,7 @@ use check/cx.{ModExports, Cx, cx_new}
 use check/checker.{check_module, check_module_headers, check_module_bodies, ModuleHeaders, exports_of, exported_impl}
 use check/identity
 use check/identity.{Minted, EffectDecl}
-use ir/interp.{eval_comptime_in, CtOut, CtOpts, ct_default, CtWorld, ConstScope, ct_world_add, ct_world_empty}
+use ir/interp.{eval_comptime_in, CtOut, CtOpts, ct_default, CtWorld, ConstScope, ct_world_add, ct_world_empty, ct_size}
 use check/jsig.{Jsig, jsig_refused}
 use driver/fsmem
 use std/memfs
@@ -110,7 +110,8 @@ fn seg_ok(s: String) -> Bool = {
   }
   true
 }
-use ir/core.{ConstValue, CVInt, CVBool, CVStr, CVList}
+use ir/core.{ConstValue, CVInt, CVBool, CVStr, CVBytes, CVList}
+use std/bytes
 
 ## The segments of a module path that are not legal path segments, in order.
 ##
@@ -1229,13 +1230,16 @@ pub(pkg) fn analyze_observed(
 ## error in it holds `XError`, which lowering refuses by panicking. A module
 ## calling into one gets a comptime diagnostic instead, and has an error to
 ## report anyway, since the one it imports does. A std source checked as a
-## program module is in the world already, as std.
+## program module is in the world already, as std, but its fresh result
+## tables are retained alongside the baseline and still consume allowance.
 pub(pkg) fn world_after(w: CtWorld, checked: CheckedMod, ran: Bool, is_std: Bool) -> CtWorld =
-  if ran && not is_std {
+  if not ran { w }
+  else if is_std { CtWorld { ..w, payload = w.payload + ct_size(checked.ct) } }
+  else {
     let scope = ConstScope { path = checked.mod_path, imported = checked.cx.imported_names,
       renames = checked.cx.import_renames }
     ct_world_add(w, checked.class_name, scope, checked.tm, checked.ct, true)
-  } else { w }
+  }
 
 ## Whether the parser's marks line up with the tree and say nothing was
 ## dropped. A table of the wrong length is not trusted: no declaration can
@@ -1800,6 +1804,27 @@ fn folded(prog: Program, mod_path: String, name: String) -> Option[ConstValue] =
     if cm.mod_path == mod_path { return map.get(cm.ct.consts, name) }
   }
   None
+}
+
+test "fresh results of bundled source modules consume the shared allowance" {
+  in_mem(() => {
+    let std = std_or_die()
+    let text = "pub const FRESH_BYTES: Bytes = bytes_utf8(\"abcd\")\n"
+    let a = std_dir() ++ "/bytes.dawn"
+    let b = std_dir() ++ "/str.dawn"
+    put(a, text)
+    put(b, text)
+    let first = load_file(a)
+    let second = load_file(b)
+    let loaded = LoadResult { ..first, modules = first.modules ++ second.modules,
+      diags = first.diags ++ second.diags }
+    let opts = CtOpts { ..ct_default(), session_limit = std.ct_world.payload + 39 }
+    let prog = analyze_program(loaded, std, opts, jsig_refused())
+    assert folded(prog, "std/bytes", "FRESH_BYTES") == Some(CVBytes(bytes.utf8("abcd")))
+    assert folded(prog, "std/str", "FRESH_BYTES") == None
+    assert list.any(rendered_diags(prog), ld => str.contains(ld.d.msg, "session result size limit"))
+    assert prog.ct_world.payload == std.ct_world.payload + 20
+  })
 }
 
 test "comptime calls the functions of the modules before it" {

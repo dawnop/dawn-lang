@@ -81,6 +81,7 @@ type Entry = {
   # the one place a step reads the carry's key set rather than a surface
   std_names: Option[List[String]],
   impls_in: Impls,
+  payload_in: Int,
   ids_in: Map[Int, Minted],
   minted: Option[List[(Int, Minted)]],
   step: ModuleStep
@@ -135,6 +136,16 @@ pub fn evict(owner: Session) -> Session = {
   let session: State = owner
   let none: Map[String, Entry] = map.empty()
   State { ..session, memo = none }
+}
+
+## A shared host may retain other Programs between analyses. A changed
+## result allowance changes this owner's world, so no old successful fold
+## may be reused under the new allowance.
+pub(pkg) fn limit_results(owner: Session, limit: Int) -> Session = {
+  let session: State = owner
+  if session.opts.session_limit == limit { return owner }
+  let none: Map[String, Entry] = map.empty()
+  State { ..session, opts = CtOpts { ..session.opts, session_limit = limit }, memo = none }
 }
 
 ## A permanent cold switch for this owner; reconstruct an owner to re-enable.
@@ -391,6 +402,11 @@ fn kept(
   if not (same_input(raw, e.raw) && identity == e.std_identity) { return None }
   if not reads_hold(e, carry.exports, seen, fresh, named_base) { return None }
   if not comptime_reads_hold(e, seen, rechecked, baseline) { return None }
+  # A fold reads the remaining result allowance as well as named values.
+  # Recompute both successes and refusals when earlier results change it.
+  let ct = e.step.checked.ct
+  if (len(ct.consts) > 0 || len(ct.blocks) > 0 || len(ct.diags) > 0) &&
+    carry.ct_world.payload != e.payload_in { return None }
   if not (impls_is == Some(e.pred) || same_rows(carry.impls, e.impls_in)) { return None }
   if ids_is == Some(e.pred) { return Some(Kept { identities = e.step.after.identities, minted = e.minted }) }
   if len(e.step.diags) > 0 { return None }
@@ -473,6 +489,7 @@ pub(pkg) fn analyze_placing[S](
     }
     let ids_in = carry.identities
     let impls_in = carry.impls
+    let payload_in = carry.ct_world.payload
     var entry = match reuse {
       Some(pair) -> {
         let (e, k) = pair
@@ -492,7 +509,7 @@ pub(pkg) fn analyze_placing[S](
         let checked_mod = CheckedMod { ..e.step.checked, cx = current_selective(ids_cx, e, carry, fresh) }
         ids_is = if ids_is == Some(e.pred) { Some(Some(raw.mod_path)) } else { None }
         impls_is = Some(Some(raw.mod_path))
-        Entry { ..e, pred = pred, impls_in = impls_in, ids_in = ids_in, minted = k.minted,
+        Entry { ..e, pred = pred, impls_in = impls_in, payload_in = payload_in, ids_in = ids_in, minted = k.minted,
           step = ModuleStep { ..e.step, checked = checked_mod } }
       }
       None -> {
@@ -553,7 +570,7 @@ pub(pkg) fn analyze_placing[S](
           ct_world = computed.after.ct_world }
         Entry {
           raw = raw, std_identity = identity, pred = pred, reads = reads, std_names = std_names,
-          impls_in = impls_in, ids_in = ids_in, minted = None, step = computed
+          impls_in = impls_in, payload_in = payload_in, ids_in = ids_in, minted = None, step = computed
         }
       }
     }

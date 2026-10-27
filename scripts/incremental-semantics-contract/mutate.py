@@ -37,8 +37,8 @@ PASSES = "selfhost/src/check/passes.dawn"
 SERVER = "selfhost/src/lsp/server.dawn"
 
 # Anchors two groups quote, spelled once.
-WARM_ANALYZE = "incremental.analyze_placing(ws0.cache, loaded,"
-COLD_ANALYZE = "incremental.analyze_placing(incremental.evict(ws0.cache), loaded,"
+WARM_ANALYZE = "incremental.analyze_placing(cache, loaded,"
+COLD_ANALYZE = "incremental.analyze_placing(incremental.evict(cache), loaded,"
 LOADED = "      let loaded = reusing.loaded"
 PREFIX_ANALYZE = "      let (update, sent) = placed"
 SAME_INPUT = "-> Bool = LoadedModule { ..a, line_starts = b.line_starts } == b\n"

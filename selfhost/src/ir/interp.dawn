@@ -657,7 +657,8 @@ fn const_nodes(v: ConstValue) -> Int = {
   n
 }
 
-fn ct_size(ct: CtOut) -> Int = {
+## Logical retained bytes in one module's result tables, including blocks.
+pub(pkg) fn ct_size(ct: CtOut) -> Int = {
   var n = 0
   for k in map.keys(ct.consts) { n = n + const_size(map.get(ct.consts, k).expect("const key")) }
   for k in map.keys(ct.blocks) { n = n + const_size(map.get(ct.blocks, k).expect("block key")) }
@@ -679,9 +680,15 @@ fn retain_result(icx: ICx, run: CtRun, v: ConstValue, lo: Int, hi: Int) -> (CtRu
 }
 
 fn keep_block(icx: ICx, run: CtRun, v: ConstValue, lo: Int, hi: Int) -> CtRun = {
-  let (next, ok) = retain_result(icx, run, v, lo, hi)
+  # A revisited source span replaces one retained entry. It is not another
+  # result beside that entry, unlike two distinct const or block keys.
+  let base = match map.get(run.out.blocks, (lo, hi)) {
+    Some(old) -> CtRun { ..run, payload = run.payload - const_size(old) }
+    None -> run
+  }
+  let (next, ok) = retain_result(icx, base, v, lo, hi)
   if ok { CtRun { ..next, out = CtOut { ..next.out, blocks = map.insert(next.out.blocks, (lo, hi), v) } } }
-  else { next }
+  else { CtRun { ..run, out = next.out } }
 }
 
 fn scan_bytes(v: EvalValue) -> Int = match v {
@@ -1378,25 +1385,28 @@ fn call_bytes(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
     let s = if name == "bytes_decode_utf8" { bytes.decode_utf8_lossy(b) } else { bytes.decode_latin1(b) }
     return Ok((st1, env, VStr(s)))
   }
-  let width = as_int(args[1])
-  let floats = name == "bytes_unpack_float"
-  if width != 4 && width != 8 && (floats || (width != 1 && width != 2)) {
-    return cerr(st, env, "panicked: bytes.unpack: width " ++ to_string(width) ++
-        (if floats { " is not 4 or 8" } else { " is not 1, 2, 4 or 8" }))
+  if name == "bytes_unpack_int" || name == "bytes_unpack_float" {
+    let width = as_int(args[1])
+    let floats = name == "bytes_unpack_float"
+    if width != 4 && width != 8 && (floats || (width != 1 && width != 2)) {
+      return cerr(st, env, "panicked: bytes.unpack: width " ++ to_string(width) ++
+          (if floats { " is not 4 or 8" } else { " is not 1, 2, 4 or 8" }))
+    }
+    if n % width != 0 {
+      return cerr(st, env, "panicked: bytes.unpack: length " ++ to_string(n) ++
+          " is not a multiple of " ++ to_string(width))
+    }
+    let (stb, _, _) = burn_n(st, env, n)?
+    let (st1, _, _) = grow_n(stb, env, n / width)?
+    let order = if as_bool(args[if floats { 2 } else { 3 }]) { bytes.Little } else { bytes.Big }
+    let xs = if floats {
+      list.map(bytes.unpack_floats(b, width, order), (f: Float) => VFloat(f))
+    } else {
+      list.map(bytes.unpack_ints(b, width, as_bool(args[2]), order), (i: Int) => VInt(i))
+    }
+    return Ok((st1, env, VArray(xs)))
   }
-  if n % width != 0 {
-    return cerr(st, env, "panicked: bytes.unpack: length " ++ to_string(n) ++
-        " is not a multiple of " ++ to_string(width))
-  }
-  let (stb, _, _) = burn_n(st, env, n)?
-  let (st1, _, _) = grow_n(stb, env, n / width)?
-  let order = if as_bool(args[if floats { 2 } else { 3 }]) { bytes.Little } else { bytes.Big }
-  let xs = if floats {
-    list.map(bytes.unpack_floats(b, width, order), (f: Float) => VFloat(f))
-  } else {
-    list.map(bytes.unpack_ints(b, width, as_bool(args[2]), order), (i: Int) => VInt(i))
-  }
-  Ok((st1, env, VArray(xs)))
+  cerr(st, env, no_arm_msg(name))
 }
 
 fn call_array(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
@@ -1442,7 +1452,8 @@ fn call_array(st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER = {
   }
   # steal is a logical read. The native ownership optimisation is not an
   # observable removal, so older Array versions keep all of their elements.
-  Ok((st, env, xs[i]))
+  if name == "array_get" || name == "array_steal" { return Ok((st, env, xs[i])) }
+  cerr(st, env, no_arm_msg(name))
 }
 
 # ---- intrinsics (the pure ones; io never reaches the interpreter) ----
@@ -1898,7 +1909,10 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]
     # builtin. These are the *top-level* rendering, where a String is itself
     # and not a quoted literal.
   } else if name == "to_string" || name == "str_of_int" || name == "str_of_bool" {
-    Ok((st, env, VStr(stringify(args[0]))))
+    match args[0] {
+      VCursor(_, _) -> cerr(st, env, "a Cursor measure cannot be rendered at comptime")
+      _ -> Ok((st, env, VStr(stringify(args[0]))))
+    }
   } else if name == "show" {
     # Not charged by size: a String never reaches this arm (lowering renders a
     # known String through `quote`, which is charged; lower.show_erased), and
@@ -3868,4 +3882,24 @@ test "retained results share a session budget across module boundaries" {
   assert len(next.out.diags) == 1
   assert next.out.diags[0].lo == 12 && next.out.diags[0].hi == 34
   assert str.contains(next.out.diags[0].msg, "session result size limit")
+}
+
+test "a Cursor measure cannot pass through primitive rendering" {
+  let env: Env = map.empty()
+  assert show_value(VCursor(0, 0)) == None
+  match call_builtin(probe_icx(), fresh_st(1000), env, "str_of_int", [VCursor(0, 0)]) {
+    Err((_, _, KErr(f))) -> { assert str.contains(f.msg, "Cursor measure cannot be rendered") }
+    _ -> { assert false }
+  }
+}
+
+test "a repeated block span retains one result under the module quota" {
+  let base = probe_icx()
+  let icx = ICx { ..base, limits = CtOpts { ..ct_default(), module_limit = 16 } }
+  let out = CtOut { diags = [], consts = map.empty(), blocks = map.empty(), reads = set.empty(), missed = false }
+  let run = CtRun { out = out, cache = empty_cache(), payload = 0 }
+  let once = keep_block(icx, run, CVInt(7), 1, 2)
+  let twice = keep_block(icx, once, CVInt(7), 1, 2)
+  assert twice.payload == 16
+  assert len(twice.out.blocks) == 1 && twice.out.diags == []
 }

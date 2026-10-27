@@ -1,0 +1,52 @@
+# A binary lookup table is a Bytes value, with no text encoding or boxed
+# integer list in the final constant. The package CRC and SHA functions are
+# also called unchanged at comptime. This example makes no speed claim for
+# table lookup: choosing a runtime CRC algorithm still needs measurement.
+
+use std/bytes
+use inflate/crc32
+use sha2/sha256
+
+fn table() -> Bytes = {
+  var b = bytes.buf()
+  for i in 0..256 {
+    var c = i
+    for _bit in 0..8 { c = (c >>> 1) ^ (0xEDB88320 & (0 - (c & 1))) }
+    b = bytes.put_bytes(b, bytes.pack_ints([c], 4))
+  }
+  bytes.freeze(b)
+}
+
+const TABLE: Bytes = table()
+const CRLF: Bytes = bytes.utf8("\r\n")
+const CRC: Int = crc32.sum(bytes.utf8("123456789"))
+const SHA: String = sha256.hex(bytes.utf8("abc"))
+
+fn table_crc(b: Bytes) -> Int = {
+  var c = 0xFFFFFFFF
+  for octet in b {
+    let i = ((c ^ octet) & 255) * 4
+    let entry = bytes.unpack_ints(bytes.slice(TABLE, i, i + 4), 4, false)[0]
+    c = (c >>> 8) ^ entry
+  }
+  c ^ 0xFFFFFFFF
+}
+
+const TABLE_CRC: Int = table_crc(bytes.utf8("123456789"))
+
+pub fn main() -> Unit !io = {
+  println("table ${len(TABLE)} bytes")
+  println("crc32 ${CRC}")
+  println("sha256 ${SHA}")
+  println("protocol ${bytes.to_hex(CRLF)}")
+}
+
+test "compiled binary data agrees with independent checks and runtime algorithms" {
+  assert len(TABLE) == 1024
+  assert TABLE_CRC == 0xCBF43926 && CRC == 0xCBF43926
+  assert table_crc(bytes.utf8("123456789")) == crc32.sum(bytes.utf8("123456789"))
+  assert table_crc(bytes.utf8("")) == 0
+  assert SHA == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  assert SHA == sha256.hex(bytes.utf8("abc"))
+  assert bytes.to_hex(CRLF) == "0d0a"
+}

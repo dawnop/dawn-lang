@@ -227,6 +227,19 @@ def interp_arms():
     arms = set(
         names(chain, r'(?<![\w.\]])name == "([A-Za-z_0-9]+)"', "interp.dawn", "arms in call_builtin")
     )
+    # Byte and Array primitives keep their allocation checks together in
+    # helpers. Prove the dispatcher still reaches those helpers before reading
+    # their explicit arms, rather than treating a prefix as an implementation.
+    for helper, dispatch in (
+        ("call_bytes", 'str.starts_with(name, "bytes_")'),
+        ("call_array", 'str.starts_with(name, "array_") || name == "list_to_array"'),
+    ):
+        source = "\n".join(chain)
+        if dispatch not in source or f"{helper}(st, env, name, args)" not in source:
+            fail(f"interp.dawn: call_builtin no longer dispatches {dispatch} through {helper}")
+        arms |= set(names(body(lines, f"fn {helper}(", "interp.dawn"),
+                          r'(?<![\w.\]])name == "([A-Za-z_0-9]+)"',
+                          "interp.dawn", f"arms in {helper}"))
     listed = set(
         names(
             body(lines, "fn interp_arms()", "interp.dawn"),

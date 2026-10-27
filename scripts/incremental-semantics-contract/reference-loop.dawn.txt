@@ -20,6 +20,8 @@
 # deliberate change of what such a file reports (docs/lsp-module-memo-design.md
 # §十四). That rule is spelled out again below rather than shared with the
 # driver, so that a mutation of the driver's copy shows.
+# The comptime world receives the complete CtOut for retained-size accounting;
+# its control flow remains independent of the extracted module step.
 # Injected into a private subject, never linked into the production compiler.
 pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Fs !Env !io = {
   var diags = loaded.diags
@@ -119,7 +121,8 @@ pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js:
           renames = cx.import_renames }
         ct = eval_comptime_in(tm, world, scope, std.fn_decls, std.by_owner, std.impl_fns,
           std.std_names, cx.adts, cx.traits, cx.impl_table, mf.class_name, opts)
-        if not is_std { world = ct_world_add(world, mf.class_name, scope, tm, ct.consts, true) }
+        if is_std { world = CtWorld { ..world, payload = world.payload + ct_size(ct) } }
+        else { world = ct_world_add(world, mf.class_name, scope, tm, ct, true) }
       }
       for d in cx.diags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
       for d in ct.diags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }
