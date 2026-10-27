@@ -50,3 +50,6 @@ if [ "$fail" != 0 ]; then
   exit 1
 fi
 echo "OK: ${#units[@]} package unit(s), every test block run"
+
+# Product ownership is independent of whether the package suites pass.
+python3 scripts/dependency-test-contract/run.py

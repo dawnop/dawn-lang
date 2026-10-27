@@ -459,7 +459,8 @@ release_block = '''  let lease = jsig_for(jars)
   Ok(bracket(
     lease,
     held => held.close(),
-    held => analyze_program(loaded, std, opts, held.jsig)
+    held => if product { analyze_product(loaded, std, opts, held.jsig) }
+    else { analyze_program(loaded, std, opts, held.jsig) }
   ))'''
 
 if name == "always-system":

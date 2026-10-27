@@ -109,8 +109,8 @@ MUTATIONS = {
     "cold/parse-failure-unpublished": ((ANALYZE, PARSE_HEADERS, "    let _ = headers\n"),),
     "cold/parse-failure-drops-impls": ((ANALYZE, PARSE_HEADERS,
         "    cx = Cx { ..headers.cx, diags = [], impl_table = cx.impl_table }\n"),),
-    "cold/parse-failure-skips-imports": ((ANALYZE, "check_module_headers(cx, mf.m, before.exports)",
-                                          "check_module_headers(cx, mf.m, map.empty())"),),
+    "cold/parse-failure-skips-imports": ((ANALYZE, "check_module_headers(cx, mf.m, before.exports, tests)",
+                                          "check_module_headers(cx, mf.m, map.empty(), tests)"),),
     "cold/parse-failure-reports-headers": ((ANALYZE, PARSE_HEADERS, PARSE_HEADERS +
         "    for d in headers.cx.diags { diags = diags ++ [LocDiag { path = mf.path, d = d }] }\n"),),
     # A module that fails to parse without losing a declaration is checked

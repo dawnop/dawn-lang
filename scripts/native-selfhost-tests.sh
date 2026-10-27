@@ -61,3 +61,6 @@ echo "== selfhost tests, native backend =="
 
 # Repeat the byte vectors after folding on this native compiler host.
 DAWNC_BIN="$DAWNC" "$ROOT/scripts/comptime-bytes-contract/run.sh" --native-host
+
+# Exercise package test ownership through the native driver as well.
+python3 scripts/dependency-test-contract/run.py --native-host "$DAWNC"
