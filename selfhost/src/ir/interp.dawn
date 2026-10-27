@@ -10,7 +10,7 @@
 # structural instead of a promise. Note what is not in this file any more:
 # no pattern matcher, no `for`/`while`, no `?`/`!`, no interpolation.
 #
-# Control flow: ER = Result[(ESt, Env, CValue), (ESt, Env, Ctl)] -- `?` is
+# Control flow: ER = Result[(ESt, Env, EvalValue), (ESt, Env, Ctl)] -- `?` is
 # throw, a call catches KReturn, a loop catches KBreak/KContinue naming it.
 # The state carries fuel (the real bound on runaway evaluation) and the call
 # depth (turns a would-be stack overflow into a decent message). Both start
@@ -34,7 +34,7 @@ use std/map
 use std/set
 use front/token.{Diag, mk_diag}
 use check/tast.{
-  TExpr, TStmt, TFun, TModule,
+  TExpr, TStmt, TFun, TModule, tex_ty,
   XStr, XLambda, XApply, XJava, XPropagate, XUnwrap, XReturn, XIndex,
   XCallDyn, XCallBuiltin, XCallFn, XCtor, XField, XListLit, XTupleLit,
   TLEExpr, TLESpread, TLEIf,
@@ -49,8 +49,7 @@ use check/types.{
   EV_PACK_ID, EV_MISS_MSG, FROM_INT_ID, FROM_FLOAT_ID, ty_show
 }
 use ir/core.{
-  CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
-  VClosure, VDict, VCursor,
+  ConstValue, CVInt, CVFloat, CVBool, CVStr, CVUnit, CVList, CVTuple, CVAdt,
   CNoSite, CExpr, CStmt, CFun, CDictDef, CSlotFn, CSlotDefault, ty_key, ty_key_inst,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
@@ -64,7 +63,35 @@ use ir/core.{
 }
 use ir/lower
 use ir/float_eval
-use check/cx.{cx_new}
+use check/cx.{cx_new, is_const_literal_type}
+
+type EvalValue =
+  | VInt(v: Int)
+  | VFloat(v: Float)
+  | VBool(v: Bool)
+  | VStr(v: String)
+  | VUnit
+  | VList(elems: List[EvalValue])
+  | VTuple(elems: List[EvalValue])
+  | VAdt(adt: Int, ci: Int, fields: List[EvalValue])
+# Every function value has this one shape. Lambdas, local named functions,
+# top-level functions used as values, builtins used as values and bare
+# constructors are all lifted by lowering into a top-level function plus a
+# captured environment, so one case does what four used to.
+  | VClosure(owner: String, name: String, caps: Map[Int, EvalValue])
+# A trait dictionary, named by the key its CDictDef carries plus the
+# dictionaries it was built from (empty unless the impl behind it is
+# conditional). Comptime dispatches through this: the key finds the slot table
+# and `args` is what a slot body reads back out.
+  | VDict(key: String, args: List[EvalValue])
+# A position in a String (std/cursor), as the comptime interpreter holds one:
+# which of the run's strings it was taken on, by the interpreter's own number
+# for that string, and how many code points into it. Like a function value it
+# exists only while a fold runs: the checker refuses a constant of type
+# `Cursor` (spec 7.2), so no emitter ever reads one. Carrying the string is
+# what lets the interpreter refuse to answer for a position used on another
+# string, a question the backends answer two different ways (spec 11).
+  | VCursor(text: Int, at: Int)
 
 type CtFrame =
   | FDirect(owner: String, name: String)
@@ -86,7 +113,7 @@ type CtFailure = {
 
 type Ctl =
   | KErr(failure: CtFailure)
-  | KReturn(v: CValue)
+  | KReturn(v: EvalValue)
 # break and continue name their loop: lowering turns a `match` into a
 # once-loop, so a `break` inside an arm leaves a loop that is not the
 # innermost one.
@@ -124,7 +151,7 @@ pub(pkg) type LowerCache = {
   # repeats a few hundred values, and each fold is a lowering and an
   # interpretation (about 70 us measured at L0); a failed fold is not kept,
   # so every literal out of range is reported where it is.
-  lits: Map[String, CValue]
+  lits: Map[String, ConstValue]
 }
 
 ## One expression's evaluation. Fuel and depth are the per-evaluation half and
@@ -161,9 +188,9 @@ fn no_texts() -> Texts = {
   Texts { ids = ids, strs = [], cps = [], last = -1 }
 }
 
-alias Env = Map[Int, CValue]
+alias Env = Map[Int, EvalValue]
 
-alias ER = Result[(ESt, Env, CValue), (ESt, Env, Ctl)]
+alias ER = Result[(ESt, Env, EvalValue), (ESt, Env, Ctl)]
 
 alias SR = Result[(ESt, Env), (ESt, Env, Ctl)]
 
@@ -287,10 +314,10 @@ pub(pkg) type ICx = {
   owner_of: Map[String, String],
   std_names: Set[String],
   adts: Adts,
-  consts: Map[String, CValue],
+  consts: Map[String, ConstValue],
   # comptime block results by span: a block nested in the expression being
   # folded is itself folded first, and lowering leaves behind a reference
-  blocks: Map[(Int, Int), CValue],
+  blocks: Map[(Int, Int), ConstValue],
   # the module being folded, and the tables lowering needs from it
   owner: String,
   traits: Traits,
@@ -359,14 +386,14 @@ pub type CtWorld = {
   # owner → how its bodies name constants
   scopes: Map[String, ConstScope],
   # module path → its folded constants
-  consts: Map[String, Map[String, CValue]]
+  consts: Map[String, Map[String, ConstValue]]
 }
 
 pub fn ct_world_empty() -> CtWorld = {
   let no_owners: Map[String, Map[String, TFun]] = map.empty()
   let no_syms: Map[String, Map[Int, Sym]] = map.empty()
   let no_scopes: Map[String, ConstScope] = map.empty()
-  let no_consts: Map[String, Map[String, CValue]] = map.empty()
+  let no_consts: Map[String, Map[String, ConstValue]] = map.empty()
   let no_sigs: Map[(String, String), Sig] = map.empty()
   CtWorld { owners = no_owners, impl_fns = no_impls(), sigs = no_sigs, syms = no_syms,
     scopes = no_scopes, consts = no_consts }
@@ -379,7 +406,7 @@ pub fn ct_world_add(
   owner: String,
   scope: ConstScope,
   tm: TModule,
-  consts: Map[String, CValue],
+  consts: Map[String, ConstValue],
   bodies: Bool
 ) -> CtWorld = {
   var sigs = w.sigs
@@ -571,7 +598,7 @@ fn text_id(st: ESt, env: Env, s: String) -> Result[(ESt, Int), (ESt, Env, Ctl)] 
 ## number and its code-point index, or a refusal when it was taken on another
 ## string. The comparison is of contents, so a position in one string is a
 ## position in any equal one, exactly as it is on both backends.
-fn cursor_in(st: ESt, env: Env, s: String, v: CValue) -> Result[(Int, Int), (ESt, Env, Ctl)] =
+fn cursor_in(st: ESt, env: Env, s: String, v: EvalValue) -> Result[(Int, Int), (ESt, Env, Ctl)] =
   match v {
     VCursor(id, c) ->
       if st.texts.strs[id] == s {
@@ -590,19 +617,19 @@ fn cross_text[T](st: ESt, env: Env) -> Result[T, (ESt, Env, Ctl)] =
     Ok(_) -> panic("unreachable")
   }
 
-fn some_v(v: CValue) -> CValue = VAdt(OPTION_ID, 0, [v])
+fn some_v(v: EvalValue) -> EvalValue = VAdt(OPTION_ID, 0, [v])
 
-fn none_v() -> CValue = VAdt(OPTION_ID, 1, [])
+fn none_v() -> EvalValue = VAdt(OPTION_ID, 1, [])
 
 # ---- value helpers (a mismatch here is an interpreter bug, not a user error) ----
 
-fn as_int(v: CValue) -> Int =
+fn as_int(v: EvalValue) -> Int =
   match v {
     VInt(n) -> n
     _ -> panic("comptime interpreter bug: expected an Int")
   }
 
-fn as_float(v: CValue) -> Float =
+fn as_float(v: EvalValue) -> Float =
   match v {
     VFloat(x) -> x
     _ -> panic("comptime interpreter bug: expected a Float")
@@ -612,34 +639,34 @@ fn as_float(v: CValue) -> Float =
 ## it has no runtime representation of its own and the interpreter's value
 ## domain needs no variant for it. Whatever produced the value has been
 ## through the checker, so a non-scalar integer is a compiler bug.
-fn as_char(v: CValue) -> Char =
+fn as_char(v: EvalValue) -> Char =
   char.of(as_int(v)).expect("comptime interpreter bug: not a code point")
 
-fn as_bool(v: CValue) -> Bool =
+fn as_bool(v: EvalValue) -> Bool =
   match v {
     VBool(b) -> b
     _ -> panic("comptime interpreter bug: expected a Bool")
   }
 
-fn as_str(v: CValue) -> String =
+fn as_str(v: EvalValue) -> String =
   match v {
     VStr(s) -> s
     _ -> panic("comptime interpreter bug: expected a String")
   }
 
-fn as_list(v: CValue) -> List[CValue] =
+fn as_list(v: EvalValue) -> List[EvalValue] =
   match v {
     VList(xs) -> xs
     _ -> panic("comptime interpreter bug: expected a List")
   }
 
-fn as_adt(v: CValue) -> (Int, Int, List[CValue]) =
+fn as_adt(v: EvalValue) -> (Int, Int, List[EvalValue]) =
   match v {
     VAdt(aid, ci, fs) -> (aid, ci, fs)
     _ -> panic("comptime interpreter bug: expected an ADT value")
   }
 
-pub fn cvalue_kind(v: CValue) -> String =
+fn eval_value_kind(v: EvalValue) -> String =
   match v {
     VInt(_) -> "Int"
     VFloat(_) -> "Float"
@@ -654,7 +681,7 @@ pub fn cvalue_kind(v: CValue) -> String =
     VCursor(_, _) -> "Cursor"
   }
 
-fn stringify(v: CValue) -> String =
+fn stringify(v: EvalValue) -> String =
   match v {
     VInt(n) -> to_string(n)
     # the shared dtoa, called directly rather than through `to_string`: the
@@ -680,7 +707,7 @@ fn stringify(v: CValue) -> String =
 ## arm answered the literal string `"<value>"` for those -- a wrong answer
 ## rather than a refusal, and a const folds into the emitted program, so it
 ## would have been baked into both backends' output.
-fn show_value(v: CValue) -> Option[String] =
+fn show_value(v: EvalValue) -> Option[String] =
   match v {
     VStr(s) -> Some(quote_str(s))
     VInt(_) | VFloat(_) | VBool(_) -> Some(stringify(v))
@@ -704,7 +731,7 @@ fn quote_str(s: String) -> String = {
 ## so Dawn's own `==` on Float *is* the answer — no host query needed.
 fn float_ieee_eq(a: Float, b: Float) -> Bool = a == b
 
-fn value_eq(a: CValue, b: CValue) -> Bool = value_eq_or_clash(a, b) == EQ_TRUE
+fn value_eq(a: EvalValue, b: EvalValue) -> Bool = value_eq_or_clash(a, b) == EQ_TRUE
 
 const EQ_FALSE: Int = 0
 const EQ_TRUE: Int = 1
@@ -713,14 +740,14 @@ const EQ_CLASH: Int = 2
 
 ## `==` and `!=` at comptime: the equality, or the refusal for two cursors
 ## taken on different strings, wherever in the two values they sit.
-fn eq_or_refuse(st: ESt, env: Env, a: CValue, b: CValue) -> Result[Bool, (ESt, Env, Ctl)] = {
+fn eq_or_refuse(st: ESt, env: Env, a: EvalValue, b: EvalValue) -> Result[Bool, (ESt, Env, Ctl)] = {
   let r = value_eq_or_clash(a, b)
   if r == EQ_CLASH { cross_text(st, env) } else { Ok(r == EQ_TRUE) }
 }
 
 fn eq_code(b: Bool) -> Int = if b { EQ_TRUE } else { EQ_FALSE }
 
-fn value_eq_or_clash(a: CValue, b: CValue) -> Int =
+fn value_eq_or_clash(a: EvalValue, b: EvalValue) -> Int =
   match a {
     VCursor(x, i) ->
       match b {
@@ -748,7 +775,7 @@ fn value_eq_or_clash(a: CValue, b: CValue) -> Int =
 ## In order, stopping at the first pair that is not equal, as the backends'
 ## equality does: a difference before any clash is an answer both of them
 ## give, and a clash before any difference is one they do not.
-fn list_eq_or_clash(xs: List[CValue], ys: List[CValue]) -> Int = {
+fn list_eq_or_clash(xs: List[EvalValue], ys: List[EvalValue]) -> Int = {
   if len(xs) != len(ys) { return EQ_FALSE }
   var i = 0
   while i < len(xs) {
@@ -759,7 +786,7 @@ fn list_eq_or_clash(xs: List[CValue], ys: List[CValue]) -> Int = {
   EQ_TRUE
 }
 
-fn scalar_eq(a: CValue, b: CValue) -> Bool =
+fn scalar_eq(a: EvalValue, b: EvalValue) -> Bool =
   match a {
     VInt(x) ->
       match b {
@@ -996,7 +1023,7 @@ fn get_cfun(
 ## A constant's value and the module path it was read from. The folding
 ## module's own constants are the ones folded so far (`icx.consts`), so an
 ## initializer still sees only earlier constants.
-fn const_lookup(icx: ICx, owner: String, name: String) -> Option[(String, CValue)] = {
+fn const_lookup(icx: ICx, owner: String, name: String) -> Option[(String, ConstValue)] = {
   if owner != "" {
     if owner == icx.scope.path {
       return match map.get(icx.consts, name) {
@@ -1023,7 +1050,7 @@ fn const_lookup(icx: ICx, owner: String, name: String) -> Option[(String, CValue
   }
 }
 
-fn world_const(icx: ICx, path: String, name: String) -> Option[(String, CValue)] =
+fn world_const(icx: ICx, path: String, name: String) -> Option[(String, ConstValue)] =
   match map.get(icx.world.consts, path) {
     Some(vals) ->
       match map.get(vals, name) {
@@ -1035,7 +1062,7 @@ fn world_const(icx: ICx, path: String, name: String) -> Option[(String, CValue)]
 
 ## A simple name a selective import brought in, found under the name its
 ## declaring module gave it (spec §10.2).
-fn imported_const(icx: ICx, sc: ConstScope, name: String) -> Option[(String, CValue)] =
+fn imported_const(icx: ICx, sc: ConstScope, name: String) -> Option[(String, ConstValue)] =
   match map.get(sc.imported, name) {
     Some(from) -> world_const(icx, from, map.get(sc.renames, name).unwrap_or(name))
     None -> None
@@ -1049,8 +1076,8 @@ fn call_cfun(
   env: Env,
   cf: CFun,
   frame: CtFrame,
-  caps: Map[Int, CValue],
-  args: List[CValue]
+  caps: Map[Int, EvalValue],
+  args: List[EvalValue]
 ) -> ER !io = {
   if st.depth + 1 > icx.max_depth {
     return framed(
@@ -1105,20 +1132,20 @@ fn call_default(
   owner: String,
   tid: Int,
   method: String,
-  args: List[CValue]
+  args: List[EvalValue]
 ) -> ER !io = {
   let frame = FDefault(owner, trait_frame_name(icx, tid), tid, method)
   match get_trait_cfun(icx, st, env, tid, "\$default", method) {
     Err(err) -> Err(frame_error(err, frame))
     Ok(pair) -> {
       let (st1, cf) = pair
-      let no_caps: Map[Int, CValue] = map.empty()
+      let no_caps: Map[Int, EvalValue] = map.empty()
       call_cfun(icx, st1, env, cf, frame, no_caps, args)
     }
   }
 }
 
-fn apply_fn(icx: ICx, st: ESt, env: Env, f: CValue, args: List[CValue]) -> ER !io =
+fn apply_fn(icx: ICx, st: ESt, env: Env, f: EvalValue, args: List[EvalValue]) -> ER !io =
   match f {
     VClosure(owner, name, caps) -> {
       let frame = FDynamic(owner, name)
@@ -1142,7 +1169,7 @@ fn call_named(
   env: Env,
   owner: String,
   name: String,
-  args: List[CValue]
+  args: List[EvalValue]
 ) -> ER !io = {
   let frame = FDirect(owner, name)
   if owner == "std/hamt" {
@@ -1152,7 +1179,7 @@ fn call_named(
     Err(err) -> Err(frame_error(err, frame))
     Ok(pair) -> {
       let (st1, cf) = pair
-      let no_caps: Map[Int, CValue] = map.empty()
+      let no_caps: Map[Int, EvalValue] = map.empty()
       call_cfun(icx, st1, env, cf, frame, no_caps, args)
     }
   }
@@ -1230,7 +1257,7 @@ fn comptime_rejects() -> List[String] = {
   for op in ["observe", "note", "completed", "checkpoint", "rewind", "origin", "field", "number", "parent"] {
     out = out ++ ["provenance_" ++ op]
   }
-  # `CValue` has no `VBytes`: comptime cannot hold a Bytes at all, so the
+  # `EvalValue` has no `VBytes`: comptime cannot hold a Bytes at all, so the
   # ten byte primitives have nothing to operate on
   for op in ["utf8", "decode_utf8", "decode_latin1", "len", "at", "slice",
     "pack_int", "unpack_int", "pack_float", "unpack_float"] {
@@ -1274,7 +1301,7 @@ fn comptime_rejects() -> List[String] = {
   # has neither a reactor instance nor a turn boundary in which one could live.
   out = out ++ ["reactor_state_has", "reactor_state_get", "reactor_state_set"]
   # The GPU primitives are io at a device: a compile must not open a driver
-  # any more than it may read a file, and `CValue` has no Array to hand them.
+  # any more than it may read a file, and `EvalValue` has no Array to hand them.
   for op in ["load_module_host", "alloc_host", "memcpy_htod_host",
     "memcpy_dtoh_host", "launch_host", "module_global_host", "free_host", "sync_host",
     "close_host"] {
@@ -1285,12 +1312,12 @@ fn comptime_rejects() -> List[String] = {
   # that: there is still no host object to reclaim, and an `Err` here would be
   # a fabricated answer rather than a fold.
   out = out ++ ["cast"]
-  # Array: `CValue` has no representation for it. Map and Set are refused too
+  # Array: `EvalValue` has no representation for it. Map and Set are refused too
   # -- the group spec §7.2.2 names -- but not here: lowering turns them into
   # calls on std/hamt before this evaluator sees a name, and the refusal is
   # `call_named`'s (`comptime_refused_after_lowering` below).
   for op in ["new", "len", "get", "push", "with", "steal", "extend", "slice"] { out = out ++ ["array_" ++ op] }
-  # the flat buffers: mutable, and `CValue` has nowhere to put one
+  # the flat buffers: mutable, and `EvalValue` has nowhere to put one
   for op in ["new", "len", "at", "set", "fill", "copy_from", "pack", "unpack"] { out = out ++ ["i64buf_" ++ op] }
   for op in ["new", "len", "at", "set", "fill", "copy_from", "pack", "unpack"] { out = out ++ ["f64buf_" ++ op] }
   # the List/Array crossing: an Array is what it ends or starts with
@@ -1306,7 +1333,7 @@ fn comptime_rejects() -> List[String] = {
   # this file already has. A handler with a `var` installs a cell, and that
   # `cell_new` is where the fold stops ("builtin `cell_new` is not available
   # at comptime", interp_test.dawn pins it). Refused rather than given arms
-  # because `CValue` is immutable, so an implementation would have to invent a
+  # because `EvalValue` is immutable, so an implementation would have to invent a
   # store the rest of this interpreter has no notion of. `cell_get`/`cell_set`/
   # `cell_take` only ever follow a `cell_new`, so the first refusal is the one
   # a program meets.
@@ -1344,7 +1371,7 @@ fn comptime_rejects() -> List[String] = {
 ##
 ## Refused, but not by the chain -- no name here ever reaches it. Lowering
 ## turns each into a call on the Dawn trie in std/hamt (`lower.hamt_fn`), and
-## `call_named` refuses that module's Core, because `CValue` has no
+## `call_named` refuses that module's Core, because `EvalValue` has no
 ## representation for a trie. So these are in the lowered group of the
 ## partition and in no list the chain reads; this list exists for the one
 ## reader that has to know the refusal is real all the same, the
@@ -1396,13 +1423,13 @@ const NO_ARM_LISTED: String = "listed in interp_arms but has no arm: "
 ## is a node and everything else ends the walk. The three terminators the
 ## contract names all arrive as "not a `VAdt` at that id" -- the placeholder
 ## boxes to `VUnit`, a null pack cannot be constructed at all, and any other
-## erased value is some other `CValue`.
+## erased value is some other `EvalValue`.
 ##
 ## A miss panics rather than answering the placeholder, and panics *this
 ## compiler* rather than raising a comptime diagnostic: a pack without a key
 ## its own reader named is lowering's bug, not the interpreted program's, and
 ## `lower.impl_ev_sources` treats the same class of break the same way.
-fn ev_get_value(pack: CValue, key: Int) -> CValue =
+fn ev_get_value(pack: EvalValue, key: Int) -> EvalValue =
   match pack {
     VAdt(aid, _, fields) ->
       if aid != EV_PACK_ID {
@@ -1417,7 +1444,7 @@ fn ev_get_value(pack: CValue, key: Int) -> CValue =
   }
 
 ## One pack node, in the shape `lower.ev_build` conses them.
-fn ev_node(key: Int, ev: CValue, outer: CValue) -> CValue =
+fn ev_node(key: Int, ev: EvalValue, outer: EvalValue) -> EvalValue =
   VAdt(EV_PACK_ID, 0, [VInt(key), ev, outer])
 
 ## The evidence-pack join, on the interpreter's own values: the third
@@ -1433,7 +1460,7 @@ fn ev_node(key: Int, ev: CValue, outer: CValue) -> CValue =
 ## No panic. A miss is a broken invariant, but a `front` with nothing in it is
 ## an ordinary answer: a row whose first non-ground atom instantiated to pure
 ## carries the placeholder, and appending it must give `back` back.
-fn ev_append_value(front: CValue, back: CValue) -> CValue =
+fn ev_append_value(front: EvalValue, back: EvalValue) -> EvalValue =
   match front {
     VAdt(aid, _, fields) ->
       if aid != EV_PACK_ID {
@@ -1447,7 +1474,7 @@ fn ev_append_value(front: CValue, back: CValue) -> CValue =
 ## Did the walk end in the contract's panic? `catch_panic` because that is
 ## what a panic is here, and the message because "some panic" would pass for
 ## an index-out-of-range just as well.
-fn ev_get_panics(pack: CValue, key: Int) -> Bool =
+fn ev_get_panics(pack: EvalValue, key: Int) -> Bool =
   match catch_panic(() => ev_get_value(pack, key)) {
     Ok(_) -> false
     Err(e) -> str.contains(e.message, EV_MISS_MSG)
@@ -1461,7 +1488,7 @@ fn ev_get_panics(pack: CValue, key: Int) -> Bool =
 # the C one, by emitc's test that the runtime declares what the emitter calls.
 
 test "an evidence pack answers by key, not by position" {
-  let empty: CValue = VUnit
+  let empty: EvalValue = VUnit
   let one = ev_node(7, VInt(700), empty)
   let two = ev_node(4, VInt(400), one)
   let three = ev_node(1, VInt(100), two)
@@ -1478,7 +1505,7 @@ test "an evidence pack answers by key, not by position" {
 }
 
 test "an evidence pack ends on the placeholder, and a miss is a panic" {
-  let empty: CValue = VUnit
+  let empty: EvalValue = VUnit
   let one = ev_node(7, VInt(700), empty)
   # the placeholder ends the walk rather than being read as a node -- the
   # whole reason the terminator test belongs to the runtime -- and the end of
@@ -1490,13 +1517,13 @@ test "an evidence pack ends on the placeholder, and a miss is a panic" {
   # answer without the header's `kind` byte, and the one `CIsCtor` would have
   # read a tag off
   assert ev_get_panics(VStr("not a pack"), 7)
-  # NULL is the fourth thing that ends a walk, and it has no CValue at all --
+  # NULL is the fourth thing that ends a walk, and it has no EvalValue at all --
   # it comes from the hand-written shims, so `dawn_ev_get`'s own `p != NULL`
   # is the only place it is answered and nothing here reaches it.
 }
 
 test "an appended pack answers from both halves, and answers front's first" {
-  let empty: CValue = VUnit
+  let empty: EvalValue = VUnit
   # two chains that answer nothing of each other's: the shape a row with two
   # non-ground atoms hands one slot
   let front = ev_node(1, VInt(100), ev_node(4, VInt(400), empty))
@@ -1524,7 +1551,7 @@ test "an appended pack answers from both halves, and answers front's first" {
 }
 
 test "appending an empty pack changes nothing on either side" {
-  let empty: CValue = VUnit
+  let empty: EvalValue = VUnit
   let back = ev_node(7, VInt(700), empty)
   # an empty front is the identity: a row whose non-ground atom instantiated
   # to pure brings the placeholder, and it must not cost `back` a key. Not a
@@ -1541,7 +1568,7 @@ test "appending an empty pack changes nothing on either side" {
   assert value_eq(onto_empty, front)
 }
 
-fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -> ER !io =
+fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]) -> ER !io =
   if not has_name(interp_arms(), name) {
     cerr(st, env, no_arm_msg(name))
   } else if name == "cmp" {
@@ -1683,7 +1710,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # is negative exactly when the length does not fit in an Int, which
     # `burn_n` treats as over any budget.
     let (st1, _, _) = burn_n(st, env, if to <= from { 0 } else { to - from })?
-    var out: List[CValue] = []
+    var out: List[EvalValue] = []
     var i = from
     while i < to {
       out = out ++ [VInt(i)]
@@ -1779,7 +1806,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
   } else if name == "code_points" {
     let s = as_str(args[0])
     let (st1, _, _) = burn_n(st, env, len(s))?
-    var out: List[CValue] = []
+    var out: List[EvalValue] = []
     for cp in code_points(s) { out = out ++ [VInt(char.code(cp))] }
     Ok((st1, env, VList(out)))
   } else if name == "from_code_points" {
@@ -1838,14 +1865,14 @@ fn merge_sort(
   icx: ICx,
   st: ESt,
   env: Env,
-  xs: List[CValue],
-  f: CValue
-) -> Result[(ESt, List[CValue]), (ESt, Env, Ctl)] !io = {
+  xs: List[EvalValue],
+  f: EvalValue
+) -> Result[(ESt, List[EvalValue]), (ESt, Env, Ctl)] !io = {
   if len(xs) <= 1 { return Ok((st, xs)) }
   let mid = len(xs) / 2
   let (st1, left) = merge_sort(icx, st, env, list.take(xs, mid), f)?
   let (st2, right) = merge_sort(icx, st1, env, list.drop(xs, mid), f)?
-  var out: List[CValue] = []
+  var out: List[EvalValue] = []
   var i = 0
   var j = 0
   var st3 = st2
@@ -1889,10 +1916,10 @@ fn eval_all(
   st: ESt,
   env: Env,
   es: List[CExpr]
-) -> Result[(ESt, Env, List[CValue]), (ESt, Env, Ctl)] !io = {
+) -> Result[(ESt, Env, List[EvalValue]), (ESt, Env, Ctl)] !io = {
   var st1 = st
   var env1 = env
-  var vals: List[CValue] = []
+  var vals: List[EvalValue] = []
   for e in es {
     let (st2, env2, v) = ceval(icx, st1, env1, e)?
     st1 = st2
@@ -1975,7 +2002,7 @@ fn ceval_closure(
 ) -> ER !io = {
   let (st1, env1, vals) = eval_all(icx, st, env, caps)?
   let (st2, cf) = get_cfun(icx, st1, env1, owner, name)?
-  var cenv: Map[Int, CValue] = map.empty()
+  var cenv: Map[Int, EvalValue] = map.empty()
   var i = 0
   for p in cf.captures {
     if i < len(vals) { cenv = map.insert(cenv, p.sym, vals[i]) }
@@ -1995,7 +2022,7 @@ fn ceval_call(icx: ICx, st: ESt, env: Env, callee: CCallee, args: List[CExpr]) -
   }
 }
 
-fn ceval_dynamic(icx: ICx, st: ESt, env: Env, target: CExpr, vals: List[CValue]) -> ER !io = {
+fn ceval_dynamic(icx: ICx, st: ESt, env: Env, target: CExpr, vals: List[EvalValue]) -> ER !io = {
   let (st2, env2, f) = ceval(icx, st, env, target)?
   apply_fn(icx, st2, env2, f, vals)
 }
@@ -2010,7 +2037,7 @@ fn ceval_method(
   dexpr: CExpr,
   m: String,
   idx: Int,
-  vals: List[CValue]
+  vals: List[EvalValue]
 ) -> ER !io = {
   let (st2, env2, dv) = ceval(icx, st1, env1, dexpr)?
   match dv {
@@ -2043,14 +2070,14 @@ fn call_impl(
   tid: Int,
   subject: Ty,
   m: String,
-  vals: List[CValue]
+  vals: List[EvalValue]
 ) -> ER !io = {
   let frame = FImpl(owner, trait_frame_name(icx, tid), tid, ty_key(subject), m)
   match get_trait_cfun(icx, st1, env1, tid, subject_key(subject), m) {
     Err(err) -> Err(frame_error(err, frame))
     Ok(pair) -> {
       let (st2, cf) = pair
-      let no_caps: Map[Int, CValue] = map.empty()
+      let no_caps: Map[Int, EvalValue] = map.empty()
       call_cfun(icx, st2, env1, cf, frame, no_caps, vals)
     }
   }
@@ -2072,7 +2099,7 @@ fn ceval_update(icx: ICx, st: ESt, env: Env, base: CExpr, fields: List[CUpdField
   let (st1, env1, bv) = ceval(icx, st, env, base)?
   let (st2, env2, vals) = eval_all(icx, st1, env1, update_values(fields))?
   let (aid, ci, kept) = as_adt(bv)
-  var out: List[CValue] = []
+  var out: List[EvalValue] = []
   var i = 0
   var k = 0
   for f in fields {
@@ -2184,7 +2211,7 @@ fn ceval_const_ref(icx: ICx, st: ESt, env: Env, owner: String, name: String) -> 
   match const_lookup(icx, owner, name) {
     Some(pr) -> {
       let (path, v) = pr
-      Ok((note_read(icx, st, path), env, v))
+      Ok((note_read(icx, st, path), env, thaw_const(v)))
     }
     None -> cerr(note_miss(st), env, const_miss(icx, owner, name))
   }
@@ -2212,7 +2239,7 @@ fn const_miss(icx: ICx, owner: String, name: String) -> String = {
 ## first, exactly as codegen would have
 fn ceval_comptime(icx: ICx, st: ESt, env: Env, lo: Int, hi: Int) -> ER =
   match map.get(icx.blocks, (lo, hi)) {
-    Some(v) -> Ok((st, env, v))
+    Some(v) -> Ok((st, env, thaw_const(v)))
     None -> cerr(st, env, "a nested comptime block did not fold")
   }
 
@@ -2226,7 +2253,7 @@ fn ceval_return(icx: ICx, st: ESt, env: Env, v: Option[CExpr]) -> ER !io =
   }
 
 fn ceval_dict_ref(st: ESt, env: Env, key: String) -> ER = {
-  let no_args: List[CValue] = []
+  let no_args: List[EvalValue] = []
   Ok((st, env, VDict(key, no_args)))
 }
 
@@ -2353,7 +2380,7 @@ fn holds(op: CBinOp, c: Int) -> Bool =
 ## a list. One function for both, so a fold cannot order a pair one way
 ## through `<` and the other way through `list.sort`, and the answer is a sign,
 ## as `dawn_cmp_*` and the JVM's scalar comparison return.
-fn order(st: ESt, env: Env, lv: CValue, rv: CValue) -> Result[Int, (ESt, Env, Ctl)] =
+fn order(st: ESt, env: Env, lv: EvalValue, rv: EvalValue) -> Result[Int, (ESt, Env, Ctl)] =
   match lv {
     VInt(a) -> {
       let b = as_int(rv)
@@ -2389,7 +2416,7 @@ fn order(st: ESt, env: Env, lv: CValue, rv: CValue) -> Result[Int, (ESt, Env, Ct
     }
   }
 
-fn arith(st: ESt, env: Env, op: CBinOp, lv: CValue, rv: CValue) -> ER =
+fn arith(st: ESt, env: Env, op: CBinOp, lv: EvalValue, rv: EvalValue) -> ER =
   match lv {
     VInt(a) ->
       match rv {
@@ -2434,7 +2461,7 @@ fn arith(st: ESt, env: Env, op: CBinOp, lv: CValue, rv: CValue) -> ER =
     _ -> cerr(st, env, "arithmetic needs two numbers of the same type")
   }
 
-fn bitwise(st: ESt, env: Env, op: CBinOp, lv: CValue, rv: CValue) -> ER =
+fn bitwise(st: ESt, env: Env, op: CBinOp, lv: EvalValue, rv: EvalValue) -> ER =
   match lv {
     VInt(a) ->
       match rv {
@@ -2554,14 +2581,72 @@ fn exec_loop(
   Ok((st1, env1))
 }
 
+# ---- the result boundary ----
+
+## The reverse crossing happens only when evaluation reads a frozen constant.
+fn thaw_const(v: ConstValue) -> EvalValue =
+  match v {
+    CVInt(x) -> VInt(x)
+    CVFloat(x) -> VFloat(x)
+    CVBool(x) -> VBool(x)
+    CVStr(x) -> VStr(x)
+    CVUnit -> VUnit
+    CVList(xs) -> VList(list.map(xs, (x: ConstValue) => thaw_const(x)))
+    CVTuple(xs) -> VTuple(list.map(xs, (x: ConstValue) => thaw_const(x)))
+    CVAdt(a, c, xs) -> VAdt(a, c, list.map(xs, (x: ConstValue) => thaw_const(x)))
+  }
+
+## Each node pays fuel and depth before descending. Working-only values fail
+## here, with their logical location, before a backend can consume the tree.
+fn freeze_const(
+  icx: ICx, st: ESt, env: Env, v: EvalValue, path: String, depth: Int
+) -> Result[(ESt, ConstValue), (ESt, Env, Ctl)] = {
+  if depth >= icx.max_depth {
+    return Err((st, env, KErr(ct_failure("constant nesting limit at " ++ path, "simplify the result"))))
+  }
+  let (st1, _, _) = burn_n(st, env, 1)?
+  match v {
+    VInt(x) -> Ok((st1, CVInt(x)))
+    VFloat(x) -> Ok((st1, CVFloat(x)))
+    VBool(x) -> Ok((st1, CVBool(x)))
+    VStr(x) -> Ok((st1, CVStr(x)))
+    VUnit -> Ok((st1, CVUnit))
+    VList(xs) | VTuple(xs) | VAdt(_, _, xs) -> {
+      var st2 = st1
+      var out: List[ConstValue] = []
+      var i = 0
+      for x in xs {
+        let part = match v {
+          VAdt(a, c, _) -> "." ++ adt_of(icx.adts, a).ctors[c].fields[i].name
+          _ -> "[" ++ to_string(i) ++ "]"
+        }
+        let (next, cv) = freeze_const(icx, st2, env, x, path ++ part, depth + 1)?
+        st2 = next
+        out = out ++ [cv]
+        i = i + 1
+      }
+      let cv = match v {
+        VList(_) -> CVList(out)
+        VTuple(_) -> CVTuple(out)
+        VAdt(a, c, _) -> CVAdt(a, c, out)
+        _ -> panic("freeze: structured value lost its shape")
+      }
+      Ok((st2, cv))
+    }
+    VClosure(_, _, _) | VDict(_, _) | VCursor(_, _) ->
+      Err((st1, env, KErr(ct_failure("working value cannot escape at " ++ path,
+        "return a closed literal value (spec §7.2)"))))
+  }
+}
+
 # ---- the module driver ----
 
 ## Accumulated results of one module's comptime evaluation: diagnostics,
 ## const values by name, comptime-block values by (lo, hi) span.
 pub type CtOut = {
   diags: List[Diag],
-  consts: Map[String, CValue],
-  blocks: Map[(Int, Int), CValue],
+  consts: Map[String, ConstValue],
+  blocks: Map[(Int, Int), ConstValue],
   # The other modules, by path, whose bodies or constants the run read, and
   # whether some lookup into another module found nothing. Together they
   # bound what the result depends on beyond the module's own input: an
@@ -2585,7 +2670,7 @@ pub(pkg) type CtRun = {
 fn empty_cache() -> LowerCache = {
   let no_fns: Map[String, CFun] = map.empty()
   let no_dicts: Map[String, CDictDef] = map.empty()
-  let no_lits: Map[String, CValue] = map.empty()
+  let no_lits: Map[String, ConstValue] = map.empty()
   LowerCache { fns = no_fns, dicts = no_dicts, next_lam = 0, reads = set.empty(), missed = false,
     lits = no_lits }
 }
@@ -2610,7 +2695,7 @@ fn fold_expr(
   e: TExpr,
   lo: Int,
   hi: Int
-) -> (LowerCache, Result[CValue, Diag]) !io = {
+) -> (LowerCache, Result[ConstValue, Diag]) !io = {
   let env: Env = map.empty()
   let (ce, lifted, dicts, next) =
     lower.lower_expr_in(icx.owner, e, icx.traits, icx.impls, icx.adts,
@@ -2620,9 +2705,21 @@ fn fold_expr(
   var dts = cache.dicts
   for d in dicts { dts = map.insert(dts, d.key, d) }
   let st = st_from(fuel, LowerCache { ..cache, fns = tbl, dicts = dts, next_lam = next })
-  match ceval(icx, st, env, ce) {
+  let result_ty = tex_ty(e)
+  if not is_const_literal_type(icx.adts, result_ty, set.empty()) {
+    return (st.cache, Err(failure_diag(ct_failure("result at $ has no constant representation: " ++
+        ty_show(icx.adts, result_ty), "return a closed literal value (spec §7.2)"), lo, hi)))
+  }
+  let frozen = match ceval(icx, st, env, ce) {
     Ok(r) -> {
-      let (st1, _, v) = r
+      let (st1, env1, v) = r
+      freeze_const(icx, st1, env1, v, "$", 0)
+    }
+    Err(r) -> Err(r)
+  }
+  match frozen {
+    Ok(r) -> {
+      let (st1, v) = r
       (st1.cache, Ok(v))
     }
     Err(r) -> {
@@ -3005,8 +3102,8 @@ fn module_icx(
   # this module's own impl methods and trait defaults join std's
   var impl_fns = std_impl_fns
   for f in tm.fns { impl_fns = note_trait_fn(impl_fns, owner, f) }
-  let no_consts: Map[String, CValue] = map.empty()
-  let no_blocks: Map[(Int, Int), CValue] = map.empty()
+  let no_consts: Map[String, ConstValue] = map.empty()
+  let no_blocks: Map[(Int, Int), ConstValue] = map.empty()
   ICx {
     fns = fns,
     by_owner = std_owners,
@@ -3046,8 +3143,8 @@ fn eval_module_in(
   opts: CtOpts
 ) -> CtRun !io = {
   let fuel = opts.fuel
-  let empty_c: Map[String, CValue] = map.empty()
-  let empty_b: Map[(Int, Int), CValue] = map.empty()
+  let empty_c: Map[String, ConstValue] = map.empty()
+  let empty_b: Map[(Int, Int), ConstValue] = map.empty()
   var run = CtRun {
     out = CtOut { diags = [], consts = empty_c, blocks = empty_b, reads = set.empty(), missed = false },
     cache = empty_cache()
@@ -3124,7 +3221,7 @@ pub(pkg) fn eval_closed(
   owner: String,
   e: TExpr,
   opts: CtOpts
-) -> Result[CValue, String] !io =
+) -> Result[ConstValue, String] !io =
   eval_closed_in(closed_icx(tm, world, scope, ct, std_fns, std_owners, std_impl_fns, std_names, adts,
     traits, impls, owner, opts), e, opts)
 
@@ -3156,7 +3253,7 @@ pub(pkg) fn closed_icx(
 
 ## `eval_closed` in a context `closed_icx` built: the fold and its barrier.
 ## The lowering cache still starts empty for each fold.
-pub(pkg) fn eval_closed_in(icx: ICx, e: TExpr, opts: CtOpts) -> Result[CValue, String] !io = {
+pub(pkg) fn eval_closed_in(icx: ICx, e: TExpr, opts: CtOpts) -> Result[ConstValue, String] !io = {
   match catch_panic(() => fold_expr(icx, opts.fuel, empty_cache(), e, 0, 0)) {
     Ok(pr) -> {
       let (_, r) = pr
@@ -3199,8 +3296,8 @@ fn probe_icx() -> ICx = {
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
   let no_owner_of: Map[String, String] = map.empty()
-  let no_consts: Map[String, CValue] = map.empty()
-  let no_blocks: Map[(Int, Int), CValue] = map.empty()
+  let no_consts: Map[String, ConstValue] = map.empty()
+  let no_blocks: Map[(Int, Int), ConstValue] = map.empty()
   let no_syms: Map[Int, Sym] = map.empty()
   ICx {
     fns = no_fns,
@@ -3237,7 +3334,7 @@ fn probe_icx() -> ICx = {
 ## are written once and read from here.
 fn probe_builtin(icx: ICx, name: String) -> String !io = {
   let env: Env = map.empty()
-  let no_args: List[CValue] = []
+  let no_args: List[EvalValue] = []
   match catch_panic(() => call_builtin(icx, fresh_st(1000), env, name, no_args)) {
     Err(msg) -> if str.contains(msg.message, NO_ARM_LISTED) { "listed-no-arm" } else { "arm" }
     Ok(r) ->
@@ -3260,7 +3357,7 @@ fn probe_builtin(icx: ICx, name: String) -> String !io = {
 ## chain, so this is the probe that says the refusal is real.
 fn probe_hamt(icx: ICx, name: String) -> String !io = {
   let env: Env = map.empty()
-  let no_args: List[CValue] = []
+  let no_args: List[EvalValue] = []
   match call_named(icx, fresh_st(1000), env, "std/hamt", name, no_args) {
     Ok(_) -> "folded"
     Err(t) -> {
@@ -3440,6 +3537,35 @@ test "comptime refuses a C extern even when it has a fallback" {
   let e = CExtern("f", [], Some(CInt(1)), TyInt, CNoSite)
   match ceval(probe_icx(), fresh_st(1000), env, e) {
     Err((_, _, KErr(f))) -> { assert f.msg == "a C extern cannot be evaluated at compile time: `f` is io" }
+    _ -> { assert false }
+  }
+}
+
+test "freeze rejects a nested working value at its element path" {
+  let icx = probe_icx()
+  let env: Env = map.empty()
+  let caps: Map[Int, EvalValue] = map.empty()
+  let v = VTuple([VInt(1), VList([VClosure("m", "f", caps)])])
+  match freeze_const(icx, st_from(100, empty_cache()), env, v, "$", 0) {
+    Err((_, _, KErr(f))) -> { assert str.contains(f.msg, "$[1][0]") }
+    _ -> { assert false }
+  }
+}
+
+test "freeze and thaw preserve closed data and charge every node" {
+  let icx = probe_icx()
+  let env: Env = map.empty()
+  let v = VTuple([VInt(42), VList([VStr("abc"), VBool(true)]), VUnit])
+  match freeze_const(icx, st_from(100, empty_cache()), env, v, "$", 0) {
+    Ok((st, cv)) -> {
+      assert st.fuel == 94
+      assert cv == CVTuple([CVInt(42), CVList([CVStr("abc"), CVBool(true)]), CVUnit])
+      assert thaw_const(cv) == v
+    }
+    _ -> { assert false }
+  }
+  match freeze_const(icx, st_from(5, empty_cache()), env, v, "$", 0) {
+    Err((_, _, KErr(f))) -> { assert str.contains(f.msg, "fuel exhausted") }
     _ -> { assert false }
   }
 }

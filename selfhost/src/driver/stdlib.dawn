@@ -38,7 +38,7 @@ use ir/interp.{
   eval_comptime, eval_comptime_in, note_direct_fn, note_trait_fn, CtOut, ct_default, CtWorld,
   ConstScope, ct_world_empty, ct_world_add
 }
-use ir/core.{VStr, VBool, CValue}
+use ir/core.{CVStr, CVBool, ConstValue}
 use front/parser
 use front/lexer
 use front/token.{Diag}
@@ -1206,21 +1206,21 @@ test "float rendering and parsing fold through std/fmt, not the host" {
       std.std_names, cx1.adts, cx1.traits, cx1.impl_table, "m", ct_default())
     if len(ct.diags) > 0 { println("FOLD DIAG: ${ct.diags[0].msg}") }
     assert len(ct.diags) == 0
-    assert map.get(ct.consts, "A") == Some(VStr("0.1"))
-    assert map.get(ct.consts, "B") == Some(VStr("3.0E-7"))
-    assert map.get(ct.consts, "C") == Some(VStr("1.0E300"))
-    assert map.get(ct.consts, "D") == Some(VStr("-0.0"))
-    assert map.get(ct.consts, "E") == Some(VStr("NaN"))
-    assert map.get(ct.consts, "F") == Some(VStr("Infinity"))
-    assert map.get(ct.consts, "G") == Some(VStr("9999999.0"))
-    assert map.get(ct.consts, "H") == Some(VStr("1.0E7"))
-    assert map.get(ct.consts, "P") == Some(VBool(true))
-    assert map.get(ct.consts, "Q") == Some(VBool(true))
-    assert map.get(ct.consts, "R") == Some(VBool(true))
-    assert map.get(ct.consts, "S") == Some(VBool(true))
+    assert map.get(ct.consts, "A") == Some(CVStr("0.1"))
+    assert map.get(ct.consts, "B") == Some(CVStr("3.0E-7"))
+    assert map.get(ct.consts, "C") == Some(CVStr("1.0E300"))
+    assert map.get(ct.consts, "D") == Some(CVStr("-0.0"))
+    assert map.get(ct.consts, "E") == Some(CVStr("NaN"))
+    assert map.get(ct.consts, "F") == Some(CVStr("Infinity"))
+    assert map.get(ct.consts, "G") == Some(CVStr("9999999.0"))
+    assert map.get(ct.consts, "H") == Some(CVStr("1.0E7"))
+    assert map.get(ct.consts, "P") == Some(CVBool(true))
+    assert map.get(ct.consts, "Q") == Some(CVBool(true))
+    assert map.get(ct.consts, "R") == Some(CVBool(true))
+    assert map.get(ct.consts, "S") == Some(CVBool(true))
     # the defaulted radix folds both ways: written, and omitted
-    assert map.get(ct.consts, "T") == Some(VBool(true))
-    assert map.get(ct.consts, "U") == Some(VBool(true))
+    assert map.get(ct.consts, "T") == Some(CVBool(true))
+    assert map.get(ct.consts, "U") == Some(CVBool(true))
   }))
 }
 
@@ -1449,7 +1449,7 @@ test "a std directory with no modules.txt is not read at all" {
 ## What a user module's `str.to_upper("Hello")` folds to against `std`, through
 ## check and comptime evaluation: the one observation that tells a lowering
 ## std/str from the real one by what it computes.
-fn upper_of_hello(std: StdCtx) -> Option[CValue] !io = {
+fn upper_of_hello(std: StdCtx) -> Option[ConstValue] !io = {
   let src = "use std/str\n" ++
     "const U: String = comptime { str.to_upper(\"Hello\") }\n"
   let (m, pdiags) = parser.parse_module(src)
@@ -1480,7 +1480,7 @@ test "a stray std/str.dawn under the working directory changes no program" {
     }
     upper_of_hello(std)
   })
-  assert got == Some(VStr("HELLO"))
+  assert got == Some(CVStr("HELLO"))
 }
 
 test "a command's std is --std, then DAWN_STD, then the embedded copy" {
@@ -1536,7 +1536,7 @@ test "a complete std under the working directory is not the default" {
     Err(e) -> panic("embedded std: ${std_load_error_text(e)}")
   })
   assert dir0 == absent
-  assert plain == Some(VStr("HELLO"))
+  assert plain == Some(CVStr("HELLO"))
 
   # named through DAWN_STD, the same directory is the std, wholesale
   let named = fsmem.mem_std_dir(memfs.BASE)
@@ -1546,7 +1546,7 @@ test "a complete std under the working directory is not the default" {
       Err(e) -> panic("DAWN_STD std: ${std_load_error_text(e)}")
     })
   assert dir1 == Some(named)
-  assert asked == Some(VStr("hello"))
+  assert asked == Some(CVStr("hello"))
 }
 
 test "a std module's file is only known when a directory supplied it" {

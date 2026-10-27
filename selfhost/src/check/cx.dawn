@@ -2031,6 +2031,11 @@ fn const_hint_default() -> String =
 ## safe default a wildcard is allowed to be: a new variant is not serializable
 ## until someone says how.
 pub(pkg) fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
+  is_const_literal_type(cx.adts, t, visited)
+
+## The evaluator already has ADT metadata. It must not build a checker and
+## its builtin tables again for each frozen literal just to ask this rule.
+pub(pkg) fn is_const_literal_type(adts: Adts, t: Ty, visited: Set[Int]) -> Bool =
   match t {
     TyInt | TyFloat | TyBool | TyString -> true
     # One value, so the constant is the singleton. Refusing it was a
@@ -2043,22 +2048,27 @@ pub(pkg) fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
       if backend_dependent_repr(own, nm) {
         false
       } else {
-        is_const_serializable(cx, tgt, visited)
+        is_const_literal_type(adts, tgt, visited)
       }
-    TyList(e) -> is_const_serializable(cx, e, visited)
+    TyList(e) -> is_const_literal_type(adts, e, visited)
     TyTuple(elems) -> {
       for e in elems {
-        if not is_const_serializable(cx, e, visited) { return false }
+        if not is_const_literal_type(adts, e, visited) { return false }
       }
       true
     }
     TyAdt(aid, targs) -> {
+      # Inspect arguments before the recursion shortcut: a non-regular
+      # recursive field can introduce a function or another refused type.
+      for arg in targs {
+        if not is_const_literal_type(adts, arg, visited) { return false }
+      }
       # recursive types terminate here
       if set.has(visited, aid) { return true }
       let v2 = set.insert(visited, aid)
       # A type the table does not carry is not serializable rather than a
       # panic. Nothing well formed reaches that.
-      let a = match map.get(cx.adts, aid) { Some(info) -> info, None -> return false }
+      let a = match map.get(adts, aid) { Some(info) -> info, None -> return false }
       var m: Map[Int, Ty] = map.empty()
       var i = 0
       for tp in a.tparams {
@@ -2072,13 +2082,10 @@ pub(pkg) fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
         }
         i = i + 1
       }
-      for a2 in targs {
-        if not is_const_serializable(cx, a2, v2) { return false }
-      }
       let em: Map[Int, Eff] = map.empty()
       for c in a.ctors {
         for f in c.fields {
-          if not is_const_serializable(cx, subst(f.ty, m, em), v2) { return false }
+          if not is_const_literal_type(adts, subst(f.ty, m, em), v2) { return false }
         }
       }
       true

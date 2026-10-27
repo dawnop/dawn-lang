@@ -18,24 +18,24 @@ use front/ast.{module_fns, module_consts, vis_exported}
 use front/lexdump
 
 ## Render one comptime value for the golden (both sides must agree).
-pub fn cv_show(adts: Adts, v: CValue) -> String =
+pub fn cv_show(adts: Adts, v: ConstValue) -> String =
   match v {
-    VInt(n) -> to_string(n)
-    VFloat(f) -> to_string(f)
-    VBool(b) -> to_string(b)
-    VStr(s) -> "\"" ++ lexdump.esc(s) ++ "\""
-    VUnit -> "()"
-    VList(elems) -> {
+    CVInt(n) -> to_string(n)
+    CVFloat(f) -> to_string(f)
+    CVBool(b) -> to_string(b)
+    CVStr(s) -> "\"" ++ lexdump.esc(s) ++ "\""
+    CVUnit -> "()"
+    CVList(elems) -> {
       var parts: List[String] = []
       for x in elems { parts = parts ++ [cv_show(adts, x)] }
       "[" ++ join(parts, ", ") ++ "]"
     }
-    VTuple(elems) -> {
+    CVTuple(elems) -> {
       var parts: List[String] = []
       for x in elems { parts = parts ++ [cv_show(adts, x)] }
       "(" ++ join(parts, ", ") ++ ")"
     }
-    VAdt(aid, ci, fields) -> {
+    CVAdt(aid, ci, fields) -> {
       let name = adt_of(adts, aid).ctors[ci].name
       if len(fields) == 0 {
         name
@@ -45,7 +45,6 @@ pub fn cv_show(adts: Adts, v: CValue) -> String =
         name ++ "(" ++ join(parts, ", ") ++ ")"
       }
     }
-    _ -> "<fn>"
   }
 
 pub(pkg) fn render(prog: Program) -> String = {
@@ -79,7 +78,7 @@ pub(pkg) fn render(prog: Program) -> String = {
   }
   out
 }
-use ir/core.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt}
+use ir/core.{ConstValue, CVInt, CVFloat, CVBool, CVStr, CVUnit, CVList, CVTuple, CVAdt}
 
 test "the dump prints where a diagnostic sits in the revision it dumps" {
   # A diagnostic raised inside `g` is recorded as an offset from `g`, so a
