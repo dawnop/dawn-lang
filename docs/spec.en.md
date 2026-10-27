@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 8f60956bd16f72b8 -->
+<!-- doc-check: translation-of docs/spec.md @ 8ecb03c261b51cfd -->
 
 # Dawn Language Specification
 
@@ -1319,7 +1319,9 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
   annotated lambda. A function with an **effect label** can be a value all the same: the label
   enters the value's type and the call site supplies the evidence (§6.5, boundary). An **effect
   operation** cannot; there is no function symbol to take.
-- Limits: calls with trait bounds and impl-based sorting are not allowed in comptime.
+- comptime supports calls with trait bounds, user impls, default methods and impl-based sorting.
+  Whether evaluation completes still depends on the primitives actually reached and the budget
+  (§7.2). Dictionaries may be working values but cannot be constant results.
 
 #### Heterogeneous collections
 
@@ -3378,11 +3380,15 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
 
 ### 7.2 Constraints
 
-1. comptime code **must be pure** (it may call any pure function, including those of this
-   module and of dependency modules).
-2. The result type must be **constant-serialisable** — that is, the compiler can rebuild
-   the value at class initialisation time: `Int`/`Float`/`Bool`/`String`/`Unit`, plus
-   `List`/tuples/records/ADTs made only of those. Function values are not allowed.
+1. comptime executes ordinary pure Dawn expressions in an **isolated context**. It may call
+   pure functions from this module and dependencies, but cannot read outer runtime locals.
+2. The result type must be **constant-serialisable**: it has a compiler-defined, finite, closed
+   structured literal representation without host addresses, resource identity, mutable external
+   state or backend-private measures. Reconstruction on each backend preserves observable Dawn
+   behaviour. This result domain differs from the evaluator working domain and is not defined
+   by a user Serialize trait. The current result domain is: `Int`/`Float`/`Bool`/`String`/`Unit`, plus
+   `List`/tuples/records/ADTs made only of those. Functions, dictionaries and cursors may be working values; functions and dictionaries cannot
+   be results.
    **An opaque type is as serialisable as its target** (§2.7), with one exception:
    `std/cursor`'s `Cursor` is not. Its `Int` is an offset into **the backend's own
    representation** of the string (UTF-16 code units on the JVM, UTF-8 bytes on native),
@@ -3409,8 +3415,8 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
    produces, before it allocates: a String `++` by the code points of its result, a
    List `++` by the elements of its right operand (the left one is shared, see §2.2),
    and `range`, list slicing, `join`, `code_points`/`from_code_points`, case mapping,
-   string slicing and quoting by the elements or code points they produce. The budget
-   so bounds memory and the time of one step as well: doubling `s = s ++ s` pays the
+   string slicing and quoting by the elements or code points they produce. This bounds these primitives
+   in allocation growth and step time, but is not a total memory cap for a compilation or LSP session: doubling `s = s ++ s` pays the
    length of its result each time, not a few steps. A count too large for an `Int` (a
    `range` whose ends are further apart than an `Int` can say, for instance) is over any
    budget, not zero.

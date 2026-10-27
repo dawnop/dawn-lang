@@ -50,6 +50,8 @@ Playground 补全生成入口：[play-ui-builtins-design.md](play-ui-builtins-de
 | [codebase-audit-v2/05-stdlib-and-packages.md](codebase-audit-v2/05-stdlib-and-packages.md) | current | std、inflate、JSON、Web 与 SHA-2。 |
 | [codebase-audit-v2/06-docs-tests-and-governance.md](codebase-audit-v2/06-docs-tests-and-governance.md) | current | normative spec、文档状态、examples/packages/contract gates 与仓库治理。 |
 
+comptime 字节常量设计：[comptime-bytes-design.md](comptime-bytes-design.md)。
+
 ## 当前架构与流程
 
 [JVM 差分输出与 perf-data 审查](jvm-perf-data-audit.md)。
