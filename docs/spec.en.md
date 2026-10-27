@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 8ecb03c261b51cfd -->
+<!-- doc-check: translation-of docs/spec.md @ 922698e3341f0d4b -->
 
 # Dawn Language Specification
 
@@ -3400,15 +3400,12 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
    measure into the artefact as a string (and the interpreter counts code points, so that
    would be a third answer again). The exception comes off once cursors have a single
    currency.
-   `Map`/`Set` are not allowed for now: they are HAMTs over `Array`, and the comptime
-   interpreter has no `Array` primitive; `List` works because the interpreter carries its
-   own list representation, not because it can run `std/pvec`.
-   `Bytes` is not allowed either, for the same kind of reason: the interpreter's value type
-   has no byte-string case, so a `Bytes` value has nowhere to live at compile time, and the
-   `std/bytes` primitives are refused at comptime across the board. That `Bytes` has
-   `Eq`/`Hash`/`Show` does not change this; whether a type can be a constant asks whether the
-   interpreter can hold it, not which traits it supports. To prepare byte data at compile
-   time, compute a `List[Int]` or a `String` and turn it into `Bytes` where it is used.
+   `Array` is a value-semantic working value only, never a result. `Map`/`Set` remain refused:
+   the evaluator explicitly rejects HAMT operations, so Array support does not imply collection
+   support. Byte primitives may be used in intermediate computations; Bytes result representation
+   and reconstruction on both backends are not yet enabled, so Bytes and nested Bytes results
+   remain refused. Hash is independently limited; foldability depends on the actual call chain.
+
 3. Evaluation has a step budget (10⁸ steps by default, tunable with `--comptime-fuel`);
    exceeding it is an error — which guarantees compilation always terminates. A
    primitive whose output grows with its input is charged by the size of what it
@@ -3423,8 +3420,8 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
 4. There is no Java interop and no io inside comptime (constraint 1 guarantees this
    automatically).
 5. Pure does not mean foldable: some pure builtins are refused at comptime too, because the
-   values they operate on are ones the interpreter cannot represent (the `Array`, `Bytes`
-   and `Map`/`Set` mentioned above), or because the answer they would fold belongs to the
+   values they operate on are ones the interpreter cannot represent (for example `Map`/`Set`
+   and mutable buffers), or because the answer they would fold belongs to the
    build rather than to the program. Which ones is looked up per function, not enumerated
    here: `dawn doc --builtins` gives every compiler builtin's entry a `"comptime"` field
    whose value is `"ok"` or `"refused"`. The flag is taken from the list the interpreter

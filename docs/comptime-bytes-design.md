@@ -12,7 +12,7 @@ comptime 在隔离上下文执行普通纯 Dawn 表达式。结果必须有编�
 结构化字面量表示，只描述语言值，不携带宿主地址、资源身份、可变外部状态或后端私有度量。
 工作域允许 closure、dictionary、cursor 与值语义 Array；结果域仅含标量、Bytes 及其
 List、tuple、record、ADT、opaque 递归组合。Bytes 表示长度与 0..255 序列，没有编码前提。
-用户 trait 不决定字面量表示。K0 仍记录当前 Bytes 被拒绝的实现边界。
+用户 trait 不决定字面量表示。K0 记录原有拒绝边界；K2 支持 Bytes 工作值，K3 打开 Bytes 结果域。
 
 ## 求值与冻结
 
@@ -60,8 +60,8 @@ CRC32("123456789") 为 `0xCBF43926`。另测 SHA padding 55/56/63/64/65、编码
 | 刀 | 范围 | 状态 |
 |---|---|---|
 | K0 | 后端无关规则、trait 文档纠正、现状负例 | `f8b4b9f9`；1183 项单元测试及文档、锚点子集通过 |
-| K1 | EvalValue/ConstValue 与冻结边界 | 1185 项单元测试通过；冻结逐节点计步 |
-| K2 | Bytes 与 Array 完整构造路径 | 待做 |
+| K1 | EvalValue/ConstValue 与冻结边界 | `9876ccfb`；1185 项单元测试通过；冻结逐节点计步 |
+| K2 | Bytes 与 Array 完整构造路径 | 1186 项单元测试及 builtin 合约通过；原版 SHA、hex、Base64 已可折叠 |
 | K3 | 双后端产物、预算、预览边界 | 待做 |
 | K4 | 生产 const、契约、文档与干净自举闭环 | 待做 |
 
