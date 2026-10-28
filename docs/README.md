@@ -232,6 +232,7 @@ comptime 字节常量设计：[comptime-bytes-design.md](comptime-bytes-design.m
 | [unused-imports-design.md](unused-imports-design.md) | current | 裁决 8：未使用的 import 是编译错误（按名、含 `use java`、test 算使用、模块有其它错误时不报、无逃生舱），test-only 反向边挪进兄弟测试模块，LSP 删除 code action。 |
 | [self-recursion-design.md](self-recursion-design.md) | current | 每条路径返回前都调用自己的函数或 impl 方法是编译错误（同一已解析符号、按 Rust `unconditional_recursion` 的定义、效果调用算出口、互递归不做），typed 树遍 `check/selfrec`，selfhost 自检墙钟无可测差异。 |
 | [effects-design.md](effects-design.md) | historical | 用户具名效果 + `with handle`，尾恢复档；权威条文在 spec §6.5，教程见 tutorial §17。 |
+| [structured-concurrency-design.md](structured-concurrency-design.md) | proposed | C02 结构化任务合同：scope 闭合、合作式取消与资源交付、续延消费权、不挂起清理、单调 deadline、子错误与监督；仅固定语义，尚未批准任务或调度器实现。 |
 | [oneshot-design.md](oneshot-design.md) | current | 一次性恢复（one-shot resumption）的**勘察结账**：四路勘察给出本仓第一批实测数字（JVM `Continuation` 70–460 ns、native 影子栈税 15%/5%/2–4%、传染面 1.45%），排除全栈复制/侧栈/wasm 非 CPS 三条路线，路线为 yield 冒泡；2026-08-31 用户立项，§9 六问全裁毕，施工中。 |
 | [core-move2-design.md](core-move2-design.md) | historical | Move 2 的结账与 `CSProtect` 关档。 |
 | [arch-split-design.md](arch-split-design.md) | historical | ARCH-01 拆 `Cx` + ARCH-02 拆 `Gen`，**取代 lowered-ir-design.md §3.2 的六组件方案**。这一块里唯一仍值得整篇读的，理由见下。 |
