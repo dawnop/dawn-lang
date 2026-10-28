@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 4c97436f3f3e9fe8 -->
+<!-- doc-check: translation-of docs/spec.md @ eab570e759c0bc5c -->
 
 # Dawn Language Specification
 
@@ -3721,8 +3721,9 @@ wasm call the C stub. The compile-time interpreter refuses extern evaluation.
 The syntax is restricted to a whole top-level function body, excluding methods,
 nested functions, closures and local expressions.
 
-F1 emits C that tests can link directly with a stub. The package manifest's
-`[native] sources` and automatic compilation and staging belong to F2. See the
+F1 syntax, checking, Core and backends, F2 package manifest `[native] sources`
+and build integration, and the F3 sqlite package and focused contracts are
+implemented. Broader syntax contract coverage remains for F4. See the
 [extern design](ffi-extern-design.md) for the full contract.
 
 ### 9.2 Type mapping
