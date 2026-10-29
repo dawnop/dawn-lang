@@ -43,7 +43,7 @@ A request body the JDK's stream cannot read (a chunk size that is not hex, a chu
 
 ## 2.0.0
 
-This major pairs with `web8` 8.0.0 from the same release tag. The package
+This major pairs with `web9` 9.0.0 from the same release tag. The package
 identity is `web_jvm2`; retain the `web_jvm` dependency alias and imports.
 `BodySource.read` now takes `(pos, n)`, and the JVM pump supplies the actual
 number of bytes already sent. `input_source(stream)` ignores `pos` because

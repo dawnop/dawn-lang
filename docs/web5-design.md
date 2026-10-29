@@ -139,3 +139,54 @@ opaque 指向 `pub(pkg)` 表示这一格没有现成夹具，动码前先用两�
 又从包外对真实的 `web5` 复验：字面量报 `undefined constructor: Response`，读字段报
 `` `.` field access needs a record value, got Response ``，引入 `ResponseRep`/`response_rep`/
 `dispatch_segs`/`Dispatch` 都报 `` package-private to package `web5` ``。
+
+
+## 八、header 拒绝归责到调用点（web9，2026-10-29）
+
+本节的方案在动码前写成，延续构造处单点校验的设计；实现后的验证见下。
+
+### 问题与被推翻的方案
+
+`types.dawn` 的 `build` 检查 status 与 Content-Type，`with_header` 检查名字、值和帧头；
+两处都直接 `panic(p)`，因此报的是框架内部行。`redirect` 经 `bodyless` 与 `with_header`，
+`attachment` 经 `raw` 与 `with_header`，`error_response` 经 fold 调 `with_header`，也都丢失应用位置。
+L4 的 `Loc` 与 `caller()` 已随种子提供，不再需要运行时栈回溯或兼容包装。
+
+### 公开面与转传
+
+给 `text`、`json_response`、`raw`、`binary`、`streaming`、`with_header`、`redirect`、
+`try_redirect`、`attachment`、`error_response` 增加末尾 `at: Loc = caller()`。
+`build` 与 `bodyless` 必须显式接收 `at`，每一跳传到底层，最终 `panic(..., at = at)`。
+`streaming` 的负长度与 status 拒绝也使用同一个调用位置；`try_redirect` 的非法 status
+仍是 panic，非法 Location 仍返回不带位置的 400。`error_response` 的非法 header
+归责到渲染调用点，因为 HttpError 仍是公开数据，构造时没有被校验的位置可追溯。
+`json_ok` 的固定 status/content type 不会拒绝，`try_with_header` 只返回 400，均不加形参。
+
+函数值不保留默认实参，增加 `Loc` 改变其类型，因此按 v2-in-name 规则直接升级 `web9 / 9.0.0`。
+普通调用保持省略；函数值调用必须补 `loc.here()` 或显式转传，包装器需要自己声明并转传 `at`。
+全仓扫描调用方；site 与 playground 的当前 manifest 均没有 web 依赖，playground 的 `raw`
+是自己的 Reply 构造函数，不迁移同名函数。JVM adapter 使用路径依赖，沿用其公开版本。
+
+### 验证方案
+
+在独立模块逐个公开发射器构造拒绝，用 `loc.here()` 的相邻行作独立标尺，
+断言消息里的调用点文件和行，并补充显式覆盖、方法式、函数值调用与 Result 400 路径。
+将 panic 的 `at` 去掉，验证同一组测试失败，然后恢复并重跑。
+变动的 Emit-Change label 以差分实测和 gatemap 的 coupled 查询为准。
+
+### 实施验证
+
+新增独立模块的 16 项位置测试，web 共 100 项全绿；web-jvm 114 项、site 278 项、playground 125 项全绿。
+在副本里将三处 `panic(p, at = at)` 与负长度 panic 改回内部默认位置，15 项位置断言失败，
+不带位置的 400 测试仍通过。原树不参与变异。
+跨包应用探针中，redirect 从 `web8/types.dawn:603:16` 变为 `src/main.dawn:6:27`，
+attachment 从 `web8/types.dawn:335:16` 变为 `src/main.dawn:10:27`，
+error_response 的非法名字从 `web8/types.dawn:603:16` 变为 `src/main.dawn:15:27`。
+802 项 mutation anchor 预检与 anchor-guard 通过。性能不在本刀的断言范围。
+
+### 不做的（理由）
+
+不增加兼容层、隐式调用栈或受检 header 类型；显式默认参数已经完整表达归责。
+不把 Loc 塞入 HttpError 或改变 400 正文；位置只修正替调用者报错的 panic。
+不改 dawnop-site 仓库；消费侧随正式 release 更新 web 的身份、版本、依赖哈希和锁文件，
+函数值与包装器按上面的规则迁移。

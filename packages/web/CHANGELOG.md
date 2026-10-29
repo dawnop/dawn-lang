@@ -1,5 +1,20 @@
 # web changelog
 
+## 9.0.0
+
+- **Breaking:** the package identity is `web9`. `text`, `json_response`, `raw`,
+  `binary`, `streaming`, `with_header`, `redirect`, `try_redirect`, `attachment`
+  and `error_response` gain a trailing `at: Loc = caller()`. A refusal now
+  names the application's constructor call instead of a framework line.
+  Status, stream-length and framing refusals use the same location.
+- Direct calls can omit `at`. Function values gain a required `Loc` argument;
+  wrappers that report on behalf of their caller declare and forward `at`.
+  No compatibility entry points are provided. `json_ok` and `try_with_header`
+  keep their signatures. Returned 400 errors keep their existing wording.
+- `error_response` attributes an illegal HttpError header to its rendering
+  call; the public error record does not store its construction location.
+- See [the migration guide](MIGRATION.md) for the downstream dependency bump.
+
 ## 8.0.0
 
 - **Breaking:** `BodySource.read(n)` becomes `read(pos, n)`. Each server pump
@@ -18,7 +33,7 @@
 - See [the migration guide](MIGRATION.md), including the dawnop-site S7 impact.
 
 Newest first. From 2.0.0 the manifest name carries the major (`web2` ...
-`web8`, the v2-in-name rule); consumers keep `use web/...` through a
+`web9`, the v2-in-name rule); consumers keep `use web/...` through a
 `web = ...` alias. Design background: `docs/web5-design.md`,
 `docs/std-defaults-design.md`, `docs/audit/web-api-v2-design.md` and
 `docs/web-core-split-design.md` (in Chinese).

@@ -326,13 +326,13 @@ fn content_type_problem(content_type: String) -> Option[String] =
 # where it is built: a panic, the same verdict `with_header` gives a header the
 # program built out of its own strings, and inside a handler the per-request
 # isolation renders it as a 500.
-fn build(status: Int, content_type: String, body: ResponseBody) -> Response = {
+fn build(status: Int, content_type: String, body: ResponseBody, at: Loc) -> Response = {
   match status_problem(status) {
-    Some(p) -> panic(p)
+    Some(p) -> panic(p, at = at)
     None -> ()
   }
   match content_type_problem(content_type) {
-    Some(p) -> panic(p)
+    Some(p) -> panic(p, at = at)
     None -> ()
   }
   ResponseRep { status = status, content_type = content_type, headers = [], body = body }
@@ -340,14 +340,15 @@ fn build(status: Int, content_type: String, body: ResponseBody) -> Response = {
 
 ## A `text/plain; charset=utf-8` response. Every constructor refuses a status
 ## outside 200..599 with a panic: a final response is never 1xx here, since
-## nothing in this framework sends an interim one.
-pub fn text(status: Int, body: String) -> Response =
-  build(status, "text/plain; charset=utf-8", Text(body))
+## nothing in this framework sends an interim one. Refusals name `at`, the
+## constructor call site by default; wrappers pass their own `at` through.
+pub fn text(status: Int, body: String, at: Loc = caller()) -> Response =
+  build(status, "text/plain; charset=utf-8", Text(body), at)
 
 ## A rendered JSON response (`application/json; charset=utf-8`) at any status
 ## in 200..599.
-pub fn json_response(status: Int, j: Json) -> Response =
-  build(status, "application/json; charset=utf-8", Text(render(j)))
+pub fn json_response(status: Int, j: Json, at: Loc = caller()) -> Response =
+  build(status, "application/json; charset=utf-8", Text(render(j)), at)
 
 ## `json_response` at 200 — the ordinary success shape of a JSON API.
 pub fn json_ok(j: Json) -> Response = json_response(200, j)
@@ -356,12 +357,12 @@ pub fn json_ok(j: Json) -> Response = json_response(200, j)
 ## a wire format this module has no constructor for (XML, HTML, WebDAV). A
 ## content type that cannot travel as a header value panics, as `with_header`
 ## does.
-pub fn raw(status: Int, content_type: String, body: String) -> Response =
-  build(status, content_type, Text(body))
+pub fn raw(status: Int, content_type: String, body: String, at: Loc = caller()) -> Response =
+  build(status, content_type, Text(body), at)
 
 ## A binary body: raw Bytes written verbatim, with an exact Content-Length.
-pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
-  build(status, content_type, Binary(raw))
+pub fn binary(status: Int, content_type: String, raw: Bytes, at: Loc = caller()) -> Response =
+  build(status, content_type, Binary(raw), at)
 
 # `length` used to be a second function, `streaming_sized`, and a negative
 # length its panic; one constructor with a defaulted `Option` says the same
@@ -386,12 +387,12 @@ pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
 ## the connection ends short of the promised length, which is how the client
 ## learns of it; one that runs long is cut off by the JDK's fixed-length stream
 ## and logged as a failed transfer. A negative length panics.
-pub fn streaming(status: Int, content_type: String, source: BodySource, length: Option[Int] = None) -> Response = {
+pub fn streaming(status: Int, content_type: String, source: BodySource, length: Option[Int] = None, at: Loc = caller()) -> Response = {
   match length {
-    Some(n) if n < 0 -> panic("illegal stream length ${n}: a byte count is not negative")
+    Some(n) if n < 0 -> panic("illegal stream length ${n}: a byte count is not negative", at = at)
     _ -> ()
   }
-  build(status, content_type, Stream(source, length))
+  build(status, content_type, Stream(source, length), at)
 }
 
 # ---- header hygiene ----
@@ -597,10 +598,10 @@ fn decimal_length(v: String) -> Option[Int] = {
 ## and `Content-Length` must be a decimal byte count equal to the body's length
 ## (any count on a body with no content, which is how a HEAD answer states the
 ## length of what it does not carry; never on a stream of unknown length), once.
-pub fn with_header(r: Response, name: String, value: String) -> Response = {
+pub fn with_header(r: Response, name: String, value: String, at: Loc = caller()) -> Response = {
   let rep: ResponseRep = r
   match header_problem(rep, name, value) {
-    Some(p) -> panic(p)
+    Some(p) -> panic(p, at = at)
     None -> ResponseRep { ..rep, headers = rep.headers ++ [(name, value)] }
   }
 }
@@ -622,18 +623,18 @@ pub fn try_with_header(r: Response, name: String, value: String) -> Result[Respo
 # A redirect carries no content, so its body is `Empty` rather than an empty
 # `Text`. The wire is the same either way (body_length maps both to -1), but
 # only one of them says so.
-fn bodyless(status: Int) -> Response = build(status, "text/plain; charset=utf-8", Empty)
+fn bodyless(status: Int, at: Loc) -> Response = build(status, "text/plain; charset=utf-8", Empty, at)
 
 ## A redirect: status (301/302/303/307) plus a Location header, empty body.
 ## A Location that cannot travel as a field value panics (see `with_header`);
 ## `try_redirect` is the form for a target built from request input.
-pub fn redirect(status: Int, location: String) -> Response =
-  with_header(bodyless(status), "Location", location)
+pub fn redirect(status: Int, location: String, at: Loc = caller()) -> Response =
+  with_header(bodyless(status, at), "Location", location, at = at)
 
 ## `redirect` for a target built from request input: an illegal Location is a
-## 400 rather than a panic.
-pub fn try_redirect(status: Int, location: String) -> Result[Response, HttpError] =
-  try_with_header(bodyless(status), "Location", location)
+## 400 rather than a panic. An illegal status still panics at `at`.
+pub fn try_redirect(status: Int, location: String, at: Loc = caller()) -> Result[Response, HttpError] =
+  try_with_header(bodyless(status, at), "Location", location)
 
 # Percent-encode as RFC 5987 attr-char: everything but ALPHA / DIGIT and the
 # fifteen listed punctuation marks, over the *UTF-8 bytes* rather than the code
@@ -699,10 +700,10 @@ fn ascii_filename(name: String) -> String = {
 ## Force a download with a given filename: Content-Disposition with both
 ## `filename=` (quoted ASCII) and `filename*=` (RFC 5987 UTF-8), so a name with
 ## quotes or non-ASCII characters arrives intact and cannot inject parameters.
-pub fn attachment(content_type: String, filename: String, body: String) -> Response =
-  with_header(raw(200, content_type, body), "Content-Disposition",
+pub fn attachment(content_type: String, filename: String, body: String, at: Loc = caller()) -> Response =
+  with_header(raw(200, content_type, body, at = at), "Content-Disposition",
     "attachment; filename=\"" ++ ascii_filename(filename) ++ "\"; filename*=UTF-8''" ++
-      pct_encode(filename))
+      pct_encode(filename), at = at)
 
 # The three strings below were hardcoded to what one consumer (dawnop-site,
 # whose frontend was written against FastAPI) needed: the key "detail", a
@@ -769,15 +770,16 @@ pub fn default_errors() -> ErrorFormat =
 ## something else). The error's own headers ride along (through the with_header
 ## guard), so a 401 can carry its WWW-Authenticate challenge. An error whose
 ## status is outside 200..599 renders as a 500 with `fmt.internal_message`.
-pub fn error_response(e: HttpError, fmt: ErrorFormat = default_errors()) -> Response = {
+## Illegal headers panic at this rendering call (or the explicit `at`).
+pub fn error_response(e: HttpError, fmt: ErrorFormat = default_errors(), at: Loc = caller()) -> Response = {
   let (status, message) = match status_problem(e.status) {
     None -> (e.status, e.message)
     Some(_) -> (500, fmt.internal_message)
   }
-  let base = json_response(status, JObj(map.from([(fmt.detail_key, JStr(message))])))
+  let base = json_response(status, JObj(map.from([(fmt.detail_key, JStr(message))])), at = at)
   fold(e.headers, base, (r, h) => {
     let (k, v) = h
-    with_header(r, k, v)
+    with_header(r, k, v, at = at)
   })
 }
 
@@ -1333,7 +1335,7 @@ test "the 422 wording separates name from complaint, by configuration" {
 
 # Whether building the response panicked, and with what. Every constructor
 # refusal is a panic, so this is the one question the tests below ask. The
-# message ends with where the panic is written (spec 8.2), which the tests
+# message ends with the public constructor call site, which the tests
 # below leave out of what they compare.
 fn refusal(build: fn() -> Response) -> Option[String] =
   match catch_panic(build) {

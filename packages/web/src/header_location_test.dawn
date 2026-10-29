@@ -1,0 +1,138 @@
+# Keep the location oracle outside types: an omitted forwarding hop must name
+# a different file and fail, even when the refusal text itself stays correct.
+use std/loc
+use std/str
+use std/bytes
+use json/value.{JStr}
+use types.{Response, HttpError, text, json_response, raw, binary, streaming, with_header, redirect, try_redirect, attachment, error_response, http_error, try_with_header}
+use source.{bytes_source}
+
+# here() is on the line immediately before each call under test. Check both
+# file and line independently of the constructor's implementation and columns.
+fn at_site[T](result: Result[T, ForeignError], mark: Loc, problem: String) -> Bool =
+  loc.path(mark) == "src/header_location_test.dawn" && match result {
+    Ok(_) -> false
+    Err(e) -> str.starts_with(e.message, problem) &&
+      str.contains(e.message, " at ${loc.path(mark)}:${loc.line(mark) + 1}:")
+  }
+
+test "text refuses at its caller" {
+  let mark = loc.here()
+  let result = catch_panic(() => text(100, ""))
+  assert at_site(result, mark, "illegal response status 100")
+}
+
+test "json_response refuses at its caller" {
+  let mark = loc.here()
+  let result = catch_panic(() => json_response(600, JStr("")))
+  assert at_site(result, mark, "illegal response status 600")
+}
+
+test "raw refuses Content-Type at its caller" {
+  let mark = loc.here()
+  let result = catch_panic(() => raw(200, "bad\r\ntype", ""))
+  assert at_site(result, mark, "illegal Content-Type: bad\\r\\ntype")
+}
+
+test "binary refuses Content-Type at its caller" {
+  let mark = loc.here()
+  let result = catch_panic(() => binary(200, "bad\n", bytes.utf8("")))
+  assert at_site(result, mark, "illegal Content-Type: bad\\n")
+}
+
+test "streaming refuses Content-Type at its caller" {
+  let mark = loc.here()
+  let result = catch_panic(() => streaming(200, "bad\n", bytes_source(bytes.utf8(""))))
+  assert at_site(result, mark, "illegal Content-Type: bad\\n")
+}
+
+test "with_header refuses a value at its caller" {
+  let mark = loc.here()
+  let result = catch_panic(() => with_header(text(200, ""), "X-Test", "bad\n"))
+  assert at_site(result, mark, "illegal value for header X-Test: bad\\n")
+}
+
+test "redirect forwards its caller to with_header" {
+  let mark = loc.here()
+  let result = catch_panic(() => redirect(302, "/bad\n"))
+  assert at_site(result, mark, "illegal value for header Location: /bad\\n")
+}
+
+test "try_redirect forwards its caller through bodyless" {
+  let mark = loc.here()
+  let result = catch_panic(() => try_redirect(100, "/next"))
+  assert at_site(result, mark, "illegal response status 100")
+}
+
+test "attachment forwards its caller through raw" {
+  let mark = loc.here()
+  let result = catch_panic(() => attachment("bad\n", "name.txt", ""))
+  assert at_site(result, mark, "illegal Content-Type: bad\\n")
+}
+
+test "error_response forwards its caller through the header fold" {
+  let e = HttpError { ..http_error(401, "denied"), headers = [("X-Test", "bad\n")] }
+  let mark = loc.here()
+  let result = catch_panic(() => error_response(e))
+  assert at_site(result, mark, "illegal value for header X-Test: bad\\n")
+}
+
+test "header names and framing refuse at the modifier call" {
+  let mark = loc.here()
+  let result = catch_panic(() => with_header(text(200, ""), "Bad Name", "ok"))
+  assert at_site(result, mark, "illegal header name: Bad Name")
+  let frame = loc.here()
+  let framed = catch_panic(() => with_header(text(200, "x"), "Content-Length", "2"))
+  assert at_site(framed, frame, "header Content-Length says 2 but the body is 1 bytes")
+}
+
+test "redirect status and stream length use the public caller too" {
+  let mark = loc.here()
+  let result = catch_panic(() => redirect(100, "/next"))
+  assert at_site(result, mark, "illegal response status 100")
+  let size = loc.here()
+  let sized = catch_panic(() => streaming(200, "text/plain", bytes_source(bytes.utf8("")), length = Some(-1)))
+  assert at_site(sized, size, "illegal stream length -1")
+}
+
+fn download(at: Loc = caller()) -> Response = attachment("bad\n", "name.txt", "", at = at)
+
+test "a wrapper explicitly forwards its own caller" {
+  let mark = loc.here()
+  let result = catch_panic(() => download())
+  assert at_site(result, mark, "illegal Content-Type: bad\\n")
+}
+
+test "an explicit at survives nested constructors and a function value" {
+  let at = loc.here()
+  let make = attachment
+  let result = catch_panic(() => make("bad\n", "name.txt", "", at))
+  match result {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "illegal Content-Type: bad\\n at ${at}" }
+  }
+}
+
+test "method style captures the start of the modifier call" {
+  let base = text(200, "")
+  let mark = loc.here()
+  let result = catch_panic(() => base.with_header("X-Test", "bad\n"))
+  assert at_site(result, mark, "illegal value for header X-Test: bad\\n")
+}
+
+test "request-input refusals remain location-free 400 errors" {
+  match try_redirect(302, "/bad\n") {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.status == 400
+      assert e.message == "illegal value for header Location: /bad\\n"
+    }
+  }
+  match try_with_header(text(200, ""), "Bad Name", "ok") {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.status == 400
+      assert e.message == "illegal header name: Bad Name"
+    }
+  }
+}
