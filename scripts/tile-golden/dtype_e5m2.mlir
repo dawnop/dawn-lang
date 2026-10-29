@@ -19,14 +19,27 @@ cuda_tile.module @m {
     %21 = make_tensor_view %20, shape = [512], strides = [1] : tensor_view<512xf64, strides=[1]>
     %22 = make_partition_view %21 : partition_view<tile=(128), padding_value = zero, tensor_view<512xf64, strides=[1]>, dim_map=[0]>
     %23, %24 = load_view_tko weak %22[%4] token=%0 : partition_view<tile=(128), padding_value = zero, tensor_view<512xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
-    %25 = ftof %23 rounding<nearest_even> : tile<128xf64> -> tile<128xf8E5M2>
-    %26 = ftof %25 rounding<nearest_even> : tile<128xf8E5M2> -> tile<128xf64>
-    %27 = reshape %26 : tile<128xf64> -> tile<1x128xf64>
-    %28 = constant <i32: 2> : tile<i32>
-    %29 = muli %15, %28 : tile<i32>
-    %30 = constant <i32: 1> : tile<i32>
-    %31 = addi %29, %30 : tile<i32>
-    %32 = store_view_tko weak %27, %13[%31, %4] token=%19 : tile<1x128xf64>, partition_view<tile=(1x128), padding_value = zero, tensor_view<2x512xf64, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
+    %25 = ftof %23 rounding<zero> : tile<128xf64> -> tile<128xf32>
+    %26 = ftof %25 rounding<nearest_even> : tile<128xf32> -> tile<128xf64>
+    %27 = bitcast %25 : tile<128xf32> -> tile<128xi32>
+    %28 = bitcast %23 : tile<128xf64> -> tile<128xi64>
+    %29 = constant <i64: 9218868437227405312> : tile<128xi64>
+    %30 = andi %28, %29 : tile<128xi64>
+    %31 = cmpi not_equal %30, %29, signed : tile<128xi64> -> tile<128xi1>
+    %32 = cmpf not_equal unordered %26, %23 : tile<128xf64> -> tile<128xi1>
+    %33 = andi %31, %32 : tile<128xi1>
+    %34 = constant <i32: 1> : tile<128xi32>
+    %35 = ori %27, %34 : tile<128xi32>
+    %36 = select %33, %35, %27 : tile<128xi1>, tile<128xi32>
+    %37 = bitcast %36 : tile<128xi32> -> tile<128xf32>
+    %38 = ftof %37 rounding<nearest_even> : tile<128xf32> -> tile<128xf8E5M2>
+    %39 = ftof %38 rounding<nearest_even> : tile<128xf8E5M2> -> tile<128xf64>
+    %40 = reshape %39 : tile<128xf64> -> tile<1x128xf64>
+    %41 = constant <i32: 2> : tile<i32>
+    %42 = muli %15, %41 : tile<i32>
+    %43 = constant <i32: 1> : tile<i32>
+    %44 = addi %42, %43 : tile<i32>
+    %45 = store_view_tko weak %40, %13[%44, %4] token=%19 : tile<1x128xf64>, partition_view<tile=(1x128), padding_value = zero, tensor_view<2x512xf64, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
     return
   }
 }

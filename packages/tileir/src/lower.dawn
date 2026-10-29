@@ -649,6 +649,50 @@ fn define_all(l0: L, handles: List[Int], tys: List[Ty]) -> (L, List[Int]) = {
   })
 }
 
+# Give every expansion instruction the source operation's owner, exactly
+# as pointer ladders do. Only the final value binds the source handle.
+fn temporary(l0: L, make: fn(Int) -> Instr) -> (L, Ref) = {
+  let (l1, d) = fresh(l0)
+  (emit(l1, make(d)), Val(d))
+}
+
+# Ordinary f64 -> f32 -> fp8 RNE loses the side of a target midpoint.
+# RTZ plus an inexact-only sticky bit supplies round-to-odd instead.
+# All target boundaries are inside the normal f32 range; tiny and huge
+# values still reach the target's signed-zero and saturation rules.
+fn narrow_from_f64(l0: L, dst: Int, to: String, shape: List[Int], x: Ref) -> L = {
+  let f64 = num_tile(shape, "f64")
+  let f32 = num_tile(shape, "f32")
+  let i64 = num_tile(shape, "i64")
+  let i32 = i32_tile(shape)
+  let mask = i1_tile(shape)
+  let (l1, t) = temporary(l0, d => Cast(d, "ftof_zero", f64, f32, x))
+  let (l2, back) = temporary(l1, d => Cast(d, "ftof", f32, f64, t))
+  let (l3, u) = temporary(l2, d => Cast(d, "bitcast", f32, i32, t))
+  let (l4, raw) = temporary(l3, d => Cast(d, "bitcast", f64, i64, x))
+  let (l5, exponent_mask) = temporary(l4, d => ConstInt(d, i64, 0x7ff0000000000000))
+  let (l6, exponent) = temporary(l5, d => IntBin(d, "andi", i64, raw, exponent_mask))
+  let (l7, finite) = temporary(l6, d => CmpInt(d, "ne", i64, mask, exponent, exponent_mask))
+  let (l8, inexact) = temporary(l7, d => CmpFloat(d, "une", f64, mask, back, x))
+  let (l9, jam) = temporary(l8, d => IntBin(d, "andi", mask, finite, inexact))
+  let (l10, one) = temporary(l9, d => ConstInt(d, i32, 1))
+  let (l11, odd_bits) = temporary(l10, d => IntBin(d, "ori", i32, u, one))
+  let (l12, chosen) = temporary(l11, d => SelectTile(d, mask, i32, jam, odd_bits, u))
+  let (l13, odd) = temporary(l12, d => Cast(d, "bitcast", i32, f32, chosen))
+  let (l14, src) = if to == "f4E2M1FN" {
+    # E2M1 has no NaN. Its Dawn value is +0, independent of the
+    # assembler's bare conversion rule for that special input.
+    let (la, nan) = temporary(l13, d => CmpFloat(d, "une", f64, mask, x, x))
+    let (lb, zero) = temporary(la, d => ConstFloat(d, f32, 0.0))
+    temporary(lb, d => SelectTile(d, mask, f32, nan, zero, odd))
+  } else {
+    (l13, odd)
+  }
+  let ty = num_tile(shape, to)
+  let (l15, result) = define(l14, dst, ty)
+  emit(l15, Cast(result, "ftof", f32, ty, src))
+}
+
 # The shape of `shape`'s rank with every dimension 1: what a rank-0 value
 # reshapes to before it is broadcast over the whole tile, and what one
 # dimension's `iota` reshapes to with its own dimension put back.
@@ -956,9 +1000,13 @@ fn lower_one(l0: L, op: TileOp) -> L = match op {
   }
   Convert(dst, op, from, to, shape, src) -> {
     let a = ref_of(l0, src, "${op} operand")
-    let ty = num_tile(shape, to)
-    let (l1, d) = define(l0, dst, ty)
-    emit(l1, Cast(d, op, num_tile(shape, from), ty, a))
+    if op == "ftof" && from == "f64" && (to == "f8E5M2" || to == "f8E4M3FN" || to == "f4E2M1FN") {
+      narrow_from_f64(l0, dst, to, shape, a)
+    } else {
+      let ty = num_tile(shape, to)
+      let (l1, d) = define(l0, dst, ty)
+      emit(l1, Cast(d, op, num_tile(shape, from), ty, a))
+    }
   }
   # `pack` and `unpack` are conversions in every respect the writer cares
   # about -- one operand, the result type, no attributes -- and differ from
@@ -2158,4 +2206,26 @@ test "S3: hand-built if yields must have identical complete types" {
       Err(e) -> { assert str.contains(e.message, "an if's branches yield different types") }
     }
   }
+}
+
+test "a narrow conversion keeps dense values and the source owner inside a region" {
+  let p = TileProg { name = "narrow", params = [], globals = [], hints = [], producer = None, debug = None,
+    ops = [ConstI(0, "i1", [], 1), If([4], 0,
+      [ConstF(1, "f64", [2], 1.125), Convert(2, "ftof", "f64", "f8E5M2", [2], 1), Yield([2])],
+      [ConstF(3, "f8E5M2", [2], 1.0), Yield([3])])] }
+  let (k, owners) = lower_spans(p)
+  assert len(k.body) == len(owners) + 1
+  let nested = owners[1].inner[0]
+  assert len(nested) > 3
+  assert list.all(list.take(list.drop(nested, 1), len(nested) - 2), o => o.op == 3)
+  let defs = defines_inside(k.body)
+  assert list.all(range(0, len(defs)), j => list.contains(defs, j))
+}
+
+test "an explicit f32 conversion remains a separate rounding" {
+  let p = TileProg { name = "explicit", params = [], globals = [], hints = [], producer = None, debug = None,
+    ops = [ConstF(0, "f64", [], 1.125), Convert(1, "ftof", "f64", "f32", [], 0),
+      Convert(2, "ftof", "f32", "f8E5M2", [], 1)] }
+  let k = lower(p)
+  assert len(k.body) == 4
 }
