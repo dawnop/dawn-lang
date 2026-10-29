@@ -1322,8 +1322,13 @@ TOML
 }
 
 python3 "$here/rounding_cases.py" --check || fail "the independent rounding table is stale"
+
+# The independent table must first accept the actual host reference.
 build_native "$root/std" "$work/arch.bin" "$here/arch_diff.dawn"
-"$work/arch.bin" --oracle-selftest > "$work/oracle-clean.out" 2>&1 || { cat "$work/oracle-clean.out" >&2; fail "independent narrow table disagrees with the reference"; }
+"$work/arch.bin" --oracle-selftest > "$work/oracle-clean.out" 2>&1 || {
+  cat "$work/oracle-clean.out" >&2
+  fail "the clean narrow-format reference disagrees with the independent table"
+}
 cat "$work/oracle-clean.out"
 
 verdict_of() { # transcript
@@ -3281,6 +3286,90 @@ TOML
 }
 
 rounding_controls
+
+# N2: a same-width E5M2 writer replacement. Every runnable architecture
+# kernel is re-encoded, including controls that must stay byte-identical.
+if [ "$(arch_level "$gpu_name")" -ge 90 ]; then
+  name=e5m2-tag-as-e4m3
+  pkg="$work/pkg-$name"
+  cp -r "$root/packages/tileir" "$pkg"
+  python3 "$here/mutate.py" "$pkg/src/bytecode.dawn" "$name" \
+    '  "f8E5M2" -> 11' '  "f8E5M2" -> 10'
+  cp "$pkg/src/bytecode.dawn" "$work/$name.writer"
+  mutant_kernels "$name" "$pkg" "${arch_ran[@]}"
+  args=()
+  for k in "${arch_ran[@]}"; do
+    if [ "$k" = dtype_e5m2 ]; then
+      python3 - "$golden/$k.tilebc" "$work/$name-$k.tilebc" <<'PY_BYTES'
+from pathlib import Path
+import sys
+before, after = [Path(p).read_bytes() for p in sys.argv[1:]]
+changes = [(i, a, b) for i, (a, b) in enumerate(zip(before, after)) if a != b]
+if len(before) != len(after) or not changes or any((a, b) != (11, 10) for _, a, b in changes):
+    raise SystemExit("E5M2 writer: expected only same-width type-tag bytes 0b -> 0a")
+print("E5M2 writer offsets " + ",".join(str(i) for i, _, _ in changes) + ": 0b -> 0a")
+PY_BYTES
+    else
+      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" || fail "$name: control $k bytes changed"
+    fi
+    args+=("$k" "$work/$name-$k.cubin")
+  done
+  rc=0
+  device "$work/arch.bin" "${args[@]}" > "$work/$name.out" 2> "$work/$name.err" || rc=$?
+  [ "$arch_verdict" = pass ] && [ "$rc" = 1 ] && [ "$(verdict_of "$work/$name.out")" = fail ] || {
+    cat "$work/$name.out" "$work/$name.err" >&2
+    fail "$name: expected a clean pass and an executed wrong answer"
+  }
+  awk '/^kernel /{k=$2} /^  verdict /{if (k == "dtype_e5m2") {if ($2 != "differ:result") bad=1; red++}
+      else if ($2 != "identical:exact") bad=1} END {exit bad || red != 1}' "$work/$name.out" || {
+    cat "$work/$name.out" >&2; fail "$name: target/control verdicts differ from the frozen set"
+  }
+  grep -q '^  oracle device seg=0 lane=1 ' "$work/$name.out" || fail "$name: expected storage lane 1 to expose the changed exponent split"
+  echo "PASS  mutant: $name (assembled; dtype_e5m2 seg=0 lane=1 differs; all other architecture types agree)"
+else
+  echo "SKIP  mutant: e5m2-tag-as-e4m3 requires sm_90 (this ledger is $gpu_name)"
+fi
+
+# Rejecting signed inputs models a missing magnitude step without feeding
+# negative values to exponent(), whose precondition is positive input.
+# Mutating the reference itself proves the oracle is independent. These
+# copies are compiled and executed; a syntax error or a crash is not a kill.
+for name in e8m0-no-magnitude e8m0-underflow-zero e8m0-underflow-nan; do
+  dir="$work/std-$name"
+  cp -r "$root/std" "$dir"
+  if [ "$name" = e8m0-no-magnitude ]; then
+    python3 "$here/mutate.py" "$dir/narrow.dawn" "$name" \
+      $'pub fn round_f8e8m0(x: Float) -> Float =\n  if x != x {\n    x\n  } else {\n    let a = magnitude(x)' \
+      $'pub fn round_f8e8m0(x: Float) -> Float =\n  if x != x || x < 0.0 {\n    0.0 / 0.0\n  } else {\n    let a = x'
+    lane=1
+  else
+    replacement='0.0'
+    [ "$name" != e8m0-underflow-nan ] || replacement='0.0 / 0.0'
+    python3 "$here/mutate.py" "$dir/narrow.dawn" "$name" \
+      $'      } else if e < -127 {\n        pow2(-127)' \
+      "$(printf '      } else if e < -127 {\n        %s' "$replacement")"
+    lane=0
+  fi
+  cp "$dir/narrow.dawn" "$work/$name.source"
+  build_native "$dir" "$work/$name.bin" "$here/arch_diff.dawn"
+  rc=0
+  "$work/$name.bin" --oracle-selftest > "$work/$name.out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] && grep -q "^oracle tileref dtype_e8m0 seg=1 lane=$lane " "$work/$name.out" &&
+    grep -q '^oracle tileref dtype_e5m2 pass$' "$work/$name.out" || {
+      cat "$work/$name.out" >&2; fail "$name: expected the specific E8M0 lane and a green E5M2 control"
+    }
+  echo "PASS  mutant: $name (tileref oracle rejects seg=1 lane=$lane; E5M2 control agrees)"
+done
+for name in short-input short-output; do
+  rc=0
+  "$work/arch.bin" --oracle-control "$name" > "$work/oracle-$name.out" 2>&1 || rc=$?
+  if [ "$name" = short-input ]; then pattern='^oracle input dtype_e8m0 arg=1 length=511 first_missing=511$'
+  else pattern='^oracle tileref dtype_e8m0 length=1023 expected=1032 first_missing=1023$'; fi
+  [ "$rc" = 1 ] && grep -q "$pattern" "$work/oracle-$name.out" || {
+    cat "$work/oracle-$name.out" >&2; fail "$name: expected an explicit truncation lane"
+  }
+  echo "PASS  mutant: narrow-$name (oracle reports the first missing lane)"
+done
 
 # A package mutant held to one family: every kernel's bytes move, and on the
 # device exactly the named red set differs and the rest do not.
@@ -6227,6 +6316,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
   scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn scripts/tile-gpu-diff/scalar_diff.dawn scripts/tile-gpu-diff/entry6_diff.dawn scripts/tile-gpu-diff/read_layout_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
+  scripts/tile-gpu-diff/rounding.dawn scripts/tile-gpu-diff/rounding_cases.py \
   scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py scripts/tile-gpu-diff/fold_verdict.sh)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
