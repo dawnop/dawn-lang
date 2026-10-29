@@ -159,6 +159,7 @@ def main():
         mods.append((fam, mod, n))
     (out / "src" / "kernels.dawn").write_text(kernels_module())
     shutil.copy(HERE / "glue.dawn", out / "src" / "glue.dawn")
+    shutil.copy(DIFF / "rounding.dawn", out / "src" / "rounding.dawn")
     uses = "\n".join(f"use {m}" for _f, m, _n in mods)
     arms = "\n".join(f'    ["{f}"] -> {m}.family_main()' for f, m, _n in mods)
     names = "|".join(f for f, _m, _n in mods)

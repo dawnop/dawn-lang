@@ -232,7 +232,11 @@ let (prog, entry) = trace3("matmul",
   `mma_scaled` is the block-scaled product and `mmai` the i8 one.
 - `t.to(BF16)` converts a float tile, rounding to nearest even (a tile
   already in that format is answered unchanged); `float_to_float` takes the
-  other roundings. `t.transpose()` swaps a rank-2 tile's dimensions;
+  other roundings. From f64 to F8E5M2, F8E4M3FN or F4E2M1FN, the default
+  rounds the source binary64 value once to the target grid, then saturates.
+  Signed zero is preserved; E5M2/E4M3 retain the NaN class and E2M1 maps
+  NaN to +0. Explicit f64 -> f32 -> target still means two roundings.
+  `t.transpose()` swaps a rank-2 tile's dimensions;
   `permute_tile(t, perm)` reorders any rank.
 - `reshape(t, shape)` regroups `t`'s lanes into `shape`, row-major, as
   many lanes as before: a `[T, T]` product goes into a `[1, T, T]` cell as

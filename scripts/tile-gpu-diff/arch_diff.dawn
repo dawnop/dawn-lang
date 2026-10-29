@@ -97,6 +97,8 @@ use tileref/ref.{dtype_convert_ref, dtype_e2m1_ref, mmaf_scaled_ref, view_atomic
 use std/list
 use std/map
 use std/narrow
+use std/bytes
+use rounding
 
 ## The sentinel every output buffer holds before a launch: a value no kernel
 ## here computes, so a lane that still has it is a lane nothing wrote.
@@ -237,22 +239,24 @@ fn stopped(t: Trace) -> String =
     ""
   }
 
-fn rendered(o: Option[List[Float]]) -> String = match o {
-  Some(v) -> to_string(v)
-  None -> "-"
-}
+# Finite values and signed zeros compare by raw bits; only NaNs compare
+# by class, as the existing format contract permits.
+fn float_to_bits(v: Float) -> Int = bytes.unpack_ints(bytes.pack_floats([v], 8), 8, true)[0]
 
-## The verdict for one kernel. Every kernel here is EXACT tier, so there is
-## no tolerance arm: the two renderings are equal or they are not.
+fn float_of_bits(b: Int) -> Float = bytes.unpack_floats(bytes.pack_ints([b], 8), 8)[0]
+
+fn same(a: Float, b: Float) -> Bool =
+  if a != a { b != b } else { float_to_bits(a) == float_to_bits(b) }
+
 fn verdict(fake: Trace, real: Trace) -> String = {
   let stop = stopped(real)
-  if stop != "" {
-    "blocked:" ++ stop
-  } else if rendered(real.result) == rendered(fake.result) {
-    "identical:exact"
-  } else {
-    "differ:result"
-  }
+  if stop != "" { "blocked:" ++ stop }
+  else { match (fake.result, real.result) {
+    (Some(a), Some(b)) -> if len(a) == len(b) && list.all(range(0, len(a)), j => same(a[j], b[j])) {
+      "identical:exact"
+    } else { "differ:result" }
+    _ -> "differ:result"
+  } }
 }
 
 ## EVERY differing lane, up to `SHOWN_DIFFERENCES` of them, as segment and
@@ -269,7 +273,7 @@ fn differences(real: Trace, fake: Trace, n: Int) -> String =
       if len(a) != len(b) {
         "lengths ${len(a)} and ${len(b)}"
       } else {
-        let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+        let bad = list.filter(range(0, len(a)), i => not same(a[i], b[i]))
         if len(bad) == 0 {
           "-"
         } else {
@@ -337,34 +341,8 @@ fn e4m3_x() -> List[Float] =
 ## measure: 464 is the midpoint above 448 and ties DOWN to it because 448's
 ## significand is even, and anything above answers NaN because the format
 ## has nothing else left.
-fn e4m3_y() -> List[Float] =
-  list.map(range(0, DT_N), i =>
-      if i == 0 {
-        1.0 + pow2(0 - 4)
-      } else if i == 1 {
-        1.0 + 3.0 * pow2(0 - 4)
-      } else if i == 2 {
-        448.0
-      } else if i == 3 {
-        464.0
-      } else if i == 4 {
-        480.0
-      } else if i == 5 {
-        0.0 - 480.0
-      } else if i == 6 {
-        1.0 / 0.0
-      } else if i == 7 {
-        0.0 / 0.0
-      } else if i == 8 {
-        pow2(0 - 11)
-      } else {
-        to_float(i - 256) * 0.1 + 1.0 / 3.0
-      })
+fn e4m3_y() -> List[Float] = rounding.inputs(0, DT_N)
 
-## The f8E5M2 storage corpus: five exponent bits and two significand ones,
-## so this format DOES have an infinity and its largest finite value is
-## 57344. The pinned lanes are the same five questions as f8E4M3FN's, asked
-## of the other split of the byte.
 fn e5m2_x() -> List[Float] =
   list.map(range(0, DT_N), i =>
       if i == 0 {
@@ -383,33 +361,7 @@ fn e5m2_x() -> List[Float] =
         to_float(i - 256) * 0.0123456789
       })
 
-## The f64 the f8E5M2 conversion segment rounds. This format DOES have an
-## infinity, so its top end is an ordinary IEEE overflow rather than the
-## choice f8E4M3FN's is: 61440 is the midpoint above the largest finite
-## value and ties to even, which here is the infinity.
-fn e5m2_y() -> List[Float] =
-  list.map(range(0, DT_N), i =>
-      if i == 0 {
-        1.0 + pow2(0 - 3)
-      } else if i == 1 {
-        1.0 + 3.0 * pow2(0 - 3)
-      } else if i == 2 {
-        57344.0
-      } else if i == 3 {
-        1.0e30
-      } else if i == 4 {
-        0.0 - 1.0e30
-      } else if i == 5 {
-        1.0 / 0.0
-      } else if i == 6 {
-        0.0 / 0.0
-      } else if i == 7 {
-        pow2(0 - 18)
-      } else if i == 8 {
-        pow2(0 - 17)
-      } else {
-        to_float(i - 256) * 0.1 + 1.0 / 3.0
-      })
+fn e5m2_y() -> List[Float] = rounding.inputs(1, DT_N)
 
 ## The f8E8M0FNU storage corpus: the format is the exponent alone, so every
 ## lane a buffer of it can hold is a power of two and `copy_from_host` rounds each
@@ -481,27 +433,7 @@ fn e2m1_x() -> List[Float] =
 ## values and nothing else, so the pinned lanes are its two unmeasured
 ## answers: a magnitude above 6 saturates rather than overflowing, and a NaN
 ## goes to +0 because there is no NaN encoding to go to.
-fn e2m1_y() -> List[Float] =
-  list.map(range(0, DT_N), i =>
-      if i == 0 {
-        1.25
-      } else if i == 1 {
-        1.75
-      } else if i == 2 {
-        5.0
-      } else if i == 3 {
-        6.5
-      } else if i == 4 {
-        1.0e30
-      } else if i == 5 {
-        0.0 - 1.0e30
-      } else if i == 6 {
-        0.25
-      } else if i == 7 {
-        0.75
-      } else {
-        to_float(i % 29) * 0.25 - 3.5
-      })
+fn e2m1_y() -> List[Float] = rounding.inputs(3, DT_N)
 
 ## The block-scaled product's four inputs. The operands are small whole
 ## numbers and the scales are powers of two, which is what keeps the tier
@@ -601,7 +533,8 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
   } else {
     # THE BINS START AT ZERO AND NOT AT THE SENTINEL, and this is the one
     # buffer here that could not use it. An atomic reduction folds into what
-    # is already in the cell, so the sentinel would be an addend; in f64
+    # is already in the cell, so the sentinel would be an addend
+    # in f64
     # that is harmless (`gsview_diff`'s view_atomic starts every cell at its
     # mode's identity for the same reason and the sums are exact anyway),
     # but bf16 carries eight significand bits and -12345 + 31 rounds
@@ -610,6 +543,28 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
     # that had done nothing.
     [("i32", va_x()), ("bf16", filled(VA_BINS, 0.0) ++ sentinel_buffer(TAIL))]
   }
+}
+
+# Each execution is checked against literal results, independently of the
+# host reference and of the other execution.
+fn oracle(i: Int, t: Trace, explicit: Bool) -> String = match t.result {
+  None -> "missing-result"
+  Some(v) -> {
+    rounding.check(i, v, DT_N, TAIL, SENTINEL, explicit)
+  }
+}
+
+fn bits(v: Float) -> String = bytes.to_hex(bytes.pack_floats([v], 8, bytes.Big))
+
+fn oracle_selftest(_control: String) -> Unit !io !Exit = {
+  var ok = true
+  for i in [0, 1, 3] {
+    let t = with_gpu_fake(case_kernels(i), () => stages(case_name(i), case_grid(i), case_bufs(i)))
+    let v = oracle(i, t, false)
+    io.println("oracle tileref ${case_name(i)} ${v}")
+    if v != "pass" { ok = false }
+  }
+  if not ok { io.exit(1) }
 }
 
 ## The reference table the fake device answers with, for one case.
@@ -731,7 +686,13 @@ fn usage() -> Unit !Exit !io = {
 }
 
 pub fn main() -> Unit !io = io.with_exit_real(() => {
-  let paths = args()
+  let passed = args()
+  let explicit = len(passed) > 0 && passed[0] == "--explicit-f32"
+  let paths = if explicit { list.drop(passed, 1) } else { passed }
+  if paths == ["--oracle-selftest"] { oracle_selftest("")
+    return }
+  if len(paths) == 2 && paths[0] == "--oracle-control" { oracle_selftest(paths[1])
+    return }
   let count = len(paths) / 2
   if count == 0 || len(paths) != 2 * count { usage() } else { () }
   var cubins: Map[String, Bytes] = map.empty()
@@ -758,15 +719,25 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     let bufs = case_bufs(i)
     let gx = case_grid(i)
     let refs = case_kernels(i)
-    let fake = with_gpu_fake(refs, () => stages(name, gx, bufs))
+    let reference_bufs = if explicit && i == 1 {
+      let (dt, y) = bufs[1]
+      [bufs[0], (dt, bytes.unpack_floats(bytes.pack_floats(y, 4), 4)), bufs[2]]
+    } else { bufs }
+    let fake = with_gpu_fake(refs, () => stages(name, gx, reference_bufs))
     let real = with_gpu_real(cubins, () => stages(name, gx, bufs))
-    let v = verdict(fake, real)
+    let host_oracle = if i < 4 { oracle(i, fake, explicit && i == 1) } else { "pass" }
+    let device_oracle = if (i < 4) && stopped(real) == "" { oracle(i, real, explicit && i == 1) } else { "skipped:" ++ stopped(real) }
+    let v = if host_oracle != "pass" || ((i < 4) && stopped(real) == "" && device_oracle != "pass") { "differ:result" } else { verdict(fake, real) }
     io.println("kernel ${name} tier=exact bufs=${buffers_of(i)} grid=(${gx}, 1, 1)"
         ++ " segments=${case_segments(i)}")
     io.println("  index ${shape_of(i)}")
     io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
     io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
         ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    if i < 4 {
+      io.println("  oracle tileref ${host_oracle}")
+      io.println("  oracle device ${device_oracle}")
+    }
     io.println("  diffs ${differences(real, fake, case_lanes(i))}")
     if real.note != "" { io.println("  note  ${real.note}") } else { () }
     io.println("  verdict ${v}")

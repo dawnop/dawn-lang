@@ -270,14 +270,19 @@ The shift operators require `TileShiftDtype`: I8, I16, I32 or Int. Their Amount 
 
 ## Conversions
 
-Every conversion is one operation; the format pair and the rounding are its attributes.
+A source conversion has a format pair and rounding. From f64 to F8E5M2,
+F8E4M3FN or F4E2M1FN, default conversion rounds the source binary64 value
+once to the target grid, then saturates, preserving signed zero. E5M2/E4M3
+preserve the NaN class; E2M1 maps NaN to +0. The shared lowering uses a
+round-to-odd f32 intermediate to preserve this result. Explicit f64 -> f32
+-> target retains its two roundings. E8M0 keeps its separate directed rule.
 
 | Function | Operation | Also |
 |---|---|---|
 | `int_to_float` | `itof` | - |
 | `float_to_int` | `ftoi` | - |
-| `float_to_float` | `ftof` | - |
-| `to` | `ftof` | - |
+| `float_to_float` | `ftof` | `bitcast`, `constant`, `andi`, `ori`, `cmpf`, `cmpi`, `select` |
+| `to` | `ftof` | `bitcast`, `constant`, `andi`, `ori`, `cmpf`, `cmpi`, `select` |
 | `mask_to_int` | `exti` | - |
 | `int_to_mask` | `trunci` | - |
 | `bits_to_float` | `bitcast` | - |

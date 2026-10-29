@@ -691,7 +691,18 @@ fi
 # ---------------------------------------------------------------- the run
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# Keep the named narrow-format evidence on failure as well as success.
+finish() {
+  if [ -n "${NARROW_EVIDENCE:-}" ]; then
+    mkdir -p "$NARROW_EVIDENCE"
+    find "$work" -maxdepth 1 -type f \( -name '*.out' -o -name '*.err' -o -name '*e5m2*' -o -name '*e8m0*' -o -name 'oracle-*' -o -name '*narrow*' \) \
+      -exec cp {} "$NARROW_EVIDENCE/" \;
+    (cd "$NARROW_EVIDENCE" && sha256sum ./*) > "$work/narrow-sha256.txt"
+    cp "$work/narrow-sha256.txt" "$NARROW_EVIDENCE/SHA256SUMS"
+  fi
+  rm -rf "$work"
+}
+trap finish EXIT
 cd "$root"
 
 toolchain_value() { # key
@@ -1295,6 +1306,7 @@ build_native() { # std-dir, bin, program (default vadd_diff.dawn)
   rm -rf "$proj"
   mkdir -p "$proj/src"
   cp "$program" "$proj/src/main.dawn"
+  cp "$here/rounding.dawn" "$proj/src/rounding.dawn"
   cat > "$proj/dawn.toml" <<TOML
 schema = 1
 name = "tile_gpu_diff"
@@ -1308,6 +1320,11 @@ TOML
     -I "$root/runtime/c" -o "$2" "$2.c" "$rt_obj" -lm > "$2.cc" 2>&1 ||
     { cat "$2.cc" >&2; fail "native compile failed for $program against $1"; }
 }
+
+python3 "$here/rounding_cases.py" --check || fail "the independent rounding table is stale"
+build_native "$root/std" "$work/arch.bin" "$here/arch_diff.dawn"
+"$work/arch.bin" --oracle-selftest > "$work/oracle-clean.out" 2>&1 || { cat "$work/oracle-clean.out" >&2; fail "independent narrow table disagrees with the reference"; }
+cat "$work/oracle-clean.out"
 
 verdict_of() { # transcript
   sed -n 's/^tile-gpu-diff: //p' "$1" | tail -n 1
@@ -1572,7 +1589,6 @@ if [ "${#arch_ran[@]}" -eq 0 ]; then
 else
   arch_args=()
   for k in "${arch_ran[@]}"; do arch_args+=("$k" "$work/$k.cubin"); done
-  build_native "$root/std" "$work/arch.bin" "$here/arch_diff.dawn"
   rc=0
   device "$work/arch.bin" "${arch_args[@]}" > "$work/arch.out" 2> "$work/arch.err" || rc=$?
   cat "$work/arch.out"
@@ -3011,7 +3027,7 @@ verdict_families=(
   scalar_verdict bitwise_verdict shift_verdict staged_verdict
 )
 fold_verdict_selftest || fail "the verdict fold's negative control failed"
-fold_script_selftest "$here/run.sh" || fail "a family verdict is assigned in run.sh but not read by the fold"
+(fold_script_selftest "$here/run.sh") || fail "a family verdict is assigned in run.sh but not read by the fold"
 verdict="$(fold_named_verdicts "${verdict_families[@]}")" || fail "the verdict fold could not read every family"
 
 # ---- mutants: a copy of std with one anchor rewritten in std/gpu.dawn
@@ -3167,6 +3183,104 @@ TOML
     assemble_golden "$k" "$work/$tag-$k.tilebc" "$work/$tag-$k.cubin"
   done
 }
+
+# The existing architecture family is the numerical judge for each temporary
+# lowering copy. Successful assembly, a named wrong lane and unaffected
+# architecture controls are required; a refusal is never a killed mutant.
+rounding_controls() {
+  local name pkg k rc args=() expected lane
+  if [ "$(arch_level "$gpu_name")" -lt 90 ]; then
+    echo "SKIP  rounding controls: signed fp8 requires sm_90 (this ledger is $gpu_name)"
+    return
+  fi
+  for name in narrow-odd-missing narrow-rne-intermediate narrow-rtz-only narrow-unconditional-jam narrow-sign-cleared narrow-e2m1-nan-unselected; do
+    if [ "$name" = narrow-e2m1-nan-unselected ] && [ "$(arch_level "$gpu_name")" -lt 100 ]; then
+      echo "SKIP  mutant: $name requires sm_100"
+      continue
+    fi
+    pkg="$work/pkg-$name"
+    cp -r "$root/packages/tileir" "$pkg"
+    case "$name" in
+      narrow-odd-missing)
+        python3 "$here/mutate.py" "$pkg/src/lower.dawn" "$name" \
+          '      narrow_from_f64(l0, dst, to, shape, a)' \
+          $'      let ty = num_tile(shape, to)\n      let (l1, d) = define(l0, dst, ty)\n      emit(l1, Cast(d, op, num_tile(shape, from), ty, a))'
+        lane=29 ;;
+      narrow-rne-intermediate)
+        python3 "$here/mutate.py" "$pkg/src/lower.dawn" "$name" \
+          'Cast(d, "ftof_zero", f64, f32, x)' 'Cast(d, "ftof", f64, f32, x)'
+        python3 "$here/mutate.py" "$pkg/src/lower.dawn" "$name" \
+          'SelectTile(d, mask, i32, jam, odd_bits, u)' 'SelectTile(d, mask, i32, jam, u, u)'
+        lane=29 ;;
+      narrow-rtz-only)
+        python3 "$here/mutate.py" "$pkg/src/lower.dawn" "$name" \
+          'SelectTile(d, mask, i32, jam, odd_bits, u)' 'SelectTile(d, mask, i32, jam, u, u)'
+        lane=29 ;;
+      narrow-unconditional-jam)
+        python3 "$here/mutate.py" "$pkg/src/lower.dawn" "$name" \
+          'SelectTile(d, mask, i32, jam, odd_bits, u)' 'SelectTile(d, mask, i32, jam, odd_bits, odd_bits)'
+        lane=4 ;;
+      narrow-sign-cleared)
+        python3 "$here/mutate.py" "$pkg/src/lower.dawn" "$name" \
+          '  let (l13, odd) = temporary(l12, d => Cast(d, "bitcast", i32, f32, chosen))' \
+          $'  let (ls, sign_mask) = temporary(l12, d => ConstInt(d, i32, 0x7fffffff))\n  let (lc, cleared) = temporary(ls, d => IntBin(d, "andi", i32, chosen, sign_mask))\n  let (l13, odd) = temporary(lc, d => Cast(d, "bitcast", i32, f32, cleared))'
+        lane=1 ;;
+      narrow-e2m1-nan-unselected)
+        python3 "$here/mutate.py" "$pkg/src/lower.dawn" "$name" \
+          '    temporary(lb, d => SelectTile(d, mask, f32, nan, zero, odd))' '(lb, odd)'
+        lane=nan ;;
+    esac
+    cp "$pkg/src/lower.dawn" "$work/$name.source"
+    mutant_kernels "$name" "$pkg" "${arch_ran[@]}"
+    args=()
+    for k in "${arch_ran[@]}"; do args+=("$k" "$work/$name-$k.cubin"); done
+    rc=0
+    device "$work/arch.bin" "${args[@]}" > "$work/$name.out" 2> "$work/$name.err" || rc=$?
+    [ "$arch_verdict" = pass ] && [ "$rc" = 1 ] && [ "$(verdict_of "$work/$name.out")" = fail ] || {
+      cat "$work/$name.out" "$work/$name.err" >&2
+      fail "$name: expected a clean pass and an executed numerical failure"
+    }
+    if [ "$lane" = nan ]; then
+      expected=dtype_e2m1
+      awk '/^kernel /{k=$2} k == "dtype_e2m1" && /^  oracle device seg=1 lane=40 bits=.* expected=0000000000000000$/ {seen=1} END {exit !seen}' "$work/$name.out" || fail "$name: missing the NaN-to-positive-zero verdict at lane 40"
+    else
+      expected=dtype_e5m2
+      awk -v lane="$lane" '/^kernel /{k=$2} k == "dtype_e5m2" && $0 ~ "^  oracle device seg=1 lane="lane" " {seen=1} END {exit !seen}' "$work/$name.out" || {
+        cat "$work/$name.out" >&2; fail "$name: did not reject the specified E5M2 lane $lane"
+      }
+    fi
+    awk -v only="$expected" -v nan="$lane" '/^kernel /{k=$2} /^  verdict / {
+      if (k == only) {if ($2 != "differ:result") bad=1; seen=1}
+      else if (nan == "nan" || (k != "dtype_e4m3" && k != "dtype_e2m1")) {if ($2 != "identical:exact") bad=1}
+    } END {exit bad || !seen}' "$work/$name.out" || fail "$name: a control kernel moved or target stayed green"
+    echo "PASS  mutant: $name (assembled; $expected lane=$lane differs; architecture controls agree)"
+  done
+
+  # Explicit two-step source is a positive control with a different oracle.
+  name=narrow-explicit-f32
+  local proj="$work/proj-$name"
+  mkdir -p "$proj/src"
+  cp "$golden/kernels.dawn" "$proj/src/main.dawn"
+  python3 "$here/mutate.py" "$proj/src/main.dawn" "$name" \
+    '  seg(1, float_to_float(float_to_float(load_cell(y), F8E5M2), F64))' \
+    '  seg(1, float_to_float(float_to_float(float_to_float(load_cell(y), F32), F8E5M2), F64))'
+  cat > "$proj/dawn.toml" <<TOML
+schema = 1
+name = "explicit_rounding"
+[deps]
+tileir = "$root/packages/tileir"
+tileref = "$root/packages/tileref"
+TOML
+  "$root/bin/dawn" run "$proj" -- dtype_e5m2 --bytecode "$work/$name.tilebc" > "$work/$name.record.out" 2> "$work/$name.record.err" || fail "$name: recording failed"
+  assemble_golden dtype_e5m2 "$work/$name.tilebc" "$work/$name.cubin"
+  device "$work/arch.bin" --explicit-f32 dtype_e5m2 "$work/$name.cubin" > "$work/$name.out" 2> "$work/$name.err" || {
+    cat "$work/$name.out" "$work/$name.err" >&2; fail "$name: explicit two-rounding source lost its semantics"
+  }
+  [ "$(verdict_of "$work/$name.out")" = pass ] && grep -q '^  oracle device pass$' "$work/$name.out" || fail "$name: independent two-rounding oracle disagrees"
+  echo "PASS  control: $name (the explicit two-rounding source agrees with its distinct literal oracle)"
+}
+
+rounding_controls
 
 # A package mutant held to one family: every kernel's bytes move, and on the
 # device exactly the named red set differs and the rest do not.
