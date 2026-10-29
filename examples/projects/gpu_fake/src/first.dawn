@@ -8,7 +8,7 @@
 # gallery, the site's strip and the recorded output of main.dawn stay as they
 # are: main hands its arguments here only when it is given some.
 #
-# Three ways to run it, each a different device behind the same `!Gpu` code:
+# Four ways to run it, each a different device behind the same `!Gpu` code:
 #
 #   dawn run examples/projects/gpu_fake -- fake
 #       the fake device. No GPU, no driver, no `tileiras`. The fake device
@@ -23,9 +23,13 @@
 #       no device runtime on the JVM (`gpu.unsupported_backend`), so this
 #       one is built with the C backend. The README has the commands.
 #
+#   <native build> assemble <gpu-name> <tileiras>
+#       assemble the same record and run it through the CUDA driver.
+#
 # The example-tests gate runs this file's tests, so CI compiles all of it and
 # runs the fake path; it has no GPU.
 
+use std/bytes
 use std/dtype.{F64}
 use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, free, sync, buffer_arg, launch_entry3, Entry3,
   with_gpu_fake, with_gpu_real, reference_kernels }
@@ -33,6 +37,8 @@ use std/io
 use std/io.{Exit}
 use std/list
 use std/map
+use sha2/sha256
+use tileir/asm.{assemble, AssembleError, AssemblerNotFound, AssemblerFailed, NoCubin, explain}
 use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{TileProg, trace3, cells, In, Out}
 use tileir/bytecode.{encode}
@@ -78,10 +84,52 @@ fn ys() -> List[Float] = list.map(range(0, 256), i => to_float(2 * i))
 ## What `run` must answer: `x + 2x`, written without going through `add`.
 fn expected() -> List[Float] = list.map(range(0, 256), i => to_float(3 * i))
 
-fn show(r: Result[List[Float], ForeignError]) -> String = match r {
-  Ok(zs) -> if zs == expected() { "ok, 256 lanes agree with 3 * i" } else { "WRONG: ${zs}" }
-  Err(e) -> "refused: ${e.kind}: ${e.message}"
+## Validate the downloaded data independently of the device implementation.
+fn answer_error(r: Result[List[Float], ForeignError]) -> Option[String] = match r {
+  Err(e) -> Some("${e.kind}: ${e.message}")
+  Ok(zs) -> {
+    let want = expected()
+    if len(zs) != len(want) { Some("answer length: expected ${len(want)}, got ${len(zs)}") } else {
+      var wrong: Option[String] = None
+      for i in range(0, len(want)) {
+        if wrong == None && zs[i] != want[i] {
+          wrong = Some("answer lane ${i}: expected ${want[i]}, got ${zs[i]}")
+        }
+      }
+      wrong
+    }
+  }
 }
+
+fn finish(device: String, r: Result[List[Float], ForeignError]) -> Unit !io !Exit = match answer_error(r) {
+  None -> io.println("${device} device: ok, 256 lanes agree with 3 * i")
+  Some(error) -> {
+    io.eprintln("gpu_fake: ${error}")
+    io.exit(1)
+  }
+}
+
+## Both real CLI modes enter the driver here, with the entry from record().
+fn on_real(cubin: Bytes, e: Entry3[Float, Float, Float]) -> Result[List[Float], ForeignError] !io =
+  with_gpu_real(map.from([("vadd", cubin)]), () => run(e, xs(), ys()))
+
+## AssembleError keeps its constructor as well as its readable explanation.
+fn assembly_error(e: AssembleError) -> String = "AssembleError: ${e}: ${explain(e)}"
+
+fn assemble_run(prog: TileProg, e: Entry3[Float, Float, Float], gpu_name: String, tileiras: String) -> Unit !io !Exit =
+  match io.with_fs_real(() => io.with_proc_real(() => assemble(prog, gpu_name, tileiras))) {
+    Err(err) -> {
+      io.eprintln(assembly_error(err))
+      io.exit(1)
+    }
+    Ok(cubin) -> {
+      let source = encode(prog)
+      io.println("bytecode: ${len(source)} bytes, sha256 ${sha256.hex(source)}")
+      io.println("cubin: ${len(cubin)} bytes, sha256 ${sha256.hex(cubin)}")
+      io.println("transfer: upload 256 + 256 f64 lanes (4096 bytes), download 256 f64 lanes (2048 bytes)")
+      finish("real", on_real(cubin, e))
+    }
+  }
 
 # `io.exit` answers `Unit`, and a function that returns Bytes needs some.
 fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
@@ -96,7 +144,7 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match io.with_fs_real(() => io.
 }
 
 ## What main does when it is given arguments: `fake`, `emit <out.tilebc>` or
-## `real <vadd.cubin>`.
+## `real <vadd.cubin>` or `assemble <gpu-name> <tileiras>`.
 pub fn cli(argv: List[String]) -> Unit !io = io.with_exit_real(() => {
   let (prog, e) = record()
   if len(argv) == 2 && argv[0] == "emit" {
@@ -108,12 +156,13 @@ pub fn cli(argv: List[String]) -> Unit !io = io.with_exit_real(() => {
       }
     }
   } else if len(argv) == 2 && argv[0] == "real" {
-    let cubins = map.from([("vadd", read_cubin(argv[1]))])
-    io.println("real device: ${show(with_gpu_real(cubins, () => run(e, xs(), ys())))}")
+    finish("real", on_real(read_cubin(argv[1]), e))
+  } else if len(argv) == 3 && argv[0] == "assemble" {
+    assemble_run(prog, e, argv[1], argv[2])
   } else if len(argv) == 1 && argv[0] == "fake" {
-    io.println("fake device: ${show(with_gpu_fake(reference_kernels(), () => run(e, xs(), ys())))}")
+    finish("fake", with_gpu_fake(reference_kernels(), () => run(e, xs(), ys())))
   } else {
-    io.eprintln("usage: gpu_fake [fake | emit <out.tilebc> | real <vadd.cubin>]")
+    io.eprintln("usage: gpu_fake [fake | emit <out.tilebc> | real <vadd.cubin> | assemble <gpu-name> <tileiras>]")
     io.exit(2)
   }
 })
@@ -136,5 +185,93 @@ test "a vector shorter than its cells reach is refused before the device is aske
   match r {
     Err(err) -> { assert err.kind == "gpu.short_tensor" }
     Ok(_) -> { assert false }
+  }
+}
+
+# A Proc handler controls the assembler protocol without starting a process.
+# Fs is real scratch storage, just as it is for assemble in the CLI.
+fn control_require(ok: Bool) -> Unit = if ok { () } else { panic("controlled assembler protocol mismatch") }
+
+fn controlled_assembly(mode: String) -> Result[Bytes, AssembleError] !io = io.with_fs_real(() => {
+  with handle io.Proc {
+    proc_run(argv, stdout, stderr) => {
+      control_require(argv[0] == "controlled-tileiras")
+      if mode == "missing" {
+        Err(ForeignError { kind = "proc.not_found", message = "controlled missing executable", cause = None })
+      } else if argv == ["controlled-tileiras", "--version"] {
+        control_require(io.write_file(stdout, "Cuda compilation tools, release 13.4, V13.4.92\n") == Ok(()))
+        Ok(0)
+      } else {
+        control_require(list.take(argv, 4) == ["controlled-tileiras", "--gpu-name", "sm_86", "-o"])
+        control_require(len(argv) == 6)
+        if mode == "failed" {
+          control_require(io.write_file(stderr, "controlled assembly refusal") == Ok(()))
+          Ok(23)
+        } else {
+          if mode == "clean" { control_require(io.write_bytes(argv[4], bytes.utf8("cubin control")) == Ok(())) }
+          Ok(0)
+        }
+      }
+    }
+  }
+  let (prog, _e) = record()
+  assemble(prog, "sm_86", "controlled-tileiras")
+})
+
+test "controlled assembly succeeds before its three AssembleError controls" {
+  assert controlled_assembly("clean") == Ok(bytes.utf8("cubin control"))
+  match controlled_assembly("missing") {
+    Err(e) -> {
+      assert e == AssemblerNotFound("controlled-tileiras", "controlled missing executable")
+      assert assembly_error(e) == "AssembleError: ${e}: could not run tileiras at `controlled-tileiras`: controlled missing executable"
+    }
+    Ok(_) -> { assert false }
+  }
+  match controlled_assembly("failed") {
+    Err(AssemblerFailed(argv, status, stderr)) -> {
+      assert list.take(argv, 3) == ["--gpu-name", "sm_86", "-o"]
+      assert status == 23
+      assert stderr == "controlled assembly refusal"
+    }
+    _ -> { assert false }
+  }
+  match controlled_assembly("no-cubin") {
+    Err(NoCubin(path)) -> { assert len(path) > 0 }
+    _ -> { assert false }
+  }
+}
+
+test "the answer control names the changed lane and preserves device errors" {
+  assert answer_error(Ok(expected())) == None
+  let wrong = [1.0] ++ list.drop(expected(), 1)
+  assert answer_error(Ok(wrong)) == Some("answer lane 0: expected 0.0, got 1.0")
+  assert answer_error(Ok([])) == Some("answer length: expected 256, got 0")
+  let refused = ForeignError { kind = "gpu.no_driver", message = "controlled refusal", cause = None }
+  assert answer_error(Err(refused)) == Some("gpu.no_driver: controlled refusal")
+}
+
+test "only a correct answer returns normally from finish" {
+  let attempt = (r: Result[List[Float], ForeignError]) => {
+    with handle io.Exit {
+      exit_now(code) resume k => code
+    }
+    finish("control", r)
+    0
+  }
+  assert attempt(Ok(expected())) == 0
+  assert attempt(Ok([1.0] ++ list.drop(expected(), 1))) == 1
+  assert attempt(Err(ForeignError { kind = "gpu.unsupported_backend", message = "controlled refusal", cause = None })) == 1
+}
+
+test "an actual missing assembler path keeps AssemblerNotFound" {
+  assert controlled_assembly("clean") == Ok(bytes.utf8("cubin control"))
+  let (prog, _e) = record()
+  let path = "/dawn-example-no-such-directory/tileiras"
+  match io.with_fs_real(() => io.with_proc_real(() => assemble(prog, "sm_86", path))) {
+    Err(AssemblerNotFound(tool, detail)) -> {
+      assert tool == path
+      assert len(detail) > 0
+    }
+    _ -> { assert false }
   }
 }

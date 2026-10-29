@@ -80,27 +80,47 @@ and this code is that file's: CI compiles it and runs its tests.
 
 ### On a GPU
 
-The same `run` takes `with_gpu_real(cubins, ..)` in place of `with_gpu_fake`,
-where `cubins` maps a kernel name to the cubin `tileiras` made from
-`encode(prog)`. `std/gpu` does not run `tileiras`; the example does it by hand,
-in three steps between the Dawn and the card (`asm.assemble`, below, is the same
-encode-and-assemble in one call):
+Build the actual example from the repository root (JDK 21 and a C compiler
+are needed to build the native driver). Choose the target explicitly for your
+card: `sm_86`, `sm_90` or `sm_100`; pass the assembler executable explicitly too.
+The commands below use `sm_86` as an example. If `tileiras` is already
+installed, set `TILEIRAS` to that executable instead of the installer command:
 
 ```bash
-dawnc build examples/projects/gpu_fake -o gpu_fake      # the C backend: the JVM has no device runtime
-./gpu_fake fake                                         # the test above, as a program: no GPU needed
-./gpu_fake emit vadd.tilebc                             # encode(prog), written to a file
-tileiras --gpu-name sm_86 -o vadd.cubin vadd.tilebc     # your card's architecture, and see below
-./gpu_fake real vadd.cubin                              # with_gpu_real, through the CUDA driver
+source site/dawnc.sh
+DAWNC=$(site_dawnc)
+"$DAWNC" build examples/projects/gpu_fake -o gpu_fake
+./gpu_fake fake
+TILEIRAS=$(scripts/tile-golden/install-tileiras.sh "$HOME/.cache/dawn-tileiras")
+./gpu_fake assemble sm_86 "$TILEIRAS"
 ```
 
-The last line prints `real device: ok, 256 lanes agree with 3 * i` when the card
-computed the sum itself. On the JVM (`dawn run`) `with_gpu_real` answers every
-operation with `gpu.unsupported_backend`, and on a machine with no NVIDIA driver
-with `gpu.no_driver`; the fake device has neither limit. The flags to give
-`tileiras` depend on its version and the target (see "Assembling with tileiras" below),
-and `tileir/asm.tileiras_args` answers them. This path was run on an sm_86 card
-with tileiras 13.4.92.
+`assemble` records the same `vadd`, calls `asm.assemble`, installs the cubin
+with `with_gpu_real` and calls the same typed host `run` shown above. It prints
+the bytecode and cubin SHA-256 hashes and byte lengths, the upload/download
+lengths, then `real device: ok, 256 lanes agree with 3 * i` only after every
+lane agrees with the independent answer. It exits 0 only on success. An
+assembly failure exits 1 and prints `AssembleError`, its constructor and
+explanation. A device refusal exits 1 with its English kind and message; a
+wrong answer exits 1 with the first wrong lane and its expected/actual values.
+A read/write or usage error exits 2. No target detection or cache is involved.
+
+The existing separate steps remain available with that same binary:
+
+```bash
+./gpu_fake emit vadd.tilebc
+"$TILEIRAS" --gpu-name sm_86 -o vadd.cubin vadd.tilebc
+./gpu_fake real vadd.cubin
+```
+
+These plain assembler flags are sufficient for this straight-line `vadd`.
+For other kernels, use `tileir/asm.tileiras_args` as explained below.
+On the JVM (`./bin/dawn run examples/projects/gpu_fake -- fake`), fake needs
+neither GPU nor assembler. The real paths require the native build:
+`with_gpu_real` reports `gpu.unsupported_backend` on the JVM and
+`gpu.no_driver` without an NVIDIA driver; neither refusal counts as success.
+CPU CI compiles the complete path and runs fake and controlled assembler
+failures, without attempting a device launch.
 
 ### The Tile IR itself
 
@@ -153,7 +173,7 @@ what it looks like and how to fix it. Both are checked against the source.
   when the kernel picks that cell itself.
 
 `trace_kernel(name, params, body)` records a body over `param(d, pos)`
-handles, every one `Shared`; it is there for kernels with more than five
+handles, every one `Shared`; it is there for kernels with more than six
 parameters. `params` says how each is passed: `ByPtr("f32")` is a buffer,
 `ByValue("f32")` a scalar the launch hands over (`i32`, `i64`, `f32` or
 `f64`), which the body reads with `scalar(p)` and never through memory. `launch_entryN` refuses an `Out` or `Shared` argument that
@@ -382,20 +402,63 @@ program and a cubin. It encodes `prog`, writes a temporary `.tilebc`, asks
 `tileiras --version` which assembler it was given, runs it with the arguments
 for that version and target, reads the cubin back and removes the scratch
 directory. `tileiras` is the path of the executable (a bare name is looked up
-on `PATH`); this package does not install it. The shortest path from a kernel
-to a card:
+on `PATH`); this package does not install it. The runnable path above is implemented in
+`examples/projects/gpu_fake/src/first.dawn`. These are its complete assembly
+and driver functions, using `record`, `run`, `xs` and `ys` defined above;
+`finish` checks `expected()` lane by lane and exits 1 on a failure:
 
 ```dawn
-use std/io.{with_fs_real, with_proc_real}
+use std/io
+use std/io.{Exit}
+use std/map
+use sha2/sha256
+use tileir/asm.{assemble, AssembleError, explain}
+use tileir/bytecode.{encode}
 use std/gpu.{with_gpu_real}
-use tileir/prog.{trace3, cells, In, Out}
-use tileir/asm.{assemble, explain}
 
-let (prog, _entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)   # trace
-match with_fs_real(() => with_proc_real(() => assemble(prog, "sm_86", tileiras))) {  # encode + assemble
-  Ok(cubin) -> with_gpu_real(map.from([("vadd", cubin)]), () => run_vadd(xs, ys))     # launch
-  Err(e) -> println(explain(e))
+fn answer_error(r: Result[List[Float], ForeignError]) -> Option[String] = match r {
+  Err(e) -> Some("${e.kind}: ${e.message}")
+  Ok(zs) -> {
+    let want = expected()
+    if len(zs) != len(want) { Some("answer length: expected ${len(want)}, got ${len(zs)}") } else {
+      var wrong: Option[String] = None
+      for i in range(0, len(want)) {
+        if wrong == None && zs[i] != want[i] {
+          wrong = Some("answer lane ${i}: expected ${want[i]}, got ${zs[i]}")
+        }
+      }
+      wrong
+    }
+  }
 }
+
+fn finish(device: String, r: Result[List[Float], ForeignError]) -> Unit !io !Exit = match answer_error(r) {
+  None -> io.println("${device} device: ok, 256 lanes agree with 3 * i")
+  Some(error) -> {
+    io.eprintln("gpu_fake: ${error}")
+    io.exit(1)
+  }
+}
+
+fn on_real(cubin: Bytes, e: Entry3[Float, Float, Float]) -> Result[List[Float], ForeignError] !io =
+  with_gpu_real(map.from([("vadd", cubin)]), () => run(e, xs(), ys()))
+
+fn assembly_error(e: AssembleError) -> String = "AssembleError: ${e}: ${explain(e)}"
+
+fn assemble_run(prog: TileProg, e: Entry3[Float, Float, Float], gpu_name: String, tileiras: String) -> Unit !io !Exit =
+  match io.with_fs_real(() => io.with_proc_real(() => assemble(prog, gpu_name, tileiras))) {
+    Err(err) -> {
+      io.eprintln(assembly_error(err))
+      io.exit(1)
+    }
+    Ok(cubin) -> {
+      let source = encode(prog)
+      io.println("bytecode: ${len(source)} bytes, sha256 ${sha256.hex(source)}")
+      io.println("cubin: ${len(cubin)} bytes, sha256 ${sha256.hex(cubin)}")
+      io.println("transfer: upload 256 + 256 f64 lanes (4096 bytes), download 256 f64 lanes (2048 bytes)")
+      finish("real", on_real(cubin, e))
+    }
+  }
 ```
 
 It returns `Result[Bytes, AssembleError]` and takes the `Fs` and `Proc`
