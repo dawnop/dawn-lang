@@ -343,23 +343,18 @@ fn e4m3_x() -> List[Float] =
 ## has nothing else left.
 fn e4m3_y() -> List[Float] = rounding.inputs(0, DT_N)
 
-fn e5m2_x() -> List[Float] =
-  list.map(range(0, DT_N), i =>
-      if i == 0 {
-        0.0
-      } else if i == 1 {
-        0.0 - 0.0
-      } else if i == 2 {
-        pow2(0 - 16)
-      } else if i == 3 {
-        pow2(0 - 14)
-      } else if i == 4 {
-        57344.0
-      } else if i == 5 {
-        0.0 - 57344.0
-      } else {
-        to_float(i - 256) * 0.0123456789
-      })
+fn e5m2_stored(i: Int) -> Float = {
+  let code = if i < 124 { i } else { i + 4 }
+  let e = (code >> 2) & 31
+  let m = code & 3
+  let v = if e == 0 { to_float(m) * pow2(-16) } else { to_float(4 + m) * pow2(e - 17) }
+  float_of_bits(float_to_bits(v) | (if code & 128 == 0 { 0 } else { 1 << 63 }))
+}
+
+fn e5m2_x() -> List[Float] = list.map(range(0, DT_N), i =>
+    if i < 248 { e5m2_stored(i) }
+    else if i == 248 { float_of_bits(0x7ff8000000000000) }
+    else { to_float(i - 256) * 0.0123456789 })
 
 fn e5m2_y() -> List[Float] = rounding.inputs(1, DT_N)
 
@@ -378,42 +373,46 @@ fn e8m0_x() -> List[Float] =
         to_float(i) * 0.75
       })
 
-## The f64 the second segment takes into f8E8M0FNU and back, THROUGH
-## BINARY32 because the kernel does. The first lanes are the values the
-## format has no encoding for at all -- zero, a negative, an infinity and a
-## NaN -- which std/narrow answers NaN for and which nothing had ever
-## asked a device.
-fn e8m0_y() -> List[Float] =
-  list.map(range(0, DT_N), i =>
-      if i == 0 {
-        1.0
-      } else if i == 1 {
-        1.99
-      } else if i == 2 {
-        pow2(127)
-      } else if i == 3 {
-        pow2(0 - 127)
-      } else if i == 4 {
-        0.0
-      } else if i == 5 {
-        0.0 - 1.0
-      } else if i == 6 {
-        1.0 / 0.0
-      } else if i == 7 {
-        0.0 / 0.0
-      } else if i == 8 {
-        pow2(0 - 140)
-      } else if i == 9 {
-        pow2(140)
-      } else if i == 10 {
-        0.0 - 3.0
-      } else if i == 11 {
-        0.0 - 0.4
-      } else if i == 12 {
-        0.0 - 0.0
-      } else {
-        to_float(i) * 0.5 + 0.25
-      })
+# Literal binary32 patterns, paired with independent binary64 answers.
+# Taking magnitude and clamping below 2^-127 sends both signs of every
+# subnormal here to 2^-127. The last subnormal is still below 2^-126;
+# the first normal reaches it. NaN payloads have no preservation contract.
+const E8M0_CONVERSION: List[(Int, Int)] = [
+  (0x00000001, 0x3800000000000000),
+  (0x80000001, 0x3800000000000000),
+  (0x00000200, 0x3800000000000000),
+  (0x80000200, 0x3800000000000000),
+  (0x003fffff, 0x3800000000000000),
+  (0x803fffff, 0x3800000000000000),
+  (0x00400000, 0x3800000000000000),
+  (0x80400000, 0x3800000000000000),
+  (0x00400001, 0x3800000000000000),
+  (0x80400001, 0x3800000000000000),
+  (0x007fffff, 0x3800000000000000),
+  (0x807fffff, 0x3800000000000000),
+  (0x00800000, 0x3810000000000000),
+  (0x80800000, 0x3810000000000000),
+  (0x00000000, 0x3800000000000000),
+  (0x80000000, 0x3800000000000000),
+  (0x3f800000, 0x3ff0000000000000),
+  (0xbf800000, 0x3ff0000000000000),
+  (0x3ffeb852, 0x3ff0000000000000),
+  (0xc0400000, 0x4000000000000000),
+  (0xbecccccd, 0x3fd0000000000000),
+  (0x7f000000, 0x47e0000000000000),
+  (0x7f7fffff, 0x47e0000000000000),
+  (0x7f800000, 0x47e0000000000000),
+  (0xff800000, 0x47e0000000000000),
+  (0x7fc00000, 0x7ff8000000000000)
+]
+
+fn f32_of_bits(b: Int) -> Float = bytes.unpack_floats(bytes.pack_ints([b], 4), 4)[0]
+
+fn e8m0_y() -> List[Float] = list.map(range(0, DT_N), i =>
+    if i < len(E8M0_CONVERSION) { let (b, _) = E8M0_CONVERSION[i]
+      f32_of_bits(b) }
+    else if i == 26 { pow2(140) }
+    else { to_float(i) * 0.5 + 0.25 })
 
 ## The fp4 storage corpus, in i32 words: eight nibbles to a word, and the
 ## sweep is over the NIBBLES. Word 0 puts nibbles 0 to 7 on lanes 0 to 7 and
@@ -550,19 +549,86 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
 fn oracle(i: Int, t: Trace, explicit: Bool) -> String = match t.result {
   None -> "missing-result"
   Some(v) -> {
+    if i == 1 {
+      let bad = list.find(range(0, 249), j => {
+        let want = if j < 248 { e5m2_stored(j) } else { float_of_bits(0x7ff8000000000000) }
+        len(v) <= j || not same(v[j], want)
+      })
+      if bad != None { return "seg=0 lane=${bad.expect("storage lane")} storage encoding differs" }
+    }
+    if i == 2 {
+      if len(v) != 2 * DT_N + TAIL { return "length=${len(v)} expected=${2 * DT_N + TAIL} first_missing=${len(v)}" }
+      let bad = list.find(range(0, len(E8M0_CONVERSION)), j => {
+        let (_, b) = E8M0_CONVERSION[j]
+        not same(v[DT_N + j], float_of_bits(b))
+      })
+      match bad {
+        Some(j) -> {
+          let (_, b) = E8M0_CONVERSION[j]
+          return "seg=1 lane=${j} bits=${bits(v[DT_N + j])} expected=${bits(float_of_bits(b))}"
+        }
+        None -> ()
+      }
+    }
     rounding.check(i, v, DT_N, TAIL, SENTINEL, explicit)
   }
 }
 
 fn bits(v: Float) -> String = bytes.to_hex(bytes.pack_floats([v], 8, bytes.Big))
 
-fn oracle_selftest(_control: String) -> Unit !io !Exit = {
+fn input_problem(i: Int, bufs: List[(String, List[Float])]) -> String = {
+  let bad = list.find(range(0, 3), j => {
+    let (_, v) = bufs[j]
+    len(v) != (if j == 2 { 2 * DT_N + TAIL } else if i == 3 && j == 0 { DT_N / 8 } else { DT_N })
+  })
+  match bad {
+    Some(j) -> {
+      let (_, v) = bufs[j]
+      "input ${case_name(i)} arg=${j} length=${len(v)} first_missing=${len(v)}"
+    }
+    None -> "pass"
+  }
+}
+
+# Prove that constructing f64 values from binary32 patterns and passing
+# through f32 has preserved every finite input's class AND its sign bit.
+fn input_bits() -> String = {
+  let y = e8m0_y()
+  let bad = list.find(range(0, len(E8M0_CONVERSION)), j => {
+    let (b, _) = E8M0_CONVERSION[j]
+    let got = bytes.unpack_ints(bytes.pack_floats([y[j]], 4), 4, false)[0]
+    if b & 0x7fffffff > 0x7f800000 { y[j] == y[j] } else { b != got }
+  })
+  match bad {
+    None -> "pass"
+    Some(j) -> "e8m0 input lane=${j} changed binary32 bits"
+  }
+}
+
+fn oracle_selftest(control: String) -> Unit !io !Exit = {
   var ok = true
-  for i in [0, 1, 3] {
-    let t = with_gpu_fake(case_kernels(i), () => stages(case_name(i), case_grid(i), case_bufs(i)))
-    let v = oracle(i, t, false)
-    io.println("oracle tileref ${case_name(i)} ${v}")
-    if v != "pass" { ok = false }
+  let proof = input_bits()
+  io.println("oracle input-bits ${proof} e8m0=${len(E8M0_CONVERSION)} subnormal=12 signed_zero=2")
+  if proof != "pass" { ok = false }
+  for i in [0, 1, 2, 3] {
+    let original = case_bufs(i)
+    let bufs = if control == "short-input" && i == 2 {
+      let (dt, y) = original[1]
+      [original[0], (dt, list.take(y, DT_N - 1)), original[2]]
+    } else { original }
+    let input = input_problem(i, bufs)
+    if input != "pass" {
+      io.println("oracle ${input}")
+      ok = false
+    } else {
+      let clean = with_gpu_fake(case_kernels(i), () => stages(case_name(i), case_grid(i), bufs))
+      let t = if control == "short-output" && i == 2 {
+        Trace { ..clean, result = Some(list.take(clean.result.expect("reference result"), 2 * DT_N - 1)) }
+      } else { clean }
+      let v = oracle(i, t, false)
+      io.println("oracle tileref ${case_name(i)} ${v}")
+      if v != "pass" { ok = false }
+    }
   }
   if not ok { io.exit(1) }
 }
@@ -693,6 +759,10 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     return }
   if len(paths) == 2 && paths[0] == "--oracle-control" { oracle_selftest(paths[1])
     return }
+  let proof = input_bits()
+  io.println("oracle input-bits ${proof} e8m0=${len(E8M0_CONVERSION)} subnormal=12 signed_zero=2")
+  if proof != "pass" { io.exit(1)
+    return }
   let count = len(paths) / 2
   if count == 0 || len(paths) != 2 * count { usage() } else { () }
   var cubins: Map[String, Bytes] = map.empty()
@@ -717,6 +787,10 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
   for i in order {
     let name = case_name(i)
     let bufs = case_bufs(i)
+    let input = if i < 4 { input_problem(i, bufs) } else { "pass" }
+    if input != "pass" { io.eprintln(input)
+      io.exit(1)
+      return }
     let gx = case_grid(i)
     let refs = case_kernels(i)
     let reference_bufs = if explicit && i == 1 {
