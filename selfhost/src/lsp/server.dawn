@@ -26,9 +26,9 @@ use json/render.{render}
 use driver/analyze.{
   Program, ProjectPlan, LocDiag, CheckedMod,
   rendered_diags,
-  analyze_standalone, standalone_entry, project_plan,
+  analyze_standalone_snapshot, standalone_entry, project_plan,
   project_module_path, project_files_now, workspace_walk_diags,
-  ParseMemo, no_parses, load_entries_reusing, use_candidates
+  ParseMemo, no_parses, load_entries_reusing, load_entries_snapshots, use_candidates
 }
 use compiler_plan/source
 use compiler_plan/source.{canon, canon_identity}
@@ -57,7 +57,7 @@ use version.{VERSION}
 use lsp/lsptok.{semantic_tokens, token_types, token_modifiers, encode_tokens}
 use lsp/lspref.{Occurrence, occurrences, ModRefs, Shift, mod_refs, refs_to, refresh, NotPun}
 use lsp/lsprename.{Key, Edit, name_class, check_new_name, name_edit, ordered, apply_edits, changed_name, edit_index, link_segments, spells}
-use front/lexer.{line_starts_of, view_of, SourceView, slice_cps}
+use front/lexer.{line_starts_of, view_of, SourceView, slice_cps, SourceSnapshot, source_snapshot}
 use front/diag.{utf16_len}
 use check/types.{Sig, builtins, sig_render, sig_render_parts, PkgRoot}
 use front/ast.{
@@ -1936,7 +1936,7 @@ fn refs_world(st: LspState, ws: Workspace, verify: Bool) -> Option[RefsWorld] !F
     InputsReady(overlay, entries, _) -> {
       # the open documents first, then the rest of the tree; the loader reads
       # a file reached twice once
-      let read = load_entries_reusing(ws.plan, entries ++ w0.seeds, overlay, w0.parses)
+      let read = load_entries_snapshots(ws.plan, entries ++ w0.seeds, overlay, w0.parses, workspace_snapshots(st, ws.path_by_uri))
       let key = workspace_identity(ws.plan).lookup_key
       let cache = incremental.limit_results(w0.cache, result_limit(st, ReferencesResults(key)))
       let checked = incremental.analyze(cache, read.loaded)
@@ -2070,6 +2070,19 @@ fn workspace_inputs(
   } else {
     InputsConflict(conflicts)
   }
+}
+
+## Called only after workspace_inputs accepted all aliases atomically. These
+## are the exact immutable tables installed with each document revision;
+## the loader checks their text again against its selected overlay.
+fn workspace_snapshots(st: LspState, paths: Map[String, String]) -> Map[String, SourceSnapshot] = {
+  var out: Map[String, SourceSnapshot] = map.empty()
+  for uri in sort(map.keys(paths)) {
+    let path = map.get(paths, uri).expect("workspace path")
+    let d = map.get(st.docs, uri).expect("workspace document")
+    out = map.insert(out, path, SourceSnapshot { text = d.text, view = d.view, line_starts = d.ls })
+  }
+  out
 }
 
 fn conflict_diagnostics(
@@ -2213,7 +2226,7 @@ fn rebuild_snapshot(
       }, none_sent)
     }
     InputsReady(overlay, entries, entry_by_uri) -> {
-      let reusing = load_entries_reusing(ws0.plan, entries, overlay, ws0.parses)
+      let reusing = load_entries_snapshots(ws0.plan, entries, overlay, ws0.parses, workspace_snapshots(st, ws0.path_by_uri))
       let loaded = reusing.loaded
       # one call either way, so that what the session reuses is the same
       # whether or not anything is published early
@@ -2408,9 +2421,13 @@ fn install_workspace_after(
 ## A standalone buffer borrows the shared oracle and is analysed cold on
 ## every revision; it owns no session a close of another URI could replace.
 fn standalone_analysis(st: LspState, uri: String, source_path: String, text: String) -> Program !Fs !Env !io = {
+  standalone_snapshot_analysis(st, uri, source_path, source_snapshot(text))
+}
+
+fn standalone_snapshot_analysis(st: LspState, uri: String, source_path: String, snapshot: SourceSnapshot) -> Program !Fs !Env !io = {
   let lease = st.standalone.expect("standalone LSP lease used after shutdown")
   let opts = CtOpts { ..st.host.ct, session_limit = result_limit(st, StandaloneResults(uri)) }
-  analyze_standalone(source_path, text, st.std, opts, lease.jsig)
+  analyze_standalone_snapshot(source_path, snapshot, st.std, opts, lease.jsig)
 }
 
 fn standalone_doc(
@@ -2426,15 +2443,16 @@ fn standalone_doc(
     Some(found) -> found
     None -> "<lsp>"
   }
-  let prog = standalone_analysis(st, uri, source_path, text)
+  let snapshot = source_snapshot(text)
+  let prog = standalone_snapshot_analysis(st, uri, source_path, snapshot)
   Doc {
     uri = uri,
     version = version,
     path = path,
     canonical_path = canonical_path,
     text = text,
-    view = view_of(text),
-    ls = line_starts_of(text),
+    view = snapshot.view,
+    ls = snapshot.line_starts,
     analysis = Standalone(prog, standalone_entry(prog), modules)
   }
 }
@@ -2463,14 +2481,15 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
         }
         Some(_) -> {
           let identity = workspace_identity(plan)
+          let snapshot = source_snapshot(text)
           let d = Doc {
             uri = uri,
             version = version,
             path = Some(path),
             canonical_path = Some(canonical_path),
             text = text,
-            view = view_of(text),
-            ls = line_starts_of(text),
+            view = snapshot.view,
+            ls = snapshot.line_starts,
             analysis = WorkspaceMember(identity)
           }
           var st = LspState { ..st0, docs = map.insert(st0.docs, uri, d) }
@@ -2510,6 +2529,13 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
     }
   }
 
+## Install all position products together, before any workspace rebuild or
+## early diagnostic can observe the new revision.
+fn revised_doc(old: Doc, text: String, version: Int) -> Doc = {
+  let snapshot = source_snapshot(text)
+  Doc { ..old, version = version, text = text, view = snapshot.view, ls = snapshot.line_starts }
+}
+
 fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> LspState !Fs !Env !io =
   match old.analysis {
     Standalone(_, _, modules) -> {
@@ -2517,15 +2543,16 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
         Some(found) -> found
         None -> "<lsp>"
       }
-      let prog = standalone_analysis(st0, old.uri, source_path, text)
+      let snapshot = source_snapshot(text)
+      let prog = standalone_snapshot_analysis(st0, old.uri, source_path, snapshot)
       # re-read rather than carry the old one: the identity is settled by the
       # analysis, and an edit re-runs the analysis
       let d = Doc {
         ..old,
         version = version,
         text = text,
-        view = view_of(text),
-        ls = line_starts_of(text),
+        view = snapshot.view,
+        ls = snapshot.line_starts,
         analysis = Standalone(prog, standalone_entry(prog), modules)
       }
       let st = LspState { ..st0, docs = map.insert(st0.docs, old.uri, d) }
@@ -2533,13 +2560,7 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
       st
     }
     WorkspaceMember(identity) -> {
-      let d = Doc {
-        ..old,
-        version = version,
-        text = text,
-        view = view_of(text),
-        ls = line_starts_of(text)
-      }
+      let d = revised_doc(old, text, version)
       var st = LspState { ..st0, docs = map.insert(st0.docs, old.uri, d) }
       let before = map.get(st.workspaces, identity.lookup_key).expect("workspace member identity")
       let affected = slot_uris(before)
@@ -4854,6 +4875,76 @@ test "a query context grafts the tables an unchecked entry's imports name" {
         assert list.any(rs, r => r.lo == at)
         let t = find_target(qc, at).expect("definition answers on the imported name")
         assert t.lo == at
+      })))
+}
+
+test "source snapshots preserve cold diagnostics positions and full and range tokens across revisions" {
+  let root = memfs.BASE ++ "/snapshot-project"
+  let path = root ++ "/src/main.dawn"
+  let uri = "file://" ++ path
+  let original = "pub fn answer() -> Int = missing\n"
+  var files = fsmem.mem_std(memfs.BASE)
+  files = memfs.put(files, root ++ "/dawn.toml", "schema = 1\nname = \"snapshots\"\n")
+  files = memfs.put(files, path, original)
+  let _ = memfs.with_fs(files, () => io.with_proc_real(() =>
+      envmem.with_env_table(memfs.BASE, [], () => {
+        let std = match load_std(fsmem.mem_std_dir(memfs.BASE)) {
+          Ok(s) -> s
+          Err(e) -> panic(std_load_error_text(e))
+        }
+        let plan = project_plan(source.SourceFile(path))
+        let identity = workspace_identity(plan)
+        let base = def_probe_state(std)
+        let doc = Doc {
+          uri = uri, version = 1, path = Some(path), canonical_path = Some(path),
+          text = original, view = view_of(original), ls = line_starts_of(original),
+          analysis = WorkspaceMember(identity)
+        }
+        let lease = jsig_refused_lease()
+        let empty = Workspace {
+          plan = plan, path_by_uri = map.insert(map.empty(), uri, path),
+          prog = None, entry_by_uri = map.empty(), lease = lease,
+          cache = incremental.new(std, ct_default(), lease.jsig, 128),
+          analysis_stats = None, parses = no_parses(), diag_by_uri = map.empty(),
+          refresh_problem = None, world = None
+        }
+        var st = LspState { ..base, docs = map.insert(base.docs, uri, doc) }
+        var ws = rebuild_workspace(st, empty)
+        let edits = [
+          "# inserted first line\n" ++ original,
+          "pub fn answer() -> Int = if \"\u{1F600}\" == \"\" { missing } else { 1 }\n",
+          "# CRLF\r\npub fn answer() -> Int = missing\r\n",
+          "pub fn answer() -> Int = {\n  missing\npub fn intact() -> Int = 2\n",
+          original
+        ]
+        for text in edits {
+          let snapshot = source_snapshot(text)
+          let edited = revised_doc(doc, text, 2)
+          st = LspState { ..st, docs = map.insert(st.docs, uri, edited) }
+          ws = rebuild_workspace(st, ws)
+          let over = map.insert(map.empty(), path, text)
+          let cold_load = load_entries_reusing(plan, [path], over, no_parses()).loaded
+          let cold = incremental.analyze(empty.cache, cold_load).program
+          let prog = ws.prog.expect("snapshot program")
+          assert prog.diags == cold.diags
+          assert prog.decl_spans == cold.decl_spans
+          assert rendered_diags(prog) == rendered_diags(cold)
+          let cold_doc = Doc { ..edited, view = view_of(text), ls = line_starts_of(text) }
+          let warm_st = LspState { ..st, workspaces = map.insert(st.workspaces, identity.lookup_key, Ready(ws)) }
+          let cold_docs = LspState { ..st, docs = map.insert(st.docs, uri, cold_doc) }
+          let cold_ws = Workspace { ..ws, prog = Some(cold),
+            diag_by_uri = diagnostics_of_program(cold_docs, ws.path_by_uri, cold) }
+          let cold_st = LspState { ..cold_docs,
+            workspaces = map.insert(st.workspaces, identity.lookup_key, Ready(cold_ws)) }
+          assert diagnostics_for_uri(warm_st, uri) == diagnostics_for_uri(cold_st, uri)
+          for i in range(0, len(snapshot.view.cps) + 1) {
+            assert lsp_position(edited.view, edited.ls, i) == lsp_position(cold_doc.view, cold_doc.ls, i)
+          }
+          let params = jobj([("textDocument", jobj([("uri", JStr(uri))])),
+            ("range", jobj([("start", jpos(1, 0)), ("end", jpos(3, 5))]))])
+          assert handle_semantic_tokens(warm_st, params, false) == handle_semantic_tokens(cold_st, params, false)
+          assert handle_semantic_tokens(warm_st, params, true) == handle_semantic_tokens(cold_st, params, true)
+        }
       })))
 }
 

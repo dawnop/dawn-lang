@@ -31,14 +31,15 @@ SERVER = "selfhost/src/lsp/server.dawn"
 MUTATIONS = {
     # The loader every entry goes through: `load_entries_over` for a command and
     # the editor's `load_entries_reusing`, which reuses unchanged parses, both
-    # end in `load_source_entries`.
+    # end in `load_source_snapshots`.
     "fresh-replan-loader": ((
         ANALYZE,
-        '''fn load_source_entries(
+        '''fn load_source_snapshots(
   sp: source.SourcePlan,
   entries: List[String],
   over: Map[String, String],
-  previous: ParseMemo
+  previous: ParseMemo,
+  snapshots: Map[String, lexer.SourceSnapshot]
 ) -> ReusingLoad !Fs !Env !io =
   resolve(
     sp.source_root,
@@ -47,14 +48,16 @@ MUTATIONS = {
     sp.pkgs,
     over,
     entry_file(sp.target),
-    previous
+    previous,
+    snapshots
   )
 ''',
-        '''fn load_source_entries(
+        '''fn load_source_snapshots(
   sp: source.SourcePlan,
   entries: List[String],
   over: Map[String, String],
-  previous: ParseMemo
+  previous: ParseMemo,
+  snapshots: Map[String, lexer.SourceSnapshot]
 ) -> ReusingLoad !Fs !Env !io = {
   # `project_plan` is `!Proc` since io.run moved onto the effect, and this row
   # is not; answering it here keeps the mutation to one function. `Env` is on
@@ -67,7 +70,8 @@ MUTATIONS = {
     fresh.source.pkgs,
     over,
     entry_file(fresh.source.target),
-    previous
+    previous,
+    snapshots
   )
 }
 ''',

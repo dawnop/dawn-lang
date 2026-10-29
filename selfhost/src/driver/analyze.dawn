@@ -625,7 +625,20 @@ pub(pkg) fn load_entries_reusing(
   over: Map[String, String],
   previous: ParseMemo
 ) -> ReusingLoad !Fs !Env !io = {
-  let read = load_source_entries(plan.source, entries, over, previous)
+  let snapshots: Map[String, lexer.SourceSnapshot] = map.empty()
+  load_entries_snapshots(plan, entries, over, previous, snapshots)
+}
+
+## Snapshots only prepare fresh parses. Text equality still owns parse reuse;
+## module identity, rewrites and incremental admission remain unchanged.
+pub(pkg) fn load_entries_snapshots(
+  plan: ProjectPlan,
+  entries: List[String],
+  over: Map[String, String],
+  previous: ParseMemo,
+  snapshots: Map[String, lexer.SourceSnapshot]
+) -> ReusingLoad !Fs !Env !io = {
+  let read = load_source_snapshots(plan.source, entries, over, previous, snapshots)
   let loaded = LoadResult { ..read.loaded, diags = walk_diags_of(plan) ++ read.loaded.diags }
   ReusingLoad { ..read, loaded = loaded }
 }
@@ -659,6 +672,17 @@ fn load_source_entries(
   entries: List[String],
   over: Map[String, String],
   previous: ParseMemo
+) -> ReusingLoad !Fs !Env !io = {
+  let snapshots: Map[String, lexer.SourceSnapshot] = map.empty()
+  load_source_snapshots(sp, entries, over, previous, snapshots)
+}
+
+fn load_source_snapshots(
+  sp: source.SourcePlan,
+  entries: List[String],
+  over: Map[String, String],
+  previous: ParseMemo,
+  snapshots: Map[String, lexer.SourceSnapshot]
 ) -> ReusingLoad !Fs !Env !io =
   resolve(
     sp.source_root,
@@ -667,7 +691,8 @@ fn load_source_entries(
     sp.pkgs,
     over,
     entry_file(sp.target),
-    previous
+    previous,
+    snapshots
   )
 
 ## Parse `text` for the file at canonical path `key`, or hand back the parse
@@ -681,6 +706,25 @@ fn parse_reusing(previous: ParseMemo, key: String, text: String) -> (Parsed, Boo
 fn fresh_parse(text: String) -> Parsed = {
   let (m, pdiags, marks) = parser.parse_module_marked(text)
   Parsed { text = text, line_starts = lexer.line_starts_of(text), m = m, pdiags = pdiags, marks = marks }
+}
+
+## A stale URI/path revision is not authority for the newly read text. Reject
+## it before using either code points or line starts, even on a parse miss.
+fn parse_snapshot_reusing(
+  previous: ParseMemo, key: String, text: String, snapshots: Map[String, lexer.SourceSnapshot]
+) -> (Parsed, Bool) = {
+  match map.get(previous.by_path, key) {
+    Some(p) -> if p.text == text { return (p, true) }
+    None -> ()
+  }
+  match map.get(snapshots, key) {
+    Some(snapshot) -> if snapshot.text == text {
+      let (m, pdiags, marks) = parser.parse_module_snapshot(snapshot)
+      return (Parsed { text = text, line_starts = snapshot.line_starts, m = m, pdiags = pdiags, marks = marks }, false)
+    }
+    None -> ()
+  }
+  parse_reusing(previous, key, text)
 }
 
 ## The file whose module is the program's entry (spec §10.1, §10.5): the one
@@ -699,7 +743,8 @@ fn resolve(
   pkgs: Map[String, source.PkgR],
   over: Map[String, String],
   entry: Option[String],
-  previous: ParseMemo
+  previous: ParseMemo,
+  snapshots: Map[String, lexer.SourceSnapshot]
 ) -> ReusingLoad !Fs !Env !io = {
   var diags = diags0
   var parses: Map[String, Parsed] = map.empty()
@@ -733,7 +778,7 @@ fn resolve(
       }
       match read_over(over, c, f) {
         Ok(text) -> {
-          let (parsed, hit) = parse_reusing(previous, c, text)
+          let (parsed, hit) = parse_snapshot_reusing(previous, c, text, snapshots)
           parses = map.insert(parses, c, parsed)
           if hit { reused = reused + 1 }
           let mf = LoadedModule {
@@ -882,7 +927,7 @@ fn resolve(
         } else {
           match read_over(over, dep_canon, dep_file) {
             Ok(text) -> {
-              let (parsed, hit) = parse_reusing(previous, dep_canon, text)
+              let (parsed, hit) = parse_snapshot_reusing(previous, dep_canon, text, snapshots)
               parses = map.insert(parses, dep_canon, parsed)
               if hit { reused = reused + 1 }
               let m2p = parsed.m
@@ -1584,7 +1629,18 @@ pub(pkg) fn analyze_standalone(
   opts: CtOpts,
   js: Jsig
 ) -> Program !Fs !Env !io = {
-  let (m, pdiags, marks) = parser.parse_module_marked(text)
+  analyze_standalone_snapshot(path, lexer.source_snapshot(text), std, opts, js)
+}
+
+pub(pkg) fn analyze_standalone_snapshot(
+  path: String,
+  snapshot: lexer.SourceSnapshot,
+  std: StdCtx,
+  opts: CtOpts,
+  js: Jsig
+) -> Program !Fs !Env !io = {
+  let text = snapshot.text
+  let (m, pdiags, marks) = parser.parse_module_snapshot(snapshot)
   var diags: List[LocDiag] = []
   match entry_name_of(path) {
     Some(nm) -> {
@@ -1603,7 +1659,7 @@ pub(pkg) fn analyze_standalone(
     class_name = "main",
     path = path,
     text = text,
-    line_starts = lexer.line_starts_of(text),
+    line_starts = snapshot.line_starts,
     m = m,
     pdiags = pdiags,
     marks = marks,

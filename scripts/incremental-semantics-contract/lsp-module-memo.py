@@ -40,6 +40,8 @@ from cold import HERE, ROOT, apply, owned, run
 CACHE = ("lsp/server", "workspace commits its module memo with its Program and drops it on conflict")
 RESOLVER = ("lsp/server", "a handler state cell answers at every spelling of it")
 PARSES = ("driver/analyze", "a reusing load parses only the files whose text changed")
+SOURCE = ("contract/source_snapshot", "source snapshots reject another revision before consuming code points or line starts")
+POSITIONS = ("lsp/server", "source snapshots preserve cold diagnostics positions and full and range tokens across revisions")
 
 SERVER = "selfhost/src/lsp/server.dawn"
 CHECKER = "selfhost/src/check/checker.dawn"
@@ -91,6 +93,8 @@ def main():
     # one's failure must be owned by.
     owners = {"drop-session": CACHE, "bypass-cache": CACHE, "keep-conflict-cache": CACHE,
               "drop-parses": CACHE, "stale-parse": PARSES, "stale-line-starts": PARSES,
+              "wrong-source-revision": SOURCE, "stale-source-code-points": POSITIONS,
+              "stale-source-line-starts": POSITIONS,
               "resolver-drops-the-declaration": RESOLVER}
     group = owned(runpy.run_path(str(HERE / "mutate.py"))["MUTATIONS"], "lsp-module-memo")
     if list(group) != list(owners):
@@ -131,7 +135,7 @@ def main():
             status, output = run("test", target)
             if name == "positive":
                 if status or not all(re.search(owner_line("PASS", each), output, re.M)
-                                     for each in (CACHE, RESOLVER, PARSES)):
+                                     for each in (CACHE, RESOLVER, PARSES, SOURCE, POSITIONS)):
                     raise RuntimeError(f"positive failed\n{output}")
             elif not status or not re.search(
                     owner_line("FAIL", owner) + r"\n\s+assertion failed:", output, re.M):

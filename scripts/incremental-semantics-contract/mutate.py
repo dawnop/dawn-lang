@@ -176,6 +176,15 @@ MUTATIONS = {
     # its own, not the ones the previous parse of the path held.
     "lsp-module-memo/stale-line-starts": ((ANALYZE, "else { (fresh_parse(text), false) }",
                                            "else { (Parsed { ..fresh_parse(text), line_starts = p.line_starts }, false) }"),),
+    "lsp-module-memo/wrong-source-revision": ((ANALYZE,
+        "Some(snapshot) -> if snapshot.text == text {",
+        "Some(snapshot) -> if true {"),),
+    "lsp-module-memo/stale-source-code-points": ((SERVER,
+        "  Doc { ..old, version = version, text = text, view = snapshot.view, ls = snapshot.line_starts }",
+        "  Doc { ..old, version = version, text = text, view = SourceView { ..snapshot.view, cps = old.view.cps }, ls = snapshot.line_starts }"),),
+    "lsp-module-memo/stale-source-line-starts": ((SERVER,
+        "  Doc { ..old, version = version, text = text, view = snapshot.view, ls = snapshot.line_starts }",
+        "  Doc { ..old, version = version, text = text, view = snapshot.view, ls = old.ls }"),),
     # A body is checked with offsets relative to its own declaration, and
     # `tast_positions.symbols` is what adds the declaration's start back
     # on the way out. Its owner here is the LSP reader of those positions;

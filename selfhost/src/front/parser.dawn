@@ -49,7 +49,7 @@ use front/ast.{
   Vis, VisPrivate, VisPkg, VisPub,
   e_lo, e_hi, t_hi, pat_lo, pat_hi
 }
-use front/lexer.{lex_cps, lex_at, slice_cps}
+use front/lexer.{lex_cps, lex_at, slice_cps, SourceSnapshot, lex_snapshot}
 use front/effect_name
 
 # ---- parser state ----
@@ -238,6 +238,18 @@ pub fn parse_module_marked(text: String) -> (Module, List[Diag], ParseMarks) = {
 
 fn parse_marked(text: String) -> (Module, List[Diag], List[Char], List[Token], ParseMarks) = {
   let (cps, toks, lexds) = lex_cps(text)
+  parse_marked_lexed(cps, toks, lexds)
+}
+
+## Share the document's original code points with the same recovery algorithm
+## as the text entry point. No token stream survives this call.
+pub(pkg) fn parse_module_snapshot(source: SourceSnapshot) -> (Module, List[Diag], ParseMarks) = {
+  let (cps, toks, lexds) = lex_snapshot(source)
+  let (m, ds, _, _, marks) = parse_marked_lexed(cps, toks, lexds)
+  (m, ds, marks)
+}
+
+fn parse_marked_lexed(cps: List[Char], toks: List[Token], lexds: List[Diag]) -> (Module, List[Diag], List[Char], List[Token], ParseMarks) = {
   let p = P { toks = toks, cps = Some(cps) }
   let (decls, ds, marks) = parse_decls(p, lexds)
   # A clean parse has nothing to relocate, so it never pays for the scan, and
