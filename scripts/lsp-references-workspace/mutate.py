@@ -41,8 +41,8 @@ MUTATIONS = {
     # does: every editor session pays for it, and publishes a module nothing
     # open imports
     'diagnostics-load-whole-tree': [
-        (SERVER, '      let reusing = load_entries_reusing(ws0.plan, entries, overlay, ws0.parses)\n',
-         '      let reusing = load_entries_reusing(ws0.plan, entries ++ project_seeds(ws0.plan), overlay, ws0.parses)\n'),
+        (SERVER, '      let reusing = load_entries_snapshots(ws0.plan, entries, overlay, ws0.parses, workspace_snapshots(st, ws0.path_by_uri))\n',
+         '      let reusing = load_entries_snapshots(ws0.plan, entries ++ project_seeds(ws0.plan), overlay, ws0.parses, workspace_snapshots(st, ws0.path_by_uri))\n'),
     ],
     # an entry whose module was reused keeps the sites it read in a file
     # edited since, instead of moving them with the edit

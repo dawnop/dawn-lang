@@ -170,6 +170,16 @@ fn lex_go(
   collect: Bool
 ) -> (List[Char], List[Token], List[Token], List[Diag]) = {
   let s = src_of(text, base)
+  lex_source(s, collect)
+}
+
+## Lex the original revision, never a recovery pass's synthetic token stream.
+pub(pkg) fn lex_snapshot(source: SourceSnapshot) -> (List[Char], List[Token], List[Diag]) = {
+  let (cps, toks, _, ds) = lex_source(Src { cps = source.view.cps, n = len(source.view.cps), base = 0 }, false)
+  (cps, toks, ds)
+}
+
+fn lex_source(s: Src, collect: Bool) -> (List[Char], List[Token], List[Token], List[Diag]) = {
   var i = 0
   var toks: List[Token] = []
   var comments: List[Token] = []
@@ -266,6 +276,27 @@ fn lex_go(
 ## `slice_cp` covers all internal slicing; `offs` exists only to map code-point
 ## positions to UTF-16 columns when talking to an editor (lsp/server.dawn).
 pub type SourceView = { cps: List[Char], offs: List[Int], u16len: Int }
+
+## One immutable text revision and its position tables. Keep this out of
+## LoadedModule: incremental admission compares syntax, not decoded buffers.
+## Only open documents retain the UTF-16 table; loader use is transient.
+pub(pkg) type SourceSnapshot = { text: String, view: SourceView, line_starts: List[Int] }
+
+pub(pkg) fn source_snapshot(text: String) -> SourceSnapshot = {
+  let cps = code_points(text)
+  var offs: List[Int] = []
+  var ls = [0]
+  var o = 0
+  var i = 0
+  for c in cps {
+    offs = offs ++ [o]
+    o = o + (if char.code(c) >= 65536 { 2 } else { 1 })
+    if c == '\n' { ls = ls ++ [i + 1] }
+    i = i + 1
+  }
+  let view = SourceView { cps = cps, offs = offs ++ [o], u16len = o }
+  SourceSnapshot { text = text, view = view, line_starts = ls }
+}
 
 pub fn view_of(text: String) -> SourceView = {
   let cps = code_points(text)

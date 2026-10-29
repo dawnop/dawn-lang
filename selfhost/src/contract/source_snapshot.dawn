@@ -1,0 +1,47 @@
+# A supplied source revision is only a decoding aid, never permission to parse
+# a different overlay. Compare every parse product to the ordinary cold loader
+# so stale code points and stale line tables cannot agree merely by count.
+
+use std/map
+use std/memfs
+use std/io
+use driver/fsmem
+use compiler_plan/envmem
+use compiler_plan/source.{SourceFile}
+use driver/analyze.{project_plan, load_entries_reusing, load_entries_snapshots, no_parses}
+use front/lexer
+
+test "source snapshots reject another revision before consuming code points or line starts" {
+  let root = memfs.BASE ++ "/source-snapshot"
+  let path = root ++ "/src/main.dawn"
+  let original = "pub fn answer() -> Int = 1\n"
+  var files = fsmem.mem_std(memfs.BASE)
+  files = memfs.put(files, root ++ "/dawn.toml", "schema = 1\nname = \"snapshots\"\n")
+  files = memfs.put(files, path, original)
+  let _ = memfs.with_fs(files, () => io.with_proc_real(() =>
+      envmem.with_env_table(memfs.BASE, [], () => {
+        let plan = project_plan(SourceFile(path))
+        let old = lexer.source_snapshot(original)
+        var previous = no_parses()
+        for text in [
+          "# first line\n" ++ original,
+          "pub fn answer() -> String = \"\u{1F600}\"\n",
+          "# CRLF\r\npub fn answer() -> Int = missing\r\n",
+          "pub fn answer() -> Int = {\n  missing\npub fn intact() -> Int = 2\n"
+        ] {
+          let over = map.insert(map.empty(), path, text)
+          let cold = load_entries_reusing(plan, [path], over, no_parses())
+          let wrong = load_entries_snapshots(plan, [path], over, previous, map.insert(map.empty(), path, old))
+          let right = load_entries_snapshots(plan, [path], over, previous,
+            map.insert(map.empty(), path, lexer.source_snapshot(text)))
+          assert wrong.loaded == cold.loaded
+          assert right.loaded == cold.loaded
+          assert wrong.parses.reused == 0
+          assert right.parses.reused == 0
+          let repeated = load_entries_snapshots(plan, [path], over, right.parses, map.insert(map.empty(), path, old))
+          assert repeated.loaded == cold.loaded
+          assert repeated.parses.reused == 1
+          previous = right.parses
+        }
+      })))
+}
