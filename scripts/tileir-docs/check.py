@@ -83,6 +83,7 @@ LAYERS = ("type check", "record", "emit", "device")
 # 'test "<name>"'. The README's first example is that program, and it stays so
 # because this gate compares the text.
 SHOWN = ("fn vadd", "fn record", "fn run", "fn xs", "fn ys", "fn expected",
+         "fn answer_error", "fn finish", "fn on_real", "fn assembly_error", "fn assemble_run",
          'test "the kernel launched through its entry on the fake device adds the vectors"')
 
 
@@ -392,6 +393,27 @@ def check_readme(readme_text, first_text):
             problems.append(f"first.dawn has no `{header}`; this gate expects it, update SHOWN with the README")
         elif body not in readme_text:
             problems.append(f"README.md does not show `{header}` the way first.dawn writes it")
+    # Text equality alone would accept changing both copies to the fake
+    # backend. Hold the execution seam as well as the documented snippets.
+    real = item_text(first_text, "fn on_real") or ""
+    tokens = code_tokens(real, dawn=True)
+    if (tokens.count("with_gpu_real") != 1 or "with_gpu_fake" in tokens
+            or "reference_kernels" in tokens):
+        problems.append("first.dawn: on_real must call with_gpu_real exactly once and never the fake backend")
+    assembled = item_text(first_text, "fn assemble_run") or ""
+    cli = item_text(first_text.replace("pub fn cli", "fn cli"), "fn cli") or ""
+    for call in ("assemble(prog, gpu_name, tileiras)", 'finish("real", on_real(cubin, e))'):
+        if call not in assembled:
+            problems.append(f"first.dawn: assemble_run must call `{call}`")
+    for call in ('argv[0] == "assemble"', "assemble_run(prog, e, argv[1], argv[2])",
+                 'finish("real", on_real(read_cubin(argv[1]), e))'):
+        if call not in cli:
+            problems.append(f"first.dawn: CLI must call `{call}`")
+    for command in ('"$DAWNC" build examples/projects/gpu_fake -o gpu_fake',
+                    './gpu_fake assemble sm_86 "$TILEIRAS"', './gpu_fake fake',
+                    './gpu_fake emit vadd.tilebc', './gpu_fake real vadd.cubin'):
+        if command not in readme_text:
+            problems.append(f"README.md has no public command `{command}`")
     return problems
 
 
@@ -572,6 +594,29 @@ def self_test():
                 print("      " + p)
             if want:
                 print(f"      wanted a problem containing: {want}")
+    real = item_text(first, "fn on_real")
+    fake = real.replace('with_gpu_real(map.from([("vadd", cubin)])',
+                        'with_gpu_fake(reference_kernels()')
+    assert real != fake, "stale real-backend mutation anchor"
+    controls = [
+        ("the real assembly path is clean", readme, first, None),
+        ("an assembly snippet changed in README", readme.replace("assemble(prog, gpu_name, tileiras)",
+            "assemble(prog, gpu_name, other_tool)"), first, "does not show `fn assemble_run`"),
+        ("an assembly call changed in the example", readme, first.replace(
+            "assemble(prog, gpu_name, tileiras)", "assemble(prog, gpu_name, other_tool)", 1),
+            "assemble_run must call"),
+        ("even both copies cannot replace the real backend with fake", readme.replace(real, fake),
+            first.replace(real, fake), "on_real must call with_gpu_real"),
+        ("a missing public assemble command", readme.replace('./gpu_fake assemble sm_86 "$TILEIRAS"',
+            './gpu_fake fake'), first, "has no public command"),
+    ]
+    for name, doc, example, want in controls:
+        problems = check_readme(doc, example)
+        ok = not problems if want is None else any(want in p for p in problems)
+        print(("PASS  " if ok else "FAIL  ") + name)
+        if not ok:
+            bad += 1
+            print(f"      got {problems!r}, wanted {want!r}")
     for name, table, gpu_fixture, runtime_fixture, want in error_controls(errs, gpu, runtime):
         problems = check_errors(table, gpu_fixture, src, runtime_fixture, checker)
         ok = not problems if want is None else any(want in p for p in problems)

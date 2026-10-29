@@ -6753,3 +6753,28 @@ N2 存储与 E8M0 补点：E5M2 存储段独立枚举 248 个有限编码及两�
 仍相同。每段仍 512 lane，guard 仍 8 lane。具名 E5M2 writer 标签替换要求
 合法装配、字节改变、目标数值红而控制绿；E8M0 遗漏 magnitude、下溢成零/NaN
 及有效输入/输出截断都必须命中指定 lane，临时副本不改真实实现。
+
+### N3：一步装配的首个真机例程
+
+实现与契约（2026-10-29，先定方案后实现）。`gpu_fake/first.dawn` 原有 `trace3`、
+同一个 `run` 与 fake/emit/real，但读者仍须手工装配；README 的 assemble
+片段还引用没有定义的 `g`、`run_vadd`。更实际的问题是 real 分支只打印失败，
+错误答案和设备拒绝都能退出 0。
+
+新增 `assemble <gpu-name> <tileiras>` 分派，复用 `asm.assemble`、
+`with_fs_real/with_proc_real` 和唯一的 `with_gpu_real` 包装函数。原有 F64
+256 lane、128 cell、`3*i` 独立答案与 kernel 不变；fake 和 real 使用同一
+host run 和逐 lane 判定。成功才退出 0，装配失败保留 AssembleError 构造器
+与 explain，设备失败保留 kind/message，答案失败写明 lane。例程用现有 sha2
+包输出 bytecode/cubin 摘要与长度，供公开命令的正确性收据核对。
+
+固定改动面：本节、first.dawn、其 manifest、tileir README、tileir-docs
+对照门和 example-main registry。不改 tile 输入、runtime 或录制 API。
+文档门逐项比较真实函数与 CLI，并显式拒绝把 on_real 换成 fake。
+CPU 测试编译完整路径、运行 fake，并用受控 Proc 证明装配器不存在、非零
+装配和成功却没有 cubin 三种构造器；答案控制必须命中 lane。负控先 clean，
+再检查指定判词。三架构各仅一次小向量正确性实跑，不比较速度；最终完整
+门禁保持既有预算，不为示例新增 GPU CI 要求。
+
+不做的：不重新实现 assemble，不加探测、缓存、autotune，不改 FA/GQA、
+来源图或六参 API；三账输入若相同则保留原始身份，不伪造重录。
