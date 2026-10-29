@@ -110,13 +110,16 @@ expect('ordinary string recovers over blank line',
 // The classes the editor paints, read off the real syntax tree. The name
 // after `fn` must reach tok-def: a token named `def` was resolved by
 // StreamLanguage's legacy table instead of tokenTable (issue #350).
-function tokenClasses(doc: string) {
-  const state = EditorState.create({ doc, extensions: [dawn()] })
+function stateTokenClasses(state: EditorState) {
+  const doc = state.doc.toString()
   const out: [string, string][] = []
   highlightTree(ensureSyntaxTree(state, doc.length, 5000)!, dawnHighlight, (from, to, cls) => {
     out.push([doc.slice(from, to), cls])
   })
   return out
+}
+function tokenClasses(doc: string) {
+  return stateTokenClasses(EditorState.create({ doc, extensions: [dawn()] }))
 }
 expect('definition name gets tok-def', tokenClasses('fn area(s: Shape) -> Float = 1.0'), [
   ['fn', 'tok-keyword'], ['area', 'tok-def'], ['s', 'tok-variableName'],
@@ -126,6 +129,94 @@ expect('only the name after fn is a definition', tokenClasses('pub fn go() -> Un
   ['pub', 'tok-keyword'], ['fn', 'tok-keyword'], ['go', 'tok-def'],
   ['Unit', 'tok-typeName'], ['go', 'tok-variableName'],
 ])
+// Keep the two flash_attn imports verbatim, including the blank line.
+const importDoc = 'use std/math.{exp as host_exp}\n\nuse std/narrow.{BF16, F32, f32}\nlet as = f32(host_exp(1.0))'
+expect('flash_attn imports preserve all names and the following code', tokenClasses(importDoc), [
+  ['use', 'tok-keyword'], ['std', 'tok-variableName'], ['math', 'tok-variableName'],
+  ['exp', 'tok-variableName'], ['as', 'tok-keyword'], ['host_exp', 'tok-variableName'],
+  ['use', 'tok-keyword'], ['std', 'tok-variableName'], ['narrow', 'tok-variableName'],
+  ['BF16', 'tok-typeName'], ['F32', 'tok-typeName'], ['f32', 'tok-variableName'],
+  ['let', 'tok-keyword'], ['as', 'tok-variableName'], ['f32', 'tok-variableName'],
+  ['host_exp', 'tok-variableName'], ['1.0', 'tok-number'],
+])
+// Each character names the class of a standalone `as`: keyword or variable.
+// Newlines follow module_use's skip_nl sites, rather than a whole-list flag.
+const importCases: [string, string][] = [
+  ['use a/b as ab', 'k'],
+  ['use a/java as local', 'k'],
+  ['use java as local', 'v'],
+  ['use _ as local', 'v'],
+  ['use A as local', 'v'],
+  ['use a.{true as local}', 'v'],
+  ['use a.{test as local}', 'k'],
+  ['use a/b.{X as Y}', 'k'],
+  ['use a/b.{f as g, X as Y}', 'kk'],
+  ['use a/b.{\n\n  X as Y,\n  f as g, # tail\n\n}\nlet as = 1', 'kkv'],
+  ['use as/b.{as as local, f as as}', 'vvkkv'],
+  ['use a/b as as', 'kv'],
+  ['use a/b.{as}', 'v'],
+  ['use as/as/as as as', 'vvvkv'],
+  ['use a/b.{f as as, as as local,}', 'kvvk'],
+  ['use a/b.{f\n, as as local\n, X as Y\n}', 'vkk'],
+  ['use a/b.{f # tail\n, g as h, # tail\n}', 'k'],
+  ['use a/b\nas', 'v'],
+  ['use\nas as', 'vv'],
+  ['use a/\nas as', 'vv'],
+  ['use a.\n{as as local}', 'vv'],
+  ['use a.{f\nas local}', 'v'],
+  ['use a.{f as\nas as}', 'kvv'],
+  ['use a as\nas as', 'kvv'],
+  ['use a.{f as g as h}', 'kv'],
+  ['use a as b as c', 'kv'],
+  ['use a.{f + as}', 'v'],
+  ['use a.{f 1 as}', 'v'],
+  ['use a.{f "use a/b" as}', 'v'],
+  ['use a.{f} as', 'v'],
+  ['let as = 1', 'v'],
+  ['use a/b ask ab\nuse a/b.{f ask g}\nask', ''],
+  ['use java "java.lang.Math"\nas', 'v'],
+  ['# use a/b.{X as Y}\nas', 'v'],
+  ['let text = "use a/b.{X as Y}"\nas', 'v'],
+  ['"""use a/b.{\nX as Y}\n"""\nas', 'v'],
+  ['`use a/b.{\nX as Y}`\nas', 'v'],
+  ['"${use a/b as alias}"\nas', 'vv'],
+]
+for (const [doc, want] of importCases) {
+  expect('contextual import as: ' + JSON.stringify(doc),
+    tokenClasses(doc).filter(([text]) => text === 'as').map(([, cls]) => cls === 'tok-keyword' ? 'k' : cls === 'tok-variableName' ? 'v' : cls).join(''), want)
+}
+expect('ask is a complete identifier', tokenClasses('use a/b ask ab'), [
+  ['use', 'tok-keyword'], ['a', 'tok-variableName'], ['b', 'tok-variableName'],
+  ['ask', 'tok-variableName'], ['ab', 'tok-variableName'],
+])
+// Reuse a parsed prefix across edits and independent branches. The long list
+// crosses StreamLanguage's cached state chunks, exercising copyState as well
+// as its newline callback (including blank lines).
+const importPrefix = 'use a/b.{\n' + '  f, # cached entry\n'.repeat(80)
+const importBase = EditorState.create({ doc: importPrefix + '  as as local, X as Y}\nlet as = 1', extensions: [dawn()] })
+stateTokenClasses(importBase)
+let importState = importBase
+const compareImportEdit = (name: string, from: number, to: number, insert: string) => {
+  importState = importState.update({ changes: { from, to, insert } }).state
+  expect(name, stateTokenClasses(importState), tokenClasses(importState.doc.toString()))
+}
+importState = EditorState.create({ doc: 'use a/b.{f as g, X as Y}\nlet as = 1', extensions: [dawn()] })
+stateTokenClasses(importState)
+compareImportEdit('incremental single-line import becomes multiline', 9, 9, '\n')
+const commaAt = importState.doc.toString().indexOf(',')
+compareImportEdit('incremental second entry moves to a new line', commaAt + 1, commaAt + 1, '\n')
+importState = importBase
+compareImportEdit('incremental import gains a blank line', importPrefix.length, importPrefix.length, '\n')
+let aliasAt = importState.doc.toString().indexOf('as local')
+compareImportEdit('incremental as becomes ask', aliasAt + 2, aliasAt + 2, 'k')
+compareImportEdit('incremental ask becomes as', aliasAt + 2, aliasAt + 3, '')
+compareImportEdit('incremental rename deleted', aliasAt, aliasAt + 3, '')
+compareImportEdit('incremental rename inserted', aliasAt, aliasAt, 'as ')
+const closeAt = importState.doc.toString().indexOf('}')
+compareImportEdit('incremental list closes before plain as', closeAt, closeAt, '}\nlet as = 2\n')
+expect('cached original survives edited branches', stateTokenClasses(importBase), tokenClasses(importBase.doc.toString()))
+importState = importBase
+compareImportEdit('independent branch removes use', 0, 3, 'let')
 callBrackets('nested character and raw braces', '"${foo(\'}\', `}`)}"')
 callBrackets('blank line in triple string', '"""$name\n\nend"""')
 // A char literal is one code point or one escape (`\u{...}` through its `}`),

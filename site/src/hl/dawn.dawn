@@ -27,6 +27,56 @@ fn is_keyword(w: String) -> Bool =
   w == "trait" || w == "impl" || w == "effect" || w == "handle" || w == "opaque" ||
   w == "return" || w == "break" || w == "continue" || w == "alias"
 
+# Keep these phases and transitions aligned with dawn-lang.ts and
+# parser.module_use. Newlines after an entry prevent a later `as` rename,
+# but still allow the list's comma or closing brace.
+type UsePhase =
+  | UseIdle
+  | UseFirstPath
+  | UsePath
+  | UsePathEnd
+  | UseOpen
+  | UseItem
+  | UseItemEnd
+  | UseModuleAlias
+  | UseItemAlias
+  | UseListEnd
+
+fn use_newline(phase: UsePhase) -> UsePhase =
+  match phase {
+    UseItemEnd -> UseListEnd
+    UseItem -> UseItem
+    UseListEnd -> UseListEnd
+    _ -> UseIdle
+  }
+
+fn use_token(phase: UsePhase, text: String, name: Bool) -> UsePhase = {
+  if text == "use" { return UseFirstPath }
+  if (phase == UseFirstPath || phase == UsePath) && name &&
+    not is_upper(cp_at(code_points(text), 0)) && (phase != UseFirstPath || text != "java") {
+    return UsePathEnd
+  }
+  if phase == UsePathEnd {
+    if text == "/" { return UsePath }
+    if text == "." { return UseOpen }
+    if text == "as" { return UseModuleAlias }
+  }
+  if phase == UseOpen && text == "{" { return UseItem }
+  if phase == UseItem && name { return UseItemEnd }
+  if phase == UseItemEnd && text == "as" { return UseItemAlias }
+  if phase == UseItemAlias && name { return UseListEnd }
+  if (phase == UseItemEnd || phase == UseListEnd) && text == "," { return UseItem }
+  UseIdle
+}
+
+# lexer IDENT/TYPEIDENT, rather than the wider presentation keyword table.
+fn import_name(w: String) -> Bool =
+  not (w == "fn" || w == "let" || w == "var" || w == "type" || w == "alias" ||
+      w == "const" || w == "use" || w == "pub" || w == "trait" || w == "impl" ||
+      w == "effect" || w == "match" || w == "if" || w == "else" || w == "for" ||
+      w == "while" || w == "return" || w == "break" || w == "continue" ||
+      w == "comptime" || w == "true" || w == "false" || w == "not" || w == "_")
+
 fn span(cls: String, text: String) -> String =
   "<span class=\"${cls}\">" ++ escape_html(text) ++ "</span>"
 
@@ -160,6 +210,7 @@ fn highlight_from(cs: List[Char], from: Int, interp: Bool) -> (String, Int) = {
   var parts: List[String] = []
   var start = from
   var prev_word = ""
+  var use_phase = UseIdle
   var depth = 1
   var stop = false
   var i = from
@@ -181,11 +232,13 @@ fn highlight_from(cs: List[Char], from: Int, interp: Bool) -> (String, Int) = {
       start = e
       i = e
     } else if c == '"' {
+      use_phase = UseIdle
       let (html, e) = string_html(cs, i)
       parts = parts ++ [escape_html(seg(cs, start, i)) ++ html]
       start = e
       i = e
     } else if c == '`' {
+      use_phase = UseIdle
       # raw string: literal through the closing backtick, no interpolation
       var e = i + 1
       while e < n && cp_at(cs, e) != '`' {
@@ -196,11 +249,13 @@ fn highlight_from(cs: List[Char], from: Int, interp: Bool) -> (String, Int) = {
       start = e2
       i = e2
     } else if c == '\'' {
+      use_phase = UseIdle
       let e = char_end(cs, i)
       parts = parts ++ [escape_html(seg(cs, start, i)) ++ span("n", seg(cs, i, e))]
       start = e
       i = e
     } else if is_digit(c) {
+      use_phase = UseIdle
       let e = number_end(cs, i)
       parts = parts ++ [escape_html(seg(cs, start, i)) ++ span("n", seg(cs, i, e))]
       start = e
@@ -209,8 +264,10 @@ fn highlight_from(cs: List[Char], from: Int, interp: Bool) -> (String, Int) = {
       let e = ident_end(cs, i)
       let w = seg(cs, i, e)
       let after = cp_at(cs, e)
+      let rename = w == "as" && (use_phase == UsePathEnd || use_phase == UseItemEnd)
+      use_phase = if interp { UseIdle } else { use_token(use_phase, w, import_name(w)) }
       let cls =
-        if is_keyword(w) {
+        if rename || is_keyword(w) {
           "k"
         } else if w == "true" || w == "false" {
           "n"
@@ -230,11 +287,17 @@ fn highlight_from(cs: List[Char], from: Int, interp: Bool) -> (String, Int) = {
       }
       prev_word = w
     } else if c == '!' && (is_ident_start(cp_at(cs, i + 1)) || cp_at(cs, i + 1) == '(') {
+      use_phase = UseIdle
       let e = if cp_at(cs, i + 1) == '(' { i + 1 } else { ident_end(cs, i + 1) }
       parts = parts ++ [escape_html(seg(cs, start, i)) ++ span("k", seg(cs, i, e))]
       start = e
       i = e
     } else {
+      if c == '\n' {
+        use_phase = use_newline(use_phase)
+      } else if c != ' ' && c != '\t' && c != '\r' {
+        use_phase = if interp { UseIdle } else { use_token(use_phase, seg(cs, i, i + 1), false) }
+      }
       i = i + 1
     }
   }
@@ -307,4 +370,145 @@ test "tail-block params are not definition names" {
 test "char literals and bools" {
   assert highlight_dawn("'a'") == `<span class="n">'a'</span>`
   assert highlight_dawn("true") == `<span class="n">true</span>`
+}
+
+test "flash_attn imports keep exact HTML" {
+  assert highlight_dawn(`use std/math.{exp as host_exp}
+
+use std/narrow.{BF16, F32, f32}`) ==
+    `<span class="k">use</span> std/math.{exp <span class="k">as</span> host_exp}
+
+<span class="k">use</span> std/narrow.{<span class="t">BF16</span>, <span class="t">F32</span>, f32}`
+}
+
+test "contextual import renames and newline boundaries" {
+  assert highlight_dawn(`use a/java as local`) ==
+    `<span class="k">use</span> a/<span class="k">java</span> <span class="k">as</span> local`
+  assert highlight_dawn(`use java as local`) ==
+    `<span class="k">use</span> <span class="k">java</span> as local`
+  assert highlight_dawn(`use _ as local`) == `<span class="k">use</span> _ as local`
+  assert highlight_dawn(`use A as local`) == `<span class="k">use</span> <span class="t">A</span> as local`
+  assert highlight_dawn(`use a.{true as local}`) == `<span class="k">use</span> a.{<span class="n">true</span> as local}`
+  assert highlight_dawn(`use a.{test as local}`) == `<span class="k">use</span> a.{<span class="k">test</span> <span class="k">as</span> local}`
+  assert highlight_dawn(`use a/b as ab`) ==
+    `<span class="k">use</span> a/b <span class="k">as</span> ab`
+  assert highlight_dawn(`use a/b.{X as Y}`) ==
+    `<span class="k">use</span> a/b.{<span class="t">X</span> <span class="k">as</span> <span class="t">Y</span>}`
+  assert highlight_dawn(`use a/b.{f as g, X as Y}`) ==
+    `<span class="k">use</span> a/b.{f <span class="k">as</span> g, <span class="t">X</span> <span class="k">as</span> <span class="t">Y</span>}`
+  assert highlight_dawn(`use a/b.{
+
+  X as Y,
+  f as g, # tail
+
+}
+let as = 1`) ==
+    `<span class="k">use</span> a/b.{
+
+  <span class="t">X</span> <span class="k">as</span> <span class="t">Y</span>,
+  f <span class="k">as</span> g, <span class="c"># tail</span>
+
+}
+<span class="k">let</span> as = <span class="n">1</span>`
+  assert highlight_dawn(`use as/b.{as as local, f as as}`) ==
+    `<span class="k">use</span> as/b.{as <span class="k">as</span> local, f <span class="k">as</span> as}`
+  assert highlight_dawn(`use a/b as as`) ==
+    `<span class="k">use</span> a/b <span class="k">as</span> as`
+  assert highlight_dawn(`use a/b.{as}`) ==
+    `<span class="k">use</span> a/b.{as}`
+  assert highlight_dawn(`use as/as/as as as`) ==
+    `<span class="k">use</span> as/as/as <span class="k">as</span> as`
+  assert highlight_dawn(`use a/b.{f as as, as as local,}`) ==
+    `<span class="k">use</span> a/b.{f <span class="k">as</span> as, as <span class="k">as</span> local,}`
+  assert highlight_dawn(`use a/b.{f
+, as as local
+, X as Y
+}`) ==
+    `<span class="k">use</span> a/b.{f
+, as <span class="k">as</span> local
+, <span class="t">X</span> <span class="k">as</span> <span class="t">Y</span>
+}`
+  assert highlight_dawn(`use a/b.{f # tail
+, g as h, # tail
+}`) ==
+    `<span class="k">use</span> a/b.{f <span class="c"># tail</span>
+, g <span class="k">as</span> h, <span class="c"># tail</span>
+}`
+  assert highlight_dawn(`use a/b
+as`) ==
+    `<span class="k">use</span> a/b
+as`
+  assert highlight_dawn(`use
+as as`) ==
+    `<span class="k">use</span>
+as as`
+  assert highlight_dawn(`use a/
+as as`) ==
+    `<span class="k">use</span> a/
+as as`
+  assert highlight_dawn(`use a.
+{as as local}`) ==
+    `<span class="k">use</span> a.
+{as as local}`
+  assert highlight_dawn(`use a.{f
+as local}`) ==
+    `<span class="k">use</span> a.{f
+as local}`
+  assert highlight_dawn(`use a.{f as
+as as}`) ==
+    `<span class="k">use</span> a.{f <span class="k">as</span>
+as as}`
+  assert highlight_dawn(`use a as
+as as`) ==
+    `<span class="k">use</span> a <span class="k">as</span>
+as as`
+  assert highlight_dawn(`use a.{f as g as h}`) ==
+    `<span class="k">use</span> a.{f <span class="k">as</span> g as h}`
+  assert highlight_dawn(`use a as b as c`) ==
+    `<span class="k">use</span> a <span class="k">as</span> b as c`
+  assert highlight_dawn(`use a.{f + as}`) ==
+    `<span class="k">use</span> a.{f + as}`
+  assert highlight_dawn(`use a.{f 1 as}`) ==
+    `<span class="k">use</span> a.{f <span class="n">1</span> as}`
+  assert highlight_dawn(`use a.{f "use a/b" as}`) ==
+    `<span class="k">use</span> a.{f <span class="s">"use a/b"</span> as}`
+  assert highlight_dawn(`use a.{f} as`) ==
+    `<span class="k">use</span> a.{f} as`
+  assert highlight_dawn(`let as = 1`) ==
+    `<span class="k">let</span> as = <span class="n">1</span>`
+  assert highlight_dawn(`use a/b ask ab
+use a/b.{f ask g}
+ask`) ==
+    `<span class="k">use</span> a/b ask ab
+<span class="k">use</span> a/b.{f ask g}
+ask`
+  assert highlight_dawn(`use java "java.lang.Math"
+as`) ==
+    `<span class="k">use</span> <span class="k">java</span> <span class="s">"java.lang.Math"</span>
+as`
+  assert highlight_dawn(`# use a/b.{X as Y}
+as`) ==
+    `<span class="c"># use a/b.{X as Y}</span>
+as`
+  assert highlight_dawn(`let text = "use a/b.{X as Y}"
+as`) ==
+    `<span class="k">let</span> text = <span class="s">"use a/b.{X as Y}"</span>
+as`
+  assert highlight_dawn(`"""use a/b.{
+X as Y}
+"""
+as`) ==
+    `<span class="s">"""use a/b.{
+X as Y}
+"""</span>
+as`
+  assert highlight_dawn("`use a/b.{\nX as Y}`\nas") ==
+    "<span class=\"s\">`use a/b.{\nX as Y}`</span>\nas"
+}
+
+test "interpolation cannot start an import" {
+  assert highlight_dawn(`"${use a/b as alias}"
+as`) ==
+    `<span class="s">"</span><span class="i">${</span><span class="k">use</span> a/b as <span class="k">alias</span><span class="i">}</span><span class="s">"</span>
+as`
 }

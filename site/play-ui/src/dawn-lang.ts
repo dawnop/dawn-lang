@@ -39,12 +39,48 @@ const interpTag = Tag.define()
 type Context = { kind: 'string'; closer: '"' | '"""' | '`' } |
   { kind: 'interp'; depth: number }
 
+// These phases mirror parser.module_use and site/src/hl/dawn.dawn. Only
+// Item, ItemEnd (without its rename), and ListEnd can meet a newline.
+type UsePhase = 'idle' | 'firstPath' | 'path' | 'pathEnd' | 'open' | 'item' | 'itemEnd' |
+  'moduleAlias' | 'itemAlias' | 'listEnd'
+
+function useNewline(phase: UsePhase): UsePhase {
+  return phase === 'itemEnd' ? 'listEnd' :
+    phase === 'item' || phase === 'listEnd' ? phase : 'idle'
+}
+
+function useToken(phase: UsePhase, token: string, name = false): UsePhase {
+  if (token === 'use') return 'firstPath'
+  if ((phase === 'firstPath' || phase === 'path') && name && !/^[A-Z]/.test(token) &&
+      (phase !== 'firstPath' || token !== 'java')) return 'pathEnd'
+  if (phase === 'pathEnd') {
+    if (token === '/') return 'path'
+    if (token === '.') return 'open'
+    if (token === 'as') return 'moduleAlias'
+  }
+  if (phase === 'open' && token === '{') return 'item'
+  if (phase === 'item' && name) return 'itemEnd'
+  if (phase === 'itemEnd' && token === 'as') return 'itemAlias'
+  if (phase === 'itemAlias' && name) return 'listEnd'
+  if ((phase === 'itemEnd' || phase === 'listEnd') && token === ',') return 'item'
+  return 'idle'
+}
+
+// Import names follow lexer IDENT/TYPEIDENT, including contextual words that
+// the presentation keyword table also colours. A lone underscore is a token.
+const IMPORT_RESERVED = new Set([
+  'fn', 'let', 'var', 'type', 'alias', 'const', 'use', 'pub', 'trait', 'impl',
+  'effect', 'match', 'if', 'else', 'for', 'while', 'return', 'break', 'continue',
+  'comptime', 'true', 'false', 'not', '_',
+])
+
 interface State {
   // Interpolation returns to its enclosing string, even across nested strings
   // and expressions. Each cached line owns its copy of this stack.
   contexts: Context[]
   // the previous significant token was `fn`, so the next identifier is a def name
   afterFn: boolean
+  usePhase: UsePhase
 }
 
 function isIdentStart(ch: string) {
@@ -98,13 +134,15 @@ function scanStringBody(stream: any, closer: string, raw: boolean): boolean {
 
 export const dawnMode = StreamLanguage.define<State>({
   name: 'dawn',
-  startState: () => ({ contexts: [], afterFn: false }),
-  copyState: state => ({ contexts: state.contexts.map(frame => ({ ...frame })), afterFn: state.afterFn }),
+  startState: () => ({ contexts: [], afterFn: false, usePhase: 'idle' }),
+  copyState: state => ({ contexts: state.contexts.map(frame => ({ ...frame })), afterFn: state.afterFn, usePhase: state.usePhase }),
   blankLine(state) {
+    state.usePhase = useNewline(state.usePhase)
     const top = state.contexts[state.contexts.length - 1]
     if (top?.kind === 'string' && top.closer === '"') state.contexts.pop()
   },
   token(stream, state) {
+    if (stream.sol()) state.usePhase = useNewline(state.usePhase)
     // An unfinished ordinary string stops at the line boundary. Do not pop
     // an enclosing string while a multi-line interpolation is still code.
     let context = state.contexts[state.contexts.length - 1]
@@ -149,12 +187,14 @@ export const dawnMode = StreamLanguage.define<State>({
 
     // strings: triple, then single double-quote, then raw backtick
     if (stream.match('"""')) {
+      state.usePhase = 'idle'
       if (!scanStringBody(stream, '"""', false)) {
         state.contexts.push({ kind: 'string', closer: '"""' })
       }
       return 'string'
     }
     if (ch === '"') {
+      state.usePhase = 'idle'
       stream.next()
       if (!scanStringBody(stream, '"', false)) {
         state.contexts.push({ kind: 'string', closer: '"' })
@@ -162,6 +202,7 @@ export const dawnMode = StreamLanguage.define<State>({
       return 'string'
     }
     if (ch === '`') {
+      state.usePhase = 'idle'
       stream.next()
       if (!scanStringBody(stream, '`', true)) state.contexts.push({ kind: 'string', closer: '`' })
       return 'string'
@@ -169,12 +210,14 @@ export const dawnMode = StreamLanguage.define<State>({
 
     // char literal: 'a', '\n', '\\', '\u{1F600}', a non-BMP character
     if (ch === "'") {
+      state.usePhase = 'idle'
       stream.pos = charEnd(stream.string, stream.pos)
       return 'string'
     }
 
     // number
     if (/[0-9]/.test(ch)) {
+      state.usePhase = 'idle'
       stream.match(/^[0-9][0-9_]*(\.[0-9_]+)?/)
       return 'number'
     }
@@ -185,7 +228,9 @@ export const dawnMode = StreamLanguage.define<State>({
       stream.next()
       while (isIdentChar(stream.peek() ?? '')) stream.next()
       const word = stream.string.slice(start, stream.pos)
-      if (KEYWORDS.has(word)) {
+      const rename = word === 'as' && (state.usePhase === 'pathEnd' || state.usePhase === 'itemEnd')
+      state.usePhase = context ? 'idle' : useToken(state.usePhase, word, !IMPORT_RESERVED.has(word))
+      if (rename || KEYWORDS.has(word)) {
         if (word === 'fn') state.afterFn = true
         return 'keyword'
       }
@@ -199,6 +244,7 @@ export const dawnMode = StreamLanguage.define<State>({
       return 'variableName'
     }
 
+    state.usePhase = context ? 'idle' : useToken(state.usePhase, ch)
     stream.next()
     return null
   },
