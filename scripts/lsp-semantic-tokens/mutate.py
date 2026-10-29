@@ -14,9 +14,21 @@ import sys
 
 LSPTOK = "selfhost/src/lsp/lsptok.dawn"
 SERVER = "selfhost/src/lsp/server.dawn"
+QUERY = "selfhost/src/lsp/lspq.dawn"
 
 # mutation -> (file, anchor, replacement)
 MUTATIONS = {
+    'no-selective-alias': (QUERY,
+        '  match map.get(exp.aliases, imp.name) {\n',
+        '  match map.get(exp.aliases, "") {\n'),
+    'selective-value-priority': (QUERY,
+        '  offer_at(q, imp.lo, imp.hi, text, type_site)\n',
+        '  offer_at(q, imp.lo, imp.hi, text, if map.has(exp.consts, imp.name) {\n'
+        '    site_of_const_in(qc, exp.mod_path, imp.name)\n'
+        '  } else { type_site })\n'),
+    'drop-selective-value-reference': (QUERY,
+        '      q = collect_also(q, imp.lo, imp.hi, site_of_const_in(qc, exp.mod_path, imp.name), ImportValueUse)\n',
+        '      q = q\n'),
     # a constant painted as the type its case resembles
     'const-as-type': (LSPTOK,
         '      DConst(_, _, _, _, _, _, nlo, _) -> { ix = map.insert(ix, nlo, kind(T_VARIABLE, M_READONLY)) }\n',

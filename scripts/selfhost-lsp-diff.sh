@@ -62,6 +62,11 @@ pub type Combine = Op(f: fn(Int, Int) -> Int)
 
 pub const LIMIT: Int = 42
 
+pub opaque type Only = Float
+pub alias Label = String
+pub opaque type DUAL = Float
+pub const DUAL: Int = 7
+
 pub fn area(s: Shape) -> Float =
   match s {
     Circle(r) -> 3.14 * r * r
@@ -76,6 +81,14 @@ pub fn helper(n: Int) -> Int = n + LIMIT
 pub fn pad_to(s: String, width: Int, fill: String = " ",
   why: String = "a default far wider than any signature shows") -> String =
   if width > 0 { s ++ fill } else { why }
+EOF
+
+# The same import spelling can name both a type and a witness constant.
+cat > "$OUT/proj/src/selective.dawn" <<'EOF'
+use util.{Only as O, Label as Text, DUAL as D, LIMIT as CAP}
+fn identity(x: O, label: Text) -> O = x
+fn dual(x: D) -> D = x
+fn value() -> Int = D + CAP
 EOF
 
 # Calls into a function with defaults: what hover renders for one, and the
@@ -844,6 +857,22 @@ note("textDocument/didOpen", {"textDocument": {
 req("textDocument/formatting", {"textDocument": {"uri": messy_uri},
     "options": {"tabSize": 2, "insertSpaces": True}})
 note("textDocument/didClose", tdoc(messy_uri))
+
+selective_path = f"{out_dir}/proj/src/selective.dawn"
+selective_uri = "file://" + selective_path
+selective_text = open(selective_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": selective_uri, "languageId": "dawn", "version": 1, "text": selective_text}})
+for needle, delta in [("Only as O", 0), ("Only as O", 8),
+                      ("Label as Text", 0), ("Label as Text", 9),
+                      ("DUAL as D", 0), ("DUAL as D", 8), ("D + CAP", 0)]:
+    for method in ["hover", "definition", "references"]:
+        params = at(selective_uri, selective_text, needle, delta=delta)
+        if method == "references":
+            params["context"] = {"includeDeclaration": True}
+        req("textDocument/" + method, params)
+req("textDocument/semanticTokens/full", tdoc(selective_uri))
+note("textDocument/didClose", tdoc(selective_uri))
 
 req("shutdown", None)
 note("exit", {})

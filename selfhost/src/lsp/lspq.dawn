@@ -225,17 +225,20 @@ pub(pkg) type LocalRole = NoRole | LetRole | ParamRole | FnRole | MutableRole
 
 ## How a name is used, where the span alone does not say
 ## (docs/lsp-references-design.md §R1). `AssignUse` is the target of an
-## assignment, which documentHighlight shows as a write. The other two are a
+## assignment, which documentHighlight shows as a write. The others are a
 ## second resolution of a span the walk already answered for, read by
 ## references alone (`references_only`): `PunUse` is the field of a record pun
 ## (`Point { x }`, in a construction or a pattern), whose span hover,
 ## definition and tokens answer as the local `x`; `ImplUse` is an impl's trait
 ## name or method name, as a use of the trait or the trait method, where the
-## walk answers with the impl's own. Every other name is a `PlainUse`.
-pub(pkg) type UseKind = PlainUse | AssignUse | PunUse | ImplUse
+## walk answers with the impl's own; `ImportValueUse` is a constant imported
+## beside a type, where display and navigation prefer the type. Every other
+## name is a `PlainUse`.
+pub(pkg) type UseKind = PlainUse | AssignUse | PunUse | ImplUse | ImportValueUse
 
 ## Is `r` one of the second resolutions only references read?
-pub(pkg) fn references_only(r: Resolution) -> Bool = r.use_kind == PunUse || r.use_kind == ImplUse
+pub(pkg) fn references_only(r: Resolution) -> Bool =
+  r.use_kind == PunUse || r.use_kind == ImplUse || r.use_kind == ImportValueUse
 
 ## The resolved names starting in `lo..=hi`, by offset. A top-level
 ## declaration whose span misses the range is not walked, as for inlay hints.
@@ -2475,18 +2478,22 @@ fn visit_selective(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
 }
 
 fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
+  # Import display and navigation prefer the type explicitly, even when the
+  # same entry also imports a witness constant. Candidate order is no policy.
+  match map.get(exp.aliases, imp.name) {
+    Some(al) -> return offer_selective_type(qc, q0, exp, imp,
+      alias_text(qc, al.name, al.is_opaque, map.get(exp.alias_resolved, imp.name)),
+      site_of_alias(qc, al.owner, al.name, al.nlo, al.nhi))
+    None -> ()
+  }
+  match map.get(exp.types_by_name, imp.name) {
+    Some(aid) -> return offer_selective_type(qc, q0, exp, imp, type_text(qc, aid), site_of_type(qc, aid))
+    None -> ()
+  }
   var q = q0
   match map.get(exp.fns, imp.name) {
     Some(s) -> {
       q = offer_sig_at(qc, q, imp.lo, imp.hi, s, site_of_sig(qc, s))
-    }
-    None -> ()
-  }
-  match map.get(exp.types_by_name, imp.name) {
-    Some(aid) -> {
-      let a = adt_of(qc.entry.cx.adts, aid)
-      let summary = join(map(a.ctors, c => c.name), " | ")
-      q = offer_at(q, imp.lo, imp.hi, "type " ++ a.name ++ " = " ++ summary, site_of_type(qc, aid))
     }
     None -> ()
   }
@@ -2529,6 +2536,22 @@ fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
     }
   }
   q
+}
+
+## A selective import displays its type and any same-name constant together,
+## navigates to the type, and remains a reference of both declarations. The
+## constant is references-only so semantic tokens never sort competing kinds.
+fn offer_selective_type(qc: QCx, q0: Q, exp: ModExports, imp: ImportName, hover: String, type_site: Site) -> Q = {
+  var q = q0
+  var text = hover
+  match map.get(exp.consts, imp.name) {
+    Some(t) -> {
+      if live(q, imp.lo, imp.hi) { text = text ++ "\n" ++ const_text(qc, exp.mod_path, imp.name, t) }
+      q = collect_also(q, imp.lo, imp.hi, site_of_const_in(qc, exp.mod_path, imp.name), ImportValueUse)
+    }
+    None -> ()
+  }
+  offer_at(q, imp.lo, imp.hi, text, type_site)
 }
 
 # ---- expressions ----

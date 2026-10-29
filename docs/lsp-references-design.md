@@ -4,6 +4,7 @@
 > T1（semantic tokens 服务端，§T1）同日落地，分支 `feat/lsp-semantic-tokens`；T2（VS Code 与 Playground 两个消费端，§T2）同日，分支 `feat/lsp-semantic-tokens-clients`；
 > R1（单文件 references 与 documentHighlight，§R1）同日落地，分支 `feat/lsp-references-local`；
 > R2（工作区 references，§R2）同日落地，分支 `feat/lsp-references-workspace`；R3（prepareRename 与 rename，§R3）同日落地，分支 `feat/lsp-rename`。
+> S1（选择性导入的 alias 与类型/见证常量双身份，§S1）于 2026-10-29 落地。
 > 依据：裁决 `agent-handoff/ruling-lsp-tokens-rename-20261003.md`，调研 `agent-handoff/research-lsp-tokens-rename-report-20261003.md`
 > （§1.4 空洞实测表、§2、§3.4、§5.1 刀序）。前六节写 T0，§T1 写 T1，§T2 写 T2，§R1 写 R1，§R2 写 R2，§R3 写 R3。
 
@@ -764,3 +765,51 @@ push-total 16,794 → 16,920 s（+126 s）。`steps.lock.json` 已重录。
 - **上下文关键字的提示**：调研建议放行但在 prepareRename 的消息里提示。prepareRename 不知道新名字，提示只能是泛泛的一句；真出问题时第 15 条会拒绝，并带编译器的原文。
 - **改后文档链接再解析一次**：链接只在 `dawn doc` 里读；改的是末段且只在旧链接确实落在被改声明上时才改，改后 `dawn doc` 会照常解析它。
 - **自检的结果缓存**：改后分析的 session 不保留。保留它要在客户端真的应用了这份编辑之后才对，服务端不知道客户端何时、是否应用。
+
+## S1 选择性导入的类型身份
+
+### S1.1 问题与根因
+
+`lsp/lspq.visit_selective_at` 访问函数、ADT、构造器、常量、trait 与 effect，
+却遗漏 `ModExports.aliases`。opaque type 和 alias 的原名及重命名两侧因此没有
+共享解析结果，影响语义 token、hover、definition 和 references。
+普通类型使用的 `offer_type_name` 与限定使用的 `offer_qual_type` 已有正确的
+`alias_text`、`site_of_alias` 路径，可以直接复用。
+
+`std/narrow` 的 BF16、F32 同时是类型和见证常量。仅补表仍会产生同跨度的多个
+候选，hover 的后者胜出规则与 token 候选的排序不能表达统一的展示政策。
+
+### S1.2 规则
+
+选择性导入先解析 alias，再解析 ADT；命中类型时立即走专用出口，不再向普通
+展示通道提供常量候选。hover 显示类型声明和同名常量；definition 使用类型站点。
+同名常量另收集为仅 references 读取的解析，导入的两种身份都可以被值或类型
+使用位置的 references 找到。值位置继续依照 typed AST 解析为常量。
+
+不新增语法。`Name as Local` 两侧继续共用 `visit_selective_at`，不按名字或
+标准库模块增加例外。无文件站点的内嵌 std 继续允许 hover，但不给出虚构跳转。
+
+### S1.3 落点与验收
+
+- `selfhost/src/lsp/lspq.dawn`：补 alias 表、显式类型优先级和常量的第二身份。
+- `selfhost/src/lsp/server.dawn`：opaque/alias 原名和改名、双身份 hover、definition、
+  references、类型与值的 token，以及磁盘与内嵌 std 边界。
+- `scripts/lsp-semantic-tokens.py` 及其 mutator：线协议逐 token 验收与回退负控。
+- `scripts/selfhost-lsp-diff.sh`：把导入查询加入现有会话，实测输出差异后逐 label 声明。
+
+线协议验收逐项核对项目场景的 34 个 token 和 narrow 场景的 15 个 token，
+另核对选择列表范围中的 11 个 token、hover 文本、definition 的文件和精确范围、
+类型及常量各自的 references。测试同时拒绝测试源的错误诊断，防止无效程序掩盖缺口。
+server 内联测试分别以项目分析器和磁盘/内嵌 std 建立查询上下文；standalone
+分析器只加载单个缓冲区，不能用来测试项目的选择性导入。
+
+修复前的精确基线对上述线协议断言报告 24 个失败；修复后正向通过。
+扩展后的 `selfhost-lsp-diff.sh` 比较 247 条消息，未声明时报告 `lsp` 的 38 行差异。
+三个新增负控分别移除 alias 查表、把展示站点改成常量、移除常量第二身份的引用；
+构建失败不算负控成功，每个负控必须使其指定的验收断言失败。
+
+### S1.4 不做的（理由）
+
+- 内嵌 std 函数语义 token：需要独立的数据模型工作，本刀不改变站点身份。
+- 前端语法染色：上下文 `as` 属于高亮器自身，与本次共享解析缺口不同。
+- 全局常量重分类：实际值使用必须保留 readonly variable 分类。
