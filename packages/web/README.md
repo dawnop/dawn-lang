@@ -158,8 +158,17 @@ wrap the source's close, or bracket the file around the whole exchange.
 A failed file read panics with the IO error; the pump catches it, reports it
 and closes the source instead of treating the failure as EOF.
 
-Version 8 changes the source callback and the package identity to `web8`.
-The JVM adapter is `web_jvm2` 2.0.0. Upgrade both from the same release tag;
+Version 9 adds a trailing `at: Loc = caller()` to the refusing constructors:
+`text`, `json_response`, `raw`, `binary`, `streaming`, `with_header`, `redirect`,
+`try_redirect`, `attachment` and `error_response`. A panic names that call
+site, including through nested constructors. Wrappers declare and forward
+`at`; function values require the extra `Loc` argument. `error_response`
+attributes an illegal error header to the rendering call. Returned 400 errors
+keep their wording; `json_ok` and `try_with_header` keep their signatures.
+
+The package identity is `web9` 9.0.0; the source callback remains the version 8
+`read(pos, n)` protocol. The JVM adapter is `web_jvm2` 2.0.0. Upgrade both
+from the same release tag;
 keep the dependency aliases `web` and `web_jvm`. See [migration](MIGRATION.md).
 
 An `HttpError` whose status is outside `200..599` is answered as the neutral
