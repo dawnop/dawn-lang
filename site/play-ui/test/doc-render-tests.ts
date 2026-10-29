@@ -1,5 +1,6 @@
 import { DOMParser, parseHTML } from 'linkedom'
 import { EditorState } from '@codemirror/state'
+import { ensureSyntaxTree } from '@codemirror/language'
 import type { EditorView } from '@codemirror/view'
 import { CompletionContext, type Completion } from '@codemirror/autocomplete'
 import { LSPPlugin, type LSPClient } from '@codemirror/lsp-client'
@@ -38,6 +39,17 @@ export async function docRenderTests(expect: Expect): Promise<number> {
     const rendered = renderDawnCode(tricky)
     check('multiline interpolation and escapes preserve text', rendered.textContent, tricky)
     check('snippet uses exactly editor token classes', [...rendered.querySelectorAll('span')].map((s) => [s.textContent, s.className]), ranges.map(([a, b, cls]) => [tricky.slice(a, b), cls]))
+    const imports = 'use std/math.{exp as host_exp}\n\nuse std/narrow.{BF16, F32, f32}\nuse as/b.{as as local, f as as}\nlet as = 1'
+    const importState = EditorState.create({ doc: imports, extensions: [dawn()] })
+    const importRanges: [string, string][] = []
+    highlightTree(ensureSyntaxTree(importState, imports.length, 5000)!, dawnHighlight,
+      (a, b, cls) => importRanges.push([imports.slice(a, b), cls]))
+    const importCode = renderDawnCode(imports)
+    check('import documentation preserves the entire snippet', importCode.textContent, imports)
+    check('import documentation matches editor classes without semantic tokens',
+      [...importCode.querySelectorAll('span')].map(s => [s.textContent, s.className]), importRanges)
+    check('import documentation highlights only rename operators',
+      [...importCode.querySelectorAll('.tok-keyword')].map(s => s.textContent), ['use', 'as', 'use', 'use', 'as', 'as', 'let'])
     check('only Dawn and unlabeled code use the Dawn parser', [undefined, '', 'DAWN title', 'text', 'plaintext', 'rust'].map((n) => highlightLanguage(n) === dawnMode), [true, true, true, false, false, false])
     const sample = 'fn greet(value: Int) -> String = {\n  let text = "hello ${value}"\n  text # comment\n}'
     const literal = '---\n\n\n[`name`]\n<img src=x onerror=alert(1)>'
