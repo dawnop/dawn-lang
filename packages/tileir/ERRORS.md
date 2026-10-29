@@ -116,7 +116,12 @@ targets, which `asm.assembler_defect` names (see
 The host side is `std/gpu`: every operation answers `Result[_, ForeignError]`,
 and the `kind` is one of the rows below. Most are raised **above the effect**,
 before any handler is asked, so the fake and the real device refuse them in
-the same words; the rest are a handler's. A `cuda.*` kind is the CUDA driver's
+the same words; the rest are a handler's. The inventory is the union of actual
+error constructors in `std/gpu.dawn`, the marked GPU section of
+`runtime/c/dawn_rt.c` and the JVM GPU generator in
+`selfhost/src/jvm/rtclasses.dawn`. Shared kinds have one row with both origins.
+Runtime checks run inside the real handler: they can follow driver
+initialization and earlier device operations. A `cuda.*` kind is the CUDA driver's
 own `CUresult` name, passed through unchanged (`cuda.CUDA_ERROR_NOT_FOUND`
 for a global a module does not export).
 
@@ -129,10 +134,10 @@ gpu.grid_mismatch: gpu.launch_entry: kernel `vadd`: the Out cells make 2 block(s
 
 | Kind | Layer | Raised by, and why | Fix |
 |---|---|---|---|
-| `gpu.bad_length` | device | above the effect: `alloc` of a buffer with fewer than one element | allocate at least one element |
+| `gpu.bad_length` | device | above the effect: `alloc` of a buffer with fewer than one element; also the C runtime, after driver initialization, rejects a negative byte count at allocation or device-to-host copy | allocate at least one element; a raw runtime call must pass a nonnegative byte count |
 | `gpu.length_mismatch` | device | above the effect: `copy_from_host` of a list whose length is not the buffer's; also a raw upload of the wrong number of bytes | upload exactly as many elements as the buffer holds |
 | `gpu.unsupported_dtype` | device | a handler at `alloc`, or above the effect when a typed copy names a format that is not a buffer format: the device does not move that format (the message lists the ones it does) | use a listed format, or convert on the host |
-| `gpu.bad_grid` | device | above the effect: a grid axis below one or above CUDA's limit, more than three axes, or a launch with a dynamic Out extent that did not name its grid | pass `grid:` with the block counts; check the limits |
+| `gpu.bad_grid` | device | above the effect: a grid axis below one or above CUDA's limit, more than three axes, or a launch with a dynamic Out extent that did not name its grid; also the C runtime, after driver initialization and before function lookup, rejects any axis below 0 or above 2^31 - 1 | pass `grid:` with the block counts; check the host and raw runtime limits |
 | `gpu.grid_mismatch` | device | above the effect: the grid passed, or an In's cells, disagree with the Out cells that fix the grid | drop `grid:` when the Out cells fix it, or make the cells agree |
 | `gpu.bad_entry` | device | above the effect: an entry whose cells are malformed, or an argument of the wrong kind (a `scalar_arg` where the kernel reads a buffer) | record the kernel with `traceN` and pass what its markers say |
 | `gpu.aliased_argument` | device | above the effect: an `Out` or `Shared` argument is the same buffer as another argument | allocate a buffer for the output |
@@ -146,8 +151,11 @@ gpu.grid_mismatch: gpu.launch_entry: kernel `vadd`: the Out cells make 2 block(s
 | `gpu.no_module_symbol` | device | the fake device: the kernel's module exports no global of that name (a `private` global is not exported) | declare the global public, or look up another name |
 | `gpu.bad_global_dtype` | device | a handler: the global was already looked up as another format | read one global in one format |
 | `gpu.bad_global_size` | device | the real device: the global's byte size is not a whole number of elements of the format asked for | ask for the format it was declared with |
-| `gpu.no_driver` | device | the real device: there is no `libcuda` to load | run on a machine with an NVIDIA driver, or use the fake device |
-| `gpu.unsupported_backend` | device | any operation of the real device on a backend with no device runtime: the JVM, and WebAssembly | build with the C backend (`dawnc build`) |
+| `gpu.no_driver` | device | the C runtime during driver initialization: `libcuda.so.1` cannot be loaded or a required driver entry point is absent | install a compatible NVIDIA driver and make its library available, or use the fake device |
+| `gpu.driver_too_old` | device | the C runtime at module load, after driver initialization and before `cuModuleLoadData`: a cubin with ELF ABI version 8 or newer needs driver API 13000 (CUDA 13, r580 or newer), but the loaded driver reports less; a failed version query is treated as 0 | update the loaded driver to support the toolchain's cubin ABI, or rebuild with a compatible toolchain; the message prints the ABI and required and actual API versions |
+| `gpu.bad_kernel_name` | device | the C runtime at launch, after driver initialization and grid validation but before `cuModuleGetFunction`: the kernel name contains a NUL byte, which a C driver name cannot represent | remove the embedded NUL and use the kernel's exported entry name |
+| `gpu.bad_symbol_name` | device | the C runtime at module-global lookup, after driver initialization but before `cuModuleGetGlobal_v2`: the symbol name contains a NUL byte | remove the embedded NUL and use the global's exported name |
+| `gpu.unsupported_backend` | device | the JVM GPU runtime and the C runtime's WebAssembly branch: any real-device operation on a backend with no device runtime | build for a native target with the C backend (`dawnc build`) |
 | `cuda.CUDA_ERROR_NOT_FOUND` | device | the driver, unchanged. One example of a family: `cuda.` followed by the `CUresult` name, for everything the driver refuses; this one is a global a module does not export | read the CUDA driver documentation for the name |
 
 

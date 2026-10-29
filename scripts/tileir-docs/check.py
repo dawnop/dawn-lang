@@ -33,12 +33,13 @@ beside this directory. So both are checked here, and the rule for each is
 
 ## ERRORS.md
 
-  * Kinds. The table of `gpu.*` error kinds holds exactly the kinds std/gpu.dawn
-    builds before its tests start (`refuse("gpu.x", ..)` and the
-    `Err(("gpu.x", ..))` of the launch plan), plus the two the runtime builds
-    (`gpu.no_driver` in runtime/c/dawn_rt.c, `gpu.unsupported_backend` in
-    runtime/c/dawn_rt.c and the JVM runtime classes), each of which must still
-    be spelled in its source file.
+  * Kinds. The table holds the union of the `gpu.*` kinds constructed by
+    std/gpu before its tests, the marked C GPU runtime and the JVM GPU class
+    generator. Comments and unrelated strings do not count. Each kind keeps
+    all its source files, even when two implementations build the same kind;
+    the table owes one row per kind, not one per source. There is no runtime
+    kind allowlist to forget when adding the next refusal. The dynamic
+    `cuda.*` family owes exactly one representative row.
   * Fragments. The type-check, recording and emitting layers have no codes,
     only messages, so their rows are keyed by a fragment of the message that
     is a literal in the source (the checker's for the first, packages/tileir's
@@ -77,11 +78,6 @@ RUNTIME_C = ROOT / "runtime" / "c" / "dawn_rt.c"
 RUNTIME_JVM = ROOT / "selfhost" / "src" / "jvm" / "rtclasses.dawn"
 CHECKER = ROOT / "selfhost" / "src" / "check" / "checker.dawn"
 
-# The kinds the runtime builds, and the files that must still spell them.
-RUNTIME_KINDS = {
-    "gpu.no_driver": [RUNTIME_C],
-    "gpu.unsupported_backend": [RUNTIME_C, RUNTIME_JVM],
-}
 LAYERS = ("type check", "record", "emit", "device")
 # The items of the example file the README shows verbatim: "fn <name>" or
 # 'test "<name>"'. The README's first example is that program, and it stays so
@@ -190,17 +186,132 @@ def check_operations(table_text, dev_text, prog_text, features_text):
 
 # ---- ERRORS.md ----
 
-def production(text):
-    """std/gpu.dawn up to its first test block."""
-    m = re.search(r"^test ", text, re.M)
-    return text[:m.start()] if m else text
+def code_tokens(text, dawn=False):
+    """Keep string literals atomic, so examples inside them are never code.
+
+    These are the current literal constructor protocols, not a C/Dawn parser.
+    Source boundaries and nonempty inventories fail closed if those protocols
+    disappear; the controls exercise every form read below.
+    """
+    pattern = r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|/\*[\s\S]*?\*/|//[^\n]*'''
+    if dawn:
+        pattern += r"|\#[^\n]*"
+    pattern += r"|[A-Za-z_][A-Za-z_0-9]*|[0-9]+|[^\s]"
+    return [m.group() for m in re.finditer(pattern, text)
+            if not m.group().startswith(("//", "/*", "#"))]
+
+
+def literal_kinds(tokens, prefix):
+    """Literal first arguments of a particular constructor, not all strings."""
+    kinds = set()
+    for i in range(len(tokens) - len(prefix)):
+        if tokens[i:i + len(prefix)] != list(prefix):
+            continue
+        literal = tokens[i + len(prefix)]
+        if re.fullmatch(r'"gpu\.[a-z][a-z0-9_]*"', literal):
+            kinds.add(literal[1:-1])
+    return kinds
+
+
+def brace_bodies(tokens):
+    """Outermost C blocks, so an allocation cannot lend its local to another function."""
+    depth = 0
+    for i, token in enumerate(tokens):
+        if token == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif token == "}":
+            depth -= 1
+            if depth == 0:
+                yield tokens[start + 1:i]
+
+
+def function_bodies(tokens):
+    """GPU generator bodies, with nested braces balanced outside literals."""
+    for i, token in enumerate(tokens[:-1]):
+        if token != "fn" or not tokens[i + 1].startswith("gen_gpu_"):
+            continue
+        try:
+            start = tokens.index("{", i + 2)
+        except ValueError:
+            raise ValueError(f"{tokens[i + 1]}: GPU generator has no block body") from None
+        depth = 1
+        for end in range(start + 1, len(tokens)):
+            depth += (tokens[end] == "{") - (tokens[end] == "}")
+            if depth == 0:
+                yield tokens[i + 1], tokens[start + 1:end]
+                break
+        else:
+            raise ValueError("unterminated Dawn function body")
 
 
 def gpu_kinds(text):
-    body = production(text)
-    kinds = set(re.findall(r'refuse\("(gpu\.[a-z_]+)"', body))
-    kinds |= set(re.findall(r'Err\(\("(gpu\.[a-z_]+)"', body))
+    tokens = code_tokens(text, dawn=True)
+    if "test" in tokens:
+        tokens = tokens[:tokens.index("test")]
+    return (literal_kinds(tokens, ("refuse", "("))
+            | literal_kinds(tokens, ("Err", "(", "(")))
+
+
+def c_gpu_kinds(text):
+    begin, end = "=== DAWN_RT_GPU_BEGIN ===", "=== DAWN_RT_GPU_END ==="
+    if text.count(begin) != 1 or text.count(end) != 1 or text.index(begin) >= text.index(end):
+        raise ValueError("C GPU section needs exactly one ordered pair of boundary markers")
+    tokens = code_tokens(text[text.index(begin) + len(begin):text.index(end)])
+    kinds = literal_kinds(tokens, ("dawn_gpu_refuse", "("))
+    # The WASI branch constructs ForeignError directly. Follow the tagged
+    # allocation to its kind field, rather than treating DAWN_LIT as an error.
+    for body in brace_bodies(tokens):
+        for i in range(1, len(body) - 4):
+            # CUDA's names are dynamic, but this formatting result is passed
+            # to the same refusal constructor. It is one family, not a list.
+            if body[i:i + 2] == ["snprintf", "("]:
+                owner = body[i + 2]
+                prefix = ["snprintf", "(", owner, ",", "sizeof", owner, ",", '"cuda.%s"', ","]
+                refusal = ["dawn_gpu_refuse", "(", owner, ","]
+                if body[i:i + len(prefix)] == prefix and any(
+                        body[j:j + len(refusal)] == refusal for j in range(i, len(body))):
+                    kinds.add("cuda.*")
+            if body[i:i + 4] != ["=", "dawn_adt_new", "(", "DAWN_TAG_FOREIGN_ERROR"]:
+                continue
+            owner = body[i - 1]
+            kinds |= literal_kinds(body[i:], (owner, "-", ">", "fields", "[", "0", "]", ".", "p",
+                                              "=", "DAWN_LIT", "("))
     return kinds
+
+
+def jvm_gpu_kinds(text):
+    kinds = set()
+    for name, body in function_bodies(code_tokens(text, dawn=True)):
+        # The first string pushed for a newly allocated ForeignError is its
+        # kind. A later LDC (the message) or an unrelated LDC is not a kind.
+        for i, visitor in enumerate(body):
+            prefix = [visitor, ".", "visitTypeInsn", "(", "OP_NEW", ",", "FERR_CLASS", ")",
+                      visitor, ".", "visitInsn", "(", "OP_DUP", ")",
+                      visitor, ".", "visitLdcInsn", "("]
+            if body[i:i + len(prefix)] != prefix:
+                continue
+            init = [visitor, ".", "visitMethodInsn", "(", "OP_INVOKESPECIAL", ",", "FERR_CLASS",
+                    ",", '"<init>"', ","]
+            if not any(body[j:j + len(init)] == init for j in range(i + len(prefix), len(body))):
+                raise ValueError(f"{name}: ForeignError allocation has no constructor invocation")
+            kinds |= literal_kinds(body[i:], prefix)
+    return kinds
+
+
+def error_sources(gpu_text, runtime_texts):
+    """The kind union with every producer retained, including shared kinds."""
+    origins = {}
+    for path, extractor, text in ((GPU, gpu_kinds, gpu_text),
+                                  (RUNTIME_C, c_gpu_kinds, runtime_texts.get(RUNTIME_C, "")),
+                                  (RUNTIME_JVM, jvm_gpu_kinds, runtime_texts.get(RUNTIME_JVM, ""))):
+        kinds = extractor(text)
+        if not kinds:
+            raise ValueError(f"{path.relative_to(ROOT)} builds no gpu.* error kind: the constructor reader is stale")
+        for kind in kinds:
+            origins.setdefault(kind, set()).add(path)
+    return origins
 
 
 def check_errors(table_text, gpu_text, src_texts, runtime_texts, checker_text):
@@ -208,14 +319,11 @@ def check_errors(table_text, gpu_text, src_texts, runtime_texts, checker_text):
     `checker_text` the type checker's, and `runtime_texts` maps each runtime
     file to its text."""
     problems = []
-    want = gpu_kinds(gpu_text)
-    if not want:
-        problems.append("std/gpu.dawn builds no gpu.* error kind: the pattern this gate reads is stale")
-    for kind, files in RUNTIME_KINDS.items():
-        for f in files:
-            if kind not in runtime_texts.get(f, ""):
-                problems.append(f"{kind} is no longer spelled in {f.relative_to(ROOT)}")
-        want.add(kind)
+    try:
+        origins = error_sources(gpu_text, runtime_texts)
+    except ValueError as e:
+        return [str(e)]
+    want = set(origins)
     rows = table_rows(table_text)
     kinds_seen = {}
     layers_seen = set()
@@ -230,9 +338,12 @@ def check_errors(table_text, gpu_text, src_texts, runtime_texts, checker_text):
             problems.append(f"ERRORS.md:{n}: `{key}` names the layer {layer!r}, expected one of {', '.join(LAYERS)}")
             continue
         layers_seen.add(layer)
-        if re.fullmatch(r"gpu\.[a-z_]+", key) or key.startswith("cuda."):
+        if re.fullmatch(r"gpu\.[a-z][a-z0-9_]*", key) or key.startswith("cuda."):
             if layer != "device":
                 problems.append(f"ERRORS.md:{n}: `{key}` is an error kind of the device layer, not {layer!r}")
+            # One representative documents the dynamic CUresult family.
+            if key.startswith("cuda."):
+                key = "cuda.*"
             if key in kinds_seen:
                 problems.append(f"ERRORS.md:{n}: `{key}` already has a row on line {kinds_seen[key]}")
             kinds_seen[key] = n
@@ -245,10 +356,9 @@ def check_errors(table_text, gpu_text, src_texts, runtime_texts, checker_text):
             if key not in checker_text:
                 problems.append(f"ERRORS.md:{n}: the fragment `{key}` is not in selfhost/src/check/checker.dawn, so the message was reworded or removed")
     for kind in sorted(want - set(kinds_seen)):
-        problems.append(f"{kind} is an error kind and ERRORS.md has no row for it")
+        files = ", ".join(str(p.relative_to(ROOT)) for p in sorted(origins[kind]))
+        problems.append(f"{kind} is an error kind and ERRORS.md has no row for it (built by {files})")
     for kind in sorted(set(kinds_seen) - want):
-        if kind.startswith("cuda."):
-            continue
         problems.append(f"ERRORS.md:{kinds_seen[kind]}: `{kind}` is not an error kind std/gpu.dawn or the runtime builds")
     for layer in LAYERS:
         if layer not in layers_seen:
@@ -292,6 +402,107 @@ def sources():
 
 
 # ---- self-test ----
+
+def error_controls(errs, gpu, runtime):
+    """In-memory source mutations; no test ever edits a real runtime file."""
+    def replace(text, old, new):
+        # Positive controls must prove their noise was inserted as well. A
+        # missing source fixture is a broken self-test, never a clean pass.
+        assert old in text, f"self-test fixture is stale: {old!r}"
+        return text.replace(old, new, 1)
+
+    c_refusal = 'dawn_gpu_refuse("gpu.control_c2", "control")'
+    c_added = replace(runtime[RUNTIME_C],
+        'return dawn_gpu_refuse("gpu.no_driver", message);',
+        f'if (name == NULL) return {c_refusal};\n'
+        '  return dawn_gpu_refuse("gpu.no_driver", message);')
+    jvm_added = replace(runtime[RUNTIME_JVM],
+        'm.visitLdcInsn("gpu.unsupported_backend")',
+        'm.visitLdcInsn("gpu.control_jvm2")')
+    yield ("a new C runtime kind needs a row", errs, gpu,
+           {**runtime, RUNTIME_C: c_added}, "gpu.control_c2 is an error kind")
+    yield ("a documented new C runtime kind is accepted",
+           errs + "| `gpu.control_c2` | device | control | control |\n", gpu,
+           {**runtime, RUNTIME_C: c_added}, None)
+    yield ("a new JVM runtime kind needs a row", errs, gpu,
+           {**runtime, RUNTIME_JVM: jvm_added}, "gpu.control_jvm2 is an error kind")
+    yield ("a documented new JVM runtime kind is accepted",
+           errs + "| `gpu.control_jvm2` | device | control | control |\n", gpu,
+           {**runtime, RUNTIME_JVM: jvm_added}, None)
+    yield ("a new std refusal needs a row", errs,
+           'fn control() -> Result[Unit, ForeignError] = refuse("gpu.control_std2", "control")\n' + gpu,
+           runtime, "gpu.control_std2 is an error kind")
+    yield ("a new std launch-plan error needs a row", errs,
+           'fn control() -> Result[Unit, (String, String)] = Err(("gpu.control_plan2", "control"))\n' + gpu,
+           runtime, "gpu.control_plan2 is an error kind")
+    direct = replace(runtime[RUNTIME_C],
+        'a->fields[0].p = DAWN_LIT("gpu.unsupported_backend");',
+        'a->fields[0].p = DAWN_LIT("gpu.control_wasi2");')
+    yield ("a new direct C ForeignError kind needs a row", errs, gpu,
+           {**runtime, RUNTIME_C: direct}, "gpu.control_wasi2 is an error kind")
+    for kind in ("gpu.driver_too_old", "gpu.bad_kernel_name", "gpu.bad_symbol_name"):
+        table = "\n".join(line for line in errs.splitlines()
+                          if not line.startswith(f"| `{kind}` |")) + "\n"
+        yield (f"removing {kind} is rejected", table, gpu, runtime,
+               f"{kind} is an error kind and ERRORS.md has no row")
+    yield ("a runtime device error cannot be filed under emit",
+           errs.replace("| `gpu.bad_symbol_name` | device |", "| `gpu.bad_symbol_name` | emit |", 1),
+           gpu, runtime, "`gpu.bad_symbol_name` is an error kind of the device layer")
+    yield ("the dynamic CUDA family needs its representative row",
+           "\n".join(line for line in errs.splitlines() if not line.startswith("| `cuda.")) + "\n",
+           gpu, runtime, "cuda.* is an error kind and ERRORS.md has no row")
+    yield ("two CUDA representatives duplicate one dynamic family",
+           errs + "| `cuda.CUDA_ERROR_UNKNOWN` | device | control | control |\n",
+           gpu, runtime, "`cuda.*` already has a row")
+    # Use the same spelling as each real mutation above, in comments and
+    # strings (including complete constructor examples), within the read scope.
+    c_noise = ('/* return ' + c_refusal + '; */\n// return ' + c_refusal + ';\n'
+               'const char *kind_example = "gpu.control_c2";\n'
+               r'const char *call_example = "dawn_gpu_refuse(\"gpu.control_c2\", \"control\")";' + '\n'
+               'const char *literal_example = DAWN_LIT("gpu.control_wasi2");\n')
+    c_noisy = replace(runtime[RUNTIME_C], "#ifndef __wasi__", c_noise + "#ifndef __wasi__")
+    yield ("C comments and ordinary strings do not invent kinds", errs, gpu,
+           {**runtime, RUNTIME_C: c_noisy}, None)
+    c_unrelated = replace(runtime[RUNTIME_C],
+        "#ifndef __wasi__", 'static void control(void) {\n'
+        '  dawn_adt *a = dawn_adt_new(DAWN_TAG_SOME, 1, DAWN_MASK_ONE_BOXED);\n'
+        '  a->fields[0].p = DAWN_LIT("gpu.control_wasi2");\n}\n#ifndef __wasi__')
+    yield ("a C field on another ADT is not an error kind", errs, gpu,
+           {**runtime, RUNTIME_C: c_unrelated}, None)
+    jvm_noise = ('  ## m.visitLdcInsn("gpu.control_jvm2")\n'
+                 '  let example = "gpu.control_jvm2"\n'
+                 r'  let call_example = "m.visitLdcInsn(\"gpu.control_jvm2\")"' + '\n'
+                 '  m.visitLdcInsn("gpu.control_jvm2")\n')
+    jvm_noisy = replace(runtime[RUNTIME_JVM],
+        '  let m = open_static(cw, name, desc)\n',
+        '  let m = open_static(cw, name, desc)\n' + jvm_noise)
+    yield ("JVM comments and unrelated LDC strings do not invent kinds", errs, gpu,
+           {**runtime, RUNTIME_JVM: jvm_noisy}, None)
+    std_noise = ('## refuse("gpu.control_std2", "control")\n'
+                 '## Err(("gpu.control_plan2", "control"))\n'
+                 'const example = "gpu.control_std2"\n'
+                 r'const call_example = "refuse(\"gpu.control_std2\", \"control\")"' + '\n')
+    yield ("std comments and ordinary strings do not invent kinds", errs,
+           std_noise + gpu, runtime, None)
+    yield ("std test fixtures do not invent kinds", errs,
+           gpu + '\ntest "control" { refuse("gpu.control_std2", "control") }\n', runtime, None)
+    yield ("C code outside the GPU section does not invent kinds", errs, gpu,
+           {**runtime, RUNTIME_C: runtime[RUNTIME_C] + '\n' + c_refusal + ';\n'}, None)
+    other_jvm = item_text(runtime[RUNTIME_JVM], "fn gen_gpu_refusal")
+    other_jvm = other_jvm.replace('"gpu.unsupported_backend"', '"gpu.control_jvm2"')
+    other_jvm = other_jvm.replace("gen_gpu_", "gen_unrelated_")
+    yield ("other JVM generators do not invent GPU kinds", errs, gpu,
+           {**runtime, RUNTIME_JVM: runtime[RUNTIME_JVM] + '\n' + other_jvm}, None)
+    yield ("a missing C GPU boundary fails closed", errs, gpu,
+           {**runtime, RUNTIME_C: runtime[RUNTIME_C].replace("=== DAWN_RT_GPU_END ===", "")},
+           "C GPU section needs exactly one ordered pair")
+    yield ("a duplicated C GPU boundary fails closed", errs, gpu,
+           {**runtime, RUNTIME_C: runtime[RUNTIME_C] + "\n// === DAWN_RT_GPU_BEGIN ===\n"},
+           "C GPU section needs exactly one ordered pair")
+    yield ("a stale JVM constructor reader fails closed", errs, gpu,
+           {**runtime, RUNTIME_JVM: runtime[RUNTIME_JVM].replace("gen_gpu_", "gen_other_")},
+           "builds no gpu.* error kind")
+
 
 def self_test():
     ops, errs = read(OPERATIONS), read(ERRORS)
@@ -361,6 +572,19 @@ def self_test():
                 print("      " + p)
             if want:
                 print(f"      wanted a problem containing: {want}")
+    for name, table, gpu_fixture, runtime_fixture, want in error_controls(errs, gpu, runtime):
+        problems = check_errors(table, gpu_fixture, src, runtime_fixture, checker)
+        ok = not problems if want is None else any(want in p for p in problems)
+        print(("PASS  " if ok else "FAIL  ") + name)
+        if not ok:
+            bad += 1
+            print(f"      got {problems!r}, wanted {want!r}")
+    origins = error_sources(gpu, runtime)
+    shared = (origins["gpu.bad_length"] == {GPU, RUNTIME_C}
+              and origins["gpu.bad_grid"] == {GPU, RUNTIME_C}
+              and origins["gpu.unsupported_backend"] == {RUNTIME_C, RUNTIME_JVM})
+    print(("PASS  " if shared else "FAIL  ") + "shared kinds retain every producer")
+    bad += not shared
     # the pattern of gpu_kinds is itself read: one of the kinds it finds is not
     # a test fixture
     if "gpu.test" in gpu_kinds(gpu):
