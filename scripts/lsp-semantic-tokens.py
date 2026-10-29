@@ -152,6 +152,70 @@ pub fn main() -> Unit !io = {
 }
 """
 
+# Import entries have a display identity even when they also import a value.
+# Keep plain constants and value uses beside them to catch blanket retyping.
+ALIAS_HELPER = """pub opaque type Only = Float
+pub alias Label = String
+pub opaque type DUAL = Float
+pub const DUAL: Int = 7
+pub type CHOICE = Chosen
+pub const LIMIT: Int = 9
+pub opaque type Bare = Float
+"""
+
+ALIASES = """use helper.{Only as O, Label as Text, DUAL as D, CHOICE as C, LIMIT as CAP, Bare}
+fn identity(x: O, text: Text, bare: Bare) -> O = x
+fn dual(x: D) -> D = x
+fn choice(x: C) -> C = x
+fn value() -> Int = D + CAP
+"""
+
+ALIAS_TOKENS = [
+    ('helper', 'namespace', ''),
+    ('Only', 'type', ''), ('O', 'type', ''),
+    ('Label', 'type', ''), ('Text', 'type', ''),
+    ('DUAL', 'type', ''), ('D', 'type', ''),
+    ('CHOICE', 'enum', ''), ('C', 'enum', ''),
+    ('LIMIT', 'variable', 'readonly'), ('CAP', 'variable', 'readonly'),
+    ('Bare', 'type', ''),
+    ('identity', 'function', 'declaration'),
+    ('x', 'parameter', 'declaration'), ('O', 'type', ''),
+    ('text', 'parameter', 'declaration'), ('Text', 'type', ''),
+    ('bare', 'parameter', 'declaration'), ('Bare', 'type', ''),
+    ('O', 'type', ''), ('x', 'parameter', ''),
+    ('dual', 'function', 'declaration'),
+    ('x', 'parameter', 'declaration'), ('D', 'type', ''),
+    ('D', 'type', ''), ('x', 'parameter', ''),
+    ('choice', 'function', 'declaration'),
+    ('x', 'parameter', 'declaration'), ('C', 'enum', ''),
+    ('C', 'enum', ''), ('x', 'parameter', ''),
+    ('value', 'function', 'declaration'),
+    ('D', 'variable', 'readonly'),
+    ('CAP', 'variable', 'readonly'),
+]
+
+NARROW = """use std/narrow.{BF16 as B, F32}
+fn identity(x: B) -> B = x
+fn witness() -> Unit = {
+  let b = B
+  let f = F32
+  ()
+}
+"""
+
+NARROW_TOKENS = [
+    ('std', 'namespace', 'defaultLibrary'),
+    ('narrow', 'namespace', 'defaultLibrary'),
+    ('BF16', 'type', 'defaultLibrary'), ('B', 'type', 'defaultLibrary'),
+    ('F32', 'type', 'defaultLibrary'),
+    ('identity', 'function', 'declaration'),
+    ('x', 'parameter', 'declaration'), ('B', 'type', 'defaultLibrary'),
+    ('B', 'type', 'defaultLibrary'), ('x', 'parameter', ''),
+    ('witness', 'function', 'declaration'),
+    ('b', 'variable', 'declaration'), ('B', 'variable', 'readonly+defaultLibrary'),
+    ('f', 'variable', 'declaration'), ('F32', 'variable', 'readonly+defaultLibrary'),
+]
+
 # The expected tokens, (text, type, modifiers) in document order; modifiers
 # joined with "+". Filled from --dump and read name by name against
 # docs/lsp-references-design.md §T1's table.
@@ -453,6 +517,7 @@ class Session:
         self.p = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.next_id = 0
+        self.diagnostics = {}
         init = self.request("initialize", {"processId": None, "rootUri": None, "capabilities": {}})
         self.provider = (init or {}).get("capabilities", {}).get("semanticTokensProvider")
         self.notify("initialized", {})
@@ -476,6 +541,9 @@ class Session:
             msg = read_msg(self.p.stdout)
             if msg is None:
                 raise RuntimeError("server closed while waiting for %s" % method)
+            if msg.get("method") == "textDocument/publishDiagnostics":
+                p = msg["params"]
+                self.diagnostics[p["uri"]] = p.get("diagnostics", [])
             if msg.get("id") == mine and "method" not in msg:
                 return msg
 
@@ -592,6 +660,9 @@ def check_doc(s, uri, text, label, want, ranges, dump):
     s.notify("textDocument/didOpen", {"textDocument": {
         "uri": uri, "languageId": "dawn", "version": 1, "text": text}})
     got = tokens(s, uri, text)
+    errors = [d for d in s.diagnostics.get(uri, []) if d.get("severity") == 1]
+    if errors:
+        bad(label + ": fixture", "unexpected diagnostics: %r" % errors)
     if dump:
         print("%s = [" % label)
         for t, _ in got:
@@ -606,6 +677,50 @@ def check_doc(s, uri, text, label, want, ranges, dump):
         rgot = tokens(s, uri, text, rng)
         compare(rlabel, rwant, kinds(rgot))
         placed(rlabel, text, rgot, lo, hi)
+
+
+def check_alias_navigation(s, uri, helper_uri):
+    """Both import spellings navigate as types and reference both identities."""
+    for name, local, head, type_uses in [
+            ("Only", "O", "opaque type Only", 4),
+            ("Label", "Text", "alias Label = String", 3),
+            ("DUAL", "D", "opaque type DUAL", 4),
+            ("CHOICE", "C", "type CHOICE", 4),
+            ("Bare", "Bare", "opaque type Bare", 2)]:
+        entry = name if name == local else name + " as " + local
+        start = ALIASES.index(entry)
+        for at in sorted({start, start + len(entry) - len(local)}):
+            label = "alias navigation: %s at %d" % (name, at)
+            params = {"textDocument": {"uri": uri}, "position": utf16_position(ALIASES, at)}
+            hover = s.request("textDocument/hover", params) or {}
+            markdown = (hover.get("contents") or {}).get("value", "")
+            if head not in markdown or (name == "DUAL" and "const " + name + ": Int" not in markdown):
+                bad(label, "missing type or constant hover: %r" % markdown)
+            else:
+                ok(label + ": hover")
+            kind = "alias " if name == "Label" else "type "
+            decl = ALIAS_HELPER.index(kind + name) + len(kind)
+            want_def = [{"uri": helper_uri, "range": {
+                "start": utf16_position(ALIAS_HELPER, decl),
+                "end": utf16_position(ALIAS_HELPER, decl + len(name))}}]
+            got_def = s.request("textDocument/definition", params)
+            if got_def != want_def:
+                bad(label, "definition: want %r, got %r" % (want_def, got_def))
+            else:
+                ok(label + ": definition")
+            refs = s.request("textDocument/references", dict(params, context={"includeDeclaration": False})) or []
+            if len(refs) != type_uses or any(r["uri"] != uri for r in refs):
+                bad(label, "type references: want %d local uses, got %r" % (type_uses, refs))
+            else:
+                ok(label + ": type references")
+    for needle in ["D + CAP"]:
+        params = {"textDocument": {"uri": uri}, "position": utf16_position(ALIASES, ALIASES.index(needle)),
+                  "context": {"includeDeclaration": False}}
+        refs = s.request("textDocument/references", params) or []
+        if len(refs) != 3 or any(r["uri"] != uri for r in refs):
+            bad("alias value references: " + needle, "want both import spellings and the value use, got %r" % refs)
+        else:
+            ok("alias value references: " + needle)
 
 
 # An edit that leaves the importing module unparseable (#788). Its own
@@ -680,6 +795,23 @@ def contract(server, env, dump=False):
             check_doc(s, "file://" + os.path.join(one, "one.dawn"), SINGLE, "SINGLE_TOKENS",
                       SINGLE_TOKENS, SINGLE_RANGES, dump)
             check_doc(s, "file://" + os.path.join(one, "wide.dawn"), WIDE, "WIDE_TOKENS", WIDE_TOKENS, [], dump)
+            check_doc(s, "file://" + os.path.join(one, "narrow.dawn"), NARROW,
+                      "NARROW_TOKENS", NARROW_TOKENS, [], dump)
+        finally:
+            s.close()
+        aliases = os.path.join(work, "aliases")
+        os.makedirs(aliases)
+        with open(os.path.join(aliases, "helper.dawn"), "w") as f:
+            f.write(ALIAS_HELPER)
+        alias_main = os.path.join(aliases, "main.dawn")
+        with open(alias_main, "w") as f:
+            f.write(ALIASES)
+        s = Session(server, aliases, env)
+        try:
+            check_doc(s, "file://" + alias_main, ALIASES, "ALIAS_TOKENS", ALIAS_TOKENS,
+                      [("alias import range", "Only as O", "}\n", ALIAS_TOKENS[1:12])], dump)
+            if not dump:
+                check_alias_navigation(s, "file://" + alias_main, "file://" + os.path.join(aliases, "helper.dawn"))
         finally:
             s.close()
         src = os.path.join(work, "proj", "src")
@@ -713,6 +845,9 @@ def contract(server, env, dump=False):
 MUTATE = os.path.join(ROOT, "scripts", "lsp-semantic-tokens", "mutate.py")
 
 MUTANTS = [
+    ('no-selective-alias', 'ALIAS_TOKENS'),
+    ('selective-value-priority', 'NARROW_TOKENS'),
+    ('drop-selective-value-reference', 'test:lsp/server :: selective aliases resolve both spellings and keep type and value identities'),
     ('const-as-type', 'SINGLE_TOKENS'),
     ('drop-mutable', 'SINGLE_TOKENS'),
     ('range-unclipped', 'range inside norm'),

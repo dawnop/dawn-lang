@@ -4986,6 +4986,144 @@ fn def_probe_span(t: Target, what: String) -> (Int, Int) =
     None -> panic("no definition offered for ${what}")
   }
 
+test "selective aliases resolve both spellings and keep type and value identities" {
+  io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() => {
+    let std = std_for_probe()
+    let st = def_probe_state(std)
+    let root = "/tmp/dawn-selfhost-lsp-def/selective-project"
+    let _ = io.mkdirs(root)
+    let helper = join([
+      "pub opaque type Only = Float",
+      "pub alias Label = String",
+      "pub opaque type DUAL = Float",
+      "pub const DUAL: Int = 7",
+      "pub type CHOICE = Chosen",
+      "pub const LIMIT: Int = 9",
+      "pub opaque type Bare = Float",
+      ""
+    ], "\n")
+    def_probe_put(root ++ "/selective_helper.dawn", helper)
+    let text = join([
+      "use selective_helper.{Only as O, Label as Text, DUAL as D, CHOICE as C, LIMIT as CAP, Bare}",
+      "fn identity(x: O, text: Text, bare: Bare) -> O = x",
+      "fn dual(x: D) -> D = x",
+      "fn choice(x: C) -> C = x",
+      "fn value() -> Int = D + CAP",
+      ""
+    ], "\n")
+    let path = root ++ "/selective_main.dawn"
+    def_probe_put(path, text)
+    let plan = project_plan(source.SourceFile(path))
+    let loaded = load_entries_reusing(plan, [path], map.empty(), no_parses()).loaded
+    let lease = jsig_refused_lease()
+    let prog = incremental.analyze(incremental.new(std, ct_default(), lease.jsig, 128), loaded).program
+    assert len(prog.diags) == 0
+    let d = Doc {
+      uri = path_to_uri(path), version = 0, path = Some(path), canonical_path = Some(path),
+      text = text, view = view_of(text), ls = line_starts_of(text),
+      analysis = Standalone(prog, "selective_main", Some(plan.modules.by_use))
+    }
+    let analysis = analysis_of(st, d).expect("selective imports have an analysis")
+    let qc = doc_qcx(st, d, analysis).expect("selective imports have a query context")
+    for row in [("Only as O", 0, "Only"), ("Only as O", 8, "Only"),
+      ("Label as Text", 0, "Label"), ("Label as Text", 9, "Label"),
+      ("DUAL as D", 0, "DUAL"), ("DUAL as D", 8, "DUAL"),
+      ("CHOICE as C", 0, "CHOICE"), ("CHOICE as C", 10, "CHOICE"),
+      ("Bare}", 0, "Bare")] {
+      let (needle, skip, name) = row
+      let target = def_probe_at(st, d, text, needle, skip)
+      let (lo, hi) = def_probe_span(target, "the imported type")
+      assert str.slice(helper, lo, hi) == name
+      assert lo == if name == "Label" { probe_offset(helper, "alias Label", 6) }
+      else { probe_offset(helper, "type " ++ name, 5) }
+      assert target.def_path != None
+      let uses = occurrences(qc, probe_offset(text, needle, skip), false)
+      assert len(uses) == if name == "Bare" { 2 } else if name == "Label" { 3 } else { 4 }
+    }
+    for needle in ["DUAL as D"] {
+      let target = def_probe_at(st, d, text, needle, 0)
+      assert str.contains(target.hover, "opaque type DUAL")
+      assert str.contains(target.hover, "const DUAL: Int")
+    }
+    for row in [("D + CAP", "DUAL")] {
+      let (needle, name) = row
+      let target = def_probe_at(st, d, text, needle, 0)
+      let (lo, _) = def_probe_span(target, "the imported constant")
+      assert lo == probe_offset(helper, "const " ++ name, 6)
+      assert str.contains(target.hover, "const D: Int")
+      assert len(occurrences(qc, probe_offset(text, needle, 0), false)) == 3
+    }
+    let tokens = semantic_tokens(qc, 0, len(text))
+    for row in [("Only as O", 0, 1, 0), ("Only as O", 8, 1, 0),
+      ("Label as Text", 0, 1, 0), ("Label as Text", 9, 1, 0),
+      ("DUAL as D", 0, 1, 0), ("DUAL as D", 8, 1, 0),
+      ("CHOICE as C", 0, 3, 0), ("CHOICE as C", 10, 3, 0),
+      ("Bare}", 0, 1, 0), ("LIMIT as CAP", 0, 7, 2),
+      ("LIMIT as CAP", 9, 7, 2), ("D + CAP", 0, 7, 2)] {
+      let (needle, skip, ty, mods) = row
+      let off = probe_offset(text, needle, skip)
+      let hits = filter(tokens, t => t.lo == off)
+      assert len(hits) == 1
+      assert hits[0].ty == ty && hits[0].mods == mods
+    }
+  })))
+}
+
+test "selective narrow witnesses prefer type declarations and keep embedded navigation absent" {
+  io.with_fs_real(() => no_host(() => {
+    let disk = std_for_probe()
+    let embedded = match load_std("/tmp/dawn-selfhost-lsp-def/no-selective-std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("embedded std: ${std_load_error_text(e)}")
+    }
+    let text = join([
+      "use std/narrow.{BF16 as B, F32}",
+      "fn identity(x: B) -> B = x",
+      "fn witness() -> Unit = {",
+      "  let b = B",
+      "  let f = F32",
+      "  ()",
+      "}",
+      ""
+    ], "\n")
+    for std in [disk, embedded] {
+      let st = def_probe_state(std)
+      let d = def_probe_doc_named(st, "selective_narrow.dawn", text)
+      let analysis = analysis_of(st, d).expect("narrow imports have an analysis")
+      let qc = doc_qcx(st, d, analysis).expect("narrow imports have a query context")
+      let tokens = semantic_tokens(qc, 0, len(text))
+      for row in [("BF16 as B", 0, "BF16"), ("BF16 as B", 8, "BF16"), ("F32}", 0, "F32")] {
+        let (needle, skip, name) = row
+        let target = def_probe_at(st, d, text, needle, skip)
+        assert str.contains(target.hover, "opaque type " ++ name)
+        assert str.contains(target.hover, "const " ++ name ++ ": Dtype[" ++ name ++ "]")
+        if std.dir == None {
+          assert target.def == None
+          assert len(filter(tokens, t => t.lo == probe_offset(text, needle, skip))) == 0
+        }
+        else {
+          let (lo, hi) = def_probe_span(target, "the narrow type")
+          for (mp, src_text, _) in std.srcs {
+            if mp == "std/narrow" {
+              assert str.slice(src_text, lo, hi) == name
+              assert lo == probe_offset(src_text, "opaque type " ++ name, 12)
+            }
+          }
+          let hits = filter(tokens, t => t.lo == probe_offset(text, needle, skip))
+          assert len(hits) == 1 && hits[0].ty == 1 && hits[0].mods == 4
+        }
+      }
+      if std.dir != None {
+        for needle in ["B\n", "F32\n"] {
+          let hits = filter(tokens, t => t.lo == probe_offset(text, needle, 0))
+          assert len(hits) == 1 && hits[0].ty == 7 && hits[0].mods == 6
+          assert len(occurrences(qc, probe_offset(text, needle, 0), false)) == if needle == "B\n" { 3 } else { 2 }
+        }
+      }
+    }
+  }))
+}
+
 test "a definition in std names std's file and points at the declaration" {
   # the real handler stays: `load_std("std")` names a relative directory, so
   # the working directory this runs in is one of the inputs.
