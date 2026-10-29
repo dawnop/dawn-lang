@@ -6694,3 +6694,32 @@ HQ%HKV==0 和 I32 容量乘积；Entry6 不能从第六标量自动推导这些�
 K/V 的 PadZero 只保护合法尾 tile 内的读取，score 必须由算法显式 select 为负无穷，
 再进入 max/exp/sum。本次 BF16 mask probe 是小语义消费者，普通 flash 的整块 M=N 域
 和五参 BF16 读者面保持原契约；生产融合 GQA 属于后续任务。
+
+### N1：运行时错误表的完整性
+
+旧文档门只从 `std/gpu.dawn` 提取错误，另外手写两个运行时名字。实际 C
+运行时已产生 `gpu.driver_too_old`、`gpu.bad_kernel_name`、`gpu.bad_symbol_name`，
+但旧门的全部自测仍通过；继续往白名单加名字不能防止下一次同类遗漏。
+
+本次改动限于本文、`packages/tileir/ERRORS.md` 与 `scripts/tileir-docs/check.py`。
+先按当前构造形式提取来源，再把来源并集与表行双向比较：标准库只读首个 test
+之前的 `refuse` / `Err` 构造；C 只读已有 GPU 标记之间的 `dawn_gpu_refuse`
+调用和带 `DAWN_TAG_FOREIGN_ERROR` 的 kind 字段；JVM 只读 `gen_gpu_` 函数内
+构造 `FERR_CLASS` 时第一个字符串操作数。词法扫描保留字符串 token，跳过注释，
+所以注释中的构造示例、普通字符串和标准库测试不扩张全集。任一来源提取为空、
+C 标记丢失或重复均拒绝；这不是通用 C/Dawn 数据流分析，构造协议改变时须一起
+维护提取器及其负控。每个 kind 保留全部来源，同名错误只占一行；动态 `cuda.*`
+从 C 的格式化及拒绝调用提取，仍为一类驱动错误，只允许一个代表行。
+
+表中明确区分 effect 之前的标准库检查与 handler 内的运行时检查。ELF ABI
+检查发生在驱动初始化之后、`cuModuleLoadData` 之前；NUL 名字发生在初始化
+之后、函数或全局查找之前。`bad_length` 与 `bad_grid` 的 C 运行时来源也保留。
+
+验收先确认干净输入，再在内存加入 C/JVM 新 kind、删除三个漏项各自的表行、
+加入无代码来源的表行、把 device 错误改归 emit，并确认注释/普通字符串不改变
+集合。原 README 与 OPERATIONS 自测保留；另用旧门对照证明新构造曾被漏掉。
+变异文本、摘要与指定诊断留在运行证据中，不修改实际运行时来制造负控。
+现有预算与门禁步骤保持原值；Markdown 不属于 tile 输入，最终仍核三账身份。
+
+不做的（理由）：不改运行时行为、来源机制、kernel 或黄金文件；不新增设备实跑
+或精细计时门，因为本刀验证的是静态文档覆盖，不能冒称新的三卡数值验收。
