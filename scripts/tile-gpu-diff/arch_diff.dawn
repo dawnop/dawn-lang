@@ -93,7 +93,7 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, wrap_i32, nibble_word}
-use tileref/ref.{dtype_convert_ref, dtype_e2m1_ref, mmaf_scaled_ref, view_atomic_bf16_ref}
+use tileref/ref.{dtype_convert_ref, dtype_e2m1_ref, mmaf_scaled_ref, mmaf_scaled_packed_ref, view_atomic_bf16_ref}
 use std/list
 use std/map
 use std/narrow
@@ -116,6 +116,7 @@ pub const MMS_M: Int = 32
 pub const MMS_K: Int = 64
 pub const MMS_N: Int = 32
 pub const MMS_V: Int = 32
+pub const SMM_D: Int = 64
 pub const VA_BINS: Int = 16
 pub const VA_TILE: Int = 64
 pub const VA_N: Int = 500
@@ -458,6 +459,38 @@ fn mms_sb() -> List[Float] =
   list.map(range(0, (MMS_K / MMS_V) * MMS_N), t =>
       pow2((2 * (t / MMS_N) + t % MMS_N) % 4 - 1))
 
+# Whole operands and positive powers of two keep every product and partial
+# sum exactly representable in f32. The square matrices are deliberately
+# noncommutative so swapping the writer's operand references is observable.
+fn smm_a() -> List[Float] = list.map(range(0, SMM_D * SMM_D), t =>
+    to_float((t / SMM_D + 2 * (t % SMM_D)) % 7 - 3))
+
+fn smm_b() -> List[Float] = list.map(range(0, SMM_D * SMM_D), t =>
+    to_float((3 * (t / SMM_D) + t % SMM_D) % 5 - 2))
+
+fn smm_v(i: Int) -> Int = if i == 7 || i == 9 { 16 } else { 32 }
+
+fn smm_sa(v: Int) -> List[Float] = list.map(range(0, SMM_D * (SMM_D / v)), t =>
+    pow2((t / (SMM_D / v) + t % (SMM_D / v)) % 3))
+
+fn smm_sb(v: Int) -> List[Float] = list.map(range(0, (SMM_D / v) * SMM_D), t =>
+    pow2((2 * (t / SMM_D) + t % SMM_D) % 4))
+
+fn smm_words(xs: List[Float]) -> List[Float] = list.map(range(0, len(xs) / 8), w =>
+    nibble_word(j => narrow.f4e2m1_bits(xs[w * 8 + j])))
+
+# This oracle uses integer block dot products and integer scale weights.
+# It does not decode buffers, call tileref, or fold the scaled products in
+# the order used by the device or interpreter.
+fn smm_answer(v: Int, i: Int, j: Int) -> Float = {
+  let sum = list.fold(range(0, SMM_D / v), 0, (acc, block) => {
+    let dot = list.fold(range(block * v, (block + 1) * v), 0, (s, k) =>
+        s + ((i + 2 * k) % 7 - 3) * ((3 * k + j) % 5 - 2))
+    acc + dot * (1 << ((i + block) % 3)) * (1 << ((2 * block + j) % 4))
+  })
+  to_float(sum)
+}
+
 ## The bf16 atomic reduction's input: VA_N lanes, each naming one of the
 ## VA_BINS bins. The stride is coprime with the bin count so that every bin
 ## is hit, and no bin comes near 256, which is where whole numbers stop
@@ -477,9 +510,10 @@ fn va_blocks() -> Int = VA_N / VA_TILE + 1
 ## cubin.
 pub fn case_name(i: Int) -> String =
   ["dtype_e4m3", "dtype_e5m2", "dtype_e8m0", "dtype_e2m1", "mmaf_scaled_e4m3",
-    "view_atomic_bf16"][i]
+    "view_atomic_bf16", "mmaf_scaled_e5m2", "mmaf_scaled_fp4_e8m0_v16",
+    "mmaf_scaled_fp4_e8m0_v32", "mmaf_scaled_fp4_e4m3_v16"][i]
 
-pub const CASES: Int = 6
+pub const CASES: Int = 10
 
 ## The index of the kernel called `name`, or -1 for a name this program does
 ## not know.
@@ -494,7 +528,9 @@ fn case_segments(i: Int) -> Int = if i >= 4 { 1 } else { 2 }
 
 ## The lanes in one segment of each kernel's output.
 fn case_lanes(i: Int) -> Int =
-  if i == 4 {
+  if i >= 6 {
+    SMM_D * SMM_D
+  } else if i == 4 {
     MMS_M * MMS_N
   } else if i == 5 {
     VA_BINS
@@ -505,7 +541,7 @@ fn case_lanes(i: Int) -> Int =
 ## The blocks each kernel is launched with. The block-scaled product names
 ## no block id at all and runs on one.
 fn case_grid(i: Int) -> Int =
-  if i == 4 {
+  if i == 4 || i >= 6 {
     1
   } else if i == 5 {
     va_blocks()
@@ -518,7 +554,14 @@ fn case_grid(i: Int) -> Int =
 ## sentinel in its tail says whether a write went past the end.
 fn case_bufs(i: Int) -> List[(String, List[Float])] = {
   let out = sentinel_buffer(case_segments(i) * case_lanes(i) + TAIL)
-  if i == 0 {
+  if i >= 6 {
+    let packed = i != 6
+    let dt = if packed { "i32" } else { "f8E5M2" }
+    let scale = if i == 9 { "f8E4M3FN" } else { "f8E8M0FNU" }
+    [(dt, if packed { smm_words(smm_a()) } else { smm_a() }),
+      (dt, if packed { smm_words(smm_b()) } else { smm_b() }),
+      (scale, smm_sa(smm_v(i))), (scale, smm_sb(smm_v(i))), ("f64", out)]
+  } else if i == 0 {
     [("f8E4M3FN", e4m3_x()), ("f64", e4m3_y()), ("f64", out)]
   } else if i == 1 {
     [("f8E5M2", e5m2_x()), ("f64", e5m2_y()), ("f64", out)]
@@ -549,6 +592,14 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
 fn oracle(i: Int, t: Trace, explicit: Bool) -> String = match t.result {
   None -> "missing-result"
   Some(v) -> {
+    if i >= 6 {
+      if len(v) != SMM_D * SMM_D + TAIL { return "length=${len(v)} expected=${SMM_D * SMM_D + TAIL}" }
+      for lane in range(0, len(v)) {
+        let want = if lane < SMM_D * SMM_D { smm_answer(smm_v(i), lane / SMM_D, lane % SMM_D) } else { SENTINEL }
+        if not same(v[lane], want) { return "lane=${lane} got=${v[lane]} expected=${want}" }
+      }
+      return "pass"
+    }
     if i == 1 {
       let bad = list.find(range(0, 249), j => {
         let want = if j < 248 { e5m2_stored(j) } else { float_of_bits(0x7ff8000000000000) }
@@ -633,9 +684,24 @@ fn oracle_selftest(control: String) -> Unit !io !Exit = {
   if not ok { io.exit(1) }
 }
 
+fn scaled_oracle_selftest() -> Unit !io !Exit = {
+  var ok = true
+  for i in range(6, CASES) {
+    let clean = with_gpu_fake(case_kernels(i), () => stages(case_name(i), 1, case_bufs(i)))
+    let result = oracle(i, clean, false)
+    io.println("oracle tileref ${case_name(i)} ${result}")
+    if result != "pass" { ok = false }
+  }
+  if not ok { io.exit(1) }
+}
+
 ## The reference table the fake device answers with, for one case.
 fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
-  if i == 0 {
+  if i >= 6 {
+    map.from([(case_name(i), (5, last_out((dts, ins) =>
+        if i == 6 { mmaf_scaled_ref(SMM_D, SMM_D, SMM_D, smm_v(i), dts, ins) }
+        else { mmaf_scaled_packed_ref(SMM_D, SMM_D, SMM_D, smm_v(i), dts, ins) })))])
+  } else if i == 0 {
     map.from([("dtype_e4m3", (3, last_out((dts, ins) => dtype_convert_ref(DT_N, "f8E4M3FN", dts, ins))))])
   } else if i == 1 {
     map.from([("dtype_e5m2", (3, last_out((dts, ins) => dtype_convert_ref(DT_N, "f8E5M2", dts, ins))))])
@@ -659,7 +725,20 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
 ## the block size pass for one that honours it.
 fn shape_of(i: Int) -> String = {
   let idx = range(0, DT_N)
-  if i == 5 {
+  if i >= 6 {
+    let v = smm_v(i)
+    let sk = SMM_D / v
+    let sa = smm_sa(v)
+    let sb = smm_sb(v)
+    let split_a = len(list.filter(range(0, SMM_D), r =>
+        len(list.filter(range(1, sk), q => sa[r * sk + q] != sa[r * sk])) > 0))
+    let split_b = len(list.filter(range(0, SMM_D), c =>
+        len(list.filter(range(1, sk), q => sb[q * SMM_D + c] != sb[c])) > 0))
+    # |a|<=3, |b|<=2, sa<=4, sb<=8, K=64: even the sum of
+    # absolute products is bounded by 12288, independently of fold order.
+    "scale_blocks=${sk} rows_with_split_scale=${split_a} cols_with_split_scale=${split_b}"
+      ++ " bound_inside_2p24=${if SMM_D * 3 * 2 * 4 * 8 < 16777216 { 1 } else { 0 }}"
+  } else if i == 5 {
     let x = va_x()
     let counts = list.map(range(0, VA_BINS), j =>
         len(list.filter(range(0, VA_N), t => to_int(x[t]) == j)))
@@ -747,7 +826,8 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.rea
 
 fn usage() -> Unit !Exit !io = {
   io.eprintln("usage: arch_diff <kernel> <cubin> [<kernel> <cubin> ...], where <kernel> is one of"
-      ++ " dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2m1 mmaf_scaled_e4m3 view_atomic_bf16")
+      ++ " dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2m1 mmaf_scaled_e4m3 view_atomic_bf16"
+      ++ " mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16")
   io.exit(2)
 }
 
@@ -755,6 +835,8 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
   let passed = args()
   let explicit = len(passed) > 0 && passed[0] == "--explicit-f32"
   let paths = if explicit { list.drop(passed, 1) } else { passed }
+  if paths == ["--scaled-oracle-selftest"] { scaled_oracle_selftest()
+    return }
   if paths == ["--oracle-selftest"] { oracle_selftest("")
     return }
   if len(paths) == 2 && paths[0] == "--oracle-control" { oracle_selftest(paths[1])
@@ -799,16 +881,17 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     } else { bufs }
     let fake = with_gpu_fake(refs, () => stages(name, gx, reference_bufs))
     let real = with_gpu_real(cubins, () => stages(name, gx, bufs))
-    let host_oracle = if i < 4 { oracle(i, fake, explicit && i == 1) } else { "pass" }
-    let device_oracle = if (i < 4) && stopped(real) == "" { oracle(i, real, explicit && i == 1) } else { "skipped:" ++ stopped(real) }
-    let v = if host_oracle != "pass" || ((i < 4) && stopped(real) == "" && device_oracle != "pass") { "differ:result" } else { verdict(fake, real) }
+    let has_oracle = i < 4 || i >= 6
+    let host_oracle = if has_oracle { oracle(i, fake, explicit && i == 1) } else { "pass" }
+    let device_oracle = if has_oracle && stopped(real) == "" { oracle(i, real, explicit && i == 1) } else { "skipped:" ++ stopped(real) }
+    let v = if host_oracle != "pass" || (has_oracle && stopped(real) == "" && device_oracle != "pass") { "differ:result" } else { verdict(fake, real) }
     io.println("kernel ${name} tier=exact bufs=${buffers_of(i)} grid=(${gx}, 1, 1)"
         ++ " segments=${case_segments(i)}")
     io.println("  index ${shape_of(i)}")
     io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
     io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
         ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
-    if i < 4 {
+    if has_oracle {
       io.println("  oracle tileref ${host_oracle}")
       io.println("  oracle device ${device_oracle}")
     }

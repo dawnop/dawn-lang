@@ -37,7 +37,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, FloatDtype
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
   blocks_of, read_prefix, read_at, read_blocks, tile_shape, t_call_enter, t_call_exit, t_body_enter, t_body_exit }
 use tileir/prog.{TileOp, TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, trace6, cells, In, Out, Shared,
-  Whole, Scalar, trace_calls, erase }
+  Whole, Scalar, trace_calls, erase, Convert, MmaFScaled }
 use tileir/render.{render, text_debug}
 use tileir/bytecode.{encode, bytecode_version}
 use tileir/asm.{tileiras_args}
@@ -4587,6 +4587,98 @@ fn mmaf_scaled_e4m3(a: Param[F8E4M3FN], b: Param[F8E4M3FN], sa: Param[F8E8M0FNU]
   store_cell(out, float_to_float(r, F64))
 }
 
+# Square operands keep swapping the writer's lhs/rhs references legal. The
+# device corpus makes the products noncommutative and scales each K block
+# differently, so a successful assembly alone cannot satisfy the check.
+const SMM_D: Int = 64
+
+fn scaled_e5m2(a: Param[F8E5M2], b: Param[F8E5M2], sa: Param[F8E8M0FNU],
+  sb: Param[F8E8M0FNU], out: Param[Float]) -> Unit !Dev = {
+  let r = mma_scaled(load_cell(a), load_cell(b), f_const(F32, 0.0), load_cell(sa), load_cell(sb))
+  store_cell(out, float_to_float(r, F64))
+}
+
+fn scaled_fp4[S](a: Param[I32], b: Param[I32], sa: Param[S], sb: Param[S],
+  out: Param[Float]) -> Unit !Dev = {
+  let lhs = reshape(unpack_bytes(pack_bytes(load_cell(a)), F4E2M1FN), [SMM_D, SMM_D])
+  let rhs = reshape(unpack_bytes(pack_bytes(load_cell(b)), F4E2M1FN), [SMM_D, SMM_D])
+  let r = mma_scaled(lhs, rhs, f_const(F32, 0.0), load_cell(sa), load_cell(sb))
+  store_cell(out, float_to_float(r, F64))
+}
+
+fn scaled_fp4_record[S](name: String, scale: Dtype[S], v: Int) -> TileProg = {
+  let (p, _e) = trace5(name,
+    In(I32, one_cell([SMM_D * SMM_D / 8])), In(I32, one_cell([SMM_D * SMM_D / 8])),
+    In(scale, one_cell([SMM_D, SMM_D / v])), In(scale, one_cell([SMM_D / v, SMM_D])),
+    Out(F64, one_cell([SMM_D, SMM_D])), scaled_fp4)
+  p
+}
+
+# e5m3 has no host buffer codec. Keep its existing f64 conversion route and
+# record V=32 separately; sm107 assembly is not a device correctness claim.
+fn scaled_fp4_e5m3(a: Param[I32], b: Param[I32], sa: Param[Float], sb: Param[Float],
+  out: Param[Float]) -> Unit !Dev = {
+  let lhs = reshape(unpack_bytes(pack_bytes(load_cell(a)), F4E2M1FN), [SMM_D, SMM_D])
+  let rhs = reshape(unpack_bytes(pack_bytes(load_cell(b)), F4E2M1FN), [SMM_D, SMM_D])
+  let r = mma_scaled(lhs, rhs, f_const(F32, 0.0), float_to_float(load_cell(sa), F8E5M3FNU),
+    float_to_float(load_cell(sb), F8E5M3FNU))
+  store_cell(out, float_to_float(r, F64))
+}
+
+# Verifier probes start from the typed recorder, then alter only the
+# selected conversion result in the public TileProg. This reaches unequal
+# type seams without exposing or unwrapping opaque Tile handles.
+fn scaled_probe[D, E, S, T](name: String, a_dt: Dtype[D], b_dt: Dtype[E],
+  sa_dt: Dtype[S], sb_dt: Dtype[T], v: Int, rhs_v: Int, scale_columns: Int = 0) -> TileProg = {
+  let per = if scale_columns == 0 { 64 / v } else { scale_columns }
+  let (p, _e) = trace5("scaled_probe",
+    In(F64, one_cell([32, 64])), In(F64, one_cell([64, 32])),
+    In(F64, one_cell([32, per])), In(F64, one_cell([64 / rhs_v, 32])),
+    Out(F64, one_cell([32, 32])), (a, b, sa, sb, out) => {
+      let r = mma_scaled(float_to_float(load_cell(a), a_dt), float_to_float(load_cell(b), a_dt),
+        f_const(F32, 0.0), float_to_float(load_cell(sa), sa_dt), float_to_float(load_cell(sb), sa_dt))
+      store_cell(out, float_to_float(r, F64))
+    })
+  let mm = list.find(p.ops, op => match op { MmaFScaled(_, _, _, _, _, _, _, _, _, _, _, _) -> true
+    _ -> false }).expect("scaled probe operation")
+  let (rhs, rhs_scale) = match mm { MmaFScaled(_, _, _, _, _, _, _, _, b, _, _, sb) -> (b, sb)
+    _ -> panic("scaled probe operation missing") }
+  let ops = list.map(p.ops, op => match op {
+    Convert(d, mode, from, to, shape, src) -> {
+      let target = if d == rhs { dtype_name(b_dt) } else if d == rhs_scale { dtype_name(sb_dt) } else { to }
+      let changed_mode = if target == to { mode } else if target == "f8E8M0FNU" { "ftof_zero" } else { "ftof" }
+      Convert(d, changed_mode, from, target, shape, src)
+    }
+    _ -> op
+  })
+  TileProg { ..p, ops = ops }
+}
+
+fn scaled_probe_named(name: String) -> TileProg = match name {
+  "e4m3-e8m0" -> scaled_probe(name, F8E4M3FN, F8E4M3FN, F8E8M0FNU, F8E8M0FNU, 32, 32)
+  "e5m2-e8m0" -> scaled_probe(name, F8E5M2, F8E5M2, F8E8M0FNU, F8E8M0FNU, 32, 32)
+  "fp4-e8m0-v16" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F8E8M0FNU, F8E8M0FNU, 16, 16)
+  "fp4-e8m0-v32" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F8E8M0FNU, F8E8M0FNU, 32, 32)
+  "fp4-e4m3" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F8E4M3FN, F8E4M3FN, 16, 16)
+  "fp4-e5m3-v16" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F8E5M3FNU, F8E5M3FNU, 16, 16)
+  "fp4-e5m3-v32" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F8E5M3FNU, F8E5M3FNU, 32, 32)
+  "e4m3-e4m3" -> scaled_probe(name, F8E4M3FN, F8E4M3FN, F8E4M3FN, F8E4M3FN, 32, 32)
+  "e5m2-e4m3" -> scaled_probe(name, F8E5M2, F8E5M2, F8E4M3FN, F8E4M3FN, 32, 32)
+  "e4m3-e5m3" -> scaled_probe(name, F8E4M3FN, F8E4M3FN, F8E5M3FNU, F8E5M3FNU, 32, 32)
+  "e5m2-e5m3" -> scaled_probe(name, F8E5M2, F8E5M2, F8E5M3FNU, F8E5M3FNU, 32, 32)
+  "wide-operand" -> scaled_probe(name, F16, F16, F8E8M0FNU, F8E8M0FNU, 32, 32)
+  "wide-scale" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F32, F32, 16, 16)
+  "mixed-operands" -> scaled_probe(name, F8E4M3FN, F8E5M2, F8E8M0FNU, F8E8M0FNU, 32, 32)
+  "mixed-scales" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F8E8M0FNU, F8E4M3FN, 16, 16)
+  "fp8-v16" -> scaled_probe(name, F8E4M3FN, F8E4M3FN, F8E8M0FNU, F8E8M0FNU, 16, 16)
+  "fp4-e8m0-v8" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F8E8M0FNU, F8E8M0FNU, 8, 8)
+  "fp4-e4m3-v32" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F8E4M3FN, F8E4M3FN, 32, 32)
+  "fp4-e5m3-v8" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F8E5M3FNU, F8E5M3FNU, 8, 8)
+  "rhs-block" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F8E8M0FNU, F8E8M0FNU, 16, 32)
+  "nondividing-block" -> scaled_probe(name, F4E2M1FN, F4E2M1FN, F8E8M0FNU, F8E8M0FNU, 16, 16, 128)
+  _ -> panic("unknown scaled MMA probe")
+}
+
 # ---- knife T20: f8E5M3FNU ----
 #
 # The 13.4 scale format, type tag 130 (two bytes on the wire), which the
@@ -6451,6 +6543,23 @@ fn trace_after(name: String) -> TileProg = match name {
     let (p, _e) = trace2("dtype_e5m3", In(F64, one_cell([E5M3_N])), Out(F64, one_cell([E5M3_N])), dtype_e5m3)
     p
   }
+  "mmaf_scaled_e5m2" -> {
+    let (p, _e) = trace5(name,
+      In(F8E5M2, one_cell([SMM_D, SMM_D])), In(F8E5M2, one_cell([SMM_D, SMM_D])),
+      In(F8E8M0FNU, one_cell([SMM_D, SMM_D / 32])), In(F8E8M0FNU, one_cell([SMM_D / 32, SMM_D])),
+      Out(F64, one_cell([SMM_D, SMM_D])), scaled_e5m2)
+    p
+  }
+  "mmaf_scaled_fp4_e8m0_v16" -> scaled_fp4_record(name, F8E8M0FNU, 16)
+  "mmaf_scaled_fp4_e8m0_v32" -> scaled_fp4_record(name, F8E8M0FNU, 32)
+  "mmaf_scaled_fp4_e4m3_v16" -> scaled_fp4_record(name, F8E4M3FN, 16)
+  "mmaf_scaled_fp4_e5m3_v32" -> {
+    let (p, _e) = trace5(name,
+      In(I32, one_cell([SMM_D * SMM_D / 8])), In(I32, one_cell([SMM_D * SMM_D / 8])),
+      In(F64, one_cell([SMM_D, SMM_D / 32])), In(F64, one_cell([SMM_D / 32, SMM_D])),
+      Out(F64, one_cell([SMM_D, SMM_D])), scaled_fp4_e5m3)
+    p
+  }
   "mmaf_scaled_e5m3" -> {
     let (p, _e) = trace5("mmaf_scaled_e5m3",
       In(I32, cells([MMS_M * MMS_K / 8], [MMS_M * MMS_K / 8])), In(I32, cells([MMS_K * MMS_N / 8], [MMS_K * MMS_N / 8])),
@@ -7073,6 +7182,13 @@ fn fa_config_check() -> Unit = {
 }
 
 pub fn main() -> Unit !io = match args() {
+  ["--scaled-probe", name, path] -> {
+    let bytes = encode(scaled_probe_named(name))
+    match with_fs_real(() => write_bytes(path, bytes)) {
+      Ok(_) -> ()
+      Err(_e) -> panic("cannot write scaled MMA probe")
+    }
+  }
   ["--read-layout-structure"] -> {
     read_layout_check(trace("read_layout_g3"))
     println("PASS read layout dynamicShape, capacity stride, effective bound and grouped axis")

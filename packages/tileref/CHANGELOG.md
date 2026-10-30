@@ -1,5 +1,9 @@
 # tileref changelog
 
+## 0.1.7 (2026-10-30)
+
+- Decode packed fp4 operands independently for block-scaled MMA references.
+
 ## 0.1.6
 
 - Add independent scalar references for grouped read layouts and the small

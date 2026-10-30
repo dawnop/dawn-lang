@@ -1971,12 +1971,14 @@ fn matrix_dims(s: List[Int]) -> (Int, Int) = if len(s) == 2 { (s[0], s[1]) } els
 ## and `[k / block, n]`: each scale element multiplies a run of `block`
 ## elements along K in the matrix beside it, and `block` is read off `sa`.
 ##
-## The dialect allows two combinations and nothing else (Ops.td's table):
+## The dialect's table allows the following operand/scale combinations:
 ## `f8E4M3FN`, `f8E5M2` or `f4E2M1FN` operands with `f8E8M0FNU` scales, and
-## `f4E2M1FN` operands with `f8E4M3FN` scales. The result is f32 in both.
-## There is no combination with a wide operand format, which is why this
-## operation cannot be assembled for this machine's sm_86 at all: every
-## operand type it takes is one `tileiras` refuses below sm_100.
+## `f4E2M1FN` operands with `f8E4M3FN` or `f8E5M3FNU` scales. The result is
+## always f32. The 13.4.92 verifier requires block 32 for fp8 operands,
+## block 16 or 32 for fp4 with e8m0/e5m3 scales, and block 16 for fp4 with
+## e4m3 scales. E4M3 scales must be nonnegative. These combinations require
+## sm_100, except e5m3 scales which require sm_107; sm_90 and sm_86 refuse
+## them. The combination/architecture probes pin those assembler rules.
 pub fn mma_scaled[D, S](a: Tile[D], b: Tile[D], c: Tile[F32], sa: Tile[S], sb: Tile[S], at: Loc = caller()) -> Tile[F32] !Dev = called("mma_scaled", at, () => {
   let x: Int = a
   let y: Int = b
