@@ -693,6 +693,13 @@ fi
 work="$(mktemp -d)"
 # Keep the named narrow-format evidence on failure as well as success.
 finish() {
+  if [ -n "${SCALED_EVIDENCE:-}" ]; then
+    mkdir -p "$SCALED_EVIDENCE"
+    find "$work" -maxdepth 1 -type f \( -name '*scaled*' -o -name 'arch.out' -o -name 'arch.err' \) \
+      -exec cp {} "$SCALED_EVIDENCE/" \;
+    if [ -d "$work/scaled-matrix" ]; then cp -r "$work/scaled-matrix" "$SCALED_EVIDENCE/"; fi
+    (cd "$SCALED_EVIDENCE" && find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$SCALED_EVIDENCE/SHA256SUMS"
+  fi
   if [ -n "${NARROW_EVIDENCE:-}" ]; then
     mkdir -p "$NARROW_EVIDENCE"
     find "$work" -maxdepth 1 -type f \( -name '*.out' -o -name '*.err' -o -name '*e5m2*' -o -name '*e8m0*' -o -name 'oracle-*' -o -name '*narrow*' \) \
@@ -805,6 +812,16 @@ while read -r k a; do
     *) fail "asm.tileiras_args answered '$a' for $k, which does not start with --gpu-name $gpu_name" ;;
   esac
 done < "$work/asm-args.out"
+
+# Recheck the operation's actual assembler refusals on this ledger's target;
+# the architecture floor alone cannot witness a refusal. The producer runs
+# in one existing project and never changes the recorded goldens.
+case "$gpu_name" in
+  sm_100|sm_90|sm_86)
+    producer_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$root/bin/dawn" run "$asm_proj" --)"
+    python3 "$golden/scaled-combinations.py" --producer-json "$producer_json" \
+      --out "$work/scaled-matrix" --tileiras "$tileiras" --arch "$gpu_name" || fail "scaled MMA target refusals" ;;
+esac
 [ "$(wc -l < "$work/asm-args.out")" -eq "$(echo $asm_names | wc -w)" ] ||
   fail "asm.tileiras_args answered for $(wc -l < "$work/asm-args.out") of $(echo $asm_names | wc -w) kernels"
 asm_probe="$asm_plain o0=${asm_o0:--}"
@@ -987,8 +1004,9 @@ i4_green=(dtype_i16 dtype_i64 dtype_tf32 pack_roundtrip)
 # Incompatibility with architecture 'sm_86': atomicRMW ADDF with bf16 is not
 # supported`), which T13 measured and could not follow with a device.
 # sm_89 is its floor and the lowest in this list.
-arch_kernels=(dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2m1 mmaf_scaled_e4m3 view_atomic_bf16)
-arch_floors=(sm_90 sm_90 sm_100 sm_100 sm_100 sm_89)
+arch_kernels=(dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2m1 mmaf_scaled_e4m3 view_atomic_bf16
+  mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16)
+arch_floors=(sm_90 sm_90 sm_100 sm_100 sm_100 sm_89 sm_100 sm_100 sm_100 sm_100)
 # The attribute kernels of knife T4, in the order attr_diff takes them. Its
 # subject is the ATTRIBUTE DOMAINS and not the opcode table: the knife adds
 # no opcode at all, and every one of these eight computes the same thing
@@ -1628,7 +1646,7 @@ else
     [ -n "$arch_shape" ] || fail "arch_diff printed no index line for $kernel"
     case "$kernel" in
       dtype_e2m1) fields="encodings off_grid saturating" ;;
-      mmaf_scaled_e4m3) fields="scale_blocks rows_with_split_scale cols_with_split_scale bound_inside_2p24" ;;
+      mmaf_scaled_*) fields="scale_blocks rows_with_split_scale cols_with_split_scale bound_inside_2p24" ;;
       view_atomic_bf16) fields="bins_hit blocks max_count exact_in_bf16" ;;
       *) fields="off_grid rounded_on_upload host_nan beyond_max" ;;
     esac
@@ -3287,8 +3305,8 @@ TOML
 
 rounding_controls
 
-# N2: a same-width E5M2 writer replacement. Every runnable architecture
-# kernel is re-encoded, including controls that must stay byte-identical.
+# N2: a same-width E5M2 writer replacement for the dtype corpus. Other
+# architecture kernels use clean cubins; N6 covers scaled E5M2 separately.
 if [ "$(arch_level "$gpu_name")" -ge 90 ]; then
   name=e5m2-tag-as-e4m3
   pkg="$work/pkg-$name"
@@ -3296,7 +3314,7 @@ if [ "$(arch_level "$gpu_name")" -ge 90 ]; then
   python3 "$here/mutate.py" "$pkg/src/bytecode.dawn" "$name" \
     '  "f8E5M2" -> 11' '  "f8E5M2" -> 10'
   cp "$pkg/src/bytecode.dawn" "$work/$name.writer"
-  mutant_kernels "$name" "$pkg" "${arch_ran[@]}"
+  mutant_kernels "$name" "$pkg" dtype_e5m2
   args=()
   for k in "${arch_ran[@]}"; do
     if [ "$k" = dtype_e5m2 ]; then
@@ -3310,7 +3328,7 @@ if len(before) != len(after) or not changes or any((a, b) != (11, 10) for _, a, 
 print("E5M2 writer offsets " + ",".join(str(i) for i, _, _ in changes) + ": 0b -> 0a")
 PY_BYTES
     else
-      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" || fail "$name: control $k bytes changed"
+      cp "$work/$k.cubin" "$work/$name-$k.cubin"
     fi
     args+=("$k" "$work/$name-$k.cubin")
   done
@@ -3328,6 +3346,79 @@ PY_BYTES
   echo "PASS  mutant: $name (assembled; dtype_e5m2 seg=0 lane=1 differs; all other architecture types agree)"
 else
   echo "SKIP  mutant: e5m2-tag-as-e4m3 requires sm_90 (this ledger is $gpu_name)"
+fi
+
+# N6: every scaled combination must expose a valid writer mistake as a
+# wrong answer. Only the named targets are re-encoded; all other architecture
+# kernels keep their clean cubins and must remain identical:exact.
+scaled_writer_verdict() { # tag, comma-separated red set
+  local tag="$1" reds="$2" rc=0 k args=()
+  for k in "${arch_ran[@]}"; do
+    case ",$reds," in
+      *",$k,"*) args+=("$k" "$work/$tag-$k.cubin") ;;
+      *) args+=("$k" "$work/$k.cubin") ;;
+    esac
+  done
+  device "$work/arch.bin" "${args[@]}" > "$work/$tag.out" 2> "$work/$tag.err" || rc=$?
+  [ "$arch_verdict" = pass ] && [ "$rc" = 1 ] && [ "$(verdict_of "$work/$tag.out")" = fail ] || {
+    cat "$work/$tag.out" "$work/$tag.err" >&2; fail "$tag: missing executed numerical failure"
+  }
+  awk -v reds="$reds" '
+    BEGIN {n=split(reds,r,","); for(i=1;i<=n;i++) want[r[i]]=1}
+    /^kernel / {k=$2}
+    /^  verdict / {
+      if (k in want) {if($2 != "differ:result") bad=1; seen[k]=1}
+      else if($2 != "identical:exact") bad=1
+    }
+    /^  diffs / && k in want && $0 ~ /\[seg 0 lane / {lane[k]=1}
+    END {for(k in want) if(!seen[k] || !lane[k]) bad=1; exit bad}
+  ' "$work/$tag.out" || { cat "$work/$tag.out" >&2; fail "$tag: wrong lane or target/control verdicts"; }
+  echo "PASS  mutant: $tag (assembled; $reds answer at named lanes differs; architecture controls agree)"
+}
+if [ "$(arch_level "$gpu_name")" -ge 100 ]; then
+  tag=scaled-square-operands-swapped
+  pkg="$work/pkg-$tag"
+  cp -r "$root/packages/tileir" "$pkg"
+  python3 "$here/mutate.py" "$pkg/src/bytecode.dawn" "$tag" \
+    '    emit_ref(emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale), rhs_scale)' \
+    '    emit_ref(emit_ref(emit_ref(emit_ref(emit_ref(w1, rhs), lhs), acc), lhs_scale), rhs_scale)'
+  cp "$pkg/src/bytecode.dawn" "$work/$tag.writer"
+  scaled_targets=(mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16)
+  mutant_kernels "$tag" "$pkg" "${scaled_targets[@]}"
+  for k in "${scaled_targets[@]}"; do
+    [ "$(wc -c < "$golden/$k.tilebc")" = "$(wc -c < "$work/$tag-$k.tilebc")" ] &&
+      ! cmp -s "$golden/$k.tilebc" "$work/$tag-$k.tilebc" || fail "$tag: expected changed bytes at the same size for $k"
+  done
+  scaled_writer_verdict "$tag" "$(IFS=,; printf '%s' "${scaled_targets[*]}")"
+  for pair in 'e4m3 e5m2 10 11' 'e5m2 e4m3 11 10'; do
+    read -r old new old_tag new_tag <<< "$pair"
+    tag="scaled-$old-as-$new"
+    pkg="$work/pkg-$tag"
+    cp -r "$root/packages/tileir" "$pkg"
+    if [ "$old" = e4m3 ]; then
+      python3 "$here/mutate.py" "$pkg/src/bytecode.dawn" "$tag" \
+        '  "f8E4M3FN" -> 10' '  "f8E4M3FN" -> 11'
+    else
+      python3 "$here/mutate.py" "$pkg/src/bytecode.dawn" "$tag" \
+        '  "f8E5M2" -> 11' '  "f8E5M2" -> 10'
+    fi
+    cp "$pkg/src/bytecode.dawn" "$work/$tag.writer"
+    k="mmaf_scaled_$old"
+    mutant_kernels "$tag" "$pkg" "$k"
+    python3 - "$golden/$k.tilebc" "$work/$tag-$k.tilebc" "$old_tag" "$new_tag" <<'PY_SCALED_BYTES'
+from pathlib import Path
+import sys
+before, after = [Path(p).read_bytes() for p in sys.argv[1:3]]
+a, b = map(int, sys.argv[3:])
+changes = [(i, x, y) for i, (x, y) in enumerate(zip(before, after)) if x != y]
+if len(before) != len(after) or not changes or any((x, y) != (a, b) for _, x, y in changes):
+    raise SystemExit("scaled writer: expected only the named same-width type-tag replacement")
+print("scaled type writer offsets " + ",".join(str(i) for i, _, _ in changes))
+PY_SCALED_BYTES
+    scaled_writer_verdict "$tag" "$k"
+  done
+else
+  echo "SKIP  scaled writer numerical controls: all scaled MMA combinations require sm_100"
 fi
 
 # Rejecting signed inputs models a missing magnitude step without feeding

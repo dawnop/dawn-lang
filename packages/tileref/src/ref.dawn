@@ -4057,6 +4057,25 @@ pub fn mmaf_scaled_ref(m: Int, k: Int, n: Int, v: Int, dtypes: List[String],
   })
 }
 
+## The same scaled product with fp4 matrices transported as signed I32
+## words, eight low-first nibbles per word. Decode on the host before the
+## scalar reference; no device unpack, reshape or writer is reused here.
+pub fn mmaf_scaled_packed_ref(m: Int, k: Int, n: Int, v: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let a = list.map(range(0, m * k), i =>
+      narrow.f4e2m1_of_bits(nibble_at(wrap_i32(to_int(ins[0][i / 8])), i % 8)))
+  let b = list.map(range(0, k * n), i =>
+      narrow.f4e2m1_of_bits(nibble_at(wrap_i32(to_int(ins[1][i / 8])), i % 8)))
+  mmaf_scaled_ref(m, k, n, v, dtypes, [a, b, ins[2], ins[3], ins[4]])
+}
+
+test "packed scaled MMA decodes words before applying both scale blocks" {
+  let dt = ["i32", "i32", "f8E8M0FNU", "f8E8M0FNU", "f64"]
+  let r = mmaf_scaled_packed_ref(1, 8, 1, 4, dt,
+    [[to_float(0x22222222)], [to_float(0x44444444)], [1.0, 2.0], [2.0, 1.0], [0.0, -12345.0]])
+  assert r == [32.0, -12345.0]
+}
+
 # ---- references for the loop kernels (knife T5) ----
 #
 # These four are the host halves of the `loop` and `break` kernels, and
