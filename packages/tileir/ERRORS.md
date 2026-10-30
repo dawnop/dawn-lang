@@ -134,14 +134,14 @@ gpu.grid_mismatch: gpu.launch_entry: kernel `vadd`: the Out cells make 2 block(s
 
 | Kind | Layer | Raised by, and why | Fix |
 |---|---|---|---|
-| `gpu.bad_length` | device | above the effect: `alloc` of a buffer with fewer than one element; also the C runtime, after driver initialization, rejects a negative byte count at allocation or device-to-host copy | allocate at least one element; a raw runtime call must pass a nonnegative byte count |
+| `gpu.bad_length` | device | above the effect: `alloc` of a buffer with fewer than one element, or whose element count times its format's byte width exceeds Int max (9223372036854775807); also the C runtime, after driver initialization, rejects a negative byte count at allocation or device-to-host copy | allocate at least one element and at most Int max divided by the element width; a raw runtime call must pass a nonnegative byte count |
 | `gpu.length_mismatch` | device | above the effect: `copy_from_host` of a list whose length is not the buffer's; also a raw upload of the wrong number of bytes | upload exactly as many elements as the buffer holds |
 | `gpu.unsupported_dtype` | device | a handler at `alloc`, or above the effect when a typed copy names a format that is not a buffer format: the device does not move that format (the message lists the ones it does) | use a listed format, or convert on the host |
 | `gpu.bad_grid` | device | above the effect: a grid axis below one or above CUDA's limit, more than three axes, or a launch with a dynamic Out extent that did not name its grid; also the C runtime, after driver initialization and before function lookup, rejects any axis below 0 or above 2^31 - 1 | pass `grid:` with the block counts; check the host and raw runtime limits |
 | `gpu.grid_mismatch` | device | above the effect: the grid passed, or an In's cells, disagree with the Out cells that fix the grid | drop `grid:` when the Out cells fix it, or make the cells agree |
 | `gpu.bad_entry` | device | above the effect: an entry whose cells are malformed, or an argument of the wrong kind (a `scalar_arg` where the kernel reads a buffer) | record the kernel with `traceN` and pass what its markers say |
 | `gpu.aliased_argument` | device | above the effect: an `Out` or `Shared` argument is the same buffer as another argument | allocate a buffer for the output |
-| `gpu.short_tensor` | device | above the effect: a buffer holds fewer elements than its cells reach | allocate (or upload) the full extent |
+| `gpu.short_tensor` | device | above the effect: a buffer holds fewer elements than its cells reach, or a dynamic grid-axis times tile product or the combined extent product exceeds Int max; the message names the argument, dimension and overflowing product, including static Free dimensions in a manually constructed entry | allocate (or upload) the full extent; reduce the extents or grid and tile until each product fits in Int |
 | `gpu.no_such_buffer` | device | a handler: a handle that was never issued or was freed | do not use a buffer after `free` |
 | `gpu.no_kernel` | device | a handler: no kernel of that name (the fake device has the map it was given, the real one the cubins) | register the kernel under the name you launch |
 | `gpu.no_arguments` | device | a handler: a launch with no buffers | pass the kernel's arguments |
