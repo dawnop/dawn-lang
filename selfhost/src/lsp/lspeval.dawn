@@ -47,8 +47,7 @@ use check/tast.{
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   tex_ty
 }
-use check/types.{
-  Ty, Eff, TyVar, TyAssoc, TyAdt, TyOpaque, TyList, TyMap, TySet, TyTuple, TyFn,
+use check/types.{Ty, Eff, TyVar, TyAssoc, TyAdt, TyOpaque, TyList, TyMap, TySet, TyTuple, TyFn,
   TyUnit, TyNever, EPure, EffVar, EUnion, eff_labels, eff_base, eff_vars,
   impl_at, trait_of, reduce_eff_via_bindings
 }
@@ -203,7 +202,7 @@ pub(pkg) fn fold_refusal(qc: QCx, lo: Int, hi: Int, e: TExpr) -> Option[String] 
   match t {
     TyUnit -> { return Some("unit") }
     TyNever -> { return Some("no value: never returns") }
-    TyFn(_, _, _) -> { return Some("no value: a function") }
+    TyFn(_, _, _, _) -> { return Some("no value: a function") }
     _ -> ()
   }
   if ty_has_var(t) { return Some("no value: generic type") }
@@ -244,13 +243,13 @@ fn ty_has_var(t: Ty) -> Bool =
   match t {
     TyVar(_, _) -> true
     TyAssoc(_, _, _) -> true
-    TyAdt(_, args) -> any_var(args)
-    TyOpaque(_, _, _, args, _) -> any_var(args)
+    TyAdt(_, args, _) -> any_var(args)
+    TyOpaque(_, _, _, args, _, _) -> any_var(args)
     TyList(x) -> ty_has_var(x)
     TyMap(k, v) -> ty_has_var(k) || ty_has_var(v)
     TySet(x) -> ty_has_var(x)
     TyTuple(xs) -> any_var(xs)
-    TyFn(ps, r, _) -> any_var(ps) || ty_has_var(r)
+    TyFn(ps, r, _, _) -> any_var(ps) || ty_has_var(r)
     _ -> false
   }
 
@@ -280,7 +279,7 @@ fn row_pure(e: Eff) -> Bool = row_ok(e) && len(eff_vars(e)) == 0
 ## The row of a callable value's type; anything else carries none.
 fn ty_row_pure(t: Ty) -> Bool =
   match t {
-    TyFn(_, _, r) -> row_pure(r)
+    TyFn(_, _, r, _) -> row_pure(r)
     _ -> true
   }
 

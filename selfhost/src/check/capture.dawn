@@ -1,0 +1,149 @@
+# Scope identities and finite symbolic capture sets are independent of value
+# types and calling effects. Keeping their substitution here prevents either
+# axis from quietly treating a region as an ordinary type or evidence slot.
+use std/list
+use std/map
+
+pub type Scope = { name: String, id: Int }
+pub type Member = Region(scope: Scope) | CaptureVar(name: String, id: Int)
+pub alias Capture = List[Member]
+pub type CaptureParam = { name: String, id: Int, bound: Option[Capture] }
+pub type Function = { scopes: List[Scope], bound: Option[Capture] }
+pub type Params = {
+  scopes: List[Scope], captures: List[CaptureParam],
+  bounds: List[(Int, Capture)], fn_effects: List[Int]
+}
+pub type Arguments = { scopes: List[Scope], captures: List[Capture] }
+const EMPTY_ARGUMENTS: Arguments = Arguments { scopes = [], captures = [] }
+pub fn empty_arguments() -> Arguments = EMPTY_ARGUMENTS
+
+pub fn arguments(p: Params) -> Arguments = Arguments { scopes = p.scopes,
+  captures = map(p.captures, c => [CaptureVar(c.name, c.id)]) }
+
+pub fn arguments_subst(a: Arguments, sm: Map[Int, Scope], cm: Map[Int, Capture]) -> Arguments =
+  Arguments { scopes = map(a.scopes, s => scope_subst(s, sm)), captures = map(a.captures, c => subst(c, sm, cm)) }
+
+pub fn arguments_equal(a: Arguments, b: Arguments) -> Bool = {
+  if len(a.scopes) != len(b.scopes) || len(a.captures) != len(b.captures) { return false }
+  for i in 0..len(a.scopes) { if not same_scope(a.scopes[i], b.scopes[i]) { return false } }
+  for i in 0..len(a.captures) { if not equal(a.captures[i], b.captures[i]) { return false } }
+  true
+}
+
+pub fn argument_names(a: Arguments) -> List[String] =
+  map(a.scopes, s => s.name) ++ map(a.captures, c => if len(c) == 1 {
+    match c[0] { Region(s) -> s.name, CaptureVar(n, _) -> n }
+  } else { show(c) })
+
+const EMPTY_FUNCTION: Function = Function { scopes = [], bound = None }
+pub fn empty_function() -> Function = EMPTY_FUNCTION
+const EMPTY_PARAMS: Params = Params { scopes = [], captures = [], bounds = [], fn_effects = [] }
+pub fn empty_params() -> Params = EMPTY_PARAMS
+
+fn key(m: Member) -> (Int, Int) = match m {
+  Region(s) -> (0, s.id)
+  CaptureVar(_, id) -> (1, id)
+}
+
+pub fn same_scope(a: Scope, b: Scope) -> Bool = a.id == b.id
+
+## Names are diagnostic spelling; only kind and identity decide membership.
+pub fn contains(c: Capture, m: Member) -> Bool = list.any(c, x => key(x) == key(m))
+
+pub fn normalize(c: Capture) -> Capture = {
+  var out: Capture = []
+  for m in c { if not contains(out, m) { out = out ++ [m] } }
+  sort_by(out, (a, b) => {
+    let (ak, ai) = key(a)
+    let (bk, bi) = key(b)
+    if ak != bk { ak - bk } else if ai < bi { -1 } else if ai == bi { 0 } else { 1 }
+  })
+}
+
+pub fn union(a: Capture, b: Capture) -> Capture = normalize(a ++ b)
+pub fn subset(a: Capture, b: Capture) -> Bool = list.all(a, x => contains(b, x))
+pub fn equal(a: Capture, b: Capture) -> Bool = subset(a, b) && subset(b, a)
+
+## Bounds justify expanding a source variable, never enlarging a destination
+## variable. A cycle without a proof is unknown, not an empty capture set.
+pub fn subset_in(a: Capture, b: Capture, params: List[CaptureParam]) -> Bool =
+  subset_step(a, b, params, [])
+
+fn subset_step(a: Capture, b: Capture, params: List[CaptureParam], seen: List[Int]) -> Bool = {
+  for member in a {
+    if contains(b, member) { continue }
+    match member {
+      CaptureVar(_, id) -> {
+        if list.contains(seen, id) { return false }
+        var proved = false
+        for param in params {
+          if param.id == id {
+            match param.bound {
+              Some(upper) -> { proved = subset_step(upper, b, params, seen ++ [id]) }
+              None -> ()
+            }
+          }
+        }
+        if not proved { return false }
+      }
+      Region(_) -> return false
+    }
+  }
+  true
+}
+
+pub fn bound(f: Function) -> Capture = match f.bound { Some(c) -> c, None -> [] }
+
+pub fn show(c: Capture) -> String = {
+  let names = map(normalize(c), x => match x {
+    Region(s) -> s.name
+    CaptureVar(n, _) -> n
+  })
+  "^{" ++ join(sort(names), ", ") ++ "}"
+}
+
+pub fn scope_subst(s: Scope, sm: Map[Int, Scope]) -> Scope =
+  match map.get(sm, s.id) { Some(t) -> t, None -> s }
+
+## Substitution is simultaneous: replacement sets are not recursively
+## expanded, so mutually named bounds cannot make this operation diverge.
+pub fn subst(c: Capture, sm: Map[Int, Scope], cm: Map[Int, Capture]) -> Capture = {
+  var out: Capture = []
+  for m in c {
+    match m {
+      Region(s) -> { out = out ++ [Region(scope_subst(s, sm))] }
+      CaptureVar(_, id) -> {
+        out = out ++ match map.get(cm, id) { Some(r) -> r, None -> [m] }
+      }
+    }
+  }
+  normalize(out)
+}
+
+test "capture sets retain kind and identity through unions and substitution" {
+  let s = Scope { name = "s", id = 1 }
+  let t = Scope { name = "s", id = 2 }
+  let renamed = Scope { name = "renamed", id = 1 }
+  assert same_scope(s, renamed)
+  assert not same_scope(s, t)
+  assert equal([Region(s)], [Region(renamed), Region(s)])
+  assert not equal([Region(s)], [Region(t)])
+  assert not equal([Region(s)], [CaptureVar("s", 1)])
+  assert len(union([Region(s)], [Region(t), Region(s)])) == 2
+  assert show([Region(t), CaptureVar("c", 3), Region(t)]) == "^{c, s}"
+  assert equal(subst([Region(s), CaptureVar("c", 3)], map.from([(1, t)]),
+    map.from([(3, [Region(s)])])), [Region(s), Region(t)])
+}
+
+test "capture inclusion follows upper bounds without treating cycles as empty" {
+  let s = Region(Scope { name = "s", id = 1 })
+  let c = CaptureVar("c", 2)
+  let d = CaptureVar("d", 3)
+  let bound = [CaptureParam { name = "c", id = 2, bound = Some([s]) }]
+  assert subset_in([c], [s], bound)
+  assert not subset_in([s], [c], bound)
+  let cycle = [CaptureParam { name = "c", id = 2, bound = Some([d]) },
+    CaptureParam { name = "d", id = 3, bound = Some([c]) }]
+  assert not subset_in([c], [], cycle)
+  assert subset_in([c], [d], cycle)
+}

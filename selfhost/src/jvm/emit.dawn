@@ -18,13 +18,13 @@
 # parse error below class-file version 50, and that is where these classes
 # emit now (K-A4). scripts/constpool-scan.py keeps the pool clear of them.
 
+use check/capture
 use std/str
 use std/bytes
 use std/set
 use std/list
 use std/map
-use check/types.{
-  Intr, Rt, RtStrings, RtBytes, RtArray, RtMem, RtIo, RtGpu, peel_opaque, cast_target,
+use check/types.{Intr, Rt, RtStrings, RtBytes, RtArray, RtMem, RtIo, RtGpu, peel_opaque, cast_target,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyF64Buf, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, adt_of, adt_jvm_name, ctor_jvm_name,
@@ -37,7 +37,7 @@ use check/types.{
 }
 use check/tast.{call_source, TJavaCall, TModule, BEq, BNeq, BLt, BLe, BGt, BGe}
 use ir/interp.{CtOut}
-use front/ast.{
+use front/ast.{no_scope_syntax,
   Decl, DFn, DImpl, DTrait, DTest, FnDecl, TraitMethod, TypeRef, TNamed, TQual, EUnit, VisPub
 }
 use jvm/codegen.{
@@ -469,7 +469,8 @@ fn box_ty(m: MethodVisitor, t: Ty) -> Unit !io = {
 fn unerase(gx: GenCtx, g: Gen, t: Ty) -> Unit !io = {
   let m = g.mv
   match t {
-    TyOpaque(_, _, _, _, tgt) -> unerase(gx, g, tgt)
+    TyOpaque(_, _, _, _, tgt, _) -> unerase(gx, g, tgt)
+    TyCaptured(value, _) -> unerase(gx, g, value)
     TyInt -> {
       m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
       m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
@@ -484,16 +485,16 @@ fn unerase(gx: GenCtx, g: Gen, t: Ty) -> Unit !io = {
     }
     TyString -> { m.visitTypeInsn(OP_CHECKCAST, "java/lang/String") }
     TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
-    TyI64Buf -> { m.visitTypeInsn(OP_CHECKCAST, "[J") }
-    TyF64Buf -> { m.visitTypeInsn(OP_CHECKCAST, "[D") }
-    TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(gx.adts, aid))) }
+    TyI64Buf(_) -> { m.visitTypeInsn(OP_CHECKCAST, "[J") }
+    TyF64Buf(_) -> { m.visitTypeInsn(OP_CHECKCAST, "[D") }
+    TyAdt(aid, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(gx.adts, aid))) }
     TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, PVEC_CLASS) }
     TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
     TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
     TyArray(_) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }
     TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
     TyJava(fqcn, _) -> { m.visitTypeInsn(OP_CHECKCAST, internal_of(fqcn)) }
-    TyFn(_, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(fn_arity(t))) }
+    TyFn(_, _, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(fn_arity(t))) }
     TyUnit -> { m.visitTypeInsn(OP_CHECKCAST, UNIT_CLASS) }
     # TyVar (and a projection over one) is already erased, and the two
     # bottom types carry no value
@@ -515,22 +516,23 @@ fn unerase(gx: GenCtx, g: Gen, t: Ty) -> Unit !io = {
 ## accepts everything, which is the same answer as no check at all.
 fn unerase_class(adts: Adts, t: Ty) -> String =
   match t {
-    TyOpaque(_, _, _, _, tgt) -> unerase_class(adts, tgt)
+    TyOpaque(_, _, _, _, tgt, _) -> unerase_class(adts, tgt)
+    TyCaptured(value, _) -> unerase_class(adts, value)
     TyInt -> "java/lang/Long"
     TyFloat -> "java/lang/Double"
     TyBool -> "java/lang/Boolean"
     TyString -> "java/lang/String"
     TyBytes -> "[B"
-    TyI64Buf -> "[J"
-    TyF64Buf -> "[D"
-    TyAdt(aid, _) -> adt_jvm_name(adt_of(adts, aid))
+    TyI64Buf(_) -> "[J"
+    TyF64Buf(_) -> "[D"
+    TyAdt(aid, _, _) -> adt_jvm_name(adt_of(adts, aid))
     TyList(_) -> PVEC_CLASS
     TyMap(_, _) -> HAMT_CLASS
     TySet(_) -> HAMT_CLASS
     TyArray(_) -> ARRAY_CLASS
     TyTuple(elems) -> tuple_class(len(elems))
     TyJava(fqcn, _) -> internal_of(fqcn)
-    TyFn(_, _, _) -> fn_iface(fn_arity(t))
+    TyFn(_, _, _, _) -> fn_iface(fn_arity(t))
     TyUnit -> UNIT_CLASS
     TyVar(_, _) | TyAssoc(_, _, _) | TyNever | TyError -> obj()
   }
@@ -570,7 +572,7 @@ fn sig_desc_with_dicts(adts: Adts, s: Sig) -> String = {
   # no erasure, and the field reads inside need no cast
   for l in eff_labels(abi) {
     let (eid, _) = l
-    ps = ps ++ desc_of(adts, TyAdt(eid, []))
+    ps = ps ++ desc_of(adts, TyAdt(eid, [], capture.empty_arguments()))
   }
   # ... one erased slot per effect variable, behind them (rule 丁), and one per
   # written projection behind those (rule 丙): which evidence fills either is
@@ -604,7 +606,7 @@ fn trait_iface_desc(adts: Adts, s: Sig) -> String = {
   let abi = sig_abi_eff(s)
   for l in eff_labels(abi) {
     let (eid, _) = l
-    ps = ps ++ desc_of(adts, TyAdt(eid, []))
+    ps = ps ++ desc_of(adts, TyAdt(eid, [], capture.empty_arguments()))
   }
   ps = ps ++ erased_ev_slots(nev(abi) - len(eff_labels(abi)))
   "(" ++ ps ++ ")" ++ desc_of(adts, s.ret)
@@ -768,7 +770,7 @@ fn const_method(gx: GenCtx, st: ConstEmit, desc: String, refs: Int) -> (ConstEmi
 fn const_ref_desc(gx: GenCtx, v: ConstValue) -> String = match v {
   CVList(_) -> "L" ++ PVEC_CLASS ++ ";"
   CVTuple(xs) -> "L" ++ tuple_class(len(xs)) ++ ";"
-  CVAdt(a, _, _) -> desc_of(gx.adts, TyAdt(a, []))
+  CVAdt(a, _, _) -> desc_of(gx.adts, TyAdt(a, [], capture.empty_arguments()))
   _ -> panic("constant builder requires a structured value")
 }
 
@@ -997,7 +999,7 @@ fn emit_method_return(g: Gen) -> Unit !io = {
 
 fn tyfn_parts(t: Ty) -> (List[Ty], Ty) =
   match t {
-    TyFn(ps, r, _) -> (ps, r)
+    TyFn(ps, r, _, _) -> (ps, r)
     _ -> panic("expected a fn type")
   }
 
@@ -2080,7 +2082,7 @@ fn decl_sites(src: String, decls: List[Decl]) -> Map[String, MethodSite] = {
           k = k + 1
         }
       }
-      DImpl(_tps, trait_name, _tlo, _thi, subject, methods, _assoc, _ebs, _lo, _hi) -> {
+      DImpl(_tps, trait_name, _tlo, _thi, subject, methods, _assoc, _ebs, _lo, _hi, _) -> {
         match subject_head(subject) {
           Some(sn) -> {
             for m in methods {
@@ -2149,7 +2151,7 @@ fn note_lift_sites(
 
 test "the site table is keyed by the name a method is emitted under" {
   let body = EUnit(0, 0)
-  let f = FnDecl {
+  let f = FnDecl { scope = no_scope_syntax(),
     vis = VisPub,
     name = "big",
     tparams = [],
@@ -2178,7 +2180,7 @@ test "the site table is keyed by the name a method is emitted under" {
   }
   let decls: List[Decl] = [
     DFn(f),
-    DImpl([], "Show", 0, 4, sub, [impl_m], [], [], 30, 50),
+    DImpl([], "Show", 0, 4, sub, [impl_m], [], [], 30, 50, no_scope_syntax()),
     DTrait("Show", "T", 0, 1, [tm], [], [], VisPub, 55, 75, 58, 62),
     DTest("a test", body, 80, 90, 85, 91, None)
   ]
@@ -2379,7 +2381,7 @@ fn emit_module_with(
     }
     if keep {
       out = out ++ gen_adt(supers, adts, a,
-        eq_override(impl_table, class_name, TyAdt(aid, a.tparams)))
+        eq_override(impl_table, class_name, TyAdt(aid, a.tparams, capture.empty_arguments())))
     }
   }
   for tid in own_trait_ids {
@@ -2583,7 +2585,7 @@ fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, By
         let mabi = sig_abi_eff(ms.sig)
         for l in eff_labels(mabi) {
           let (eid, _) = l
-          load_slot(m, TyAdt(eid, []), slot)
+          load_slot(m, TyAdt(eid, [], capture.empty_arguments()), slot)
           slot = slot + 1
         }
         # the erased slots -- rule 丁's variables and rule 丙's projections -- are
@@ -2695,7 +2697,7 @@ fn gen_ccall(
       let pabi = sig_abi_eff(psig)
       var evtys = map(eff_labels(pabi), l => {
         let (eid, _) = l
-        TyAdt(eid, [])
+        TyAdt(eid, [], capture.empty_arguments())
       })
       # rule 丁's variables and rule 丙's projections are erased slots behind
       # the labels' exact ones, and they are part of the count the dictionary
@@ -4261,7 +4263,7 @@ test "a signature's descriptor carries one evidence slot per row atom" {
   # impl method purer than the trait row that admits it. Delete that fold and
   # every other test here stays green.
   let adts = prelude_adts()
-  let base = Sig {
+  let base = Sig { scope_params = capture.empty_params(),
     name = "f",
     param_tys = [TyInt],
     param_names = ["x"],
@@ -4305,7 +4307,7 @@ test "call result width reads the return descriptor, not its last character" {
 ## One class holding `f(x) = m.g(m.g(x))`, a nested pair of sited calls,
 ## written by `gen_cbody` with `mapping` as given: its bytes and the Gen.
 fn mapped_fixture(mapping: Bool) -> (Bytes, Gen) !io = {
-  let base = Sig {
+  let base = Sig { scope_params = capture.empty_params(),
     name = "g", param_tys = [TyInt], param_names = ["x"], param_defaults = [None], caller_params = [],
     ret = TyInt, eff = EPure, is_builtin = false, tparams = [], constraints = [], eparams = [],
     owner = None, trait_id = None, op_of = None, inferring = false

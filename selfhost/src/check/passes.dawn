@@ -8,13 +8,14 @@
 # meet only in the helpers cx.dawn already holds. checker.dawn still calls down
 # here (check_module runs the passes in order); nothing here calls back up.
 
+use check/capture
 use std/str
 use std/list
 use std/map
 use std/set
 use front/effect_name
 
-use front/ast.{
+use front/ast.{parameter_names, TScoped, TCaptured, TKindArg, no_scope_syntax,
   TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, EffParamDecl, EffArg,
   Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
@@ -25,7 +26,7 @@ use front/ast.{
   e_lo, e_hi
 }
 
-use check/types.{
+use check/types.{TyCaptured,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyF64Buf, TyUnit, TyNever, TyError, TyVar,
   TyAssoc, TyAdt, TyList, TyJava,
   TyMap, TySet, TyArray, TyTuple, TyFn, TyOpaque, Eff, EPure, EIo, EffVar, ELabeled,
@@ -50,7 +51,7 @@ use check/identity
 use check/identity.{TypeDecl, TraitDecl, EffectDecl, FunctionDecl, ConstDecl, MethodDecl, Named, ImplHead,
   PathTable, path_table, path_table_add, path_table_get, path_table_claim, path_text }
 use check/cx.{
-  resolve_named_effect,
+  resolve_named_effect, declare_capture_params, bind_capture_params,
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
   package_of, exports_seen_by, pkg_private, pkg_private_err, private_name_err,
   cerr_h, cerr_o, fresh, fresh_effvar, mint, enter_decl_owner, leave_decl_owner,
@@ -258,8 +259,10 @@ pub(pkg) fn bind_fn(cx: Cx, name: String, sig: Sig, org: Origin, lo: Int, hi: In
 ## variable without a binder.
 pub fn stray_eff_atom(ref: TypeRef, declared: List[String], bound: List[String]) -> Option[(String, Int, Int)] =
   match ref {
+    TScoped(t, _, _, _) | TCaptured(t, _, _, _) -> stray_eff_atom(t, declared, bound)
+    TKindArg(_, _, _) -> None
     TAssoc(_, _, _, _) -> None
-    TFn(params, ret, effs, lo, hi) -> {
+    TFn(params, ret, effs, lo, hi, _) -> {
       for a in effs {
         # Keep walking: a legal label must not conceal an unbound variable
         # later in the row.
@@ -384,7 +387,7 @@ pub(pkg) fn refuse_decl_effvar(cx: Cx, ref: TypeRef, declared: List[String], bou
   }
 
 test "a type declaration accounts for io and for the names it binds, nothing else" {
-  let ty = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 10, 30)
+  let ty = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 10, 30, no_scope_syntax())
   let nothing: List[String] = []
   assert stray_eff_atom(ty("io"), nothing, nothing) == None
   assert stray_eff_atom(ty("e"), nothing, nothing) == Some(("e", 10, 30))
@@ -394,7 +397,7 @@ test "a type declaration accounts for io and for the names it binds, nothing els
   # A declaration is not a variable, and must not hide a later variable.
   assert stray_eff_atom(ty("Ask"), ["Ask"], nothing) == None
   assert stray_eff_atom(ty("dep.Ask"), nothing, nothing) == None
-  let mixed = TFn([], TNamed("Int", [], [], 0, 3), ["dep.Ask", "e"], 10, 30)
+  let mixed = TFn([], TNamed("Int", [], [], 0, 3), ["dep.Ask", "e"], 10, 30, no_scope_syntax())
   assert stray_eff_atom(mixed, nothing, nothing) == Some(("e", 10, 30))
   # and it is found through the shapes a type can nest in
   let nested = TNamed("List", [TTuple([TNamed("Int", [], [], 0, 3), ty("e")], 5, 40)], [], 4, 41)
@@ -403,7 +406,7 @@ test "a type declaration accounts for io and for the names it binds, nothing els
 }
 
 test "a name no table knows is refused as a variable only when it is spelled as one" {
-  let ty = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 10, 30)
+  let ty = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 10, 30, no_scope_syntax())
   let nothing: List[String] = []
   # an undeclared uppercase name is left to `resolve_eff_at`, which says
   # "unknown effect" once, rather than reported here as a variable
@@ -415,7 +418,7 @@ test "a name no table knows is refused as a variable only when it is spelled as 
 }
 
 test "an unbound effect variable is refused and a label is not" {
-  let ty = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 10, 30)
+  let ty = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 10, 30, no_scope_syntax())
   let nothing: List[String] = []
   let (cx1, bad1) = refuse_decl_effvar(test_cx(), ty("e"), nothing, nothing)
   assert bad1
@@ -437,7 +440,8 @@ fn t_lo2(t: TypeRef) -> Int =
     TQual(_, _, _, _, lo, _) -> lo
     TAssoc(_, _, lo, _) -> lo
     TTuple(_, lo, _) -> lo
-    TFn(_, _, _, lo, _) -> lo
+    TScoped(_, _, lo, _) | TCaptured(_, _, lo, _) | TKindArg(_, lo, _) -> lo
+    TFn(_, _, _, lo, _, _) -> lo
   }
 
 fn t_hi2(t: TypeRef) -> Int =
@@ -446,7 +450,8 @@ fn t_hi2(t: TypeRef) -> Int =
     TQual(_, _, _, _, _, hi) -> hi
     TAssoc(_, _, _, hi) -> hi
     TTuple(_, _, hi) -> hi
-    TFn(_, _, _, _, hi) -> hi
+    TScoped(_, _, _, hi) | TCaptured(_, _, _, hi) | TKindArg(_, _, hi) -> hi
+    TFn(_, _, _, _, hi, _) -> hi
   }
 
 ## Can a field of a `derive`d impl carry that capability?
@@ -494,7 +499,7 @@ fn derived_field_ok(cx: Cx, tid: Int, own: List[Ty], t: Ty) -> Bool =
             # Only the relations fall through (`opaque_inherits`), so a field
             # of an opaque type is printable only through an impl written on
             # it: checker.resolve_witness says why `Show` does not.
-            TyOpaque(_, _, _, _, tgt) ->
+            TyOpaque(_, _, _, _, tgt, _) ->
               if opaque_inherits(tid) { derived_field_ok(cx, tid, own, tgt) } else { false }
             _ -> false
           }
@@ -770,9 +775,11 @@ pub(pkg) fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
           cx1 = cxa
           aid = oid
         }
+        let (scoped_cx, scope_params) = declare_capture_params(cx1, d.scope, tvs, evs)
+        cx1 = scoped_cx
         cx1 = Cx {
           ..cx1,
-          aliases = map.insert(cx1.aliases, d.name, AliasE {
+          aliases = map.insert(cx1.aliases, d.name, AliasE { scope_params = scope_params,
             name = d.name,
             tparams = tvs,
             eparams = evs,
@@ -885,7 +892,9 @@ pub(pkg) fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
       }
       pi = pi + 1
     }
-    let info = AdtI {
+    let (scoped_cx, scope_params) = declare_capture_params(cx1, d.scope, tvs, [])
+    cx1 = scoped_cx
+    let info = AdtI { scope_params = scope_params,
       id = aid,
       name = d.name,
       is_record = d.is_record,
@@ -942,6 +951,7 @@ pub(pkg) fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> 
     }
     let saved_tp = cx1.current_tparams
     let saved_ev = cx1.current_eff_vars
+    let saved_capture = cx1.current_capture_params
     # The declaration's own effect binders, minted once and shared by every
     # field: two fields that write `!e` mean one variable, and the next
     # declaration's `!e` is a different one. Without a scope of its own this
@@ -955,7 +965,7 @@ pub(pkg) fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> 
       ev = map.insert(ev, en, v)
       bound_eparams = bound_eparams ++ [v]
     }
-    cx1 = Cx { ..cx1, current_tparams = tp, current_eff_vars = ev }
+    cx1 = Cx { ..cx1, current_tparams = tp, current_eff_vars = ev, current_capture_params = info.scope_params }
     # pass_type_shells hands out slots 0, 1, 2, .. to the accepted constructors
     # in declaration order, so this loop reaches them in that order and the
     # rebuilt list is grown by appending. Writing at the slot instead rebuilt
@@ -1007,6 +1017,7 @@ pub(pkg) fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> 
       ..cx1,
       current_tparams = saved_tp,
       current_eff_vars = saved_ev,
+      current_capture_params = saved_capture,
       adts = map.insert(cx1.adts, sh.adt, AdtI { ..info, ctors = new_ctors, bound_eparams = bound_eparams })
     }
     di = di + 1
@@ -1016,7 +1027,7 @@ pub(pkg) fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> 
 
 test "type shells and fields build recursive types" {
   # type Tree[T] = | Leaf | Node(v: T, kids: List[Tree[T]])
-  let m = Module { decls = [DType(TypeDeclR {
+  let m = Module { decls = [DType(TypeDeclR { scope = no_scope_syntax(),
     vis = VisPrivate,
     is_opaque = false,
     name = "Tree",
@@ -1060,7 +1071,7 @@ test "type shells and fields build recursive types" {
   match a.ctors[1].fields[1].ty {
     TyList(inner) ->
       match inner {
-        TyAdt(aid2, args) -> {
+        TyAdt(aid2, args, _) -> {
           assert aid2 == aid
           assert args == a.tparams
         }
@@ -1071,7 +1082,7 @@ test "type shells and fields build recursive types" {
 }
 
 test "duplicate constructors and prelude clashes are caught" {
-  let mk = (name: String) => DType(TypeDeclR {
+  let mk = (name: String) => DType(TypeDeclR { scope = no_scope_syntax(),
     vis = VisPrivate,
     is_opaque = false,
     name = name,
@@ -1100,7 +1111,7 @@ test "redeclaring Array collides in std and nowhere else" {
   # and every *use* of the name still reached the primitive, so the module
   # failed later with `declares return type Array[Int] but its body is
   # Array[Int]`, two different types printing the same.
-  let decl = DType(TypeDeclR {
+  let decl = DType(TypeDeclR { scope = no_scope_syntax(),
     vis = VisPrivate,
     is_opaque = false,
     name = "Array",
@@ -1140,7 +1151,7 @@ pub(pkg) fn pass_resolve_aliases(cx: Cx) -> Cx !io = {
 test "alias cycles and derive Show violations are reported at the declaration" {
   # alias A = B, alias B = A  → cycle; type P = { f: fn() -> Unit } derive Show → not printable
   let m = Module { decls = [
-    DType(TypeDeclR {
+    DType(TypeDeclR { scope = no_scope_syntax(),
       vis = VisPrivate,
       is_opaque = false,
       name = "A",
@@ -1155,7 +1166,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
       nlo = 6,
       nhi = 7
     }),
-    DType(TypeDeclR {
+    DType(TypeDeclR { scope = no_scope_syntax(),
       vis = VisPrivate,
       is_opaque = false,
       name = "B",
@@ -1170,7 +1181,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
       nlo = 18,
       nhi = 19
     }),
-    DType(TypeDeclR {
+    DType(TypeDeclR { scope = no_scope_syntax(),
       vis = VisPrivate,
       is_opaque = false,
       name = "P",
@@ -1180,7 +1191,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
         name = "P",
         fields = [FieldDecl {
           name = "f",
-          tref = TFn([], TNamed("Unit", [], [], 40, 44), [], 33, 44),
+          tref = TFn([], TNamed("Unit", [], [], 40, 44), [], 33, 44, no_scope_syntax()),
           lo = 30,
           hi = 44
         }],
@@ -1333,9 +1344,9 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       # would have been the alternative, and it would have put a control arm's
       # cost on every handler ever written.
       let idx = len(fields)
-      fields = fields ++ [FieldI { name = op.name, ty = TyFn(ptys, ret, EPure) }]
+      fields = fields ++ [FieldI { name = op.name, ty = TyFn(ptys, ret, EPure, capture.empty_function()) }]
       op_names = op_names ++ [op.name]
-      let sig = Sig {
+      let sig = Sig { scope_params = capture.empty_params(),
         name = op.name,
         param_tys = ptys,
         param_names = map(op.params, p => p.name),
@@ -1373,7 +1384,7 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
     # written header -- but it shares the effect's audience so that nothing
     # downstream has to special-case a record with no answer
     let ev_audience = vis_audience(cx1, d.vis)
-    let info = AdtI {
+    let info = AdtI { scope_params = capture.empty_params(),
       id = eid,
       name = rec_name,
       is_record = true,
@@ -1591,7 +1602,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       cx1 = cx5
       let eparams = eff_params_of(cx1.current_eff_vars)
       cx1 = Cx { ..cx1, current_tparams = saved_tp, current_eff_vars = saved_ev }
-      let sig = Sig {
+      let sig = Sig { scope_params = capture.empty_params(),
         name = me.name,
         param_tys = ptys,
         param_names = map(me.params, p => p.name),
@@ -1810,8 +1821,7 @@ pub(pkg) fn pass_register_impls(
     # The same head `identity.declarations` gives this impl, so the binders
     # its subject and its methods mint are numbered inside the impl and not
     # inside whichever declaration the previous pass left open.
-    var head_names: List[String] = []
-    for tp in d.tparams { head_names = head_names ++ [tp.name] }
+    let head_names = parameter_names(d.tparams, d.scope)
     let head = [ImplHead(d.trait_name, identity.type_shape(d.subject, head_names))]
     cx1 = enter_decl_owner(cx1, head, d.tlo, d.thi)
     let tid = match map.get(cx1.traits_by_name, d.trait_name) {
@@ -1848,7 +1858,9 @@ pub(pkg) fn pass_register_impls(
       tp_scope = map.insert(tp_scope, tp.name, v)
     }
     let empty_ev: Map[String, Eff] = map.empty()
-    cx1 = Cx { ..cx1, current_tparams = tp_scope, current_eff_vars = empty_ev }
+    cx1 = Cx { ..cx1, current_tparams = tp_scope, current_eff_vars = empty_ev, current_capture_params = capture.empty_params() }
+    let (scoped_cx, scope_params) = bind_capture_params(cx1, d.scope)
+    cx1 = scoped_cx
     let (cxbnd, iconstraints) = resolve_bounds(cx1, d.tparams)
     cx1 = cxbnd
     var ibd = cx1.current_tparam_bounds
@@ -1887,7 +1899,7 @@ pub(pkg) fn pass_register_impls(
       if n == d.trait_name { trait_local = true }
     }
     let subject_local = match subject {
-      TyOpaque(_, _, ow, _, _) -> Some(ow) == cx1.owner_class
+      TyOpaque(_, _, ow, _, _, _) -> Some(ow) == cx1.owner_class
       _ ->
         match head_of(subject) {
           Some(HAdt(aid)) -> set.has(local_adts, aid)
@@ -1943,9 +1955,9 @@ pub(pkg) fn pass_register_impls(
     cx1 = sigs_cx
     impl_sigs = method_sigs
     let no_tp: Map[String, Ty] = map.empty()
-    cx1 = Cx { ..cx1, current_tparams = no_tp }
+    cx1 = Cx { ..cx1, current_tparams = no_tp, current_capture_params = capture.empty_params() }
     cx1 = report_missing_methods(cx1, d, tr, subject, inst, em0, provided)
-    let info = ImplI {
+    let info = ImplI { scope_params = scope_params,
       trait_id = tid,
       subject = subject,
       tparams = itvars,
@@ -2001,9 +2013,9 @@ fn register_derived_impls(start: Cx, m: Module, shells: List[Option[Shell]]) -> 
           dhi = b.hi
         }
       }
-      let ii = ImplI {
+      let ii = ImplI { scope_params = capture.empty_params(),
         trait_id = tid,
-        subject = TyAdt(sh.adt, info.tparams),
+        subject = TyAdt(sh.adt, info.tparams, capture.empty_arguments()),
         tparams = info.tparams,
         constraints = derive_constraints(info.tparams, tid),
         lo = dlo,
@@ -2226,7 +2238,7 @@ fn impl_method_sigs(
     cx1 = cx4
     let eparams = eff_params_of(cx1.current_eff_vars)
     cx1 = Cx { ..cx1, current_eff_vars = saved_ev }
-    let msig = Sig {
+    let msig = Sig { scope_params = cx1.current_capture_params,
       name = me.name,
       param_tys = ptys,
       param_names = map(me.params, p => p.name),
@@ -2409,7 +2421,7 @@ fn check_derived_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx = 
       Some(s) -> s
     }
     let info = adt_of(cx1.adts, sh.adt)
-    let subject = TyAdt(sh.adt, info.tparams)
+    let subject = TyAdt(sh.adt, info.tparams, capture.empty_arguments())
     for dv in derivable_traits() {
       let dname = dv.name
       let tid = dv.trait_id
@@ -2491,7 +2503,7 @@ test "impl registration enforces coherence and signature matching" {
     nlo = 17,
     nhi = 20
   }
-  fn good_impl(lo: Int) -> Decl = DImpl([], "Eq4", lo, lo + 3, TNamed("Int", [], [], lo + 4, lo + 7), [FnDecl {
+  fn good_impl(lo: Int) -> Decl = DImpl([], "Eq4", lo, lo + 3, TNamed("Int", [], [], lo + 4, lo + 7), [FnDecl { scope = no_scope_syntax(),
     vis = VisPrivate,
     name = "eq4",
     tparams = no_tparams(),
@@ -2507,7 +2519,7 @@ test "impl registration enforces coherence and signature matching" {
     hi = 13,
     nlo = 0,
     nhi = 3
-  }], [], [], lo, lo + 20)
+  }], [], [], lo, lo + 20, no_scope_syntax())
   let m = Module { decls = [
     DTrait("Eq4", "T", 10, 11, [tm], [], [], VisPrivate, 0, 40, 6, 9),
     good_impl(50),
@@ -2524,7 +2536,7 @@ test "impl registration enforces coherence and signature matching" {
   # a missing method reports with the expected render
   let m2 = Module { decls = [
     DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name = "eq5" }], [], [], VisPrivate, 0, 40, 6, 9),
-    DImpl([], "Eq5", 50, 53, TNamed("Int", [], [], 54, 57), no_fn_decls(), [], [], 50, 70)
+    DImpl([], "Eq5", 50, 53, TNamed("Int", [], [], 54, 57), no_fn_decls(), [], [], 50, 70, no_scope_syntax())
   ] }
   var cx2 = seed_prelude(test_cx())
   cx2 = pass_register_traits(cx2, m2)
@@ -2606,6 +2618,7 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = 
     }
     let saved_tp = cx1.current_tparams
     let saved_ev = cx1.current_eff_vars
+    let saved_capture = cx1.current_capture_params
     var ev_scope: Map[String, Eff] = map.empty()
     # An explicit binder mints its variable here, before anything in the
     # signature is resolved, which is what makes it a binder: `resolve_eff_at`
@@ -2624,7 +2637,9 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = 
       cx1 = cxe
       ev_scope = map.insert(ev_scope, ep.name, v)
     }
-    cx1 = Cx { ..cx1, current_tparams = tp_scope, current_eff_vars = ev_scope }
+    cx1 = Cx { ..cx1, current_tparams = tp_scope, current_eff_vars = ev_scope, current_capture_params = capture.empty_params() }
+    let (scoped_cx, scope_params) = bind_capture_params(cx1, d.scope)
+    cx1 = scoped_cx
     # bounds resolve before the parameter types, so a `T.Item` in one can
     # find its trait (assoc-types-design.md D2)
     let (cxbd, constraints) = resolve_bounds(cx1, d.tparams)
@@ -2660,10 +2675,10 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = 
     }
     cx1 = cx5
     let eparams = eff_params_of(cx1.current_eff_vars)
-    cx1 = Cx { ..cx1, current_tparams = saved_tp, current_eff_vars = saved_ev }
+    cx1 = Cx { ..cx1, current_tparams = saved_tp, current_eff_vars = saved_ev, current_capture_params = saved_capture }
     # until the body is checked, an unannotated fn assumes the worst effect
     let final_eff = if inferring && len(d.effs) == 0 { EIo } else { eff }
-    let sig = Sig {
+    let sig = Sig { scope_params = scope_params,
       name = d.name,
       param_tys = ptys,
       param_names = map(d.params, p => p.name),
@@ -2757,7 +2772,7 @@ fn fn_header(t: PathTable[Sig], name: String) -> Sig =
 test "fn signatures resolve with bounds and worst-effect inference" {
   # fn f[T: Ord](x: T) -> T   and   fn g(x: Int) = x  (inferring → io placeholder)
   let m = Module { decls = [
-    DFn(FnDecl {
+    DFn(FnDecl { scope = no_scope_syntax(),
       vis = VisPrivate,
       name = "f",
       tparams = [TypeParamDecl {
@@ -2776,7 +2791,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
       nlo = 3,
       nhi = 4
     }),
-    DFn(FnDecl {
+    DFn(FnDecl { scope = no_scope_syntax(),
       vis = VisPrivate,
       name = "g",
       tparams = no_tparams(),
@@ -2803,9 +2818,9 @@ test "fn signatures resolve with bounds and worst-effect inference" {
 
 test "a signature's effect variables land in eparams once each, in mint order" {
   # fn h(f: fn() -> Int !a, g: fn() -> Int !b, k: fn() -> Int !a) -> Int !c
-  let arrow = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 0, 3)
+  let arrow = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 0, 3, no_scope_syntax())
   let m = Module { decls = [
-    DFn(FnDecl {
+    DFn(FnDecl { scope = no_scope_syntax(),
       vis = VisPrivate,
       name = "h",
       tparams = no_tparams(),
@@ -2863,14 +2878,14 @@ test "an explicit binder list produces the eparams the implicit spelling does" {
   # writing them changes nothing a later pass can see. `[!c, !a, !b]` is the
   # order the resolver would have met the names in -- the row first -- so the
   # two spellings agree, which is the whole claim.
-  let arrow = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 0, 3)
+  let arrow = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 0, 3, no_scope_syntax())
   let binder = (n: String) => EffParamDecl { name = n, lo = 0, hi = 2 }
   let params = [
     Param { name = "f", tref = arrow("a"), default = None, default_src = None, lo = 5, hi = 6 },
     Param { name = "g", tref = arrow("b"), default = None, default_src = None, lo = 7, hi = 8 },
     Param { name = "k", tref = arrow("a"), default = None, default_src = None, lo = 9, hi = 10 }
   ]
-  let decl = FnDecl {
+  let decl = FnDecl { scope = no_scope_syntax(),
     vis = VisPrivate,
     name = "h",
     tparams = no_tparams(),
@@ -3037,7 +3052,7 @@ test "const declarations register in order with serializability checks" {
 }
 
 test "main shape violations are reported" {
-  let m = Module { decls = [DFn(FnDecl {
+  let m = Module { decls = [DFn(FnDecl { scope = no_scope_syntax(),
     vis = VisPrivate,
     name = "main",
     tparams = no_tparams(),
@@ -3183,19 +3198,20 @@ fn effect_audience(cx: Cx, eid: Int) -> Audience =
 ## failed to resolve is not a public-surface problem.
 fn ty_poisoned(t: Ty) -> Bool =
   match t {
+    TyCaptured(value, _) -> ty_poisoned(value)
     TyError -> true
-    TyInt | TyFloat | TyBool | TyString | TyBytes | TyI64Buf | TyF64Buf | TyUnit | TyNever -> false
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyI64Buf(_) | TyF64Buf(_) | TyUnit | TyNever -> false
     TyVar(_, _) -> false
     TyJava(_, _) -> false
-    TyAdt(_, args) -> list.any(args, a => ty_poisoned(a))
+    TyAdt(_, args, _) -> list.any(args, a => ty_poisoned(a))
     TyList(e) -> ty_poisoned(e)
     TyMap(k, v) -> ty_poisoned(k) || ty_poisoned(v)
     TySet(e) -> ty_poisoned(e)
     TyArray(e) -> ty_poisoned(e)
-    TyOpaque(_, _, _, args, _) -> list.any(args, a => ty_poisoned(a))
+    TyOpaque(_, _, _, args, _, _) -> list.any(args, a => ty_poisoned(a))
     TyAssoc(s, _, _) -> ty_poisoned(s)
     TyTuple(es) -> list.any(es, e => ty_poisoned(e))
-    TyFn(ps, r, _) -> list.any(ps, p => ty_poisoned(p)) || ty_poisoned(r)
+    TyFn(ps, r, _, _) -> list.any(ps, p => ty_poisoned(p)) || ty_poisoned(r)
   }
 
 fn sig_poisoned(sig: Sig) -> Bool =
@@ -3209,13 +3225,14 @@ fn sig_poisoned(sig: Sig) -> Bool =
 ## enclosing token that they did write.
 fn surface_ty_leaks(cx: Cx, root: Audience, t: Ty, sp: TySpan, path: String) -> List[SurfaceLeak] =
   match t {
+    TyCaptured(value, _) -> surface_ty_leaks(cx, root, value, ty_span_kid(sp, 0), path)
     # scalars, `Never`, type variables and Java identities are nameable
     # wherever the root is (design §5.1)
-    TyInt | TyFloat | TyBool | TyString | TyBytes | TyI64Buf | TyF64Buf | TyUnit | TyNever -> no_leaks()
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyI64Buf(_) | TyF64Buf(_) | TyUnit | TyNever -> no_leaks()
     TyVar(_, _) -> no_leaks()
     TyJava(_, _) -> no_leaks()
     TyError -> no_leaks()
-    TyAdt(id, args) -> {
+    TyAdt(id, args, _) -> {
       let info = adt_of(cx.adts, id)
       var out = no_leaks()
       if not audience_covers(info.audience, root) {
@@ -3247,7 +3264,7 @@ fn surface_ty_leaks(cx: Cx, root: Audience, t: Ty, sp: TySpan, path: String) -> 
       if not audience_covers(a, root) { out = [leak_at("type", "Array", a, path, sp)] }
       out ++ surface_ty_leaks(cx, root, e, ty_span_kid(sp, 0), path ++ " array element")
     }
-    TyOpaque(id, name, owner, args, _) -> {
+    TyOpaque(id, name, owner, args, _, _) -> {
       let a = opaque_audience(cx, id, name, owner)
       var out = no_leaks()
       if not audience_covers(a, root) { out = [leak_at("type", name, a, path, sp)] }
@@ -3284,7 +3301,7 @@ fn surface_ty_leaks(cx: Cx, root: Audience, t: Ty, sp: TySpan, path: String) -> 
       }
       out
     }
-    TyFn(params, ret, eff) -> {
+    TyFn(params, ret, eff, _) -> {
       var out = no_leaks()
       var i = 0
       for p in params {
@@ -3672,7 +3689,7 @@ pub(pkg) fn pass_export_surface(cx: Cx, m: Module) -> Cx = {
       # an impl has no `pub` to read: observability is decided from its head.
       # Derived impls have no written head to visit at all, and their surface
       # is the deriving type's, which is a root in its own right.
-      DImpl(tps, _, tlo, thi, _, _, assoc, _, ilo, ihi) -> {
+      DImpl(tps, _, tlo, thi, _, _, assoc, _, ilo, ihi, _) -> {
         cx1 = surface_impl(cx1, root, tps, assoc, tlo, thi, ilo, ihi)
       }
       _ -> ()

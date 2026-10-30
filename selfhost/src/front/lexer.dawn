@@ -20,7 +20,7 @@ use front/token.{
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
   PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, PIPE,
-  AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR,
+  AMPAMP, PIPEPIPE, AMP, CARET, AT, TILDE, SHL, SHR, USHR,
   BANG, NOT
 }
 
@@ -1061,6 +1061,7 @@ fn one_kind(c: Char) -> Option[(TokKind, String)] =
     '%' -> Some((PERCENT, "%"))
     '|' -> Some((PIPE, "|"))
     '&' -> Some((AMP, "&"))
+    '@' -> Some((AT, "@"))
     '^' -> Some((CARET, "^"))
     '~' -> Some((TILDE, "~"))
     '!' -> Some((BANG, "!"))
@@ -1487,15 +1488,11 @@ test "unrecognized character" {
   assert kinds("a \\ b") == ["IDENT", "IDENT", "NEWLINE", "EOF"]
 }
 
-test "`@` is not a token" {
-  # No production ever used `@` (#194). It is an unrecognized character at the
-  # `@` itself, and it no longer continues a line: the newline after a stray
-  # one ends the statement as it would after anything else.
-  let (_, ds) = lex("let a = 1 @\nb")
-  assert len(ds) == 1
-  assert ds[0].msg == "unrecognized character: @"
-  assert ds[0].lo == 10 && ds[0].hi == 11
-  assert kinds("let a = 1 @\nb") == ["LET", "IDENT", "EQ", "INT", "NEWLINE", "IDENT", "NEWLINE", "EOF"]
+test "Scope marker is a token and does not continue a line" {
+  let (_, ds) = lex("I64Buf@s\n")
+  assert ds == []
+  assert kinds("I64Buf@s\n") == ["TYPEIDENT", "AT", "IDENT", "NEWLINE", "EOF"]
+  assert kinds("let a = 1 @\nb") == ["LET", "IDENT", "EQ", "INT", "AT", "NEWLINE", "IDENT", "NEWLINE", "EOF"]
 }
 
 test "three char and two char operators" {

@@ -1,0 +1,59 @@
+# These syntax contracts use strings so the compiler's own source closure
+# remains readable by the current seed while the new spelling is introduced.
+use front/parser
+use front/ast
+use front/ast.{TFn, TScoped, TNamed, ELambda, EListLit}
+
+test "Mem scope syntax retains separate binders and the whole arrow's capture bound" {
+  let source = "fn build[T: Show + ^{c}, @s, ^c: ^{s}, !e: fn](b: I64Buf@s, " ++
+    "read: fn[@t](F64Buf@t) -> Int !(mem.Mem[t] | e) ^{c}) -> T = todo(\"foundation\")\n"
+  let (module, ds) = parser.parse_module(source)
+  assert ds == []
+  let f = ast.module_fns(module)[0]
+  assert len(f.tparams) == 1 && f.tparams[0].name == "T"
+  assert len(f.eparams) == 1 && f.eparams[0].name == "e"
+  assert f.scope.fn_effects == ["e"]
+  assert len(f.scope.bounds) == 1 && f.scope.bounds[0].name == "T"
+  assert f.scope.bounds[0].members == ["c"]
+  assert len(f.scope.binders) == 2
+  assert not f.scope.binders[0].capture && f.scope.binders[0].name == "s"
+  assert f.scope.binders[1].capture && f.scope.binders[1].bound == Some(["s"])
+  match f.params[0].tref {
+    TScoped(TNamed("I64Buf", [], [], _, _), "s", _, _) -> ()
+    _ -> { assert false }
+  }
+  match f.params[1].tref {
+    TFn(_, TNamed("Int", [], [], _, _), effects, _, _, scope) -> {
+      assert effects == ["mem.Mem[t]", "e"]
+      assert scope.capture == Some(["c"])
+      assert scope.binders[0].name == "t"
+    }
+    _ -> { assert false }
+  }
+}
+
+test "Scope lambdas preserve their binder and ordinary lists keep their reading" {
+  let (module, ds) = parser.parse_module("fn identity() = [@s] (b: I64Buf@s) => b\nfn list() = [1, 2]\n")
+  assert ds == []
+  let functions = ast.module_fns(module)
+  match functions[0].body {
+    ELambda(_, _, _, _, _, scopes) -> { assert len(scopes) == 1 && scopes[0].name == "s" }
+    _ -> { assert false }
+  }
+  match functions[1].body { EListLit(_, _, _) -> (), _ -> { assert false } }
+}
+
+test "Scope syntax rejects kind confusion and extra higher rank binders" {
+  for source in [
+    "fn f(x: fn[T]() -> Int) -> Unit = ()",
+    "fn f(x: fn[^c]() -> Int) -> Unit = ()",
+    "fn f(x: fn[!e]() -> Int) -> Unit = ()",
+    "fn f[@s: ^{}]() -> Unit = ()",
+    "fn f[@s, ^s]() -> Unit = ()",
+    "fn f[@s, !s]() -> Unit = ()",
+    "fn f(x: Int^{*}) -> Unit = ()"
+  ] {
+    let (_, ds) = parser.parse_module(source)
+    assert len(ds) > 0
+  }
+}

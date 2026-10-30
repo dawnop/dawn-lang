@@ -19,6 +19,7 @@
 # whole self-hosting bootstrap, because `scripts/doc-check.py` reads `docs/`
 # and nothing reads the claims at the top of a source file.
 
+use check/capture
 use check/tast.{call_source}
 use std/char
 use std/str
@@ -27,7 +28,7 @@ use std/narrow
 use std/list
 use std/map
 use std/set
-use check/types.{
+use check/types.{TyCaptured,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
   TyAdt, TyTuple, TyFn, TyBytes, TyI64Buf, TyF64Buf, TyList, TyMap, TySet, TyArray, TyJava, peel_opaque,
   Intr, intrinsics, Adts, adt_of, prelude_adts, OPTION_ID, RESULT_ID, cast_target,
@@ -503,21 +504,22 @@ pub type CRepr =
 ## Deliberately without a wildcard.
 pub fn c_repr(t: Ty) -> CRepr =
   match t {
-    TyOpaque(_, _, _, _, tgt) -> c_repr(tgt)
+    TyCaptured(value, _) -> c_repr(value)
+    TyOpaque(_, _, _, _, tgt, _) -> c_repr(tgt)
     TyInt -> RInt64
     TyFloat -> RFloat64
     TyBool -> RBoolean
     TyString -> RString
     TyUnit -> RUnitV
     TyNever -> RUnitV
-    TyAdt(_, _) -> RAdtPtr
+    TyAdt(_, _, _) -> RAdtPtr
     TyTuple(_) -> RAdtPtr
-    TyFn(_, _, _) -> RCloPtr
+    TyFn(_, _, _, _) -> RCloPtr
     TyVar(_, _) | TyAssoc(_, _, _) -> ROpaque
     TyError -> ROpaque
     TyBytes -> ROpaque
-    TyI64Buf -> ROpaque
-    TyF64Buf -> ROpaque
+    TyI64Buf(_) -> ROpaque
+    TyF64Buf(_) -> ROpaque
     TyList(_) -> ROpaque
     TyMap(_, _) -> ROpaque
     TySet(_) -> ROpaque
@@ -1931,7 +1933,7 @@ fn scalar_rt(prefix: String, t: Ty, what: String) -> String =
     TyBool -> "${prefix}_bool"
     TyBytes -> "${prefix}_bytes"
     # an opaque type is its target at run time, here as everywhere
-    TyOpaque(_, _, _, _, tgt) -> scalar_rt(prefix, tgt, what)
+    TyOpaque(_, _, _, _, tgt, _) -> scalar_rt(prefix, tgt, what)
     # Cursor has no native representation yet (bytes-design.md): an honest
     # gap, not a wrong answer
     _ -> no_rt(what, t)
@@ -3436,7 +3438,7 @@ test "a slot member and the ref classification agree about every repr" {
   # never got compiled -- and the harness marks emitc `blocked` whenever the
   # JVM run fails, which is why a whole family stayed invisible.
   assert slot_of(TyUnit) == "u"
-  assert slot_of(TyOpaque(0, "H", "m", [], TyUnit)) == "u"
+  assert slot_of(TyOpaque(0, "H", "m", [], TyUnit, capture.empty_arguments())) == "u"
   assert not is_ref_ty(TyUnit)
   assert box_call("x", TyUnit) == "dawn_box_unit(x)"
   assert c_type(TyUnit) == "dawn_unit"
@@ -3471,10 +3473,10 @@ test "a slot member and the ref classification agree about every repr" {
   # is a use-after-free that only appears for whichever type they disagree on.
   let every: List[Ty] = [
     TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever,
-    TyError, TyBytes, TyVar("T", 0), TyAdt(0, []), TyTuple([TyInt]),
-    TyFn([], TyInt, EPure), TyList(TyInt), TyMap(TyInt, TyInt), TySet(TyInt),
+    TyError, TyBytes, TyVar("T", 0), TyAdt(0, [], capture.empty_arguments()), TyTuple([TyInt]),
+    TyFn([], TyInt, EPure, capture.empty_function()), TyList(TyInt), TyMap(TyInt, TyInt), TySet(TyInt),
     TyArray(TyInt), TyJava("java.lang.Object", "Object"),
-    TyOpaque(0, "H", "m", [], TyBytes), TyOpaque(1, "I", "m", [], TyInt)
+    TyOpaque(0, "H", "m", [], TyBytes, capture.empty_arguments()), TyOpaque(1, "I", "m", [], TyInt, capture.empty_arguments())
   ]
   for t in every {
     assert is_ref_ty(t) == (slot_of(t) == "p")

@@ -1959,6 +1959,34 @@ fn light(c: Color) -> Int =
   ctl 约束。同域处理、恢复或丢弃续延仍合法；合成续延携带保存帧及证据的域依赖，不能存到域外。
   panic/catch_panic 与尾恢复 handler 保留，读写效果不改成 io，也不在闭包创建点结算。
 
+
+K2 已提供类型与语法基础，以下捕获传播、出口和按域消解语义仍待 K3/K4。
+当前 std/mem API 与 13 个已知误接受反例保持原行为；识别新类型拼写不表示 #847 已修复。
+Scope 与 Capture 分别具有独立身份和参数轴，不是普通类型或运行时值；函数环境上界
+与调用效果分别保存。内部 Scope binder 按 alpha 等价比较，替换须同时避免身份与显示名捕获。
+
+```text
+scope_binder   := "@" lower_name
+capture_binder := "^" lower_name [":" capture_bound]
+capture_bound  := "^" "{" [lower_name ("," lower_name)*] "}"
+scoped_buffer  := ("I64Buf" | "F64Buf") "@" lower_name
+scope_fn_type  := "fn" "[" scope_binder ("," scope_binder)* "]" fn_type_tail
+scope_lambda   := "[" scope_binder ("," scope_binder)* "]" "(" params ")" "=>" expr
+```
+
+声明参数表可并列 `T: Show + ^{c}`、`@s`、`^c: ^{s, d}`、`!e: fn`。
+同表所有 binder 在约束中同时可见；未绑定、跨种类误用或文本遮蔽须诊断。
+函数类型内部只允许 Scope 量词，不开放 `fn[T]`、`fn[^c]` 或 `fn[!e]`。
+`^{...}` 是类型的末尾后缀，在函数类型上修饰整个箭头；返回带捕获的函数须分组，
+例如 `fn() -> (fn() -> Int ^{c})`。`I64Buf@s^{s}` 合法但冗余，`I64Buf@s^{}` 不能擦除 s。
+`Mem[s]` 和 `mem.Mem[s]` 仅为 std/mem 的效果原子加域参数，不开放任意参数化用户效果。
+名义类型的域实参写作 `Holder[s]`；捕获实参可为集合参数名或 `^{s, c}`。
+格式化对无注释的捕获集合去重并排序，保留集合内注释。
+
+本阶段显式类型应用执行种类检查和静态替换；从调用实参求域/捕获约束、推断自由捕获、
+检查出口、为运行器产生新域和按域寻址证据由后续刀接入。
+现有程序省略捕获注解时的接受集合保持不变，普通 T 的空捕获默认值尚不用于提前翻红旧反例。
+
 ### 6.3 效果多态
 
 高阶函数用效果变量转发参数的效果：

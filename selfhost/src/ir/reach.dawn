@@ -43,6 +43,7 @@
 # (dawn_cp_in / dawn_case) instead of answering from a table that is not
 # there.
 
+use check/capture
 use ir/core.{synthetic_definition,
   CNoSite, CModule, CFun, CExpr, CStmt, CDictSlot, CDictDef, subject_key, fn_key,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic, CCtor,
@@ -53,8 +54,7 @@ use ir/core.{synthetic_definition,
   CDirect, CDynamic, CMethod, CImpl, CDefault,
   CSlotFn, CSlotDefault, CParam, COwned, cex_ty, sam_ev_exprs
 }
-use check/types.{
-  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyF64Buf, TyUnit, TyNever, TyError,
+use check/types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyF64Buf, TyUnit, TyNever, TyError,
   TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyOpaque, TyAssoc,
   TyTuple, TyFn, ELabeled, EPure, eff_labels
 }
@@ -444,16 +444,17 @@ fn mark(u: TableUse, name: String) -> TableUse =
 ## so every arm that cannot prove "no List" answers true.
 fn mentions_list(ty: Ty) -> Bool =
   match ty {
+    TyCaptured(value, _) -> mentions_list(value)
     TyList(_) -> true
     TySet(t) | TyArray(t) -> mentions_list(t)
     TyMap(k, v) -> mentions_list(k) || mentions_list(v)
     TyTuple(ts) -> any_mentions_list(ts)
-    TyOpaque(_, _, _, args, target) -> any_mentions_list(args) || mentions_list(target)
+    TyOpaque(_, _, _, args, target, _) -> any_mentions_list(args) || mentions_list(target)
     TyAssoc(subject, _, _) -> mentions_list(subject)
-    TyFn(ps, ret, _) -> any_mentions_list(ps) || mentions_list(ret)
-    TyAdt(_, args) -> any_mentions_list(args)
+    TyFn(ps, ret, _, _) -> any_mentions_list(ps) || mentions_list(ret)
+    TyAdt(_, args, _) -> any_mentions_list(args)
     TyJava(_, _) | TyVar(_, _) | TyInt | TyFloat | TyBool | TyString | TyBytes |
-      TyI64Buf | TyF64Buf | TyUnit | TyNever | TyError -> false
+      TyI64Buf(_) | TyF64Buf(_) | TyUnit | TyNever | TyError -> false
   }
 
 fn any_mentions_list(ts: List[Ty]) -> Bool = {
@@ -475,7 +476,7 @@ fn any_mentions_list(ts: List[Ty]) -> Bool = {
 fn folded_may_hold_list(ty: Ty) -> Bool =
   match ty {
     TyInt | TyFloat | TyBool | TyString | TyBytes | TyUnit | TyNever | TyError -> false
-    TyOpaque(_, _, _, _, target) -> folded_may_hold_list(target)
+    TyOpaque(_, _, _, _, target, _) -> folded_may_hold_list(target)
     _ -> true
   }
 
@@ -508,19 +509,20 @@ fn type_use(st0: Rch, ty: Ty) -> Rch = {
 fn descriptor_use(st: Rch, ty: Ty) -> Rch =
   match ty {
     TyJava(name, _) -> java_class_use(st, name)
-    TyOpaque(_, _, _, _, target) -> descriptor_use(st, target)
+    TyOpaque(_, _, _, _, target, _) -> descriptor_use(st, target)
     _ -> st
   }
 
 fn type_adts(st: Rch, ty: Ty) -> Rch =
   match ty {
-    TyAdt(aid, args) -> types_adts(Rch { ..st, adts = set.insert(st.adts, aid) }, args)
+    TyCaptured(value, _) -> type_adts(st, value)
+    TyAdt(aid, args, _) -> types_adts(Rch { ..st, adts = set.insert(st.adts, aid) }, args)
     TyList(t) | TySet(t) | TyArray(t) -> type_adts(st, t)
     TyMap(k, v) -> type_adts(type_adts(st, k), v)
     TyTuple(ts) -> types_adts(st, ts)
-    TyOpaque(_, _, _, args, target) -> type_adts(types_adts(st, args), target)
+    TyOpaque(_, _, _, args, target, _) -> type_adts(types_adts(st, args), target)
     TyAssoc(subject, _, _) -> type_adts(st, subject)
-    TyFn(ps, ret, eff) -> {
+    TyFn(ps, ret, eff, _) -> {
       var s = type_adts(types_adts(st, ps), ret)
       for label in eff_labels(eff) {
         let (aid, _) = label
@@ -529,7 +531,7 @@ fn type_adts(st: Rch, ty: Ty) -> Rch =
       s
     }
     TyJava(_, _) | TyVar(_, _) | TyInt | TyFloat | TyBool | TyString | TyBytes |
-      TyI64Buf | TyF64Buf | TyUnit | TyNever | TyError -> st
+      TyI64Buf(_) | TyF64Buf(_) | TyUnit | TyNever | TyError -> st
   }
 
 fn types_adts(st0: Rch, ts: List[Ty]) -> Rch = {
@@ -664,11 +666,11 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
         walk_list(Rch { ..next, mode = st.mode }, lists.drop(args, 1))
       } else { walk_list(called, args) }
     }
-    CCtor(aid, _, args, _) -> walk_list(type_use(st0, TyAdt(aid, [])), args)
+    CCtor(aid, _, args, _) -> walk_list(type_use(st0, TyAdt(aid, [], capture.empty_arguments())), args)
     # a kept field is a read of the base at its declared type, exactly as the
     # whole-constructor form spells it with a CField
     CUpdate(base, aid, _, fields, _) -> {
-      var st = walk(type_use(st0, TyAdt(aid, [])), base)
+      var st = walk(type_use(st0, TyAdt(aid, [], capture.empty_arguments())), base)
       for f in fields {
         match f.value {
           Some(v) -> { st = walk(st, v) }
@@ -677,9 +679,9 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
       }
       st
     }
-    CField(target, aid, _, _, _) -> walk(type_use(st0, TyAdt(aid, [])), target)
-    CIsCtor(target, aid, _) -> walk(type_use(st0, TyAdt(aid, [])), target)
-    CTagOf(target, aid) -> walk(type_use(st0, TyAdt(aid, [])), target)
+    CField(target, aid, _, _, _) -> walk(type_use(st0, TyAdt(aid, [], capture.empty_arguments())), target)
+    CIsCtor(target, aid, _) -> walk(type_use(st0, TyAdt(aid, [], capture.empty_arguments())), target)
+    CTagOf(target, aid) -> walk(type_use(st0, TyAdt(aid, [], capture.empty_arguments())), target)
     CClosure(fn_name, owner, captures, _) -> {
       let next = direct(st0, owner, fn_name)
       # Function values keep the canonical plain entry and can cross scopes.
@@ -1100,13 +1102,13 @@ test "control runtime follows reachable operations rather than declarations" {
 
 test "evidence freight includes signatures, typed fields and function rows" {
   let unused = tmod("std/unused", [
-    CFun { ..tfn("std/unused", "unused", CUnit), ret = TyAdt(90, []) }
+    CFun { ..tfn("std/unused", "unused", CUnit), ret = TyAdt(90, [], capture.empty_arguments()) }
   ])
   let f = CFun {
     ..tfn("app", "main", CField(CLocal(1, TyVar("erased", 0)), 93, 0, 0, TyUnit)),
-    evs = [CParam { sym = 1, ty = TyAdt(91, []), mode = COwned }],
+    evs = [CParam { sym = 1, ty = TyAdt(91, [], capture.empty_arguments()), mode = COwned }],
     params = [CParam { sym = 2,
-      ty = TyFn([], TyUnit, ELabeled(EPure, [(92, "Ask")])), mode = COwned }]
+      ty = TyFn([], TyUnit, ELabeled(EPure, [(92, "Ask")]), capture.empty_function()), mode = COwned }]
   }
   let l = live_set([tmod("app", [f]), unused], ["app"], [])
   assert adt_live(l, 91)
@@ -1118,7 +1120,7 @@ test "evidence freight includes signatures, typed fields and function rows" {
 
 test "control Java types follow descriptors rather than erased type arguments" {
   let ctl = TyJava("dawn.rt.Ctl", "Ctl")
-  let erased = live_set([], [], [], [TyList(ctl), TyFn([ctl], TyUnit, EPure)])
+  let erased = live_set([], [], [], [TyList(ctl), TyFn([ctl], TyUnit, EPure, capture.empty_function())])
   assert not erased.ctl
   assert not java_class_live(erased, "dawn/rt/Ctl")
   let direct = live_set([], [], [], [ctl])
@@ -1127,7 +1129,7 @@ test "control Java types follow descriptors rather than erased type arguments" {
   let array = live_set([], [], [], [TyJava("[[Ldawn.rt.CtlK;", "CtlK[][]")])
   assert array.ctl
   assert java_class_live(array, "dawn/rt/CtlK")
-  let iface = live_set([], [], [], [TyFn([], TyUnit, ELabeled(EPure, [(94, "Ask")]))])
+  let iface = live_set([], [], [], [TyFn([], TyUnit, ELabeled(EPure, [(94, "Ask")]), capture.empty_function())])
   assert adt_live(iface, 94)
   assert not iface.ctl
 }
@@ -1293,12 +1295,12 @@ test "the list criterion reads through containers but not through a record" {
   assert mentions_list(TyMap(TyString, TyList(TyInt)))
   assert mentions_list(TySet(TyList(TyInt)))
   assert mentions_list(TyTuple([TyInt, TyList(TyInt)]))
-  assert mentions_list(TyFn([TyList(TyInt)], TyUnit, EPure))
-  assert mentions_list(TyAdt(1, [TyList(TyInt)]))
+  assert mentions_list(TyFn([TyList(TyInt)], TyUnit, EPure, capture.empty_function()))
+  assert mentions_list(TyAdt(1, [TyList(TyInt)], capture.empty_arguments()))
   # a record's own fields are not read here on purpose: a `List[T]` field is a
   # descriptor, and building one takes a literal or a primitive in some live
   # body, which carries its own TyList
-  assert not mentions_list(TyAdt(1, []))
+  assert not mentions_list(TyAdt(1, [], capture.empty_arguments()))
   assert not mentions_list(TyString)
 }
 
@@ -1310,7 +1312,7 @@ test "a folded constant is judged by its type, since its payload is not Core" {
   let roots = [("std/pvec", "from_array")]
   let scalar = tmod("app", [tfn("app", "main", CConstRef("app", "N", TyInt))])
   assert not live_set([scalar, pvec], ["app"], roots).lists
-  let record = tmod("app", [tfn("app", "main", CConstRef("app", "P", TyAdt(70, [])))])
+  let record = tmod("app", [tfn("app", "main", CConstRef("app", "P", TyAdt(70, [], capture.empty_arguments())))])
   assert live_set([record, pvec], ["app"], roots).lists
   let block = tmod("app", [tfn("app", "main", CComptime(0, 1, TyTuple([TyInt])))])
   assert live_set([block, pvec], ["app"], roots).lists
@@ -1416,7 +1418,7 @@ test "a test's description never shadows a function of the same name" {
 
 test "execution modes share definition identity and follow observation roots" {
   let call = (name: String) => CCall(CDirect("app", name), [], TyUnit, CNoSite)
-  let observed = CIntrinsic("provenance_observe", [CClosure("lambda$0", "app", [], TyFn([], TyUnit, EPure))], TyUnit, CNoSite)
+  let observed = CIntrinsic("provenance_observe", [CClosure("lambda$0", "app", [], TyFn([], TyUnit, EPure, capture.empty_function()))], TyUnit, CNoSite)
   let helper = tfn("app", "helper", CUnit)
   let cold = tfn("app", "cold", CUnit)
   let callback = tfn("app", "lambda$0", call("helper"))

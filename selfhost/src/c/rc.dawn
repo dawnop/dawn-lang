@@ -31,6 +31,7 @@
 # dups match the consuming uses; that needs the type of every receiver, and
 # the corpus for it is the spike-native asan check.
 
+use check/capture
 use ir/core.{synthetic_definition,
   CNoSite, CModule, CFun, CParam, CExpr, CStmt, CCallee, CBorrowed,
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
@@ -2053,7 +2054,7 @@ fn sweep(st: RSt, after: Set[Int], ctors: Map[Int, Int]) -> (RSt, List[CStmt]) =
 ## ledger.
 fn adt_id(ty: Ty) -> Int =
   match peel_opaque(ty) {
-    TyAdt(aid, _) -> if aid == DICT_ADT_ID { -1 } else { aid }
+    TyAdt(aid, _, _) -> if aid == DICT_ADT_ID { -1 } else { aid }
     _ -> -1
   }
 
@@ -3053,7 +3054,7 @@ test "borrowed and owned argument snapshots retain a reassigned reference" {
 }
 
 test "a dynamic target snapshot remains owned across argument return" {
-  let fn_ty = TyFn([TyInt], TyInt, EPure)
+  let fn_ty = TyFn([TyInt], TyInt, EPure, capture.empty_function())
   let p = CParam { sym = 1, ty = fn_ty, mode = COwned }
   let later = CBlock(
     [CSAssign(1, CFnRef("m", "replacement", fn_ty))],
@@ -3321,7 +3322,7 @@ test "a binding is released at the statement that stops touching it" {
 }
 
 test "a record update releases its spread owner before an updated field runs" {
-  let rec = TyAdt(7, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
   let ref = TyList(TyInt)
   let p = CParam { sym = 1, ty = rec, mode = COwned }
   # Lowering's exact shape for `R { ..r, a: g(r.a) }`: the update's base is
@@ -3371,7 +3372,7 @@ test "a record update releases its spread owner before an updated field runs" {
 }
 
 test "a record bound after an earlier statement is released before its update" {
-  let rec = TyAdt(7, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
   let ref = TyList(TyInt)
   let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [
     CUpdField { ty = ref, value = None },
@@ -3421,7 +3422,7 @@ test "a record bound after an earlier statement is released before its update" {
 }
 
 test "a reassigned record is not lifted ahead of the assignment" {
-  let rec = TyAdt(7, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
   let ref = TyList(TyInt)
   let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [CUpdField { ty = ref, value = None }], rec)
   let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec, CNoSite))]
@@ -3458,7 +3459,7 @@ test "a constructor written out whole is not taken for an update" {
   # `let loaded = load(); R { a: loaded.a, b: g(loaded.b) }` names no base:
   # scheduling is keyed on CUpdate, and a program that means an update writes
   # `..loaded` (driver/analyze.load_directory_planned did, once this was so).
-  let rec = TyAdt(7, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
   let ref = TyList(TyInt)
   let rebuilt = CCtor(7, 0, [
     CField(CLocal(2, rec), 7, 0, 0, ref),
@@ -3478,7 +3479,7 @@ test "an update nested in a written field keeps its node until its own block" {
   # `R { ..r, a: g(R { ..r, b: [] }) }`: while the outer update is scheduled,
   # the inner one is a written value. It has a base of its own, so lifting
   # the outer one must leave it an update for its own block to schedule.
-  let rec = TyAdt(7, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
   let ref = TyList(TyInt)
   let inner = CBlock([CSLet(3, rec, CLocal(1, rec))], Some(CUpdate(CLocal(3, rec), 7, 0, [
     CUpdField { ty = ref, value = None },
@@ -3680,7 +3681,7 @@ test "an arm whose list element returns leaves the other arm alone" {
 }
 
 test "a directly applied closure is held in scope across a returning argument" {
-  let fn_ty = TyFn([TyInt], TyInt, EPure)
+  let fn_ty = TyFn([TyInt], TyInt, EPure, capture.empty_function())
   let p = CParam { sym = 1, ty = TyBool, mode = COwned }
   # #506: `borrow` used to name the fresh closure outside the scope the
   # argument's return unwinds, and rc_module refused the result
@@ -3990,14 +3991,14 @@ fn t_reuse_counts(m: CModule) -> Reuses = {
 }
 
 fn t_rec_fn(tail: CExpr, extra: List[CStmt]) -> CModule = {
-  let rec = TyAdt(7, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
   let p = CParam { sym = 1, ty = rec, mode = COwned }
   # the field read is the last touch of the parameter
   let read = CSLet(2, TyInt, CField(CLocal(1, rec), 7, 0, 0, TyInt))
   rc_module(one_fn([p], rec, CBlock([read] ++ extra, Some(tail), rec)), owned_modes())
 }
 
-fn steal_rec() -> Ty = TyAdt(7, [])
+fn steal_rec() -> Ty = TyAdt(7, [], capture.empty_arguments())
 
 fn steal_dup(sym: Int, owner: Int, idx: Int) -> CStmt =
   CSLet(sym, TyList(TyInt), CDup(CField(CLocal(owner, steal_rec()), 7, 0, idx, TyList(TyInt)), TyList(TyInt)))
@@ -4066,7 +4067,7 @@ test "the checker refuses a steal with no reset and a reset that names a field n
 }
 
 test "a node released before a constructor of its type is reset and handed on" {
-  let rec = TyAdt(7, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
   let m = t_rec_fn(CCtor(7, 0, [CLocal(2, TyInt)], rec), [CSDiscard(CInt(0))])
   assert len(rc_check(m, owned_modes())) == 0
   assert t_reuse_counts(m) == Reuses { resets = 1, reuses = 1 }
@@ -4080,7 +4081,7 @@ test "a node released before a constructor of its type is reset and handed on" {
 test "a constructor field that returns releases the token it would have spent" {
   # `R { a: if c { return w } else { 2 }, b: v.b }` after `v` died: the field
   # runs before the token is spent, so the return drops a token still held
-  let rec = TyAdt(7, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
   let cond = CCall(CDirect("m", "c"), [], TyBool, CNoSite)
   let v = CParam { sym = 1, ty = rec, mode = COwned }
   let w = CParam { sym = 5, ty = rec, mode = COwned }
@@ -4093,8 +4094,8 @@ test "a constructor field that returns releases the token it would have spent" {
 }
 
 test "a node of another type, or a constructor with no fields, is just dropped" {
-  let rec = TyAdt(7, [])
-  let other = TyAdt(8, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
+  let other = TyAdt(8, [], capture.empty_arguments())
   let a = t_rec_fn(CCtor(8, 0, [CInt(1)], other), [])
   assert len(rc_check(a, owned_modes())) == 0
   assert t_reuse_counts(a) == Reuses { resets = 0, reuses = 0 }
@@ -4104,7 +4105,7 @@ test "a node of another type, or a constructor with no fields, is just dropped" 
 }
 
 test "a token an arm does not spend is released on that arm" {
-  let rec = TyAdt(7, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
   let cond = CCall(CDirect("m", "c"), [], TyBool, CNoSite)
   let build = CCtor(7, 0, [CLocal(2, TyInt)], rec)
   let other = CCall(CDirect("m", "other"), [], rec, CNoSite)
@@ -4114,19 +4115,19 @@ test "a token an arm does not spend is released on that arm" {
 }
 
 test "a token made outside a loop is not spent inside it" {
-  let rec = TyAdt(7, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
   let looped = CSLoop(5, CBlock(
     [CSDiscard(CCtor(7, 0, [CLocal(2, TyInt)], rec))],
     Some(CBreak(5)),
     TyNever
   ), None)
-  let m = t_rec_fn(CCtor(8, 0, [CInt(0)], TyAdt(8, [])), [looped])
+  let m = t_rec_fn(CCtor(8, 0, [CInt(0)], TyAdt(8, [], capture.empty_arguments())), [looped])
   assert len(rc_check(m, owned_modes())) == 0
   assert t_reuse_counts(m) == Reuses { resets = 1, reuses = 0 }
 }
 
 test "two dead nodes get a token each only when two constructors follow" {
-  let rec = TyAdt(7, [])
+  let rec = TyAdt(7, [], capture.empty_arguments())
   let p = CParam { sym = 1, ty = rec, mode = COwned }
   let q = CParam { sym = 2, ty = rec, mode = COwned }
   let reads = [

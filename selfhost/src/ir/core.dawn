@@ -35,8 +35,9 @@
 # loops), so flattening to a basic-block CFG would cost both backends work
 # and buy nothing at this stage.
 
+use check/capture
 use check/tast.{TJavaCall, CallSource}
-use check/types.{
+use check/types.{TyCaptured,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyAdt,
   TyVar, TyList, TyMap, TySet, TyArray, TyTuple, TyFn, TyBytes, TyI64Buf, TyF64Buf, TyJava, TyAssoc,
   EPure, EIo, EffVar, ELabeled, fn_arity
@@ -510,20 +511,21 @@ pub type ConstValue =
 ## inside the same declaration, rather than a signal.
 pub fn ty_key(t: Ty) -> String =
   match t {
+    TyCaptured(value, _) -> ty_key(value)
     TyInt -> "Int"
     TyFloat -> "Float"
     TyBool -> "Bool"
     TyString -> "String"
     TyBytes -> "Bytes"
-    TyI64Buf -> "I64Buf"
-    TyF64Buf -> "F64Buf"
+    TyI64Buf(_) -> "I64Buf"
+    TyF64Buf(_) -> "F64Buf"
     TyUnit -> "Unit"
     TyNever -> "Never"
     TyError -> "Error"
-    TyAdt(id, _) -> "Adt${to_string(id)}"
+    TyAdt(id, _, _) -> "Adt${to_string(id)}"
     # the id alone is not enough: two instantiations of one opaque type share
     # it, and an impl at each has to get its own name
-    TyOpaque(id, _, _, _, tgt) -> "Op" ++ to_string(id) ++ "_" ++ ty_key(tgt)
+    TyOpaque(id, _, _, _, tgt, _) -> "Op" ++ to_string(id) ++ "_" ++ ty_key(tgt)
     TyVar(_, id) -> "Var${to_string(id)}"
     # never a key: reduction is eager and projections cannot be impl subjects,
     # so a projection reaching a symbol name is a compiler bug, not a program
@@ -536,7 +538,7 @@ pub fn ty_key(t: Ty) -> String =
     # the *runtime* arity, not the written one: a function value's evidence
     # pack is a parameter of the value, so the name a shape compiles to has to
     # count it. `types.fn_arity` is the one place it is derived.
-    TyFn(_, _, _) -> "Fn${to_string(fn_arity(t))}"
+    TyFn(_, _, _, _) -> "Fn${to_string(fn_arity(t))}"
     TyJava(_, _) -> "Java"
   }
 
@@ -563,7 +565,7 @@ pub fn subject_key(t: Ty) -> String =
     # constructor, so the declared subject `Box[T]` and the instantiated
     # `Box[Int]` are one impl and have to spell one name. The target moves
     # under substitution, so it cannot be part of the spelling.
-    TyOpaque(id, _, _, _, _) -> "Op${to_string(id)}"
+    TyOpaque(id, _, _, _, _, _) -> "Op${to_string(id)}"
     _ -> ty_key(t)
   }
 
@@ -650,7 +652,7 @@ pub fn callee_mode_key(c: CCallee) -> Option[(String, String)] =
 ## same standing: see the note there.
 pub fn ty_key_inst(t: Ty) -> String =
   match t {
-    TyAdt(id, args) -> "Adt" ++ to_string(id) ++ args_key(args)
+    TyAdt(id, args, _) -> "Adt" ++ to_string(id) ++ args_key(args)
     TyTuple(es) -> "Tup" ++ to_string(len(es)) ++ args_key(es)
     TyList(e) -> "List_${ty_key_inst(e)}"
     TyMap(k, v) -> "Map_" ++ ty_key_inst(k) ++ "_" ++ ty_key_inst(v)
@@ -660,9 +662,9 @@ pub fn ty_key_inst(t: Ty) -> String =
     # opaque type with none keeps the spelling `ty_key` already gave it
     # (`args_key([])` is empty) and nothing emitted today is renamed. They
     # cannot be left out: `Phantom[Int]` and `Phantom[String]` share a target.
-    TyOpaque(id, _, _, args, tgt) ->
+    TyOpaque(id, _, _, args, tgt, _) ->
       "Op" ++ to_string(id) ++ "_" ++ ty_key_inst(tgt) ++ args_key(args)
-    TyFn(ps, r, _) -> "Fn" ++ to_string(fn_arity(t)) ++ args_key(ps) ++ "_r" ++ ty_key_inst(r)
+    TyFn(ps, r, _, _) -> "Fn" ++ to_string(fn_arity(t)) ++ args_key(ps) ++ "_r" ++ ty_key_inst(r)
     _ -> ty_key(t)
   }
 
@@ -826,12 +828,12 @@ test "a function type's identity key counts its evidence slot" {
   # written parameters plus one, for every row alike -- which is exactly what
   # makes an eta adapter unnecessary: a row widening on the way into a slot
   # does not change the arity, so there is no crossing to make physical.
-  let pure_fn = TyFn([TyInt], TyBool, EPure)
-  let var_fn = TyFn([TyInt], TyBool, EffVar("e", 1))
+  let pure_fn = TyFn([TyInt], TyBool, EPure, capture.empty_function())
+  let var_fn = TyFn([TyInt], TyBool, EffVar("e", 1), capture.empty_function())
   assert ty_key(pure_fn) == "Fn2"
   assert ty_key(var_fn) == "Fn2"
-  assert ty_key(TyFn([TyInt], TyBool, EIo)) == "Fn2"
-  assert ty_key(TyFn([], TyBool, ELabeled(EPure, [(7, "Ask")]))) == "Fn1"
+  assert ty_key(TyFn([TyInt], TyBool, EIo, capture.empty_function())) == "Fn2"
+  assert ty_key(TyFn([], TyBool, ELabeled(EPure, [(7, "Ask")]), capture.empty_function())) == "Fn1"
   assert ty_key(pure_fn) == ty_key(var_fn)
   # the instantiated spelling counts the same way, and keeps the written
   # parameters (the evidence slot is erased and has nothing to spell)
