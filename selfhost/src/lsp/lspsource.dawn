@@ -1,0 +1,92 @@
+# Library documents keep their source identity independently of transport.
+# The registry owns the exact text and checked tree together: inventing a URI
+# cannot confer std privileges, and no embedded source needs a disk cache.
+
+use std/map
+use std/bytes
+use sha2/sha256
+use driver/stdlib.{StdCtx, std_file_of}
+use driver/analyze.{CheckedMod}
+use front/lexer.{SourceSnapshot, source_snapshot}
+
+## The owner of source positions, independent of filesystem availability.
+pub type SourceId = FileSource(path: String) | BufferSource(uri: String) | BundledSource(bundle: String, module: String)
+
+pub(pkg) type LibraryDoc = { id: SourceId, snapshot: SourceSnapshot, checked: CheckedMod }
+pub(pkg) type Library = { modules: Map[String, LibraryDoc], sources: Map[String, LibraryDoc], uris: Map[String, String] }
+
+## An index key for references, independent of the URI encoding.
+pub(pkg) fn source_key(id: SourceId) -> String =
+  match id {
+    FileSource(p) -> p
+    BufferSource(u) -> u
+    BundledSource(b, m) -> "bundle:${len(b)}:${b}${len(m)}:${m}"
+  }
+
+## The URI of a registered bundled source. File URIs belong to the server's
+## platform-aware path encoder instead.
+pub(pkg) fn bundled_uri(id: SourceId) -> Option[String] =
+  match id {
+    BundledSource(b, m) -> Some("dawn-stdlib:${b}/${m}.dawn")
+    _ -> None
+  }
+
+## Capture one library version. Lengths frame both names and texts before
+## hashing, so neither a delimiter in a comment nor a module boundary aliases
+## another snapshot. Disk sources retain the loader's canonical identity.
+pub(pkg) fn library(std: StdCtx) -> Library = {
+  var digest = sha256.new()
+  for tr in std.srcs {
+    let (mp, text, _) = tr
+    digest = sha256.update(digest, bytes.utf8("${len(mp)}:${mp}${len(text)}:${text}"))
+  }
+  let bundle = sha256.finish(digest)
+  var modules: Map[String, LibraryDoc] = map.empty()
+  var sources: Map[String, LibraryDoc] = map.empty()
+  var uris: Map[String, String] = map.empty()
+  for tr in std.srcs {
+    let (mp, text, m) = tr
+    for row in std.mods {
+      let (name, cx, tm, ct) = row
+      if name == mp {
+        let id = match std_file_of(std, mp) {
+          Some(p) -> FileSource(p)
+          None -> BundledSource(bundle, mp)
+        }
+        let cm = CheckedMod { mod_path = mp, class_name = mp, path = source_key(id), m = m, cx = cx, tm = tm, ct = ct }
+        let doc = LibraryDoc { id = id, snapshot = source_snapshot(text), checked = cm }
+        modules = map.insert(modules, mp, doc)
+        sources = map.insert(sources, source_key(id), doc)
+        match bundled_uri(id) {
+          Some(uri) -> { uris = map.insert(uris, uri, mp) }
+          None -> ()
+        }
+      }
+    }
+  }
+  Library { modules = modules, sources = sources, uris = uris }
+}
+
+## Resolve only an exact registered identity, including its bundle digest.
+pub(pkg) fn library_doc(lib: Library, id: SourceId) -> Option[LibraryDoc] =
+  match map.get(lib.sources, source_key(id)) {
+    Some(doc) -> if doc.id == id { Some(doc) } else { None }
+    None -> None
+  }
+
+## Checked library views carry the registry's identity through program-shaped
+## queries too. Their internal path key is never a filesystem path.
+pub(pkg) fn checked_source(lib: Library, cm: CheckedMod) -> SourceId = {
+  match map.get(lib.modules, cm.mod_path) {
+    Some(doc) -> if cm.path == doc.checked.path { return doc.id }
+    None -> ()
+  }
+  FileSource(cm.path)
+}
+
+## Content reads never parse a caller-supplied module name as authority.
+pub(pkg) fn document_at(lib: Library, uri: String) -> Option[LibraryDoc] =
+  match map.get(lib.uris, uri) {
+    Some(mp) -> map.get(lib.modules, mp)
+    None -> None
+  }

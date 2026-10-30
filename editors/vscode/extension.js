@@ -25,6 +25,7 @@ const fs = require('fs');
 const vscode = require('vscode');
 const { LanguageClient } = require('vscode-languageclient/node');
 const server = require('./server');
+const source = require('./source');
 
 let client;
 let output;
@@ -89,7 +90,7 @@ async function startClient(manifests) {
     'Dawn Language Server',
     { command: resolved.found || resolved.command, args: ['lsp'] },
     {
-      documentSelector: [{ scheme: 'file', language: 'dawn' }],
+      documentSelector: [{ scheme: 'file', language: 'dawn' }, { scheme: source.scheme, language: 'dawn' }],
       synchronize: { fileEvents: manifests },
       outputChannel: output,
       initializationOptions: server.initializationOptions((key, dflt) =>
@@ -97,6 +98,7 @@ async function startClient(manifests) {
     },
   );
   client = c;
+  c.registerFeature(source.capability());
   try {
     await c.start();
   } catch (err) {
@@ -117,6 +119,7 @@ async function restartClient(manifests, why) {
 }
 
 function activate(context) {
+  source.register(vscode, context, () => client);
   output = vscode.window.createOutputChannel('Dawn Language Server');
   context.subscriptions.push(output);
 

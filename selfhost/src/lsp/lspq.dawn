@@ -53,7 +53,8 @@ use check/cx.{ModExports, Cx}
 use check/identity
 use check/tast_positions
 use driver/analyze.{Program, CheckedMod}
-use driver/stdlib.{StdCtx, std_file_of}
+use driver/stdlib.{StdCtx}
+use lsp/lspsource.{SourceId, FileSource, Library, checked_source}
 use ir/interp.{CtOut}
 use ir/core.{CVInt}
 use front/lexer.{slice_cps}
@@ -66,6 +67,8 @@ use lsp/lspinlay.{InlayOpts, Hint, DefaultArg, type_hint, effect_hint, decl_effe
 ## state plus everything needed to resolve names defined elsewhere.
 pub(pkg) type QCx = {
   entry: CheckedMod,
+  source: SourceId,
+  library: Library,
   prog: Program,
   std: StdCtx,
   # mod_path → exports for every module in scope (std + program)
@@ -101,17 +104,15 @@ pub(pkg) fn typed_trees(tm: TModule) -> TypedTrees = {
 
 ## What sits under the cursor: hover text plus an optional definition site.
 ##
-## `def` None = there is no definition to jump to, and `def_path` is only read
-## when `def` is `Some`. `def_path` None then means the analyzed document
-## itself, so nothing defined in another file may leave it None: the two
-## readings are indistinguishable downstream, and `location_of` resolves the
-## second one against the requesting buffer.
+## A definition always carries an explicit source after the query boundary.
+## Inside the walk, an absent source is relative to the entry; builtins carry
+## no definition at all. `find_target` and `walked_resolutions` bind locals.
 pub type Target = {
   lo: Int,
   hi: Int,
   hover: String,
   def: Option[(Int, Int)],
-  def_path: Option[String],
+  def_path: Option[SourceId],
   # the signature `hover` renders, when the target is a callable: what
   # `textDocument/signatureHelp` lays out parameter by parameter
   sig: Option[Sig],
@@ -176,7 +177,14 @@ fn query(qc: QCx, offset: Int) -> Q = {
   q
 }
 
-pub(pkg) fn find_target(qc: QCx, offset: Int) -> Option[Target] = query(qc, offset).best
+pub(pkg) fn find_target(qc: QCx, offset: Int) -> Option[Target] =
+  match query(qc, offset).best {
+    Some(t) -> Some(Target { ..t, def_path = match t.def {
+      Some(_) -> Some(t.def_path.unwrap_or(qc.source))
+      None -> None
+    } })
+    None -> None
+  }
 
 pub(pkg) fn in_for_pattern(qc: QCx, offset: Int) -> Bool = query(qc, offset).in_for_pattern
 
@@ -210,7 +218,7 @@ pub(pkg) fn type_of_span(qc: QCx, lo: Int, hi: Int) -> Option[Ty] = {
 ## knew, at a local's own declaration, that the site alone does not say;
 ## `use_kind`, what it knew about the use itself.
 pub(pkg) type Resolution = {
-  lo: Int, hi: Int, def: (Int, Int), def_path: Option[String], role: LocalRole, use_kind: UseKind
+  lo: Int, hi: Int, def: (Int, Int), def_path: Option[SourceId], role: LocalRole, use_kind: UseKind
 }
 
 ## A local declared at its own name: a parameter, a local `fn`, a mutable
@@ -262,7 +270,7 @@ pub(pkg) fn walked_resolutions(qc: QCx, lo: Int, hi: Int) -> List[Resolution] = 
     let (dlo, dhi) = decl_span(d)
     if dhi >= lo && dlo <= hi { q = visit_decl(qc, q, d) }
   }
-  q.found.unwrap_or(none)
+  map(q.found.unwrap_or(none), r => Resolution { ..r, def_path = Some(r.def_path.unwrap_or(qc.source)) })
 }
 
 ## Where a top-level declaration is written, from its first token to its last.
@@ -872,7 +880,7 @@ fn hint_method_call(
 
 # ---- the offer rule: innermost span containing the offset, later ties win ----
 
-fn offer(q: Q, lo: Int, hi: Int, hover: String, def: Option[(Int, Int)], dp: Option[String]) -> Q =
+fn offer(q: Q, lo: Int, hi: Int, hover: String, def: Option[(Int, Int)], dp: Option[SourceId]) -> Q =
   offer_target(q, Target { lo = lo, hi = hi, hover = hover, def = def, def_path = dp, sig = None, doc = None, expr = None })
 
 ## Can an offer at `lo..hi` become the answer? Only when it holds the offset,
@@ -882,16 +890,15 @@ fn offer(q: Q, lo: Int, hi: Int, hover: String, def: Option[(Int, Int)], dp: Opt
 fn live(q: Q, lo: Int, hi: Int) -> Bool = q.offset >= lo && q.offset < hi
 
 ## A callable's signature, rendered for hover and kept whole for signature help.
-fn offer_sig(qc: QCx, q: Q, lo: Int, hi: Int, s: Sig, def: Option[(Int, Int)], dp: Option[String]) -> Q =
+fn offer_sig(qc: QCx, q: Q, lo: Int, hi: Int, s: Sig, def: Option[(Int, Int)], dp: Option[SourceId]) -> Q =
   offer_target(q, Target {
     lo = lo, hi = hi, hover = if live(q, lo, hi) { render_sig(qc, s) } else { "" }, def = def, def_path = dp,
     sig = Some(s), doc = None, expr = None
   })
 
 ## A declaration resolved to where it is: the jump target and the doc's home.
-## The two are separate because an embedded std module has a text but no file:
-## its declarations offer no jump and still carry their doc.
-type Site = { def: Option[(Int, Int)], dp: Option[String], doc: Option[DocSite] }
+## The source can be a file or a registered immutable library document.
+type Site = { def: Option[(Int, Int)], dp: Option[SourceId], doc: Option[DocSite] }
 
 fn no_site() -> Site = Site { def = None, dp = None, doc = None }
 
@@ -926,7 +933,7 @@ fn offer_target(q: Q, t: Target) -> Q = {
   }
 }
 
-fn no_def() -> (Option[(Int, Int)], Option[String]) = (None, None)
+fn no_def() -> (Option[(Int, Int)], Option[SourceId]) = (None, None)
 
 ## A use of the local `sid` at `lo..hi`: a name read (`x`), or called
 ## (`f(x)`, `local_eval()`). A call used to be answered by the top-level
@@ -1050,22 +1057,20 @@ pub(pkg) fn sig_by_owner(qc: QCx, owner: Option[String], name: String, trait_id:
 ## duplicate-impl diagnostic, so std must not carry one -- and the bundle's own
 ## `dir_modules` record is where the file lives instead.
 ##
-## When the embedded copy supplied the module there is no file, and `jump` is
-## false: the declaration offers no definition rather than `None`. `None` here
-## means "the document being analyzed", which is what makes a local definition
-## resolve against the live buffer; a std module borrowing it hands
-## `location_of` the requesting document's uri and std's offsets, and the reply
-## is a confident range in an unrelated file rather than a missing one. The
-## doc is unaffected: std's text is in `StdCtx.srcs` either way.
-type Holder = { m: Module, def_path: Option[String], jump: Bool, home: DocHome }
+## Every std holder names its registered library source, embedded included.
+type Holder = { m: Module, def_path: Option[SourceId], home: DocHome }
 
 fn holder_by_class(qc: QCx, owner: String) -> Option[Holder] = {
   if owner == qc.entry.class_name {
-    return Some(Holder { m = qc.entry.m, def_path = None, jump = true, home = DocHere })
+    return Some(Holder { m = qc.entry.m, def_path = None, home = DocHere })
   }
   for cm in qc.prog.modules {
     if cm.class_name == owner {
-      return Some(Holder { m = cm.m, def_path = Some(cm.path), jump = true, home = DocFile(cm.path) })
+      let id = checked_source(qc.library, cm)
+      return Some(Holder { m = cm.m, def_path = Some(id), home = match id {
+        FileSource(p) -> DocFile(p)
+        _ -> DocStd(cm.mod_path)
+      } })
     }
   }
   for tr in qc.std.srcs {
@@ -1076,16 +1081,14 @@ fn holder_by_class(qc: QCx, owner: String) -> Option[Holder] = {
 }
 
 fn std_holder(qc: QCx, mp: String, m: Module) -> Holder =
-  match std_file_of(qc.std, mp) {
-    Some(f) -> Holder { m = m, def_path = Some(f), jump = true, home = DocStd(mp) }
-    None -> Holder { m = m, def_path = None, jump = false, home = DocStd(mp) }
-  }
+  Holder { m = m, def_path = match map.get(qc.library.modules, mp) {
+    Some(doc) -> Some(doc.id)
+    None -> None
+  }, home = DocStd(mp) }
 
-## A declaration found in `h`: named at `nlo..nhi`, starting on the line of `lo`.
-fn site_in(h: Holder, nlo: Int, nhi: Int, lo: Int) -> Site = {
-  let doc = Some(DocSite { home = h.home, at = DeclAt(lo) })
-  if h.jump { Site { def = Some((nlo, nhi)), dp = h.def_path, doc = doc } } else { Site { ..no_site(), doc = doc } }
-}
+## A declaration found in a source, retaining its real name span.
+fn site_in(h: Holder, nlo: Int, nhi: Int, lo: Int) -> Site =
+  Site { def = Some((nlo, nhi)), dp = h.def_path, doc = Some(DocSite { home = h.home, at = DeclAt(lo) }) }
 
 ## Definition site of a signature (the Kotlin sig.nameSpan / sig.srcPath).
 fn site_of_sig(qc: QCx, s: Sig) -> Site = {
@@ -1248,7 +1251,11 @@ fn site_of_const_in(qc: QCx, mod_path: String, name: String) -> Site = {
 fn holder_by_path(qc: QCx, mod_path: String) -> Option[Holder] = {
   for cm in qc.prog.modules {
     if cm.mod_path == mod_path {
-      return Some(Holder { m = cm.m, def_path = Some(cm.path), jump = true, home = DocFile(cm.path) })
+      let id = checked_source(qc.library, cm)
+      return Some(Holder { m = cm.m, def_path = Some(id), home = match id {
+        FileSource(p) -> DocFile(p)
+        _ -> DocStd(cm.mod_path)
+      } })
     }
   }
   for tr in qc.std.srcs {
@@ -1719,15 +1726,13 @@ fn module_target(qc: QCx, path: String, lo: Int, hi: Int) -> Target = {
       match e.src_path {
         Some(sp) -> {
           let d0: Option[(Int, Int)] = Some((0, 0))
-          (d0, Some(sp))
+          (d0, Some(FileSource(sp)))
         }
-        # std exports carry no src_path, so the bundle's record answers for
-        # them; an embedded std has no file and offers no jump
         None ->
-          match std_file_of(qc.std, path) {
-            Some(f) -> {
+          match map.get(qc.library.modules, path) {
+            Some(doc) -> {
               let d0: Option[(Int, Int)] = Some((0, 0))
-              (d0, Some(f))
+              (d0, Some(doc.id))
             }
             None -> no_def()
           }

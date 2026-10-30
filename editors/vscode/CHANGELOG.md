@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6
+
+- Open embedded standard-library definitions as read-only source documents,
+  with semantic highlighting, hover and navigation from the same server snapshot.
+
 ## 0.1.5
 
 - Three inlay hint settings, passed to the server as

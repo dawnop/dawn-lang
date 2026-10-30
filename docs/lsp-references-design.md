@@ -162,8 +162,8 @@ T1 验收时按报告 5.1 的测法（与 inlay_full 交错对比）复测。
 - 一个跨度只发它开头的那个名字（字段声明的跨度是 `l: Expr`，`Expr` 另有自己的 token）；`use std/str` 的路径是例外，每段一个 `namespace`。
   同一起点被 offer 两次（记录简写 `{ x }` 既是字段又是局部量）时取最内层的那个，与 hover 的规则一致；token 互不重叠。
 - 没有分析（文档未打开、尚未分析完、所在工作区还在加载）时回 `{"data": []}`，不回错误，也不回 `null`：语法高亮照常，等分析好了客户端下一次请求就有。
-- 没有声明可落的名字不发：内建类型（`Int`、`List`）、内建函数（`len`、`show`）、从内嵌副本读出的 std（没有文件）。它们保留语法着色；
-  大写开头的内建类型被 TextMate 涂成类型，本来就对。
+- 没有源码声明的内建类型（`Int`、`List`）和内建函数（`len`、`show`）保留语法着色。
+  内嵌 std 的声明具有库快照身份，照常参与 full/range 分类、hover 与引用；definition 只向声明支持内容读取的客户端投影虚拟 URI，见 [标准库源文档设计](lsp-std-source-design.md)。
 
 ### T1.4 行为变化与 Emit-Change
 
@@ -296,7 +296,8 @@ CM6 里 mark 与语法高亮的 span 谁包谁取决于优先级，所以每条�
   两个变异（解码改用写死的 T1 顺序；列按码点算）手工证红，这个测试不在 CI 里跑，所以没做成常驻变异体。
 - 端到端：本机用网关接 JVM 的 `dawn lsp`、再接 `scripts/release-native.sh` 编出的 `dawnc lsp` 各跑一次（initialize、didOpen、range、full 被拒），
   同一段 10 行程序两边都是 legend 原样到达、`full` 被关；token 逐项相同，只差一个：JVM 那边 `println` 有一个 `function`+`defaultLibrary`，
-  native 没有。native 的 std 是编进二进制的副本，没有文件可落（T1.3 已写明这类名字不发），所以 Playground 里 std 函数保留语法色，这是预期，不是缺口。
+  native 没有。这是当时将声明位置等同于磁盘路径的限制。标准库源文档契约现已改为按库快照身份分类，
+  embedded 与 disk 的库名字都应有 token；是否协商虚拟内容读取只影响导航，不影响分类与 hover。
 
 ### T2.6 不做的（理由）
 
@@ -332,7 +333,7 @@ CM6 里 mark 与语法高亮的 span 谁包谁取决于优先级，所以每条�
 
 ### R1.2 声明处与 `includeDeclaration`
 
-声明处是「名字就站在它自己的定义位置上」的那个：本文档内（`def_path` 为空），且起点等于定义位置；`let` 的定义位置是整条语句（`Sym.dlo`），
+声明处是「名字就站在它自己的定义位置上」的那个：声明源身份与本文档相同，且起点等于定义位置；`let` 的定义位置是整条语句（`Sym.dlo`），
 它的名字靠 T1 在声明处打的 `LocalRole` 认出来。`context.includeDeclaration` 为真时它在结果里，为假时去掉；声明在别的模块时本来就不在本文档。
 请求没带 `context` 时按假处理（LSP 规定该字段必有，缺了就取保守的一边）。
 
@@ -496,7 +497,7 @@ pub(pkg) type ModRefs = { path: String, text: String, refs: List[Ref], read: Map
 
 ### R2.4 与 R1 相同的部分
 
-`includeDeclaration`：照 R1，声明处只在为真时给出，缺 `context` 按假；声明在别的模块时，「声明处」由那个模块自己的条目判定（它在那里 `def_path` 为空）。
+`includeDeclaration`：照 R1，声明处只在为真时给出，缺 `context` 按假；声明在别的模块时，「声明处」由那个模块自己的条目判定（它在那里携带与模块相同的源身份）。
 Playground：**旧结论（网关不转发 references，与 R1 同样）已于 Playground 客户端分刀的刀 4 改写**（PR #729，见 [play-lsp-client-design.md](play-lsp-client-design.md) §6）：
 网关现在放行 `textDocument/references`，请求重建为本缓冲区的一个位置加 `includeDeclaration`，回包只留 `untitled:` 缓冲区自己的位置（照 definition）、至多 1000 条。
 documentHighlight 仍不转发。Playground 的文档是 `untitled:` 缓冲区，在服务端本来就是 standalone，所以 R2 的工作区引用程序在这里不起作用：
@@ -787,7 +788,7 @@ push-total 16,794 → 16,920 s（+126 s）。`steps.lock.json` 已重录。
 使用位置的 references 找到。值位置继续依照 typed AST 解析为常量。
 
 不新增语法。`Name as Local` 两侧继续共用 `visit_selective_at`，不按名字或
-标准库模块增加例外。无文件站点的内嵌 std 继续允许 hover，但不给出虚构跳转。
+标准库模块增加例外。内嵌 std 通过登记快照提供真实声明跨度与可读取的虚拟跳转；没有源码的内建名仍无定义。
 
 ### S1.3 落点与验收
 
@@ -810,6 +811,22 @@ server 内联测试分别以项目分析器和磁盘/内嵌 std 建立查询上�
 
 ### S1.4 不做的（理由）
 
-- 内嵌 std 函数语义 token：需要独立的数据模型工作，本刀不改变站点身份。
+- 内嵌 std 函数语义 token：S1 当时未处理；后续标准库源文档契约已补齐统一源身份，见 [设计](lsp-std-source-design.md)。
 - 前端语法染色：上下文 `as` 属于高亮器自身，与本次共享解析缺口不同。
 - 全局常量重分类：实际值使用必须保留 readonly variable 分类。
+
+
+## S2 标准库源文档
+
+内嵌和磁盘 std 共享声明源身份、文本快照与检查结果。语义分类与引用不依赖磁盘文件或客户端导航能力；
+普通用户模块的本地名字也在查询出口绑定到明确源身份。库身份来自所选库的登记记录，不从 `std/` 拼写推导。
+workspace 在检查后按 canonical 文件绑定最终 CheckedMod；早期诊断发布使用相同绑定。
+
+VS Code 的只读提供方通过 `dawn/source` 读取 `dawn-stdlib:` 文档，并声明 `experimental.dawnSource`。
+未协商的客户端不接收它无法打开的虚拟 Location；token 和 hover 仍使用相同解析。
+未知快照、未知模块、篡改的虚拟文本均不取得 std 查询视图。磁盘源码仍可编辑并沿用自己的 impl baseline。
+
+真实会话矩阵与能构建的负控由 `scripts/lsp-std-documents.py` 执行，接入已有 std-resolution 门。
+它从用户 definition 返回的 URI 接续读取和 didOpen，覆盖 math/narrow/cursor、类型与值身份、
+full/range、局部及跨库查询、编辑和重开、文件别名、来源负例与外部改名边界。
+实现与不做项见 [标准库源文档设计](lsp-std-source-design.md)。

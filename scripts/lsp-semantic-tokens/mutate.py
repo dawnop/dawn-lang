@@ -29,14 +29,53 @@ MUTATIONS = {
     'drop-selective-value-reference': (QUERY,
         '      q = collect_also(q, imp.lo, imp.hi, site_of_const_in(qc, exp.mod_path, imp.name), ImportValueUse)\n',
         '      q = q\n'),
+    'std-no-bundled-resolutions': (QUERY,
+        'fn offer_target(q: Q, t: Target) -> Q = {\n',
+        'fn offer_target(q: Q, t: Target) -> Q = {\n'
+        '  let unfiled = match t.def_path { Some(FileSource(_)) -> false, Some(_) -> true, None -> false }\n'
+        '  if unfiled && q.found != None { return q }\n'),
+    'std-values-prefer-types': (QUERY,
+        'fn site_of_const_in(qc: QCx, mod_path: String, name: String) -> Site = {\n',
+        'fn site_of_const_in(qc: QCx, mod_path: String, name: String) -> Site = {\n'
+        '  match holder_by_path(qc, mod_path) {\n'
+        '    Some(h) -> { for d in h.m.decls {\n'
+        '      match d { DType(t) -> if t.name == name { return site_in(h, t.nlo, t.nhi, t.lo) }, _ -> () }\n'
+        '    } }\n'
+        '    None -> ()\n'
+        '  }\n'),
+    'std-no-content-registration': ('selfhost/src/lsp/lspsource.dawn',
+        '  match map.get(lib.uris, uri) {\n',
+        '  match map.get(lib.uris, "") {\n'),
+    'std-planned-entry': (SERVER,
+        '        entry_by_uri = checked_entries(ws0.path_by_uri, prog),\n',
+        '        entry_by_uri = entry_by_uri,\n'),
+    'std-forged-source': (SERVER,
+        '  match document_at(st0.library, uri) {\n',
+        '  match map.get(st0.library.modules, "std/cursor") {\n'),
+    'std-wrong-snapshot': (SERVER,
+        '("text", JStr(doc.snapshot.text))',
+        '("text", JStr("# wrong 🎈\\n" ++ doc.snapshot.text))'),
+    'std-builtin-in-buffer': (QUERY,
+        '    Some(t) -> Some(Target { ..t, def_path = match t.def {\n'
+        '      Some(_) -> Some(t.def_path.unwrap_or(qc.source))\n'
+        '      None -> None\n'
+        '    } })\n',
+        '    Some(t) -> Some(Target { ..t, def = Some(t.def.unwrap_or((0, 0))),\n'
+        '      def_path = Some(t.def_path.unwrap_or(qc.source)) })\n'),
+    'std-library-as-file': ('selfhost/src/lsp/lspsource.dawn',
+        '    Some(doc) -> if cm.path == doc.checked.path { return doc.id }\n',
+        '    Some(doc) -> if cm.path == doc.checked.path { return FileSource(cm.path) }\n'),
+    'std-reference-without-source': ('selfhost/src/lsp/lspref.dawn',
+        'r.def_path == def_path && r.def == def\n',
+        'r.def == def\n'),
     # a constant painted as the type its case resembles
     'const-as-type': (LSPTOK,
         '      DConst(_, _, _, _, _, _, nlo, _) -> { ix = map.insert(ix, nlo, kind(T_VARIABLE, M_READONLY)) }\n',
         '      DConst(_, _, _, _, _, _, nlo, _) -> { ix = map.insert(ix, nlo, kind(T_TYPE, 0)) }\n'),
     # a `var` that reads like a `let`
     'drop-mutable': (LSPTOK,
-        '    Some(MutableRole) -> Some(kind(T_VARIABLE, decl + M_MUTABLE))\n',
-        '    Some(MutableRole) -> Some(kind(T_VARIABLE, decl))\n'),
+        '    Some(MutableRole) -> Some(kind(T_VARIABLE, decl + lib + M_MUTABLE))\n',
+        '    Some(MutableRole) -> Some(kind(T_VARIABLE, decl + lib))\n'),
     # a range request answered with every token the walked declarations hold
     'range-unclipped': (LSPTOK,
         'fn in_range(r: Resolution, lo: Int, hi: Int) -> Bool = r.lo >= lo && r.lo < hi\n',

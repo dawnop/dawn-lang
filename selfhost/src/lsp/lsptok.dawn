@@ -16,10 +16,11 @@
 # Only names are sent, never keywords, literals, comments or operators: the
 # grammar colours those correctly already, and the Playground's 256 KiB
 # message cap leaves no room for them (research report §2.4). A name with no
-# declaration behind it (a builtin type or function, std read from the
-# embedded copy) gets no token and keeps its grammar colour.
+# declaration behind it (a builtin type or function) gets no token and keeps
+# its grammar colour. Embedded std declarations retain their source identity.
 
 use std/map
+use lsp/lspsource.{SourceId, source_key, library_doc, checked_source}
 use front/ast.{
   Module, Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DEffect, Param, TypeParamDecl
 }
@@ -77,7 +78,7 @@ pub(pkg) fn semantic_tokens(qc: QCx, lo: Int, hi: Int) -> List[Token] = {
   # each local's role, at its declaration
   var roles: Map[Int, LocalRole] = map.empty()
   for r in rs {
-    if r.role != NoRole && r.def_path == None {
+    if r.role != NoRole && r.def_path == Some(qc.source) {
       let (dlo, _) = r.def
       roles = map.insert(roles, dlo, r.role)
     }
@@ -96,10 +97,12 @@ pub(pkg) fn semantic_tokens(qc: QCx, lo: Int, hi: Int) -> List[Token] = {
     if in_range(r, lo, hi) && not references_only(r) {
       let (dlo, _) = r.def
       var index: Map[Int, Kind] = map.empty()
-      match r.def_path {
-        Some(key) -> {
+      let other: Option[SourceId] = if r.def_path == Some(qc.source) { None } else { r.def_path }
+      match other {
+        Some(id) -> {
+          let key = source_key(id)
           if not map.has(indexes, key) {
-            indexes = map.insert(indexes, key, match module_at(qc, key) {
+            indexes = map.insert(indexes, key, match module_at(qc, id) {
               Some(m) -> decl_index(m.decls)
               None -> map.empty()
             })
@@ -163,14 +166,14 @@ fn in_range(r: Resolution, lo: Int, hi: Int) -> Bool = r.lo >= lo && r.lo < hi
 fn classify(qc: QCx, r: Resolution, index: Map[Int, Kind], roles: Map[Int, LocalRole]) -> Option[Kind] = {
   let (dlo, dhi) = r.def
   let lib = match r.def_path {
-    Some(p) -> if map.has(qc.std.dir_modules, p) { M_DEFAULT_LIBRARY } else { 0 }
+    Some(id) -> match library_doc(qc.library, id) { Some(_) -> M_DEFAULT_LIBRARY, None -> 0 }
     None -> 0
   }
   # a module names its own file at line 0, column 0, a span no name has
-  if dlo == 0 && dhi == 0 && r.def_path != None { return Some(kind(T_NAMESPACE, lib)) }
+  if dlo == 0 && dhi == 0 { return Some(kind(T_NAMESPACE, lib)) }
   # a local's declaration carries its role; a `let`'s site is its statement,
   # so the name is not where the site starts
-  let own = r.def_path == None && (r.lo == dlo || r.role != NoRole)
+  let own = r.def_path == Some(qc.source) && (r.lo == dlo || r.role != NoRole)
   match map.get(index, dlo) {
     Some(k) -> {
       let decl = if own && k.declares { M_DECLARATION } else { 0 }
@@ -178,16 +181,16 @@ fn classify(qc: QCx, r: Resolution, index: Map[Int, Kind], roles: Map[Int, Local
     }
     None -> ()
   }
-  if r.def_path != None { return None }
+  if r.def_path != Some(qc.source) { return None }
   # the rest is declared inside a declaration of this document: a local, or a
   # type parameter, which case tells apart (spec §1)
   let decl = if own { M_DECLARATION } else { 0 }
-  if dlo < len(qc.cps) && is_upper(qc.cps[dlo]) { return Some(kind(T_TYPE_PARAMETER, decl)) }
+  if dlo < len(qc.cps) && is_upper(qc.cps[dlo]) { return Some(kind(T_TYPE_PARAMETER, decl + lib)) }
   match map.get(roles, dlo) {
-    Some(ParamRole) -> Some(kind(T_PARAMETER, decl))
-    Some(FnRole) -> Some(kind(T_FUNCTION, decl))
-    Some(MutableRole) -> Some(kind(T_VARIABLE, decl + M_MUTABLE))
-    _ -> Some(kind(T_VARIABLE, decl))
+    Some(ParamRole) -> Some(kind(T_PARAMETER, decl + lib))
+    Some(FnRole) -> Some(kind(T_FUNCTION, decl + lib))
+    Some(MutableRole) -> Some(kind(T_VARIABLE, decl + lib + M_MUTABLE))
+    _ -> Some(kind(T_VARIABLE, decl + lib))
   }
 }
 
@@ -212,18 +215,12 @@ fn decl_holding(decls: List[Decl], at: Int) -> Option[Int] = {
 
 ## The module a definition site names: the program file at `path`, or the std
 ## module read from it.
-fn module_at(qc: QCx, path: String) -> Option[Module] = {
+fn module_at(qc: QCx, id: SourceId) -> Option[Module] = {
   for cm in qc.prog.modules {
-    if cm.path == path { return Some(cm.m) }
+    if id == checked_source(qc.library, cm) { return Some(cm.m) }
   }
-  match map.get(qc.std.dir_modules, path) {
-    Some(mp) -> {
-      for tr in qc.std.srcs {
-        let (smp, _, m) = tr
-        if smp == mp { return Some(m) }
-      }
-      None
-    }
+  match library_doc(qc.library, id) {
+    Some(doc) -> Some(doc.checked.m)
     None -> None
   }
 }
