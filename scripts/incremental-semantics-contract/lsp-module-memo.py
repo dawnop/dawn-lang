@@ -18,8 +18,9 @@ dealt with the positive among them, not added to every shard as in
 module-memo.py, because here each subject is one `dawn check` plus one
 `dawn test` of selfhost and they cost the same: 65s to 97s each on a runner
 (the per-subject `OK:` timestamps of runs 39053565925 and 38576085599), so
-the eight subjects split 4 + 4 and a positive in both shards would be a
-ninth. A positive-less shard keeps what module-memo.py's shard note lists:
+before the source-snapshot controls, the eight subjects split 4 + 4 and a
+positive in both shards would have been a ninth. A positive-less shard keeps
+what module-memo.py's shard note lists:
 every anchor is applied before anything is built, every mutant must compile,
 and a mutant counts only when its owning assertion is the failure. That the
 assertions are not stuck on FAIL is a property of the tree, shown once per
@@ -55,12 +56,15 @@ def owner_line(verdict, owner):
 
 def check_cli():
     """Exercise the shard flags and the current partitions without a compiler."""
+    group = owned(runpy.run_path(str(HERE / "mutate.py"))["MUTATIONS"], "lsp-module-memo")
+    subjects = len(group) + 1
+    empty_shards, empty_index = str(subjects + 1), str(subjects)
     cases = [
         (['--shards', '0'], 2, 'require --shards >= 1'),
         (['--shards', '2', '--shard', '-1'], 2, 'require --shards >= 1'),
         (['--shards', '2', '--shard', '2'], 2, 'require --shards >= 1'),
-        (['--shards', '9', '--shard', '8'], 2, 'the selected shard has no mutants'),
-        (['--shards', '9', '--check-shards'], 2, 'every shard must contain a mutant'),
+        (['--shards', empty_shards, '--shard', empty_index], 2, 'the selected shard has no mutants'),
+        (['--shards', empty_shards, '--check-shards'], 2, 'every shard must contain a mutant'),
     ]
     for count in [1, 2]:
         cases.append((['--shards', str(count), '--check-shards'], 0, 'unique subjects; disjoint shard sizes'))
