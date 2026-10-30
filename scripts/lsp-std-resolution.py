@@ -197,6 +197,7 @@ def main():
     if failures:
         print("\nlsp-std-resolution: %d assertion(s) failed" % len(failures), file=sys.stderr)
         return 1
+    subprocess.run([sys.executable, "-B", os.path.join(ROOT, "scripts", "lsp-std-documents.py"), "--mutants", "--server", DAWN, "lsp"], check=True)
     print("\nlsp-std-resolution: OK")
     return 0
 

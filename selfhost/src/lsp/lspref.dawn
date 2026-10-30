@@ -27,6 +27,7 @@
 
 use lsp/lspq.{QCx, Resolution, NoRole, AssignUse, PlainUse, PunUse, walked_resolutions, find_target}
 use lsp/lsptok.{name_runs}
+use lsp/lspsource.{SourceId, source_key}
 use std/map
 use std/set
 
@@ -82,7 +83,7 @@ pub(pkg) fn occurrences(qc: QCx, offset: Int, with_decl: Bool) -> List[Occurrenc
 ## Does `r` name the declaration at `def` in `def_path`? By site, which is the
 ## declaration's identity: two declarations never share one, and the spelling
 ## of the name is not consulted.
-fn same_decl(r: Resolution, def_path: Option[String], def: (Int, Int)) -> Bool = r.def_path == def_path && r.def == def
+fn same_decl(r: Resolution, def_path: Option[SourceId], def: (Int, Int)) -> Bool = r.def_path == def_path && r.def == def
 
 ## Where the walk saw a record pun: the start of every span it also resolved
 ## to a field as a pun (`PunUse`). The local's resolution of that span starts
@@ -101,12 +102,12 @@ fn pun_starts(walked: List[Resolution]) -> Set[Int] = {
 ## `r` is from.
 fn occurrence(qc: QCx, r: Resolution, puns: Set[Int]) -> Occurrence = {
   let (dlo, dhi) = r.def
-  let is_module = dlo == 0 && dhi == 0 && r.def_path != None
+  let is_module = dlo == 0 && dhi == 0
   let runs = name_runs(qc.cps, r.lo, r.hi, is_module)
   let (lo, hi) = if len(runs) == 0 { (r.lo, r.hi) } else { runs[len(runs) - 1] }
   # a declaration is its own site; a `let`'s site is its statement, and the
   # walk tags its name with a role instead (`lspq.LocalRole`)
-  let decl = r.def_path == None && r.use_kind == PlainUse && (r.lo == dlo || r.role != NoRole)
+  let decl = r.def_path == Some(qc.source) && r.use_kind == PlainUse && (r.lo == dlo || r.role != NoRole)
   let pun = if r.use_kind == PunUse { PunField } else if set.has(puns, r.lo) { PunLocal } else { NotPun }
   Occurrence { lo = lo, hi = hi, decl = decl, write = decl || r.use_kind == AssignUse, pun = pun }
 }
@@ -139,7 +140,10 @@ pub(pkg) fn mod_refs(qc: QCx, path: String, text: String, ident: Map[String, Str
     let o = occurrence(qc, r, puns)
     let at = match r.def_path {
       None -> path
-      Some(p) -> map.get(ident, p).unwrap_or(p)
+      Some(p) -> {
+        let key = source_key(p)
+        if p == qc.source { path } else { map.get(ident, key).unwrap_or(key) }
+      }
     }
     if at != path {
       match map.get(texts, at) {

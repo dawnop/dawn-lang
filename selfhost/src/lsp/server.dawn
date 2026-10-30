@@ -38,9 +38,13 @@ use std/memfs
 use compiler_plan/envmem
 use ir/interp.{CtOpts, ct_default, ct_hover}
 use lsp/lspeval.{with_value, with_default_values}
+use lsp/lspsource.{
+  SourceId, FileSource, BufferSource, Library, library, library_doc,
+  document_at, bundled_uri, source_key, checked_source
+}
 use check/jsig.{Jsig, JsigLease, jsig_refused_lease}
 use driver/stdlib.{
-  StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice, std_load_error_text, std_file_of
+  StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice, std_load_error_text
 }
 use check/checker.{exports_of, visible_bins}
 use check/cx.{ModExports, Cx, cx_new, package_of, exports_seen_by}
@@ -613,9 +617,40 @@ fn analysis_of(st: LspState, d: Doc) -> Option[Analysis] =
 fn doc_qcx(st: LspState, d: Doc, analysis: Analysis) -> Option[QCx] = {
   let entry = list.find(analysis.prog.modules, cm => cm.mod_path == analysis.entry)
   match entry {
-    Some(e) -> Some(module_qcx(st, analysis.prog, program_exports(st, analysis.prog), e, d.view.cps))
+    Some(e) -> Some(QCx { ..module_qcx(st, analysis.prog, program_exports(st, analysis.prog), e, d.view.cps), source = doc_source_id(st, d) })
     None -> None
   }
+}
+
+## Bind a document to the source that owns its analysis, never a module name
+## inferred from the URI spelling.
+fn doc_source_id(st: LspState, d: Doc) -> SourceId =
+  match d.canonical_path {
+    Some(p) -> FileSource(p)
+    None -> match document_at(st.library, d.uri) {
+      Some(src) -> src.id
+      None -> BufferSource(d.uri)
+    }
+  }
+
+## Immutable std reading reuses the checked library, including its package
+## visibility and intrinsic scope. It never enters the user module loader.
+fn library_program(st: LspState) -> Program =
+  Program { modules = map(map.values(st.library.modules), doc => doc.checked), diags = [],
+    decl_spans = map.empty(), ct_world = st.std.ct_world }
+
+## The checker determines the final module identity. Both partial diagnostic
+## publication and the finished workspace bind by the same canonical file.
+fn checked_entries(paths: Map[String, String], prog: Program) -> Map[String, String] !Fs !Env = {
+  var out: Map[String, String] = map.empty()
+  for cm in prog.modules {
+    let id = canon_identity(cm.path)
+    for pr in map.entries(paths) {
+      let (uri, path) = pr
+      if path == id { out = map.insert(out, uri, cm.mod_path) }
+    }
+  }
+  out
 }
 
 ## Every export surface in the program, std's and each module's own, before
@@ -644,6 +679,8 @@ fn module_qcx(st: LspState, prog: Program, env: Map[String, ModExports], e: Chec
     entry = with_import_tables(e, seen),
     prog = prog,
     std = st.std,
+    source = checked_source(st.library, e),
+    library = st.library,
     exports_env = seen,
     bins = visible_bins(st.bins, e.cx),
     typed = typed_trees(e.tm),
@@ -717,6 +754,8 @@ type LifecycleGate =
 
 type LspState = {
   std: StdCtx,
+  library: Library,
+  source_documents: Bool,
   bins: Map[String, Sig],
   docs: Map[String, Doc],
   workspaces: Map[String, WorkspaceSlot],
@@ -965,6 +1004,8 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
   let standalone = host.standalone()
   var st = LspState {
     std = std,
+    library = library(std),
+    source_documents = false,
     bins = builtins(),
     docs = map.empty(),
     workspaces = map.empty(),
@@ -1638,6 +1679,7 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
   if method == "initialize" {
     st = LspState {
       ..st,
+      source_documents = get_or_null(get_or_null(get_or_null(params, "capabilities"), "experimental"), "dawnSource") == JBool(true),
       watch_manifests = client_watches_files(params),
       related_information = client_relates_diagnostics(params),
       inlay = inlay_opts_of(params),
@@ -1645,6 +1687,7 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     }
     respond(id, jobj([("capabilities", jobj([
       ("textDocumentSync", JInt(1)),
+      ("experimental", jobj([("dawnSource", JBool(true))])),
       ("hoverProvider", JBool(true)),
       ("completionProvider", jobj([
         ("resolveProvider", JBool(true)),
@@ -1663,6 +1706,11 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
       ("inlayHintProvider", JBool(true)),
       ("semanticTokensProvider", semantic_tokens_provider())
     ])), ("serverInfo", server_info())]))
+  } else if method == "dawn/source" {
+    match document_at(st.library, ostr(params, "uri")) {
+      Some(doc) -> respond(id, jobj([("uri", JStr(ostr(params, "uri"))), ("text", JStr(doc.snapshot.text)), ("languageId", JStr("dawn"))]))
+      None -> respond_error(id, -32602, "unknown library source document")
+    }
   } else if method == "initialized" {
     if st.watch_manifests { send(manifest_watch_registration()) }
   } else if method == "textDocument/didOpen" || method == "textDocument/didChange" {
@@ -2162,8 +2210,10 @@ fn publish_placed(
   var sent = sent0
   var uris: List[String] = []
   var paths: Set[String] = set.empty()
+  let bound_entries = checked_entries(ws0.path_by_uri, part)
+  let placed_name = if len(part.modules) > 0 { part.modules[len(part.modules) - 1].mod_path } else { mod_path }
   for uri in sort(map.keys(entry_by_uri)) {
-    if map.get(entry_by_uri, uri) == Some(mod_path) {
+    if map.get(bound_entries, uri) == Some(placed_name) {
       uris = uris ++ [uri]
       paths = set.insert(paths, map.get(ws0.path_by_uri, uri).expect("workspace path"))
     }
@@ -2247,7 +2297,7 @@ fn rebuild_snapshot(
         cache = update.session,
         analysis_stats = Some(update.stats),
         parses = retained_parses(st, reusing.parses),
-        entry_by_uri = entry_by_uri,
+        entry_by_uri = checked_entries(ws0.path_by_uri, prog),
         diag_by_uri = with_walk_diags(st, ws0, diagnostics_of_program(st, ws0.path_by_uri, prog)),
         # the references program is brought up to date by the next request
         # that reads it, not here: this is the path every keystroke takes
@@ -2457,7 +2507,28 @@ fn standalone_doc(
   }
 }
 
-fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !Env !Console !io =
+## Only the registered immutable text can open a privileged library view.
+fn open_library_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Env !io = {
+  match document_at(st0.library, uri) {
+    Some(src) -> if text == src.snapshot.text {
+      let prog = library_program(st0)
+      let d = Doc { uri = uri, version = version, path = None, canonical_path = None,
+        text = text, view = src.snapshot.view, ls = src.snapshot.line_starts,
+        analysis = Standalone(prog, src.checked.mod_path, None) }
+      let st = LspState { ..st0, docs = map.insert(st0.docs, uri, d) }
+      publish_uris(st, set.from([uri]))
+      return st
+    }
+    None -> ()
+  }
+  # A forged identity or modified immutable text cannot retain old analysis.
+  let st = LspState { ..st0, docs = map.remove(st0.docs, uri) }
+  publish_one(st, uri, [])
+  return st
+}
+
+fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !Env !Console !io = {
+  if str.starts_with(uri, "dawn-stdlib:") { return open_library_doc(st0, uri, text, version) }
   match uri_to_path(uri) {
     None -> {
       let no_path: Option[String] = None
@@ -2469,8 +2540,8 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
     }
     Some(path) -> {
       let canonical_path = canon_identity(path)
-      let plan = project_plan(source.SourceFile(path))
-      match project_module_path(plan, path) {
+      let plan = project_plan(source.SourceFile(canonical_path))
+      match project_module_path(plan, canonical_path) {
         None -> {
           let modules: Option[Map[String, String]] = Some(plan.modules.by_use)
           let d = standalone_doc(
@@ -2528,6 +2599,7 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
       }
     }
   }
+}
 
 ## Install all position products together, before any workspace rebuild or
 ## early diagnostic can observe the new revision.
@@ -2536,7 +2608,8 @@ fn revised_doc(old: Doc, text: String, version: Int) -> Doc = {
   Doc { ..old, version = version, text = text, view = snapshot.view, ls = snapshot.line_starts }
 }
 
-fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> LspState !Fs !Env !io =
+fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> LspState !Fs !Env !io = {
+  if str.starts_with(old.uri, "dawn-stdlib:") { return open_library_doc(st0, old.uri, text, version) }
   match old.analysis {
     Standalone(_, _, modules) -> {
       let source_path = match old.path {
@@ -2576,6 +2649,7 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
       install_workspace_after(st, identity, slot, affected, sent)
     }
   }
+}
 
 fn update_doc(st: LspState, uri: String, text: String, version: Int) -> LspState !Fs !Proc !Env !Console !io =
   match map.get(st.docs, uri) {
@@ -3133,9 +3207,10 @@ fn unloaded_doc(
     Some(f) -> f
     None -> return (None, st)
   }
-  let (key, text) = match def_source(st, d, analysis.workspace_key, analysis.definition_root, Some(file)) {
+  let (key, text) = match def_source(st, d, analysis.workspace_key, analysis.definition_root, Some(FileSource(file))) {
     Some(InBuffer(d2)) -> ("doc ${d2.uri}", d2.text)
     Some(OnDisk(p, t)) -> ("file ${p}", t)
+    Some(InLibrary(u, snap)) -> (u, snap.text)
     None -> return (None, st)
   }
   let (m, _) = source_parser.parse_module(text)
@@ -3384,7 +3459,10 @@ fn workspace_references(
   let own = map.get(ident, entry.path).expect("the requesting module's identity")
   let target = match t.def_path {
     None -> own
-    Some(p) -> map.get(ident, p).unwrap_or(p)
+    Some(p) -> {
+      let key = source_key(p)
+      map.get(ident, key).unwrap_or(key)
+    }
   }
   var found: List[Found] = []
   for o in occurrences(qc, offset, with_decl) {
@@ -3546,7 +3624,7 @@ fn rename_start(st: LspState, d: Doc, offset: Int) -> (Result[RenameStart, Strin
     Some(e) -> e
     None -> return (Err("this document has no analysis to rename in"), kept)
   }
-  let qc = module_qcx(st, prog, program_exports(st, prog), entry, d.view.cps)
+  let qc = QCx { ..module_qcx(st, prog, program_exports(st, prog), entry, d.view.cps), source = doc_source_id(st, d) }
   let t = match find_target(qc, offset) {
     Some(t) -> t
     None -> return (Err("there is no name here to rename"), kept)
@@ -3574,7 +3652,10 @@ fn rename_start(st: LspState, d: Doc, offset: Int) -> (Result[RenameStart, Strin
   let own = map.get(ident, entry.path).expect("the requesting module's identity")
   let tpath = match t.def_path {
     None -> own
-    Some(p) -> map.get(ident, p).unwrap_or(p)
+    Some(p) -> {
+      let key = source_key(p)
+      map.get(ident, key).unwrap_or(key)
+    }
   }
   let (dlo, dhi) = def
   if dlo == 0 && dhi == 0 && t.def_path != None {
@@ -3648,7 +3729,7 @@ fn local_rename_start(st: LspState, d: Doc, analysis: Analysis, offset: Int) -> 
     Some(e) -> e
     None -> return Err("this document has no analysis to rename in")
   }
-  let qc = module_qcx(st, prog, program_exports(st, prog), entry, d.view.cps)
+  let qc = QCx { ..module_qcx(st, prog, program_exports(st, prog), entry, d.view.cps), source = doc_source_id(st, d) }
   let t = match find_target(qc, offset) {
     Some(t) -> t
     None -> return Err("there is no name here to rename")
@@ -3665,8 +3746,8 @@ fn local_rename_start(st: LspState, d: Doc, analysis: Analysis, offset: Int) -> 
   if name_class(old) == Err("`${old}` is not a name") { return Err("there is no name here to rename") }
   let (dlo, dhi) = def
   let own_decl = match t.def_path {
-    None -> true
-    Some(p) -> p == entry.path
+    None -> false
+    Some(p) -> p == qc.source
   }
   if dlo == 0 && dhi == 0 && t.def_path != None {
     return Err("`${old}` names a module; a module is renamed by moving its file")
@@ -3682,7 +3763,7 @@ fn local_rename_start(st: LspState, d: Doc, analysis: Analysis, offset: Int) -> 
   if len(prog.diags) > 0 {
     return Err("`${entry.mod_path}` has errors; rename reads every name, so fix them first")
   }
-  let tpath = if own_decl { d.uri } else { t.def_path.expect("a declaration path") }
+  let tpath = if own_decl { d.uri } else { source_key(t.def_path.expect("a declaration source")) }
   Ok(LocalRename {
     analysis = analysis, entry = entry, qc = qc, target = Key { path = tpath, def = def },
     old = old, lo = here.lo, hi = here.hi, as_name = as_name
@@ -3988,8 +4069,8 @@ fn handle_rename(st: LspState, params: Json) -> (Result[Json, String], LspState)
   (Ok(jobj([("changes", JObj(changes))])), st1)
 }
 
-## Resolve a definition site to a Location: a None def_path (or one naming the
-## requesting document) maps through the live buffer; another file maps
+## Resolve a definition site to a Location: the requesting source maps
+## through the live buffer; another file maps
 ## through a live buffer only when it belongs to the requesting source root,
 ## else the text on disk. The lookup key is never interpreted as a path, and a
 ## standalone analysis never borrows another document's world.
@@ -4007,7 +4088,7 @@ fn location_of(
   d: Doc,
   workspace_key: Option[String],
   definition_root: Option[String],
-  def_path: Option[String],
+  def_path: Option[SourceId],
   lo: Int,
   hi: Int
 ) -> Option[Json] !Fs !Env =
@@ -4018,12 +4099,13 @@ fn location_of(
         ("uri", JStr(path_to_uri(path))),
         ("range", jrange(view_of(text), line_starts_of(text), lo, hi))
       ]))
+    Some(InLibrary(uri, snap)) -> Some(jobj([("uri", JStr(uri)), ("range", jrange(snap.view, snap.line_starts, lo, hi))]))
     None -> None
   }
 
 ## Where the text of a definition's file is read: a live buffer, or the file
 ## on disk at its canonical path.
-type DefSource = InBuffer(d: Doc) | OnDisk(path: String, text: String)
+type DefSource = InBuffer(d: Doc) | OnDisk(path: String, text: String) | InLibrary(uri: String, snapshot: SourceSnapshot)
 
 ## The one lookup behind a definition's location and a hover's doc, so the two
 ## never read different texts for the same declaration (the rule is the one
@@ -4033,19 +4115,22 @@ fn def_source(
   d: Doc,
   workspace_key: Option[String],
   definition_root: Option[String],
-  def_path: Option[String]
+  def_path: Option[SourceId]
 ) -> Option[DefSource] !Fs !Env = {
-  let same = match def_path {
-    None -> true
-    Some(dp) ->
-      match d.canonical_path {
-        Some(p) -> canon_identity(dp) == p
-        None -> false
-      }
-  }
+  let same = def_path == Some(doc_source_id(st, d))
   if same { return Some(InBuffer(d)) }
   let dp = match def_path {
-    Some(p) -> p
+    Some(FileSource(p)) -> p
+    Some(id) -> {
+      if not st.source_documents { return None }
+      match library_doc(st.library, id) {
+        Some(doc) -> match bundled_uri(doc.id) {
+          Some(uri) -> return Some(InLibrary(uri, doc.snapshot))
+          None -> return None
+        }
+        None -> return None
+      }
+    }
     None -> return None
   }
   let dc = canon_identity(dp)
@@ -4089,18 +4174,15 @@ fn target_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> (
 fn site_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, site: DocSite) -> (Option[String], LspState) !Fs !Env = {
   let found: Option[(String, String)] = match site.home {
     DocHere -> Some(("doc ${d.uri}", d.text))
-    DocStd(mp) -> {
-      var hit: Option[(String, String)] = None
-      for tr in qc.std.srcs {
-        let (smp, stext, _) = tr
-        if smp == mp && hit == None { hit = Some(("std ${mp}", stext)) }
-      }
-      hit
+    DocStd(mp) -> match map.get(qc.library.modules, mp) {
+      Some(src) -> Some((source_key(src.id), src.snapshot.text))
+      None -> None
     }
     DocFile(path) ->
-      match def_source(st, d, analysis.workspace_key, analysis.definition_root, Some(path)) {
+      match def_source(st, d, analysis.workspace_key, analysis.definition_root, Some(FileSource(path))) {
         Some(InBuffer(d2)) -> Some(("doc ${d2.uri}", d2.text))
         Some(OnDisk(p, text)) -> Some(("file ${p}", text))
+        Some(InLibrary(u, snap)) -> Some((u, snap.text))
         None -> None
       }
   }
@@ -4162,17 +4244,17 @@ fn linked_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, home: DocHome, 
     if map.has(to, l.text) { continue }
     match resolve_link(sc, mods, l.text) {
       Ok(t) -> {
-        let def_path: Option[Option[String]] =
+        let def_path: Option[Option[SourceId]] =
           if t.module == qc.entry.mod_path {
-            Some(None)
+            Some(Some(qc.source))
           } else {
-            var found: Option[Option[String]] = None
+            var found: Option[Option[SourceId]] = None
             for cm in qc.prog.modules {
-              if cm.mod_path == t.module && found == None { found = Some(Some(cm.path)) }
+              if cm.mod_path == t.module && found == None { found = Some(Some(FileSource(cm.path))) }
             }
             if found == None && t.module != "" {
-              match std_file_of(qc.std, t.module) {
-                Some(f) -> { found = Some(Some(f)) }
+              match map.get(st.library.modules, t.module) {
+                Some(doc) -> { found = Some(Some(doc.id)) }
                 None -> ()
               }
             }
@@ -4189,6 +4271,10 @@ fn linked_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, home: DocHome, 
               Some(OnDisk(path, text)) -> {
                 let (line, ch) = lsp_position(view_of(text), line_starts_of(text), lo)
                 to = map.insert(to, l.text, "${path_to_uri(path)}#L${line + 1},${ch + 1}")
+              }
+              Some(InLibrary(uri, snap)) -> {
+                let (line, ch) = lsp_position(snap.view, snap.line_starts, lo)
+                to = map.insert(to, l.text, "${uri}#L${line + 1},${ch + 1}")
               }
               None -> ()
             }
@@ -4543,6 +4629,8 @@ test "a bundled std buffer keeps its std identity through the document seam" {
     let no_ws: Map[String, WorkspaceSlot] = map.empty()
     let st = LspState {
       std = std,
+      library = library(std),
+      source_documents = false,
       bins = builtins(),
       docs = no_docs,
       workspaces = no_ws,
@@ -4644,6 +4732,8 @@ fn def_probe_state(std: StdCtx) -> LspState = {
   let no_ws: Map[String, WorkspaceSlot] = map.empty()
   LspState {
     std = std,
+    library = library(std),
+    source_documents = false,
     bins = builtins(),
     docs = no_docs,
     workspaces = no_ws,
@@ -4661,6 +4751,35 @@ fn def_probe_state(std: StdCtx) -> LspState = {
     inlay = default_inlay_opts(),
     default_item_data = false
   }
+}
+
+test "library snapshots isolate identical module names and their UTF-16 text" {
+  io.with_fs_real(() => no_host(() => {
+    let root = "/tmp/dawn-selfhost-lsp-def/source-snapshots"
+    let _ = io.mkdirs(root)
+    def_probe_put("${root}/modules.txt", "snapshot\n")
+    let first = "## First.\npub fn echo(x: String) -> String = x\n"
+    let second = "## 中文🎈\npub fn echo(x: String) -> String = \"🎈\" ++ x\n"
+    let no_files: Map[String, String] = map.empty()
+    def_probe_put("${root}/snapshot.dawn", first)
+    let std1 = match load_std(root) { Ok(sc) -> sc, Err(e) -> panic(std_load_error_text(e)) }
+    let lib1 = library(StdCtx { ..std1, dir = None, dir_modules = no_files })
+    def_probe_put("${root}/snapshot.dawn", second)
+    let std2 = match load_std(root) { Ok(sc) -> sc, Err(e) -> panic(std_load_error_text(e)) }
+    let lib2 = library(StdCtx { ..std2, dir = None, dir_modules = no_files })
+    let doc1 = map.get(lib1.modules, "std/snapshot").expect("first source")
+    let doc2 = map.get(lib2.modules, "std/snapshot").expect("second source")
+    assert doc1.id != doc2.id
+    let uri1 = bundled_uri(doc1.id).expect("first URI")
+    match document_at(lib2, uri1) {
+      Some(_) -> panic("a different snapshot accepted the old URI")
+      None -> ()
+    }
+    assert doc1.snapshot.text == first && doc2.snapshot.text == second
+    let at = probe_offset(second, " ++ x", 4)
+    let (line, col) = lsp_position(doc2.snapshot.view, doc2.snapshot.line_starts, at)
+    assert line == 1 && col == 43
+  }))
 }
 
 test "LSP analysis configuration keeps legacy defaults and rejects negative limits" {
@@ -5160,7 +5279,7 @@ test "selective aliases resolve both spellings and keep type and value identitie
   })))
 }
 
-test "selective narrow witnesses prefer type declarations and keep embedded navigation absent" {
+test "selective narrow witnesses keep type identity in disk and embedded sources" {
   io.with_fs_real(() => no_host(() => {
     let disk = std_for_probe()
     let embedded = match load_std("/tmp/dawn-selfhost-lsp-def/no-selective-std") {
@@ -5189,8 +5308,8 @@ test "selective narrow witnesses prefer type declarations and keep embedded navi
         assert str.contains(target.hover, "opaque type " ++ name)
         assert str.contains(target.hover, "const " ++ name ++ ": Dtype[" ++ name ++ "]")
         if std.dir == None {
-          assert target.def == None
-          assert len(filter(tokens, t => t.lo == probe_offset(text, needle, skip))) == 0
+          assert target.def != None
+          assert len(filter(tokens, t => t.lo == probe_offset(text, needle, skip))) == 1
         }
         else {
           let (lo, hi) = def_probe_span(target, "the narrow type")
@@ -5234,8 +5353,8 @@ test "a definition in std names std's file and points at the declaration" {
 
     let t = def_probe_at(st, d, text, "list.reverse", 5)
     let dp = match t.def_path {
-      Some(p) -> p
-      None -> panic("a definition in std must name std's file")
+      Some(FileSource(p)) -> p
+      _ -> panic("a definition in std must name std's file")
     }
     assert dp == canon_identity("std/list.dawn")
 
@@ -5263,11 +5382,11 @@ test "a definition in std names std's file and points at the declaration" {
     # ModExports.src_path -- and std modules are checked with no src_path on
     # purpose, so the bundle's own record is the only thing that can answer.
     let u = def_probe_at(st, d, text, "std/list", 0)
-    assert u.def_path == Some(canon_identity("std/list.dawn"))
+    assert u.def_path == Some(FileSource(canon_identity("std/list.dawn")))
   }))
 }
 
-test "an embedded std offers no definition instead of one in the wrong file" {
+test "an embedded std keeps a source site and negotiates readable locations" {
   io.with_fs_real(() => no_host(() => {
     # A released toolchain in a project with no std directory: the embedded copy
     # answers, and there is no file on disk to jump into. The honest reply is no
@@ -5284,21 +5403,22 @@ test "an embedded std offers no definition instead of one in the wrong file" {
     let d = def_probe_doc(st, text)
 
     let t = def_probe_at(st, d, text, "list.reverse", 5)
-    match t.def {
-      Some(_) -> panic("an embedded std module has no file to point into")
-      None -> ()
-    }
-    # `handle_definition` replies [] on a None def, so location_of is never
-    # reached and cannot invent a range.
+    let (lo, hi) = def_probe_span(t, "list.reverse")
+    let id = t.def_path.expect("embedded source identity")
+    let src = library_doc(st.library, id).expect("registered source")
+    assert slice_cps(src.snapshot.view.cps, lo, hi) == "reverse"
+    let nokey: Option[String] = None
+    assert location_of(st, d, nokey, nokey, t.def_path, lo, hi) == None
+    let capable = LspState { ..st, source_documents = true }
+    let loc = location_of(capable, d, nokey, nokey, t.def_path, lo, hi).expect("readable source")
+    assert ostr(loc, "uri") == bundled_uri(id).expect("bundled URI")
 
-    # What must survive: hover travels independently of def/def_path, and losing
-    # the jump must not cost the text.
     assert str.contains(t.hover, "reverse")
     assert str.contains(t.hover, "List[T]")
 
     # local definitions are unaffected by which half of std answered
     let l = def_probe_at(st, d, text, "helper(xs", 0)
-    assert l.def_path == absent
+    assert l.def_path == Some(doc_source_id(st, d))
     let (llo, lhi) = def_probe_span(l, "helper")
     assert str.slice(text, llo, lhi) == "helper"
   }))
@@ -5332,8 +5452,8 @@ test "a definition of a std constant names std's file too" {
 
     let t = def_probe_at(st, d, text, "PROBE_LIMIT + 1", 0)
     let dp = match t.def_path {
-      Some(p) -> p
-      None -> panic("a std constant must name std's file")
+      Some(FileSource(p)) -> p
+      _ -> panic("a std constant must name std's file")
     }
     assert dp == canon_identity("${root}/constprobe.dawn")
     let (lo, hi) = def_probe_span(t, "PROBE_LIMIT")
@@ -5388,8 +5508,8 @@ test "a type and a constant spelled alike are told apart by position" {
       Ok(x) -> x
       Err(e) -> panic("probe std module: ${e.message}")
     }
-    assert as_type.def_path == Some(dec)
-    assert as_value.def_path == Some(dec)
+    assert as_type.def_path == Some(FileSource(dec))
+    assert as_value.def_path == Some(FileSource(dec))
     let (tlo, thi) = def_probe_span(as_type, "the type")
     assert str.slice(src, tlo, thi) == "W8"
     assert tlo == len("pub opaque type ")
@@ -5403,9 +5523,7 @@ test "a local definition still resolves against the requesting document" {
   # the real handler stays: `load_std("std")` names a relative directory, so
   # the working directory this runs in is one of the inputs.
   io.with_fs_real(() => io.with_env_real(() => {
-    # The contract the std fix leans on, from the other side. `def_path` None has
-    # to keep meaning "this buffer" -- that is what makes a definition in the file
-    # being edited resolve against the live text rather than whatever is on disk.
+    # A local definition carries this document identity and reads its live text.
     let std = match load_std("std") {
       Ok(sc) -> sc
       Err(e) -> panic("std: ${std_load_error_text(e)}")
@@ -5416,7 +5534,7 @@ test "a local definition still resolves against the requesting document" {
 
     let t = def_probe_at(st, d, text, "helper(xs", 0)
     let absent: Option[String] = None
-    assert t.def_path == absent
+    assert t.def_path == Some(doc_source_id(st, d))
     let (lo, hi) = def_probe_span(t, "helper")
     assert str.slice(text, lo, hi) == "helper"
 
@@ -5487,7 +5605,7 @@ test "a handler state cell answers at every spelling of it" {
     assert decl.hover == "var acc: List[Int]"
     let (dlo, dhi) = def_probe_span(decl, "the cell declaration")
     assert str.slice(text, dlo, dhi) == "acc"
-    assert decl.def_path == absent
+    assert decl.def_path == Some(doc_source_id(st, d))
 
     # the write, whose left-hand side is a name the author wrote and the checker
     # did not keep: same text, and the jump lands on the declaration
@@ -5571,15 +5689,15 @@ test "a handler arm's operation name answers as the operation it implements" {
     let (alo, ahi) = def_probe_span(arm, "the arm of a local effect")
     assert (alo, ahi) == def_probe_span(call, "the operation call")
     assert str.slice(text, alo, ahi) == "ask"
-    assert arm.def_path == absent
+    assert arm.def_path == Some(doc_source_id(st, d))
 
     # a std effect under a renamed import: the signature names the effect by
     # its own name, and the jump lands in std's file, on the operation
     let out = def_probe_at(st, d, text, "console_println(s) =>", 3)
     assert out.hover == "fn console_println(s: String) -> Unit !Console"
     let dp = match out.def_path {
-      Some(p) -> p
-      None -> panic("an arm of a std effect must name std's file")
+      Some(FileSource(p)) -> p
+      _ -> panic("an arm of a std effect must name std's file")
     }
     assert dp == canon_identity("std/io.dawn")
     let (olo, ohi) = def_probe_span(out, "the arm of a std effect")
@@ -5634,7 +5752,7 @@ test "a handler arm answers for qualified and imported effects, with the operati
     assert hover_probe_at(st, d, text, "probe_at(n) =>", 0) == call
     assert str.ends_with(call, "\n```\n\n---\n\nAsks for the value at `n`.")
     let q = def_probe_at(st, d, text, "probe_at(n) =>", 0)
-    assert q.def_path == Some(file)
+    assert q.def_path == Some(FileSource(file))
     let (qlo, qhi) = def_probe_span(q, "the arm of a qualified effect")
     let src = match io.read_file(file) {
       Ok(s) -> s
@@ -5935,7 +6053,7 @@ test "an operator answers with the impl that carries it out, or the primitive" {
     # an impl of the module's own type: the jump is its method, in this buffer
     let own = def_probe_at(st, d, text, "p + q", 2)
     assert own.hover == "V\n+ via impl Add[V]: fn(V, V) -> V"
-    assert own.def_path == None
+    assert own.def_path == Some(doc_source_id(st, d))
     let (lo, hi) = def_probe_span(own, "the impl method")
     assert str.slice(text, lo, hi) == "add"
     assert lo == probe_offset(text, "fn add", 3)
@@ -5943,8 +6061,8 @@ test "an operator answers with the impl that carries it out, or the primitive" {
     let lib = def_probe_at(st, d, text, "x + y", 2)
     assert lib.hover == "F32\n+ via impl Add[F32]: fn(F32, F32) -> F32"
     let dp = match lib.def_path {
-      Some(p) -> p
-      None -> panic("an impl in std must name std's file")
+      Some(FileSource(p)) -> p
+      _ -> panic("an impl in std must name std's file")
     }
     assert dp == canon_identity("std/narrow.dawn")
     let src = match io.read_file(dp) {
@@ -6481,8 +6599,8 @@ test "hover reads a std declaration's doc from std's text, file or embedded" {
     assert hover_probe_at(st, d, text, "REACH) +", 0) == reach
     assert hover_probe_at(st, d, text, "bare(1)", 1) == "```dawn\nfn bare(n: Int) -> Int\n```"
 
-    # The embedded copy has no file, so `reverse` offers no definition (the
-    # test above this section); its doc is in `StdCtx.srcs` all the same.
+    # Embedded declarations keep their real source site and doc; transport is
+    # negotiated separately from resolution.
     let emb = match load_std("/tmp/dawn-selfhost-lsp-def/no-std-here") {
       Ok(sc) -> sc
       Err(e) -> panic("embedded std: ${std_load_error_text(e)}")
@@ -6490,7 +6608,7 @@ test "hover reads a std declaration's doc from std's text, file or embedded" {
     let est = def_probe_state(emb)
     let etext = def_probe_text()
     let ed = def_probe_doc(est, etext)
-    assert def_probe_at(est, ed, etext, "list.reverse", 5).def == None
+    assert def_probe_at(est, ed, etext, "list.reverse", 5).def != None
     let rev = hover_probe_at(est, ed, etext, "list.reverse", 5)
     assert str.ends_with(rev, "\n```\n\n---\n\nA reversed copy; the input is not changed.")
   }))
