@@ -4,7 +4,7 @@
 
 *[Chinese original](spec.md). This English specification is its translation; `scripts/doc-check.py` checks the translation pin.*
 
-> Status: **normative**. Applies to version: 0.103.0 (the `VERSION` in `selfhost/src/version.dawn`).<!-- doc-check: version -->
+> Status: **normative**. Applies to version: 0.104.0 (the `VERSION` in `selfhost/src/version.dawn`).<!-- doc-check: version -->
 > When the implementation conflicts with this document, this document wins and the implementation
 > is a bug — unless some clause here is explicitly marked "superseded by X".
 >
