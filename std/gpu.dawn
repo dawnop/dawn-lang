@@ -454,12 +454,22 @@ pub effect Gpu {
 fn refuse(kind: String, message: String) -> ForeignError =
   ForeignError { kind = kind, message = message, cause = None }
 
+# Host lengths are positive signed Int values. Check by division before a
+# product: wrapping to a small positive value must never authorize storage.
+const MAX_HOST_SIZE: Int = 9223372036854775807
+
 ## A buffer of `len` elements of format `d`. `Err(kind: "gpu.bad_length")`
-## for a `len` below one, before any handler is asked.
+## for a `len` below one or whose byte size exceeds Int max, before any
+## handler is asked. Unknown buffer formats remain the handler's refusal.
 pub fn alloc[D](d: Dtype[D], len: Int) -> Result[DeviceBuffer[D], ForeignError] !Gpu =
   if len < 1 {
     Err(refuse("gpu.bad_length", "gpu.alloc: a buffer has at least one element, got ${len}"))
   } else {
+    let width = unwrap_or(element_bytes(dtype_name(d)), 1)
+    if len > MAX_HOST_SIZE / width {
+      return Err(refuse("gpu.bad_length",
+        "gpu.alloc: ${dtype_name(d)} length ${len} times element width ${width} exceeds Int max ${MAX_HOST_SIZE}"))
+    }
     match gpu_alloc(dtype_name(d), len) {
       Ok(h) -> {
         let b: DeviceBuffer[D] = (h, len)
@@ -655,7 +665,7 @@ fn dims_text(ns: List[Int]) -> String =
 
 # How many cells a dimension of `extent` cut by `tile` has, or DYNAMIC.
 fn cell_count(extent: Int, tile: Int) -> Int =
-  if extent == DYNAMIC { DYNAMIC } else { (extent + tile - 1) / tile }
+  if extent == DYNAMIC { DYNAMIC } else { (extent - 1) / tile + 1 }
 
 fn pad_axes(ns: List[Int]) -> List[Int] = ns ++ list.map(range(len(ns), 3), _k => 1)
 
@@ -795,14 +805,28 @@ fn resolve_grid(grid: List[Int], given: List[Int]) -> Result[List[Int], (String,
 
 # How many elements argument `i`'s cells reach over the resolved grid: the
 # product of its extents, a dynamic one being the grid's blocks times the
-# tile. 0 for an argument with no cells.
-fn reach(a: EntryArg, grid: List[Int]) -> Int = {
+# tile. 0 for an argument with no cells. All factors are positive after
+# entry and grid validation, so division can prove each product fits.
+fn reach(a: EntryArg, grid: List[Int]) -> Result[Int, String] = {
   let (_role, extent, tile, along) = arg_parts(a)
   if len(tile) == 0 {
-    0
+    Ok(0)
   } else {
-    list.fold(range(0, len(tile)), 1, (n, j) =>
-        n * if extent[j] == DYNAMIC { grid[axis_number(along[j])] * tile[j] } else { extent[j] })
+    var n = 1
+    for j in range(0, len(tile)) {
+      let dim = if extent[j] == DYNAMIC {
+        let k = axis_number(along[j])
+        if grid[k] > MAX_HOST_SIZE / tile[j] {
+          return Err("dynamic dimension ${j} grid axis ${k} times tile (${grid[k]} times ${tile[j]}) exceeds Int max ${MAX_HOST_SIZE}")
+        }
+        grid[k] * tile[j]
+      } else { extent[j] }
+      if n > MAX_HOST_SIZE / dim {
+        return Err("extent product through dimension ${j} (${n} times ${dim}) exceeds Int max ${MAX_HOST_SIZE}")
+      }
+      n = n * dim
+    }
+    Ok(n)
   }
 }
 
@@ -878,9 +902,16 @@ fn launch_buffers(args: List[EntryArg], launches: List[(LaunchArg, Int)], given:
       } else {
         match follow_problem(args, g) {
           Some(p) -> Err(("gpu.grid_mismatch", p))
-          None -> match list.find(range(0, n), i => sizes[i] < reach(args[i], g)) {
-            Some(i) -> Err(("gpu.short_tensor", "${arg_word(args, i)} holds ${sizes[i]} element(s) and its cells reach ${reach(args[i], g)}"))
-            None -> Ok(g)
+          None -> {
+            for i in range(0, n) {
+              match reach(args[i], g) {
+                Err(p) -> return Err(("gpu.short_tensor", "${arg_word(args, i)} ${p}"))
+                Ok(needed) -> if sizes[i] < needed {
+                  return Err(("gpu.short_tensor", "${arg_word(args, i)} holds ${sizes[i]} element(s) and its cells reach ${needed}"))
+                }
+              }
+            }
+            Ok(g)
           }
         }
       }
@@ -977,7 +1008,8 @@ pub fn entry6[A, B, C, D, E, F](kernel: String, a: EntryArg, b: EntryArg, c: Ent
 ## kernel reads a buffer, a [`buffer_arg`] where it takes a value),
 ## `gpu.aliased_argument` when an Out or Shared argument is the buffer of
 ## another argument, `gpu.grid_mismatch` when `grid` or an In argument's
-## cells disagree with the Out cells, `gpu.short_tensor` when a tensor is
+## cells disagree with the Out cells, `gpu.short_tensor` when the reach's
+## grid-times-tile or extent product exceeds Int max, or a tensor is
 ## shorter than its cells reach, and `gpu.bad_grid` as [`launch`] has it.
 pub fn launch_entry1[A](e: Entry1[A], a: Launch[A], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
   let p: (String, List[EntryArg]) = e
@@ -2585,6 +2617,73 @@ fn entry_launches(launches: fn() -> List[Result[Unit, ForeignError]] !Gpu) -> Li
     Ok(_) -> "ok"
     Err(e) -> "${e.kind}: ${e.message}"
   })
+}
+
+fn alloc_metadata[D](d: Dtype[D], n: Int) -> Result[Unit, ForeignError] !Gpu =
+  match alloc(d, n) {
+    Ok(_b) -> Ok(())
+    Err(e) -> Err(e)
+  }
+
+test "allocation byte products are checked before a metadata-only handler" {
+  # No storage is allocated, even at the legal boundary. The old F64 path
+  # accepted 2^61+1 elements, whose byte product wraps to 8.
+  assert entry_launches(() => [
+    alloc_metadata(F64, 2305843009213693953),
+    alloc_metadata(F32, 2305843009213693952),
+    alloc_metadata(BF16, 4611686018427387904),
+    alloc_metadata(F64, 1152921504606846975),
+    alloc_metadata(F32, 2305843009213693951),
+    alloc_metadata(BF16, 4611686018427387903),
+    alloc_metadata(narrow.F8E5M2, 9223372036854775807)
+  ]) == [
+    "gpu.bad_length: gpu.alloc: f64 length 2305843009213693953 times element width 8 exceeds Int max 9223372036854775807",
+    "gpu.bad_length: gpu.alloc: f32 length 2305843009213693952 times element width 4 exceeds Int max 9223372036854775807",
+    "gpu.bad_length: gpu.alloc: bf16 length 4611686018427387904 times element width 2 exceeds Int max 9223372036854775807",
+    "ok", "ok", "ok", "ok"
+  ]
+}
+
+test "cell counts preserve positive Int boundaries without adding the tile" {
+  assert cell_count(9223372036854775807, 2) == 4611686018427387904
+  assert cell_count(9223372036854775807, 9223372036854775807) == 1
+  assert cell_count(1, 9223372036854775807) == 1
+  assert cell_count(9223372036854775807, 1) == 9223372036854775807
+  assert cell_count(DYNAMIC, 9223372036854775807) == DYNAMIC
+  assert entry_grid([arg_out([9223372036854775807], [9223372036854775807])]) == Ok([1, 1, 1])
+}
+
+test "launch plans reject static Free extent products that wrap to zero" {
+  let a = arg_in([4294967296, 4294967296], [1, 1], [Free, Free])
+  assert launch_plan([a], [(Buffer(1), 1)], [1]) == Err(("gpu.short_tensor",
+    "argument 0 (In) extent product through dimension 1 (4294967296 times 4294967296) exceeds Int max 9223372036854775807"))
+  let edge = arg_in([9223372036854775807, 1], [1, 1], [Free, Free])
+  assert launch_plan([edge], [(Buffer(1), 9223372036854775807)], [1]) == Ok([1, 1, 1])
+  assert launch_plan([edge], [(Buffer(1), 9223372036854775806)], [1]) == Err(("gpu.short_tensor",
+    "argument 0 (In) holds 9223372036854775806 element(s) and its cells reach 9223372036854775807"))
+  # An earlier short buffer still wins over a later overflowing argument.
+  assert launch_plan([arg_in([2], [1], [Free]), a], [(Buffer(1), 1), (Buffer(2), 1)], [1]) == Err(("gpu.short_tensor",
+    "argument 0 (In) holds 1 element(s) and its cells reach 2"))
+  assert launch_plan([a], [], [1]) == Err(("gpu.bad_entry",
+    "the entry has 1 argument(s) and the launch passes 0"))
+}
+
+test "launch plans check dynamic dimension and combined extent products" {
+  let wide = arg_out([DYNAMIC], [4611686018427387905])
+  assert launch_plan([wide], [(Buffer(1), 1)], [4]) == Err(("gpu.short_tensor",
+    "argument 0 (Out) dynamic dimension 0 grid axis 0 times tile (4 times 4611686018427387905) exceeds Int max 9223372036854775807"))
+  let combined = arg_in([DYNAMIC, 4294967296], [2, 1], [Axis(0), Free])
+  assert launch_plan([combined], [(Buffer(1), 1)], [1073741824]) == Err(("gpu.short_tensor",
+    "argument 0 (In) extent product through dimension 1 (2147483648 times 4294967296) exceeds Int max 9223372036854775807"))
+  let edge = arg_out([DYNAMIC], [3074457345618258602])
+  assert launch_plan([edge], [(Buffer(1), 9223372036854775807)], [3]) == Ok([3, 1, 1])
+  assert launch_plan([wide], [(Buffer(1), 1)], [0]) == Err(("gpu.bad_grid",
+    "a grid has at least one block along each axis, got [0, 1, 1]"))
+  assert launch_plan([wide, wide], [(Buffer(1), 1), (Buffer(1), 1)], [4]) == Err(("gpu.aliased_argument",
+    "argument 0 (Out) and argument 1 (Out) are one buffer (handle 1); an Out or Shared argument shares its buffer with no other"))
+  let fixed = arg_in([2], [1], [Axis(0)])
+  assert launch_plan([wide, fixed], [(Buffer(1), 1), (Buffer(2), 1)], [4]) == Err(("gpu.grid_mismatch",
+    "argument 1 (In) has 2 cell(s) in dimension 0, which follows grid axis 0, and the grid has 4 block(s) there"))
 }
 
 fn dynamic_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
