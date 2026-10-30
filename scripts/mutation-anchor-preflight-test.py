@@ -201,8 +201,8 @@ class PreflightTests(unittest.TestCase):
         # lsp-workspace reached that mutant after building the probe.
         self.assert_registry_drift_is_red("project-plan-contract", "fresh-replan-loader",
                                           "selfhost/src/driver/analyze.dawn",
-                                          "    entry_file(sp.target),\n    previous\n  )\n",
-                                          "    entry_file(sp.target), previous\n  )\n")
+                                          "    entry_file(sp.target),\n    previous,\n    snapshots\n  )\n",
+                                          "    entry_file(sp.target), previous, snapshots\n  )\n")
         self.assert_registry_drift_is_red("project-plan-contract", "fresh-completion",
                                           "selfhost/src/lsp/server.dawn",
                                           "completions_at(qc, analysis.modules,",
