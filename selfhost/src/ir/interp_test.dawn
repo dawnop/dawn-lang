@@ -12,6 +12,7 @@
 # keeps them off the compiler package's public surface. `no_impls`, `test_sig`
 # and `test_tfun` are fixtures small enough to write twice rather than publish.
 
+use check/capture
 use std/str
 use std/map
 use std/set
@@ -36,7 +37,7 @@ use ir/interp.{
 fn no_impls() -> Map[(Int, String, String), (String, TFun)] = map.empty()
 
 fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =
-  Sig {
+  Sig { scope_params = capture.empty_params(),
     name = name,
     param_tys = params,
     param_names = [],
@@ -188,7 +189,7 @@ test "interpreter identity tables keep direct, impl, and default spellings separ
   let impl_fn = explicit_fn.expect("impl same")
   let default_fn = defs_tm.fns[0]
   assert direct_fn.sig.param_tys == [TyInt, TyInt]
-  assert impl_fn.sig.param_tys == [TyAdt(explicit_id, [])]
+  assert impl_fn.sig.param_tys == [TyAdt(explicit_id, [], capture.empty_arguments())]
   assert default_fn.sig.param_tys != direct_fn.sig.param_tys
   assert default_fn.sig.param_tys != impl_fn.sig.param_tys
 
@@ -247,7 +248,7 @@ test "interpreter identity tables keep direct, impl, and default spellings separ
     CCall(CImpl(o, got_tid, subject, "same"), _, _, _) -> {
       assert o == "same_impl"
       assert got_tid == tid
-      assert subject == TyAdt(explicit_id, [])
+      assert subject == TyAdt(explicit_id, [], capture.empty_arguments())
     }
     _ -> { assert false }
   }

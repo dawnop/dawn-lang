@@ -1,0 +1,234 @@
+# Rigid static identities, rather than runtime buffer allocation, isolate the
+# type foundation from capture propagation and scoped effect discharge.
+use std/map
+use check/capture
+use check/capture.{Scope, Function, Arguments, Region, CaptureVar}
+use check/types
+use check/types.{Ty, TyInt, TyUnit, TyI64Buf, TyF64Buf, TyFn, EPure, ScopedEffect}
+use check/cx.{test_cx, cx_new, bind_capture_params, resolve_type}
+use check/passes.{seed_prelude}
+use check/checker.{check_module, exports_of, assignable, unify_into, unify_eff}
+use front/parser
+use front/ast
+use front/ast.{ScopeSyntax, CaptureBound}
+
+fn region(name: String, id: Int) -> Scope = Scope { name = name, id = id }
+fn quantified(s: Scope) -> Ty = TyFn([TyI64Buf(Some(s))], TyF64Buf(Some(s)),
+  types.scoped_eff(EPure, [ScopedEffect { id = 77, name = "Mem", scope = s }]),
+  Function { scopes = [s], bound = None })
+
+test "Mem scope type equality distinguishes rigid regions and alpha renames quantifiers" {
+  let s = region("s", 1)
+  let t = region("s", 2)
+  assert not types.ty_equal(TyI64Buf(Some(s)), TyI64Buf(Some(t)))
+  assert types.ty_equal(TyI64Buf(Some(s)), TyI64Buf(Some(region("renamed", 1))))
+  assert types.ty_equal(quantified(s), quantified(t))
+  assert types.ty_equal(quantified(s), quantified(region("renamed", 42)))
+  assert types.ty_scope_refs(quantified(s)) == []
+  assert assignable(test_cx(), quantified(s), quantified(t))
+  let (_, _, ok) = unify_into(test_cx(), quantified(s), quantified(t), map.empty(), map.empty())
+  assert ok
+  assert not types.ty_equal(quantified(s), TyFn([TyI64Buf(Some(s))], TyF64Buf(Some(t)),
+    types.scoped_eff(EPure, [ScopedEffect { id = 77, name = "Mem", scope = s }]),
+    Function { scopes = [s], bound = None }))
+}
+
+test "Mem scope substitution renames a binder before capturing a replacement" {
+  let bound = region("s", 1)
+  let free = region("t", 2)
+  let source = TyFn([], TyI64Buf(Some(free)),
+    types.scoped_eff(EPure, [ScopedEffect { id = 77, name = "Mem", scope = bound }]),
+    Function { scopes = [bound], bound = Some([CaptureVar("c", 3)]) })
+  let replaced = types.subst_scopes(source, map.from([(2, bound)]), map.from([(3, [Region(bound)])]))
+  match replaced {
+    TyFn([], TyI64Buf(Some(result)), row, scope) -> {
+      assert result.id == bound.id
+      assert scope.scopes[0].id != bound.id
+      assert scope.scopes[0].name != result.name
+      assert types.eff_scopes(row)[0].scope.id == scope.scopes[0].id
+      assert capture.equal(capture.bound(scope), [Region(bound)])
+    }
+    _ -> { assert false }
+  }
+}
+
+test "Mem scope printing groups a captured function returned by a captured arrow" {
+  let s = region("s", 1)
+  let c = [CaptureVar("c", 2)]
+  let inner = TyFn([], TyInt, EPure, Function { scopes = [], bound = Some(c) })
+  let outer = TyFn([TyI64Buf(Some(s))], inner,
+    types.scoped_eff(EPure, [ScopedEffect { id = 77, name = "Mem", scope = s }]),
+    Function { scopes = [s], bound = Some(c) })
+  assert types.ty_show(map.empty(), outer) == "fn[@s](I64Buf@s) -> (fn() -> Int ^{c}) !Mem[s] ^{c}"
+  let plain = TyFn([], TyUnit, EPure, capture.empty_function())
+  assert types.ty_show(map.empty(), plain) == "fn() -> Unit"
+}
+
+fn diagnostics(source: String) -> List[String] !io = {
+  let (module, ds) = parser.parse_module(source)
+  if ds != [] { panic(ds[0].msg) }
+  let (cx, _) = check_module(seed_prelude(test_cx()), module, map.empty())
+  map(cx.diags, d => d.msg)
+}
+
+test "Mem scope contracts survive aliases aggregates fields and scoped lambda checking" {
+  assert diagnostics("type Holder[@s] = { buffer: I64Buf@s }\n" ++
+      "alias Reader[@s, ^c, !e: fn] = fn() -> I64Buf@s !e ^{c}\n" ++
+      "fn redundant[@s](b: I64Buf@s^{s}) -> I64Buf@s = b\n" ++
+      "fn pack[@t](b: I64Buf@t) -> Holder[t] = Holder { buffer = b }\n" ++
+      "fn unpack[@t](h: Holder[t]) -> I64Buf@t = h.buffer\n" ++
+      "type Cell[^c] = { read: fn() -> Int ^{c} }\n" ++
+      "fn widen[@s, ^d](read: fn() -> Int ^{d}) -> Cell[^{s, d}] = Cell { read = read }\n" ++
+      "fn bounded[@s, ^c: ^{s}](read: fn() -> Int ^{c}) -> (fn() -> Int ^{s}) = read\n" ++
+      "fn identity() -> (fn[@s](I64Buf@s) -> I64Buf@s) = [@t] (b: I64Buf@t) => b\n") == []
+}
+
+test "Mem scope annotations report missing binders and bounds that erase a buffer region" {
+  assert diagnostics("fn f[@e]() -> Unit !e = ()")[0] == "`e` is a Scope or capture parameter, not an effect parameter"
+  assert diagnostics("fn f(b: I64Buf@s) -> Unit = ()")[0] == "unknown Scope parameter `s`"
+  assert diagnostics("fn f(x: Int^{c}) -> Unit = ()")[0] == "unknown Scope or capture parameter `c`"
+  assert diagnostics("fn f[@s](b: I64Buf@s^{}) -> Unit = ()")[0] == "a capture bound cannot erase a buffer's Scope"
+  assert diagnostics("fn f[@s](x: fn[@s]() -> Int) -> Unit = ()")[0] == "parameter `s` shadows another parameter"
+}
+
+test "Mem scope contracts survive exported aliases and a second module's interface" {
+  let (producer, pd) = parser.parse_module("pub type Holder[@s] = { buffer: I64Buf@s }\n" ++
+      "pub alias Reader[@s, ^c, !e: fn] = fn() -> I64Buf@s !e ^{c}\n")
+  assert pd == []
+  let (cx, _) = check_module(seed_prelude(cx_new(Some("model"), None)), producer, map.empty())
+  assert cx.diags == []
+  let exported = exports_of(cx, producer, "model", "model")
+  assert len(map.get(exported.aliases, "Reader").expect("exported alias").scope_params.fn_effects) == 1
+  let (consumer, cd) = parser.parse_module("use model\n" ++
+      "pub fn reuse[@t, ^d, !f: fn](h: model.Holder[t], read: model.Reader[t, d, !f]) -> model.Holder[t] = h\n")
+  assert cd == []
+  let (checked, _) = check_module(seed_prelude(cx_new(Some("consumer"), None)), consumer,
+    map.from([("model", exported)]))
+  assert checked.diags == []
+  let signature = map.get(checked.fns, "reuse").expect("exported signature")
+  assert len(signature.scope_params.scopes) == 1
+  assert len(signature.scope_params.captures) == 1
+  assert len(signature.scope_params.fn_effects) == 1
+  let refs = types.ty_scope_refs(signature.param_tys[1])
+  assert capture.contains(refs, Region(signature.scope_params.scopes[0]))
+  let c = signature.scope_params.captures[0]
+  assert capture.contains(refs, CaptureVar(c.name, c.id))
+  assert types.sig_render(checked.adts, checked.traits, signature) ==
+    "fn reuse[@t, ^d, !f: fn](h: Holder[t], read: fn() -> I64Buf@t !f ^{d}) -> Holder[t]"
+}
+
+test "Mem scope rows retain each domain through union effect substitution and unification" {
+  let s = region("s", 1)
+  let t = region("t", 2)
+  let a = types.scoped_eff(EPure, [ScopedEffect { id = 77, name = "Mem", scope = s }])
+  let b = types.scoped_eff(EPure, [ScopedEffect { id = 77, name = "Mem", scope = t }])
+  assert not types.eff_carries(a, b)
+  let both = types.eff_union([a, b, a])
+  assert types.eff_show(both) == "(Mem[s]|Mem[t])"
+  assert len(types.eff_scopes(both)) == 2
+  let e = types.EffVar("e", 3)
+  let replaced = types.subst_eff(types.eff_union([a, e]), map.from([(3, b)]))
+  assert types.eff_carries(replaced, both) && types.eff_carries(both, replaced)
+  let (bindings, fits) = unify_eff(test_cx(), types.eff_union([a, e]), both, map.empty(), map.empty())
+  assert fits
+  assert map.get(bindings, 3) == Some(b)
+}
+
+test "Mem scope substitution avoids textual binder capture across every argument kind" {
+  let s = region("s", 1)
+  let free = region("s", 2)
+  let arrow = TyFn([], types.TyVar("T", 3), types.EffVar("e", 4),
+    Function { scopes = [s], bound = None })
+  let inserted = types.subst(arrow, map.from([(3, TyI64Buf(Some(free)))]), map.empty())
+  match inserted {
+    TyFn([], TyI64Buf(Some(result)), _, sc) -> {
+      assert result == free
+      assert sc.scopes[0].name != result.name
+      assert sc.scopes[0].id != result.id
+    }
+    _ -> { assert false }
+  }
+  let inner = quantified(s)
+  let nested = types.subst(arrow, map.from([(3, inner)]), map.empty())
+  match nested {
+    TyFn([], TyFn(_, _, _, child), _, parent) -> {
+      assert parent.scopes[0].name != child.scopes[0].name
+      assert parent.scopes[0].id != child.scopes[0].id
+    }
+    _ -> { assert false }
+  }
+  let row_replaced = types.subst(arrow, map.empty(), map.from([(4, types.EffVar("s", 5))]))
+  match row_replaced {
+    TyFn(_, _, _, sc) -> { assert sc.scopes[0].name != "s" }
+    _ -> { assert false }
+  }
+  let source = TyFn([], TyI64Buf(Some(region("t", 6))), EPure,
+    Function { scopes = [s], bound = None })
+  let renamed = types.subst_scopes(source, map.from([(6, free)]), map.empty())
+  match renamed {
+    TyFn([], TyI64Buf(Some(result)), _, sc) -> {
+      assert result == free
+      assert sc.scopes[0].name != result.name
+    }
+    _ -> { assert false }
+  }
+}
+
+test "Mem scope printing keeps a returned capture bound inside a pure arrow" {
+  let c = [CaptureVar("c", 1)]
+  let inner = TyFn([], TyInt, EPure, Function { scopes = [], bound = Some(c) })
+  let outer = TyFn([], inner, EPure, capture.empty_function())
+  assert types.ty_show(map.empty(), outer) == "fn() -> (fn() -> Int ^{c})"
+  let value = TyFn([], types.TyCaptured(TyInt, c), EPure, capture.empty_function())
+  assert types.ty_show(map.empty(), value) == "fn() -> (Int^{c})"
+  assert diagnostics("alias Returned[^c] = fn() -> (fn() -> Int ^{c})\n" ++
+      "alias Value[^c] = fn() -> (Int^{c})\n") == []
+}
+
+test "Mem scope substitution keeps qualified function types in TyFn" {
+  let c = [CaptureVar("c", 1)]
+  let source = types.TyCaptured(types.TyVar("T", 2), c)
+  let result = types.subst(source,
+    map.from([(2, TyFn([], TyInt, EPure, capture.empty_function()))]), map.empty())
+  match result {
+    TyFn([], TyInt, EPure, sc) -> { assert sc.bound == Some(c) }
+    _ -> { assert false }
+  }
+  assert diagnostics("alias Narrow[@s] = (fn() -> Int ^{s})^{}\n")[0] ==
+    "a capture bound cannot erase a function's declared captures"
+}
+
+test "Mem scope nominal argument equality uses identity rather than display spelling" {
+  let s = region("s", 1)
+  let renamed = region("renamed", 1)
+  let x = types.TyAdt(42, [TyInt], scope_arguments(s))
+  let y = types.TyAdt(42, [TyInt], scope_arguments(renamed))
+  assert types.ty_equal(x, y)
+  let (_, _, fits) = unify_into(test_cx(), x, y, map.empty(), map.empty())
+  assert fits
+}
+
+fn scope_arguments(s: Scope) -> Arguments = Arguments { scopes = [s], captures = [] }
+
+test "Mem scope alpha equivalence cannot capture a free identity into a target binder" {
+  let s = region("s", 1)
+  let t = region("t", 2)
+  let free = TyFn([], TyI64Buf(Some(t)), EPure, Function { scopes = [s], bound = Some([Region(t)]) })
+  let bound = TyFn([], TyI64Buf(Some(t)), EPure, Function { scopes = [t], bound = Some([Region(t)]) })
+  assert not types.ty_equal(free, bound)
+  assert not types.ty_equal(bound, free)
+  assert not assignable(test_cx(), free, bound)
+  let (_, _, fits) = unify_into(test_cx(), bound, free, map.empty(), map.empty())
+  assert not fits
+}
+
+test "Mem scope interface validation rejects malformed kind metadata before value resolution" {
+  let invalid = ScopeSyntax { ..ast.no_scope_syntax(),
+    bounds = [CaptureBound { name = "Missing", members = [], lo = 0, hi = 0 }],
+    fn_effects = ["missing"] }
+  let (bounded, _) = bind_capture_params(test_cx(), invalid)
+  assert bounded.diags[0].msg == "a capture bound requires a type parameter"
+  assert bounded.diags[1].msg == "a fn row bound requires an effect parameter"
+  let (argument, _) = resolve_type(test_cx(), ast.TKindArg(["s"], 0, 0))
+  assert argument.diags[0].msg == "a Scope or capture argument is not a value type"
+}

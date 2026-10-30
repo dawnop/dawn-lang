@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ eab570e759c0bc5c -->
+<!-- doc-check: translation-of docs/spec.md @ 8d9de77b2466540b -->
 
 # Dawn Language Specification
 
@@ -2478,6 +2478,44 @@ Surface spelling and full constraints are in
   frames and evidence and cannot be stored outside the scope. Panic/catch_panic
   and tail-resumptive handlers remain available. Reads and writes do not become
   io and effects are not settled at closure creation.
+
+
+K2 provides the type and syntax foundation. Capture propagation, exits and
+scope-specific discharge below remain pending in K3/K4. The current std/mem API
+and all 13 known bad acceptance cases retain their behavior; recognizing the new
+type spelling does not fix #847. Scope and Capture have separate identities and
+parameter axes rather than being value types. Function environment bounds and
+calling effects are stored separately. Internal Scope binders compare modulo
+alpha renaming; substitution must avoid capture of both identities and printed names.
+
+```text
+scope_binder   := "@" lower_name
+capture_binder := "^" lower_name [":" capture_bound]
+capture_bound  := "^" "{" [lower_name ("," lower_name)*] "}"
+scoped_buffer  := ("I64Buf" | "F64Buf") "@" lower_name
+scope_fn_type  := "fn" "[" scope_binder ("," scope_binder)* "]" fn_type_tail
+scope_lambda   := "[" scope_binder ("," scope_binder)* "]" "(" params ")" "=>" expr
+```
+
+Declaration parameter lists may combine `T: Show + ^{c}`, `@s`,
+`^c: ^{s, d}` and `!e: fn`. All binders in one list are simultaneously visible
+in bounds. Unbound names, kind errors and textual shadowing are diagnosed.
+Only Scope may be quantified inside a function type: `fn[T]`, `fn[^c]` and
+`fn[!e]` are excluded. The final `^{...}` suffix bounds the entire function
+arrow, so a captured function result requires grouping, as in
+`fn() -> (fn() -> Int ^{c})`. `I64Buf@s^{s}` is legal and redundant;
+`I64Buf@s^{}` cannot erase s. `Mem[s]` and `mem.Mem[s]` add a scope to the
+std/mem effect atom without permitting arbitrary parameterized user effects.
+Nominal scope arguments use `Holder[s]`; capture arguments may name a capture
+parameter or use `^{s, c}`. Formatting sorts and deduplicates capture sets
+without comments and preserves comments inside a set.
+
+Explicit type applications check kinds and perform static substitution in this
+stage. Inferring scope and capture constraints from call arguments, propagating
+free captures, checking exits, generating fresh runner scopes and addressing
+evidence by scope are connected in later cuts. Omitted capture annotations keep
+the existing acceptance set; the empty default for ordinary T does not reject
+old acceptance oracles early.
 
 ### 6.3 Effect polymorphism
 

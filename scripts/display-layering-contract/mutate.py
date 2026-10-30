@@ -43,7 +43,7 @@ TO_STR_MATCH = """    match t {
 # The old peel, as an arm of `to_str`: an opaque type asks every layer below
 # it for a Display before it falls back to its own Show.
 TO_STR_MATCH_INHERITING = """    match t {
-      TyOpaque(_, _, _, _, tgt) ->
+      TyOpaque(_, _, _, _, tgt, _) ->
         if has_display_below(st, tgt) { to_str(st, e, tgt, wit) } else { show_at(st, e, t) }
       TyVar(_, _) ->
         match wit {"""
@@ -55,7 +55,7 @@ HAS_DISPLAY_BELOW = """fn has_display_below(st: LSt, t: Ty) -> Bool =
     true
   } else {
     match t {
-      TyOpaque(_, _, _, _, tgt) -> has_display_below(st, tgt)
+      TyOpaque(_, _, _, _, tgt, _) -> has_display_below(st, tgt)
       _ -> false
     }
   }

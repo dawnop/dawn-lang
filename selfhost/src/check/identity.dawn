@@ -8,7 +8,7 @@ use std/str
 use std/bytes
 use front/parser
 use front/token.{Diag, Note, mk_diag, DiagOwner}
-use front/ast.{Module, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg,
+use front/ast.{parameter_names, ScopeSyntax, ScopeBinder, TScoped, TCaptured, TKindArg, no_scope_syntax, Module, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg,
   DFn, DType, DTrait, DEffect, DConst, DImpl, DTest, DUseModule, DUseJava, e_lo, e_hi }
 
 pub type Kind =
@@ -35,6 +35,7 @@ pub type TypeShape =
   | QualifiedType(owner: String, name: String, args: List[TypeShape], effects: List[List[EffectShape]])
   | AssociatedType(subject: TypeShape, member: String)
   | TupleType(elems: List[TypeShape])
+  | ScopedType(value: TypeShape, syntax: String)
   | FunctionType(params: List[TypeShape], ret: TypeShape, effects: List[EffectShape])
 
 pub type Part =
@@ -69,6 +70,11 @@ pub type Located = { entry: Entry, span: Span }
 pub type DeclSpans = { by_path: Map[String, Span] }
 
 fn effect_atom(name: String, binders: List[String]) -> EffectShape = {
+  if str.contains(name, "[") {
+    let parts = str.split(name, "[")
+    let scope = str.take(parts[1], len(parts[1]) - 1)
+    return NamedEffect(parts[0] ++ "[" ++ shape_text(bare(scope, binders)) ++ "]")
+  }
   let parts = str.split(name, ".")
   if len(parts) == 2 {
     var i = 0
@@ -106,7 +112,17 @@ pub fn type_shape(t: TypeRef, binders: List[String]) -> TypeShape =
     TQual(owner, name, args, es, _, _) -> QualifiedType(owner, name, shapes(args, binders), effects(es, binders))
     TAssoc(subject, name, _, _) -> AssociatedType(bare(subject, binders), name)
     TTuple(es, _, _) -> TupleType(shapes(es, binders))
-    TFn(ps, ret, es, _, _) -> FunctionType(shapes(ps, binders), type_shape(ret, binders), effect_atoms(es, binders))
+    TScoped(value, name, _, _) -> ScopedType(type_shape(value, binders), "@" ++ shape_text(bare(name, binders)))
+    TCaptured(value, bound, _, _) -> ScopedType(type_shape(value, binders), "^{" ++ join(sort(map(bound, n => shape_text(bare(n, binders)))), ",") ++ "}")
+    TKindArg(name, _, _) -> ScopedType(TupleType(map(name, n => bare(n, binders))), "argument")
+    TFn(ps, ret, es, _, _, scope) -> {
+      let all = binders ++ map(scope.binders, b => b.name)
+      let value = FunctionType(shapes(ps, all), type_shape(ret, all), effect_atoms(es, all))
+      if scope == no_scope_syntax() { value } else {
+        ScopedType(value, join(map(scope.binders, b => if b.capture { "^" } else { "@" }), ",") ++
+            match scope.capture { None -> "", Some(c) -> "^{" ++ join(sort(map(c, n => shape_text(bare(n, all)))), ",") ++ "}" })
+      }
+    }
   }
 
 ## A declaration path written as text, injectively: every atom carries its
@@ -217,6 +233,7 @@ fn shape_text(t: TypeShape) -> String =
       "q" ++ atom(owner) ++ atom(name) ++ shapes_text(args) ++ effect_rows_text(es)
     AssociatedType(subject, member) -> "a" ++ shape_text(subject) ++ atom(member)
     TupleType(elems) -> "t" ++ shapes_text(elems)
+    ScopedType(value, syntax) -> "s" ++ shape_text(value) ++ atom(syntax)
     FunctionType(params, ret, es) -> "F" ++ shapes_text(params) ++ shape_text(ret) ++ effect_row_text(es)
   }
 
@@ -486,8 +503,8 @@ pub fn located(m: Module) -> List[Located] = {
       DTest(name, _, lo, hi, _, _, _) -> {
         all = all ++ [located_entry([Named(TestDecl, name)], i, None, lo, hi)]
       }
-      DImpl(params, trait_name, _, _, subject, methods, associated, effect_members, lo, hi) -> {
-        let path = [ImplHead(trait_name, type_shape(subject, map(params, p => p.name)))]
+      DImpl(params, trait_name, _, _, subject, methods, associated, effect_members, lo, hi, scope) -> {
+        let path = [ImplHead(trait_name, type_shape(subject, parameter_names(params, scope)))]
         all = all ++ [located_entry(path, i, None, lo, hi)]
         var j = 0
         for method in methods {
@@ -630,10 +647,10 @@ test "identity keeps distinct member owners" {
 
 test "identity normalizes associated effect subjects without merging module spellings" {
   let ret = TNamed("Int", [], [], 0, 3)
-  let a = TFn([], ret, ["T.E", "io"], 0, 10)
-  let b = TFn([], ret, ["U.E", "io"], 50, 70)
+  let a = TFn([], ret, ["T.E", "io"], 0, 10, no_scope_syntax())
+  let b = TFn([], ret, ["U.E", "io"], 50, 70, no_scope_syntax())
   assert type_shape(a, ["T"]) == type_shape(b, ["U"])
-  assert type_shape(a, ["T"]) != type_shape(TFn([], ret, ["T.F", "io"], 0, 10), ["T"])
+  assert type_shape(a, ["T"]) != type_shape(TFn([], ret, ["T.F", "io"], 0, 10, no_scope_syntax()), ["T"])
   assert effect_atom("m.Ask", ["T"]) == NamedEffect("m.Ask")
   assert effect_atom("T.E", ["X", "T"]) == ProjectedEffect(1, "E")
   let arg = EffArg { atoms = ["T.E"], lo = 0, hi = 3 }
@@ -938,4 +955,15 @@ test "identity spreads a one-character edit across the whole derived band" {
     derive(minted("pkg/m", TypeDecl, "B")) & 4294967295
   assert derive(minted("pkg/m", TypeDecl, "A")) & 4294967295 !=
     derive(minted("pkg/m", EffectDecl, "A")) & 4294967295
+}
+
+test "Scope identity shapes alpha rename internal binders in types captures and rows" {
+  let int = TNamed("Int", [], [], 0, 3)
+  let buf = TNamed("I64Buf", [], [], 0, 6)
+  let a = TFn([TScoped(buf, "s", 0, 8)], int, ["Mem[s]"], 0, 30,
+    ScopeSyntax { ..no_scope_syntax(), binders = [ScopeBinder { name = "s", capture = false, bound = None, lo = 0, hi = 2 }], capture = Some(["s", "c"]) })
+  let b = TFn([TScoped(buf, "t", 50, 58)], int, ["Mem[t]"], 50, 80,
+    ScopeSyntax { ..no_scope_syntax(), binders = [ScopeBinder { name = "t", capture = false, bound = None, lo = 50, hi = 52 }], capture = Some(["c", "t"]) })
+  assert type_shape(a, []) == type_shape(b, [])
+  assert type_shape(TScoped(buf, "s", 0, 8), []) != type_shape(TScoped(buf, "t", 0, 8), [])
 }

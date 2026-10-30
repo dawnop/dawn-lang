@@ -41,8 +41,7 @@ use std/io.{Env}
 use std/map
 use std/set
 use std/str
-use check/types.{
-  Adts, Traits, Ty, TyFn, TyAdt, TyNever, TyVar, Eff, peel_opaque, eff_labels, eff_vars,
+use check/types.{Adts, Traits, Ty, TyFn, TyAdt, TyNever, TyVar, Eff, peel_opaque, eff_labels, eff_vars,
   eff_assocs, key_is_label, key_effect_id, intrinsics, EV_PACK_ID, sig_abi_eff
 }
 use ir/core.{
@@ -305,7 +304,7 @@ fn closure_rows_expr(rows: Map[(String, String), List[Eff]], e: CExpr) -> Map[(S
     CClosure(name, owner, caps, ty) -> {
       let r = rows_all(rows, caps)
       match peel_opaque(ty) {
-        TyFn(_, _, eff) -> {
+        TyFn(_, _, eff, _) -> {
           let prev = match map.get(r, (owner, name)) {
             Some(xs) -> xs
             None -> []
@@ -501,7 +500,7 @@ fn check_node(a: Acc, e: CExpr) -> Acc =
 ## The evidence record of one label, if `t` is one: `ev$<id>$<name>`.
 fn exact_record(adts: Adts, t: Ty) -> Option[String] =
   match peel_opaque(t) {
-    TyAdt(id, _) ->
+    TyAdt(id, _, _) ->
       if id == EV_PACK_ID {
         None
       } else {

@@ -25,11 +25,11 @@ use front/token.{
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
   PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, PIPE,
-  AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR, BANG,
+  AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR, BANG, AT,
   keyword
 }
-use front/ast.{
-  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, EffParamDecl,
+use front/ast.{no_scope_syntax,
+  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, TScoped, TCaptured, TKindArg, ScopeSyntax, ScopeBinder, CaptureBound, Bound, TypeParamDecl, EffParamDecl,
   EffArg,
   Param, LambdaParam,
   AssocDecl, EffAssocDecl, AssocBind, EffAssocBind,
@@ -47,7 +47,7 @@ use front/ast.{
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
   DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module, ParseMarks, ExampleOf, example_spelling,
   Vis, VisPrivate, VisPkg, VisPub,
-  e_lo, e_hi, t_hi, pat_lo, pat_hi
+  e_lo, e_hi, t_lo, t_hi, pat_lo, pat_hi
 }
 use front/lexer.{lex_cps, lex_at, slice_cps, SourceSnapshot, lex_snapshot}
 use front/effect_name
@@ -1272,16 +1272,29 @@ fn number_examples(decls: List[Decl]) -> List[Decl] = {
 ## `!` cannot begin anything else between the brackets, so there is no ambiguity
 ## to resolve and no lookahead to spend: the item's first token decides which
 ## kind it is.
-fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl])] = {
+fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl], ScopeSyntax)] = {
   if not at_kind(p, st, LBRACKET) {
     let none: List[TypeParamDecl] = []
     let none_e: List[EffParamDecl] = []
-    return Ok((st, (none, none_e)))
+    return Ok((st, (none, none_e, no_scope_syntax())))
   }
   var st1 = adv1(p, st)
   var out: List[TypeParamDecl] = []
   var effs: List[EffParamDecl] = []
+  var scope = no_scope_syntax()
+  var names: List[String] = []
   while not at_kind(p, st1, RBRACKET) {
+    if at_kind(p, st1, AT) || at_kind(p, st1, CARET) {
+      let (next, binder) = scope_binder(p, st1)?
+      for name in names {
+        if name == binder.name { return Err((next, pd("duplicate parameter `" ++ name ++ "`", binder.lo, binder.hi))) }
+      }
+      names = names ++ [binder.name]
+      scope = ScopeSyntax { ..scope, binders = scope.binders ++ [binder] }
+      if at_kind(p, next, COMMA) { st1 = adv1(p, next) } else { st1 = next
+        break }
+      continue
+    }
     if at_kind(p, st1, BANG) {
       let (st2, bang) = want(p, st1, BANG, "`!`")?
       # An uppercase name after `!` is a declared effect, not a variable. A
@@ -1313,16 +1326,23 @@ fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl])] = 
       if dup {
         return Err((st3, pd("duplicate effect parameter `" ++ n.text ++ "`", bang.lo, n.hi)))
       }
-      # `[!e: X]` would be a bound, and a bound constrains a type. Refusing it
-      # here rather than at the checker keeps the effect axis free of a bound
-      # syntax that has nothing to mean.
-      if at_kind(p, st3, COLON) {
-        return Err((st3, pd_h("an effect parameter cannot be constrained",
-          bang.lo, n.hi, "trait bounds constrain type parameters, not effects")))
+      var after = st3
+      if at_kind(p, after, COLON) {
+        let col = adv1(p, after)
+        if not at_kind(p, col, FN) {
+          return Err((after, pd_h("an effect parameter cannot be constrained",
+            bang.lo, n.hi, "trait bounds constrain type parameters, not effects")))
+        }
+        after = adv1(p, col)
+        scope = ScopeSyntax { ..scope, fn_effects = scope.fn_effects ++ [n.text] }
       }
+      for name in names {
+        if name == n.text { return Err((after, pd("duplicate parameter `" ++ name ++ "`", bang.lo, n.hi))) }
+      }
+      names = names ++ [n.text]
       effs = effs ++ [EffParamDecl { name = n.text, lo = bang.lo, hi = n.hi }]
-      if at_kind(p, st3, COMMA) { st1 = adv1(p, st3) } else {
-        st1 = st3
+      if at_kind(p, after, COMMA) { st1 = adv1(p, after) } else {
+        st1 = after
         break
       }
       continue
@@ -1331,17 +1351,22 @@ fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl])] = 
     var bounds: List[Bound] = []
     var st3 = st2
     if at_kind(p, st3, COLON) {
-      let st4 = adv1(p, st3)
-      let (st5, first) = want(p, st4, TYPEIDENT, "a trait name after `:`")?
-      bounds = [Bound { name = first.text, lo = first.lo, hi = first.hi }]
-      st3 = st5
-      while at_kind(p, st3, PLUS) {
-        let st6 = adv1(p, st3)
-        let (st7, b) = want(p, st6, TYPEIDENT, "a trait name after `+`")?
-        bounds = bounds ++ [Bound { name = b.text, lo = b.lo, hi = b.hi }]
-        st3 = st7
+      st3 = adv1(p, st3)
+      while true {
+        if at_kind(p, st3, CARET) {
+          let (next, bound) = capture_bound(p, st3)?
+          scope = ScopeSyntax { ..scope, bounds = scope.bounds ++ [CaptureBound { name = n.text, members = bound, lo = tok_at(p, st3.pos, 0).lo, hi = tok_at(p, next.pos, -1).hi }] }
+          st3 = next
+        } else {
+          let (next, b) = want(p, st3, TYPEIDENT, "a trait name or capture bound")?
+          bounds = bounds ++ [Bound { name = b.text, lo = b.lo, hi = b.hi }]
+          st3 = next
+        }
+        if not at_kind(p, st3, PLUS) { break }
+        st3 = adv1(p, st3)
       }
     }
+    names = names ++ [n.text]
     let end = if len(bounds) > 0 { bounds[len(bounds) - 1].hi } else { n.hi }
     out = out ++ [TypeParamDecl { name = n.text, bounds = bounds, lo = n.lo, hi = end }]
     if at_kind(p, st3, COMMA) { st1 = adv1(p, st3) } else {
@@ -1350,10 +1375,10 @@ fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl])] = 
     }
   }
   let (st8, _) = want(p, st1, RBRACKET, "`]`")?
-  if len(out) == 0 && len(effs) == 0 {
+  if len(out) == 0 && len(effs) == 0 && len(scope.binders) == 0 {
     return Err((st8, perr(p, st8, "type parameter list cannot be empty")))
   }
-  Ok((st8, (out, effs)))
+  Ok((st8, (out, effs, scope)))
 }
 
 ## `alias Name[T] = TypeRef` — a transparent type alias (spec §2.6) — and
@@ -1365,7 +1390,7 @@ fn alias_decl(p: P, st: St, vis: Vis, is_opaque: Bool) -> PR[Decl] = {
     if is_opaque { want(p, st, TYPE, "`type`")? } else { want(p, st, ALIAS, "`alias`")? }
   let (st2, name) = want(p, st1, TYPEIDENT, "a type name (uppercase)")?
   let (st3, tps) = type_params(p, st2)?
-  let (tparam_decls, eparam_decls) = tps
+  let (tparam_decls, eparam_decls, scope) = tps
   for tp in tparam_decls {
     if len(tp.bounds) > 0 {
       let what = if is_opaque { "opaque type" } else { "alias" }
@@ -1376,7 +1401,7 @@ fn alias_decl(p: P, st: St, vis: Vis, is_opaque: Bool) -> PR[Decl] = {
   let (st4, _) = want(p, st3, EQ, "`=`")?
   let (st5, target) = type_ref(p, st4)?
   let names = map(tparam_decls, t => t.name)
-  Ok((st5, DType(TypeDeclR {
+  Ok((st5, DType(TypeDeclR { scope = scope,
     vis = vis,
     is_opaque = is_opaque,
     name = name.text,
@@ -1397,7 +1422,7 @@ fn type_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
   let (st1, kw) = want(p, st, TYPE, "`type`")?
   let (st2, name) = want(p, st1, TYPEIDENT, "a type name (uppercase)")?
   let (st3, tps) = type_params(p, st2)?
-  let (tparam_decls, eparam_decls) = tps
+  let (tparam_decls, eparam_decls, scope) = tps
   for tp in tparam_decls {
     if len(tp.bounds) > 0 {
       return Err((st3, pd_h("type declarations cannot constrain their type parameters",
@@ -1408,7 +1433,7 @@ fn type_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
   let eparams = map(eparam_decls, e => e.name)
   let (st4, _) = want(p, st3, EQ, "`=`")?
   if at_kind(p, st4, LBRACE) {
-    return record_decl(p, st4, vis, kw, name, tparams, eparams)
+    return record_decl(p, st4, vis, kw, name, tparams, eparams, scope)
   }
   # `type` declares a nominal type only. The parser recognizes alias shapes,
   # not names: a bare TYPEIDENT is always a constructor, and the checker owns
@@ -1444,7 +1469,7 @@ fn type_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
   let end = if len(derives) > 0 { derives[len(derives) - 1].hi } else {
     ctors[len(ctors) - 1].hi
   }
-  Ok((st11, DType(TypeDeclR {
+  Ok((st11, DType(TypeDeclR { scope = scope,
     vis = vis,
     is_opaque = false,
     name = name.text,
@@ -1492,7 +1517,8 @@ fn record_decl(
   kw: Token,
   name: Token,
   tparams: List[String],
-  eparams: List[String]
+  eparams: List[String],
+  scope: ScopeSyntax
 ) -> PR[Decl] = {
   var st1 = skip_nl(p, adv1(p, st))
   var fields: List[FieldDecl] = []
@@ -1518,7 +1544,7 @@ fn record_decl(
   }
   let (st6, derives) = parse_derives(p, st5)?
   let end = if len(derives) > 0 { derives[len(derives) - 1].hi } else { close.hi }
-  Ok((st6, DType(TypeDeclR {
+  Ok((st6, DType(TypeDeclR { scope = scope,
     vis = vis,
     is_opaque = false,
     name = name.text,
@@ -1601,7 +1627,7 @@ fn fn_decl(p: P, st: St, vis: Vis, in_impl: Bool) -> PR[FnDecl] = {
   let (st1, fn_tok) = want(p, st, FN, "`fn`")?
   let (st2, name_tok) = want(p, st1, IDENT, "a function name (lowercase)")?
   let (st3, tps) = type_params(p, st2)?
-  let (tparams, eparams) = tps
+  let (tparams, eparams, scope) = tps
   if in_impl && len(tparams) > 0 {
     let tp = tparams[0]
     return Err((st3, pd("impl methods cannot declare their own type parameters", tp.lo, tp.hi)))
@@ -1637,7 +1663,7 @@ fn fn_decl(p: P, st: St, vis: Vis, in_impl: Bool) -> PR[FnDecl] = {
   let (st11, _) = want(p, st10, EQ, "`=` (function body)")?
   let st12 = skip_nl(p, st11)
   let (st13, body) = expression(p, st12, false)?
-  Ok((st13, FnDecl {
+  Ok((st13, FnDecl { scope = scope,
     vis = vis,
     name = name_tok.text,
     tparams = tparams,
@@ -1947,7 +1973,7 @@ fn effect_op(p: P, st: St) -> PR[EffectOp] = {
 fn impl_decl(p: P, st: St) -> PR[Decl] = {
   let (st0, kw) = want(p, st, IMPL, "`impl`")?
   let (st1, tps) = type_params(p, st0)?
-  let (tparams, eparams) = tps
+  let (tparams, eparams, scope) = tps
   # An impl's own parameters instantiate the trait's subject, and the subject is
   # a type. Nothing on an impl head reads an effect (docs/effect-params-design.md
   # decision 4: fn / alias / type take the table, trait and impl do not).
@@ -1987,7 +2013,7 @@ fn impl_decl(p: P, st: St) -> PR[Decl] = {
   }
   let (st10, close) = want(p, st8, RBRACE, "`}`")?
   Ok((st10, DImpl(tparams, trait_tok.text, trait_tok.lo, trait_tok.hi, subject, methods,
-    assoc, eff_binds, kw.lo, close.hi)))
+    assoc, eff_binds, kw.lo, close.hi, scope)))
 }
 
 ## `type Item = X` -- the binding an impl owes for each associated type its
@@ -2061,10 +2087,77 @@ fn eff_bind_row(p: P, st: St) -> PR[(List[String], Int)] = {
   Ok((st2, (atoms, hi)))
 }
 
+## A finite set contains names, never value paths or arbitrary expressions.
+fn capture_bound(p: P, st: St) -> PR[List[String]] = {
+  let (st1, _) = want(p, st, CARET, "`^` before a capture bound")?
+  let (st2, _) = want(p, st1, LBRACE, "`{` after `^`")?
+  var next = st2
+  var names: List[String] = []
+  while not at_kind(p, next, RBRACE) {
+    let (after, name) = want(p, next, IDENT, "a Scope or capture parameter name")?
+    if not list.any(names, n => n == name.text) { names = names ++ [name.text] }
+    next = after
+    if not at_kind(p, next, COMMA) { break }
+    next = adv1(p, next)
+  }
+  let (end, _) = want(p, next, RBRACE, "`}` after a capture bound")?
+  Ok((end, sort(names)))
+}
+
+fn scope_binder(p: P, st: St) -> PR[ScopeBinder] = {
+  let (st1, marker) = adv(p, st)
+  let (st2, name) = want(p, st1, IDENT, "a parameter name (lowercase)")?
+  var after = st2
+  var bound: Option[List[String]] = None
+  if at_kind(p, after, COLON) {
+    if marker.kind == AT {
+      return Err((after, pd("a Scope parameter cannot have a bound", marker.lo, name.hi)))
+    }
+    let (end, cap) = capture_bound(p, adv1(p, after))?
+    after = end
+    bound = Some(cap)
+  }
+  Ok((after, ScopeBinder { name = name.text, capture = marker.kind == CARET, bound = bound,
+    lo = marker.lo, hi = tok_at(p, after.pos, -1).hi }))
+}
+
+fn scope_lambda(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  let (after, axes) = type_params(p, st)?
+  let (types, effects, scope) = axes
+  if len(types) > 0 || len(effects) > 0 || list.any(scope.binders, b => b.capture) {
+    return Err((after, perr(p, st, "a lambda can bind only Scope parameters")))
+  }
+  let (end, lambda) = bare_lambda(p, after, nb)?
+  match lambda {
+    ELambda(params, body, sugar, _, hi, _) ->
+      Ok((end, ELambda(params, body, sugar, tok_at(p, st.pos, 0).lo, hi, scope.binders)))
+    _ -> Err((after, perr(p, after, "expected a parenthesized lambda")))
+  }
+}
+
 # ---- type references ----
 
-fn type_ref(p: P, st: St) -> PR[TypeRef] = {
-  if at_kind(p, st, FN) { return fn_type_ref(p, st) }
+fn type_ref(p: P, st: St) -> PR[TypeRef] = type_ref_at(p, st, true)
+
+fn type_ref_at(p: P, st: St, captures: Bool) -> PR[TypeRef] = {
+  if at_kind(p, st, FN) { return fn_type_ref(p, st, captures) }
+  let (next, value) = type_ref_head(p, st)?
+  var after = next
+  var out = value
+  if at_kind(p, after, AT) {
+    let (end, name) = want(p, adv1(p, after), IDENT, "a Scope parameter name (lowercase)")?
+    out = TScoped(out, name.text, t_lo(out), name.hi)
+    after = end
+  }
+  if captures && at_kind(p, after, CARET) {
+    let (end, bound) = capture_bound(p, after)?
+    out = TCaptured(out, bound, t_lo(out), tok_at(p, end.pos, -1).hi)
+    after = end
+  }
+  Ok((after, out))
+}
+
+fn type_ref_head(p: P, st: St) -> PR[TypeRef] = {
   if at_kind(p, st, LPAREN) { return tuple_type_ref(p, st) }
   # `m.T` — a module-qualified type (LANG-06). A lowercase name in type
   # position can only be a module alias, so the shape is unambiguous.
@@ -2129,6 +2222,21 @@ fn type_args(p: P, st: St, hi0: Int) -> PR[(List[TypeRef], List[EffArg], Int)] =
       }
       continue
     }
+    if at_kind(p, st2, CARET) {
+      let start = tok_at(p, st2.pos, 0).lo
+      let (next, names) = capture_bound(p, st2)?
+      args = args ++ [TKindArg(names, start, tok_at(p, next.pos, -1).hi)]
+      if at_kind(p, next, COMMA) { st2 = adv1(p, next) } else { st2 = next
+        break }
+      continue
+    }
+    if at_kind(p, st2, IDENT) && kind_ahead(p, st2, 1) != DOT {
+      let (next, name) = adv(p, st2)
+      args = args ++ [TKindArg([name.text], name.lo, name.hi)]
+      if at_kind(p, next, COMMA) { st2 = adv1(p, next) } else { st2 = next
+        break }
+      continue
+    }
     let (st3, a) = type_ref(p, st2)?
     args = args ++ [a]
     if at_kind(p, st3, COMMA) { st2 = adv1(p, st3) } else {
@@ -2181,8 +2289,14 @@ fn tuple_type_ref(p: P, st: St) -> PR[TypeRef] = {
 }
 
 ## fn(A, B) -> C !e
-fn fn_type_ref(p: P, st: St) -> PR[TypeRef] = {
-  let (st1, kw) = adv(p, st)
+fn fn_type_ref(p: P, st: St, captures: Bool) -> PR[TypeRef] = {
+  let (first, kw) = adv(p, st)
+  let (st1, axes) = type_params(p, first)?
+  let (types, effects, scope) = axes
+  if len(types) > 0 || len(effects) > 0 || len(scope.bounds) > 0 ||
+    list.any(scope.binders, b => b.capture) {
+    return Err((st1, pd("a function type can quantify only Scope parameters", kw.lo, tok_at(p, st1.pos, -1).hi)))
+  }
   let (st2, _) = want(p, st1, LPAREN, "`(`")?
   var st3 = st2
   var params: List[TypeRef] = []
@@ -2196,11 +2310,18 @@ fn fn_type_ref(p: P, st: St) -> PR[TypeRef] = {
   }
   let (st5, _) = want(p, st3, RPAREN, "`)`")?
   let (st6, _) = want(p, st5, ARROW, "`->`")?
-  let (st7, ret) = type_ref(p, st6)?
-  let (st8, effs) = parse_effect(p, st7)?
+  let (st7, ret) = type_ref_at(p, st6, false)?
+  let (row_end, effs) = parse_effect(p, st7)?
+  var st8 = row_end
+  var contract = scope
+  if captures && at_kind(p, st8, CARET) {
+    let (next, bound) = capture_bound(p, st8)?
+    st8 = next
+    contract = ScopeSyntax { ..contract, capture = Some(bound) }
+  }
   # the last token consumed (the ret type or the effect) ends the span
   let end = tok_at(p, st8.pos, -1).hi
-  Ok((st8, TFn(params, ret, effs, kw.lo, end)))
+  Ok((st8, TFn(params, ret, effs, kw.lo, end, contract)))
 }
 
 ## `pure` refused wherever a row could take it for a name. It is not reserved
@@ -2236,6 +2357,11 @@ fn effect_atom(p: P, st: St) -> PR[Token] = {
 ## the row retains its existing `List[String]` shape downstream.
 fn effect_atom_text(p: P, st: St) -> PR[String] = {
   let (next, name) = effect_name_token(p, st, true)?
+  if at_kind(p, next, LBRACKET) {
+    let (after, scope) = want(p, adv1(p, next), IDENT, "a Scope parameter name")?
+    let (end, _) = want(p, after, RBRACKET, "`]` after a Scope argument")?
+    return Ok((end, name.text ++ "[" ++ scope.text ++ "]"))
+  }
   Ok((next, name.text))
 }
 
@@ -2446,7 +2572,7 @@ fn while_stmt(p: P, st: St) -> PR[Stmt] = {
 ## which point at the consequence rather than the decision (spec §4.5).
 fn no_lambda_header(p: P, st: St, cond: Expr, kw: String) -> Result[Unit, (St, Diag)] =
   match cond {
-    ELambda(_, _, _, lo, hi) ->
+    ELambda(_, _, _, lo, hi, _) ->
       Err((st, pd_h("this `" ++ kw ++ "` condition parsed as a lambda", lo, hi,
         "a lambda is not a `Bool`; parenthesise it if the call was meant to " ++
           "take one, as in `" ++ kw ++ " list.any(xs, x => x > 0) { ... }`")))
@@ -3034,7 +3160,7 @@ fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   } else if k == LPAREN {
     paren_expr(p, st, nb)
   } else if k == LBRACKET {
-    list_lit(p, st)
+    if kind_ahead(p, st, 1) == AT { scope_lambda(p, st, nb) } else { list_lit(p, st) }
   } else if k == FN {
     # `fn` introduces declarations only (spec §4.5). A lambda is `x => e` /
     # `(a, b) => e` / `() => e`, so `fn` in primary position is always the
@@ -3402,7 +3528,7 @@ fn tail_block_lambda(p: P, st: St) -> PR[Expr] = {
   let (st6, stmts, tail) = block_body(p, st5)?
   let (st7, close) = want(p, st6, RBRACE, "`}`")?
   let body = EBlock(stmts, tail, open.lo, close.hi)
-  Ok((st7, ELambda(params, body, false, open.lo, close.hi)))
+  Ok((st7, ELambda(params, body, false, open.lo, close.hi, [])))
 }
 
 ## `(a, b) => e` / `(a: Int) => e` / `() => e`. `st` is at the `(`, and
@@ -3413,7 +3539,7 @@ fn bare_lambda(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let (st2, _) = want(p, st1, FATARROW, "`=>` (lambda body)")?
   let st3 = skip_nl(p, st2)
   let (st4, body) = expression(p, st3, nb)?
-  Ok((st4, ELambda(params, body, false, open.lo, e_hi(body))))
+  Ok((st4, ELambda(params, body, false, open.lo, e_hi(body), [])))
 }
 
 ## `x => e`. `st` is at the parameter name, and the caller has checked that
@@ -3423,7 +3549,7 @@ fn bare_lambda1(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let st2 = skip_nl(p, adv1(p, st1))
   let (st3, body) = expression(p, st2, nb)?
   let param = LambdaParam { name = name.text, ann = None, lo = name.lo, hi = name.hi }
-  Ok((st3, ELambda([param], body, false, name.lo, e_hi(body))))
+  Ok((st3, ELambda([param], body, false, name.lo, e_hi(body), [])))
 }
 
 ## `[a, b]` and the multi-line `[a\n b]`: inside a list literal a newline
@@ -3689,7 +3815,7 @@ fn with_stmt(p: P, st: St) -> PR[Expr] = {
   let rest_hi = cur(p, st7).lo
   let param = LambdaParam { name = name.text, ann = None, lo = name.lo, hi = name.hi }
   let body = EBlock(stmts, tail, rest_lo, rest_hi)
-  let lam = ELambda([param], body, true, kw.lo, rest_hi)
+  let lam = ELambda([param], body, true, kw.lo, rest_hi, [])
   Ok((st7, from_with(attach_trailing(callee, lam), kw.lo)))
 }
 
@@ -3758,7 +3884,7 @@ fn handle_stmt(p: P, st: St, kw: Token) -> PR[Expr] = {
   let rest_hi = cur(p, st8).lo
   let no_params: List[LambdaParam] = []
   let body = EBlock(stmts, tail, rest_lo, rest_hi)
-  let rest = ELambda(no_params, body, true, kw.lo, rest_hi)
+  let rest = ELambda(no_params, body, true, kw.lo, rest_hi, [])
   Ok((st8, EHandle(name.text, cells, arms, rest, name.lo, name.hi, kw.lo, rest_hi)))
 }
 

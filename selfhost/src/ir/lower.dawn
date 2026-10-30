@@ -13,12 +13,12 @@
 #   2. Nothing implicit. A discarded value gets a CSDiscard; a boxed value
 #      gets a CBox. If a backend has to re-derive it, it is not lowered.
 
+use check/capture
 use std/list
 use std/map
 use std/str
 use check/provenance as observation
-use check/types.{
-  Intr,
+use check/types.{Intr,
   intrinsics,
   subst,
   reduce_via_bindings,
@@ -414,7 +414,7 @@ fn ev_slot(st: LSt, key: Int) -> CExpr = {
 fn ev_from_pack(pack: CExpr, key: Int) -> CExpr =
   if key_is_label(key) {
     let raw = CIntrinsic("ev_get", [pack, CInt(key)], erased_ev_ty(), CNoSite)
-    adapt_out(raw, erased_ev_ty(), TyAdt(key_effect_id(key), []))
+    adapt_out(raw, erased_ev_ty(), TyAdt(key_effect_id(key), [], capture.empty_arguments()))
   } else {
     pack
   }
@@ -497,7 +497,7 @@ fn fn_value_evs(st: LSt) -> (LSt, List[CParam]) = {
 ## which is the regression it exists for and the shape the corpus mutant takes.
 fn is_evidence_ty(st: LSt, t: Ty) -> Bool =
   match t {
-    TyAdt(aid, _) ->
+    TyAdt(aid, _, _) ->
       if aid == EV_PACK_ID {
         true
       } else {
@@ -728,7 +728,7 @@ fn concrete_field_ty(st: LSt, scrut: Ty, adt: Int, ci: Int, idx: Int) -> Ty = {
   }
   let targs =
     match scrut {
-      TyAdt(_, args) -> args
+      TyAdt(_, args, _) -> args
       _ -> []
     }
   var m: Map[Int, Ty] = map.empty()
@@ -998,7 +998,7 @@ fn pat_ty(st: LSt, p: TPat) -> Ty =
         LBool(_) -> TyBool
         LStr(_) -> TyString
       }
-    TPCtor(adt, _, _) -> TyAdt(adt, [])
+    TPCtor(adt, _, _) -> TyAdt(adt, [], capture.empty_arguments())
     TPOr(alts) -> if len(alts) > 0 { pat_ty(st, alts[0]) } else { TyError }
     TPTuple(elems) -> TyTuple([])
     TPList(_, _, _, _) -> TyError
@@ -1043,17 +1043,17 @@ fn sym_ty(st: LSt, sym: Int, fallback: Ty) -> Ty =
 fn field_ty(t: Ty, adt: Int, ci: Int, idx: Int) -> Ty =
   if adt == OPTION_ID && ci == SOME_CI {
     match t {
-      TyAdt(_, args) -> if len(args) > 0 { args[0] } else { TyError }
+      TyAdt(_, args, _) -> if len(args) > 0 { args[0] } else { TyError }
       _ -> TyError
     }
   } else if adt == RESULT_ID && ci == OK_CI {
     match t {
-      TyAdt(_, args) -> if len(args) > 0 { args[0] } else { TyError }
+      TyAdt(_, args, _) -> if len(args) > 0 { args[0] } else { TyError }
       _ -> TyError
     }
   } else if adt == RESULT_ID && ci == ERR_CI {
     match t {
-      TyAdt(_, args) -> if len(args) > 1 { args[1] } else { TyError }
+      TyAdt(_, args, _) -> if len(args) > 1 { args[1] } else { TyError }
       _ -> TyError
     }
   } else {
@@ -1549,7 +1549,7 @@ fn owner_or(o: Option[String], fallback: String) -> String =
 ## The type of a dictionary as Core sees it: erased, like every other value a
 ## backend chooses its own representation for. The pseudo-id is named in
 ## types.dawn because `is_ref_ty` needs the same answer from the type alone.
-fn dict_ty() -> Ty = TyAdt(DICT_ADT_ID, [])
+fn dict_ty() -> Ty = TyAdt(DICT_ADT_ID, [], capture.empty_arguments())
 
 ## Build (once) an argument-free dictionary and return a reference to it.
 ## This is every ground witness, plus a conditional impl whose subject still
@@ -1676,7 +1676,7 @@ fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty, Int)] =
   for l in eff_labels(pabi) {
     let (lid, _) = l
     var src = 0 - 1
-    var from: Ty = TyAdt(lid, [])
+    var from: Ty = TyAdt(lid, [], capture.empty_arguments())
     var via = 0 - 1
     var i = 0
     for wl in lts {
@@ -1705,7 +1705,7 @@ fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty, Int)] =
       }
     }
     if src < 0 { panic("lower: no evidence source for a devirtualised label") }
-    out = out ++ [(src, from, TyAdt(lid, []), via)]
+    out = out ++ [(src, from, TyAdt(lid, [], capture.empty_arguments()), via)]
   }
   # An effect variable is not substituted by `subst_subject` -- it is the
   # method's own binder, not the subject's -- so the impl's row carries the
@@ -1820,8 +1820,8 @@ fn make_bridge(
       let (eid, _) = l
       let (stv, esym) = fresh_sym(st1)
       st1 = stv
-      evps = evps ++ [CParam { sym = esym, ty = TyAdt(eid, []), mode = COwned }]
-      evlocals = evlocals ++ [CLocal(esym, TyAdt(eid, []))]
+      evps = evps ++ [CParam { sym = esym, ty = TyAdt(eid, [], capture.empty_arguments()), mode = COwned }]
+      evlocals = evlocals ++ [CLocal(esym, TyAdt(eid, [], capture.empty_arguments()))]
     }
     for _v in eff_vars(sabi) {
       let (stv, esym) = fresh_sym(st1)
@@ -1847,7 +1847,7 @@ fn make_bridge(
       owner = st1.owner,
       captures = [],
       params = ps,
-      dicts = [CParam { sym = dsym, ty = TyAdt(-1, []), mode = COwned }],
+      dicts = [CParam { sym = dsym, ty = TyAdt(-1, [], capture.empty_arguments()), mode = COwned }],
       evs = evps,
       ret = sg.ret,
       body = adapt_in(call, psig.ret, sg.ret),
@@ -2132,7 +2132,7 @@ fn dict_expr(st: LSt, tid: Int, t: Ty) -> (LSt, CExpr) =
 ## of its own is its target (spec §2.7), which is the peel `rel_at` does for Eq.
 fn eq_subject(st: LSt, t: Ty) -> Ty =
   match t {
-    TyOpaque(_, _, _, _, tgt) ->
+    TyOpaque(_, _, _, _, tgt, _) ->
       if has_impl_at(st.impls, EQ_ID, t) { t } else { eq_subject(st, tgt) }
     _ -> t
   }
@@ -2217,7 +2217,7 @@ fn rel_at(st: LSt, rel: Rel, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
   # which would send it to the fallback and panic.
   if rel.peels_opaque {
     match t {
-      TyOpaque(_, _, _, _, tgt) -> return rel_at(st, rel, xs, tgt)
+      TyOpaque(_, _, _, _, tgt, _) -> return rel_at(st, rel, xs, tgt)
       _ -> ()
     }
   }
@@ -2353,7 +2353,7 @@ fn components(st: LSt, t: Ty) -> List[Arm] =
       }
       [Arm { ci = -1, parts = parts }]
     }
-    TyAdt(aid, _) -> {
+    TyAdt(aid, _, _) -> {
       var arms: List[Arm] = []
       var ci = 0
       for c in adt_of(st.adts, aid).ctors {
@@ -2373,7 +2373,7 @@ fn components(st: LSt, t: Ty) -> List[Arm] =
 
 fn adt_id(t: Ty) -> Int =
   match t {
-    TyAdt(aid, _) -> aid
+    TyAdt(aid, _, _) -> aid
     _ -> panic("lower: a relation asked a tuple for its constructor")
   }
 
@@ -2973,7 +2973,7 @@ fn is_relation_op(op: TBinOp) -> Bool =
 ## A witness as a value, for the hidden trailing arguments of a generic call.
 fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
   match w {
-    WForward(sym) -> (st, CLocal(sym, TyAdt(-1, [])))
+    WForward(sym) -> (st, CLocal(sym, TyAdt(-1, [], capture.empty_arguments())))
     # The structural default is not a different kind of dictionary, only one
     # whose slots the compiler supplies -- which is why deleting WStructural
     # changed nothing here.
@@ -3165,13 +3165,13 @@ fn fresh_lam(st: LSt) -> (LSt, String) =
 
 fn params_of_fn_ty(t: Ty) -> List[Ty] =
   match t {
-    TyFn(ps, _, _) -> ps
+    TyFn(ps, _, _, _) -> ps
     _ -> []
   }
 
 fn ret_of_fn_ty(t: Ty) -> Ty =
   match t {
-    TyFn(_, r, _) -> r
+    TyFn(_, r, _, _) -> r
     _ -> TyError
   }
 
@@ -3592,7 +3592,7 @@ fn atom_reads(e: Eff) -> List[TExpr] = {
   var out: List[TExpr] = []
   for l in eff_labels(e) {
     let (eid, _) = l
-    out = out ++ [XEvRead(label_key(eid), LabelSlot(eid), 0, 0, TyAdt(eid, []))]
+    out = out ++ [XEvRead(label_key(eid), LabelSlot(eid), 0, 0, TyAdt(eid, [], capture.empty_arguments()))]
   }
   for v in eff_vars(e) {
     let (vid, _) = v
@@ -3632,7 +3632,7 @@ test "a builtin taken as a value lowers as the call it wraps" {
   }
   for n in lowered_intrinsics() {
     let sg = map.get(it, n).expect("a lowered name is an intrinsic").sig
-    let (st1, clo) = lift_fn_value(initial, "app", n, true, TyFn(sg.param_tys, sg.ret, sg.eff))
+    let (st1, clo) = lift_fn_value(initial, "app", n, true, TyFn(sg.param_tys, sg.ret, sg.eff, capture.empty_function()))
     match clo {
       CClosure(_, _, _, _) -> ()
       _ -> panic("`" ++ n ++ "` taken as a value is not a closure")
@@ -3865,7 +3865,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       # discriminant is statically known
       let tt = tex_ty(target)
       match tt {
-        TyAdt(adt, _) -> (st1, read_field(st1, tv, tt, adt, 0, idx))
+        TyAdt(adt, _, _) -> (st1, read_field(st1, tv, tt, adt, 0, idx))
         _ -> panic("lower: field read on a non-ADT")
       }
     }
@@ -4698,7 +4698,7 @@ fn lower_propagate(st: LSt, operand: TExpr, ty: Ty) -> (LSt, CExpr) = {
   let (st2, sym) = fresh_sym(st1)
   let subj = CLocal(sym, ot)
   match ot {
-    TyAdt(adt, _) ->
+    TyAdt(adt, _, _) ->
       if adt == OPTION_ID {
         (st2, CBlock(
           [CSLet(sym, ot, ov),
@@ -4886,7 +4886,7 @@ fn lower_unwrap(st: LSt, operand: TExpr, msg: String, ty: Ty) -> (LSt, CExpr) = 
   let (st2, sym) = fresh_sym(st1)
   let subj = CLocal(sym, ot)
   match ot {
-    TyAdt(adt, _) ->
+    TyAdt(adt, _, _) ->
       if adt == OPTION_ID {
         (st2, CBlock(
           [CSLet(sym, ot, ov),
@@ -5911,7 +5911,7 @@ test "the flat module and the grouped functions are one lowering" {
       0, 0, 0, 0, TyBool)
   let fn_named = (nm: String) => TFun {
     name = nm,
-    sig = Sig {
+    sig = Sig { scope_params = capture.empty_params(),
       name = nm,
       param_tys = [tt, tt],
       param_names = ["a", "b"],
@@ -6026,7 +6026,7 @@ test "emitted_core carries the test bodies and what they hoisted" {
     XBinary(BEq, XLocal(x, nx, 0, 0, t), XLocal(y, ny, 0, 0, t), no_wit, 0, 0, 0, 0, TyBool)
   let src = TFun {
     name = "f",
-    sig = Sig {
+    sig = Sig { scope_params = capture.empty_params(),
       name = "f",
       param_tys = [ti, ti],
       param_names = ["a", "b"],
@@ -6117,7 +6117,7 @@ pub fn lower_module(
   lower_module_full(owner, tm, traits, impls, adts, prog_fns, false).m
 
 test "a written call's site is measured from its declaration, and a call nobody wrote has none" {
-  let sig0 = (nm: String) => Sig {
+  let sig0 = (nm: String) => Sig { scope_params = capture.empty_params(),
     name = nm,
     param_tys = [],
     param_names = [],

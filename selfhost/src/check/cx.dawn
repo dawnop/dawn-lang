@@ -7,6 +7,8 @@
 # has no re-export: a name reachable from `checker` alone would pin the whole
 # 11k-line file under all of them.
 
+use check/capture.{Scope as CaptureScope, CaptureParam, Params as CaptureParams, Function as CaptureFunction, Arguments as CaptureArguments}
+use check/capture
 use std/str
 use std/list
 use std/map
@@ -14,15 +16,15 @@ use std/set
 use check/identity
 use check/identity.{Minted, Part, minted, minted_path, minted_show, free_pool}
 use front/token.{Diag, mk_diag, DiagOwner}
-use front/ast.{TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
-use check/types.{
+use front/ast.{TScoped, TCaptured, TKindArg, ScopeSyntax, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
+use check/types.{with_capture_bound, TyCaptured,
   Adts, AdtI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
   no_eparam_names, fn_max_params,
   Audience, PackageId, PkgRoot, PkgStd, PkgDep, package_display,
-  TyInt, TyFloat, TyBool, TyString, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
+  TyInt, TyFloat, TyBool, TyString, TyI64Buf, TyF64Buf, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
   TyList, TyJava, TyTuple, TyFn, TyOpaque,
-  EPure, EIo, EffVar, ELabeled, EffAssoc, eff_union,
-  adt_of, trait_of, subst, impl_at,
+  EPure, EIo, EffVar, ELabeled, EffAssoc, eff_union, scoped_eff, ScopedEffect, is_mem_effect,
+  adt_of, trait_of, subst, subst_scopes, impl_at,
   BuiltinTypeI, builtin_type_map,
   builtin_type_visible, builtin_type_visible_at_return,
   builtin_type_hard_reserved, builtin_type_apply, builtin_type_render,
@@ -39,6 +41,7 @@ use front/effect_name
 ## (resolution results live in Cx.alias_resolved, the in-flight set in
 ## Cx.alias_resolving).
 pub type AliasE = {
+  scope_params: capture.Params,
   name: String,
   tparams: List[Ty],
   # the effect variables the declaration bound (`alias Thunk[!e]`), minted here
@@ -293,6 +296,8 @@ pub(pkg) type Cx = {
   current_eff_vars: Map[String, Eff],
   # frame-triage: declaration-scoped; enter_fn rewrites it inside a body (see Frame)
   current_tparams: Map[String, Ty],
+  # frame-triage: declaration-scoped; enter_fn restores the signature's binders
+  current_capture_params: capture.Params,
   # bounds of the type parameters in scope, keyed by the TyVar's id (not its
   # name: fresh ids are never reused, so a stale entry can never be reached
   # through a fresh current_tparams and no save/restore is needed). Feeds
@@ -503,7 +508,7 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
     Some(o) -> o == "std" || str.starts_with(o, "std/")
     None -> false
   }
-  Cx {
+  Cx { current_capture_params = capture.empty_params(),
     diags = [],
     # Outside every declaration until one is entered.
     owner_decl = free_pool(owner_class.unwrap_or("")),
@@ -843,7 +848,7 @@ pub(pkg) fn test_cx() -> Cx = cx_new(None, None)
 ## to the `len` primitive (docs/len-trait-design.md 3.1).
 pub(pkg) fn with_list_len(cx: Cx) -> Cx = {
   let tv = TyVar("T", -50)
-  let imp = ImplI {
+  let imp = ImplI { scope_params = capture.empty_params(),
     trait_id = LEN_ID,
     subject = TyList(tv),
     tparams = [tv],
@@ -1140,6 +1145,28 @@ pub(pkg) fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx
   var cx1 = cx
   var effs: List[Eff] = []
   for a in atoms {
+    if str.contains(a, "[") {
+      let parts = str.split(a, "[")
+      let owner = parts[0]
+      let name = str.take(parts[1], len(parts[1]) - 1)
+      let (scoped, region) = resolve_scope(cx1, name, lo, hi)
+      cx1 = scoped
+      let (resolved, id) = if effect_name.qualified(owner) {
+        resolve_named_effect(cx1, owner, lo, hi)
+      } else { (cx1, map.get(cx1.effects, owner)) }
+      cx1 = resolved
+      match (id, region) {
+        (Some(eid), Some(scope)) -> {
+          let info = effect_of(cx1, eid)
+          if is_mem_effect(info) {
+            effs = effs ++ [scoped_eff(EPure, [ScopedEffect { id = eid, name = info.name, scope = scope }])]
+          } else { cx1 = cerr(cx1, "only std/mem.Mem takes a Scope argument", lo, hi) }
+        }
+        (None, _) -> { cx1 = cerr(cx1, "unknown scoped effect `" ++ owner ++ "`", lo, hi) }
+        _ -> ()
+      }
+      continue
+    }
     if effect_name.ambient(a) {
       effs = effs ++ [EIo]
     } else if effect_name.qualified(a) {
@@ -1183,6 +1210,11 @@ pub(pkg) fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx
             match variable {
               Some(v) -> { effs = effs ++ [v] }
               None -> {
+                let axes = cx1.current_capture_params
+                if list.any(axes.scopes, s => s.name == a) || list.any(axes.captures, c => c.name == a) {
+                  cx1 = cerr(cx1, "`" ++ a ++ "` is a Scope or capture parameter, not an effect parameter", lo, hi)
+                  continue
+                }
                 # spec §6.3: an effect variable is introduced by appearing.
                 # This arm is where a signature's effect parameters are
                 # minted, and this table is what `eff_params_of` turns into
@@ -1292,6 +1324,111 @@ fn is_upper_name(s: String) -> Bool = {
 
 # ---- type resolution ----
 
+pub(pkg) fn resolve_scope(cx: Cx, name: String, lo: Int, hi: Int) -> (Cx, Option[capture.Scope]) = {
+  for s in cx.current_capture_params.scopes { if s.name == name { return (cx, Some(s)) } }
+  for c in cx.current_capture_params.captures {
+    if c.name == name { return (cerr(cx, "`" ++ name ++ "` is a capture parameter, not a Scope", lo, hi), None) }
+  }
+  if map.has(cx.current_eff_vars, name) {
+    return (cerr(cx, "`" ++ name ++ "` is an effect parameter, not a Scope", lo, hi), None)
+  }
+  (cerr(cx, "unknown Scope parameter `" ++ name ++ "`", lo, hi), None)
+}
+
+pub(pkg) fn resolve_capture(cx: Cx, names: List[String], lo: Int, hi: Int) -> (Cx, capture.Capture) = {
+  var next = cx
+  var out: capture.Capture = []
+  for name in names {
+    var found = false
+    for s in cx.current_capture_params.scopes {
+      if s.name == name { out = out ++ [capture.Region(s)]
+        found = true }
+    }
+    for c in cx.current_capture_params.captures {
+      if c.name == name { out = out ++ [capture.CaptureVar(c.name, c.id)]
+        found = true }
+    }
+    if not found { next = cerr(next, "unknown Scope or capture parameter `" ++ name ++ "`", lo, hi) }
+  }
+  (next, capture.normalize(out))
+}
+
+## Every binder is visible while bounds are resolved, including later ones.
+## The result is the declaration's own axes; the context also retains outer
+## binders while resolving a nested function type or scoped lambda.
+pub(pkg) fn bind_capture_params(cx: Cx, syntax: ScopeSyntax) -> (Cx, capture.Params) = {
+  var next = cx
+  var own = capture.empty_params()
+  let outer = cx.current_capture_params
+  for b in syntax.binders {
+    let have = next.current_capture_params
+    if map.has(cx.current_tparams, b.name) || map.has(cx.current_eff_vars, b.name) ||
+      list.any(have.scopes, s => s.name == b.name) || list.any(have.captures, c => c.name == b.name) {
+      next = cerr(next, "parameter `" ++ b.name ++ "` shadows another parameter", b.lo, b.hi)
+      continue
+    }
+    let (minted, id) = fresh(next)
+    next = minted
+    if b.capture {
+      own = CaptureParams { ..own, captures = own.captures ++ [CaptureParam { name = b.name, id = id, bound = None }] }
+    } else {
+      own = CaptureParams { ..own, scopes = own.scopes ++ [CaptureScope { name = b.name, id = id }] }
+    }
+    next = Cx { ..next, current_capture_params = CaptureParams { ..outer,
+      scopes = outer.scopes ++ own.scopes, captures = outer.captures ++ own.captures } }
+  }
+  var bounded: List[capture.CaptureParam] = []
+  for c in own.captures {
+    var bound: Option[capture.Capture] = None
+    for b in syntax.binders {
+      if b.name == c.name {
+        match b.bound {
+          Some(names) -> { let (resolved, value) = resolve_capture(next, names, b.lo, b.hi)
+            next = resolved
+            bound = Some(value) }
+          None -> ()
+        }
+      }
+    }
+    bounded = bounded ++ [CaptureParam { ..c, bound = bound }]
+  }
+  var bounds: List[(Int, capture.Capture)] = []
+  for entry in syntax.bounds {
+    let name = entry.name
+    let names = entry.members
+    match map.get(cx.current_tparams, name) {
+      Some(TyVar(_, id)) -> {
+        let (resolved, value) = resolve_capture(next, names, entry.lo, entry.hi)
+        next = resolved
+        bounds = bounds ++ [(id, value)]
+      }
+      _ -> { next = cerr(next, "a capture bound requires a type parameter", entry.lo, entry.hi) }
+    }
+  }
+  var fn_effects: List[Int] = []
+  for name in syntax.fn_effects {
+    match map.get(cx.current_eff_vars, name) {
+      Some(EffVar(_, id)) -> { fn_effects = fn_effects ++ [id] }
+      _ -> { next = cerr(next, "a fn row bound requires an effect parameter", 0, 0) }
+    }
+  }
+  own = CaptureParams { ..own, captures = bounded, bounds = bounds, fn_effects = fn_effects }
+  (Cx { ..next, current_capture_params = CaptureParams { ..outer,
+    scopes = outer.scopes ++ own.scopes, captures = outer.captures ++ own.captures,
+    bounds = outer.bounds ++ own.bounds, fn_effects = outer.fn_effects ++ own.fn_effects } }, own)
+}
+
+pub(pkg) fn declare_capture_params(cx: Cx, syntax: ScopeSyntax, ts: List[Ty], es: List[Eff]) -> (Cx, capture.Params) = {
+  var tp: Map[String, Ty] = map.empty()
+  var ep: Map[String, Eff] = map.empty()
+  for t in ts { match t { TyVar(n, _) -> { tp = map.insert(tp, n, t) }, _ -> () } }
+  for e in es { match e { EffVar(n, _) -> { ep = map.insert(ep, n, e) }, _ -> () } }
+  let (next, own) = bind_capture_params(Cx { ..cx, current_tparams = tp,
+    current_eff_vars = ep, current_capture_params = capture.empty_params() }, syntax)
+  (Cx { ..next, current_tparams = cx.current_tparams, current_eff_vars = cx.current_eff_vars,
+    current_capture_params = cx.current_capture_params }, own)
+}
+
 ## The `(lo, hi)` of a written type reference — its identity in `Cx.ty_spans`.
 pub fn tref_span(ref: TypeRef) -> (Int, Int) =
   match ref {
@@ -1299,7 +1436,8 @@ pub fn tref_span(ref: TypeRef) -> (Int, Int) =
     TQual(_, _, _, _, lo, hi) -> (lo, hi)
     TAssoc(_, _, lo, hi) -> (lo, hi)
     TTuple(_, lo, hi) -> (lo, hi)
-    TFn(_, _, _, lo, hi) -> (lo, hi)
+    TScoped(_, _, lo, hi) | TCaptured(_, _, lo, hi) | TKindArg(_, lo, hi) -> (lo, hi)
+    TFn(_, _, _, lo, hi, _) -> (lo, hi)
   }
 
 ## The span tree recorded for a written type reference. A ref that was never
@@ -1408,6 +1546,7 @@ pub(pkg) fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -
   # reaches here to be minted on sight.
   let saved_tp = cx1.current_tparams
   let saved_ev = cx1.current_eff_vars
+  let saved_capture = cx1.current_capture_params
   var seed_ev: Map[String, Eff] = map.empty()
   for v in al.eparams {
     match v {
@@ -1415,9 +1554,9 @@ pub(pkg) fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -
       _ -> ()
     }
   }
-  cx1 = Cx { ..cx1, current_tparams = tp, current_eff_vars = seed_ev }
+  cx1 = Cx { ..cx1, current_tparams = tp, current_eff_vars = seed_ev, current_capture_params = al.scope_params }
   let (cx2, t) = resolve_type(cx1, ref)
-  var cx3 = Cx { ..cx2, current_tparams = saved_tp, current_eff_vars = saved_ev }
+  var cx3 = Cx { ..cx2, current_tparams = saved_tp, current_eff_vars = saved_ev, current_capture_params = saved_capture }
   cx3 = Cx {
     ..cx3,
     alias_resolving = set.remove(cx3.alias_resolving, al.name)
@@ -1468,8 +1607,10 @@ fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
       }
       (record_span_at(cx1, lo, hi, elems), TyTuple(out))
     }
-    TFn(params, ret, effs, lo, hi) -> {
-      let (cx1, eff) = resolve_eff_at(cx, effs, lo, hi)
+    TFn(params, ret, effs, lo, hi, syntax) -> {
+      let saved = cx.current_capture_params
+      let (scoped, own) = bind_capture_params(cx, syntax)
+      let (cx1, eff) = resolve_eff_at(scoped, effs, lo, hi)
       var cx2 = check_value_arity(cx1, len(params), lo, hi)
       var ps: List[Ty] = []
       for p in params {
@@ -1480,10 +1621,57 @@ fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
       let (cx4, rt) = resolve_type_for(cx2, ret, TypeReturn)
       # a function type's written children are its parameters then its return
       # type, which is exactly TyFn's child order
-      (record_span_at(cx4, lo, hi, params ++ [ret]), TyFn(ps, rt, eff))
+      let (cx5, bound) = match syntax.capture {
+        None -> (cx4, None)
+        Some(names) -> { let (resolved, cap) = resolve_capture(cx4, names, lo, hi)
+          (resolved, Some(cap)) }
+      }
+      (record_span_at(Cx { ..cx5, current_capture_params = saved }, lo, hi, params ++ [ret]),
+        TyFn(ps, rt, eff, CaptureFunction { scopes = own.scopes, bound = bound }))
     }
-    TNamed(name, targs, eargs, lo, hi) -> resolve_named(cx, name, targs, eargs, lo, hi, type_use)
-    TQual(q, name, targs, eargs, lo, hi) -> resolve_qual(cx, q, name, targs, eargs, lo, hi)
+    TScoped(value, name, lo, hi) -> {
+      let (cx1, base) = resolve_type_for(cx, value, type_use)
+      let (cx2, scope) = resolve_scope(cx1, name, lo, hi)
+      let result = match base {
+        TyI64Buf(_) -> TyI64Buf(scope)
+        TyF64Buf(_) -> TyF64Buf(scope)
+        _ -> TyError
+      }
+      let cx3 = if base != TyError && result == TyError {
+        cerr(cx2, "only I64Buf and F64Buf take a Scope suffix", lo, hi)
+      } else { cx2 }
+      (record_span_at(cx3, lo, hi, [value]), result)
+    }
+    TCaptured(value, names, lo, hi) -> {
+      let (cx1, base) = resolve_type_for(cx, value, type_use)
+      let (cx2, bound) = resolve_capture(cx1, names, lo, hi)
+      var cx3 = cx2
+      match base {
+        TyI64Buf(Some(s)) | TyF64Buf(Some(s)) -> {
+          if not capture.contains(bound, capture.Region(s)) {
+            cx3 = cerr(cx3, "a capture bound cannot erase a buffer's Scope", lo, hi)
+          }
+        }
+        TyFn(_, _, _, sc) -> {
+          match sc.bound { Some(old) -> {
+            if not capture.subset_in(old, bound, cx3.current_capture_params.captures) {
+              cx3 = cerr(cx3, "a capture bound cannot erase a function's declared captures", lo, hi)
+            }
+          }, None -> () }
+        }
+        TyCaptured(_, old) -> {
+          if not capture.subset_in(old, bound, cx3.current_capture_params.captures) {
+            cx3 = cerr(cx3, "a capture bound cannot erase declared captures", lo, hi)
+          }
+        }
+        _ -> ()
+      }
+      let result = with_capture_bound(base, bound)
+      (record_span_at(cx3, lo, hi, [value]), result)
+    }
+    TKindArg(_, lo, hi) -> (cerr(cx, "a Scope or capture argument is not a value type", lo, hi), TyError)
+    TNamed(name, targs, eargs, lo, hi) -> resolve_kind_application(cx, None, name, targs, eargs, lo, hi, type_use)
+    TQual(q, name, targs, eargs, lo, hi) -> resolve_kind_application(cx, Some(q), name, targs, eargs, lo, hi, type_use)
     TAssoc(subj, name, lo, hi) -> {
       # `T.Item` has no written sub-reference: the subject is a bare name
       let (cx1, t) = resolve_assoc(cx, subj, name, lo, hi)
@@ -1493,6 +1681,73 @@ fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
 
 ## `[]` at `List[TypeRef]`, for the record sites that have no written children.
 fn no_trefs() -> List[TypeRef] = []
+
+fn resolve_kind_application(cx: Cx, qual: Option[String], name: String,
+  written: List[TypeRef], eargs: List[EffArg], lo: Int, hi: Int, type_use: TypeUse) -> (Cx, Ty) !io = {
+  let aliases = match qual { Some(q) -> match map.get(cx.module_exports, q) {
+    Some(e) -> e.aliases, None -> map.empty()
+  }, None -> cx.aliases }
+  let names = match qual { Some(q) -> match map.get(cx.module_exports, q) {
+    Some(e) -> e.types_by_name, None -> map.empty()
+  }, None -> cx.adts_by_name }
+  var params = capture.empty_params()
+  match map.get(aliases, name) {
+    Some(a) -> { params = a.scope_params }
+    None -> match map.get(names, name) {
+      Some(id) -> { params = adt_of(cx.adts, id).scope_params }
+      None -> ()
+    }
+  }
+  if len(params.scopes) == 0 && len(params.captures) == 0 &&
+    not list.any(written, t => match t { TKindArg(_, _, _) -> true, _ -> false }) {
+    return match qual {
+      Some(q) -> resolve_qual(cx, q, name, written, eargs, lo, hi)
+      None -> resolve_named(cx, name, written, eargs, lo, hi, type_use)
+    }
+  }
+  var args: List[TypeRef] = []
+  var kinds: List[List[String]] = []
+  for t in written { match t {
+    TKindArg(n, _, _) -> { kinds = kinds ++ [n] }
+    _ -> { args = args ++ [t] }
+  } }
+  var next = cx
+  var sm: Map[Int, capture.Scope] = map.empty()
+  var cm: Map[Int, capture.Capture] = map.empty()
+  var scopes: List[capture.Scope] = []
+  var captures: List[capture.Capture] = []
+  if len(kinds) != len(params.scopes) + len(params.captures) {
+    return (cerr(cx, "`" ++ name ++ "` takes " ++ to_string(len(params.scopes)) ++
+        " Scope and " ++ to_string(len(params.captures)) ++ " capture argument(s), got " ++ to_string(len(kinds)), lo, hi), TyError)
+  }
+  for i in 0..len(params.scopes) {
+    if len(kinds[i]) != 1 {
+      return (cerr(next, "a Scope argument requires one Scope parameter", lo, hi), TyError)
+    }
+    let (resolved, s) = resolve_scope(next, kinds[i][0], lo, hi)
+    next = resolved
+    match s { Some(value) -> { scopes = scopes ++ [value]
+      sm = map.insert(sm, params.scopes[i].id, value) }, None -> () }
+  }
+  for i in 0..len(params.captures) {
+    let (resolved, c) = resolve_capture(next, kinds[len(params.scopes) + i], lo, hi)
+    next = resolved
+    captures = captures ++ [c]
+    cm = map.insert(cm, params.captures[i].id, c)
+  }
+  let (resolved, value) = match qual {
+    Some(q) -> resolve_qual(next, q, name, args, eargs, lo, hi)
+    None -> resolve_named(next, name, args, eargs, lo, hi, type_use)
+  }
+  let substituted = subst_scopes(value, sm, cm)
+  let actual = CaptureArguments { scopes = scopes, captures = captures }
+  let result = match substituted {
+    TyAdt(id, ts, _) -> TyAdt(id, ts, actual)
+    TyOpaque(id, n, owner, ts, target, _) -> TyOpaque(id, n, owner, ts, target, actual)
+    _ -> substituted
+  }
+  (resolved, result)
+}
 
 ## `T.Item` -- the subject must be a type parameter in scope, and exactly one
 ## of its bounds must declare `name` (assoc-types-design.md D2). Zero declarers
@@ -1617,7 +1872,7 @@ fn resolve_qual(
         cx1 = cx2
         args = args ++ [t]
       }
-      (record_span_at(cx1, lo, hi, targs), TyAdt(aid, args))
+      (record_span_at(cx1, lo, hi, targs), TyAdt(aid, args, capture.empty_arguments()))
     }
     None -> {
       let pool = map.keys(exp.types_by_name) ++ map.keys(exp.aliases)
@@ -1951,7 +2206,7 @@ fn resolve_named(
         cx1 = cx2
         args = args ++ [t]
       }
-      (record_span_at(cx1, lo, hi, targs), TyAdt(aid, args))
+      (record_span_at(cx1, lo, hi, targs), TyAdt(aid, args, capture.empty_arguments()))
     }
   }
 }
@@ -1963,7 +2218,7 @@ fn resolve_named(
 ## arguments it was applied to — which the target cannot always give back,
 ## since a target need not mention every parameter.
 pub fn wrap_opaque(al: AliasE, args: List[Ty], target: Ty) -> Ty =
-  if al.is_opaque { TyOpaque(al.id, al.name, al.owner, args, target) } else { target }
+  if al.is_opaque { TyOpaque(al.id, al.name, al.owner, args, target, capture.empty_arguments()) } else { target }
 
 ## The std types whose representation means different things on the two
 ## backends, and so cannot be written down in Core.
@@ -2000,7 +2255,7 @@ fn backend_dependent_repr(owner: String, name: String) -> Bool =
 ## spelling out.
 pub fn const_refusal_hint(t: Ty) -> String =
   match t {
-    TyOpaque(_, nm, own, _, _) ->
+    TyOpaque(_, nm, own, _, _, _) ->
       if backend_dependent_repr(own, nm) {
         "a cursor is a position in the backend's own representation of a " ++
           "string, and the two backends do not agree on it, so there is no " ++
@@ -2044,7 +2299,7 @@ pub(pkg) fn is_const_literal_type(adts: Adts, t: Ty, visited: Set[Int]) -> Bool 
     # Serializability is a question about the representation, so an opaque
     # type is exactly as serializable as its target -- unless the target's
     # *meaning* is the backend's rather than the language's.
-    TyOpaque(_, nm, own, _, tgt) ->
+    TyOpaque(_, nm, own, _, tgt, _) ->
       if backend_dependent_repr(own, nm) {
         false
       } else {
@@ -2057,7 +2312,7 @@ pub(pkg) fn is_const_literal_type(adts: Adts, t: Ty, visited: Set[Int]) -> Bool 
       }
       true
     }
-    TyAdt(aid, targs) -> {
+    TyAdt(aid, targs, _) -> {
       # Inspect arguments before the recursion shortcut: a non-regular
       # recursive field can introduce a function or another refused type.
       for arg in targs {

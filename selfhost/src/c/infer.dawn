@@ -36,6 +36,7 @@
 # the same answer onto `CParam.mode`, and `rc.rc_module` asserts the two
 # halves agree before rewriting anything.
 
+use check/capture
 use std/list
 use std/map
 use std/set
@@ -64,8 +65,8 @@ use ir/reach
 ## earlier -- their values exist to be passed on into that convention.
 fn fn_typed(t: Ty) -> Bool =
   match t {
-    TyFn(_, _, _) -> true
-    TyOpaque(_, _, _, _, tgt) -> fn_typed(tgt)
+    TyFn(_, _, _, _) -> true
+    TyOpaque(_, _, _, _, tgt, _) -> fn_typed(tgt)
     _ -> false
   }
 
@@ -849,8 +850,8 @@ test "consuming shapes flip owned: stored, captured, aliased, reassigned" {
   let stored = t_fn("m", "s", [CParam { sym = 1, ty = lst, mode = COwned }], lst,
     CListLit([CLocal(1, lst)], TyList(lst)))
   let captured = t_fn("m", "c", [CParam { sym = 2, ty = lst, mode = COwned }],
-    TyFn([], TyInt, EPure),
-    CClosure("lam", "m", [CLocal(2, lst)], TyFn([], TyInt, EPure)))
+    TyFn([], TyInt, EPure, capture.empty_function()),
+    CClosure("lam", "m", [CLocal(2, lst)], TyFn([], TyInt, EPure, capture.empty_function())))
   let aliased = t_fn("m", "a", [CParam { sym = 3, ty = lst, mode = COwned }], TyInt,
     CBlock([CSLet(9, lst, CLocal(3, lst))], Some(CInt(0)), TyInt))
   let reassigned = t_fn("m", "w", [CParam { sym = 4, ty = lst, mode = COwned }], TyInt,
@@ -892,8 +893,8 @@ test "jurisdiction pins: closures, dictionary slots, pvec boundary, fn-typed" {
   let read_body = CIntrinsic("len", [CLocal(1, lst)], TyInt, CNoSite)
   # named by a CClosure somewhere: called through CDynamic, all owned
   let cl = t_fn("m", "cl", [CParam { sym = 1, ty = lst, mode = COwned }], TyInt, read_body)
-  let user = t_fn("m", "u", [], TyFn([], TyInt, EPure),
-    CClosure("cl", "m", [], TyFn([], TyInt, EPure)))
+  let user = t_fn("m", "u", [], TyFn([], TyInt, EPure, capture.empty_function()),
+    CClosure("cl", "m", [], TyFn([], TyInt, EPure, capture.empty_function())))
   assert len(t_row(infer_modes([t_mod("m", [cl, user])]), "m", "cl")) == 0
   # named by a dictionary slot: read as a bare function pointer
   let sl = t_fn("m", "sl", [CParam { sym = 1, ty = lst, mode = COwned }], TyInt, read_body)
@@ -920,7 +921,7 @@ test "jurisdiction pins: closures, dictionary slots, pvec boundary, fn-typed" {
   let ix = t_row(infer_modes([t_mod("std/pvec", [px])]), "std/pvec", "index")
   assert len(ix) == 2 && not mode_owned(ix[0])
   # a fn-typed parameter: higher-order is owned by consensus
-  let fty = TyFn([], TyInt, EPure)
+  let fty = TyFn([], TyInt, EPure, capture.empty_function())
   let ho = t_fn("m", "ho", [CParam { sym = 1, ty = fty, mode = COwned }], TyInt,
     CCall(CDynamic(CLocal(1, fty)), [], TyInt, CNoSite))
   assert len(t_row(infer_modes([t_mod("m", [ho])]), "m", "ho")) == 0

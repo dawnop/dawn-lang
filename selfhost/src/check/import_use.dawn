@@ -24,7 +24,7 @@ use std/set
 use std/str
 use check/cx.{Cx, cerr_h, effect_of}
 use check/types.{adt_of}
-use front/ast.{
+use front/ast.{TScoped, TCaptured, TKindArg,
   Module, Decl, DFn, DEffect, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest,
   FnDecl, Param, LambdaParam, TypeParamDecl, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg,
   Expr, EVar, EApply, EMethod, ELambda, ECtor, ERecord, EFieldAcc, EListLit, ETupleLit, EPropagate,
@@ -73,9 +73,11 @@ fn walk_tref(w: Walk, t: TypeRef) -> Walk =
     TQual(q, _, args, eargs, _, _) -> walk_eargs(walk_trefs(note_qual(w, q), args), eargs)
     # the subject is a type parameter and the member an associated name;
     # neither is something a `use` binds
+    TScoped(t, _, _, _) | TCaptured(t, _, _, _) -> walk_tref(w, t)
+    TKindArg(_, _, _) -> w
     TAssoc(_, _, _, _) -> w
     TTuple(elems, _, _) -> walk_trefs(w, elems)
-    TFn(params, ret, effs, _, _) -> note_all(walk_tref(walk_trefs(w, params), ret), effs)
+    TFn(params, ret, effs, _, _, _) -> note_all(walk_tref(walk_trefs(w, params), ret), effs)
   }
 
 fn walk_trefs(w: Walk, ts: List[TypeRef]) -> Walk = {
@@ -160,7 +162,7 @@ fn walk_expr(w: Walk, bound: Set[String], e: Expr) -> Walk =
       let o = if member_of_other(w, bound, target) { w } else { note(w, name) }
       walk_args(walk_expr(qualify_of(o, bound, target), bound, target), bound, args)
     }
-    ELambda(params, body, _, _, _) ->
+    ELambda(params, body, _, _, _, _) ->
       walk_expr(walk_lparams(w, params), bind_lparams(bound, params), body)
     ECtor(name, _, _) -> note(w, name)
     ERecord(name, fields, spread, _, _, _, _) -> {
@@ -424,7 +426,7 @@ fn walk_decl(w: Walk, d: Decl) -> Walk =
       }
       o
     }
-    DImpl(tparams, trait_name, _, _, subject, methods, assoc, eff_binds, _, _) -> {
+    DImpl(tparams, trait_name, _, _, subject, methods, assoc, eff_binds, _, _, _) -> {
       var o = walk_tref(note_spelled(walk_tparams(w, tparams), trait_name), subject)
       for m in methods { o = walk_fn(o, m) }
       for a in assoc { o = walk_tref(o, a.tref) }

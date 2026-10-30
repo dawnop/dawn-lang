@@ -27,12 +27,12 @@ use front/lexer
 use front/token.{
   Token, TokKind, Diag,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
-  USE, ELSE, FN, FOR, IF, MATCH, WHILE, NOT, TRUE, FALSE, IMPL, EFFECT, TYPE, PUB,
+  USE, ELSE, FN, FOR, IF, MATCH, WHILE, NOT, TRUE, FALSE, IMPL, EFFECT, TYPE, ALIAS, PUB,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
   PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, PIPE,
-  AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR,
+  AMPAMP, PIPEPIPE, AMP, CARET, AT, TILDE, SHL, SHR, USHR,
   BANG
 }
 
@@ -41,6 +41,9 @@ use front/token.{
 pub fn format(source: String) -> Result[String, List[Diag]] = {
   let (cps, raw, comments, diags) = lexer.lex_with_comments_cps(source)
   if len(diags) > 0 { return Err(diags) }
+  let captures = capture_literals(raw)
+  let normalized = normalize_captures(source, cps, captures)
+  if normalized != source { return format(normalized) }
   let bars = single_line_type_bars(cps, raw)
   var code: List[Token] = []
   for t in raw {
@@ -49,13 +52,102 @@ pub fn format(source: String) -> Result[String, List[Diag]] = {
   let stream = merge_by_lo(code, comments)
   if len(stream) == 0 { return Ok("") }
   let keywords = contextual_keywords(raw)
+  var capture_spaces: Set[Int] = set.empty()
+  for literal in captures { if literal.spaced { capture_spaces = set.insert(capture_spaces, literal.start) } }
   let marks = Marks {
     unary = unary_minus(raw, keywords),
     postfix = postfix_bang(raw),
     keywords = keywords,
-    signature = signature_arrows(raw)
+    signature = signature_arrows(raw),
+    captures = capture_tokens(raw, captures), capture_spaces = capture_spaces
   }
   Ok(reflow(cps, stream, marks, block_arrow(cps, raw)))
+}
+
+# A set literal has only names and commas. Restrict normalization to type
+# positions so an expression's binary xor keeps its ordinary block operand.
+type CaptureLiteral = { start: Int, open: Int, end: Int, names: List[String], spaced: Bool }
+
+fn capture_literals(raw: List[Token]) -> List[CaptureLiteral] = {
+  var out: List[CaptureLiteral] = []
+  var in_type = false
+  var alias_target = false
+  var depth = 0
+  var functions: List[Int] = []
+  var arrows: Set[Int] = set.empty()
+  for i in 0..len(raw) {
+    let k = raw[i].kind
+    if k == RPAREN || k == RBRACKET || k == RBRACE {
+      depth = depth - 1
+      let level = depth
+      functions = filter(functions, d => d <= level)
+    }
+    if k == COMMA && list.contains(functions, depth) {
+      let level = depth
+      functions = filter(functions, d => d != level)
+      arrows = set.remove(arrows, depth)
+    }
+    if k == FN && i + 1 < len(raw) && raw[i + 1].kind == IDENT { functions = []
+      arrows = set.empty() }
+    if k == ARROW && list.contains(functions, depth) { arrows = set.insert(arrows, depth) }
+    if k == EQ || k == FATARROW { functions = []
+      arrows = set.empty() }
+    if k == TYPE || k == ALIAS { alias_target = true }
+    if k == COLON || k == ARROW || k == AT { in_type = true }
+    if k == EQ { in_type = alias_target
+      alias_target = false }
+    if k == FATARROW { in_type = false }
+    if k == FN && i + 1 < len(raw) && (raw[i + 1].kind == LPAREN || raw[i + 1].kind == LBRACKET) { in_type = true
+      functions = functions ++ [depth] }
+    if k == LPAREN || k == LBRACKET || k == LBRACE { depth = depth + 1 }
+    if k != CARET || not in_type || i + 1 >= len(raw) || raw[i + 1].kind != LBRACE { continue }
+    var j = i + 2
+    var names: List[String] = []
+    var wants_name = true
+    var valid = true
+    while j < len(raw) && raw[j].kind != RBRACE {
+      if wants_name && raw[j].kind == IDENT {
+        if not list.contains(names, raw[j].text) { names = names ++ [raw[j].text] }
+        wants_name = false
+      } else if not wants_name && raw[j].kind == COMMA { wants_name = true }
+      else { valid = false
+        break }
+      j = j + 1
+    }
+    if valid && j < len(raw) && raw[j].kind == RBRACE {
+      out = out ++ [CaptureLiteral { start = raw[i].lo, open = raw[i + 1].lo, end = raw[j].hi, names = sort(names), spaced = set.has(arrows, depth) }]
+    }
+  }
+  out
+}
+
+fn normalize_captures(source: String, cps: List[Char], literals: List[CaptureLiteral]) -> String = {
+  if len(literals) == 0 { return source }
+  var out = ""
+  var cursor = 0
+  for c in literals {
+    let original = lexer.slice_cps(cps, c.start, c.end)
+    let shown = if str.contains(original, "#") { original } else { "^{" ++ join(c.names, ", ") ++ "}" }
+    out = out ++ lexer.slice_cps(cps, cursor, c.start) ++ shown
+    cursor = c.end
+  }
+  out ++ lexer.slice_cps(cps, cursor, len(cps))
+}
+
+fn capture_tokens(raw: List[Token], literals: List[CaptureLiteral]) -> Set[Int] = {
+  var out: Set[Int] = set.empty()
+  for c in literals { out = set.insert(set.insert(set.insert(out, c.start), c.open), c.end - 1) }
+  for i in 0..len(raw) {
+    if raw[i].kind == CARET && i + 1 < len(raw) && raw[i + 1].kind == IDENT && i > 0 &&
+      (raw[i - 1].kind == LBRACKET || raw[i - 1].kind == COMMA) { out = set.insert(out, raw[i].lo) }
+    if raw[i].kind == LBRACKET && i + 1 < len(raw) && raw[i + 1].kind == AT &&
+      (i == 0 || (raw[i - 1].kind != FN && raw[i - 1].kind != IDENT)) {
+      var j = i + 1
+      while j < len(raw) && raw[j].kind != RBRACKET { j = j + 1 }
+      if j < len(raw) { out = set.insert(out, raw[j].lo) }
+    }
+  }
+  out
 }
 
 ## Only a type declaration's optional first bar is redundant. Keep this a
@@ -438,7 +530,7 @@ fn is_effect_union(raw: List[Token], start: Int) -> Bool = {
 ## The token-level facts `space` and `reflow` need, each a set of span starts:
 ## unary `-`, postfix `!`, the contextual keywords standing in their position,
 ## and the `->` arrows that end a parameter list.
-type Marks = { unary: Set[Int], postfix: Set[Int], keywords: Set[Int], signature: Set[Int] }
+type Marks = { unary: Set[Int], postfix: Set[Int], keywords: Set[Int], signature: Set[Int], captures: Set[Int], capture_spaces: Set[Int] }
 
 ## Span starts of the `->` arrows that end a signature's or a function type's
 ## parameter list (`is_signature_arrow`). A line wrapped after one of these
@@ -926,6 +1018,13 @@ fn space(prev: Token, cur: Token, marks: Marks, on_use_line: Bool) -> Bool = {
   if set.has(marks.keywords, prev.lo) { return true }
   # a module path prints tight: use greet/words.{Lang, greet} (spec §10.2)
   if on_use_line && (p == SLASH || c == SLASH || p == LBRACE || c == RBRACE) { return false }
+  if p == AT || c == AT { return false }
+  if c == LBRACKET && p == FN { return false }
+  if p == RBRACKET && c == LPAREN && set.has(marks.captures, prev.lo) { return true }
+  if set.has(marks.captures, prev.lo) && (p == CARET || p == LBRACE) { return false }
+  if c == RBRACE && set.has(marks.captures, cur.lo) { return false }
+  if c == CARET && set.has(marks.capture_spaces, cur.lo) { return true }
+  if c == CARET && set.has(marks.captures, cur.lo) && p != COLON && p != PLUS && p != COMMA { return false }
   # openers hug what follows; closers/commas/colons/? hug what precedes
   if p == LPAREN || p == LBRACKET { return false }
   if c == RPAREN || c == RBRACKET { return false }
@@ -1959,4 +2058,13 @@ test "origin arm clauses preserve tokens and formatting is idempotent" {
     assert fmt_of(once) == once
     assert str.contains(once, "origin ")
   }
+}
+
+test "Mem scope formatting preserves binders and canonicalizes capture sets" {
+  let source = "fn f[@s,^c:^{s},!e:fn](b:I64Buf@s,g:fn[@t]()->Int !e ^{s,c,s})->Unit=()\n"
+  let shown = match format(source) { Ok(value) -> value, Err(_) -> "" }
+  assert shown == "fn f[@s, ^c: ^{s}, !e: fn](b: I64Buf@s, g: fn[@t]() -> Int !e ^{c, s}) -> Unit = ()\n"
+  assert format(shown) == Ok(shown)
+  assert format("fn f()=[@s] (b:I64Buf@s)=>b\n") == Ok("fn f() = [@s] (b: I64Buf@s) => b\n")
+  assert format("fn f(x:Int,y:Int)->Int=x^ {y}\n") == Ok("fn f(x: Int, y: Int) -> Int = x ^ { y }\n")
 }

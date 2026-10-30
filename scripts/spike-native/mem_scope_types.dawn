@@ -1,0 +1,16 @@
+# Scope quantifiers must survive first-class callbacks on both backends.
+# This exercises static contracts without depending on scoped Mem discharge.
+use std/mem
+
+type Holder[@s] = { buffer: I64Buf@s }
+alias Reader[@s, ^c, !e: fn] = fn() -> I64Buf@s !e ^{c}
+
+fn pack[@t](b: I64Buf@t) -> Holder[t] = Holder { buffer = b }
+fn unpack[@t](h: Holder[t]) -> I64Buf@t = h.buffer
+fn witness[@s](b: I64Buf@s) -> I64Buf@s !mem.Mem[s] = b
+fn with_callback(body: fn[@s]() -> Int) -> Int = body()
+
+pub fn main() -> Unit !io = {
+  let callback: fn[@t]() -> Int = [@u] () => 37
+  println(to_string(with_callback(callback)))
+}

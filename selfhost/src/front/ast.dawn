@@ -26,7 +26,26 @@ pub type TypeRef =
 # parameter whose bounds declare `name`.
   | TAssoc(subject: String, name: String, lo: Int, hi: Int)
   | TTuple(elems: List[TypeRef], lo: Int, hi: Int)
-  | TFn(params: List[TypeRef], ret: TypeRef, effs: List[String], lo: Int, hi: Int)
+  | TFn(params: List[TypeRef], ret: TypeRef, effs: List[String], lo: Int, hi: Int, scope: ScopeSyntax)
+  | TScoped(value: TypeRef, scope: String, lo: Int, hi: Int)
+  | TCaptured(value: TypeRef, bound: List[String], lo: Int, hi: Int)
+  | TKindArg(names: List[String], lo: Int, hi: Int)
+
+## Scope and capture binders share brackets with types, but never their
+## positional argument axis. Names here are resolved to identities later.
+pub type ScopeBinder = { name: String, capture: Bool, bound: Option[List[String]], lo: Int, hi: Int }
+pub type CaptureBound = { name: String, members: List[String], lo: Int, hi: Int }
+pub type ScopeSyntax = {
+  binders: List[ScopeBinder], bounds: List[CaptureBound],
+  fn_effects: List[String], capture: Option[List[String]]
+}
+const EMPTY_SCOPE_SYNTAX: ScopeSyntax = ScopeSyntax { binders = [], bounds = [], fn_effects = [], capture = None }
+pub fn no_scope_syntax() -> ScopeSyntax = EMPTY_SCOPE_SYNTAX
+
+## Identity shapes compare declaration binders by position across kinds.
+## This combined list is never the checker's positional type-argument axis.
+pub fn parameter_names(types: List[TypeParamDecl], scope: ScopeSyntax) -> List[String] =
+  map(types, t => t.name) ++ map(scope.binders, b => b.name)
 
 ## One trait bound (or derive) with its span: the Ord in `[T: Ord]`.
 pub type Bound = { name: String, lo: Int, hi: Int }
@@ -314,7 +333,7 @@ pub type Expr =
 # (spec §4.10). The checker reads the flag only to phrase diagnostics -- a
 # `return` crossing this boundary must talk about `with`, not accuse the
 # author of a lambda they never typed.
-  | ELambda(params: List[LambdaParam], body: Expr, sugar: Bool, lo: Int, hi: Int)
+  | ELambda(params: List[LambdaParam], body: Expr, sugar: Bool, lo: Int, hi: Int, scopes: List[ScopeBinder])
 # an uppercase name standing alone: a constructor head, a nullary
 # constructor's value, a constant or a Java class receiver. `Circle(1.0)` is an
 # EApply over this node (SYN-02); what the name resolves to decides the rest.
@@ -508,6 +527,7 @@ pub type TraitMethod = {
 }
 
 pub type FnDecl = {
+  scope: ScopeSyntax,
   vis: Vis,
   name: String,
   tparams: List[TypeParamDecl],
@@ -527,6 +547,7 @@ pub type FnDecl = {
 }
 
 pub type TypeDeclR = {
+  scope: ScopeSyntax,
   vis: Vis,
   # `opaque type N[..] = T`: nominal to every other module, its target to this
   # one. Carries alias_target like an alias does -- the difference is only who
@@ -634,7 +655,8 @@ pub type Decl =
     assoc: List[AssocBind],
     eff_binds: List[EffAssocBind],
     lo: Int,
-    hi: Int
+    hi: Int,
+    scope: ScopeSyntax
   )
   | DUseJava(fqcn: String, lo: Int, hi: Int, nlo: Int, nhi: Int)
   | DUseModule(
@@ -678,7 +700,7 @@ pub fn e_lo(e: Expr) -> Int =
     EVar(_, lo, _) -> lo
     EApply(_, _, lo, _) -> lo
     EMethod(_, _, _, _, _, lo, _) -> lo
-    ELambda(_, _, _, lo, _) -> lo
+    ELambda(_, _, _, lo, _, _) -> lo
     ECtor(_, lo, _) -> lo
     ERecord(_, _, _, _, _, lo, _) -> lo
     EFieldAcc(_, _, _, _, lo, _) -> lo
@@ -711,7 +733,7 @@ pub fn e_hi(e: Expr) -> Int =
     EVar(_, _, hi) -> hi
     EApply(_, _, _, hi) -> hi
     EMethod(_, _, _, _, _, _, hi) -> hi
-    ELambda(_, _, _, _, hi) -> hi
+    ELambda(_, _, _, _, hi, _) -> hi
     ECtor(_, _, hi) -> hi
     ERecord(_, _, _, _, _, _, hi) -> hi
     EFieldAcc(_, _, _, _, _, hi) -> hi
@@ -739,7 +761,8 @@ pub fn t_lo(t: TypeRef) -> Int =
     TQual(_, _, _, _, lo, _) -> lo
     TAssoc(_, _, lo, _) -> lo
     TTuple(_, lo, _) -> lo
-    TFn(_, _, _, lo, _) -> lo
+    TScoped(_, _, lo, _) | TCaptured(_, _, lo, _) | TKindArg(_, lo, _) -> lo
+    TFn(_, _, _, lo, _, _) -> lo
   }
 
 pub fn t_hi(t: TypeRef) -> Int =
@@ -748,7 +771,8 @@ pub fn t_hi(t: TypeRef) -> Int =
     TQual(_, _, _, _, _, hi) -> hi
     TAssoc(_, _, _, hi) -> hi
     TTuple(_, _, hi) -> hi
-    TFn(_, _, _, _, hi) -> hi
+    TScoped(_, _, _, hi) | TCaptured(_, _, _, hi) | TKindArg(_, _, hi) -> hi
+    TFn(_, _, _, _, hi, _) -> hi
   }
 
 pub fn pat_lo(p: Pattern) -> Int =
@@ -889,6 +913,7 @@ pub fn module_traits(m: Module) -> List[TraitView] = {
 }
 
 pub type ImplView = {
+  scope: ScopeSyntax,
   tparams: List[TypeParamDecl],
   trait_name: String,
   tlo: Int,
@@ -905,8 +930,8 @@ pub fn module_impls(m: Module) -> List[ImplView] = {
   var out: List[ImplView] = []
   for d in m.decls {
     match d {
-      DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, ebs, lo, hi) -> {
-        out = out ++ [ImplView {
+      DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, ebs, lo, hi, scope) -> {
+        out = out ++ [ImplView { scope = scope,
           tparams = tparams,
           trait_name = trait_name,
           tlo = tlo,

@@ -79,7 +79,7 @@ fn inst_fields(adts: Adts, adt: Int, ci: Int, column: Ty) -> List[Ty] = {
   let c = a.ctors[ci]
   let field_tys = map(c.fields, f => f.ty)
   match column {
-    TyAdt(_, targs) ->
+    TyAdt(_, targs, _) ->
       if len(a.tparams) == 0 {
         field_tys
       } else {
@@ -171,7 +171,7 @@ fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
         if has_true && has_false { return SWild }
       }
       match column {
-        TyAdt(adt, _) -> if complete_ctor_alts(adts, flat, adt) { return SWild }
+        TyAdt(adt, _, _) -> if complete_ctor_alts(adts, flat, adt) { return SWild }
         _ -> ()
       }
       if len(flat) == 1 { flat[0] } else { SOr(flat) }
@@ -189,7 +189,7 @@ fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
         index = index + 1
       }
       match column {
-        TyAdt(found_adt, _) ->
+        TyAdt(found_adt, _, _) ->
           if found_adt == adt && len(adt_of(adts, adt).ctors) == 1 && all_wild(simplified) {
             SWild
           } else {
@@ -372,7 +372,7 @@ fn useful_go(
         TyTuple(elems) ->
           return useful_go(adts, spec_tuple(expanded, len(elems)),
             wilds(len(elems)) ++ rest_q, elems ++ rest_t, left0)
-        TyAdt(aid, _) -> {
+        TyAdt(aid, _, _) -> {
           let adt = adt_of(adts, aid)
           if heads_complete(expanded, aid, len(adt.ctors)) {
             var left = left0

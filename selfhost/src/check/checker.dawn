@@ -7,13 +7,15 @@
 # This first slice: state, scopes, effect bookkeeping, and type resolution
 # (resolveType / resolveEff / alias expansion / Map-Set key validity).
 
+use check/capture
+use check/capture.{Function as CaptureFunction}
 use std/str
 use std/list
 use std/map
 use std/set
 use check/provenance as observation
-use front/ast.{
-  TypeRef, TNamed, Module,
+use front/ast.{parameter_names,
+  TypeRef, TNamed, ScopeBinder, ScopeSyntax, no_scope_syntax, Module,
   module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests, TestView,
   TraitMethod, Expr,
@@ -46,11 +48,10 @@ use check/tast.{CallSource, call_source,
   TStmt, TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   TFun, TDefault, TConst, TModule, WitRef, WForward, WConcrete, WApply, x_lo, x_hi
 }
-use check/types.{
-  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
+use check/types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever, ty_equal, primitive_captures, fn_align, apply_scope_arguments, EScoped,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes, ty_eff_vars,
-  eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, eff_assocs,
+  eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, scoped_eff, eff_scopes, eff_without_scopes, scoped_difference, eff_assocs,
   cont_row,
   eff_map_assocs,
   eff_carries,
@@ -87,7 +88,7 @@ use check/cx.{
   label_eff,
   ExportDiagnostic,
   write_symbol, write_signature, write_bounds,
-  AliasE, Cx, Frame, LambdaCx, LocalFn, StagedCell, StagedKind, OrdinaryClosure, StagedLoop, StagedBranch, ModExports, package_of, pkg_private, pkg_private_export,
+  bind_capture_params, AliasE, Cx, Frame, LambdaCx, LocalFn, StagedCell, StagedKind, OrdinaryClosure, StagedLoop, StagedBranch, ModExports, package_of, pkg_private, pkg_private_export,
   pkg_private_err, private_name_diagnostic,
   cx_new, test_cx, with_list_len, check_value_arity,
   cerr, cerr_h, cerr_o, owned_by, unowned, measured_from, owner_off, owner_at, eff_witness_at, fresh,
@@ -678,18 +679,36 @@ fn sees_through(cx: Cx, owner: String) -> Bool =
 ## to be strict equality here while `unify_into` was covariant, so the two
 ## doors disagreed.
 pub(pkg) fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
-  if t == target || is_errorish(t) || target == TyError { return true }
+  if ty_equal(t, target) || is_errorish(t) || target == TyError { return true }
+  match (t, target) {
+    (TyCaptured(value, _), _) -> match primitive_captures(value) {
+      Some(_) -> { if assignable(cx, value, target) { return true } }
+      None -> ()
+    }
+    (_, TyCaptured(value, bound)) -> match primitive_captures(t) {
+      Some(c) -> { if capture.subset_in(c, bound, cx.current_capture_params.captures) && assignable(cx, t, value) { return true } }
+      None -> ()
+    }
+    _ -> ()
+  }
   match t {
-    TyFn(ps, r, e) ->
-      match target {
-        TyFn(tps, tr, te) -> params_contra(cx, tps, ps) && assignable(cx, r, tr) && eff_carries(te, e)
+    TyCaptured(value, bound) -> match target {
+      TyCaptured(want, upper) -> capture.subset_in(bound, upper, cx.current_capture_params.captures) && assignable(cx, value, want)
+      _ -> false
+    }
+    TyFn(_, _, _, _) -> match fn_align(t, target) {
+      Some(TyFn(ps, r, e, sc)) -> match target {
+        TyFn(tps, tr, te, tc) -> params_contra(cx, tps, ps) && assignable(cx, r, tr) &&
+          eff_carries(te, e) && capture.subset_in(capture.bound(sc), capture.bound(tc), cx.current_capture_params.captures)
         _ -> false
       }
-    TyOpaque(_, _, ow, _, tgt) ->
+      _ -> false
+    }
+    TyOpaque(_, _, ow, _, tgt, _) ->
       if sees_through(cx, ow) { assignable(cx, tgt, target) } else { false }
     _ ->
       match target {
-        TyOpaque(_, _, ow, _, tgt) ->
+        TyOpaque(_, _, ow, _, tgt, _) ->
           if sees_through(cx, ow) { assignable(cx, t, tgt) } else { false }
         _ -> false
       }
@@ -814,10 +833,10 @@ fn reduce_eff(cx: Cx, e: Eff, m: Map[Int, Ty]) -> Eff =
 ## reduction stays `reduce_assoc`'s.
 fn reduce_ty_effs(cx: Cx, t: Ty, m: Map[Int, Ty]) -> Ty =
   match t {
-    TyFn(ps, r, e) -> TyFn(
+    TyFn(ps, r, e, sc) -> TyFn(
       map(ps, x => reduce_ty_effs(cx, x, m)),
       reduce_ty_effs(cx, r, m),
-      reduce_eff(cx, e, m))
+      reduce_eff(cx, e, m), sc)
     _ -> ty_map_children(t, x => reduce_ty_effs(cx, x, m))
   }
 
@@ -841,7 +860,7 @@ fn as_unified_types(cx: Cx, d: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
   match d {
     TyVar(_, _) -> subst(d, m, em)
     TyAssoc(_, _, _) -> reduce_assoc(cx, subst(d, m, em))
-    TyFn(ps, r, e) -> TyFn(map(ps, x => as_unified_types(cx, x, m, em)), as_unified_types(cx, r, m, em), subst_eff(e, em))
+    TyFn(ps, r, e, sc) -> TyFn(map(ps, x => as_unified_types(cx, x, m, em)), as_unified_types(cx, r, m, em), subst_eff(e, em), sc)
     _ -> ty_map_children(d, x => as_unified_types(cx, x, m, em))
   }
 
@@ -877,10 +896,10 @@ fn unify_dir(
   # without this peel (and the one in the TyOpaque arm below) the conversion
   # held everywhere except at a call.
   match actual {
-    TyOpaque(_, _, aow, _, atgt) ->
+    TyOpaque(_, _, aow, _, atgt, _) ->
       match declared {
         # same type: match structurally, below
-        TyOpaque(_, _, _, _, _) -> ()
+        TyOpaque(_, _, _, _, _, _) -> ()
         # a type variable BINDS rather than converts: `Some(c)` at a Cursor is
         # an `Option[Cursor]`, not an `Option[Int]`. Seeing through a type is
         # not the same as forgetting it
@@ -905,7 +924,7 @@ fn unify_dir(
             # one the conversion held everywhere except under a type
             # constructor, which is where a checked constructor puts it.
             match bound {
-              TyOpaque(_, _, ow, _, tgt) ->
+              TyOpaque(_, _, ow, _, tgt, _) ->
                 if sees_through(cx, ow) {
                   unify_dir(cx, tgt, actual, m, em, flip)
                 } else {
@@ -925,9 +944,10 @@ fn unify_dir(
         _ -> unify_dir(cx, d2, actual, m, em, flip)
       }
     }
-    TyAdt(aid, dargs) ->
+    TyAdt(aid, dargs, dscope) ->
       match actual {
-        TyAdt(aid2, aargs) -> {
+        TyAdt(aid2, aargs, ascope) -> {
+          if not capture.arguments_equal(dscope, ascope) { return (m, em, false) }
           if aid != aid2 { return (m, em, false) }
           var m1 = m
           var em1 = em
@@ -978,9 +998,10 @@ fn unify_dir(
     # target drops (`opaque type Phantom[T] = Unit`) is invisible there, so
     # comparing targets made every `Phantom[_]` one type. The ids must agree
     # first: two opaque types over the same target are still two types.
-    TyOpaque(did, _, dow, dargs, dtgt) ->
+    TyOpaque(did, _, dow, dargs, dtgt, dscope) ->
       match actual {
-        TyOpaque(aid, _, _, aargs, _) -> {
+        TyOpaque(aid, _, _, aargs, _, ascope) -> {
+          if not capture.arguments_equal(dscope, ascope) { return (m, em, false) }
           if did != aid || len(dargs) != len(aargs) { return (m, em, false) }
           var m1 = m
           var em1 = em
@@ -1016,32 +1037,39 @@ fn unify_dir(
         }
         _ -> (m, em, false)
       }
-    TyFn(dps, dr, de) ->
-      match actual {
-        TyFn(aps, ar, ae) -> {
-          if len(dps) != len(aps) { return (m, em, false) }
-          var m1 = m
-          var em1 = em
-          var ok = true
-          var i = 0
-          for d in dps {
-            let (m2, em2, ok2) = unify_dir(cx, d, aps[i], m1, em1, not flip)
-            m1 = m2
-            em1 = em2
-            if not ok2 { ok = false }
-            i = i + 1
-          }
-          let (m3, em3, ok3) = unify_dir(cx, dr, ar, m1, em1, flip)
-          let (em4, ok4) = if flip {
-            unify_eff_contra(cx, de, ae, m1, em3)
-          } else {
-            unify_eff(cx, de, ae, m1, em3)
-          }
-          (m3, em4, ok && ok3 && ok4)
-        }
-        _ -> (m, em, false)
+    TyCaptured(value, bound) -> match actual {
+      TyCaptured(other, upper) -> {
+        let covers = if flip { capture.subset_in(bound, upper, cx.current_capture_params.captures) } else { capture.subset_in(upper, bound, cx.current_capture_params.captures) }
+        let (next, effects, ok) = unify_dir(cx, value, other, m, em, flip)
+        (next, effects, ok && covers)
       }
-    _ -> (m, em, declared == actual)
+      _ -> (m, em, false)
+    }
+    TyFn(_, _, _, _) -> unify_function(cx, declared, actual, m, em, flip)
+    _ -> (m, em, ty_equal(declared, actual))
+  }
+}
+
+fn unify_function(cx: Cx, declared: Ty, actual: Ty, m: Map[Int, Ty], em: Map[Int, Eff], flip: Bool) -> (Map[Int, Ty], Map[Int, Eff], Bool) = {
+  match (fn_align(declared, actual), actual) {
+    (Some(TyFn(dps, dr, de, dc)), TyFn(aps, ar, ae, ac)) -> {
+      if len(dps) != len(aps) { return (m, em, false) }
+      var types = m
+      var effects = em
+      var ok = if flip { capture.subset_in(capture.bound(dc), capture.bound(ac), cx.current_capture_params.captures) }
+      else { capture.subset_in(capture.bound(ac), capture.bound(dc), cx.current_capture_params.captures) }
+      for i in 0..len(dps) {
+        let (next, rows, fits) = unify_dir(cx, dps[i], aps[i], types, effects, not flip)
+        types = next
+        effects = rows
+        ok = ok && fits
+      }
+      let (next, rows, fits) = unify_dir(cx, dr, ar, types, effects, flip)
+      let (out, carries) = if flip { unify_eff_contra(cx, de, ae, types, rows) }
+      else { unify_eff(cx, de, ae, types, rows) }
+      (next, out, ok && fits && carries)
+    }
+    _ -> (m, em, false)
   }
 }
 
@@ -1135,6 +1163,11 @@ pub(pkg) fn unify_eff(
     # rather than an exact row. Get the line wrong instead of deleting it and
     # the corpus does see it: both halves of the bug this arm had were wrong
     # spellings of exactly this sentence.
+    EScoped(b, ls) -> {
+      let residual = scoped_eff(eff_without_scopes(actual), scoped_difference(eff_scopes(actual), ls))
+      let (em1, ok) = unify_eff(cx, b, residual, m, em)
+      (em1, ok && eff_carries(reduce_eff(cx, subst_eff(declared, em1), m), actual))
+    }
     ELabeled(b, ls) -> {
       var written: List[Int] = []
       for l in ls {
@@ -1156,12 +1189,12 @@ pub(pkg) fn unify_eff(
 ## shapes.
 fn ty_rows_at(t: Ty, place: String) -> List[(Eff, String)] =
   match t {
-    TyFn(ps, r, e) -> {
+    TyFn(ps, r, e, _) -> {
       var out: List[(Eff, String)] = [(e, place)]
       for p in ps { out = out ++ ty_rows_at(p, place) }
       out ++ ty_rows_at(r, place)
     }
-    TyAdt(_, targs) -> {
+    TyAdt(_, targs, _) -> {
       var out: List[(Eff, String)] = []
       for a in targs { out = out ++ ty_rows_at(a, place) }
       out
@@ -1175,7 +1208,7 @@ fn ty_rows_at(t: Ty, place: String) -> List[(Eff, String)] =
       for e2 in es { out = out ++ ty_rows_at(e2, place) }
       out
     }
-    TyOpaque(_, _, _, args, tgt) -> {
+    TyOpaque(_, _, _, args, tgt, _) -> {
       var out: List[(Eff, String)] = []
       for a in args { out = out ++ ty_rows_at(a, place) }
       out ++ ty_rows_at(tgt, place)
@@ -1212,7 +1245,7 @@ fn eff_concrete_atoms(e: Eff) -> Eff = {
     parts = parts ++ [EffAssoc(sb, v, t, n)]
   }
   if eff_subsumes(eff_base(e), EIo) { parts = parts ++ [EIo] }
-  eff_with_labels(eff_union(parts), eff_labels(e))
+  scoped_eff(eff_with_labels(eff_union(parts), eff_labels(e)), eff_scopes(e))
 }
 
 ## Does `e` occur in `row`?
@@ -1256,7 +1289,7 @@ fn eff_row_minus(actual: Eff, r: Eff) -> Eff = {
     let (id, _) = l
     if not list.contains(r_labels, id) { ls = ls ++ [l] }
   }
-  eff_with_labels(eff_union(parts), ls)
+  scoped_eff(eff_with_labels(eff_union(parts), ls), scoped_difference(eff_scopes(actual), eff_scopes(r)))
 }
 
 ## The co-occurrence criterion (spec §6.6): every row of the callee's declared
@@ -1344,7 +1377,7 @@ fn earg_row_subtract(
   var de = EPure
   var is_dfn = false
   match pt {
-    TyFn(ps, r, e) -> {
+    TyFn(ps, r, e, _) -> {
       dps = ps
       dr = r
       de = e
@@ -1355,7 +1388,7 @@ fn earg_row_subtract(
   var ae = EPure
   var is_afn = false
   match at {
-    TyFn(_, _, e) -> {
+    TyFn(_, _, e, _) -> {
       ae = e
       is_afn = true
     }
@@ -1380,7 +1413,7 @@ fn earg_row_subtract(
   if not bound_here { return (em, false, None) }
   let r = eff_concrete_atoms(dred)
   if r == EPure { return (em, false, None) }
-  let bare = ty_show(cx.adts, TyFn(dps, dr, EffVar(ename, eid)))
+  let bare = ty_show(cx.adts, TyFn(dps, dr, EffVar(ename, eid), capture.empty_function()))
   let repair = "spell this parameter's row as `!" ++ ename ++ "` alone (`" ++ bare ++
     "`); the variable then takes the closure's whole row"
   match earg_cooccurs(s, eid, r) {
@@ -1425,7 +1458,7 @@ pub(pkg) fn is_concrete(cx: Cx, t: Ty) -> Bool =
     # the same wildcard and `Pair[T]` at a rigid T looked concrete, and the
     # expected result type then bound the callee's type parameters before its
     # arguments could. A stop has to be a decision, not an omission.
-    TyFn(_, _, _) -> true
+    TyFn(_, _, _, _) -> true
     TyAssoc(_, _, _) -> true
     _ -> not ty_any_child(t, x => not is_concrete(cx, x))
   }
@@ -1451,12 +1484,12 @@ pub(pkg) fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option
     None
   } else {
     match t {
-      TyFn(_, _, _) -> Some(t)
+      TyFn(_, _, _, _) -> Some(t)
       # the D1 growable vector: mutable, and compared by reference. Until it
       # is a Dawn type with an impl there is no content equality to give.
       TyArray(_) -> Some(t)
       # a flat mutable buffer: held by identity too, and it changes in place
-      TyI64Buf | TyF64Buf -> Some(t)
+      TyI64Buf(_) | TyF64Buf(_) -> Some(t)
       # reached only for Hash: `Eq[Float]` is a prelude impl, so for equality
       # the table above has already answered
       TyFloat -> Some(t)
@@ -1481,7 +1514,7 @@ pub(pkg) fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option
           Some(b) -> Some(b)
           None -> structural_gap(cx, tid, v, seen)
         }
-      TyAdt(aid, targs) -> {
+      TyAdt(aid, targs, _) -> {
         let a = adt_of(cx.adts, aid)
         if set.has(seen, a.name) { return None }
         let seen2 = set.insert(seen, a.name)
@@ -1514,7 +1547,7 @@ pub(pkg) fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option
       # `resolve_witness` peels before calling here, but only the outermost
       # type, so without this arm a `(Celsius, Int)` key walked past the Float
       # ban that `(Float, Int)` is caught by.
-      TyOpaque(_, _, _, _, tgt) -> structural_gap(cx, tid, tgt, seen)
+      TyOpaque(_, _, _, _, tgt, _) -> structural_gap(cx, tid, tgt, seen)
       # A projection is a gap, and unlike a type parameter it is one nothing
       # can close: a bound applies to a type parameter, and `C.Item` is not
       # one. Without this arm the `_` below called it "no gap", the goal was
@@ -1536,7 +1569,7 @@ pub(pkg) fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option
 pub(pkg) fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) -> Cx = {
   let rel = if tid == HASH_ID { "hash" } else { "equality" }
   let (what, hint) = match bad {
-    TyFn(_, _, _) ->
+    TyFn(_, _, _, _) ->
       if tid == HASH_ID {
         ("functions cannot be hashed", "hash the values they produce, not the functions")
       } else {
@@ -1552,7 +1585,7 @@ pub(pkg) fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: In
           "not by content",
         "use the List it backs instead")
     }
-    TyI64Buf | TyF64Buf -> {
+    TyI64Buf(_) | TyF64Buf(_) -> {
       let text = ty_show(cx.adts, bad)
       ("`" ++ text ++ "` has no " ++ rel ++ ": a buffer is held by identity, " ++
           "not by content",
@@ -1610,8 +1643,8 @@ pub(pkg) fn assoc_witness_err(cx: Cx, trait_name: String, t: Ty, lo: Int, hi: In
 
 test "assignability admits pure where io is wanted" {
   let cx = test_cx()
-  assert assignable(cx, TyFn([TyInt], TyInt, EPure), TyFn([TyInt], TyInt, EIo))
-  assert not assignable(cx, TyFn([TyInt], TyInt, EIo), TyFn([TyInt], TyInt, EPure))
+  assert assignable(cx, TyFn([TyInt], TyInt, EPure, capture.empty_function()), TyFn([TyInt], TyInt, EIo, capture.empty_function()))
+  assert not assignable(cx, TyFn([TyInt], TyInt, EIo, capture.empty_function()), TyFn([TyInt], TyInt, EPure, capture.empty_function()))
   assert assignable(cx, TyNever, TyInt)
   assert not assignable(cx, TyInt, TyBool)
 }
@@ -1629,12 +1662,12 @@ test "unification binds and checks variables" {
   assert not ok2
   # effect variables accumulate a lub
   let e = EffVar("e", 101)
-  let (m3, em3, ok3) = unify_into(cx, TyFn([t], TyUnit, e), TyFn([TyInt], TyUnit, EIo), m1, em1)
+  let (m3, em3, ok3) = unify_into(cx, TyFn([t], TyUnit, e, capture.empty_function()), TyFn([TyInt], TyUnit, EIo, capture.empty_function()), m1, em1)
   assert ok3
   assert map.get(em3, 101) == Some(EIo)
-  let phantom_t = TyOpaque(7, "Phantom", "m", [t], TyUnit)
-  let phantom_int = TyOpaque(7, "Phantom", "m", [TyInt], TyUnit)
-  let phantom_string = TyOpaque(7, "Phantom", "m", [TyString], TyUnit)
+  let phantom_t = TyOpaque(7, "Phantom", "m", [t], TyUnit, capture.empty_arguments())
+  let phantom_int = TyOpaque(7, "Phantom", "m", [TyInt], TyUnit, capture.empty_arguments())
+  let phantom_string = TyOpaque(7, "Phantom", "m", [TyString], TyUnit, capture.empty_arguments())
   let (m4, _, ok4) = unify_into(cx, phantom_t, phantom_int, m0, em0)
   assert ok4
   assert map.get(m4, 100) == Some(TyInt)
@@ -1648,14 +1681,14 @@ test "const-serializability" {
   assert not is_const_serializable(cx, TyMap(TyInt, TyInt), set.empty())
   assert not is_const_serializable(cx, TyVar("T", 5), set.empty())
   # an opaque type is its target's answer ...
-  let meters = TyOpaque(8, "Meters", "m", [], TyInt)
+  let meters = TyOpaque(8, "Meters", "m", [], TyInt, capture.empty_arguments())
   assert is_const_serializable(cx, meters, set.empty())
   assert is_const_serializable(cx, TyList(meters), set.empty())
   # ... except where the target is a position in the backend's own
   # representation, which Core has no way to write down (SEM-04). Same shape,
   # same target, only the declaring module and the name differ.
-  let cursor = TyOpaque(9, "Cursor", "std/cursor", [], TyInt)
-  let impostor = TyOpaque(9, "Cursor", "m", [], TyInt)
+  let cursor = TyOpaque(9, "Cursor", "std/cursor", [], TyInt, capture.empty_arguments())
+  let impostor = TyOpaque(9, "Cursor", "m", [], TyInt, capture.empty_arguments())
   assert not is_const_serializable(cx, cursor, set.empty())
   assert not is_const_serializable(cx, TyList(cursor), set.empty())
   assert not is_const_serializable(cx, TyTuple([TyInt, cursor]), set.empty())
@@ -1875,7 +1908,7 @@ fn capture_witness(cx: Cx, sym: Int) -> Cx = {
 ## path and the witness below cannot disagree about which type answers.
 fn ord_subject(cx: Cx, t: Ty) -> Ty =
   match t {
-    TyOpaque(_, _, _, _, tgt) ->
+    TyOpaque(_, _, _, _, tgt, _) ->
       if has_impl_at(cx.impl_table, ORD_ID, t) { t } else { ord_subject(cx, tgt) }
     _ -> t
   }
@@ -1894,7 +1927,7 @@ pub(pkg) fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[
   # every other trait, and the reason `'a' < 'b'` is Int's `<`. This path is
   # the specialised one the `<` family takes, so it needed saying twice.
   match t {
-    TyOpaque(_, _, _, _, tgt) -> {
+    TyOpaque(_, _, _, _, tgt, _) -> {
       if not has_impl_at(cx.impl_table, ORD_ID, t) { return resolve_ord_witness(cx, tgt, lo, hi) }
     }
     _ -> ()
@@ -1923,7 +1956,7 @@ pub(pkg) fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[
         true -> (cx, Some(WConcrete(ORD_ID, t)))
         false -> {
           let hint: Option[String] = match t {
-            TyAdt(aid, _) -> {
+            TyAdt(aid, _, _) -> {
               let header = adt_of(cx.adts, aid)
               if len(header.tparams) == 0 {
                 let ts = ty_show(cx.adts, t)
@@ -2158,13 +2191,13 @@ test "binary checking covers the operator families" {
     assert ts == TyBool && len(cxs.diags) == 0
   }
   # ordering a function needs an Ord impl and there is none
-  let fnt = TyFn([], TyInt, EPure)
+  let fnt = TyFn([], TyInt, EPure, capture.empty_function())
   let (cx4, t4, _) = check_binary_typed(cx, OpLt, fnt, fnt, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
   assert str.contains(cx4.diags[0].msg, "cannot be ordered")
   let (cx5, t5, _) = check_binary_typed(cx, OpConcat, TyString, TyString, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
   assert t5 == TyString
   let (cx6, t6, _) = check_binary_typed(cx, OpEq,
-    TyFn([], TyUnit, EPure), TyFn([], TyUnit, EPure), l, r, 0, 1, 4, 5, 2, 3, 0, 5)
+    TyFn([], TyUnit, EPure, capture.empty_function()), TyFn([], TyUnit, EPure, capture.empty_function()), l, r, 0, 1, 4, 5, 2, 3, 0, 5)
   assert cx6.diags[0].msg == "functions cannot be compared"
 }
 
@@ -2542,10 +2575,10 @@ pub(pkg) fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: I
     }
   }
   match ot {
-    TyAdt(aid, targs) -> {
+    TyAdt(aid, targs, _) -> {
       if aid == OPTION_ID {
         let ret_is_opt = match sig_ret {
-          TyAdt(rid, _) -> rid == OPTION_ID
+          TyAdt(rid, _, _) -> rid == OPTION_ID
           _ -> false
         }
         if not ret_is_opt {
@@ -2558,7 +2591,7 @@ pub(pkg) fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: I
       }
       if aid == RESULT_ID {
         match sig_ret {
-          TyAdt(rid, rargs) -> {
+          TyAdt(rid, rargs, _) -> {
             if rid != RESULT_ID {
               let text = ty_show(cx.adts, sig_ret)
               return (cerr(cx,
@@ -2599,7 +2632,7 @@ pub(pkg) fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: I
 
 test "propagate demands matching option and result shapes" {
   var cx = test_cx()
-  let ret_sig = Sig {
+  let ret_sig = Sig { scope_params = capture.empty_params(),
     name = "f",
     param_tys = [],
     param_names = [],
@@ -2662,7 +2695,7 @@ test "loop jumps respect lambda boundaries" {
 pub(pkg) fn check_unwrap_typed(cx: Cx, ot: Ty, operand: TExpr, msg: String, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
   if is_errorish(ot) { return (cx, TyError, XError(owner_off(cx, lo), owner_off(cx, hi))) }
   match ot {
-    TyAdt(aid, targs) ->
+    TyAdt(aid, targs, _) ->
       if aid == OPTION_ID {
         (cx, targs[0], XUnwrap(operand, msg, owner_off(cx, lo), owner_off(cx, hi), targs[0]))
       } else {
@@ -2702,7 +2735,7 @@ pub(pkg) fn check_field_access_typed(
 ) -> (Cx, Ty, TExpr) = {
   if is_errorish(tt) { return (cx, TyError, XError(owner_off(cx, lo), owner_off(cx, hi))) }
   let bad_hint: Option[String] = match tt {
-    TyAdt(aid, _) -> {
+    TyAdt(aid, _, _) -> {
       let header = adt_of(cx.adts, aid)
       if header.is_record {
         None
@@ -2714,7 +2747,7 @@ pub(pkg) fn check_field_access_typed(
     _ -> None
   }
   let is_record = match tt {
-    TyAdt(aid, _) -> {
+    TyAdt(aid, _, _) -> {
       let header = adt_of(cx.adts, aid)
       header.is_record
     }
@@ -2726,7 +2759,7 @@ pub(pkg) fn check_field_access_typed(
       flo, fhi, bad_hint), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
   }
   match tt {
-    TyAdt(aid, targs) -> {
+    TyAdt(aid, targs, scope_args) -> {
       let a = adt_of(cx.adts, aid)
       let ci = adt_of(cx.adts, aid).ctors[0]
       var idx = -1
@@ -2764,7 +2797,7 @@ pub(pkg) fn check_field_access_typed(
       }
       let em: Map[Int, Eff] = map.empty()
       {
-        let rt = subst(fty, m, em)
+        let rt = apply_scope_arguments(subst(fty, m, em), a.scope_params, scope_args)
         (cx, rt, XField(target, idx, owner_off(cx, lo), owner_off(cx, hi), rt))
       }
     }
@@ -2785,7 +2818,7 @@ test "field access follows record shape with substitution" {
   var cx = seed_prelude(test_cx())
   let (cx0, tv) = fresh_tvar(cx, "T")
   let (cx1, aid) = fresh(cx0)
-  let info = AdtI {
+  let info = AdtI { scope_params = capture.empty_params(),
     id = aid,
     name = "Box",
     is_record = true,
@@ -2802,10 +2835,10 @@ test "field access follows record shape with substitution" {
     adts = map.insert(cx1.adts, aid, info),
     adts_by_name = map.insert(cx1.adts_by_name, "Box", aid)
   }
-  let (cx2, t, x) = check_field_access_typed(cx, TyAdt(aid, [TyInt]), XError(0, 1), "v", 2, 3, 0, 3)
+  let (cx2, t, x) = check_field_access_typed(cx, TyAdt(aid, [TyInt], capture.empty_arguments()), XError(0, 1), "v", 2, 3, 0, 3)
   assert t == TyInt
   assert x == XField(XError(0, 1), 0, 0, 3, TyInt)
-  let (cx3, t2, _) = check_field_access_typed(cx, TyAdt(aid, [TyInt]), XError(0, 1), "w", 2, 3, 0, 3)
+  let (cx3, t2, _) = check_field_access_typed(cx, TyAdt(aid, [TyInt], capture.empty_arguments()), XError(0, 1), "w", 2, 3, 0, 3)
   assert cx3.diags[0].msg == "`Box` has no field `w`"
   # a single-character name never triggers a guess; the fields list shows instead
   assert cx3.diags[0].hint == "fields: v"
@@ -3312,7 +3345,7 @@ fn check_ctor_pattern_at(
   let a2 = adt_of(cx1.adts, aid)
   let ci = adt_of(cx1.adts, aid).ctors[cslot]
   let scrut_matches = match scrut {
-    TyAdt(said, _) -> said == aid
+    TyAdt(said, _, _) -> said == aid
     _ -> false
   }
   if not scrut_matches {
@@ -3326,7 +3359,7 @@ fn check_ctor_pattern_at(
   var inst: Map[Int, Ty] = map.empty()
   if scrut_matches {
     match scrut {
-      TyAdt(_, sargs) -> {
+      TyAdt(_, sargs, _) -> {
         var i = 0
         for tp in a2.tparams {
           match tp {
@@ -3345,7 +3378,8 @@ fn check_ctor_pattern_at(
   }
   let em: Map[Int, Eff] = map.empty()
   var field_tys: List[Ty] = []
-  for f in ci.fields { field_tys = field_tys ++ [subst(f.ty, inst, em)] }
+  let scope_args = match scrut { TyAdt(_, _, args) -> args, _ -> capture.empty_arguments() }
+  for f in ci.fields { field_tys = field_tys ++ [apply_scope_arguments(subst(f.ty, inst, em), a2.scope_params, scope_args)] }
   let n = len(ci.fields)
   # the other form's brackets: refused the way the expression side refuses
   # them, before any field is matched, since the subpatterns were written
@@ -3738,7 +3772,7 @@ pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
       for a in args { o = name_refs(a.e, o, sc) }
       o
     }
-    ELambda(params, body, _, _, _) -> name_refs(body, out, rs_params(sc, params))
+    ELambda(params, body, _, _, _, _) -> name_refs(body, out, rs_params(sc, params))
     EBlock(stmts, tail, _, _) -> {
       var o = out
       var s = sc
@@ -3879,7 +3913,7 @@ test "name refs walk every call position" {
     [SLet("x", false, None,
       EApply(EVar("g", 0, 1), [pos_arg(EVar("y", 2, 3))], 0, 4), 0, 5)],
     Some(EMethod(EVar("m", 6, 7), "h",
-      [pos_arg(ELambda(no_lparams(), EVar("z", 10, 11), false, 8, 12))], 8, 9, 6, 13)),
+      [pos_arg(ELambda(no_lparams(), EVar("z", 10, 11), false, 8, 12, []))], 8, 9, 6, 13)),
     0,
     14
   )
@@ -3907,7 +3941,7 @@ test "a bound name is not an edge to the top-level function it shadows" {
     0,
     1
   )
-  let lam = ELambda([LambdaParam { name = "b", ann = None, lo = 0, hi = 1 }], body, false, 0, 1)
+  let lam = ELambda([LambdaParam { name = "b", ann = None, lo = 0, hi = 1 }], body, false, 0, 1, [])
   let refs = name_refs(lam, set.empty(), ref_scope(set.empty(), set.empty()))
   assert set.to_list(refs) == ["d"]
   # a for-loop variable and a local function's own name are binders too
@@ -3972,7 +4006,7 @@ test "a handler's arms and its remainder are both call positions" {
     blo = 0,
     bhi = 1
   }
-  let rest = ELambda(no_lparams(), EApply(EVar("r", 0, 1), [], 0, 1), true, 0, 1)
+  let rest = ELambda(no_lparams(), EApply(EVar("r", 0, 1), [], 0, 1), true, 0, 1, [])
   let no_cells: List[HandlerCell] = []
   let h = EHandle("Ask", no_cells, [arm], rest, 0, 1, 0, 1)
   let refs = name_refs(h, set.empty(), ref_scope(set.empty(), set.empty()))
@@ -4075,7 +4109,7 @@ test "an isolated context reports its own effects, then restores all ten fields"
       # keyed on EIo *because* the body writes that key -- restoring gives back
       # the outer witness, not restoring leaves the body's
       eff_witness = outer_wit,
-      current_sig = Some(Sig {
+      current_sig = Some(Sig { scope_params = capture.empty_params(),
         name = "outer", param_tys = [], param_names = [], param_defaults = [], caller_params = [], ret = TyInt,
         eff = EPure, is_builtin = false, tparams = [], constraints = [], eparams = [],
         owner = None, trait_id = None, op_of = None, inferring = false
@@ -4224,7 +4258,7 @@ pub(pkg) fn needs_expected(cx: Cx, e: Expr) -> Bool =
       }
     ECtor(cname, _, _) -> ctor_needs_expected(cx, cname, true)
     ERecord(cname, _, _, _, _, _, _) -> ctor_needs_expected(cx, cname, false)
-    ELambda(params, _, _, _, _) -> {
+    ELambda(params, _, _, _, _, _) -> {
       for p in params {
         match p.ann {
           None -> return true
@@ -4398,7 +4432,7 @@ pub(pkg) fn check_fn_value(
     nbounds = nbounds + len(bounds_of(f, bi))
     bi = bi + 1
   }
-  let declared = TyFn(f.param_tys, f.ret, f.eff)
+  let declared = TyFn(f.param_tys, f.ret, f.eff, capture.empty_function())
   let eff_is_var = match f.eff {
     EffVar(_, _) -> true
     _ -> false
@@ -4411,7 +4445,7 @@ pub(pkg) fn check_fn_value(
     return (cx, declared, node(declared))
   }
   let exp: Option[(List[Ty], Ty, Eff)] = match expected {
-    Some(TyFn(eps, eret, eeff)) ->
+    Some(TyFn(eps, eret, eeff, _)) ->
       if len(eps) == len(f.param_tys) { Some((eps, eret, eeff)) } else { None }
     _ -> None
   }
@@ -4469,7 +4503,7 @@ pub(pkg) fn check_fn_value(
   # a dynamic call whose callee the rule can no longer see
   if f.name == "with_mem" && f.owner == Some("std/mem") {
     match inst {
-      TyFn(_, vret, _) -> { cx = refuse_buffer_result(cx, vret, lo, hi) }
+      TyFn(_, vret, _, _) -> { cx = refuse_buffer_result(cx, vret, lo, hi) }
       _ -> ()
     }
   }
@@ -4565,7 +4599,7 @@ fn eta_bounded_fn_value(
   # A variable bound only in a parameter still owns an ABI slot. Charge its
   # instance on the callable row, as a direct call does, so the eventual
   # caller supplies that pack even when the declared row says only `!io`.
-  let wrapper_ty = TyFn(ips, iret, reduce_eff(cx1, eff_union([ieff] ++ vinsts), m))
+  let wrapper_ty = TyFn(ips, iret, reduce_eff(cx1, eff_union([ieff] ++ vinsts), m), capture.empty_function())
   cx1 = pop_scope(cx1)
   let popped = cx1.frame.lambda_stack[len(cx1.frame.lambda_stack) - 1]
   let outer = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1)
@@ -4658,9 +4692,9 @@ test "fn values instantiate from the expected type" {
   # list_len: List[T] -> Int as a value with expected fn(List[Int]) -> Int
   let len_sig = map.get(bs, "list_len").expect("list_len")
   let (cx1, t1, _) = check_fn_value(cx, "list_len", "list_len", len_sig,
-    Some(TyFn([TyList(TyInt)], TyInt, EPure)), 0, 3)
+    Some(TyFn([TyList(TyInt)], TyInt, EPure, capture.empty_function())), 0, 3)
   assert len(cx1.diags) == 0
-  assert t1 == TyFn([TyList(TyInt)], TyInt, EPure)
+  assert t1 == TyFn([TyList(TyInt)], TyInt, EPure, capture.empty_function())
   # without context the generic cannot instantiate
   let (cx2, t2, _) = check_fn_value(cx, "list_len", "list_len", len_sig, None, 0, 3)
   assert str.contains(cx2.diags[0].msg, "cannot infer the type parameter(s) of `list_len`")
@@ -4669,14 +4703,14 @@ test "fn values instantiate from the expected type" {
   # impl table (no table builtin carries bounds since the ordering family moved
   # to std/list, so the sig is hand-built)
   let tv = TyVar("T", 0)
-  let bounded = Sig {
+  let bounded = Sig { scope_params = capture.empty_params(),
     name = "sortish", param_tys = [TyList(tv)], param_names = ["xs"], param_defaults = [],
     caller_params = [],
     ret = TyList(tv),
     eff = EPure, is_builtin = true, tparams = [tv], constraints = [[EQ_ID]], eparams = [],
     owner = None, trait_id = None, op_of = None, inferring = false
   }
-  let want = TyFn([TyList(TyInt)], TyList(TyInt), EPure)
+  let want = TyFn([TyList(TyInt)], TyList(TyInt), EPure, capture.empty_function())
   let (cx3, t3, x3) = check_fn_value(cx, "sortish", "sortish", bounded, Some(want), 0, 4)
   assert len(cx3.diags) == 0
   assert t3 == want
@@ -4704,7 +4738,7 @@ test "fn values instantiate from the expected type" {
   # a non-generic sig passes through untouched
   let join_sig = map.get(bs, "join").expect("join")
   let (cx4, t4, _) = check_fn_value(cx, "join", "join", join_sig, None, 0, 4)
-  assert t4 == TyFn([TyList(TyString), TyString], TyString, EPure)
+  assert t4 == TyFn([TyList(TyString), TyString], TyString, EPure, capture.empty_function())
 }
 
 test "bounded fn values read ordered evidence from the caller and expose ABI-only rows" {
@@ -4714,7 +4748,7 @@ test "bounded fn values read ordered evidence from the caller and expose ABI-onl
     let (eid, ename) = label
     cx = Cx { ..cx, effect_infos = map.insert(cx.effect_infos, eid,
       EffectI { id = eid, name = ename, owner = None, audience = AWorld, ops = [], ctl = false }) }
-    let (cx1, _) = declare_evidence(cx, ev_local_name(cx, eid), TyAdt(eid, []), label_key(eid), 0, 1)
+    let (cx1, _) = declare_evidence(cx, ev_local_name(cx, eid), TyAdt(eid, [], capture.empty_arguments()), label_key(eid), 0, 1)
     cx = cx1
   }
   let outer = EffVar("outer", 74)
@@ -4724,13 +4758,13 @@ test "bounded fn values read ordered evidence from the caller and expose ABI-onl
   let row = eff_union([EIo, ELabeled(EPure, labels)])
   # The callback's variable owns an ABI slot even though the declared row
   # omits it. Its instance must reach the value's row and eventual caller.
-  let bounded = Sig {
-    name = "with_callback", param_tys = [tv, TyFn([], TyInt, ev)],
+  let bounded = Sig { scope_params = capture.empty_params(),
+    name = "with_callback", param_tys = [tv, TyFn([], TyInt, ev, capture.empty_function())],
     param_names = ["x", "callback"], param_defaults = [], caller_params = [], ret = TyInt, eff = row,
     is_builtin = false, tparams = [tv], constraints = [[EQ_ID]], eparams = [ev],
     owner = None, trait_id = None, op_of = None, inferring = false
   }
-  let want = TyFn([TyInt, TyFn([], TyInt, outer)], TyInt, eff_union([row, outer]))
+  let want = TyFn([TyInt, TyFn([], TyInt, outer, capture.empty_function())], TyInt, eff_union([row, outer]), capture.empty_function())
   let (cx2, actual, value) = check_fn_value(cx1, "with_callback", "with_callback", bounded, Some(want), 0, 1)
   assert len(cx2.diags) == 0
   assert actual == want
@@ -4779,17 +4813,17 @@ pub(pkg) fn check_ctor_value(
   }
   var params: List[Ty] = []
   for f in ci.fields { params = params ++ [f.ty] }
-  let ret = TyAdt(a.id, a.tparams)
+  let ret = TyAdt(a.id, a.tparams, capture.empty_arguments())
   let node = (t: Ty) => XCtorValue(aid, cslot, owner_off(cx, lo), owner_off(cx, hi), t)
   if len(eps) != len(params) {
-    let expected_text = ty_show(cx.adts, TyFn(eps, eret, eeff))
+    let expected_text = ty_show(cx.adts, TyFn(eps, eret, eeff, capture.empty_function()))
     let hint_text = ctor_render(cx.adts, ci)
     return (cerr_h(cx, "`" ++ ci.name ++ "` takes " ++ to_string(len(params)) ++
         " field(s), but " ++ expected_text ++ " is expected", lo, hi,
       "constructor: " ++ hint_text), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
   }
   if len(a.tparams) == 0 {
-    let t0 = TyFn(params, ret, EPure)
+    let t0 = TyFn(params, ret, EPure, capture.empty_function())
     return (cx, t0, node(t0))
   }
   var m: Map[Int, Ty] = map.empty()
@@ -4824,7 +4858,7 @@ pub(pkg) fn check_ctor_value(
   }
   var ips: List[Ty] = []
   for d in params { ips = ips ++ [subst(d, m, em)] }
-  let t1 = TyFn(ips, subst(ret, m, em), EPure)
+  let t1 = TyFn(ips, subst(ret, m, em), EPure, capture.empty_function())
   (cx, t1, node(t1))
 }
 
@@ -4863,7 +4897,7 @@ pub(pkg) fn resolve_witness(
   # user or library declares. GHC's GeneralizedNewtypeDeriving and every
   # newtype-like feature surveyed draw the line the same way.
   match t {
-    TyOpaque(_, _, _, _, tgt) -> {
+    TyOpaque(_, _, _, _, tgt, _) -> {
       if not has_impl_at(cx.impl_table, trait_id, t) {
         if opaque_inherits(trait_id) {
           return resolve_witness(cx, trait_id, tgt, lo, hi, requirer)
@@ -4973,7 +5007,7 @@ pub(pkg) fn resolve_witness(
           let scalar_order = trait_id == ORD_ID && not is_adt(t)
           let nongeneric = not scalar_order && is_nongeneric_adt(cx, t)
           let literal_opaque = (trait_id == FROM_INT_ID || trait_id == FROM_FLOAT_ID) && match t {
-            TyOpaque(_, _, _, _, _) -> true
+            TyOpaque(_, _, _, _, _, _) -> true
             _ -> false
           }
           let hint = if literal_opaque {
@@ -5200,13 +5234,13 @@ fn capture_wits(cx: Cx, ws: List[WitRef]) -> Cx = {
 
 fn is_adt(t: Ty) -> Bool =
   match t {
-    TyAdt(_, _) -> true
+    TyAdt(_, _, _) -> true
     _ -> false
   }
 
 fn is_nongeneric_adt(cx: Cx, t: Ty) -> Bool =
   match t {
-    TyAdt(aid, _) -> len(adt_of(cx.adts, aid).tparams) == 0
+    TyAdt(aid, _, _) -> len(adt_of(cx.adts, aid).tparams) == 0
     _ -> false
   }
 
@@ -5215,7 +5249,7 @@ test "ctor values and witnesses" {
   # Some as fn(Int) -> Option[Int]
   let (cx1, t1, _) = check_ctor_value(cx, OPTION_ID, 0, [TyInt], opt_ty(TyInt), EPure, 0, 4)
   assert len(cx1.diags) == 0
-  assert t1 == TyFn([TyInt], opt_ty(TyInt), EPure)
+  assert t1 == TyFn([TyInt], opt_ty(TyInt), EPure, capture.empty_function())
   # arity mismatch reports with the ctor render
   let (cx2, t2, _) = check_ctor_value(cx, OPTION_ID, 0, [TyInt, TyInt], TyUnit, EPure, 0, 4)
   assert str.contains(cx2.diags[0].msg, "`Some` takes 1 field(s)")
@@ -5249,7 +5283,7 @@ test "ctor values and witnesses" {
   assert ok5 == Some(WConcrete(EQ_ID, TyList(TyInt)))
   assert not has_impl_at(cx5.impl_table, EQ_ID, TyList(TyInt))
   # a function value still has no equality, and says so at the bound
-  let (cx6, ok6) = resolve_witness(cx, EQ_ID, TyList(TyFn([TyInt], TyInt, EPure)), 0, 4, "`f`")
+  let (cx6, ok6) = resolve_witness(cx, EQ_ID, TyList(TyFn([TyInt], TyInt, EPure, capture.empty_function())), 0, 4, "`f`")
   assert ok6 == None
   assert str.contains(cx6.diags[0].msg, "cannot be compared")
 }
@@ -5356,7 +5390,7 @@ fn see_through_expected(cx: Cx, needs: Bool, expected: Option[Ty]) -> Option[Ty]
     None
   } else {
     match expected {
-      Some(TyOpaque(_, _, ow, _, tgt)) -> if sees_through(cx, ow) { Some(tgt) } else { None }
+      Some(TyOpaque(_, _, ow, _, tgt, _)) -> if sees_through(cx, ow) { Some(tgt) } else { None }
       _ -> None
     }
   }
@@ -5489,8 +5523,8 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     }
     ERecord(cname, fields, spread, nlo, nhi, lo, hi) ->
       check_ctor_call(cx, cname, fields, spread, CBraces, expected, None, nlo, nhi, lo, hi)
-    ELambda(params, body, sugar, lo, hi) ->
-      check_lambda(cx, params, body, sugar, false, false, None, None, expected, lo, hi)
+    ELambda(params, body, sugar, lo, hi, scopes) ->
+      check_scope_lambda(cx, params, body, sugar, lo, hi, scopes, expected)
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, false, nlo, nhi, lo, hi)
@@ -5917,7 +5951,7 @@ fn lit_kind_hint(cx: Cx, lit: Expr, t: Ty) -> String = {
     "`" ++ ts ++ "` takes integer literals"
   } else {
     match t {
-      TyAdt(_, _) | TyOpaque(_, _, _, _, _) ->
+      TyAdt(_, _, _) | TyOpaque(_, _, _, _, _, _) ->
         "there are no implicit conversions; a literal becomes `" ++ ts ++ "` only through `" ++
         impl_shape(cx, if fl { "FromFloat" } else { "FromInt" }, t) ++ "`, written in the module declaring it"
       _ -> "there are no implicit conversions"
@@ -5999,7 +6033,7 @@ fn lit_target(cx: Cx, t: Ty, is_float: Bool) -> LitTarget = {
   match t {
     TyInt -> LitDefault
     TyFloat -> if is_float { LitDefault } else { LitToFloat }
-    TyOpaque(_, _, ow, _, tgt) ->
+    TyOpaque(_, _, ow, _, tgt, _) ->
       if sees_through(cx, ow) {
         lit_target(cx, tgt, is_float)
       } else if has_impl_at(cx.impl_table, tid, t) {
@@ -6014,7 +6048,7 @@ fn lit_target(cx: Cx, t: Ty, is_float: Bool) -> LitTarget = {
 
 fn lit_peel(cx: Cx, t: Ty) -> Ty =
   match t {
-    TyOpaque(_, _, ow, _, tgt) -> if sees_through(cx, ow) { lit_peel(cx, tgt) } else { t }
+    TyOpaque(_, _, ow, _, tgt, _) -> if sees_through(cx, ow) { lit_peel(cx, tgt) } else { t }
     _ -> t
   }
 
@@ -6467,7 +6501,7 @@ fn arith_missing_hint(cx: Cx, tid: Int, t: Ty) -> String = {
   match t {
     TyString -> if tid == ADD_ID { "`++` concatenates strings" } else { arith_own_type_hint(tid) }
     TyList(_) -> if tid == ADD_ID { "`++` concatenates lists" } else { arith_own_type_hint(tid) }
-    TyOpaque(id, _, _, _, _) ->
+    TyOpaque(id, _, _, _, _, _) ->
       if id == CHAR_OPAQUE_ID {
         "an opaque type does not inherit its target's arithmetic; convert with char.code first"
       } else {
@@ -6475,7 +6509,7 @@ fn arith_missing_hint(cx: Cx, tid: Int, t: Ty) -> String = {
           impl_shape(cx, trait_name, t) ++ "` in the module declaring it, or convert to the " ++
           "target there first"
       }
-    TyAdt(_, _) -> "a type gets `" ++ op ++ "` from `" ++ impl_shape(cx, trait_name, t) ++
+    TyAdt(_, _, _) -> "a type gets `" ++ op ++ "` from `" ++ impl_shape(cx, trait_name, t) ++
       "`, written in the module declaring it"
     _ -> arith_own_type_hint(tid)
   }
@@ -6489,11 +6523,11 @@ fn arith_own_type_hint(tid: Int) -> String =
 ## type's own parameters, `impl[D] Add[Tile[D]]`.
 fn impl_shape(cx: Cx, trait_name: String, t: Ty) -> String = {
   let (name, params) = match t {
-    TyAdt(aid, _) -> {
+    TyAdt(aid, _, _) -> {
       let a = adt_of(cx.adts, aid)
       (a.name, map(a.tparams, tp => ty_show(cx.adts, tp)))
     }
-    TyOpaque(id, name, _, args, _) -> (name, opaque_param_names(cx, id, len(args)))
+    TyOpaque(id, name, _, args, _, _) -> (name, opaque_param_names(cx, id, len(args)))
     _ -> (ty_show(cx.adts, t), [])
   }
   if len(params) == 0 {
@@ -7202,6 +7236,27 @@ fn capture_observation(cx: Cx, sid: Int, lo: Int, hi: Int) -> Cx = {
   Cx { ..next, frame = Frame { ..next.frame, lambda_stack = stack } }
 }
 
+fn check_scope_lambda(cx: Cx, params: List[LambdaParam], body: Expr, sugar: Bool,
+  lo: Int, hi: Int, binders: List[ScopeBinder], expected: Option[Ty]) -> (Cx, Ty, TExpr) !io = {
+  if len(binders) == 0 {
+    return check_lambda(cx, params, body, sugar, false, false, None, None, expected, lo, hi)
+  }
+  let saved = cx.current_capture_params
+  let (scoped, own) = bind_capture_params(cx, ScopeSyntax { ..no_scope_syntax(), binders = binders })
+  let contract = CaptureFunction { scopes = own.scopes, bound = None }
+  let aligned = match expected {
+    Some(t) -> fn_align(t, TyFn([], TyUnit, EPure, contract))
+    None -> None
+  }
+  let (checked, ty, expr) = check_lambda(scoped, params, body, sugar, false, false, None, None, aligned, lo, hi)
+  let result = match ty { TyFn(ps, r, e, _) -> TyFn(ps, r, e, contract), _ -> ty }
+  let value = match expr {
+    XLambda(ps, ns, b, cs, a, z, _, role) -> XLambda(ps, ns, b, cs, a, z, result, role)
+    _ -> expr
+  }
+  (Cx { ..checked, current_capture_params = saved }, result, value)
+}
+
 fn check_lambda(
   cx: Cx,
   params: List[LambdaParam],
@@ -7226,7 +7281,7 @@ fn check_lambda(
   var eret = TyUnit
   var eeff = EPure
   match expected {
-    Some(TyFn(ps, r, ef)) -> {
+    Some(TyFn(ps, r, ef, _)) -> {
       have_exp = true
       eps = ps
       eret = r
@@ -7238,7 +7293,7 @@ fn check_lambda(
   # has already said so in those terms; a second line naming "this lambda" would
   # point at a closure the author did not write.
   if have_exp && len(eps) != len(params) && not arm {
-    let want = ty_show(cx1.adts, TyFn(eps, eret, eeff))
+    let want = ty_show(cx1.adts, TyFn(eps, eret, eeff, capture.empty_function()))
     let n = to_string(len(params))
     if sugar {
       cx1 = cerr_h(cx1, "the closure `with` introduced takes " ++ n ++ " parameter(s), but " ++
@@ -7359,13 +7414,13 @@ fn check_lambda(
   # travelling with the closure
   let lam_eff = eff_union(cx3.frame.used_effects)
   cx3 = Cx { ..cx3, frame = Frame { ..cx3.frame, used_effects = saved_used, eff_witness = saved_wit, observation_scopes = saved_scopes } }
-  let t = TyFn(ptys, bt, lam_eff)
+  let t = TyFn(ptys, bt, lam_eff, capture.empty_function())
   (cx3, t, XLambda(psyms, pnames, bx, popped.captures, owner_off(cx, lo), owner_off(cx, hi), t, if arm { "handler" } else if sugar { "with" } else { "lambda" }))
 }
 
 fn fn_ty_parts(t: Ty) -> (List[Ty], Ty, Eff) =
   match t {
-    TyFn(ps, r, ef) -> (ps, r, ef)
+    TyFn(ps, r, ef, _) -> (ps, r, ef)
     _ -> ([], TyError, EPure)
   }
 
@@ -7492,7 +7547,7 @@ fn declare_cells(cx: Cx, cells: List[HandlerCell], hid: Int) -> (Cx, List[TStmt]
 ## a cell read under it is refused rather than silently licensed.
 fn check_rest(cx: Cx, rest: Expr, hid: Int, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
   match rest {
-    ELambda(params, body, sugar, rlo, rhi) ->
+    ELambda(params, body, sugar, rlo, rhi, _) ->
       check_lambda(cx, params, body, sugar, false, false, Some(hid), None,
         rest_expected(expected), rlo, rhi)
     _ -> check_expr(cx, rest, rest_expected(expected))
@@ -7646,7 +7701,7 @@ fn cell_occurrences(e: Expr, name: String) -> Int =
       for a in args { o = o + cell_occurrences(a.e, name) }
       o
     }
-    ELambda(_, body, _, _, _) -> cell_repeated(cell_occurrences(body, name))
+    ELambda(_, body, _, _, _, _) -> cell_repeated(cell_occurrences(body, name))
     ERecord(_, args, spread, _, _, _, _) -> {
       var o = 0
       match spread {
@@ -7872,7 +7927,7 @@ fn check_handle(
   cx1 = push_scope(cx1)
   let (cxcells, cell_stmts) = declare_cells(cx1, cells, hid)
   cx1 = cxcells
-  let ev_ty = TyAdt(eid, [])
+  let ev_ty = TyAdt(eid, [], capture.empty_arguments())
   # spelled from the declaration this block already asked for, rather than
   # asking `ev_local_name` for it again: the question is the same one and the
   # answer is already in the log
@@ -8070,7 +8125,7 @@ fn origin_types(a: HandlerArm, ts: List[Ty]) -> List[Ty] =
 
 fn origin_arm_type(a: HandlerArm, t: Ty) -> Ty = {
   let (ps, ret, row) = fn_ty_parts(t)
-  TyFn(origin_types(a, ps), ret, row)
+  TyFn(origin_types(a, ps), ret, row, capture.empty_function())
 }
 
 fn check_handle_arms(
@@ -8224,10 +8279,10 @@ fn check_control_arm(
         to_string(len(fptys)), a.nlo, a.nhi,
       "the binder is the continuation, not a parameter: " ++ text)
   }
-  let k_ty = TyFn([fret], answer, cont_row(reff))
+  let k_ty = TyFn([fret], answer, cont_row(reff), capture.empty_function())
   let kp = LambdaParam { name = kname, ann = None, lo = a.bhi - len(kname), hi = a.bhi }
   let (cxb, at, ax) = check_lambda(cx1, origin_params(a) ++ [kp], a.body, true, true, true,
-    Some(hid), None, Some(TyFn(origin_types(a, fptys) ++ [k_ty], answer, EPure)), a.lo, a.hi)
+    Some(hid), None, Some(TyFn(origin_types(a, fptys) ++ [k_ty], answer, EPure, capture.empty_function())), a.lo, a.hi)
   cx1 = cxb
   let (_, aret, aeff) = fn_ty_parts(at)
   if not assignable(cx1, aret, answer) {
@@ -8297,7 +8352,7 @@ fn ctl_wrapper(
   let body = XCallBuiltin("ctl_yield",
     [XInt(hid, owner_off(cx, lo), owner_off(cx, hi)), XLocal(arm_sym, arm_name, owner_off(cx, lo), owner_off(cx, hi), arm_ty)] ++ pargs,
     ctl_wits(), ctl_evs(), owner_off(cx, lo), owner_off(cx, hi), NO_NAME, fret)
-  (cx1, XLambda(psyms, pnames, body, [arm_sym], owner_off(cx, lo), owner_off(cx, hi), TyFn(fptys, fret, EPure), "control-wrapper"))
+  (cx1, XLambda(psyms, pnames, body, [arm_sym], owner_off(cx, lo), owner_off(cx, hi), TyFn(fptys, fret, EPure, capture.empty_function()), "control-wrapper"))
 }
 
 ## A row without one label. `eff_drop` takes a list; this is its one-label
@@ -8313,7 +8368,7 @@ fn no_expr() -> Option[TExpr] = None
 ## so an expected type for the block is an expected type for the closure.
 fn rest_expected(expected: Option[Ty]) -> Option[Ty] =
   match expected {
-    Some(t) -> Some(TyFn([], t, EPure))
+    Some(t) -> Some(TyFn([], t, EPure, capture.empty_function()))
     None -> None
   }
 
@@ -8487,7 +8542,7 @@ fn check_apply(
   # piping into an unannotated lambda: the arguments determine its parameter types
   var lambda_unannotated = false
   match target {
-    ELambda(ps, _, _, _, _) -> {
+    ELambda(ps, _, _, _, _, _) -> {
       for p in ps {
         match p.ann {
           None -> { lambda_unannotated = true }
@@ -8511,7 +8566,7 @@ fn check_apply(
       pre_txs = pre_txs ++ [ax]
     }
     pre = Some(ats)
-    let (cxb, ftt, fxx) = check_expr(cx1, target, Some(TyFn(ats, TyNever, EIo)))
+    let (cxb, ftt, fxx) = check_expr(cx1, target, Some(TyFn(ats, TyNever, EIo, capture.empty_function())))
     cx1 = cxb
     ft = ftt
     fx = fxx
@@ -8536,7 +8591,7 @@ fn check_apply(
   var fret = TyError
   var feff = EPure
   match ft {
-    TyFn(ps, r, ef) -> {
+    TyFn(ps, r, ef, _) -> {
       is_fn = true
       fps = ps
       fret = r
@@ -9390,7 +9445,7 @@ fn check_staged_body(cx: Cx, pat: Pattern, item: Ty, body: Expr, lo: Int,
     }
   }
   let bx2 = if len(pre) == 0 { bx } else { XBlock(pre, Some(bx), x_lo(bx), x_hi(bx), TyUnit) }
-  let t = TyFn([item], TyUnit, lam_eff)
+  let t = TyFn([item], TyUnit, lam_eff, capture.empty_function())
   (cx3, XLambda([psym], [pname], bx2, popped.captures, owner_off(cx, e_lo(body)),
     owner_off(cx, e_hi(body)), t, "for-body"), lam_eff, popped.staged)
 }
@@ -9454,7 +9509,7 @@ fn check_staged_for(cx: Cx, pat: Pattern, from: Expr, ft: Ty, fx: TExpr, body: E
   let tr = trait_of(cx1.traits, STAGED_ITER_ID)
   let (_, ms) = tr.methods[0]
   let row = match ms.sig.param_tys[1] {
-    TyFn(_, _, e) -> {
+    TyFn(_, _, e, _) -> {
       let rvid = match tr.tvar {
         TyVar(_, v) -> v
         _ -> -1
@@ -9526,7 +9581,7 @@ fn check_staged_arm(cx: Cx, body: Expr, cells: Map[Int, StagedCell], expected: O
     lambda_stack = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1),
     used_effects = saved_used, eff_witness = saved_wit } }
   (cx1, bt, XLambda([], [], bx, popped.captures, owner_off(cx, e_lo(body)), owner_off(cx, e_hi(body)),
-    TyFn([], bt, row), "if-body"), row, popped.staged)
+    TyFn([], bt, row, capture.empty_function()), "if-body"), row, popped.staged)
 }
 
 ## A branch may infer its result from its sibling. Only the result tail is
@@ -9542,7 +9597,7 @@ fn staged_arm_waits(cx: Cx, e: Expr) -> Bool =
 fn staged_result_arm(cx: Cx, lam: TExpr, t: Ty, slot: Int, wit: WitRef, lo: Int,
   hi: Int) -> (Cx, TExpr, Eff) = {
   let (body, caps, llo, lhi, used) = match lam {
-    XLambda([], [], b, cs, a, z, TyFn([], _, e), _) -> (b, cs, a, z, e)
+    XLambda([], [], b, cs, a, z, TyFn([], _, e, _), _) -> (b, cs, a, z, e)
     _ -> panic("staged_result_arm: expected a generated branch closure")
   }
   let saved_used = cx.frame.used_effects
@@ -9564,7 +9619,7 @@ fn staged_result_arm(cx: Cx, lam: TExpr, t: Ty, slot: Int, wit: WitRef, lo: Int,
   let restored = Cx { ..charged, frame = Frame { ..charged.frame, used_effects = saved_used,
     eff_witness = saved_wit,
     lambda_stack = list.take(charged.frame.lambda_stack, len(charged.frame.lambda_stack) - 1) } }
-  (restored, XLambda([], [], store, popped.captures ++ [slot], llo, lhi, TyFn([], TyUnit, row), "if-result"), row)
+  (restored, XLambda([], [], store, popped.captures ++ [slot], llo, lhi, TyFn([], TyUnit, row, capture.empty_function()), "if-result"), row)
 }
 
 ## Evaluate the condition once. Typed result slots are opened empty, written
@@ -9884,7 +9939,7 @@ test "a staged value stores both arm results and reads its hidden slot after the
       for arm in [yes, no] {
         match arm {
           XLambda([], [], XCallFn(_, "result_set", [XLocal(id, ..), XBlock(_, Some(XLocal(_, name, ..)), ..)],
-            _, evs, Some(tid), ..), caps, _, _, TyFn([], TyUnit, _), _) -> {
+            _, evs, Some(tid), ..), caps, _, _, TyFn([], TyUnit, _, _), _) -> {
             assert id == slot && tid == STAGED_RESULT_ID && len(evs) == 1
             assert list.contains(caps, slot)
             assert name == "a" || name == "b"
@@ -10005,7 +10060,7 @@ fn check_local_fn(
   }
   let (row_cx, eff) = resolve_eff_at(cx1, atoms, nlo, nhi)
   cx1 = row_cx
-  let ft = TyFn(ptys, ret, eff)
+  let ft = TyFn(ptys, ret, eff, capture.empty_function())
   let (cxc, sid) = declare(cx1, name, ft, false, nlo, nhi)
   cx1 = cxc
   # The declaration error is the whole refusal: a row that failed to resolve
@@ -10015,7 +10070,7 @@ fn check_local_fn(
     check_lambda(cx1, params, body, false, false, false, None, body_local_fn, Some(ft), lo, hi)
   cx1 = cxd
   match actual {
-    TyFn(_, ar, ae) -> {
+    TyFn(_, ar, ae, _) -> {
       if not assignable(cx1, ar, ret) {
         let actual_text = ty_show(cx1.adts, ar)
         let return_text = ty_show(cx1.adts, ret)
@@ -10047,7 +10102,7 @@ fn check_local_fn(
 
 fn accepts_partial_expected(cx: Cx, e: Expr) -> Bool =
   match e {
-    ELambda(_, _, _, _, _) -> true
+    ELambda(_, _, _, _, _, _) -> true
     EVar(_, _, _) -> true
     EFieldAcc(target, name, _, _, _, _) -> qual_fn(cx, target, name) != None
     _ -> false
@@ -10469,7 +10524,7 @@ fn check_call(
   cx1 = used_signature(cx1, s)
   if observation.entry(s) { cx1 = Cx { ..cx1, observation_used = true } }
   if observation.entry(s) && not cx1.is_std_module {
-    let literal = len(args) == 1 && match args[0] { ELambda(_, _, _, _, _) -> true, _ -> false }
+    let literal = len(args) == 1 && match args[0] { ELambda(_, _, _, _, _, _) -> true, _ -> false }
     if not literal {
       cx1 = cerr_h(cx1, "observe requires a literal callback", lo, hi,
         "the lexical TraceScope must be established at this call")
@@ -10665,7 +10720,7 @@ fn check_call(
     # return type until step B's stage 2, and a two-branch read for the one
     # release the transitional spelling lived through.
     let target = match subst(s.ret, m, em) {
-      TyAdt(_, targs) -> targs[0]
+      TyAdt(_, targs, _) -> targs[0]
       _ -> TyError
     }
     if target == TyInt || target == TyFloat || target == TyBool {
@@ -10747,7 +10802,7 @@ fn check_call(
         let ev_arity = len(adt_of(cx1.adts, eid).ctors[0].fields)
         let env_idx = ev_arity - 1
         let env = XField(recv, env_idx, owner_off(cx, clo), owner_off(cx, chi), erased_ev_ty())
-        XApply(XField(recv, idx, owner_off(cx, clo), owner_off(cx, chi), TyFn(s.param_tys, s.ret, EPure)), txs2,
+        XApply(XField(recv, idx, owner_off(cx, clo), owner_off(cx, chi), TyFn(s.param_tys, s.ret, EPure, capture.empty_function())), txs2,
           [env], owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, clo), ret,
           CallSource { nhi = owner_off(cx, chi), role = "perform", operation = Some((s.owner.unwrap_or(cx.owner_class.unwrap_or("")),
             identity.path_text([identity.Named(identity.EffectDecl, effect_of(cx1, eid).name),
@@ -10805,7 +10860,7 @@ fn check_local_value_call(
   var lret = TyError
   var leff = EPure
   match lt {
-    TyFn(ps, r, ef) -> {
+    TyFn(ps, r, ef, _) -> {
       is_fn = true
       lps = ps
       lret = r
@@ -11280,9 +11335,9 @@ fn unbound_tparams(tparams: List[Ty], m: Map[Int, Ty]) -> List[Int] = {
 ## for those that is exactly what makes checking it now worth anything.
 fn round_two_ready(a: Expr, expected: Ty, unbound: List[Int], partial_ok: Bool) -> Bool =
   match a {
-    ELambda(params, _, _, _, _) -> {
+    ELambda(params, _, _, _, _, _) -> {
       let wanted: List[Ty] = match expected {
-        TyFn(ps, _, _) -> {
+        TyFn(ps, _, _, _) -> {
           var out: List[Ty] = []
           var i = 0
           for p in params {
@@ -11657,7 +11712,7 @@ fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExp
         (cxr, tx)
       } else {
         let nm = ev_local_name(cx1, eid)
-        let (cxs, found) = ev_expr(cx1, nm, LabelSlot(eid), TyAdt(eid, []), lo, hi)
+        let (cxs, found) = ev_expr(cx1, nm, LabelSlot(eid), TyAdt(eid, [], capture.empty_arguments()), lo, hi)
         (cxs, match found {
           Some(tx) -> tx
           None -> XUnit(owner_off(cx, lo), owner_off(cx, hi))
@@ -11723,7 +11778,7 @@ fn resolve_label_evidence(cx: Cx, eid: Int, lo: Int, hi: Int) -> (Cx, TExpr, Boo
       None -> ()
     }
   }
-  let (cxa, found) = ev_expr(cx1, nm, LabelSlot(eid), TyAdt(eid, []), lo, hi)
+  let (cxa, found) = ev_expr(cx1, nm, LabelSlot(eid), TyAdt(eid, [], capture.empty_arguments()), lo, hi)
   cx1 = cxa
   match found {
     Some(tx) -> (cx1, tx, true)
@@ -11859,7 +11914,7 @@ fn eff_drop(e: Eff, ids: List[Int]) -> Eff = {
     let (id, _) = l
     if not list.contains(ids, id) { ls = ls ++ [l] }
   }
-  eff_with_labels(eff_base(e), ls)
+  scoped_eff(eff_with_labels(eff_base(e), ls), eff_scopes(e))
 }
 
 ## A local function raised a label its own row does not declare and its own
@@ -12024,15 +12079,21 @@ fn check_ctor_call(
   }
   let (aid, cslot) = key.expect("ctor")
   let ad = adt_of(cx1.adts, aid)
-  let ci = adt_of(cx1.adts, aid).ctors[cslot]
+  let scope_args = match expected {
+    Some(TyAdt(id, _, args)) -> if id == aid { args } else { capture.arguments(ad.scope_params) }
+    _ -> capture.arguments(ad.scope_params)
+  }
+  let original = ad.ctors[cslot]
+  let ci = CtorI { ..original, fields = map(original.fields, f => FieldI { ..f,
+    ty = apply_scope_arguments(f.ty, ad.scope_params, scope_args) }) }
   let n = len(ci.fields)
-  let self_ty = TyAdt(ad.id, ad.tparams)
+  let self_ty = TyAdt(ad.id, ad.tparams, scope_args)
   var exp_is_fn = false
   var exp_fn_ps: List[Ty] = []
   var exp_fn_ret = TyUnit
   var exp_fn_eff = EPure
   match expected {
-    Some(TyFn(ps2, r2, ef2)) -> {
+    Some(TyFn(ps2, r2, ef2, _)) -> {
       exp_is_fn = true
       exp_fn_ps = ps2
       exp_fn_ret = r2
@@ -12675,7 +12736,7 @@ fn sam_snapshot(cx: Cx, i: Int, te: Eff, lo: Int, hi: Int) -> (Cx, (Int, TExpr))
 ## scored by arity now, checked once the winning overload is known.
 fn sam_deferred(cx: Cx, a: Expr) -> Bool =
   match a {
-    ELambda(ps, _, _, _, _) -> {
+    ELambda(ps, _, _, _, _, _) -> {
       for p in ps {
         match p.ann {
           None -> return true
@@ -12690,7 +12751,7 @@ fn sam_deferred(cx: Cx, a: Expr) -> Bool =
 
 fn deferred_arity(cx: Cx, a: Expr) -> Int =
   match a {
-    ELambda(ps, _, _, _, _) -> len(ps)
+    ELambda(ps, _, _, _, _, _) -> len(ps)
     ECtor(cn, _, _) ->
       match map.get(cx.ctors_by_name, cn) {
         Some(k) -> {
@@ -12748,7 +12809,7 @@ fn param_score(cx: Cx, p: String, at: Option[Ty], arity: Int) -> Option[Int] !io
           } else {
             None
           }
-        TyFn(fps, fret, _) ->
+        TyFn(fps, fret, _, _) ->
           match sam_of_nonprim(cx.jsig, p) {
             Some(sm) ->
               match sam_fn_ty(cx.jsig, sm) {
@@ -12923,7 +12984,7 @@ fn finalize_sams(
         let shape = sam_fn_ty(cx1.jsig, sm)
         let ft = shape.expect("sam shape scored")
         let (sps, sret) = ft
-        let (cxa, t, ax) = check_expr(cx1, a, Some(TyFn(sps, sret, EIo)))
+        let (cxa, t, ax) = check_expr(cx1, a, Some(TyFn(sps, sret, EIo, capture.empty_function())))
         cx1 = cxa
         out_i = Some(ax)
         var fits = false
@@ -12931,7 +12992,7 @@ fn finalize_sams(
         # is taken once the shape is settled: a mismatch has nothing to cross
         var row: Eff = EPure
         match t {
-          TyFn(tps, tret, te) ->
+          TyFn(tps, tret, te, _) ->
             if tps == sps {
               if sam_ret_compatible(cx1.jsig, tret, sm.ret_cls) {
                 fits = true
@@ -12948,7 +13009,7 @@ fn finalize_sams(
         }
         if not fits && not is_errorish(t) {
           let info = cx1.jsig.class_info(p)
-          let shape_text = ty_show(cx1.adts, TyFn(sps, sret, EIo))
+          let shape_text = ty_show(cx1.adts, TyFn(sps, sret, EIo, capture.empty_function()))
           cx1 = cerr_h(cx1, "this function does not fit `" ++ info.simple ++ "`",
             e_lo(a), e_hi(a),
             "expected shape: " ++ shape_text ++
@@ -12957,7 +13018,7 @@ fn finalize_sams(
       }
       Some(t) ->
         match t {
-          TyFn(_, _, te) -> {
+          TyFn(_, _, te, _) -> {
             match sam_of_nonprim(cx1.jsig, p) {
               Some(sm2) -> {
                 convs = convs ++ [(i, p, sm2.name, sm2.param_cls, sm2.ret_cls)]
@@ -13461,7 +13522,7 @@ fn check_method_call(
   # function `f` is ALSO in scope the method spelling is ambiguous and errors
   # out; the value spellings (`value_form`) read the field (spec §2.4)
   match tt {
-    TyAdt(aid, targs) -> {
+    TyAdt(aid, targs, _) -> {
       let ad = adt_of(cx1.adts, aid)
       if ad.is_record {
         let ci = adt_of(cx1.adts, aid).ctors[0]
@@ -13488,7 +13549,7 @@ fn check_method_call(
           let em0: Map[Int, Eff] = map.empty()
           let ftype = subst(ci.fields[fidx].ty, im, em0)
           match ftype {
-            TyFn(fps, fret, feff) -> {
+            TyFn(fps, fret, feff, _) -> {
               # the field holds a function value, and a function type carries
               # no parameter names
               match first_named(args0) {
@@ -13720,7 +13781,7 @@ fn check_match(
       Some(true) -> {
         var too_complex = false
         let missing = match st {
-          TyAdt(aid, _) -> {
+          TyAdt(aid, _, _) -> {
             let count = len(adt_of(cx1.adts, aid).ctors)
             var names: List[String] = []
             var ci2 = 0
@@ -13827,9 +13888,9 @@ test "lambdas infer parameters from expected types and track captures" {
   let (cxk, _) = declare(cx, "k", TyInt, false, 0, 1)
   # x => x + k against fn(Int) -> Int captures k
   let lam = ELambda([LambdaParam { name = "x", ann = None, lo = 3, hi = 4 }],
-    EBinary(OpAdd, EVar("x", 9, 10), EVar("k", 13, 14), 11, 12, 9, 14), false, 0, 14)
-  let (cx1, t, node) = check_expr(cxk, lam, Some(TyFn([TyInt], TyInt, EPure)))
-  assert t == TyFn([TyInt], TyInt, EPure)
+    EBinary(OpAdd, EVar("x", 9, 10), EVar("k", 13, 14), 11, 12, 9, 14), false, 0, 14, [])
+  let (cx1, t, node) = check_expr(cxk, lam, Some(TyFn([TyInt], TyInt, EPure, capture.empty_function())))
+  assert t == TyFn([TyInt], TyInt, EPure, capture.empty_function())
   assert len(cx1.diags) == 0
   match node {
     XLambda(_, _, _, caps, ..) -> { assert len(caps) == 1 }
@@ -13841,15 +13902,15 @@ test "lambdas infer parameters from expected types and track captures" {
   # a var cannot be captured
   let (cxv, _) = declare(cxk, "v", TyInt, true, 0, 1)
   let lam2 = ELambda([LambdaParam { name = "y", ann = None, lo = 3, hi = 4 }],
-    EVar("v", 9, 10), false, 0, 10)
-  let (cx3, _, _) = check_expr(cxv, lam2, Some(TyFn([TyInt], TyInt, EPure)))
+    EVar("v", 9, 10), false, 0, 10, [])
+  let (cx3, _, _) = check_expr(cxv, lam2, Some(TyFn([TyInt], TyInt, EPure, capture.empty_function())))
   assert str.contains(cx3.diags[0].msg, "lambdas cannot capture `var` bindings")
 }
 
 test "apply: piping arguments into an unannotated lambda" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
-  let lam = ELambda([LambdaParam { name = "x", ann = None, lo = 1, hi = 2 }], EVar("x", 7, 8), false, 0, 8)
+  let lam = ELambda([LambdaParam { name = "x", ann = None, lo = 1, hi = 2 }], EVar("x", 7, 8), false, 0, 8, [])
   let ap = EApply(lam, [pos_arg(EInt(1, 10, 11))], 0, 12)
   let (cx1, t, _) = check_expr(cx, ap, no_expected())
   assert t == TyInt
@@ -13878,7 +13939,7 @@ test "calls: builtins, dynamic targets, arity and undefined" {
   assert t == TyInt
   assert len(cx1.diags) == 0
   # a local fn value is a dynamic call target
-  let (cxa, _) = declare(cx, "f", TyFn([TyInt], TyBool, EPure), false, 0, 1)
+  let (cxa, _) = declare(cx, "f", TyFn([TyInt], TyBool, EPure, capture.empty_function()), false, 0, 1)
   let (cx2, t2, node2) =
     check_expr(cxa, EApply(EVar("f", 0, 1), [pos_arg(EInt(1, 2, 3))], 0, 4), no_expected())
   assert t2 == TyBool
@@ -13910,7 +13971,7 @@ test "argument names name a signature or a constructor; a value callee says so" 
   let (cx2, _, _) = check_expr(cx, wrong, Some(opt_ty(TyInt)))
   assert str.contains(cx2.diags[0].msg, "no field `nope`")
   # (2) a local holding a function is a function *value*: no parameter names
-  let (cxf, _) = declare(cx, "f", TyFn([TyInt], TyInt, EPure), false, 0, 1)
+  let (cxf, _) = declare(cx, "f", TyFn([TyInt], TyInt, EPure, capture.empty_function()), false, 0, 1)
   let on_fn = EApply(EVar("f", 0, 1),
     [Arg { name = Some("a"), e = EInt(1, 5, 6), trailing = false, lo = 2, hi = 6 }], 0, 7)
   let (cx3, _, _) = check_expr(cxf, on_fn, no_expected())
@@ -13920,7 +13981,7 @@ test "argument names name a signature or a constructor; a value callee says so" 
   assert cx3.diags[0].lo == 2
   # (3) an applied expression is a function value too, with no name to quote
   let lam = ELambda([LambdaParam { name = "x", ann = Some(TNamed("Int", [], [], 4, 7)), lo = 1, hi = 2 }],
-    EVar("x", 11, 12), false, 0, 12)
+    EVar("x", 11, 12), false, 0, 12, [])
   let on_value = EApply(lam, [Arg { name = Some("a"), e = EInt(1, 16, 17), trailing = false, lo = 13, hi = 17 }], 0, 18)
   let (cx4, _, _) = check_expr(cx, on_value, no_expected())
   assert cx4.diags[0].msg ==
@@ -13944,7 +14005,7 @@ test "argument names name a signature or a constructor; a value callee says so" 
 test "named arguments land on a signature's parameters, and evaluate in written order" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
-  let sg = Sig {
+  let sg = Sig { scope_params = capture.empty_params(),
     name = "move2",
     param_tys = [TyInt, TyBool],
     param_names = ["dx", "wrap"],
@@ -14069,7 +14130,7 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   # the parameter type under this call's substitution, and this call's own
   # witnesses in this call's order (#207 §4.3)
   let tv = TyVar("T", 0)
-  let gsig = Sig {
+  let gsig = Sig { scope_params = capture.empty_params(),
     name = "hold", param_tys = [TyList(tv), tv], param_names = ["xs", "probe"],
     param_defaults = [Some("[]"), None],
     caller_params = [],
@@ -14122,7 +14183,7 @@ test "omitted defaults run after the written arguments, in declaration order" {
   cx = push_scope(cx)
   # f(a: Int, b: Int = a, c: Bool, d: Int = b): two defaults that read
   # parameters, one of them an earlier default
-  let sg = Sig {
+  let sg = Sig { scope_params = capture.empty_params(),
     name = "f",
     param_tys = [TyInt, TyInt, TyBool, TyInt],
     param_names = ["a", "b", "c", "d"],
@@ -14277,7 +14338,7 @@ test "the same call, four callees, four kinds of typed node" {
     _ -> { assert false }
   }
   # a local holding a function is a dynamic call, still by name
-  let (cxb, _) = declare(cx, "h", TyFn([TyInt], TyInt, EPure), false, 0, 1)
+  let (cxb, _) = declare(cx, "h", TyFn([TyInt], TyInt, EPure, capture.empty_function()), false, 0, 1)
   let (_, _, n2) = check_expr(cxb, EApply(EVar("h", 0, 1), [pos_arg(EInt(1, 2, 3))], 0, 4),
     no_expected())
   match n2 {
@@ -14294,7 +14355,7 @@ test "the same call, four callees, four kinds of typed node" {
   }
   # anything else applies a function value
   let lam = ELambda([LambdaParam { name = "x", ann = Some(TNamed("Int", [], [], 4, 7)), lo = 1, hi = 2 }],
-    EVar("x", 11, 12), false, 0, 12)
+    EVar("x", 11, 12), false, 0, 12, [])
   let (_, _, n4) = check_expr(cx, EApply(lam, [pos_arg(EInt(1, 13, 14))], 0, 15), no_expected())
   match n4 {
     XApply(..) -> ()
@@ -14705,6 +14766,7 @@ fn enter_fn(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
     ..entry,
     current_tparams = tp,
     current_eff_vars = ev,
+    current_capture_params = s.scope_params,
     frame = Frame { ..cx.frame, current_sig = Some(s) }
   }
   cx1 = bind_dicts(cx1, s, nlo, nhi)
@@ -14742,7 +14804,7 @@ fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
     let (eid, _) = l
     let ev_name = ev_local_name(cx1, eid)
     let (cx2, _) =
-      declare_evidence(cx1, ev_name, TyAdt(eid, []), label_key(eid), nlo, nhi)
+      declare_evidence(cx1, ev_name, TyAdt(eid, [], capture.empty_arguments()), label_key(eid), nlo, nhi)
     cx1 = cx2
   }
   # one erased slot per effect variable written in the row, between the
@@ -14961,7 +15023,7 @@ fn verify_effects(
 ## row in `tparams x bounds_of` order, and a filtered row would renumber it.
 ## `eparams` stays empty because a default is refused any effect.
 pub fn default_sig(parent: Sig, fname: String, k: Int, pty: Ty) -> Sig =
-  Sig {
+  Sig { scope_params = parent.scope_params,
     name = fname ++ "\$default\$" ++ to_string(k),
     param_tys = list.take(parent.param_tys, k),
     param_names = list.take(parent.param_names, k),
@@ -15156,8 +15218,8 @@ fn extern_type_ok(t: Ty, parameter: Bool) -> Bool =
   match t {
     TyInt | TyFloat | TyBool | TyString | TyBytes -> true
     TyUnit -> not parameter
-    TyAdt(aid, [inner]) -> aid == OPTION_ID && extern_type_ok(inner, false)
-    TyAdt(aid, [inner, err]) -> aid == RESULT_ID && err == foreign_error_ty() && extern_type_ok(inner, false)
+    TyAdt(aid, [inner], _) -> aid == OPTION_ID && extern_type_ok(inner, false)
+    TyAdt(aid, [inner, err], _) -> aid == RESULT_ID && err == foreign_error_ty() && extern_type_ok(inner, false)
     _ -> false
   }
 
@@ -15445,7 +15507,7 @@ pub(pkg) fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> 
 }
 
 fn test_sig(name: String) -> Sig =
-  Sig {
+  Sig { scope_params = capture.empty_params(),
     name = name,
     param_tys = [],
     param_names = [],
@@ -15472,6 +15534,7 @@ pub(pkg) fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
   var cx1 = Cx {
     ..cx,
     current_tparams = empty_tp,
+    current_capture_params = capture.empty_params(),
     current_eff_vars = empty_ev,
     frame = Frame {
       ..cx.frame,
@@ -15526,6 +15589,7 @@ pub(pkg) fn check_const_init(
   var cx1 = Cx {
     ..cx,
     current_tparams = empty_tp,
+    current_capture_params = capture.empty_params(),
     current_eff_vars = empty_ev,
     const_cutoff = Some(visible)
   }
@@ -16194,7 +16258,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
     # both lookups re-run what registration already validated, diags discarded
     let imp_key = impl_body_key(cx1, imd.trait_name, imd.subject)
     let impl_head = [identity.ImplHead(imd.trait_name,
-      identity.type_shape(imd.subject, map(imd.tparams, tp => tp.name)))]
+      identity.type_shape(imd.subject, parameter_names(imd.tparams, imd.scope)))]
     for me in imd.methods {
       let path = impl_head ++ [identity.Named(identity.MethodDecl, me.name)]
       let (claimed, header) = identity.path_table_claim(headers.impl_sigs, method_seen, identity.path_text(path))
@@ -16464,7 +16528,7 @@ test "a projection a mismatch is about is printed as written, never reduced on o
     TyVar(_, id) -> id
     _ -> panic("view's parameter is its trait's variable")
   }
-  let ct = TyAdt(map.get(cx.adts_by_name, "C").expect("C"), [])
+  let ct = TyAdt(map.get(cx.adts_by_name, "C").expect("C"), [], capture.empty_arguments())
   let em: Map[Int, Eff] = map.empty()
   let at_c = map.insert(map.empty(), mid, ct)
   # the declared projection itself still reduces under the bindings
@@ -17000,19 +17064,19 @@ test "grouped function returns keep outer and inner effects distinct" {
 
   let outer = map.get(cx1.fns, "outer").expect("outer")
   assert outer.eff == EIo
-  assert outer.ret == TyFn([], TyInt, EPure)
+  assert outer.ret == TyFn([], TyInt, EPure, capture.empty_function())
   assert sig_render(cx1.adts, cx1.traits, outer) ==
     "fn outer() -> (fn() -> Int) !io"
 
   let inner = map.get(cx1.fns, "inner").expect("inner")
   assert inner.eff == EPure
-  assert inner.ret == TyFn([], TyInt, EIo)
+  assert inner.ret == TyFn([], TyInt, EIo, capture.empty_function())
   assert sig_render(cx1.adts, cx1.traits, inner) ==
     "fn inner() -> fn() -> Int !io"
 
   let both = map.get(cx1.fns, "both").expect("both")
   assert both.eff == EIo
-  assert both.ret == TyFn([], TyInt, EIo)
+  assert both.ret == TyFn([], TyInt, EIo, capture.empty_function())
   assert sig_render(cx1.adts, cx1.traits, both) ==
     "fn both() -> (fn() -> Int !io) !io"
 }
@@ -17159,8 +17223,8 @@ test "ADT headers retain allocated effect binders including unused parameters" {
   assert identity.packed_slot(first_id) == 0 && identity.packed_slot(second_id) == 0
   assert identity.packed_declaration(first_id) == identity.derive(minted("", identity.TypeDecl, "First"))
   assert identity.packed_declaration(unused_id) == identity.derive(minted("", identity.TypeDecl, "Unused"))
-  assert first.ctors[0].fields[0].ty == TyFn([TyInt], TyInt, first.bound_eparams[0])
-  assert second.ctors[0].fields[0].ty == TyFn([TyInt], TyInt, second.bound_eparams[0])
+  assert first.ctors[0].fields[0].ty == TyFn([TyInt], TyInt, first.bound_eparams[0], capture.empty_function())
+  assert second.ctors[0].fields[0].ty == TyFn([TyInt], TyInt, second.bound_eparams[0], capture.empty_function())
   assert unused.ctors[0].fields[0].ty == TyInt
 }
 
@@ -17185,7 +17249,7 @@ test "an effect declaration synthesises an evidence record and an operation" {
   assert rec.name == "ev\$Ask"
   assert rec.is_record
   assert rec.ctors[0].fields[0].name == "ask"
-  assert rec.ctors[0].fields[0].ty == TyFn([], TyInt, EPure)
+  assert rec.ctors[0].fields[0].ty == TyFn([], TyInt, EPure, capture.empty_function())
   # the operation is an ordinary name in the function namespace, and its own
   # effect is the label
   let sg = map.get(cx1.fns, "ask").expect("ask is in scope")
@@ -17451,7 +17515,7 @@ test "a declared effect is served by a hidden evidence parameter" {
   assert len(f.dict_syms) == 0
   assert len(f.ev_syms) == 1
   let eid = map.get(cx1.effects, "Ask").expect("Ask")
-  assert sym_of(cx1, f.ev_syms[0]).ty == TyAdt(eid, [])
+  assert sym_of(cx1, f.ev_syms[0]).ty == TyAdt(eid, [], capture.empty_arguments())
 }
 
 test "io does not absorb a label, and a label does not absorb io" {
@@ -18669,10 +18733,10 @@ test "shadowing the prelude method names does not reach the operators or the sug
   assert len(cx.diags) == 0
   # argument 3: the impls declare and are found, with `show` pointing elsewhere
   let ptv = map.get(cx.adts_by_name, "P").expect("P")
-  assert has_impl_at(cx.impl_table, SHOW_ID, TyAdt(ptv, []))
-  assert has_impl_at(cx.impl_table, EQ_ID, TyAdt(ptv, []))
+  assert has_impl_at(cx.impl_table, SHOW_ID, TyAdt(ptv, [], capture.empty_arguments()))
+  assert has_impl_at(cx.impl_table, EQ_ID, TyAdt(ptv, [], capture.empty_arguments()))
   # `==` still asks the solver and still gets the Eq impl, name or no name
-  assert eq_wit_of(src) == Some(WConcrete(EQ_ID, TyAdt(ptv, [])))
+  assert eq_wit_of(src) == Some(WConcrete(EQ_ID, TyAdt(ptv, [], capture.empty_arguments())))
   # while the bare name is the local function: one parameter, no trait
   let s = map.get(cx.fns, "show").expect("show is bound")
   assert s.trait_id == None

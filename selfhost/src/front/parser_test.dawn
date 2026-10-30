@@ -7,8 +7,7 @@ use std/str
 use std/list
 use front/parser.{parse_module, parse_module_marked}
 use front/astdump.{render_module}
-use front/ast.{
-  Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambda, EHandle, EMatch, EPropagate,
+use front/ast.{Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambda, EHandle, EMatch, EPropagate,
   EListLit, ListElem, LeExpr, LeSpread, LeIf,
   OpAdd, OpMul,
   PLit, POr, PCtor, PQual, PTuple, PList,
@@ -1055,10 +1054,10 @@ test "type grouping disambiguates outer and inner function effects" {
   match m.decls[0] {
     DType(t) ->
       match t.alias_target {
-        Some(TFn(_, inner, outer_effs, _, _)) -> {
+        Some(TFn(_, inner, outer_effs, _, _, _)) -> {
           assert outer_effs == ["io"]
           match inner {
-            TFn(_, TNamed(name, _, _, _, _), inner_effs, _, _) -> {
+            TFn(_, TNamed(name, _, _, _, _), inner_effs, _, _, _) -> {
               assert name == "Int"
               assert len(inner_effs) == 0
             }
@@ -1072,7 +1071,7 @@ test "type grouping disambiguates outer and inner function effects" {
   match m.decls[1] {
     DType(t) ->
       match t.alias_target {
-        Some(TFn(_, TFn(_, _, inner_effs, _, _), outer_effs, _, _)) -> {
+        Some(TFn(_, TFn(_, _, inner_effs, _, _, _), outer_effs, _, _, _)) -> {
           assert len(outer_effs) == 0
           assert inner_effs == ["io"]
         }
@@ -1083,7 +1082,7 @@ test "type grouping disambiguates outer and inner function effects" {
   match m.decls[2] {
     DType(t) ->
       match t.alias_target {
-        Some(TFn(_, TFn(_, _, inner_effs, _, _), outer_effs, _, _)) -> {
+        Some(TFn(_, TFn(_, _, inner_effs, _, _, _), outer_effs, _, _, _)) -> {
           assert outer_effs == ["io"]
           assert inner_effs == ["io"]
         }
@@ -1267,7 +1266,7 @@ test "a conditional impl carries its own type parameters" {
   let (m, ds) = parse_module("impl[T: Eq] Eq[List[T]] {\n  fn eq(a: List[T], b: List[T]) -> Bool = true\n}")
   assert len(ds) == 0
   match m.decls[0] {
-    DImpl(tparams, trait_name, _tlo, _thi, _subject, methods, _assoc, _ebs, _lo, _hi) -> {
+    DImpl(tparams, trait_name, _tlo, _thi, _subject, methods, _assoc, _ebs, _lo, _hi, _) -> {
       assert trait_name == "Eq"
       assert len(tparams) == 1
       assert tparams[0].name == "T"
@@ -1283,7 +1282,7 @@ test "an unconditional impl parses with no type parameters" {
   let (m, ds) = parse_module("impl Ord[Point] {\n  fn cmp(a: Point, b: Point) -> Int = 0\n}")
   assert len(ds) == 0
   match m.decls[0] {
-    DImpl(tparams, trait_name, _tlo, _thi, _subject, _methods, _assoc, _ebs, _lo, _hi) -> {
+    DImpl(tparams, trait_name, _tlo, _thi, _subject, _methods, _assoc, _ebs, _lo, _hi, _) -> {
       assert trait_name == "Ord"
       assert len(tparams) == 0
     }
@@ -1499,12 +1498,12 @@ test "a parenthesised arrow in a tail block is the block's value, not its head" 
         EApply(_, args, _, _) -> {
           assert len(args) == 2
           match args[1].e {
-            ELambda(params, body, _, _, _) -> {
+            ELambda(params, body, _, _, _, _) -> {
               assert len(params) == 0
               match body {
                 EBlock(stmts, tail, _, _) ->
                   match tail {
-                    Some(ELambda(inner, _, _, _, _)) -> { assert len(inner) == 1 }
+                    Some(ELambda(inner, _, _, _, _, _)) -> { assert len(inner) == 1 }
                     _ -> { assert false }
                   }
                 _ -> { assert false }
@@ -2004,7 +2003,7 @@ fn with_kids(e: Expr) -> List[Expr] = {
       out = [t]
       for a in args { out = out ++ [a.e] }
     }
-    ELambda(_, body, _, _, _) -> { out = [body] }
+    ELambda(_, body, _, _, _, _) -> { out = [body] }
     EBlock(_, Some(tail), _, _) -> { out = [tail] }
     _ -> ()
   }
@@ -2222,7 +2221,7 @@ test "a comma made up between two items damages its declaration" {
 }
 
 test "a character the lexer dropped damages the declaration whose line held it" {
-  let src = "fn a() -> Int = 1\nfn b() -> Int = 2 @\nfn c() -> Int = 3\n"
+  let src = "fn a() -> Int = 1\nfn b() -> Int = 2 $\nfn c() -> Int = 3\n"
   let (names, damaged, lost) = marks_of(src)
   assert names == ["a", "b", "c"]
   assert damaged == [false, true, false]

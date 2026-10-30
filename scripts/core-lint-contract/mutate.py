@@ -60,7 +60,7 @@ MUTATIONS = {
     # admitted value needs an interface one past the table.
     "static-87": ((
         TYPES,
-        """  widest - fn_arity(TyFn([], TyUnit, EPure))
+        """  widest - fn_arity(TyFn([], TyUnit, EPure, capture.empty_function()))
 }""",
         """  widest
 }""",

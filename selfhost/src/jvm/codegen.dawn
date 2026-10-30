@@ -7,11 +7,12 @@
 # visit signatures take nulls and Dawn has none — golden = byte-identical
 # .class files (docs/selfhost-codegen.md).
 
+use check/capture
 use std/io
 use std/io.{Fs, Exit, Console}
 use std/str
 use std/map
-use check/types.{
+use check/types.{TyCaptured,
   EPure, EIo, EffVar, prelude_adts, opt_ty, peel_opaque,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyF64Buf, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
@@ -45,16 +46,17 @@ use jvm/rtclasses.{
 ## The JVM descriptor of a Dawn type (the Kotlin descOf).
 pub fn desc_of(adts: Adts, t: Ty) -> String =
   match t {
+    TyCaptured(value, _) -> desc_of(adts, value)
     # an opaque type has no representation of its own -- it IS its target
-    TyOpaque(_, _, _, _, tgt) -> desc_of(adts, tgt)
+    TyOpaque(_, _, _, _, tgt, _) -> desc_of(adts, tgt)
     TyInt -> "J"
     TyFloat -> "D"
     TyBool -> "Z"
     TyString -> "Ljava/lang/String;"
     TyBytes -> "[B"
     # a flat long[]: the same family as Bytes' byte[] (docs/mem-buffer-design.md 6.3)
-    TyI64Buf -> "[J"
-    TyF64Buf -> "[D"
+    TyI64Buf(_) -> "[J"
+    TyF64Buf(_) -> "[D"
     TyUnit -> "L" ++ UNIT_CLASS ++ ";"
     # `V` is legal as a return descriptor and nowhere else, which is exactly
     # where the bottom types can appear: an expression that does not return
@@ -64,7 +66,7 @@ pub fn desc_of(adts: Adts, t: Ty) -> String =
     # a projection over a rigid subject is erased exactly like the TyVar it
     # projects from (assoc-types-design.md 4.1); ground types never carry one
     TyVar(_, _) | TyAssoc(_, _, _) -> "Ljava/lang/Object;"
-    TyAdt(aid, _) -> "L" ++ adt_jvm_name(adt_of(adts, aid)) ++ ";"
+    TyAdt(aid, _, _) -> "L" ++ adt_jvm_name(adt_of(adts, aid)) ++ ";"
     TyList(_) -> "L" ++ PVEC_CLASS ++ ";"
     TyMap(_, _) -> "L" ++ HAMT_CLASS ++ ";"
     TySet(_) -> "L" ++ HAMT_CLASS ++ ";"
@@ -77,7 +79,7 @@ pub fn desc_of(adts: Adts, t: Ty) -> String =
     }
     # the runtime arity, from `types.fn_arity`: a function value's evidence
     # pack is a hidden parameter of the value, so it picks the interface
-    TyFn(_, _, _) -> "L" ++ fn_iface(fn_arity(t)) ++ ";"
+    TyFn(_, _, _, _) -> "L" ++ fn_iface(fn_arity(t)) ++ ";"
   }
 
 pub fn method_desc(adts: Adts, params: List[Ty], ret: Ty) -> String = {
@@ -110,7 +112,8 @@ pub type JvmRepr =
 ## a one-liner, rather than silently inherit a default in a dozen callers.
 pub fn jvm_repr(t: Ty) -> JvmRepr =
   match t {
-    TyOpaque(_, _, _, _, tgt) -> jvm_repr(tgt)
+    TyCaptured(value, _) -> jvm_repr(value)
+    TyOpaque(_, _, _, _, tgt, _) -> jvm_repr(tgt)
     TyInt -> RLong
     TyFloat -> RDouble
     TyBool -> RBool
@@ -123,17 +126,17 @@ pub fn jvm_repr(t: Ty) -> JvmRepr =
     TyError -> RBottom
     TyString -> RRef
     TyBytes -> RRef
-    TyI64Buf -> RRef
-    TyF64Buf -> RRef
+    TyI64Buf(_) -> RRef
+    TyF64Buf(_) -> RRef
     TyVar(_, _) | TyAssoc(_, _, _) -> RRef
-    TyAdt(_, _) -> RRef
+    TyAdt(_, _, _) -> RRef
     TyList(_) -> RRef
     TyMap(_, _) -> RRef
     TySet(_) -> RRef
     TyArray(_) -> RRef
     TyJava(_, _) -> RRef
     TyTuple(_) -> RRef
-    TyFn(_, _, _) -> RRef
+    TyFn(_, _, _, _) -> RRef
   }
 
 ## JVM stack/local slots of a type (J/D = 2, void = 0).
@@ -175,10 +178,10 @@ test "descriptors and slot sizes mirror the Kotlin mapping" {
   # count: every function value carries one evidence slot, so `fn(Int) -> Bool`
   # is a Fn2 and calling it as a Fn1 is a link error -- and the row does not
   # enter into it, which is why no eta adapter exists anywhere
-  assert desc_of(adts, TyFn([TyInt], TyBool, EPure)) == "Ldawn/rt/Fn2;"
-  assert desc_of(adts, TyFn([TyInt], TyBool, EffVar("e", 1))) == "Ldawn/rt/Fn2;"
-  assert desc_of(adts, TyFn([TyInt], TyBool, EIo)) == "Ldawn/rt/Fn2;"
-  assert desc_of(adts, TyFn([], TyBool, EPure)) == "Ldawn/rt/Fn1;"
+  assert desc_of(adts, TyFn([TyInt], TyBool, EPure, capture.empty_function())) == "Ldawn/rt/Fn2;"
+  assert desc_of(adts, TyFn([TyInt], TyBool, EffVar("e", 1), capture.empty_function())) == "Ldawn/rt/Fn2;"
+  assert desc_of(adts, TyFn([TyInt], TyBool, EIo, capture.empty_function())) == "Ldawn/rt/Fn2;"
+  assert desc_of(adts, TyFn([], TyBool, EPure, capture.empty_function())) == "Ldawn/rt/Fn1;"
   assert desc_of(adts, opt_ty(TyInt)) == "LOption;"
   assert method_desc(adts, [TyInt, TyString], TyUnit) == "(JLjava/lang/String;)Ldawn/rt/Unit;"
   assert erased_apply_desc(2) == "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
@@ -190,7 +193,7 @@ test "a Unit is an ordinary reference, and only the bottom types are void" {
   # every shape below was a ClassFormatError while `Unit` said `V`: `V` is a
   # return descriptor and the JVM rejects it in a parameter or a field
   assert desc_of(adts, TyUnit) == "Ldawn/rt/Unit;"
-  assert desc_of(adts, TyOpaque(0, "Handle", "m", [], TyUnit)) == "Ldawn/rt/Unit;"
+  assert desc_of(adts, TyOpaque(0, "Handle", "m", [], TyUnit, capture.empty_arguments())) == "Ldawn/rt/Unit;"
   assert method_desc(adts, [TyUnit, TyInt], TyBool) == "(Ldawn/rt/Unit;J)Z"
   assert slots_of(TyUnit) == 1
   assert is_ref(TyUnit)
@@ -241,8 +244,8 @@ test "an impl static is qualified by module when the module is not its class" {
   assert impl_symbol(adts, "main", Some("std/x"), "Render", TyInt, "render") ==
     "dawn\$impl\$std\$x\$Render\$Int\$render"
   # and a type another module declared carries that module too
-  let t = TyOpaque(9, "Tag", "c", [], TyInt)
-  let u = TyOpaque(10, "Tag", "d", [], TyInt)
+  let t = TyOpaque(9, "Tag", "c", [], TyInt, capture.empty_arguments())
+  let u = TyOpaque(10, "Tag", "d", [], TyInt, capture.empty_arguments())
   assert impl_symbol(adts, "a", Some("a"), "Render", t, "render") !=
     impl_symbol(adts, "a", Some("a"), "Render", u, "render")
   assert impl_symbol(adts, "c", Some("a"), "Render", t, "render") ==
@@ -534,7 +537,8 @@ pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
   match t {
     # opacity hides the representation from other modules, not from the
     # language: an opaque Int hashes, compares and renders as that Int
-    TyOpaque(_, _, _, _, tgt) -> hash_of(m, tgt)
+    TyOpaque(_, _, _, _, tgt, _) -> hash_of(m, tgt)
+    TyCaptured(value, _) -> hash_of(m, value)
     TyInt -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
     TyFloat -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "hashCode", "(D)I", false)
@@ -547,10 +551,10 @@ pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
     TyBytes -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "hashCode", "([B)I", false)
     }
-    TyString | TyVar(_, _) | TyAssoc(_, _, _) | TyAdt(_, _) | TyJava(_, _) -> {
+    TyString | TyVar(_, _) | TyAssoc(_, _, _) | TyAdt(_, _, _) | TyJava(_, _) -> {
       m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
     }
-    TyList(_) | TyMap(_, _) | TySet(_) | TyArray(_) | TyI64Buf | TyF64Buf | TyTuple(_) | TyFn(_, _, _) -> {
+    TyList(_) | TyMap(_, _) | TySet(_) | TyArray(_) | TyI64Buf(_) | TyF64Buf(_) | TyTuple(_) | TyFn(_, _, _, _) -> {
       m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
     }
     # Still unreachable from either caller: `Hash[Unit]` is refused, and a
@@ -757,7 +761,7 @@ fn gen_forwarding_hash_code(
 
 fn adt_id_of(t: Ty) -> Int =
   match t {
-    TyAdt(aid, _) -> aid
+    TyAdt(aid, _, _) -> aid
     _ -> panic("impl subject is not an ADT")
   }
 
@@ -835,7 +839,7 @@ pub fn gen_ctor_class(
   # dictionary: the collections and every derived field comparison reach the
   # relation through them, so an `impl Eq` that only changed `==` would leave
   # `a == b` and `map.get(m, b)` disagreeing. Forward them to the impl.
-  let subject = TyAdt(ci.adt, [])
+  let subject = TyAdt(ci.adt, [], capture.empty_arguments())
   match ov.eq_owner {
     Some(owner) -> gen_forwarding_equals(cw, adts, sub, owner, subject)
     None -> if not singleton { gen_equals_method(cw, adts, sub, ci) }
@@ -989,9 +993,9 @@ pub fn subject_name(adts: Adts, t: Ty) -> String =
     TyString -> "String"
     # not writable as an impl subject in source; the prelude Eq/Hash cover them
     TyBytes -> "Bytes"
-    TyI64Buf -> "I64Buf"
-    TyF64Buf -> "F64Buf"
-    TyAdt(aid, _) -> adt_of(adts, aid).name
+    TyI64Buf(_) -> "I64Buf"
+    TyF64Buf(_) -> "F64Buf"
+    TyAdt(aid, _, _) -> adt_of(adts, aid).name
     # the builtin containers, once std writes conditional impls for them.
     # Arguments are dropped on purpose: the name identifies the *impl*, and
     # coherence gives a head at most one.
@@ -1001,7 +1005,7 @@ pub fn subject_name(adts: Adts, t: Ty) -> String =
     TyArray(_) -> "Array"
     TyUnit -> "Unit"
     # an opaque type is its own subject -- its impl is not its target's
-    TyOpaque(_, name, _, _, _) -> name
+    TyOpaque(_, name, _, _, _, _) -> name
     _ -> panic("invalid impl subject")
   }
 
@@ -1025,11 +1029,11 @@ pub fn owner_qualified(here: String, owner: Option[String], name: String) -> Str
 ## `a.Item` and `b.Item` implementing one trait in one class stay two statics.
 pub fn subject_ref(adts: Adts, here: String, t: Ty) -> String =
   match t {
-    TyAdt(aid, _) -> {
+    TyAdt(aid, _, _) -> {
       let a = adt_of(adts, aid)
       owner_qualified(here, a.owner, a.name)
     }
-    TyOpaque(_, name, owner, _, _) -> owner_qualified(here, Some(owner), name)
+    TyOpaque(_, name, owner, _, _, _) -> owner_qualified(here, Some(owner), name)
     _ -> subject_name(adts, t)
   }
 
@@ -1063,7 +1067,8 @@ pub fn dict_class(owner: String, key: String) -> String =
 ## Recover the concrete type from an erased Object on the stack (unerase).
 pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
   match t {
-    TyOpaque(_, _, _, _, tgt) -> emit_unerase(m, adts, tgt)
+    TyOpaque(_, _, _, _, tgt, _) -> emit_unerase(m, adts, tgt)
+    TyCaptured(value, _) -> emit_unerase(m, adts, value)
     TyInt -> {
       m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
       m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
@@ -1078,9 +1083,9 @@ pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
     }
     TyString -> { m.visitTypeInsn(OP_CHECKCAST, "java/lang/String") }
     TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
-    TyI64Buf -> { m.visitTypeInsn(OP_CHECKCAST, "[J") }
-    TyF64Buf -> { m.visitTypeInsn(OP_CHECKCAST, "[D") }
-    TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(adts, aid))) }
+    TyI64Buf(_) -> { m.visitTypeInsn(OP_CHECKCAST, "[J") }
+    TyF64Buf(_) -> { m.visitTypeInsn(OP_CHECKCAST, "[D") }
+    TyAdt(aid, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(adts, aid))) }
     TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, PVEC_CLASS) }
     TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
     TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
@@ -1090,7 +1095,7 @@ pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
       let internal = join(str.split(fqcn, "."), "/")
       m.visitTypeInsn(OP_CHECKCAST, internal)
     }
-    TyFn(_, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(fn_arity(t))) }
+    TyFn(_, _, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(fn_arity(t))) }
     TyUnit -> { m.visitTypeInsn(OP_CHECKCAST, UNIT_CLASS) }
     # TyVar (and a projection over one) is already erased, and the two
     # bottom types carry no value
