@@ -29,7 +29,7 @@ use front/token.{
   keyword
 }
 use front/ast.{no_scope_syntax,
-  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, TScoped, TCaptured, TKindArg, ScopeSyntax, ScopeBinder, CaptureBound, Bound, TypeParamDecl, EffParamDecl,
+  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, TScoped, TCaptured, TKindArg, ScopeSyntax, ScopeBinder, CaptureBound, Bound, TypeParamDecl, CaptureArg, EffParamDecl,
   EffArg,
   Param, LambdaParam,
   AssocDecl, EffAssocDecl, AssocBind, EffAssocBind,
@@ -1272,6 +1272,35 @@ fn number_examples(decls: List[Decl]) -> List[Decl] = {
 ## `!` cannot begin anything else between the brackets, so there is no ambiguity
 ## to resolve and no lookahead to spend: the item's first token decides which
 ## kind it is.
+fn trait_capture_arg(p: P, st: St) -> PR[CaptureArg] = {
+  if at_kind(p, st, CARET) {
+    let (after, bound) = capture_bound(p, st)?
+    return Ok((after, CaptureArg { members = bound, named = false,
+      lo = tok_at(p, st.pos, 0).lo, hi = tok_at(p, after.pos, -1).hi }))
+  }
+  let (after, name) = want(p, st, IDENT, "a Capture argument name or capture set")?
+  Ok((after, CaptureArg { members = [name.text], named = true, lo = name.lo, hi = name.hi }))
+}
+
+fn trait_capture_tail(p: P, st: St) -> PR[List[CaptureArg]] = {
+  var after = st
+  var args: List[CaptureArg] = []
+  while at_kind(p, after, COMMA) {
+    let (next, value) = trait_capture_arg(p, adv1(p, after))?
+    args = args ++ [value]
+    after = next
+  }
+  Ok((after, args))
+}
+
+fn trait_capture_args(p: P, st: St) -> PR[List[CaptureArg]] = {
+  if not at_kind(p, st, LBRACKET) { return Ok((st, [])) }
+  let (first, arg) = trait_capture_arg(p, adv1(p, st))?
+  let (after, rest) = trait_capture_tail(p, first)?
+  let (end, _) = want(p, after, RBRACKET, "`]`")?
+  Ok((end, [arg] ++ rest))
+}
+
 fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl], ScopeSyntax)] = {
   if not at_kind(p, st, LBRACKET) {
     let none: List[TypeParamDecl] = []
@@ -1359,8 +1388,9 @@ fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl], Sco
           st3 = next
         } else {
           let (next, b) = want(p, st3, TYPEIDENT, "a trait name or capture bound")?
-          bounds = bounds ++ [Bound { name = b.text, lo = b.lo, hi = b.hi }]
-          st3 = next
+          let (after, args) = trait_capture_args(p, next)?
+          bounds = bounds ++ [Bound { args = args, name = b.text, lo = b.lo, hi = tok_at(p, after.pos, -1).hi }]
+          st3 = after
         }
         if not at_kind(p, st3, PLUS) { break }
         st3 = adv1(p, st3)
@@ -1498,12 +1528,12 @@ fn parse_derives(p: P, st: St) -> PR[List[Bound]] = {
   }
   var st1 = St { ..st, pos = look + 1 }
   let (st2, first) = want(p, st1, TYPEIDENT, "a trait name to derive (Show or Ord)")?
-  var out = [Bound { name = first.text, lo = first.lo, hi = first.hi }]
+  var out = [Bound { args = [], name = first.text, lo = first.lo, hi = first.hi }]
   var st3 = st2
   while at_kind(p, st3, COMMA) {
     let st4 = adv1(p, st3)
     let (st5, n) = want(p, st4, TYPEIDENT, "a trait name to derive")?
-    out = out ++ [Bound { name = n.text, lo = n.lo, hi = n.hi }]
+    out = out ++ [Bound { args = [], name = n.text, lo = n.lo, hi = n.hi }]
     st3 = st5
   }
   Ok((st3, out))
@@ -1750,14 +1780,31 @@ fn trait_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
   let (st3, _) = want(p, st2, LBRACKET,
     "`[` (a trait declares its subject type parameter: trait " ++ name.text ++ "[T])")?
   let (st4, tp) = want(p, st3, TYPEIDENT, "a type parameter name (uppercase)")?
-  if at_kind(p, st4, COMMA) {
-    return Err((st4, perr(p, st4, "a trait has exactly one type parameter")))
+  var after = st4
+  var scope = no_scope_syntax()
+  if at_kind(p, after, COLON) {
+    let colon = after
+    after = adv1(p, after)
+    if not at_kind(p, after, CARET) {
+      return Err((colon, perr_h(p, colon, "the trait's own type parameter cannot have bounds",
+        "supertraits are not supported")))
+    }
+    let (next, bound) = capture_bound(p, after)?
+    scope = ScopeSyntax { ..scope, bounds = [CaptureBound { name = tp.text, members = bound,
+      lo = tok_at(p, after.pos, 0).lo, hi = tok_at(p, next.pos, -1).hi }] }
+    after = next
   }
-  if at_kind(p, st4, COLON) {
-    return Err((st4, perr_h(p, st4, "the trait's own type parameter cannot have bounds",
-      "supertraits are not supported")))
+  while at_kind(p, after, COMMA) {
+    let comma = after
+    after = adv1(p, after)
+    if not at_kind(p, after, CARET) {
+      return Err((comma, perr(p, comma, "a trait has exactly one type parameter")))
+    }
+    let (next, binder) = scope_binder(p, after)?
+    scope = ScopeSyntax { ..scope, binders = scope.binders ++ [binder] }
+    after = next
   }
-  let (st5, _) = want(p, st4, RBRACKET, "`]`")?
+  let (st5, _) = want(p, after, RBRACKET, "`]`")?
   let st6 = skip_nl(p, st5)
   let (st7, _) = want(p, st6, LBRACE, "`{` (the trait body)")?
   var st8 = skip_nl(p, st7)
@@ -1784,26 +1831,36 @@ fn trait_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
     return Err((st10, pd("a trait must declare at least one method", kw.lo, close.hi)))
   }
   Ok((st10, DTrait(name.text, tp.text, tp.lo, tp.hi, methods, assoc, eff_assoc, vis,
-    kw.lo, close.hi, name.lo, name.hi)))
+    kw.lo, close.hi, name.lo, name.hi, scope)))
 }
 
-## `type Item` -- an associated type member, bare on purpose: no bounds, no
-## default (assoc-types-design.md D1).
+## An associated type has an optional capture upper bound, but no own
+## parameters, trait bounds or default binding.
 fn trait_assoc(p: P, st: St) -> PR[AssocDecl] = {
   let (st1, kw) = want(p, st, TYPE, "`type`")?
   let (st2, name_tok) = want(p, st1, TYPEIDENT, "an associated type name (uppercase)")?
-  if at_kind(p, st2, COLON) {
-    return Err((st2, perr_h(p, st2, "an associated type cannot declare bounds",
-      "`type " ++ name_tok.text ++ "` is the whole declaration; the impl chooses the type")))
+  var after = st2
+  var bound: Option[List[String]] = None
+  if at_kind(p, after, COLON) {
+    let colon = after
+    after = adv1(p, after)
+    if not at_kind(p, after, CARET) {
+      return Err((colon, perr_h(p, colon, "an associated type cannot declare bounds",
+        "only a capture upper bound is supported")))
+    }
+    let (next, value) = capture_bound(p, after)?
+    bound = Some(value)
+    after = next
   }
-  if at_kind(p, st2, EQ) {
-    return Err((st2, perr_h(p, st2, "an associated type has no default",
+  if at_kind(p, after, EQ) {
+    return Err((after, perr_h(p, after, "an associated type has no default",
       "the `= Type` binding belongs in each impl, not in the trait")))
   }
-  Ok((st2, AssocDecl {
+  Ok((after, AssocDecl {
+    bound = bound,
     name = name_tok.text,
     lo = kw.lo,
-    hi = name_tok.hi,
+    hi = tok_at(p, after.pos, -1).hi,
     nlo = name_tok.lo,
     nhi = name_tok.hi
   }))
@@ -1993,7 +2050,8 @@ fn impl_decl(p: P, st: St) -> PR[Decl] = {
   let (st3, _) = want(p, st2, LBRACKET,
     "`[` (an impl names its subject type: impl " ++ trait_tok.text ++ "[Point])")?
   let (st4, subject) = type_ref(p, st3)?
-  let (st5, _) = want(p, st4, RBRACKET, "`]`")?
+  let (st4b, capture_args) = trait_capture_tail(p, st4)?
+  let (st5, _) = want(p, st4b, RBRACKET, "`]`")?
   let st6 = skip_nl(p, st5)
   let (st7, _) = want(p, st6, LBRACE, "`{` (the impl body)")?
   var st8 = skip_nl(p, st7)
@@ -2020,7 +2078,7 @@ fn impl_decl(p: P, st: St) -> PR[Decl] = {
   }
   let (st10, close) = want(p, st8, RBRACE, "`}`")?
   Ok((st10, DImpl(tparams, trait_tok.text, trait_tok.lo, trait_tok.hi, subject, methods,
-    assoc, eff_binds, kw.lo, close.hi, scope)))
+    assoc, eff_binds, kw.lo, close.hi, scope, capture_args)))
 }
 
 ## `type Item = X` -- the binding an impl owes for each associated type its
@@ -2083,9 +2141,17 @@ fn eff_bind_row(p: P, st: St) -> PR[(List[String], Int)] = {
     hi = close.hi
   } else {
     let (st3, n) = effect_name_token(p, st2, false)?
-    atoms = [n.text]
+    var text = n.text
     st2 = st3
     hi = n.hi
+    if at_kind(p, st2, LBRACKET) {
+      let (scope_end, scope_name) = want(p, adv1(p, st2), IDENT, "a bound Scope name")?
+      let (close_end, close) = want(p, scope_end, RBRACKET, "`]`")?
+      text = text ++ "[" ++ scope_name.text ++ "]"
+      st2 = close_end
+      hi = close.hi
+    }
+    atoms = [text]
   }
   if at_kind(p, st2, BANG) {
     return Err((st2, perr_h(p, st2, "an associated effect binds at most one atom",

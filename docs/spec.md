@@ -807,7 +807,12 @@ impl Ord2[Point] {
 fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)*]
 ```
 
-- trait 恰有一个类型参数；方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
+- trait 恰有一个 Type 主体参数，可附零个或多个 Capture 参数，如
+  `trait Measure[T: ^{c}, ^c]`。主体只允许捕获上界，不开放 supertrait；binder 同时可见。
+  impl 写完整应用 `Measure[I64Buf@s, ^{s}]`，普通参数 bound 省去主体，写
+  `T: Measure[c] + ^{c}`。实参必须显式给全且按不变性比较；同主体的同 trait 不同实参 bound
+  拒绝，coherence 仍按 trait 与主体 head 唯一。方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
+  普通 T 的空捕获默认与必要 std 迁移随 K3b-2 启用；K3b-1 只提供新契约的表面与静态检查。
 - **注入是逐 trait 的属性**：一个 trait 的方法名是否占据函数命名空间由该 trait 决定。
   今天 `trait` 声明恒注入，`Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` 六个预置 trait 也注入；
   **方法名由语言代用户消费掉的二十一个不注入**，它们的方法名只在 impl 体、文档与错误消息里
@@ -923,14 +928,15 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   按位置配对，**标签两边必须恰相等**——每个标签是一格隐藏证据参数，是方法形状的一部分。
 - **关联类型**（设计与裁决见
   [assoc-types-design.md](assoc-types-design.md)）：trait 体可声明裸 `type Item`
-  成员（无 bound、无默认），impl 对每个声明**恰绑定一次** `type Item = X`
+  成员，或写 `type Item: ^{c}` 声明公开捕获上界；裸 Item 的上界为空，不允许类型默认或任意 trait bound。impl 对每个声明**恰绑定一次** `type Item = X`
   （X 在 impl 自己的参数作用域解析，且不得又是投影）；漏绑、多绑、绑 trait
   没有的名字，各是编译错误。方法签名以 `T.Item` **投影**它——主体必须是带该
   trait bound 的类型参数（恰一个 bound 声明该名字；零个与歧义都是错误），
   `List[Int].Item` 这样的具体主体不支持。
   - **归约是急切的**：调用点实例化让主体落到具体头时，投影立即经该主体的
     impl（与字典选择同一扇门）换成绑定值——具体类型里**不存在**未归约投影。
-    刚性主体（泛型体内的 `T`）上的投影保持原样，只与逐字相同的投影相互统一。
+    刚性主体（泛型体内的 `T`）上的投影保留完整 trait 应用及成员的声明捕获上界，
+    只与同一完整投影统一。未知投影不按空处理，也不自动赋予主体 capture；Cur=Int 归约后为空。
   - 关联类型名**只活在 trait 作用域内**，不进模块类型命名空间；`T.Item` 是
     唯一到达方式。opaque 主体只查自己的 impl，不落到 target 的（与 witness
     同规则：只有 `Eq`/`Hash`/`Ord` 落回，关系没有关联类型）。运行期零表示：类型照常擦除，字典不多一个槽位。
@@ -957,7 +963,8 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
   [effect-params-design.md](effect-params-design.md) 刀 5；默认值为 2026-08-26 裁决）：
   trait 体可声明 `effect E` 成员（无 bound），并可给它**默认行** `effect E = !X`；impl 对
   每个声明**至多绑定一次** `effect E = !X`，右侧是**具体行**——一个具名效果、`!io` 或空行
-  `!()`，效果变量与投影都不可绑，默认行的右侧同此纪律。impl 省略有默认的成员即取默认，
+  `!()`，也可为已知的 Mem 声明加 impl 已绑定且由完整应用决定的 Scope 实参，如 `!Mem[s]`。
+  不开放任意行变量、投影 RHS 或一般参数化用户效果；默认行没有可命名的 Scope 就不能写 Mem[s]。impl 省略有默认的成员即取默认，
   写了绑定即覆盖；省略**无默认**的成员、多绑、绑 trait 没有的名字，各是编译错误。注册期把
   默认物化成该 impl 的绑定，此后归约、证据与后端对「默认来的」与「写出来的」绑定不可分辨
   （tea 的五个纯 impl 删绑定前后 Core 逐字节相同，是这句话的可执行判词）。方法的行以
@@ -1942,6 +1949,12 @@ fn light(c: Color) -> Int =
 
 #### 6.2.1 Mem 域与捕获（已裁定，待实现）
 
+trait 见证的静态契约含 trait identity、主体、Capture 实参与子见证。Capture 实参并集 W
+必须覆盖主体可达捕获与完整类型自由域的 support；impl 的主体/Item 上界、子见证和 Scope 键
+也须由 W 覆盖。Capture 无运行时槽，Scope 键沿既有字典参数传递。默认方法在定义处
+以刚性主体/捕获参数检查，不借使用点回推契约。接口摘要、模块再载入、投影和类型替换
+保存完整应用；第一版不保留丢失 Capture 信息的接口读取分支。
+
 **本节待实现**，不表示当前编译器已封住 #847。现行 `!Mem` 与结果类型检查存在闭包环境
 逃逸和 peek/poke 纯度缺口；以下是取代它们的目标语义。表面拼写与完整约束见
 [mem-capture-scope-design.md](mem-capture-scope-design.md)。
@@ -1960,8 +1973,10 @@ fn light(c: Color) -> Int =
   panic/catch_panic 与尾恢复 handler 保留，读写效果不改成 io，也不在闭包创建点结算。
 
 
-K2 已提供类型与语法基础，以下捕获传播、出口和按域消解语义仍待 K3/K4。
-当前 std/mem API 与 13 个已知误接受反例保持原行为；识别新类型拼写不表示 #847 已修复。
+K2 已提供类型与语法基础；K3a 已接入新域生成、分配归域和完整 Mem[s] 契约。
+K3b-1 提供 trait Capture 表面与静态契约，普通 T 空默认仍不启用、std 不迁移。
+实际环境与出口留 K3b-2，按域消解与控制边界留 K4。13 例基线现为 10 例拒绝，
+len_capture、ctl_cross、ctl_store 仍接受；本刀维持该基线，不表示 #847 已修复。
 Scope 与 Capture 分别具有独立身份和参数轴，不是普通类型或运行时值；函数环境上界
 与调用效果分别保存。内部 Scope binder 按 alpha 等价比较，替换须同时避免身份与显示名捕获。
 

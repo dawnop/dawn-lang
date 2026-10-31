@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 8d9de77b2466540b -->
+<!-- doc-check: translation-of docs/spec.md @ 628f13744c10f547 -->
 
 # Dawn Language Specification
 
@@ -1016,8 +1016,15 @@ impl Ord2[Point] {
 fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
 ```
 
-- A trait has exactly one type parameter; its methods enter the module function namespace
+- A trait has exactly one Type subject and may declare Capture parameters, as in
+  `trait Measure[T: ^{c}, ^c]`. Subject bounds admit captures, without supertraits; all binders
+  are visible together. An impl writes the complete application `Measure[I64Buf@s, ^{s}]`;
+  a parameter bound omits the subject: `T: Measure[c] + ^{c}`. Arguments must be explicit
+  and are invariant. Different arguments for the same trait on one subject are rejected;
+  coherence remains unique by trait and subject head. Its methods enter the module function namespace
   (callable directly, by UFCS, or in a pipeline).
+  The ordinary T empty capture default and required std migration activate in K3b-2;
+  K3b-1 supplies the new contract surface and static checks.
 - **Injection is a per-trait property**: whether a trait's method names occupy the function
   namespace is decided by that trait. Today a `trait` declaration always injects, and the six
   built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` inject too; **the twenty-one whose method name the
@@ -1172,7 +1179,8 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   label is one hidden evidence parameter, part of the method's shape.
 - **Associated types** (design and verdicts in
   [assoc-types-design.md](assoc-types-design.md)): a trait body may declare a bare `type Item`
-  member (no bound, no default), and an impl **binds each declaration exactly once** with
+  member, or declare its public capture upper bound as `type Item: ^{c}`. A bare member has an
+  empty capture bound. Type defaults and arbitrary trait bounds remain unsupported. An impl **binds each declaration exactly once** with
   `type Item = X` (X resolves in the impl's own parameter scope, and must not itself be a
   projection); a missing binding, multiple bindings, and binding a name the trait does not have
   are each a compile error. A method signature **projects** it as `T.Item` — the subject must be
@@ -1181,8 +1189,9 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   - **Reduction is eager**: when instantiation at the call site lands the subject on a concrete
     head, the projection is immediately replaced by the bound value via that subject's impl (the
     same door as dictionary selection) — an unreduced projection **does not exist** in a concrete
-    type. A projection on a rigid subject (a `T` inside a generic body) stays as it is, and
-    unifies only with a literally identical projection.
+    type. A projection on a rigid subject retains the complete trait application and the member's
+    declared capture upper bound. Unknown projections are neither empty nor automatically assigned
+    the subject's captures; a concrete Cur=Int reduces to an empty capture set.
   - An associated type name **lives only inside the trait's scope**; it does not enter the module
     type namespace, and `T.Item` is the only way to reach it. An opaque subject looks only in its own
     impls and does not fall back to the target's (same rule as witnesses: only `Eq`/`Hash`/`Ord`
@@ -1214,8 +1223,10 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
   trait body may declare an `effect E` member (no bound) and may give it a **default row**
   `effect E = !X`; an impl **binds each declaration at most once** with `effect E = !X`, whose
   right side is a **concrete row**: one named effect, `!io`, or the empty row `!()`; effect
-  variables and projections cannot be bound, and a default's right side follows the same
-  discipline. An impl that omits a defaulted member takes the default; one that writes a
+  variables and projections cannot be bound. A binding may also name the known Mem declaration
+  with a Scope bound by, and determined from, the complete impl application: `!Mem[s]`.
+  Arbitrary row variables, projection right sides and general parameterized user effects remain
+  unsupported. A default without a nameable Scope cannot construct Mem[s]. An impl that omits a defaulted member takes the default; one that writes a
   binding overrides it. Omitting a member **without** a default, multiple bindings, and binding
   a name the trait does not have are each a compile error. Registration materializes the
   default into that impl's binding, after which reduction, evidence and the backends cannot
@@ -2448,6 +2459,16 @@ outside effect position, and is refused everywhere inside one (§6.3).
 
 #### 6.2.1 Mem scopes and captures (settled, pending implementation)
 
+A trait witness's static contract contains the trait identity, subject, Capture arguments and
+subwitnesses. The union W of Capture arguments must cover the subject's reachable captures and
+free Scope support in its complete type. Subject and Item bounds, subwitnesses and Scope keys must
+also fit W. Captures have no runtime slots; Scope keys follow the existing dictionary parameters.
+Default methods are checked at their definition under rigid subject and Capture parameters,
+without inferring a wider contract from a use site. Interfaces, module reloads, projections and
+substitution retain complete applications, with no legacy reader that drops Capture information.
+The ordinary T empty default and required std migration remain for K3b-2; K3b-1 adds the new
+surface, representation and static contract checks while retaining existing program behavior.
+
 **This section is pending implementation.** The current compiler still accepts #847.
 The current `!Mem` and result-type checks have closure-environment escape and
 peek/poke purity gaps. The following target semantics replace those rules.
@@ -2480,10 +2501,13 @@ Surface spelling and full constraints are in
   io and effects are not settled at closure creation.
 
 
-K2 provides the type and syntax foundation. Capture propagation, exits and
-scope-specific discharge below remain pending in K3/K4. The current std/mem API
-and all 13 known bad acceptance cases retain their behavior; recognizing the new
-type spelling does not fix #847. Scope and Capture have separate identities and
+K2 provides the type and syntax foundation. K3a supplies fresh domains, allocation
+domains and the complete Mem[s] contract. K3b-1 supplies trait Capture syntax and
+static contracts, while leaving the ordinary T empty default inactive and std unchanged.
+Actual environments and exits remain for K3b-2; domain discharge and control boundaries
+remain for K4. The 13-case baseline now rejects ten cases and still accepts
+len_capture, ctl_cross and ctl_store. This cut preserves that baseline and does not
+complete #847. Scope and Capture have separate identities and
 parameter axes rather than being value types. Function environment bounds and
 calling effects are stored separately. Internal Scope binders compare modulo
 alpha renaming; substitution must avoid capture of both identities and printed names.

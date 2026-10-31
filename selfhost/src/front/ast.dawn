@@ -48,7 +48,27 @@ pub fn parameter_names(types: List[TypeParamDecl], scope: ScopeSyntax) -> List[S
   map(types, t => t.name) ++ map(scope.binders, b => b.name)
 
 ## One trait bound (or derive) with its span: the Ord in `[T: Ord]`.
-pub type Bound = { name: String, lo: Int, hi: Int }
+pub type CaptureArg = { members: List[String], named: Bool, lo: Int, hi: Int }
+pub type Bound = { name: String, args: List[CaptureArg], lo: Int, hi: Int }
+
+pub fn capture_arg_show(argument: CaptureArg) -> String =
+  if argument.named { argument.members[0] } else { "^{" ++ join(argument.members, ", ") ++ "}" }
+
+pub fn trait_args_show(arguments: List[CaptureArg]) -> String =
+  if len(arguments) == 0 { "" } else { "[" ++ join(map(arguments, a => capture_arg_show(a)), ", ") ++ "]" }
+
+pub fn trait_header(name: String, subject: String, scope: ScopeSyntax) -> String = {
+  var upper = ""
+  for bound in scope.bounds {
+    if bound.name == subject { upper = ": ^{" ++ join(bound.members, ", ") ++ "}" }
+  }
+  var params = [subject ++ upper]
+  for binder in scope.binders {
+    let bound = match binder.bound { Some(names) -> ": ^{" ++ join(names, ", ") ++ "}", None -> "" }
+    params = params ++ ["^" ++ binder.name ++ bound]
+  }
+  "trait " ++ name ++ "[" ++ join(params, ", ") ++ "]"
+}
 
 pub type TypeParamDecl = { name: String, bounds: List[Bound], lo: Int, hi: Int }
 
@@ -470,7 +490,7 @@ pub type Stmt =
 
 ## `type Item` in a trait body: a bare associated type declaration
 ## (docs/assoc-types-design.md D1 -- no bounds, no default).
-pub type AssocDecl = { name: String, lo: Int, hi: Int, nlo: Int, nhi: Int }
+pub type AssocDecl = { name: String, bound: Option[List[String]], lo: Int, hi: Int, nlo: Int, nhi: Int }
 
 ## `effect E [= !Row]` in a trait body: an associated effect member. Bare like
 ## `type Item` (no bounds, no body), except that it may carry a default row
@@ -643,7 +663,8 @@ pub type Decl =
     lo: Int,
     hi: Int,
     nlo: Int,
-    nhi: Int
+    nhi: Int,
+    scope: ScopeSyntax
   )
   | DImpl(
     # `impl[T: Eq] Eq[List[T]]` -- empty for the unconditional `impl Eq[Int]`.
@@ -657,7 +678,8 @@ pub type Decl =
     eff_binds: List[EffAssocBind],
     lo: Int,
     hi: Int,
-    scope: ScopeSyntax
+    scope: ScopeSyntax,
+    capture_args: List[CaptureArg]
   )
   | DUseJava(fqcn: String, lo: Int, hi: Int, nlo: Int, nhi: Int)
   | DUseModule(
@@ -873,6 +895,7 @@ pub fn module_consts(m: Module) -> List[ConstView] = {
 }
 
 pub type TraitView = {
+  scope: ScopeSyntax,
   name: String,
   tp: String,
   tplo: Int,
@@ -891,8 +914,8 @@ pub fn module_traits(m: Module) -> List[TraitView] = {
   var out: List[TraitView] = []
   for d in m.decls {
     match d {
-      DTrait(name, tp, tplo, tphi, methods, assoc, effa, vis, lo, hi, nlo, nhi) -> {
-        out = out ++ [TraitView {
+      DTrait(name, tp, tplo, tphi, methods, assoc, effa, vis, lo, hi, nlo, nhi, scope) -> {
+        out = out ++ [TraitView { scope = scope,
           name = name,
           tp = tp,
           tplo = tplo,
@@ -914,6 +937,7 @@ pub fn module_traits(m: Module) -> List[TraitView] = {
 }
 
 pub type ImplView = {
+  capture_args: List[CaptureArg],
   scope: ScopeSyntax,
   tparams: List[TypeParamDecl],
   trait_name: String,
@@ -931,8 +955,8 @@ pub fn module_impls(m: Module) -> List[ImplView] = {
   var out: List[ImplView] = []
   for d in m.decls {
     match d {
-      DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, ebs, lo, hi, scope) -> {
-        out = out ++ [ImplView { scope = scope,
+      DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, ebs, lo, hi, scope, capture_args) -> {
+        out = out ++ [ImplView { scope = scope, capture_args = capture_args,
           tparams = tparams,
           trait_name = trait_name,
           tlo = tlo,

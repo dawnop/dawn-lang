@@ -27,7 +27,7 @@ use front/docs.{
   DocSrc, doc_src_of, doc_of, member_doc_of, module_doc_of, doc_first_line, doc_links,
   module_examples
 }
-use front/ast.{
+use front/ast.{trait_header,
   Module, module_fns, module_types, module_consts, module_traits, module_effects, VisPub
 }
 use driver/analyze.{
@@ -436,11 +436,15 @@ fn module_json(w: W, cm: CheckedMod, lk: Lk, ex: Map[String, List[String]]) -> W
       w1 = open_obj(w1)
       w1 = w_field(w1, "name", td.name)
       w1 = w_field(w1, "typeParam", td.tp)
+      if len(td.scope.binders) > 0 || len(td.scope.bounds) > 0 {
+        w1 = w_field(w1, "captureContract", trait_header(td.name, td.tp, td.scope))
+      }
       w1 = w_key(w1, "assoc")
       w1 = open_arr(w1)
       for ad in td.assoc {
         w1 = open_obj(w1)
         w1 = w_field(w1, "name", ad.name)
+        match ad.bound { Some(names) -> { w1 = w_field(w1, "captureBound", "^{" ++ join(names, ", ") ++ "}") }, None -> () }
         w1 = w_doc(w1, lk, doc_of(ds, ad.lo), ad.lo)
         w1 = close_obj(w1)
       }
@@ -1066,6 +1070,21 @@ test "the standard library reference carries what --builtins cannot" {
     for internal in internal_std_modules() {
       assert not str.contains(j, quote(internal))
     }
+  }))
+}
+
+test "trait documentation retains Capture parameters and associated bounds" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") { Ok(sc) -> sc, Err(e) -> panic(std_load_error_text(e)) }
+    let text = "pub trait Head[T: ^{c}, ^c] {\n" ++
+      "type Item: ^{c}\nfn first(value: T) -> T.Item\n}\n"
+    let prog = analyze_standalone("<doc-test>", text, std, ct_default(), jsig_refused())
+    assert prog.diags == []
+    let j = w_done(module_json(w_new(), prog.modules[0], lk_of(prog.modules[0], std_modules(std), doc_src_of(text)),
+      module_examples(text, prog.modules[0].m)))
+    assert str.contains(j, "\"captureContract\": \"trait Head[T: ^{c}, ^c]\"")
+    assert str.contains(j, "\"captureBound\": \"^{c}\"")
+    assert str.contains(j, "Head[^{c}]")
   }))
 }
 

@@ -1,0 +1,78 @@
+# Each refusal belongs to a new static contract, before runtime erasure.
+use std/mem.{Mem}
+
+trait Measure[T: ^{c}, ^c] { fn measure_capture(value: T) -> Int }
+fn missing[T: Measure](value: T) -> Unit = ()
+fn use_missing(value: Int) -> Unit = missing(value)
+fn kind[@s, T: Measure[s]](value: T) -> Unit = ()
+fn unbound[T: Measure[c]](value: T) -> Unit = ()
+fn conflicting[@s,@t, T: Measure[^{s}] + Measure[^{t}]](value: T) -> Unit = ()
+
+trait Closed[T: ^{c}, ^c: ^{}] { fn inspect_closed(value: T) -> Int }
+impl[@s] Closed[Int, ^{s}] { fn inspect_closed(value: Int) -> Int = value }
+
+trait EmptySubject[T: ^{}] { fn empty_subject(value: T) -> Int }
+impl[@s] EmptySubject[I64Buf@s] { fn empty_subject(value: I64Buf@s) -> Int = len(value) }
+
+type Token[@s] = { call: fn(I64Buf@s) -> Int }
+impl[@s] Measure[Token[s], ^{}] { fn measure_capture(value: Token[s]) -> Int = 0 }
+
+trait PrivateScope[T: ^{c}, ^c] { fn private_scope(value: T) -> Int }
+impl[@s] PrivateScope[Int, ^{}] { fn private_scope(value: Int) -> Int = value }
+trait PrivateCapture[T: ^{c}, ^c] { fn private_capture(value: T) -> Int }
+impl[^d] PrivateCapture[Int, ^{}] { fn private_capture(value: Int) -> Int = value }
+
+trait Other[T: ^{d}, ^d] { fn other_capture(value: T) -> Int }
+trait Parent[T: ^{c}, ^c] { fn parent_capture(value: T) -> Int }
+type Box[T] = { value: T }
+impl[T: Other[d] + ^{c}, ^c, ^d: ^{d}] Parent[Box[T], c] {
+  fn parent_capture(value: Box[T]) -> Int = 0
+}
+
+trait Bare[T: ^{c}, ^c] { type Item
+  fn bare_item(value: T) -> T.Item
+}
+impl[@s] Bare[I64Buf@s, ^{s}] {
+  type Item = I64Buf@s
+  fn bare_item(value: I64Buf@s) -> I64Buf@s = value
+}
+
+trait Factory[T: ^{c}, ^c] { type Item
+  fn factory_item(value: T) -> T.Item
+}
+impl[@s] Factory[Int, ^{}] {
+  type Item = fn(I64Buf@s) -> Int
+  fn factory_item(value: Int) -> (fn(I64Buf@s) -> Int) = _b => value
+}
+
+trait Read[T] { effect E
+  fn read_capture(value: T) -> Int !T.E
+}
+impl[@s] Read[Int] {
+  effect E = !Mem[s]
+  fn read_capture(value: Int) -> Int !Mem[s] = value
+}
+
+effect Ask { fn ask_capture() -> Int }
+trait BadRow[T] { effect E
+  fn bad_row(value: T) -> Int !T.E
+}
+impl[@s] BadRow[Int] {
+  effect E = !Ask[s]
+  fn bad_row(value: Int) -> Int = value
+}
+
+trait Invariant[T: ^{c}, ^c] { fn invariant(value: T) -> Int }
+type Plain = { n: Int }
+impl Invariant[Plain, ^{}] { fn invariant(value: Plain) -> Int = value.n }
+fn demand[@s, T: Invariant[^{s}]](value: T, buffer: I64Buf@s) -> Int = invariant(value)
+fn widen[@s](value: Plain, buffer: I64Buf@s) -> Int = demand(value, buffer)
+
+trait Support[T: ^{c}, ^c] { fn support_capture(value: T) -> Int }
+impl[@s] Support[I64Buf@s, ^{s}] { fn support_capture(value: I64Buf@s) -> Int = len(value) }
+fn demand_empty[T: Support[^{}]](value: T) -> Int = support_capture(value)
+fn lost_support[@s](value: I64Buf@s) -> Int = demand_empty(value)
+
+trait BadDefault[T: ^{c}, ^c] {
+  fn later_capture(value: T) -> (fn() -> T) = () => value
+}

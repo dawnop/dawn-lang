@@ -32,7 +32,7 @@ use std/str
 use check/types.{
   Ty, TyAdt, TyVar, TyError, Eff, Sig, AdtI, TraitI, subst, adt_of, ty_show, sig_render, bounds_of
 }
-use check/checker.{unify_into, resolve_witness}
+use check/checker.{resolve_application, unify_into}
 use check/cx.{ModExports}
 use front/token.{
   Token, IDENT, TYPEIDENT, STRING, RPAREN, RBRACKET, LPAREN, LBRACKET, DOT, NEWLINE, EOF,
@@ -141,7 +141,7 @@ fn bounds_hold(qc: QCx, s: Sig, m: Map[Int, Ty], em: Map[Int, Eff]) -> Bool = {
         match map.get(m, id) {
           Some(_) -> {
             for tid in bounds_of(s, i) {
-              let (_, w) = resolve_witness(qc.entry.cx, tid, subst(tp, m, em), 0, 0, "")
+              let (_, w) = resolve_application(qc.entry.cx, tid, subst(tp, m, em), 0, 0, "")
               if w == None { return false }
             }
           }
@@ -238,7 +238,7 @@ fn bounds_known(qc: QCx, s: Sig) -> Bool = {
   var i = 0
   for tp in s.tparams {
     for tid in bounds_of(s, i) {
-      if not map.has(qc.entry.cx.traits, tid) { return false }
+      if not map.has(qc.entry.cx.traits, tid.id) { return false }
     }
     i = i + 1
   }

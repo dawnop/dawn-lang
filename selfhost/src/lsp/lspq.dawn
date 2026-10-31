@@ -12,10 +12,11 @@
 # rather than by scanning for a body with the same span: a key names one
 # declaration, and a span only happens to.
 
+use check/capture
 use std/list
 use std/map
 use std/str
-use front/ast.{TScoped, TCaptured, TKindArg,
+use front/ast.{ScopeSyntax, CaptureArg, t_lo, trait_header, capture_arg_show, TScoped, TCaptured, TKindArg,
   Module, Decl, Expr, Pattern, Stmt, TypeRef, FnDecl, TypeParamDecl,
   Arg, arg_exprs, PatArg, LambdaParam, Param, TypeDeclR, ImportName,
   HandlerCell, HandlerArm, EffectDeclR, ExampleOf,
@@ -283,8 +284,8 @@ pub(pkg) fn decl_span(d: Decl) -> (Int, Int) =
     DEffect(e) -> (e.lo, e.hi)
     DType(t) -> (t.lo, t.hi)
     DConst(_, _, _, _, lo, hi, _, _) -> (lo, hi)
-    DTrait(_, _, _, _, _, _, _, _, lo, hi, _, _) -> (lo, hi)
-    DImpl(_, _, _, _, _, _, _, _, lo, hi, _) -> (lo, hi)
+    DTrait(_, _, _, _, _, _, _, _, lo, hi, _, _, _) -> (lo, hi)
+    DImpl(_, _, _, _, _, _, _, _, lo, hi, _, _) -> (lo, hi)
     DUseJava(_, lo, hi, _, _) -> (lo, hi)
     DUseModule(_, _, _, lo, hi, _, _) -> (lo, hi)
     DTest(_, _, lo, hi, _, _, _) -> (lo, hi)
@@ -330,8 +331,8 @@ fn decl_bounds(d: Decl) -> Option[(Int, Int)] =
     DFn(f) -> Some((f.lo, f.hi))
     DTest(_, _, lo, hi, _, _, _) -> Some((lo, hi))
     DConst(_, _, _, _, lo, hi, _, _) -> Some((lo, hi))
-    DTrait(_, _, _, _, _, _, _, _, lo, hi, _, _) -> Some((lo, hi))
-    DImpl(_, _, _, _, _, _, _, _, lo, hi, _) -> Some((lo, hi))
+    DTrait(_, _, _, _, _, _, _, _, lo, hi, _, _, _) -> Some((lo, hi))
+    DImpl(_, _, _, _, _, _, _, _, lo, hi, _, _) -> Some((lo, hi))
     _ -> None
   }
 
@@ -1132,7 +1133,7 @@ fn site_of_trait_method(qc: QCx, tid: Int, mname: String) -> Site = {
     Some(h) -> {
       for d in h.m.decls {
         match d {
-          DTrait(name, _, _, _, methods, _, _, _, _, _, _, _) ->
+          DTrait(name, _, _, _, methods, _, _, _, _, _, _, _, _) ->
             if name == tr.name {
               for tm in methods {
                 if tm.name == mname { return site_in(h, tm.nlo, tm.nhi, tm.lo) }
@@ -1284,7 +1285,7 @@ pub(pkg) fn decl_lo_named(m: Module, name: String) -> Option[Int] = {
       DFn(f) -> if f.name == name { return Some(f.lo) }
       DType(t) -> if t.name == name { return Some(t.lo) }
       DConst(n, _, _, _, lo, _, _, _) -> if n == name { return Some(lo) }
-      DTrait(n, _, _, _, _, _, _, _, lo, _, _, _) -> if n == name { return Some(lo) }
+      DTrait(n, _, _, _, _, _, _, _, lo, _, _, _, _) -> if n == name { return Some(lo) }
       DEffect(e) -> if e.name == name { return Some(e.lo) }
       _ -> ()
     }
@@ -1482,8 +1483,10 @@ fn visit_written_type(qc: QCx, q0: Q, tref: TypeRef, type_use: WrittenTypeUse) -
     TTuple(elems, _, _) -> {
       for elem in elems { q = visit_written_type(qc, q, elem, WtStorage) }
     }
-    TScoped(t, _, _, _) | TCaptured(t, _, _, _) -> { q = visit_written_type(qc, q, t, type_use) }
-    TKindArg(_, _, _) -> ()
+    TScoped(t, _, _, _) -> { q = visit_written_type(qc, q, t, type_use) }
+    TCaptured(t, names, lo, hi) -> { q = visit_written_type(qc, q, t, type_use)
+      q = visit_capture_names(qc, q, names, lo, hi) }
+    TKindArg(names, lo, hi) -> { q = visit_capture_names(qc, q, names, lo, hi) }
     TFn(params, ret, _, _, hi, _) -> {
       for param in params { q = visit_written_type(qc, q, param, WtStorage) }
       q = visit_written_type(qc, q, ret, WtReturn)
@@ -1619,8 +1622,8 @@ fn trait_ref(qc: QCx, tid: Int) -> Option[(String, Site)] = {
     Some(h) -> {
       for d in h.m.decls {
         match d {
-          DTrait(n, tp, _, _, _, _, _, _, lo, _, nlo, nhi) ->
-            if n == tr.name { return Some(("trait " ++ n ++ "[" ++ tp ++ "]", site_in(h, nlo, nhi, lo))) }
+          DTrait(n, tp, _, _, _, _, _, _, lo, _, nlo, nhi, scope) ->
+            if n == tr.name { return Some((trait_header(n, tp, scope), site_in(h, nlo, nhi, lo))) }
           _ -> ()
         }
       }
@@ -1655,7 +1658,8 @@ fn visit_tparams(qc: QCx, q0: Q, tparams: List[TypeParamDecl]) -> (Q, List[TpBin
       out = out ++ [b]
       q = offer(q, b.lo, b.hi, "type parameter " ++ b.name, Some((b.lo, b.hi)), None)
     }
-    for bd in tp.bounds { q = offer_trait_name(qc, q, bd.name, bd.lo, bd.hi) }
+    for bd in tp.bounds { q = offer_trait_name(qc, q, bd.name, bd.lo, bd.lo + len(bd.name))
+      q = visit_trait_capture_args(qc, q, bd.args) }
   }
   (q, out)
 }
@@ -1700,6 +1704,57 @@ fn bracket_binders(qc: QCx, q0: Q, from: Int, names: List[String]) -> (Q, List[T
     }
   }
   (q, out)
+}
+
+fn visit_capture_names(qc: QCx, q0: Q, names: List[String], lo: Int, hi: Int) -> Q = {
+  var q = q0
+  var i = lo
+  while i < hi && i < len(qc.cps) {
+    if qc.cps[i] == '#' { while i < hi && qc.cps[i] != '\n' { i = i + 1 } }
+    else if is_ident_char(qc.cps[i]) {
+      let start = i
+      while i < hi && is_ident_char(qc.cps[i]) { i = i + 1 }
+      let name = slice_cps(qc.cps, start, i)
+      if list.contains(names, name) {
+        for binder in q0.tps {
+          if binder.name == name { q = offer(q, start, i, "Capture parameter " ++ name, Some((binder.lo, binder.hi)), None) }
+        }
+      }
+    } else { i = i + 1 }
+  }
+  q
+}
+
+fn visit_capture_parameters(qc: QCx, q0: Q, scope: ScopeSyntax) -> Q = {
+  var q = q0
+  var binders = q0.tps
+  for binder in scope.binders {
+    if not binder.capture { continue }
+    let lo = binder.lo + 1
+    let hi = lo + len(binder.name)
+    binders = binders ++ [TpBinder { name = binder.name, lo = lo, hi = hi }]
+    q = offer(q, lo, hi, "Capture parameter " ++ binder.name, Some((lo, hi)), None)
+  }
+  q = Q { ..q, tps = binders }
+  for bound in scope.bounds { q = visit_capture_names(qc, q, bound.members, bound.lo, bound.hi) }
+  for binder in scope.binders {
+    match binder.bound { Some(names) -> { q = visit_capture_names(qc, q, names, binder.lo + len(binder.name) + 1, binder.hi) }, None -> () }
+  }
+  q
+}
+
+fn visit_trait_capture_args(qc: QCx, q0: Q, arguments: List[CaptureArg]) -> Q = {
+  var q = q0
+  for argument in arguments { q = visit_capture_names(qc, q, argument.members, argument.lo, argument.hi) }
+  q
+}
+
+fn visit_bound_capture_args(qc: QCx, q0: Q, parameters: List[TypeParamDecl]) -> Q = {
+  var q = q0
+  for parameter in parameters { for bound in parameter.bounds {
+    q = visit_trait_capture_args(qc, q, bound.args)
+  } }
+  q
 }
 
 ## A whole-module alias (`helper` in `helper.f`), as the `use` line that made
@@ -2090,10 +2145,14 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
         None -> ()
       }
     }
-    DTrait(name, tp, _, _, methods, _, _, _, lo, _, nlo, nhi) -> {
-      q = offer_at(q, nlo, nhi, "trait " ++ name ++ "[" ++ tp ++ "]", here(nlo, nhi, lo))
+    DTrait(name, tp, _, _, methods, assoc, _, _, lo, _, nlo, nhi, scope) -> {
+      q = offer_at(q, nlo, nhi, trait_header(name, tp, scope), here(nlo, nhi, lo))
       let (qb, bs) = bracket_binders(qc, q, nhi, [tp])
-      q = Q { ..qb, tps = bs }
+      q = visit_capture_parameters(qc, Q { ..qb, tps = bs }, scope)
+      for member in assoc { match member.bound {
+        Some(names) -> { q = visit_capture_names(qc, q, names, member.nhi, member.hi) }
+        None -> ()
+      } }
       let tid = map.get(qc.entry.cx.traits_by_name, name)
       for m in methods {
         q = visit_param_types(qc, q, m.params)
@@ -2137,10 +2196,15 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
         }
       }
     }
-    DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, eff_binds, _, _, _) -> {
-      q = offer(q, tlo, thi, "impl " ++ trait_name ++ "[...]", Some((tlo, thi)), None)
+    DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, eff_binds, _, _, scope, capture_args) -> {
+      let detail = if len(capture_args) == 0 { "impl " ++ trait_name ++ "[...]" }
+      else { "impl " ++ trait_name ++ "[" ++ slice_cps(qc.cps, t_lo(subject), t_hi(subject)) ++ ", " ++
+          join(map(capture_args, a => capture_arg_show(a)), ", ") ++ "]" }
+      q = offer(q, tlo, thi, detail, Some((tlo, thi)), None)
       let (qb, bs) = visit_tparams(qc, q, tparams)
-      q = Q { ..qb, tps = bs }
+      q = visit_capture_parameters(qc, Q { ..qb, tps = bs }, scope)
+      q = visit_bound_capture_args(qc, q, tparams)
+      q = visit_trait_capture_args(qc, q, capture_args)
       q = visit_written_type(qc, q, subject, WtStorage)
       for binding in assoc { q = visit_written_type(qc, q, binding.tref, WtStorage) }
       # `effect E = !Ask`: the row's atoms name effects like any other row
@@ -2338,7 +2402,8 @@ fn tconst_init(qc: QCx, name: String) -> Option[TExpr] =
 fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
   # an impl method sees its impl's parameters as well as its own
   let (qb, bs) = visit_tparams(qc, q0, f.tparams)
-  var q = Q { ..qb, tps = q0.tps ++ bs }
+  var q = visit_capture_parameters(qc, Q { ..qb, tps = q0.tps ++ bs }, f.scope)
+  q = visit_bound_capture_args(qc, q, f.tparams)
   q = visit_param_types(qc, q, f.params)
   match f.ret {
     Some(ret) -> { q = visit_written_type(qc, q, ret, WtReturn) }
@@ -2410,8 +2475,8 @@ fn offer_example(qc: QCx, q0: Q, of: ExampleOf, nlo: Int) -> Q = {
       DConst(n, _, _, _, lo, _, dnlo, dnhi) -> if n == of.name && of.ctor == None {
         q = offer_at(q, nlo, nhi, "const " ++ n, here(dnlo, dnhi, lo))
       }
-      DTrait(n, tp, _, _, _, _, _, _, lo, _, dnlo, dnhi) -> if n == of.name && of.ctor == None {
-        q = offer_at(q, nlo, nhi, "trait " ++ n ++ "[" ++ tp ++ "]", here(dnlo, dnhi, lo))
+      DTrait(n, tp, _, _, _, _, _, _, lo, _, dnlo, dnhi, scope) -> if n == of.name && of.ctor == None {
+        q = offer_at(q, nlo, nhi, trait_header(n, tp, scope), here(dnlo, dnhi, lo))
       }
       DEffect(e) -> if e.name == of.name && of.ctor == None {
         q = offer_at(q, nlo, nhi, "effect " ++ e.name, here(e.nlo, e.nhi, e.lo))
@@ -2528,8 +2593,8 @@ fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
       Some(h) -> {
         for d in h.m.decls {
           match d {
-            DTrait(n, tp, _, _, _, _, _, _, lo, _, nlo, nhi) -> if n == imp.name {
-              q = offer_at(q, imp.lo, imp.hi, "trait " ++ n ++ "[" ++ tp ++ "]", site_in(h, nlo, nhi, lo))
+            DTrait(n, tp, _, _, _, _, _, _, lo, _, nlo, nhi, scope) -> if n == imp.name {
+              q = offer_at(q, imp.lo, imp.hi, trait_header(n, tp, scope), site_in(h, nlo, nhi, lo))
             }
             DEffect(e) -> if e.name == imp.name {
               q = offer_at(q, imp.lo, imp.hi, "effect ${e.name}", site_in(h, e.nlo, e.nhi, e.lo))
@@ -3087,7 +3152,7 @@ fn site_of_impl_method(qc: QCx, tid: Int, subject: Ty) -> Site = {
     Some(h) -> {
       for d in h.m.decls {
         match d {
-          DImpl(_, tn, tlo, thi, subj, methods, _, _, lo, _, _) ->
+          DImpl(_, tn, tlo, thi, subj, methods, _, _, lo, _, _, _) ->
             if tn == tr.name && typeref_head(subj) == hd {
               for m in methods {
                 if m.name == mname { return site_in(h, m.nlo, m.nhi, m.lo) }
@@ -3129,7 +3194,7 @@ fn offer_operator(qc: QCx, q: Q, t: TExpr, olo: Int, ohi: Int) -> Q = {
       if len(xs) == 0 { return q }
       let (v, st) = match get(wits, 0) {
         Some(w) -> operator_via(qc, w, Some(tid), tex_ty(xs[0]), olo)
-        None -> operator_via(qc, WConcrete(tid, tex_ty(xs[0])), None, tex_ty(xs[0]), olo)
+        None -> operator_via(qc, WConcrete(capture.closed_trait(tid), tex_ty(xs[0])), None, tex_ty(xs[0]), olo)
       }
       (xs, v, st)
     }
@@ -3157,9 +3222,9 @@ fn comparison_trait(op: String) -> Option[Int] =
 
 fn operator_via(qc: QCx, w: WitRef, tid0: Option[Int], left: Ty, at: Int) -> (String, Site) =
   match w {
-    WConcrete(tid, subj) -> via_impl(qc, tid, subj)
-    WApply(tid, subj, _) -> via_impl(qc, tid, subj)
-    WForward(_) ->
+    WConcrete(tid, subj) -> via_impl(qc, tid.id, subj)
+    WApply(tid, subj, _) -> via_impl(qc, tid.id, subj)
+    WForward(_, _, _) ->
       match tid0 {
         Some(tid) -> ("via bound " ++ trait_of(qc.entry.cx.traits, tid).name ++ "[" ++ show_ty(qc, left) ++ "]",
           site_of_bound(qc, tid, left, at))
@@ -3188,7 +3253,7 @@ fn site_of_bound(qc: QCx, tid: Int, left: Ty, at: Int) -> Site = {
         if f.lo <= at && at < f.hi {
           return bound_site([f.tparams], tname, tr)
         }
-      DImpl(tps, _, _, _, _, methods, _, _, _, _, _) -> {
+      DImpl(tps, _, _, _, _, methods, _, _, _, _, _, _) -> {
         for f in methods {
           if f.lo <= at && at < f.hi {
             return bound_site([f.tparams, tps], tname, tr)

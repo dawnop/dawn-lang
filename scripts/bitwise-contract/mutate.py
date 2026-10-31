@@ -17,8 +17,8 @@ C = "selfhost/src/c/emitc.dawn"
 MUTATIONS = {
     "int-trait": ((CHECKER, "if t == TyInt || is_errorish(t) {", "if is_errorish(t) {"),),
     "amount-subject": ((CHECKER,
-        "if is_shift_trait(tid) {\n    reduce_assoc(cx, TyAssoc(subject, tid, shift_amount_name(tid)))",
-        "if false {\n    reduce_assoc(cx, TyAssoc(subject, tid, shift_amount_name(tid)))"),),
+        "if is_shift_trait(tid) {\n    reduce_assoc(cx, TyAssoc(subject, capture.closed_trait(tid), shift_amount_name(tid), []))",
+        "if false {\n    reduce_assoc(cx, TyAssoc(subject, capture.closed_trait(tid), shift_amount_name(tid), []))"),),
     "opaque-inherit": ((TYPES,
         "trait_id == EQ_ID || trait_id == HASH_ID || trait_id == ORD_ID",
         "trait_id == EQ_ID || trait_id == HASH_ID || trait_id == ORD_ID || trait_id == BIT_AND_ID"),),
