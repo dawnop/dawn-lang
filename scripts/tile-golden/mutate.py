@@ -37,6 +37,11 @@ LOWER = "packages/tileir/src/lower.dawn"
 KERNELS = "scripts/tile-golden/kernels.dawn"
 
 MUTATIONS = {
+    'e8m0-lower-no-magnitude': ((LOWER, 'ConstInt(d, i32, 0x7fffffff)', 'ConstInt(d, i32, 0xffffffff)'),),
+    'e8m0-lower-rne32': ((LOWER, 'if from == "f64" { "ftof_zero" } else { "ftof" }', 'if from == "f64" { "ftof" } else { "ftof" }'),),
+    'e8m0-lower-low': ((LOWER, 'ConstInt(d, i32, 0x00400000)', 'ConstInt(d, i32, 0x00800000)'),),
+    'e8m0-lower-high': ((LOWER, 'ConstInt(d, i32, 0x7f000000)', 'ConstInt(d, i32, 0x7e800000)'),),
+    'e8m0-lower-nan': ((LOWER, 'SelectTile(d, mask, i32, nan, nan_bits, bounded)', 'SelectTile(d, mask, i32, nan, bounded, bounded)'),),
     'read-group-axis': (('packages/tileir/src/prog.dawn', '      let source_axis = axis_number(along[j])', '      let source_axis = if axis_group(along[j]) > 1 { 0 } else { axis_number(along[j]) }'),),
     'read-group-zero': (('packages/tileir/src/prog.dawn', 'BinaryI(d, "divi", "i32", [], ix[j], c)', 'IdxConst(d, 0)'),),
     'read-group-div2': (('packages/tileir/src/prog.dawn', 'IdxConst(c, axis_group(along[j]))', 'IdxConst(c, 2)'),),
