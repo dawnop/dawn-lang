@@ -21,6 +21,11 @@ import tarfile
 import tempfile
 import time
 
+# A complete 14 sample, 45 answer warm measured 171.2s. Give this batch
+# the workflow's threefold observation margin, rounded up to 540 seconds.
+# The 180 second bound below still applies to individual commands.
+FULL_WARM_TIMEOUT = 540
+
 BASE = 'fdebffc0aca84ef8346a550381488912cb247a89'
 ROOT = Path(__file__).resolve().parents[2]
 runner, dawnc = map(str, map(Path, sys.argv[1:3]))
@@ -28,8 +33,8 @@ mode = sys.argv[3] if len(sys.argv) > 3 else 'matrix'
 assert mode in ('matrix', 'all', '0', '1', '2', '3', '4'), mode
 
 
-def run(argv, **kw):
-    p = subprocess.run(list(map(str, argv)), capture_output=True, timeout=180, **kw)
+def run(argv, *, timeout=180, **kw):
+    p = subprocess.run(list(map(str, argv)), capture_output=True, timeout=timeout, **kw)
     assert p.returncode == 0, (argv[0:2], p.stderr.decode(errors='replace')[-3000:])
     return p.stdout
 
@@ -148,7 +153,7 @@ with tempfile.TemporaryDirectory(prefix='play-c-matrix.') as work:
 
         # A real full warm, followed by both view hits for every sidebar source.
         warmed = w / 'warmed'
-        run([runner, 'warm', ROOT / 'site/play-ui/samples', warmed], env=env)
+        run([runner, 'warm', ROOT / 'site/play-ui/samples', warmed], env=env, timeout=FULL_WARM_TIMEOUT)
         wanted = sum(3 + ('use tileir/' in p.read_text()) for p in samples)
         assert len(list(warmed.iterdir())) == wanted
         # Warm must leave the cold serving store empty. Reuse the cold bodies
