@@ -121,7 +121,12 @@ pub fn infer(d: Ty, a: Ty, flex: List[Scope], bindings: Map[Int, Scope]) -> (Map
 ## Apply Scope equations to a call contract while retaining capture variables.
 pub fn signature(s: Sig, bindings: Map[Int, Scope]) -> Sig = {
   if len(bindings) == 0 { return s }
-  let sm = normalized(bindings)
+  signature_normalized(s, normalized(bindings))
+}
+
+## Apply equations already normalized at a checker frame write boundary.
+pub fn signature_normalized(s: Sig, sm: Map[Int, Scope]) -> Sig = {
+  if len(sm) == 0 { return s }
   let cm: Map[Int, capture.Capture] = map.empty()
   let p = s.scope_params
   let caps = map(p.captures, c => CaptureParam { ..c,
@@ -139,7 +144,12 @@ pub fn contract(s: Sig, scopes: Map[Int, Scope], captures: Map[Int, capture.Capt
   # Ordinary calls have no equations. An empty substitution is the identity,
   # including the signature's parameter vectors and capture bounds.
   if len(scopes) == 0 && len(captures) == 0 { return s }
-  let scoped = signature(s, scopes)
+  contract_normalized(s, normalized(scopes), captures)
+}
+
+## Frame equations are normalized when learned, rather than at each read.
+pub fn contract_normalized(s: Sig, scopes: Map[Int, Scope], captures: Map[Int, capture.Capture]) -> Sig = {
+  let scoped = signature_normalized(s, scopes)
   if len(captures) == 0 { return scoped }
   let sm: Map[Int, Scope] = map.empty()
   let p = scoped.scope_params
