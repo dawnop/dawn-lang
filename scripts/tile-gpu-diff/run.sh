@@ -1005,8 +1005,8 @@ i4_green=(dtype_i16 dtype_i64 dtype_tf32 pack_roundtrip)
 # supported`), which T13 measured and could not follow with a device.
 # sm_89 is its floor and the lowest in this list.
 arch_kernels=(dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2m1 mmaf_scaled_e4m3 view_atomic_bf16
-  mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16)
-arch_floors=(sm_90 sm_90 sm_100 sm_100 sm_100 sm_89 sm_100 sm_100 sm_100 sm_100)
+  mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16 e8m0_source)
+arch_floors=(sm_90 sm_90 sm_100 sm_100 sm_100 sm_89 sm_100 sm_100 sm_100 sm_100 sm_100)
 # The attribute kernels of knife T4, in the order attr_diff takes them. Its
 # subject is the ATTRIBUTE DOMAINS and not the opcode table: the knife adds
 # no opcode at all, and every one of these eight computes the same thing
@@ -1645,6 +1645,7 @@ else
     arch_shape="$(awk -v want="$kernel" '/^kernel /{cur=$2} cur == want && /^  index /{sub(/^  index /, ""); print; exit}' "$work/arch.out")"
     [ -n "$arch_shape" ] || fail "arch_diff printed no index line for $kernel"
     case "$kernel" in
+      e8m0_source) fields="source_bits single_vs_two segments" ;;
       dtype_e2m1) fields="encodings off_grid saturating" ;;
       mmaf_scaled_*) fields="scale_blocks rows_with_split_scale cols_with_split_scale bound_inside_2p24" ;;
       view_atomic_bf16) fields="bins_hit blocks max_count exact_in_bf16" ;;
@@ -3304,6 +3305,36 @@ TOML
 }
 
 rounding_controls
+
+# The unsigned-source contract is checked structurally in tile-golden.
+# These four mutations keep its source legal and must produce a numerical
+# failure against the frozen source-value oracle after successful assembly.
+if [ "$(arch_level "$gpu_name")" -ge 100 ]; then
+  for tag in e8m0-lower-rne32 e8m0-lower-low e8m0-lower-high e8m0-lower-nan; do
+    tree="$work/tree-$tag"
+    pkg="$tree/packages/tileir"
+    mkdir -p "$tree/packages"
+    cp -r "$root/packages/tileir" "$pkg"
+    python3 "$golden/mutate.py" "$tag" "$tree"
+    cp "$pkg/src/lower.dawn" "$work/$tag.source"
+    mutant_kernels "$tag" "$pkg" e8m0_source
+    rc=0
+    device "$work/arch.bin" e8m0_source "$work/$tag-e8m0_source.cubin" > "$work/$tag.out" 2> "$work/$tag.err" || rc=$?
+    [ "$arch_verdict" = pass ] && [ "$rc" = 1 ] && [ "$(verdict_of "$work/$tag.out")" = fail ] &&
+      grep -q '^  verdict differ:result$' "$work/$tag.out" &&
+      grep -q '^  oracle tileref pass$' "$work/$tag.out" &&
+      grep -q '^  oracle device seg=' "$work/$tag.out" || {
+        cat "$work/$tag.out" "$work/$tag.err" >&2; fail "$tag: expected an assembled, executed E8M0 oracle disagreement"
+      }
+    if [ "$tag" = e8m0-lower-rne32 ]; then
+      grep -q '^  oracle device seg=0 lane=0 bits=4000000000000000 expected=3ff0000000000000$' "$work/$tag.out" ||
+        fail "$tag: missing the binary64 predecessor-of-two witness"
+    fi
+    echo "PASS  mutant: $tag (assembled; the independent E8M0 source oracle reports a wrong answer)"
+  done
+else
+  echo "SKIP  E8M0 source numerical mutants: require sm_100 (this ledger is $gpu_name)"
+fi
 
 # N2: a same-width E5M2 writer replacement for the dtype corpus. Other
 # architecture kernels use clean cubins; N6 covers scaled E5M2 separately.

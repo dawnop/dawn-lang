@@ -3632,11 +3632,22 @@ test "mmaf_scaled writes its opcode, its result type and five operands, and NO f
   # operand indices therefore follow the result type directly.
   assert mmaf_has_flags()
   let (_w1, ti) = ty(w, Tile([4, 4], Num("f32")))
-  # the nine values took indices 1..9 (the entry has one parameter), so the
-  # operands are the converted lhs 2, the converted rhs 4, the accumulator
-  # 5 and the two converted scales 7 and 9
-  assert str.contains(whole, hex(varint(OP_MMAF_SCALED)) ++ hex(varint(ti))
-      ++ hex(varint(2)) ++ hex(varint(4)) ++ hex(varint(5)) ++ hex(varint(7)) ++ hex(varint(9)))
+  # Conversion expansions may add values before either scale. Read the
+  # operands from the lowered instruction and still require exactly five
+  # indices immediately after the result type, with no flags in between.
+  match k.body[len(k.body) - 2] {
+    FloatMmaScaled(_d, _t, _lt, _rt, _st, _rst, a, b, c, sa, sb) -> {
+      # This fixture is flat and densely numbered. Compute the indices
+      # independently of the writer's value map and ref_index.
+      let indices = list.map([a, b, c, sa, sb], r => match r {
+        Val(v) -> len(k.params) + v
+        Arg(p) -> p
+      })
+      let operands = list.fold(indices, "", (s, v) => s ++ hex(varint(v)))
+      assert str.contains(whole, hex(varint(OP_MMAF_SCALED)) ++ hex(varint(ti)) ++ operands)
+    }
+    _ -> { assert false }
+  }
 }
 
 test "get_global writes its opcode, its result type and the symbol's string index, and nothing else" {

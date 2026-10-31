@@ -538,7 +538,7 @@ kernels=(
   trig_sweep rope shape_ops grid_stride
   token_join ptr_roundtrip ptr_recast
   dtype_i16 dtype_i64 dtype_tf32 dtype_e4m3
-  dtype_e5m2 dtype_e8m0 dtype_i4 dtype_e2m1
+  dtype_e5m2 dtype_e8m0 e8m0_source dtype_i4 dtype_e2m1
   pack_roundtrip
   loop_count loop_bound loop_until loop_none
   attr_round attr_nan attr_ftz attr_approx attr_exp2
@@ -601,6 +601,7 @@ fail() {
 # directions here, so an item added to one place cannot go missing from the
 # other, and run_item holds the running order to it as well.
 mutants=(
+  e8m0-lower-no-magnitude
   drop-store-token
   load-dtype-f64
   make-token-as-iota
@@ -999,7 +1000,7 @@ check_global_syms_symbols() { # cubin
 # between.
 kernel_arch() { # kernel
   case "$1" in
-    matmul_f16_sm100|matmul_i8_sm100|matmul_sm100|flash_bf16_sm100_d64|flash_bf16_sm100_d128|dtype_e4m3|dtype_e5m2|dtype_e8m0|dtype_e2m1|mmaf_scaled_e4m3|mmaf_scaled_e5m2|mmaf_scaled_fp4_e8m0_v16|mmaf_scaled_fp4_e8m0_v32|mmaf_scaled_fp4_e4m3_v16) echo sm_100 ;;
+    matmul_f16_sm100|matmul_i8_sm100|matmul_sm100|flash_bf16_sm100_d64|flash_bf16_sm100_d128|dtype_e4m3|dtype_e5m2|dtype_e8m0|e8m0_source|dtype_e2m1|mmaf_scaled_e4m3|mmaf_scaled_e5m2|mmaf_scaled_fp4_e8m0_v16|mmaf_scaled_fp4_e8m0_v32|mmaf_scaled_fp4_e4m3_v16) echo sm_100 ;;
     dtype_e5m3|mmaf_scaled_e5m3|mmaf_scaled_fp4_e5m3_v32) echo sm_107 ;;
     matmul_f16_sm90|matmul_i8_sm90|matmul_sm90|flash_bf16_sm90_d64|flash_bf16_sm90_d128) echo sm_90 ;;
     view_atomic_bf16) echo sm_89 ;;
@@ -1214,6 +1215,25 @@ for k in "${kernels[@]}"; do
 done
 
 # ---------------------------------------------------------------- mutants
+
+# Undefined device behavior cannot prove that a negative source is safe.
+# Kill this mutant with the dataflow proof on the actual lowered operand.
+if run_item e8m0-lower-no-magnitude; then
+  name=e8m0-lower-no-magnitude
+  tree="$work/tree-$name"
+  mkdir -p "$tree/packages"
+  fork_pkg "$tree/packages/tileir"
+  python3 "$here/mutate.py" "$name" "$tree"
+  rc=0
+  "$root/bin/dawn" test "$tree/packages/tileir" > "$work/$name.test" 2>&1 || rc=$?
+  [ "$rc" = 1 ] &&
+    grep -q '^FAIL  lower :: E8M0 default and zero never send signed bits to the unsigned conversion$' "$work/$name.test" &&
+    grep -q 'assertion failed: sign_free_bits(k.body, bits)' "$work/$name.test" &&
+    [ "$(grep -c '^FAIL ' "$work/$name.test")" = 1 ] || {
+      cat "$work/$name.test" >&2; fail "$name: missing the specific sign-free operand proof failure"
+    }
+  echo "PASS  mutant: $name (the actual unsigned-conversion operand fails the sign-free dataflow proof)"
+fi
 
 # A mutant is a forked package with one anchor rewritten, built into its own
 # project on both backends. The anchor is mutate.py's entry under the

@@ -2443,6 +2443,13 @@ fn convert_to[A, B](op: String, to: String, a: Tile[A]) -> Tile[B] !Dev = {
 ## `f8E8M0FNU`, which has no `nearest_even`, the default conversion writes
 ## `zero`, the dialect's own default there, as it did before `rounding` was
 ## a parameter. `TowardZero` writes the same mode under its own name.
+## Both convert the logical source magnitude to the largest power of two
+## at or below it, clamped to 2^-127 .. 2^127. Either zero maps to the
+## minimum, either infinity to the maximum, and NaN stays NaN by class.
+## This applies to every accepted source format, including f64 without
+## an implicit RNE32 rounding. An explicit f64 -> f32 -> E8M0 still rounds
+## twice. Lowering clears the sign and handles the bounds and NaN before
+## the unsigned conversion, whose upstream negative-source rule is undefined.
 ##
 ## From f64 to F8E5M2, F8E4M3FN or F4E2M1FN, the default rounds
 ## the source binary64 value once to the target grid, then saturates.

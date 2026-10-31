@@ -2085,15 +2085,15 @@ fn dtype_e5m2(x: Param[F8E5M2], y: Param[Float], out: Param[Float]) -> Unit !Dev
 # (bytecode.dawn's ftof_rounding). The mutant
 # e8m0-rounding-as-nearest-even is that sentence turned into a refusal.
 #
-# AND IT IS THE ONE KERNEL THAT DETOURS THROUGH f32. `ftof` from f64
+# THIS KERNEL EXPLICITLY DETOURS THROUGH f32. `ftof` from f64
 # straight into f8E8M0FNU makes tileiras 13.3.36 die of SIGILL with nothing
 # on either stream (measured 2026-09-05, exit 132, at every --gpu-name);
 # from f32 it is accepted. So this goes f64 -> f32 -> f8E8M0FNU -> f32 ->
 # f64 and the host reference rounds the same way twice
 # (std/gpu.dtype_e8m0_ref). The detour is a WORKAROUND FOR AN ASSEMBLER BUG
 # and not a property of the format: docs/tile-backend-design.md 6.6 records
-# it, because a later tileiras that fixes it should let this kernel lose
-# two conversions.
+# it. Keep this explicit two-rounding control; e8m0_source separately tests
+# the logical source-value conversion.
 fn dtype_e8m0(x: Param[F8E8M0FNU], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let seg = (j: Int, t: Tile[Float]) => store_sub(out, [j, 0], reshape(t, [1, DT_TILE]))
   seg(0, float_to_float(load_cell(x), F64))
@@ -5506,6 +5506,19 @@ fn staged_effect_nested(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
   store(o, base, load(o, base, [128]) + 1.0)
 }
 
+# Direct source rounding and the user's explicit RNE32 detour are distinct.
+# Each pair compares the default with an explicit TowardZero conversion.
+fn e8m0_source(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let seg = (j: Int, t: Tile[F8E8M0FNU]) =>
+    store_sub(out, [j, 0], reshape(float_to_float(float_to_float(t, F32), F64), [1, DT_TILE]))
+  let source = load_cell(x)
+  seg(0, float_to_float(source, F8E8M0FNU))
+  seg(1, float_to_float(source, F8E8M0FNU, rounding = TowardZero))
+  let explicit = float_to_float(source, F32)
+  seg(2, float_to_float(explicit, F8E8M0FNU))
+  seg(3, float_to_float(explicit, F8E8M0FNU, rounding = TowardZero))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "read_layout_g3" -> read_layout_record(name, 6, 2)
   "read_layout_g1" -> read_layout_record(name, 2, 2)
@@ -6353,6 +6366,10 @@ fn trace_after(name: String) -> TileProg = match name {
   "dtype_e8m0" -> {
     let (p, _e) = trace3("dtype_e8m0",
       In(F8E8M0FNU, dt_cells()), In(F64, dt_cells()), Out(F64, dt_out(2, 2)), dtype_e8m0)
+    p
+  }
+  "e8m0_source" -> {
+    let (p, _e) = trace2("e8m0_source", In(F64, dt_cells()), Out(F64, dt_out(4, 4)), e8m0_source)
     p
   }
   "dtype_i4" -> {
@@ -7268,7 +7285,7 @@ pub fn main() -> Unit !io = match args() {
         ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"
         ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
         ++ "|histogram|cas_swap|erf_sweep|geglu|trig_sweep|rope"
-        ++ "|dtype_i16|dtype_i64|dtype_tf32|dtype_e4m3|dtype_e5m2|dtype_e8m0"
+        ++ "|dtype_i16|dtype_i64|dtype_tf32|dtype_e4m3|dtype_e5m2|dtype_e8m0|e8m0_source"
         ++ "|dtype_i4|dtype_e2m1|pack_roundtrip|dtype_e5m3|mmaf_scaled_e5m3"
         ++ "|kv_scores|kv_context|attn_bwd_mmt|attn_bwd_ds|lin_attn_s|lin_attn_out"
         ++ "|ols_gram|ols_elim|ols_beta"
