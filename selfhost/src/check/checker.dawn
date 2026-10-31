@@ -9,6 +9,7 @@
 
 use check/capture
 use check/scope_infer
+use check/trait_contract
 use check/capture.{Function as CaptureFunction, Scope as CaptureScope, Params as CaptureParams, CaptureParam}
 use std/str
 use std/list
@@ -76,7 +77,7 @@ use check/types.{ty_scope_refs, subst_scopes, sig_scope_arity, EvidenceLabel, ev
   is_bitwise_trait, bitwise_trait_name, is_shift_trait, shift_amount_name, is_arith_trait, arith_trait_name, opaque_inherits, CHAR_OPAQUE_ID, FROM_INT_ID, FROM_FLOAT_ID,
   STAGED_ITER_ID, STAGED_VAR_ID, STAGED_COND_ID, STAGED_RESULT_ID, LEN_ID,
   head_of, impl_at, has_impl_at,
-  is_ord_scalar, ord_scalar_names, public_builtin_type_names, is_ground, expandable, type_args_of, sub_goals,
+  is_ord_scalar, ord_scalar_names, public_builtin_type_names, is_ground, expandable, type_args_of, witness_goals,
   AWorld, PkgDep
 }
 use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, jsig_refused}
@@ -154,8 +155,69 @@ fn fresh_scope_signature(cx: Cx, s: Sig) -> (Cx, Sig) = {
 fn learn_scope_argument(cx: Cx, s: Sig, declared: Ty, actual: Ty) -> (Cx, Bool) = {
   if len(s.scope_params.scopes) == 0 && len(s.scope_params.captures) == 0 { return (cx, true) }
   let (bindings, ok) = scope_infer.infer(declared, actual, s.scope_params.scopes, cx.frame.scope_bindings)
-  let captures = scope_infer.infer_captures(declared, actual, s.scope_params.captures, cx.frame.capture_bindings)
-  (Cx { ..cx, frame = Frame { ..cx.frame, scope_bindings = scope_infer.normalized(bindings), capture_bindings = captures } }, ok)
+  var captures = scope_infer.infer_captures(declared, actual, s.scope_params.captures, cx.frame.capture_bindings)
+  let (contract_captures, capture_ok) = learn_trait_captures(cx, s, declared, actual, captures)
+  captures = contract_captures
+  (Cx { ..cx, frame = Frame { ..cx.frame, scope_bindings = scope_infer.normalized(bindings), capture_bindings = captures } }, ok && capture_ok)
+}
+
+fn learn_trait_captures(cx: Cx, sig: Sig, declared: Ty, actual: Ty,
+  initial: Map[Int, capture.Capture]) -> (Map[Int, capture.Capture], Bool) = {
+  if not list.any(sig.constraints, bs => list.any(bs, b => len(b.args) > 0)) { return (initial, true) }
+  var out = initial
+  match (declared, actual) {
+    (TyVar(_, _), TyVar(_, actual_id)) -> {
+      var index = 0
+      for param in sig.tparams {
+        if param == declared {
+          let available = map.get(cx.current_tparam_bounds, actual_id).unwrap_or([])
+          for required in bounds_of(sig, index) {
+            for provided in available {
+              if required.id == provided.id && len(required.args) == len(provided.args) {
+                for i in 0..len(required.args) {
+                  out = scope_infer.infer_upper(required.args[i], provided.args[i], sig.scope_params.captures, out)
+                }
+              }
+            }
+          }
+        }
+        index = index + 1
+      }
+    }
+    (TyFn(ps, ret, _, _), TyFn(aps, ar, _, _)) -> {
+      let ds = ps ++ [ret]
+      let ats = aps ++ [ar]
+      if len(ds) == len(ats) {
+        for i in 0..len(ds) { let (next, fits) = learn_trait_captures(cx, sig, ds[i], ats[i], out)
+          out = next
+          if not fits { return (out, false) } }
+      }
+    }
+    _ -> {
+      let ds = type_args_of(declared)
+      let ats = type_args_of(actual)
+      if len(ds) == len(ats) {
+        for i in 0..len(ds) { let (next, fits) = learn_trait_captures(cx, sig, ds[i], ats[i], out)
+          out = next
+          if not fits { return (out, false) } }
+      }
+    }
+  }
+  (out, true)
+}
+
+fn learn_trait_type_bindings(cx: Cx, sig: Sig, bindings: Map[Int, Ty]) -> Cx = {
+  if len(sig.scope_params.captures) == 0 { return cx }
+  var captures = cx.frame.capture_bindings
+  for param in sig.tparams { match param {
+    TyVar(_, id) -> match map.get(bindings, id) {
+      Some(actual) -> { let (next, _) = learn_trait_captures(cx, sig, param, actual, captures)
+        captures = next }
+      None -> ()
+    }
+    _ -> ()
+  } }
+  Cx { ..cx, frame = Frame { ..cx.frame, capture_bindings = captures } }
 }
 
 fn finish_scope_signature(cx: Cx, s: Sig, lo: Int, hi: Int) -> (Cx, Sig) = {
@@ -437,8 +499,8 @@ pub(pkg) fn ev_local_name(cx: Cx, id: Int) -> String = ev_label_name(id, effect_
 ## identity (subject tvar id, trait id, member name), so two members named E
 ## on different traits or subjects cannot shadow each other; `$` keeps it
 ## unspellable like every evidence local.
-pub fn ev_assoc_local_name(vid: Int, tid: Int, name: String) -> String =
-  ev_assoc_name(vid, tid, name)
+pub fn ev_assoc_local_name(vid: Int, tid: capture.TraitApplication, name: String) -> String =
+  ev_assoc_name(vid, tid.id, name)
 
 ## The name of the local that carries an effect *variable*'s erased evidence --
 ## rule 丁's one hidden parameter per `!e` written in the row. Minted from the
@@ -596,7 +658,7 @@ test "evidence reads preserve distinct origins behind the same runtime key" {
     captures = [], sugar = false, arm = false, ctl = false, local_fn = None, handler_of = None,
     staged_kind = OrdinaryClosure, staged = map.empty() }
   let origins: List[EvidenceRole] = [LabelSlot(71), VariableSlot(72),
-    AssociatedSlot(73, 74, "E"), AssociatedSlot(75, 74, "E"), AssociatedSlot(75, 74, "F")]
+    AssociatedSlot(73, capture.closed_trait(74), "E"), AssociatedSlot(75, capture.closed_trait(74), "E"), AssociatedSlot(75, capture.closed_trait(74), "F")]
   for origin in origins {
     let key = evidence_role_key(origin)
     let isolated = Cx { ..base, frame = Frame { ..base.frame, lambda_stack = [closure] } }
@@ -946,13 +1008,13 @@ pub(pkg) fn unify_branches(cx: Cx, a: Ty, b: Ty, lo: Int, hi: Int, what: String)
 ## canonical-form invariant only bans it from ground types.
 pub(pkg) fn reduce_assoc(cx: Cx, t: Ty) -> Ty =
   match t {
-    TyAssoc(s0, tid, n) -> {
+    TyAssoc(s0, tid, n, upper) -> {
       let s = reduce_assoc(cx, s0)
-      let keep = TyAssoc(s, tid, n)
+      let keep = TyAssoc(s, tid, n, upper)
       match head_of(s) {
         None -> keep
         Some(_) ->
-          match assoc_impl_of(cx, tid, s) {
+          match assoc_impl_of(cx, tid.id, s) {
             None -> keep
             Some(ii) -> {
               var bound: Option[Ty] = None
@@ -1004,7 +1066,7 @@ fn reduce_eff(cx: Cx, e: Eff, m: Map[Int, Ty]) -> Eff =
             match head_of(t) {
               None -> keep
               Some(_) ->
-                match assoc_impl_of(cx, t0, t) {
+                match assoc_impl_of(cx, t0.id, t) {
                   # a missing impl already errored at the witness; stay put
                   None -> keep
                   Some(ii) -> {
@@ -1058,7 +1120,7 @@ fn as_unified(cx: Cx, d: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
 fn as_unified_types(cx: Cx, d: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
   match d {
     TyVar(_, _) -> subst(d, m, em)
-    TyAssoc(_, _, _) -> reduce_assoc(cx, subst(d, m, em))
+    TyAssoc(_, _, _, _) -> reduce_assoc(cx, subst(d, m, em))
     TyFn(ps, r, e, sc) -> TyFn(map(ps, x => as_unified_types(cx, x, m, em)), as_unified_types(cx, r, m, em), subst_eff(e, em), sc)
     _ -> ty_map_children(d, x => as_unified_types(cx, x, m, em))
   }
@@ -1136,10 +1198,10 @@ fn unify_dir(
     # a projection reduces first if what is known so far (m) makes its
     # subject concrete; a still-rigid one unifies only with the same
     # projection (assoc-types-design.md D7)
-    TyAssoc(_, _, _) -> {
+    TyAssoc(_, _, _, _) -> {
       let d2 = reduce_ty_effs(cx, reduce_assoc(cx, subst(declared, m, em)), m)
       match d2 {
-        TyAssoc(_, _, _) -> (m, em, d2 == actual)
+        TyAssoc(_, _, _, _) -> (m, em, d2 == actual)
         _ -> unify_dir(cx, d2, actual, m, em, flip)
       }
     }
@@ -1412,7 +1474,7 @@ fn ty_rows_at(t: Ty, place: String) -> List[(Eff, String)] =
       for a in args { out = out ++ ty_rows_at(a, place) }
       out ++ ty_rows_at(tgt, place)
     }
-    TyAssoc(sb, _, _) -> ty_rows_at(sb, place)
+    TyAssoc(sb, _, _, _) -> ty_rows_at(sb, place)
     _ -> []
   }
 
@@ -1658,7 +1720,7 @@ pub(pkg) fn is_concrete(cx: Cx, t: Ty) -> Bool =
     # expected result type then bound the callee's type parameters before its
     # arguments could. A stop has to be a decision, not an omission.
     TyFn(_, _, _, _) -> true
-    TyAssoc(_, _, _) -> true
+    TyAssoc(_, _, _, _) -> true
     _ -> not ty_any_child(t, x => not is_concrete(cx, x))
   }
 
@@ -1754,7 +1816,7 @@ pub(pkg) fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option
       # `ty_key` panics on exactly this variant. That is the whole of #123:
       # `c[i] == c[j]` under `[C: Index]` passed the checker and crashed the
       # compiler, directly and inside a tuple.
-      TyAssoc(_, _, _) -> Some(t)
+      TyAssoc(_, _, _, _) -> Some(t)
       # A rigid type parameter is not a gap in the structure -- whether `T`
       # answers is the instantiation's business, and `resolve_witness` asks it
       # there, where the bound either is or is not in scope.
@@ -1793,7 +1855,7 @@ pub(pkg) fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: In
     # Same head as the fallback, different way out: a projection has no
     # contents to derive an answer from, so it gets the one hint every
     # relation gives for this shape rather than one that cannot be followed.
-    TyAssoc(_, _, _) -> {
+    TyAssoc(_, _, _, _) -> {
       let text = ty_show(cx.adts, bad)
       let hint = assoc_witness_hint(cx, bad)
       ("`" ++ text ++ "` has no " ++ rel, hint)
@@ -2118,7 +2180,7 @@ pub(pkg) fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[
   # `<` is the one relation with its own resolver, so the projection wording
   # had to be stated twice or Ord would keep its own.
   match t {
-    TyAssoc(_, _, _) -> { return (assoc_witness_err(cx, "Ord", t, lo, hi), no_wit()) }
+    TyAssoc(_, _, _, _) -> { return (assoc_witness_err(cx, "Ord", t, lo, hi), no_wit()) }
     _ -> ()
   }
   # An opaque type answers for itself if it has its own impl, and otherwise
@@ -2140,7 +2202,7 @@ pub(pkg) fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[
   }
   match t {
     TyVar(_, vid) ->
-      match map.get(cx.frame.dict_syms, (vid, ORD_ID)) {
+      match map.get(cx.frame.dict_syms, capture.dictionary_key(vid, capture.closed_trait(ORD_ID))) {
         None -> {
           let message_text = ty_show(cx.adts, t)
           let hint_text = ty_show(cx.adts, t)
@@ -2148,11 +2210,11 @@ pub(pkg) fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[
               " cannot be ordered", lo, hi, "add the bound: [" ++ hint_text ++ ": Ord]")
           (cx1, no_wit())
         }
-        Some(sym) -> (capture_witness(cx, sym), Some(WForward(sym)))
+        Some(sym) -> (capture_witness(cx, sym), Some(WForward(sym, capture.closed_trait(ORD_ID), t)))
       }
     _ ->
       match has_impl_at(cx.impl_table, ORD_ID, t) {
-        true -> (cx, Some(WConcrete(ORD_ID, t)))
+        true -> (cx, Some(WConcrete(capture.closed_trait(ORD_ID), t)))
         false -> {
           let hint: Option[String] = match t {
             TyAdt(aid, _, _) -> {
@@ -4237,7 +4299,7 @@ fn no_lparams() -> List[LambdaParam] = []
 ## "a comptime block cannot read a handler cell" is the control.
 pub(pkg) fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
-  let empty_d: Map[(Int, Int), Int] = map.empty()
+  let empty_d: Map[capture.DictionaryKey, Int] = map.empty()
   let fresh_scope: Map[String, Int] = map.empty()
   (Cx {
     ..cx,
@@ -4296,7 +4358,7 @@ test "an isolated context reports its own effects, then restores all ten fields"
   let outer_scope: Map[String, Int] = map.insert(map.empty(), "outer", 61)
   let outer_wit: Map[Eff, (Int, Int, String)] =
     map.insert(map.empty(), EIo, (1, 2, "outer_io"))
-  let outer_dicts: Map[(Int, Int), Int] = map.insert(map.empty(), (900, EQ_ID), 77)
+  let outer_dicts: Map[capture.DictionaryKey, Int] = map.insert(map.empty(), capture.dictionary_key(900, capture.closed_trait(EQ_ID)), 77)
   let outer_init: Set[String] = set.insert(set.empty(), "outer_let")
   cx = Cx {
     ..cx,
@@ -4337,7 +4399,7 @@ test "an isolated context reports its own effects, then restores all ten fields"
   assert len(cx1.frame.used_effects) == 0
   assert map.get(cx1.frame.eff_witness, EIo) == None
   assert cx1.frame.current_sig == None
-  assert map.get(cx1.frame.dict_syms, (900, EQ_ID)) == None
+  assert map.get(cx1.frame.dict_syms, capture.dictionary_key(900, capture.closed_trait(EQ_ID))) == None
   assert len(cx1.frame.lambda_stack) == 0
   assert len(cx1.frame.loop_stack) == 0
   assert cx1.frame.isolated
@@ -4361,7 +4423,7 @@ test "an isolated context reports its own effects, then restores all ten fields"
     None -> "<not restored>"
   }
   assert sig_name == "outer"
-  assert map.get(cx3.frame.dict_syms, (900, EQ_ID)) == Some(77)
+  assert map.get(cx3.frame.dict_syms, capture.dictionary_key(900, capture.closed_trait(EQ_ID))) == Some(77)
   assert len(cx3.frame.lambda_stack) == 1
   assert cx3.frame.lambda_stack[0].boundary == 3
   assert cx3.frame.loop_stack == [7]
@@ -4584,7 +4646,7 @@ pub(pkg) fn check_fn_value(
   var prepared = fresh_sig
   var cx = used_signature(entry, prepared)
   var binders = prepared.scope_params.scopes
-  if len(binders) > 0 {
+  if len(binders) > 0 || len(prepared.scope_params.captures) > 0 {
     match expected {
       Some(TyFn(ps, r, e, contract)) -> if len(contract.scopes) == 0 {
         let declared = TyFn(prepared.param_tys, prepared.ret, prepared.eff, capture.empty_function())
@@ -4683,14 +4745,14 @@ pub(pkg) fn check_fn_value(
   for d in f.param_tys {
     let a = eps[i]
     let concrete = is_concrete(cx, a)
-    if concrete {
+    if concrete || (checking_trait_capture_default(cx) && is_tyvar(a)) {
       let (m2, em2, _) = unify_into(cx, d, a, m, em)
       m = m2
       em = em2
     }
     i = i + 1
   }
-  if is_concrete(cx, eret) {
+  if is_concrete(cx, eret) || (checking_trait_capture_default(cx) && is_tyvar(eret)) {
     let (m3, em3, _) = unify_into(cx, f.ret, eret, m, em)
     m = m3
     em = em3
@@ -4778,7 +4840,7 @@ fn eta_bounded_fn_value(
   var i = 0
   for tp in f.tparams {
     for tr_id in bounds_of(f, i) {
-      let (cxa, w) = resolve_witness(cx1, tr_id, subst(tp, m, em), lo, hi,
+      let (cxa, w) = resolve_application(cx1, tr_id, subst(tp, m, em), lo, hi,
         "`" ++ name ++ "`")
       cx1 = cxa
       match w {
@@ -4820,12 +4882,13 @@ fn eta_bounded_fn_value(
   # A variable bound only in a parameter still owns an ABI slot. Charge its
   # instance on the callable row, as a direct call does, so the eventual
   # caller supplies that pack even when the declared row says only `!io`.
-  let wrapper_ty = TyFn(ips, iret, reduce_eff(cx1, eff_union([ieff] ++ vinsts), m), contract)
+  let wrapper_eff = reduce_eff(cx1, eff_union([ieff] ++ vinsts), m)
   cx1 = pop_scope(cx1)
   let popped = cx1.frame.lambda_stack[len(cx1.frame.lambda_stack) - 1]
   let outer = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1)
   cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, lambda_stack = outer } }
   if not ok { return (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi))) }
+  let wrapper_ty = TyFn(ips, iret, wrapper_eff, default_capture_contract(cx1, contract, popped.captures))
   let body =
     if f.is_builtin {
       XCallBuiltin(name, args, wits, evid, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, iret)
@@ -4928,7 +4991,7 @@ test "fn values instantiate from the expected type" {
     name = "sortish", param_tys = [TyList(tv)], param_names = ["xs"], param_defaults = [],
     caller_params = [],
     ret = TyList(tv),
-    eff = EPure, is_builtin = true, tparams = [tv], constraints = [[EQ_ID]], eparams = [],
+    eff = EPure, is_builtin = true, tparams = [tv], constraints = [[capture.closed_trait(EQ_ID)]], eparams = [],
     owner = None, trait_id = None, op_of = None, inferring = false
   }
   let want = TyFn([TyList(TyInt)], TyList(TyInt), EPure, capture.empty_function())
@@ -4944,7 +5007,7 @@ test "fn values instantiate from the expected type" {
         XCallBuiltin(bn, bargs, bwits, _, _, _, _, _) -> {
           assert bn == "sortish"
           assert len(bargs) == 1
-          assert bwits == [WConcrete(EQ_ID, TyInt)]
+          assert bwits == [WConcrete(capture.closed_trait(EQ_ID), TyInt)]
         }
         _ -> { assert false }
       }
@@ -4982,7 +5045,7 @@ test "bounded fn values read ordered evidence from the caller and expose ABI-onl
   let bounded = Sig { scope_params = capture.empty_params(),
     name = "with_callback", param_tys = [tv, TyFn([], TyInt, ev, capture.empty_function())],
     param_names = ["x", "callback"], param_defaults = [], caller_params = [], ret = TyInt, eff = row,
-    is_builtin = false, tparams = [tv], constraints = [[EQ_ID]], eparams = [ev],
+    is_builtin = false, tparams = [tv], constraints = [[capture.closed_trait(EQ_ID)]], eparams = [ev],
     owner = None, trait_id = None, op_of = None, inferring = false
   }
   let want = TyFn([TyInt, TyFn([], TyInt, outer, capture.empty_function())], TyInt, eff_union([row, outer]), capture.empty_function())
@@ -4996,7 +5059,7 @@ test "bounded fn values read ordered evidence from the caller and expose ABI-onl
       # caller's pack rather than captured at the value's creation point.
       assert captures == []
       assert value_ty == want
-      assert wits == [WConcrete(EQ_ID, TyInt)]
+      assert wits == [WConcrete(capture.closed_trait(EQ_ID), TyInt)]
       assert len(evid) == 3
       let origins = [LabelSlot(71), LabelSlot(73), VariableSlot(74)]
       var i = 0
@@ -5086,17 +5149,31 @@ pub(pkg) fn check_ctor_value(
 ## Satisfy one trait requirement at a use site (the general resolveWitness):
 ## rigid type parameter → the caller's dictionary is forwarded (and captured by
 ## every enclosing lambda); concrete subject → coherence gives the unique impl.
-pub(pkg) fn resolve_witness(
-  cx: Cx,
-  trait_id: Int,
-  t: Ty,
-  lo: Int,
-  hi: Int,
-  requirer: String
-) -> (Cx, Option[WitRef]) = {
+pub(pkg) fn resolve_witness(cx: Cx, trait_id: Int, t: Ty, lo: Int, hi: Int,
+  requirer: String) -> (Cx, Option[WitRef]) =
+  resolve_application(cx, capture.closed_trait(trait_id), t, lo, hi, requirer)
+
+pub(pkg) fn resolve_application(cx: Cx, application: capture.TraitApplication,
+  t: Ty, lo: Int, hi: Int, requirer: String) -> (Cx, Option[WitRef]) = {
+  let trait_id = application.id
+  let contract = trait_of(cx.traits, trait_id)
+  if len(application.args) != len(contract.scope_params.captures) {
+    return (cerr(cx, "trait witness has the wrong number of Capture arguments", lo, hi), no_wit())
+  }
+  let given = match t {
+    TyVar(_, id) -> list.any(map.get(cx.current_tparam_bounds, id).unwrap_or([]), b => capture.trait_equal(b, application))
+    _ -> false
+  }
+  let explicit_contract = len(application.args) > 0 || len(contract.scope_params.bounds) > 0
+  if explicit_contract && not given {
+    let support = trait_contract.support(cx.adts, cx.current_capture_params, t)
+    if not capture.subset_in(support, capture.trait_support(application), cx.current_capture_params.captures) {
+      return (cerr(cx, "trait witness does not cover its subject support", lo, hi), no_wit())
+    }
+  }
   if is_errorish(t) { return (cx, no_wit()) }
   var keyed = cx
-  for member in ty_scope_refs(t) {
+  for member in capture.union(ty_scope_refs(t), capture.trait_support(application)) {
     match member {
       capture.Region(region) -> {
         let (next, _) = resolve_local(keyed, scope_key_name(region.id), lo, hi, false)
@@ -5107,12 +5184,27 @@ pub(pkg) fn resolve_witness(
   }
   let cx = keyed
   let trait_name = trait_of(cx.traits, trait_id).name
+  var witness_scopes: Map[Int, CaptureScope] = map.empty()
+  var witness_captures: Map[Int, capture.Capture] = map.empty()
+  if explicit_contract {
+    match impl_at(cx.impl_table, trait_id, t) {
+      Some(imp) -> {
+        let (sm, cm, valid) = trait_contract.witness_arguments(imp, application, t, cx.adts, cx.current_capture_params)
+        if not valid {
+          return (cerr(cx, "trait witness Capture arguments do not match the impl application", lo, hi), no_wit())
+        }
+        witness_scopes = sm
+        witness_captures = cm
+      }
+      None -> ()
+    }
+  }
   # A projection is answered here, before any of the per-trait paths below,
   # because all of them would answer it wrong: the impl lookup cannot hit (no
   # head), the structural default has nothing to walk, and the leftover hint
   # would tell the reader to write an impl whose subject the compiler rejects.
   match t {
-    TyAssoc(_, _, _) -> { return (assoc_witness_err(cx, trait_name, t, lo, hi), no_wit()) }
+    TyAssoc(_, _, _, _) -> { return (assoc_witness_err(cx, trait_name, t, lo, hi), no_wit()) }
     _ -> ()
   }
   # An opaque type answers for itself if it has its own impl. Without one it
@@ -5132,7 +5224,7 @@ pub(pkg) fn resolve_witness(
     TyOpaque(_, _, _, _, tgt, _) -> {
       if not has_impl_at(cx.impl_table, trait_id, t) {
         if opaque_inherits(trait_id) {
-          return resolve_witness(cx, trait_id, tgt, lo, hi, requirer)
+          return resolve_application(cx, application, tgt, lo, hi, requirer)
         }
         if is_bitwise_trait(trait_id) { return (bitwise_no_impl(cx, trait_id, t, lo, hi), no_wit()) }
         if is_arith_trait(trait_id) { return (arith_no_impl(cx, trait_id, t, lo, hi), no_wit()) }
@@ -5158,39 +5250,41 @@ pub(pkg) fn resolve_witness(
   }
   match t {
     TyVar(_, vid) ->
-      match map.get(cx.frame.dict_syms, (vid, trait_id)) {
+      match map.get(cx.frame.dict_syms, capture.dictionary_key(vid, application)) {
         None -> {
           let ts = ty_show(cx.adts, t)
           (cerr_h(cx, requirer ++ " requires `" ++ trait_name ++ "[" ++ ts ++ "]`, but `" ++
               ts ++ "` has no such bound", lo, hi,
             "add the bound: [" ++ ts ++ ": " ++ trait_name ++ "]"), no_wit())
         }
-        Some(sym) -> (capture_witness(cx, sym), Some(WForward(sym)))
+        Some(sym) -> (capture_witness(cx, sym), Some(WForward(sym, application, t)))
       }
     _ ->
       match implementation_arity(cx, trait_id, t) {
         Some(parameters) ->
           if parameters == 0 {
-            (cx, Some(WConcrete(trait_id, t)))
+            (cx, Some(WConcrete(application, t)))
           } else {
             # A conditional impl is only a witness once its own bounds are:
             # `Ord[Box[T]]` holds exactly as far as `Ord[T]` does. Failure
             # here is a real error, unlike the synthesised case below --
             # the impl promised the bound, so nothing weaker is available.
-            let goals = sub_goals(cx.impl_table, trait_id, t)
+            let goals = witness_goals(cx.impl_table, trait_id, t)
             var cxg = cx
             var ws: List[WitRef] = []
             var ok = true
             for g in goals {
-              let (gt, gty) = g
-              let (cxh, w) = resolve_witness(cxg, gt, gty, lo, hi, requirer)
+              let (declared, value) = g
+              let gt = capture.trait_subst(declared, witness_scopes, witness_captures)
+              let gty = subst_scopes(value, witness_scopes, witness_captures)
+              let (cxh, w) = resolve_application(cxg, gt, gty, lo, hi, requirer)
               cxg = cxh
               match w {
                 Some(wr) -> { ws = ws ++ [wr] }
                 None -> { ok = false }
               }
             }
-            if ok { (cxg, Some(WApply(trait_id, t, ws))) } else { (cxg, no_wit()) }
+            if ok { (cxg, Some(WApply(application, t, ws))) } else { (cxg, no_wit()) }
           }
         None -> {
           # Equality and hashing have a structural default, so a missing impl
@@ -5296,9 +5390,9 @@ fn ord_tuple_witness(
   }
   if not ok { return (cx1, no_wit()) }
   if is_ground(t) {
-    (cx1, Some(WConcrete(ORD_ID, t)))
+    (cx1, Some(WConcrete(capture.closed_trait(ORD_ID), t)))
   } else {
-    (capture_wits(cx1, ws), Some(WApply(ORD_ID, t, ws)))
+    (capture_wits(cx1, ws), Some(WApply(capture.closed_trait(ORD_ID), t, ws)))
   }
 }
 
@@ -5326,9 +5420,9 @@ fn show_tuple_witness(
   }
   if not ok { return (cx1, no_wit()) }
   if is_ground(t) {
-    (cx1, Some(WConcrete(SHOW_ID, t)))
+    (cx1, Some(WConcrete(capture.closed_trait(SHOW_ID), t)))
   } else {
-    (capture_wits(cx1, ws), Some(WApply(SHOW_ID, t, ws)))
+    (capture_wits(cx1, ws), Some(WApply(capture.closed_trait(SHOW_ID), t, ws)))
   }
 }
 
@@ -5363,7 +5457,7 @@ fn solved_structurally(
   requirer: String
 ) -> (Cx, Option[WitRef]) = {
   if is_ground(t) || not expandable(t) {
-    return (cx, Some(WConcrete(trait_id, t)))
+    return (cx, Some(WConcrete(capture.closed_trait(trait_id), t)))
   }
   var cx1 = cx
   var ws: List[WitRef] = []
@@ -5376,7 +5470,7 @@ fn solved_structurally(
       None -> { ok = false }
     }
   }
-  if ok { (cx1, Some(WApply(trait_id, t, ws))) } else { (cx1, no_wit()) }
+  if ok { (cx1, Some(WApply(capture.closed_trait(trait_id), t, ws))) } else { (cx1, no_wit()) }
 }
 
 fn probe_args(cx: Cx, trait_id: Int, args: List[Ty]) -> Option[List[WitRef]] = {
@@ -5397,25 +5491,25 @@ fn probe_args(cx: Cx, trait_id: Int, args: List[Ty]) -> Option[List[WitRef]] = {
 fn probe_witness(cx: Cx, trait_id: Int, t: Ty) -> Option[WitRef] =
   match t {
     TyVar(_, vid) ->
-      match map.get(cx.frame.dict_syms, (vid, trait_id)) {
-        Some(sym) -> Some(WForward(sym))
+      match map.get(cx.frame.dict_syms, capture.dictionary_key(vid, capture.closed_trait(trait_id))) {
+        Some(sym) -> Some(WForward(sym, capture.closed_trait(trait_id), t))
         None -> None
       }
     _ ->
       match impl_at(cx.impl_table, trait_id, t) {
         Some(imp) ->
           if len(imp.tparams) == 0 {
-            Some(WConcrete(trait_id, t))
+            Some(WConcrete(capture.closed_trait(trait_id), t))
           } else {
             var ws: List[WitRef] = []
-            for g in sub_goals(cx.impl_table, trait_id, t) {
+            for g in witness_goals(cx.impl_table, trait_id, t) {
               let (gt, gty) = g
-              match probe_witness(cx, gt, gty) {
+              match probe_witness(cx, gt.id, gty) {
                 Some(w) -> { ws = ws ++ [w] }
                 None -> return None
               }
             }
-            Some(WApply(trait_id, t, ws))
+            Some(WApply(capture.closed_trait(trait_id), t, ws))
           }
         None -> {
           if trait_id == SHOW_ID {
@@ -5424,9 +5518,9 @@ fn probe_witness(cx: Cx, trait_id: Int, t: Ty) -> Option[WitRef] =
                 match probe_args(cx, SHOW_ID, es) {
                   Some(ws) ->
                     return Some(if is_ground(t) {
-                      WConcrete(SHOW_ID, t)
+                      WConcrete(capture.closed_trait(SHOW_ID), t)
                     } else {
-                      WApply(SHOW_ID, t, ws)
+                      WApply(capture.closed_trait(SHOW_ID), t, ws)
                     })
                   None -> return None
                 }
@@ -5439,10 +5533,10 @@ fn probe_witness(cx: Cx, trait_id: Int, t: Ty) -> Option[WitRef] =
             None -> ()
           }
           if is_ground(t) || not expandable(t) {
-            return Some(WConcrete(trait_id, t))
+            return Some(WConcrete(capture.closed_trait(trait_id), t))
           }
           match probe_args(cx, trait_id, type_args_of(t)) {
-            Some(ws) -> Some(WApply(trait_id, t, ws))
+            Some(ws) -> Some(WApply(capture.closed_trait(trait_id), t, ws))
             None -> None
           }
         }
@@ -5456,7 +5550,7 @@ fn capture_wits(cx: Cx, ws: List[WitRef]) -> Cx = {
   for w in ws {
     cx1 =
       match w {
-        WForward(sym) -> capture_witness(cx1, sym)
+        WForward(sym, _, _) -> capture_witness(cx1, sym)
         WApply(_, _, inner) -> capture_wits(cx1, inner)
         WConcrete(_, _) -> cx1
       }
@@ -5487,10 +5581,10 @@ test "ctor values and witnesses" {
   assert str.contains(cx2.diags[0].msg, "`Some` takes 1 field(s)")
   # witness: Int, Bool and Bytes have a prelude Ord impl, Float does not
   let (cx3, ok3) = resolve_witness(cx, ORD_ID, TyInt, 0, 4, "`sort`")
-  assert ok3 == Some(WConcrete(ORD_ID, TyInt))
+  assert ok3 == Some(WConcrete(capture.closed_trait(ORD_ID), TyInt))
   for scalar in [TyBool, TyBytes] {
     let (_, oks) = resolve_witness(cx, ORD_ID, scalar, 0, 4, "`sort`")
-    assert oks == Some(WConcrete(ORD_ID, scalar))
+    assert oks == Some(WConcrete(capture.closed_trait(ORD_ID), scalar))
   }
   let (cx4, ok4) = resolve_witness(cx, ORD_ID, TyFloat, 0, 4, "`sort`")
   assert ok4 == None
@@ -5503,7 +5597,7 @@ test "ctor values and witnesses" {
   let pair = TyTuple([TyInt, TyString])
   let (cx4a, ok4a) = resolve_witness(cx, ORD_ID, pair, 0, 4, "`sort`")
   assert len(cx4a.diags) == 0
-  assert ok4a == Some(WConcrete(ORD_ID, pair))
+  assert ok4a == Some(WConcrete(capture.closed_trait(ORD_ID), pair))
   let (cx4b, ok4b) = resolve_witness(cx, ORD_ID, TyTuple([TyInt, TyFloat]), 0, 4, "`sort`")
   assert ok4b == None
   assert cx4b.diags[0].msg == "no impl of `Ord` for `Float`"
@@ -5512,7 +5606,7 @@ test "ctor values and witnesses" {
   # records which of the two it was
   let (cx5, ok5) = resolve_witness(cx, EQ_ID, TyList(TyInt), 0, 4, "`f`")
   assert len(cx5.diags) == 0
-  assert ok5 == Some(WConcrete(EQ_ID, TyList(TyInt)))
+  assert ok5 == Some(WConcrete(capture.closed_trait(EQ_ID), TyList(TyInt)))
   assert not has_impl_at(cx5.impl_table, EQ_ID, TyList(TyInt))
   # a function value still has no equality, and says so at the bound
   let (cx6, ok6) = resolve_witness(cx, EQ_ID, TyList(TyFn([TyInt], TyInt, EPure, capture.empty_function())), 0, 4, "`f`")
@@ -5562,32 +5656,32 @@ test "a subject containing a rigid variable takes its arguments' witnesses" {
   assert str.contains(cx1.diags[0].msg, "requires `Eq[T]`")
   # With `[T: Eq]` in scope, the whole's witness carries the part's -- which
   # is the only way to reach a relation the caller decides.
-  let dicts = map.insert(cx.frame.dict_syms, (900, EQ_ID), 77)
+  let dicts = map.insert(cx.frame.dict_syms, capture.dictionary_key(900, capture.closed_trait(EQ_ID)), 77)
   let bound = Cx { ..cx, frame = Frame { ..cx.frame, dict_syms = dicts } }
   let (cx2, w2) = resolve_witness(bound, EQ_ID, opt_ty(tv), 0, 4, "`f`")
   assert len(cx2.diags) == 0
-  assert w2 == Some(WApply(EQ_ID, opt_ty(tv), [WForward(77)]))
+  assert w2 == Some(WApply(capture.closed_trait(EQ_ID), opt_ty(tv), [WForward(77, capture.closed_trait(EQ_ID), tv)]))
   # Nesting: the argument is itself applied.
   let (cx3, w3) = resolve_witness(bound, EQ_ID, opt_ty(opt_ty(tv)), 0, 4, "`f`")
-  assert w3 == Some(WApply(EQ_ID, opt_ty(opt_ty(tv)),
-    [WApply(EQ_ID, opt_ty(tv), [WForward(77)])]))
+  assert w3 == Some(WApply(capture.closed_trait(EQ_ID), opt_ty(opt_ty(tv)),
+    [WApply(capture.closed_trait(EQ_ID), opt_ty(tv), [WForward(77, capture.closed_trait(EQ_ID), tv)])]))
   # A container is not `expandable`: there is no structure here to spell out,
   # because since S3 the relation is an ordinary conditional impl in std. This
   # table has no std in it, so the walk is what answers.
   let (cx4, w4) = resolve_witness(bound, EQ_ID, TyList(tv), 0, 4, "`f`")
-  assert w4 == Some(WConcrete(EQ_ID, TyList(tv)))
+  assert w4 == Some(WConcrete(capture.closed_trait(EQ_ID), TyList(tv)))
   # A ground subject is untouched.
   let (cx5, w5) = resolve_witness(bound, EQ_ID, opt_ty(TyInt), 0, 4, "`f`")
   assert len(cx5.diags) == 0
-  assert w5 == Some(WConcrete(EQ_ID, opt_ty(TyInt)))
+  assert w5 == Some(WConcrete(capture.closed_trait(EQ_ID), opt_ty(TyInt)))
   # Tuple Ord uses the same applied-witness shape. Both the generic builtin
   # route (`cmp`) and the operator route have to return it, or one of the two
   # entry points loses the caller's Ord[T] dictionary.
-  let ord_dicts = map.insert(cx.frame.dict_syms, (900, ORD_ID), 78)
+  let ord_dicts = map.insert(cx.frame.dict_syms, capture.dictionary_key(900, capture.closed_trait(ORD_ID)), 78)
   let ord_bound = Cx { ..cx, frame = Frame { ..cx.frame, dict_syms = ord_dicts } }
   let pair = TyTuple([TyInt, tv])
-  let applied = Some(WApply(ORD_ID, pair,
-    [WConcrete(ORD_ID, TyInt), WForward(78)]))
+  let applied = Some(WApply(capture.closed_trait(ORD_ID), pair,
+    [WConcrete(capture.closed_trait(ORD_ID), TyInt), WForward(78, capture.closed_trait(ORD_ID), tv)]))
   let (cx6, w6) = resolve_witness(ord_bound, ORD_ID, pair, 0, 4, "`cmp`")
   assert len(cx6.diags) == 0
   assert w6 == applied
@@ -6273,7 +6367,7 @@ fn lit_target(cx: Cx, t: Ty, is_float: Bool) -> LitTarget = {
       } else {
         LitDefault
       }
-    TyVar(_, vid) -> if map.get(cx.frame.dict_syms, (vid, tid)) != None { LitViaTrait } else { LitDefault }
+    TyVar(_, vid) -> if map.get(cx.frame.dict_syms, capture.dictionary_key(vid, capture.closed_trait(tid))) != None { LitViaTrait } else { LitDefault }
     _ -> if head_of(t) != None && has_impl_at(cx.impl_table, tid, t) { LitViaTrait } else { LitDefault }
   }
 }
@@ -6415,7 +6509,7 @@ fn lit_via_trait(cx: Cx, tid: Int, t: Ty, arg: TExpr, lo: Int, hi: Int) -> (Cx, 
       let em: Map[Int, Eff] = map.empty()
       let callee_eff = reduce_eff(cx2, s.eff, m)
       let concrete = match wr {
-        WForward(_) -> false
+        WForward(_, _, _) -> false
         _ -> true
       }
       let pure = concrete && callee_eff == EPure
@@ -6515,7 +6609,7 @@ fn bitwise_checked(cx: Cx, tid: Int, lt: Ty, lx: TExpr, rt: Ty, rx: TExpr,
 
 fn bitwise_rhs(cx: Cx, tid: Int, subject: Ty) -> Ty =
   if is_shift_trait(tid) {
-    reduce_assoc(cx, TyAssoc(subject, tid, shift_amount_name(tid)))
+    reduce_assoc(cx, TyAssoc(subject, capture.closed_trait(tid), shift_amount_name(tid), []))
   } else {
     subject
   }
@@ -6853,8 +6947,8 @@ fn check_index(cx: Cx, target: Expr, index: Expr, lo: Int, hi: Int) -> (Cx, Ty, 
       (cx3, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
     }
     Some(wr) -> {
-      let want_idx = reduce_assoc(cx2, TyAssoc(tt, INDEX_ID, "Idx"))
-      let result = reduce_assoc(cx2, TyAssoc(tt, INDEX_ID, "Item"))
+      let want_idx = reduce_assoc(cx2, TyAssoc(tt, capture.closed_trait(INDEX_ID), "Idx", []))
+      let result = reduce_assoc(cx2, TyAssoc(tt, capture.closed_trait(INDEX_ID), "Item", []))
       let (cx3, it, ix) = check_expr(cx2, index, Some(want_idx))
       if it != want_idx && not is_errorish(it) {
         let expected_text = ty_show(cx3.adts, want_idx)
@@ -7481,7 +7575,7 @@ fn check_scope_lambda(cx: Cx, params: List[LambdaParam], body: Expr, sugar: Bool
     None -> None
   }
   let (checked, ty, expr) = check_lambda(scoped, params, body, sugar, false, false, None, None, aligned, lo, hi, own.scopes)
-  let result = match ty { TyFn(ps, r, e, _) -> TyFn(ps, r, e, contract), _ -> ty }
+  let result = match ty { TyFn(ps, r, e, actual) -> TyFn(ps, r, e, CaptureFunction { ..contract, bound = actual.bound }), _ -> ty }
   let value = match expr {
     XLambda(ps, ns, b, cs, a, z, _, role) -> XLambda(ps, ns, b, cs, a, z, result, role)
     _ -> expr
@@ -7648,8 +7742,38 @@ fn check_lambda(
   # travelling with the closure
   let lam_eff = eff_union(cx3.frame.used_effects)
   cx3 = Cx { ..cx3, frame = Frame { ..cx3.frame, used_effects = saved_used, eff_witness = saved_wit, observation_scopes = saved_scopes } }
-  let t = TyFn(ptys, bt, lam_eff, CaptureFunction { scopes = scopes, bound = None })
+  let contract = default_capture_contract(cx3, CaptureFunction { scopes = scopes, bound = None }, popped.captures)
+  let t = TyFn(ptys, bt, lam_eff, contract)
   (cx3, t, XLambda(psyms ++ scope_symbols, pnames ++ map(scopes, r => scope_key_name(r.id)), bx, popped.captures, owner_off(cx, lo), owner_off(cx, hi), t, if arm { "handler" } else if sugar { "with" } else { "lambda" }))
+}
+
+fn checking_trait_capture_default(cx: Cx) -> Bool = match cx.frame.current_sig {
+  Some(signature) -> signature.trait_id != None && len(signature.scope_params.captures) > 0
+  None -> false
+}
+
+fn default_capture_contract(cx: Cx, contract: capture.Function, symbols: List[Int]) -> capture.Function = {
+  let signature = match cx.frame.current_sig {
+    Some(value) -> value
+    None -> return contract
+  }
+  if not checking_trait_capture_default(cx) { return contract }
+  var captured: capture.Capture = []
+  for id in symbols {
+    let value = sym_of(cx, id)
+    captured = capture.union(captured, trait_contract.capture_of(cx.adts, signature.scope_params, value.ty))
+    match value.dict_of {
+      Some(entry) -> { let (app, _) = entry
+        captured = capture.union(captured, capture.trait_support(app)) }
+      None -> ()
+    }
+    match value.cell_of {
+      Some(entry) -> { let (_, contents) = entry
+        captured = capture.union(captured, trait_contract.capture_of(cx.adts, signature.scope_params, contents)) }
+      None -> ()
+    }
+  }
+  CaptureFunction { ..contract, bound = Some(captured) }
 }
 
 fn fn_ty_parts(t: Ty) -> (List[Ty], Ty, Eff) =
@@ -9240,7 +9364,7 @@ fn check_for(
           match w {
             Some(_) -> {
               wit = w
-              let item = reduce_assoc(cx1, TyAssoc(ft, ITER_ID, "Item"))
+              let item = reduce_assoc(cx1, TyAssoc(ft, capture.closed_trait(ITER_ID), "Item", []))
               loop_t = item
             }
             None -> ()
@@ -9340,7 +9464,7 @@ fn check_for_pattern(cx: Cx, pat: Pattern, loop_t: Ty) -> (Cx, TPat) = {
 ## impls (an opaque type does not borrow its target's, `opaque_inherits`).
 fn has_trait_at(cx: Cx, tid: Int, t: Ty) -> Bool =
   match t {
-    TyVar(_, vid) -> map.get(cx.frame.dict_syms, (vid, tid)) != None
+    TyVar(_, vid) -> map.get(cx.frame.dict_syms, capture.dictionary_key(vid, capture.closed_trait(tid))) != None
     _ -> head_of(t) != None && has_impl_at(cx.impl_table, tid, t)
   }
 
@@ -9401,7 +9525,7 @@ fn mint_staged_cell(cx: Cx, id: Int, sym: Sym, kind: StagedKind, lo: Int, hi: In
   }
   let (cx1, w) = resolve_witness(cx, STAGED_VAR_ID, t, lo, hi, "a staged loop")
   if w == None { return (cx1, refused) }
-  let cell_ty = reduce_assoc(cx1, TyAssoc(t, STAGED_VAR_ID, "Cell"))
+  let cell_ty = reduce_assoc(cx1, TyAssoc(t, capture.closed_trait(STAGED_VAR_ID), "Cell", []))
   let (cx2, cid) = fresh(cx1)
   let cx3 = write_symbol(cx2, cid, Sym {
     name = sym.name,
@@ -9737,7 +9861,7 @@ fn check_staged_for(cx: Cx, pat: Pattern, from: Expr, ft: Ty, fx: TExpr, body: E
     Some(x) -> x
     None -> return (cx1, err_stmt)
   }
-  let item = reduce_assoc(cx1, TyAssoc(ft, STAGED_ITER_ID, "Item"))
+  let item = reduce_assoc(cx1, TyAssoc(ft, capture.closed_trait(STAGED_ITER_ID), "Item", []))
   # the subject is evaluated once, before any cell is opened
   let (cxr, rsid) = hidden_local(cx1, "\$staged", ft, flo, fhi)
   cx1 = cxr
@@ -9906,7 +10030,7 @@ fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], ex
       cx1 = cxv
       match rw {
         Some(w) -> {
-          let slot_ty = reduce_assoc(cx1, TyAssoc(result, STAGED_RESULT_ID, "Slot"))
+          let slot_ty = reduce_assoc(cx1, TyAssoc(result, capture.closed_trait(STAGED_RESULT_ID), "Slot", []))
           let (cxs, slot) = hidden_local(cx1, "\$result", slot_ty, lo, hi)
           let (cxo, open) = staged_call(cxs, STAGED_RESULT_ID, "result_open", result, [], w,
             slot_ty, lo, hi, NO_NAME)
@@ -9925,7 +10049,7 @@ fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], ex
       }
     }
   }
-  let row = reduce_eff(cx1, EffAssoc("C", -48, STAGED_COND_ID, "StagedCond"), map.from([(-48, ct)]))
+  let row = reduce_eff(cx1, EffAssoc("C", -48, capture.closed_trait(STAGED_COND_ID), "StagedCond"), map.from([(-48, ct)]))
   let used = eff_union([te, fe])
   if not eff_carries(row, used) {
     let declared = if row == EPure { "nothing" } else { "!" ++ eff_show(row) }
@@ -10310,7 +10434,8 @@ fn check_local_fn(
     check_lambda(cx1, params, body, false, false, false, None, body_local_fn, Some(ft), lo, hi, [])
   cx1 = cxd
   match actual {
-    TyFn(_, ar, ae, _) -> {
+    TyFn(_, ar, ae, contract) -> {
+      cx1 = write_symbol(cx1, sid, Sym { ..sym_of(cx1, sid), ty = TyFn(ptys, ret, eff, contract) })
       if not assignable(cx1, ar, ret) {
         let actual_text = ty_show(cx1.adts, ar)
         let return_text = ty_show(cx1.adts, ret)
@@ -10911,6 +11036,10 @@ fn check_call(
         "that takes the result"),
       TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
   }
+  if len(s.scope_params.captures) > 0 && list.any(s.constraints, bs => list.any(bs, b => len(b.args) > 0)) {
+    cx1 = learn_trait_type_bindings(cx1, s, m)
+    s = scope_infer.contract_normalized(s, cx1.frame.scope_bindings, cx1.frame.capture_bindings)
+  }
   # trait bounds: each (type parameter, bound) pair needs a dictionary
   var wits: List[WitRef] = []
   var any_constraint = false
@@ -10924,7 +11053,7 @@ fn check_call(
     for tp in s.tparams {
       let (blo, bhi) = bound_arg_span(s, args, tp, clo, chi)
       for tr_id in bounds_of(s, i2) {
-        let (cxa, w) = resolve_witness(cx1, tr_id, subst(tp, m, em), blo, bhi,
+        let (cxa, w) = resolve_application(cx1, tr_id, subst(tp, m, em), blo, bhi,
           "`" ++ callee ++ "`")
         cx1 = cxa
         match w {
@@ -11403,7 +11532,7 @@ fn lit_waits(cx: Cx, s: Sig, a: Expr, i: Int, pidx: List[Int], m: Map[Int, Ty],
   } else {
     let substd = reduce_instantiated(cx, subst(s.param_tys[pidx[i]], m, em), m)
     match substd {
-      TyAssoc(subject, _, _) -> not is_concrete(cx, subject)
+      TyAssoc(subject, _, _, _) -> not is_concrete(cx, subject)
       _ -> not is_concrete(cx, substd)
     }
   }
@@ -11422,7 +11551,7 @@ fn first_ready_lit(cx: Cx, s: Sig, args: List[Expr], pidx: List[Int], slots: Lis
     if pending && is_lit_atom(a) && pidx[j] >= 0 {
       let want = reduce_instantiated(cx, subst(s.param_tys[pidx[j]], m, em), m)
       let ready = match want {
-        TyAssoc(subject, _, _) -> is_concrete(cx, subject)
+        TyAssoc(subject, _, _, _) -> is_concrete(cx, subject)
         _ -> true
       }
       if ready {
@@ -11727,7 +11856,7 @@ fn named_evidence_args(
   em: Map[Int, Eff],
   lo: Int,
   hi: Int
-) -> (Cx, List[TExpr], List[Int], List[Eff], List[(String, Int, Int, String)]) = {
+) -> (Cx, List[TExpr], List[Int], List[Eff], List[(String, Int, capture.TraitApplication, String)]) = {
   let abi = sig_abi_eff(s)
   let (cx1, labels, unanswered) = evidence_args(cx, abi, lo, hi)
   let (cx2, vars, vunanswered, vinsts) = evidence_var_args(cx1, abi, em, lo, hi)
@@ -12142,11 +12271,11 @@ fn evidence_assoc_args(
   m: Map[Int, Ty],
   lo: Int,
   hi: Int
-) -> (Cx, List[TExpr], List[Int], List[(String, Int, Int, String)]) = {
+) -> (Cx, List[TExpr], List[Int], List[(String, Int, capture.TraitApplication, String)]) = {
   var cx1 = cx
   var out: List[TExpr] = []
   var unanswered: List[Int] = []
-  var dropped: List[(String, Int, Int, String)] = []
+  var dropped: List[(String, Int, capture.TraitApplication, String)] = []
   for a in eff_assocs(declared) {
     let (s0, v0, t0, n0) = a
     let red = reduce_eff(cx1, EffAssoc(s0, v0, t0, n0), m)
@@ -12189,7 +12318,7 @@ fn evidence_assoc_args(
 
 ## A row without the named projection atoms -- `eff_drop`'s twin, for the one
 ## caller that withdraws what nobody answered.
-fn eff_drop_assocs(e: Eff, atoms: List[(String, Int, Int, String)]) -> Eff = {
+fn eff_drop_assocs(e: Eff, atoms: List[(String, Int, capture.TraitApplication, String)]) -> Eff = {
   if len(atoms) == 0 { return e }
   eff_map_assocs(e, a => {
     let (_, av, at2, an) = a
@@ -14438,7 +14567,7 @@ test "named arguments land on a signature's parameters, and evaluate in written 
     param_defaults = [Some("[]"), None],
     caller_params = [],
     ret = TyInt,
-    eff = EPure, is_builtin = false, tparams = [tv], constraints = [[EQ_ID]], eparams = [],
+    eff = EPure, is_builtin = false, tparams = [tv], constraints = [[capture.closed_trait(EQ_ID)]], eparams = [],
     owner = Some("m"), trait_id = None, op_of = None, inferring = false
   }
   let cxg = Cx { ..cx, fns = map.insert(cx.fns, "hold", gsig) }
@@ -14448,12 +14577,12 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   assert t10 == TyInt
   match n10 {
     XCallFn(_, _, gargs, gwits, ..) -> {
-      assert gwits == [WConcrete(EQ_ID, TyInt)]
+      assert gwits == [WConcrete(capture.closed_trait(EQ_ID), TyInt)]
       match gargs[0] {
         XCallFn(_, dn2, dargs2, dwits2, _, _, _, _, _, dty2, _) -> {
           assert dn2 == "hold\$default\$0"
           assert len(dargs2) == 0
-          assert dwits2 == [WConcrete(EQ_ID, TyInt)]
+          assert dwits2 == [WConcrete(capture.closed_trait(EQ_ID), TyInt)]
           assert dty2 == TyList(TyInt)
         }
         _ -> { assert false }
@@ -14974,7 +15103,7 @@ test "ufcs rewrites x.f(a) into f(x, a) with the receiver pre-typed" {
 ## Mint dictionary symbols for a signature's trait bounds (the Kotlin
 ## bindDicts): typed as the tvar itself, marked with (trait, tvar).
 fn bind_dicts(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
-  let empty_d: Map[(Int, Int), Int] = map.empty()
+  let empty_d: Map[capture.DictionaryKey, Int] = map.empty()
   if not list.any(s.constraints, bs => len(bs) > 0) {
     return Cx { ..cx, frame = Frame { ..cx.frame, dict_syms = empty_d } }
   }
@@ -14984,7 +15113,7 @@ fn bind_dicts(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
     for tr_id in bounds_of(s, i) {
       match tp {
         TyVar(tn, vid) -> {
-          let tr_name = trait_of(cx1.traits, tr_id).name
+          let tr_name = trait_of(cx1.traits, tr_id.id).name
           let (cx2, sid) = fresh(cx1)
           let sym = Sym {
             name = tr_name ++ "$" ++ tn,
@@ -15000,7 +15129,7 @@ fn bind_dicts(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
             ..cx2,
             frame = Frame {
               ..cx2.frame,
-              dict_syms = map.insert(cx2.frame.dict_syms, (vid, tr_id), sid)
+              dict_syms = map.insert(cx2.frame.dict_syms, capture.dictionary_key(vid, tr_id), sid)
             }
           }, sid, sym)
         }
@@ -15021,7 +15150,7 @@ fn dict_sym_list(cx: Cx, s: Sig) -> List[Int] = {
     for tr_id in bounds_of(s, i) {
       match tp {
         TyVar(_, vid) ->
-          match map.get(cx.frame.dict_syms, (vid, tr_id)) {
+          match map.get(cx.frame.dict_syms, capture.dictionary_key(vid, tr_id)) {
             Some(sid) -> { out = out ++ [sid] }
             None -> ()
           }
@@ -15128,7 +15257,7 @@ fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
   for a in eff_assocs(abi) {
     let (_, vid, tid, n) = a
     let (cx2, _) = declare_evidence(cx1, ev_assoc_local_name(vid, tid, n), erased_ev_ty(),
-      assoc_key(tid), nlo, nhi)
+      assoc_key(tid.id), nlo, nhi)
     cx1 = cx2
   }
   cx1
@@ -15833,7 +15962,7 @@ fn test_sig(name: String) -> Sig =
 pub(pkg) fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
   let empty_tp: Map[String, Ty] = map.empty()
   let empty_ev: Map[String, Eff] = map.empty()
-  let empty_d: Map[(Int, Int), Int] = map.empty()
+  let empty_d: Map[capture.DictionaryKey, Int] = map.empty()
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   var cx1 = Cx {
     ..cx,
@@ -17033,10 +17162,10 @@ test "== resolves its witness the same way a bound does" {
   # relation the compiler defines, so the emitted code is what it always was
   # -- what changed is that the two doors cannot answer differently.
   assert eq_wit_of("fn f(a: Int, b: Int) -> Bool = a == b") ==
-    Some(WConcrete(EQ_ID, TyInt))
+    Some(WConcrete(capture.closed_trait(EQ_ID), TyInt))
   var adt_tid = -1
   match eq_wit_of("type C = | R | G\nfn f(a: C, b: C) -> Bool = a == b") {
-    Some(WConcrete(t, _)) -> { adt_tid = t }
+    Some(WConcrete(t, _)) -> { adt_tid = t.id }
     _ -> ()
   }
   assert adt_tid == EQ_ID
@@ -17047,7 +17176,7 @@ test "== resolves its witness the same way a bound does" {
     "fn f(a: P, b: P) -> Bool = a == b\n"
   var tid = -1
   match eq_wit_of(over) {
-    Some(WConcrete(t, _)) -> { tid = t }
+    Some(WConcrete(t, _)) -> { tid = t.id }
     _ -> ()
   }
   assert tid == EQ_ID
@@ -19041,7 +19170,7 @@ test "shadowing the prelude method names does not reach the operators or the sug
   assert has_impl_at(cx.impl_table, SHOW_ID, TyAdt(ptv, [], capture.empty_arguments()))
   assert has_impl_at(cx.impl_table, EQ_ID, TyAdt(ptv, [], capture.empty_arguments()))
   # `==` still asks the solver and still gets the Eq impl, name or no name
-  assert eq_wit_of(src) == Some(WConcrete(EQ_ID, TyAdt(ptv, [], capture.empty_arguments())))
+  assert eq_wit_of(src) == Some(WConcrete(capture.closed_trait(EQ_ID), TyAdt(ptv, [], capture.empty_arguments())))
   # while the bare name is the local function: one parameter, no trait
   let s = map.get(cx.fns, "show").expect("show is bound")
   assert s.trait_id == None
@@ -19454,7 +19583,7 @@ test "bitwise Int operators keep native TAST and Amount reduces before a count i
     _ -> false
   }
   assert match arith_body(tm, "move") {
-    XCallFn(_, "shl", [XLocal(..), XLocal(..)], [WForward(_)], [_], Some(tid), ..) -> tid == SHL_ID
+    XCallFn(_, "shl", [XLocal(..), XLocal(..)], [WForward(_, _, _)], [_], Some(tid), ..) -> tid == SHL_ID
     _ -> false
   }
   assert match arith_body(tm, "inverted") {

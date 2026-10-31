@@ -21,10 +21,10 @@ import tarfile
 import tempfile
 import time
 
-# Six interleaved pairs measured a 98.98s full sample warm median
-# (98.67s to 99.53s). Budget twice that median, rounded up to 30 seconds.
+# Six interleaved pairs on 2026-10-31 measured an 89.98s full sample warm
+# median (89.45s to 90.38s). Budget twice that median, rounded up to 30 seconds.
 # The 180 second bound below still applies to individual commands.
-FULL_WARM_TIMEOUT = 210
+FULL_WARM_TIMEOUT = 180
 
 BASE = 'fdebffc0aca84ef8346a550381488912cb247a89'
 ROOT = Path(__file__).resolve().parents[2]

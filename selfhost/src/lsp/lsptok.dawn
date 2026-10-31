@@ -22,7 +22,7 @@
 use std/map
 use lsp/lspsource.{SourceId, source_key, library_doc, checked_source}
 use front/ast.{
-  Module, Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DEffect, Param, TypeParamDecl
+  Module, Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DEffect, Param, TypeParamDecl, ScopeSyntax
 }
 use lsp/lspq.{
   QCx, Resolution, LocalRole, NoRole, ParamRole, FnRole, MutableRole, references_only, walked_resolutions, decl_span
@@ -235,6 +235,7 @@ fn decl_index(decls: List[Decl]) -> Map[Int, Kind] = {
         ix = map.insert(ix, f.nlo, kind(T_FUNCTION, 0))
         ix = index_params(ix, f.params)
         ix = index_tparams(ix, f.tparams)
+        ix = index_capture_params(ix, f.scope)
       }
       DType(t) -> {
         let ty = match t.alias_target {
@@ -249,20 +250,23 @@ fn decl_index(decls: List[Decl]) -> Map[Int, Kind] = {
         }
       }
       DConst(_, _, _, _, _, _, nlo, _) -> { ix = map.insert(ix, nlo, kind(T_VARIABLE, M_READONLY)) }
-      DTrait(_, _, _, _, methods, _, _, _, _, _, nlo, _) -> {
+      DTrait(_, _, _, _, methods, _, _, _, _, _, nlo, _, scope) -> {
         ix = map.insert(ix, nlo, kind(T_INTERFACE, 0))
+        for binder in scope.binders { ix = map.insert(ix, binder.lo + 1, kind(T_TYPE_PARAMETER, 0)) }
         for tm in methods {
           ix = map.insert(ix, tm.nlo, kind(T_METHOD, 0))
           ix = index_params(ix, tm.params)
         }
       }
-      DImpl(tparams, _, tlo, _, _, methods, _, _, _, _, _) -> {
+      DImpl(tparams, _, tlo, _, _, methods, _, _, _, _, scope, _) -> {
         ix = map.insert(ix, tlo, Kind { ty = T_INTERFACE, mods = 0, declares = false })
         ix = index_tparams(ix, tparams)
+        ix = index_capture_params(ix, scope)
         for f in methods {
           ix = map.insert(ix, f.nlo, kind(T_METHOD, 0))
           ix = index_params(ix, f.params)
           ix = index_tparams(ix, f.tparams)
+          ix = index_capture_params(ix, f.scope)
         }
       }
       DEffect(e) -> {
@@ -283,6 +287,14 @@ fn index_params(ix0: Map[Int, Kind], params: List[Param]) -> Map[Int, Kind] = {
   var ix = ix0
   for p in params { ix = map.insert(ix, p.lo, kind(T_PARAMETER, 0)) }
   ix
+}
+
+fn index_capture_params(ix: Map[Int, Kind], scope: ScopeSyntax) -> Map[Int, Kind] = {
+  var out = ix
+  for binder in scope.binders { if binder.capture {
+    out = map.insert(out, binder.lo + 1, kind(T_TYPE_PARAMETER, 0))
+  } }
+  out
 }
 
 fn index_tparams(ix0: Map[Int, Kind], tparams: List[TypeParamDecl]) -> Map[Int, Kind] = {

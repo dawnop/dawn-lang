@@ -65,7 +65,7 @@ pub fn desc_of(adts: Adts, t: Ty) -> String =
     TyError -> "V"
     # a projection over a rigid subject is erased exactly like the TyVar it
     # projects from (assoc-types-design.md 4.1); ground types never carry one
-    TyVar(_, _) | TyAssoc(_, _, _) -> "Ljava/lang/Object;"
+    TyVar(_, _) | TyAssoc(_, _, _, _) -> "Ljava/lang/Object;"
     TyAdt(aid, _, _) -> "L" ++ adt_jvm_name(adt_of(adts, aid)) ++ ";"
     TyList(_) -> "L" ++ PVEC_CLASS ++ ";"
     TyMap(_, _) -> "L" ++ HAMT_CLASS ++ ";"
@@ -128,7 +128,7 @@ pub fn jvm_repr(t: Ty) -> JvmRepr =
     TyBytes -> RRef
     TyI64Buf(_) -> RRef
     TyF64Buf(_) -> RRef
-    TyVar(_, _) | TyAssoc(_, _, _) -> RRef
+    TyVar(_, _) | TyAssoc(_, _, _, _) -> RRef
     TyAdt(_, _, _) -> RRef
     TyList(_) -> RRef
     TyMap(_, _) -> RRef
@@ -551,7 +551,7 @@ pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
     TyBytes -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "hashCode", "([B)I", false)
     }
-    TyString | TyVar(_, _) | TyAssoc(_, _, _) | TyAdt(_, _, _) | TyJava(_, _) -> {
+    TyString | TyVar(_, _) | TyAssoc(_, _, _, _) | TyAdt(_, _, _) | TyJava(_, _) -> {
       m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
     }
     TyList(_) | TyMap(_, _) | TySet(_) | TyArray(_) | TyI64Buf(_) | TyF64Buf(_) | TyTuple(_) | TyFn(_, _, _, _) -> {
@@ -1099,7 +1099,7 @@ pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
     TyUnit -> { m.visitTypeInsn(OP_CHECKCAST, UNIT_CLASS) }
     # TyVar (and a projection over one) is already erased, and the two
     # bottom types carry no value
-    TyVar(_, _) | TyAssoc(_, _, _) | TyNever | TyError -> ()
+    TyVar(_, _) | TyAssoc(_, _, _, _) | TyNever | TyError -> ()
   }
   ()
 }
