@@ -21,10 +21,10 @@ import tarfile
 import tempfile
 import time
 
-# A complete 14 sample, 45 answer warm measured 171.2s. Give this batch
-# the workflow's threefold observation margin, rounded up to 540 seconds.
+# Six interleaved pairs measured a 98.98s full sample warm median
+# (98.67s to 99.53s). Budget twice that median, rounded up to 30 seconds.
 # The 180 second bound below still applies to individual commands.
-FULL_WARM_TIMEOUT = 540
+FULL_WARM_TIMEOUT = 210
 
 BASE = 'fdebffc0aca84ef8346a550381488912cb247a89'
 ROOT = Path(__file__).resolve().parents[2]
