@@ -34,6 +34,7 @@ prints how many there are on every run.
 GPU 宿主尺寸上界：[gpu-host-overflow-design.md](gpu-host-overflow-design.md)。
 
 scaled MMA 组合与架构拒绝覆盖：[gpu-n6-scaled-mma-design.md](gpu-n6-scaled-mma-design.md)。
+E8M0 默认转换的源值合同与位适配：[gpu-g31-e8m0-design.md](gpu-g31-e8m0-design.md)。
 
 装配器版本身份严格拒绝：[gpu-assemble-version-design.md](gpu-assemble-version-design.md)。
 
