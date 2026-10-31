@@ -429,22 +429,39 @@ pub fn fn_arity(t: Ty) -> Int =
     _ -> 0
   }
 
-## Runtime function interfaces required by a type, including bound Scope keys.
-pub fn ty_fn_arities(t: Ty) -> List[Int] = {
-  var out: List[Int] = []
-  var children: List[Ty] = []
+## Collect missing function interfaces directly, including bound Scope keys.
+## Provided arities need no new entry, and traversal order cannot affect a set.
+pub fn ty_fn_arities(t: Ty, provided: Set[Int], initial: Set[Int]) -> Set[Int] = {
+  var out = initial
   match t {
-    TyFn(ps, r, _, _) -> { out = [fn_arity(t)]
-      children = ps ++ [r] }
-    TyAdt(_, args, _) -> { children = args }
-    TyOpaque(_, _, _, args, target, _) -> { children = args ++ [target] }
-    TyTuple(values) -> { children = values }
-    TyList(value) | TySet(value) | TyArray(value) | TyAssoc(value, _, _) | TyCaptured(value, _) -> { children = [value] }
-    TyMap(key, value) -> { children = [key, value] }
-    _ -> ()
+    TyFn(ps, r, _, _) -> {
+      let arity = fn_arity(t)
+      if not set.has(provided, arity) { out = set.insert(out, arity) }
+      for p in ps { out = ty_fn_arities(p, provided, out) }
+      ty_fn_arities(r, provided, out)
+    }
+    TyAdt(_, args, _) | TyTuple(args) -> {
+      for arg in args { out = ty_fn_arities(arg, provided, out) }
+      out
+    }
+    TyOpaque(_, _, _, args, target, _) -> {
+      for arg in args { out = ty_fn_arities(arg, provided, out) }
+      ty_fn_arities(target, provided, out)
+    }
+    TyList(value) | TySet(value) | TyArray(value) | TyAssoc(value, _, _) | TyCaptured(value, _) ->
+      ty_fn_arities(value, provided, out)
+    TyMap(key, value) -> ty_fn_arities(value, provided, ty_fn_arities(key, provided, out))
+    _ -> out
   }
-  for child in children { out = out ++ ty_fn_arities(child) }
-  out
+}
+
+test "nested function types retain missing Scope interface arities" {
+  let s = CaptureScope { name = "s", id = 11 }
+  let wide = TyFn([TyInt, TyInt, TyInt, TyInt, TyInt, TyInt, TyInt, TyInt], TyInt, EPure,
+    CaptureFunction { scopes = [s], bound = None })
+  let ordinary = TyFn([wide], TyUnit, EPure, capture.empty_function())
+  let nested = TyMap(TyString, TyTuple([ordinary, TyList(wide)]))
+  assert ty_fn_arities(nested, set.from(fn_interface_arities()), set.from([12])) == set.from([10, 12])
 }
 
 ## Scope arguments are physical Int slots before the function value's pack.

@@ -27,13 +27,10 @@ pub fn resolve(s: Scope, bindings: Map[Int, Scope]) -> Scope = {
 pub fn normalized(bindings: Map[Int, Scope]) -> Map[Int, Scope] = {
   # Most equations already point at rigid regions. Reuse that persistent map
   # and replace only aliases, rather than rebuilding it for every type read.
-  var out = bindings
-  for entry in map.entries(bindings) {
-    let (id, bound) = entry
+  map.fold(bindings, bindings, (out, id, bound) => {
     let value = resolve(bound, bindings)
-    if value != bound { out = map.insert(out, id, value) }
-  }
-  out
+    if value != bound { map.insert(out, id, value) } else { out }
+  })
 }
 
 fn bind(d: Scope, a: Scope, flex: List[Scope], bindings: Map[Int, Scope]) -> (Map[Int, Scope], Bool) = {
