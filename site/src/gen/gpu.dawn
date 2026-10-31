@@ -1580,29 +1580,56 @@ test "the kernel beside its golden is the whole function, from the lines it name
   })
 }
 
-## The golden count against an independent one: kernels.dawn dispatches on
-## each kernel's name (`  "<name>" ->`), and the set of those names is the set
-## of `.mlir` files. A count that came from a listing of the wrong directory,
-## or a golden left behind by a kernel that was renamed, is red here.
+# Probe helpers also dispatch on strings, sometimes with a real kernel's
+# name. They must not inflate this count or stand in for a missing kernel.
+fn kernel_dispatch_names(src: String) -> List[String] = {
+  let dispatch = cut_fn(src, "trace").text ++ "\n" ++ cut_fn(src, "trace_after").text
+  var arms: List[String] = []
+  for l in str.split(dispatch, "\n") {
+    match str.strip_prefix(l, "  \"") {
+      Some(rest) -> {
+        # an arm is `  "<name>" -> {` or, for a kernel whose body is one
+        # expression, `  "<name>" -> trace_kernel(..`: the name is what
+        # stands before the first `" ->`
+        let parts = str.split(rest, "\" ->")
+        if len(parts) >= 2 && not str.contains(parts[0], "\"") {
+          arms = arms ++ [parts[0]]
+        }
+      }
+      None -> ()
+    }
+  }
+  arms
+}
+
+test "kernel dispatch excludes probes and preserves missing or duplicate kernels" {
+  let src = """fn probe(name: String) -> TileProg = match name {
+  "second" -> probe()
+}
+fn trace(name: String) -> TileProg = match name {
+  "first" -> kernel()
+  _ -> trace_after(name)
+}
+fn trace_after(name: String) -> TileProg = match name {
+  "second" -> kernel()
+  _ -> panic("unknown kernel")
+}
+"""
+  assert kernel_dispatch_names(src) == ["first", "second"]
+  let missing = str.replace(src, "  \"second\" -> kernel()\n", "")
+  assert kernel_dispatch_names(missing) == ["first"]
+  let duplicate = str.replace(src, "\"second\" -> kernel()", "\"first\" -> kernel()")
+  assert kernel_dispatch_names(duplicate) == ["first", "first"]
+}
+
+## The golden count against the real trace and trace_after dispatches:
+## their kernel names must equal the set of .mlir files. A count from the
+## wrong directory, a renamed kernel's stale golden, or a duplicate arm is red.
 test "the golden kernels are the ones kernels.dawn dispatches" {
   with_fs_real(() => {
     let names = golden_names()
     assert len(names) > 0
-    var arms: List[String] = []
-    for l in str.split(must_read(kernels_file()), "\n") {
-      match str.strip_prefix(l, "  \"") {
-        Some(rest) -> {
-          # an arm is `  "<name>" -> {` or, for a kernel whose body is one
-          # expression, `  "<name>" -> trace_kernel(..`: the name is what
-          # stands before the first `" ->`
-          let parts = str.split(rest, "\" ->")
-          if len(parts) >= 2 && not str.contains(parts[0], "\"") {
-            arms = arms ++ [parts[0]]
-          }
-        }
-        None -> ()
-      }
-    }
+    let arms = kernel_dispatch_names(must_read(kernels_file()))
     assert sort(arms) == sort(names)
     assert len(names) == len(filter(must_list("scripts/tile-golden"), x => str.ends_with(x, ".tilebc")))
   })
