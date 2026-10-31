@@ -1,6 +1,6 @@
 # scaled MMA 组合覆盖
 
-> 状态：**current**。设计与实现已有定向证据；完整验收因既有序列家族超时停止，N6 未完成。
+> 状态：**current**。已实现组合与拒绝覆盖。四个新增数值组合在 sm100 通过 exact 判词；sm90/sm86 按表拒绝，三架构整轮结果见各自账本。
 > 2026-10-30；基线 `ea72ae9ecc8da23db60de3d8d98d96e3d99f7fc2`。
 
 ## 今天的缺口
@@ -79,8 +79,8 @@ e4m3 scale 的值必须非负（§9.7.22）；负 scale 的结果未定义，
 | e4m3 或 e5m2，V≠32 | f8 block scale factor 必须为 32 | P(D,e8m0,V,arch)，六个非法 V 全拒绝 |
 | fp4/e8m0 或 fp4/e5m3，V∉{16,32} | block scale factor 必须为 16 或 32 | P(e2m1,S,V,arch)，五个非法 V 全拒绝 |
 | fp4/e4m3，V≠16 | block scale factor 必须为 16 | P(e2m1,e4m3,V,arch)，六个非法 V 全拒绝 |
-| A/B 类型不相同，或左右 scale 类型不相同 | `mma_scaled[D,S]` 的类型参数约束；raw IR 仍由 assembler 验证 | S §9.7.22 AllElementTypeMatch；后续拒绝控制需钉住两条边 |
-| K 不被 V 整除、非正或非二次幂维度 | 现有 record/shape 拒绝；不发射设备请求 | `prog.dawn` 的 t_mmaf_scaled 与 check_shape；后续拒绝控制钉住 |
+| A/B 类型不相同，或左右 scale 类型不相同 | `mma_scaled[D,S]` 的类型参数约束；raw IR 仍由 assembler 验证 | S §9.7.22 AllElementTypeMatch；`mixed-operands` 与 `mixed-scales` 持久化探针分别钉住两条边 |
+| K 不被 V 整除、非正或非二次幂维度 | 现有 record/shape 拒绝；不发射设备请求 | `prog.dawn` 的 t_mmaf_scaled 与 check_shape；`nondividing-block` 以 K=64、scale 内维 128 触发 block=0 的明确拒绝 |
 
 规范网页及冻结 Ops.td 的组合表没有给 V 的数值列，尽管引言说表包含
 vector size；因此上述 V 限制来自真实 verifier，不能写成已在网页找到的规范条款。
@@ -162,10 +162,11 @@ K/scale 比例不合法的录制拒绝另有明确消息。
 可直接运行 `TILEIRAS=<assembler> scripts/tile-golden/run.sh --only scaled-mma-combinations`
 复核该矩阵及其正负判词。
 解释器差分已覆盖四个新数值组合，新增 e5m3 V32 仍按不可达处理。
-包测试为 tileir 299、tileref 33、tileinterp 205；selfhost 1202。
+包测试为 tileir 299、tileref 33、tileinterp 205；收尾 rebase 后 selfhost 1222。
+完整 golden 的 397 项均通过，含 trace twice、JVM/native parity、装配、反汇编与具名变异。
 这些数字是本刀实际执行的正确性计数，不是性能数据。
 
-完整 sm100 回归在既有 `seq.bin` 家族触发 300 秒截止，未追加账行。
+此前完整 sm100 回归曾在既有 `seq.bin` 家族触发 300 秒截止，未追加账行。
 最后打印的判词为 `xattn / last-launch-dropped / differ:result`，
 后续工作未打印完成信息；无法据此定位具体卡住的操作或判定环境原因。
 序列 harness、assembler 参数策略、writer、runtime 与相关继承 golden
@@ -178,10 +179,19 @@ K/scale 比例不合法的录制拒绝另有明确消息。
 
 原估时包含正常回归，没有包含独立超时诊断。原失败收据保留，
 不把它改写为环境偶发。后续对照后恢复正式验收，并重新基于包含宿主尺寸
-上界检查的 main：同一冻结输入按 sm100→sm90→sm86 串行全录，
-所有新组合及具名 writer 控制必须由新账行支撑。
-当前 feature 行接入四项 sm100 数值组合及其 writer 证据，
-e5m3 V32 仍只列装配证据；最终层级以完整正式账本及门禁为准。
+上界检查的 main：同一冻结输入已按 sm100→sm90→sm86 串行全录，每轮完整退出并核验 raw 后才进入下一轮。
+三本账的 inputs 均为 `7f9fe289c5fa`，保留实际录制源 `80fcf7098960`，没有重标为收尾提交。
+收尾 main 的编译器变更未改变 tile 输入；同一路径项目的新旧编译器生成 seq C 逐字节相同。
+
+| 整轮账本 | 架构族实际运行 | 四个新增数值组合 |
+|---|---:|---|
+| [sm100](../scripts/tile-gpu-diff/ledger-sm100.txt) | 10 | 全部 exact，具名 writer 数值负控通过 |
+| [sm90](../scripts/tile-gpu-diff/ledger-sm90.txt) | 3 | 全部明确 SKIP；真实装配拒绝与接受 counterpart 均核验 |
+| [sm86](../scripts/tile-gpu-diff/ledger.txt) | 0 | 全部明确 SKIP；真实装配拒绝与接受 counterpart 均核验 |
+
+feature 行接入四项 sm100 数值组合及其 writer 证据，e5m3 V32 仍只列装配证据。
+上述计数来自各账的 `arch=ran` 与输入摘要；拒绝判词来自每轮固定探针。
+完整门禁由最终提交的验证状态记录，不把局部设备通过替代全集。
 
 ## 不做的（理由）
 
