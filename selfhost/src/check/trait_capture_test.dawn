@@ -38,6 +38,28 @@ const HEAD: String = "pub trait Head[T: ^{c}, ^c] {\n" ++
 
 const MEASURE: String = "trait Measure[T: ^{c}, ^c] { fn measure(value: T) -> Int }\n"
 
+test "concrete calls infer declared value Capture bounds before selecting witnesses" {
+  assert errors(MEASURE ++
+      "impl[@s] Measure[I64Buf@s, ^{s}] { fn measure(value: I64Buf@s) -> Int = 3 }\n" ++
+      "fn through[T: Measure[c] + ^{c}, ^c](value: T) -> Int = measure(value)\n" ++
+      "fn direct[@s](value: I64Buf@s) -> Int = measure(value)\n" ++
+      "fn generic[@s](value: I64Buf@s) -> Int = through(value)\n") == []
+}
+
+test "concrete Item reduction substitutes the witness Scope before comparing results" {
+  assert errors(HEAD ++
+      "impl[@s] Head[I64Buf@s, ^{s}] {\n" ++
+      "type Item = I64Buf@s\nfn first(value: I64Buf@s) -> I64Buf@s = value\n}\n" ++
+      "fn same[@t](value: I64Buf@t) -> I64Buf@t = first(value)\n") == []
+}
+
+test "trait result instantiation preserves the subject's rigid Scope" {
+  let relay = "trait Relay[T: ^{c}, ^c] { fn relay(value: T) -> T = value }\n" ++
+    "impl[@s] Relay[I64Buf@s, ^{s}] {}\n"
+  assert errors(relay ++ "fn same[@s](value: I64Buf@s) -> I64Buf@s = relay(value)\n") == []
+  assert len(errors(relay ++ "fn relabel[@s, @t](value: I64Buf@s) -> I64Buf@t = relay(value)\n")) > 0
+}
+
 test "trait Capture syntax retains arguments bounds and formatting" {
   let source = HEAD ++ "impl[T: ^{c}, ^c] Head[List[T], c] {\n" ++
     "type Item = T\nfn first(value: List[T]) -> T = value[0]\n}\n" ++
@@ -216,10 +238,25 @@ test "witness checking keeps Capture arguments invariant" {
   assert cx.diags == []
   let imp = cx.local_impls[0]
   let empty = TraitApplication { id = imp.trait_id, args = [[]] }
+  assert imp.scope_params.scopes == [] && imp.scope_params.captures == []
   let s = Scope { name = "s", id = 987 }
   let extra = TraitApplication { ..empty, args = [[Region(s)]] }
   let (_, _, good) = trait_contract.witness_arguments(imp, empty, imp.subject, cx.adts, capture.empty_params())
   let (_, _, bad) = trait_contract.witness_arguments(imp, extra, imp.subject, cx.adts, capture.empty_params())
+  assert good && not bad
+}
+
+test "parameterized witness checking keeps Capture arguments invariant" {
+  let cx = checked(MEASURE ++ "type Zoned[@s, @t] = { left: I64Buf@s, right: I64Buf@t }\n" ++
+      "impl[@s, @t] Measure[Zoned[s, t], ^{s, t}] { fn measure(value: Zoned[s, t]) -> Int = 0 }\n")
+  assert cx.diags == []
+  let imp = cx.local_impls[0]
+  assert len(imp.scope_params.scopes) == 2
+  let exact = TraitApplication { id = imp.trait_id, args = imp.trait_args }
+  let extra = Scope { name = "extra", id = 9000101 }
+  let wider = TraitApplication { ..exact, args = [capture.union(exact.args[0], [Region(extra)])] }
+  let (_, _, good) = trait_contract.witness_arguments(imp, exact, imp.subject, cx.adts, capture.empty_params())
+  let (_, _, bad) = trait_contract.witness_arguments(imp, wider, imp.subject, cx.adts, capture.empty_params())
   assert good && not bad
 }
 
@@ -242,7 +279,8 @@ test "associated Mem bindings retain the impl Scope in exported metadata" {
   let source = parsed("use std/mem.{Mem}\ntrait Reader[T: ^{c}, ^c] {\n" ++
       "effect Read\nfn read(value: T) -> Int !T.Read\n}\n" ++
       "impl[@s] Reader[I64Buf@s, ^{s}] {\neffect Read = !Mem[s]\n" ++
-      "fn read(value: I64Buf@s) -> Int !Mem[s] = 0\n}\n")
+      "fn read(value: I64Buf@s) -> Int !Mem[s] = 0\n}\n" ++
+      "fn through[@t](value: I64Buf@t) -> Int !Mem[t] = read(value)\n")
   let (cx, _) = check_module(seed_prelude(cx_new(Some("model"), None)), source,
     map.from([("std/mem", exported)]))
   assert cx.diags == []

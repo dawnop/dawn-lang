@@ -133,10 +133,10 @@ MUTATIONS = {
     "lint-13": ((
         LOWER,
         """        if len(goals) == 0 {
-          dict_ref(st, tid, t)
+          dict_ref(st, app, t)
         } else {""",
         """        if len(goals) < 0 {
-          dict_ref(st, tid, t)
+          dict_ref(st, app, t)
         } else {""",
     ),),
     # #43: a local fn's body resolves a label through the enclosing frame.
@@ -158,8 +158,8 @@ MUTATIONS = {
     # #144: dictionary defs deduplicated by key without their arity.
     "lint-144": ((
         LOWER,
-        "let key = dict_key(tid, subject) ++ dict_shape_suffix(nargs)",
-        "let key = dict_key(tid, subject)",
+        "let key = dict_key(app, subject) ++ dict_shape_suffix(nargs)",
+        "let key = dict_key(app, subject)",
     ),),
     # arith D8: the primitive Int/Float slot of an operator trait without the
     # evidence parameter its method's projection asks for. The JVM fails to

@@ -91,7 +91,7 @@ alpha 重命名只用于类型比较和替换，不给作者两种解析。
 
 trait 声明恰有一个 Type 主体参数，可另声明零个或多个 Capture 参数；Capture binder、集合实参与参数上界复用既有 `^c`、`^{...}`。本刀不增添第二个 Type 主体、不开放 trait 方法独立泛型、不增加 Scope/Capture 的内部高阶量词。
 
-`trait M[T: ^{c}, ^c]` 声明主体的捕获上界。未写主体上界默认 `T: ^{}`，没有 trait 特例。trait 表中所有 binder 同时可见，未绑定名报错；主体位置仍不开放 supertrait bound。
+`trait M[T: ^{c}, ^c]` declares the subject capture upper bound. A subject without a bound uses the empty computation contract, `T: ^{}`. Data representation parameters follow the separate structural rule in section 3. All trait binders are visible together; unbound names are errors, and the subject position does not admit supertrait bounds.
 
 impl 头写完整应用 `M[Subject, CaptureArgs...]`，如 `impl[@s] M[I64Buf@s, ^{s}]`；类型参数的 trait bound 隐含该主体，只写其余实参，如 `[T: M[c] + ^{c}, ^c]`。显式命名集合实参 `c` 与既有名义类型同义；缺少实参报错，不推导成旧 API 或偷偷新增 binder。普通方法调用仍只用值实参/期望类型推断，不开放 `m[c](x)`。
 
@@ -129,9 +129,11 @@ assoc_effect_atom := effect_name ['[' scope_name ']']
 - 函数值的环境 C 为所有自由捕获值、被捕获的格子、字典和证据包的 cap 之并。
   参数/返回类型与 E 中的自由域也必须在存放处可命名，但不自动算成捕获环境。
   lambda 的调用行由体推出；局部命名 fn 同样计算环境，其行仍按显式签名检查。
-- `T: ^{c}` 允许 T 的值依赖 c 内的域。普通未写捕获 bound 的类型参数默认为
-  `T: ^{}`，不允许实例化为局部缓冲或局部闭包。需接收这些值的泛型库必须迁移为捕获多态。
-  这不是看定义体有没有具体 I64Buf 的检查。
+- `T: ^{c}` bounds reachable value captures. Function and impl parameters, trait subjects,
+  and associated type outputs default to empty capture contracts. Data, transparent alias
+  and opaque representation parameters do not acquire that default. Explicit bounds remain
+  mandatory at every application. These computation defaults remain staged until the later
+  K3b-2 slice enables them with the required standard library migration.
 - 未写捕获后缀的显式一等函数类型默认 `^{}`；局部无注解 let/lambda 推断集合。
   顶层/导出签名不从实现体偷偷推导非空公共捕获契约；需显式参数与上界。
   聚合的隐含字段依赖照常存在，不能用省略后缀清空它。
@@ -159,7 +161,7 @@ fn bind[T: ^{c}, ^c, !e](value: T,
 
 ### 3.1 trait 应用、见证支持与关联投影
 
-所有声明位置的普通 Type 参数，包括 trait 主体，省略捕获 bound 一律为 `^{}`。`T: ^{c}` 只声明可达值捕获上界；函数参数/返回类型中的自由域仍独立检查。trait bound 不自动放宽这个默认。
+Capture defaults follow quantification duties. Function declarations, including local functions, impl parameters, trait subjects and associated type outputs use empty computation contracts when omitted. A trait bound does not widen that default. Data representation parameters follow the structural rule below. `T: ^{c}` only bounds reachable value captures; free scopes in parameter and result types are checked independently.
 
 trait 应用的 Capture 实参是方法/成员契约的静态参数，并集为该见证环境的公开上界 W。应用良构要求 `support(Subject) ⊆ W`；support 是可达捕获与完整类型自由域支持之并，不改变普通 Type 参数捕获 bound 的含义。impl 可在输入 trait 应用良构的前提下检查，其实例化/见证求解必须实际验证此前提。impl 注册还须证明主体 cap 符合主体 bound，各关联类型绑定符合各自 bound，且字典的子见证与 Scope 实例键等依赖被 W 覆盖。无 Capture 实参的见证按空环境契约检查。对完整见证类型的自由域另作支持检查；第一版保守纳入 W，不得因运行时擦除、去虚化或 singleton 而丢弃静态依赖。
 
@@ -176,6 +178,42 @@ Capture 在 trait 应用上第一版按不变实参检查；同一个 trait 的�
 方法转函数值、默认方法调用、字典应用与转发、opaque 函数表、模块导出/再载入使用同一捕获与自由域契约。缓存和类型打印保存 trait Capture 参数、应用实参、成员上界；不保留无 Capture 信息的旧接口读取分支。
 
 解释性注：W 的独立证明是 A 的明确新增约束，不能假装从旧 `T:^{c}` 自动推出。它会保守拒绝某些实际只存代码、但类型里仍有局部域的字典逃逸；这符合现行“free_scope 也不得越界”的裁决。若要允许该类擦除，需要另证支持消除规则，不在本刀悄做优化。
+
+
+
+### 3.2 Structural data contracts and opaque envelopes
+
+Data, transparent alias and opaque representation parameters accept any well-formed Type
+argument whose support is nameable at the use. Explicit bounds still apply. Declaring a
+Scope or Capture axis still requires its complete explicit application. No hidden Capture
+binder is added to a constructor or a data declaration.
+
+Generated constructors, projections and pattern decomposition inherit their parent data
+quantification and explicit bounds. They substitute fields before computing dependencies.
+User wrapper functions, derived methods and default argument computations retain their own
+computation contracts. Constructor values are instantiated to ordinary monomorphic function
+types, whose environment and complete free scopes must fit the storage position.
+
+Tuple, List, Option, Result and user records and variants use substituted reachable fields.
+Recursive declaration components require a finite symbolic dependency summary and its least
+fixed point. An unresolved parameter or recursive edge cannot be treated as empty. A phantom
+nominal argument remains in complete type support; a transparent alias argument disappears
+only when expansion removes it. Function fields keep their own explicit environment and
+calling row. Structural data rules do not introduce nominal covariance or mutable slot
+covariance.
+
+The first opaque contract is determined by its public head. Its value capture envelope
+includes every Type argument's value captures and all explicit Scope and Capture arguments;
+complete support also includes free scopes in Type and effect arguments. The definition must
+prove that its hidden representation fits this envelope. Imports use the exported envelope
+without opening private fields, and missing envelope metadata is not interpreted as empty.
+Interfaces, caches, documentation and language server types retain quantification duties,
+explicit bounds, envelope metadata and static identities.
+
+These data summaries and opaque envelopes belong to the next K3b-2 slice. The call
+instantiation slice does not claim to implement them. Before enabling computation defaults,
+a real seed closure audit must cover the actual compiler and library migration. Control
+boundaries and domain discharge remain in K4.
 
 
 ## 4. 运行器与按域 Mem 消解
@@ -340,6 +378,19 @@ K4 保留控制边界、continuation 环境、local/peek/poke 的外域 Mem 不�
 消去的语义验收及后端审计；ctl_cross、ctl_store 均归 K4。
 K5 完成高阶 std 与 tileinterp 等客户的闭合迁移；发版后 K6 迁移站点 bcrypt/fake_clock。
 不能只改类型显示或只让七个返回反例拒绝就关闭 #847。
+
+K3b-2 starts with a separate call instantiation slice. Explicit value Capture bounds are
+inferred before witness selection. Forwarded trait arguments remain invariant when a
+value also has a wider declared bound. Item and associated effect reduction use the
+same Scope and Capture equations as the selected witness. The erased callee ABI keeps
+ordinary Type parameters while substituting its static Scope identities.
+
+Dictionary definitions retain complete applications until lowering has selected their
+subwitnesses and Scope keys. Scope arguments outside the subject participate in their
+identity and constructor layout. A projected Mem atom is read from the caller's evidence
+pack with that same instance key. Capture sets have no runtime slots. Actual environment
+inference, ordinary empty defaults, standard library migration and the remaining exit
+checks follow this slice; control boundaries and domain discharge remain in K4.
 
 两后端可以擦除静态域，不要求缓冲运行时增加域 id，也不承诺证据布局或 emit 零变化。
 必须验证 at/set 仍是直接原语，重新量 bcrypt 与 tileinterp；K1 无性能实测，不作速度承诺。

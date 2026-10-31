@@ -28,8 +28,8 @@ def drop_shape_suffix(kind):
     old = ('let name = "' + kind + '$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method ++\n'
            '    dict_shape_suffix(if param { len(goals) } else { 0 })')
     if kind == "bridge":
-        old = ('let name = "bridge$" ++ dict_key(tid, subject) ++ "$" ++ method ++\n'
-               '    dict_shape_suffix((if param { len(goals) } else { 0 }) + len(dict_scopes(subject)))')
+        old = ('let name = "bridge$" ++ dict_key(app, subject) ++ "$" ++ method ++\n'
+               '    dict_shape_suffix((if param { len(goals) } else { 0 }) + len(dict_scopes(app, subject)))')
     return (LOWER, old, old.split(' ++\n')[0])
 
 
@@ -37,8 +37,8 @@ MUTATIONS = {
     # The dictionary key forgets how many arguments the constructor takes.
     "dictionary-shape": ((
         LOWER,
-        "let key = dict_key(tid, subject) ++ dict_shape_suffix(nargs)",
-        "let key = dict_key(tid, subject)",
+        "let key = dict_key(app, subject) ++ dict_shape_suffix(nargs)",
+        "let key = dict_key(app, subject)",
     ),),
     # The constructor records no arguments at all.
     "constructor-arity": ((LOWER, "nargs = nargs,", "nargs = 0,"),),

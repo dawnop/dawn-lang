@@ -112,8 +112,14 @@ pub fn applied(tr: TraitI, app: TraitApplication) -> TraitI = {
 ## Validate the static application before constructing a witness. Capture
 ## arguments are equations here, not covariant upper bounds. Only a singleton
 ## Scope equation identifies a runtime key; a set never chooses one member.
-pub fn witness_arguments(imp: ImplI, app: TraitApplication, subject: Ty,
-  adts: Adts, params: capture.Params) -> (Map[Int, capture.Scope], Map[Int, capture.Capture], Bool) = {
+fn invariant_arguments(expected: TraitApplication, app: TraitApplication) -> Bool =
+  capture.trait_equal(expected, app)
+
+pub fn witness_equations(imp: ImplI, app: TraitApplication, subject: Ty) -> (Map[Int, capture.Scope], Map[Int, capture.Capture], Bool) = {
+  if len(imp.scope_params.scopes) == 0 && len(imp.scope_params.captures) == 0 {
+    return (map.empty(), map.empty(), invariant_arguments(TraitApplication { id = imp.trait_id,
+      args = imp.trait_args }, app))
+  }
   let (initial, fits) = scope_infer.infer(imp.subject, subject, imp.scope_params.scopes, map.empty())
   var sm = initial
   var cm = subject_captures(imp.subject, subject, imp.scope_params.captures, map.empty())
@@ -143,7 +149,14 @@ pub fn witness_arguments(imp: ImplI, app: TraitApplication, subject: Ty,
   }
   sm = scope_infer.normalized(sm)
   let expected = capture.trait_subst(TraitApplication { id = app.id, args = imp.trait_args }, sm, cm)
-  ok = ok && capture.trait_equal(expected, app)
+  ok = ok && invariant_arguments(expected, app)
+  (sm, cm, ok)
+}
+
+pub fn witness_arguments(imp: ImplI, app: TraitApplication, subject: Ty,
+  adts: Adts, params: capture.Params) -> (Map[Int, capture.Scope], Map[Int, capture.Capture], Bool) = {
+  let (sm, cm, equations_ok) = witness_equations(imp, app, subject)
+  var ok = equations_ok
   var tm: Map[Int, Ty] = map.empty()
   let args = type_args_of(subject)
   for i in 0..len(imp.tparams) {
@@ -196,4 +209,34 @@ fn subject_captures(formal: Ty, actual: Ty, flex: List[capture.CaptureParam],
     cm = subject_captures(declared[i], provided[i], flex, cm)
   } }
   cm
+}
+
+## Member types and rows must use the exact equations which selected the
+## witness. In particular, an impl's bound Scope is not the caller's Scope.
+pub fn instantiate(imp: ImplI, app: TraitApplication, subject: Ty) -> ImplI = {
+  let scoped = instantiate_scopes(imp, app, subject)
+  var tm: Map[Int, Ty] = map.empty()
+  let args = type_args_of(subject)
+  for i in 0..len(imp.tparams) { if i < len(args) { match imp.tparams[i] {
+    TyVar(_, id) -> { tm = map.insert(tm, id, args[i]) }
+    _ -> ()
+  } } }
+  let em: Map[Int, Eff] = map.empty()
+  let types = tm
+  ImplI { ..scoped, subject = subject,
+    assoc_bindings = map(scoped.assoc_bindings, entry => { let (name, value) = entry
+      (name, subst(value, types, em)) }) }
+}
+
+## The erased callee ABI keeps ordinary Type variables. Scope and Capture
+## identities still have to agree with the caller's checked application.
+pub fn instantiate_scopes(imp: ImplI, app: TraitApplication, subject: Ty) -> ImplI = {
+  if len(imp.scope_params.scopes) == 0 && len(imp.scope_params.captures) == 0 { return imp }
+  let (sm, cm, _) = witness_equations(imp, app, subject)
+  ImplI { ..imp, trait_args = app.args,
+    assoc_bindings = map(imp.assoc_bindings, entry => { let (name, value) = entry
+      (name, subst_scopes(value, sm, cm)) }),
+    eff_bindings = map(imp.eff_bindings, entry => { let (name, row) = entry
+      (name, subst_capture_eff(row, sm, cm)) }),
+    constraints = map(imp.constraints, bs => map(bs, b => capture.trait_subst(b, sm, cm))) }
 }
