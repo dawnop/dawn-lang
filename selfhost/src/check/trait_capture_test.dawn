@@ -1,0 +1,275 @@
+# Complete trait contracts must survive rigid defaults and module interfaces.
+# Source strings isolate the new surface from the seed-readable compiler.
+use std/map
+use std/list
+use std/str
+use check/capture
+use check/capture.{Scope, TraitApplication, Region, CaptureVar, Function}
+use check/types
+use check/types.{Ty, TyInt, TyUnit, TyVar, TyI64Buf, TyFn, TyAssoc, EPure}
+use check/trait_contract
+use check/scope_infer
+use check/cx.{Cx, cx_new}
+use check/passes.{seed_prelude}
+use check/checker.{check_module, exports_of, reduce_assoc}
+use front/parser
+use front/ast
+use front/fmt
+use front/astdump
+
+fn parsed(source: String) -> ast.Module = {
+  let (module, errors) = parser.parse_module(source)
+  if errors != [] { panic(errors[0].msg) }
+  module
+}
+
+fn checked(source: String) -> Cx !io = {
+  let (cx, _) = check_module(seed_prelude(cx_new(Some("model"), None)), parsed(source), map.empty())
+  cx
+}
+
+fn errors(source: String) -> List[String] !io = map(checked(source).diags, d => d.msg)
+fn has_error(source: String, fragment: String) -> Bool !io =
+  list.any(errors(source), message => str.contains(message, fragment))
+
+const HEAD: String = "pub trait Head[T: ^{c}, ^c] {\n" ++
+  "type Item: ^{c}\n" ++
+  "fn first(value: T) -> T.Item\n}\n"
+
+const MEASURE: String = "trait Measure[T: ^{c}, ^c] { fn measure(value: T) -> Int }\n"
+
+test "trait Capture syntax retains arguments bounds and formatting" {
+  let source = HEAD ++ "impl[T: ^{c}, ^c] Head[List[T], c] {\n" ++
+    "type Item = T\nfn first(value: List[T]) -> T = value[0]\n}\n" ++
+    "fn forward[T: Head[c] + ^{c}, ^c](value: T) -> T.Item = first(value)\n"
+  let module = parsed(source)
+  let declaration = ast.module_traits(module)[0]
+  assert declaration.scope.binders[0].capture
+  assert declaration.scope.bounds[0].members == ["c"]
+  assert declaration.assoc[0].bound == Some(["c"])
+  assert ast.module_impls(module)[0].capture_args[0].named
+  let f = ast.module_fns(module)[0]
+  assert f.tparams[0].bounds[0].args[0].members == ["c"]
+  assert ast.trait_header("Head", declaration.tp, declaration.scope) == "trait Head[T: ^{c}, ^c]"
+  let formatted = match fmt.format(source) { Ok(text) -> text, Err(ds) -> panic(ds[0].msg) }
+  assert fmt.format(formatted) == Ok(formatted)
+  assert ast.module_traits(parsed(formatted))[0].assoc[0].bound == Some(["c"])
+  let dump = astdump.render_module(module, [])
+  assert str.contains(dump, "CaptureParam ^c")
+  assert str.contains(dump, "TraitCaptureArg c")
+  assert str.contains(dump, "bound=^{c}")
+}
+
+test "trait Capture syntax keeps one Type subject and no method quantifiers" {
+  for source in [
+    "trait Bad[T, U] { fn f(value: T) -> T }",
+    "trait Bad[T, @s] { fn f(value: T) -> T }",
+    "trait Bad[T, !e] { fn f(value: T) -> T }",
+    "trait Bad[T: Show] { fn f(value: T) -> T }",
+    "trait Bad[T, ^c] { fn f[^d](value: T) -> T }"
+  ] { let (_, ds) = parser.parse_module(source)
+    assert len(ds) > 0 }
+}
+
+test "trait bounds require explicit Capture arity and kind" {
+  assert has_error(MEASURE ++ "fn bad[T: Measure](value: T) -> Unit = ()", "requires 1 Capture argument")
+  assert has_error(MEASURE ++ "fn bad[@s, T: Measure[s]](value: T) -> Unit = ()", "must name a Capture parameter")
+  assert has_error(MEASURE ++ "fn bad[T: Measure[c]](value: T) -> Unit = ()", "unknown Scope or capture parameter")
+  assert has_error(MEASURE ++ "fn bad[@s, @t, T: Measure[^{s}] + Measure[^{t}]](value: T) -> Unit = ()",
+    "conflicting Capture arguments")
+  assert has_error("trait Closed[T: ^{c}, ^c: ^{}] { fn inspect(value: T) -> Int }\n" ++
+      "impl[@s] Closed[Int, ^{s}] { fn inspect(value: Int) -> Int = value }", "exceeds its declared upper bound")
+}
+
+test "impl application support and private Scope checks precede members" {
+  assert has_error(MEASURE ++ "type Token[@s] = { call: fn(I64Buf@s) -> Int }\n" ++
+      "impl[@s] Measure[Token[s], ^{}] {\n" ++
+      "fn measure(value: Token[s]) -> Int = 0\n}", "subject support is not covered")
+  assert has_error(MEASURE ++ "impl[@s] Measure[Int, ^{}] {\n" ++
+      "fn measure(value: Int) -> Int = value\n}", "Scope `s` is not determined")
+  assert has_error(MEASURE ++ "impl[^d] Measure[Int, ^{}] {\n" ++
+      "fn measure(value: Int) -> Int = value\n}", "Capture `d` is not determined")
+}
+
+test "associated Item upper bounds are independent of subject captures" {
+  assert errors(HEAD ++ "impl[T: ^{c}, ^c] Head[List[T], c] {\n" ++
+      "type Item = T\nfn first(value: List[T]) -> T = value[0]\n}\n") == []
+  assert has_error("trait Bare[T: ^{c}, ^c] {\ntype Item\nfn item(value: T) -> T.Item\n}\n" ++
+      "impl[@s] Bare[I64Buf@s, ^{s}] {\ntype Item = I64Buf@s\n" ++
+      "fn item(value: I64Buf@s) -> I64Buf@s = value\n}", "associated type `Item` exceeds its capture upper bound ^{}")
+  assert errors("trait Separate[T: ^{c}, ^c] {\ntype Item\n" ++
+      "fn later(value: T.Item) -> (fn() -> T.Item) = () => value\n}\n") == []
+  assert has_error("trait Captured[T: ^{c}, ^c] {\ntype Item: ^{c}\n" ++
+      "fn later(value: T.Item) -> (fn() -> T.Item) = () => value\n}\n", "default body is fn() -> T.Item ^{c}")
+}
+
+test "trait default checks rigid environments at the definition" {
+  assert errors("trait Defer[T: ^{c}, ^c] {\n" ++
+      "fn later(value: T) -> (fn() -> T ^{c}) = () => value\n}\n") == []
+  assert has_error("trait Bad[T: ^{c}, ^c] {\n" ++
+      "fn later(value: T) -> (fn() -> T) = () => value\n}\n", "default body is fn() -> T ^{c}")
+  assert has_error("trait Local[T: ^{c}, ^c] {\n" ++
+      "fn later(value: T) -> (fn() -> T) = {\nfn read() -> T = value\nread\n}\n}\n", "default body is fn() -> T ^{c}")
+}
+
+test "trait default forwards the declared complete application" {
+  assert errors("trait Copy[T: ^{c}, ^c] {\n" ++
+      "fn copy(value: T) -> T\n" ++
+      "fn later(value: T) -> (fn() -> T ^{c}) = () => copy(value)\n}\n") == []
+  assert errors("trait Copy[T: ^{d}, ^d] { fn copy(value: T) -> T }\n" ++
+      "fn forward[T: Copy[d] + ^{c}, ^c, ^d](value: T) -> T = copy(value)\n") == []
+}
+
+test "a default method value retains its forwarded dictionary support" {
+  assert errors("trait Method[T: ^{c}, ^c] {\n" ++
+      "fn copy(value: T) -> T\n" ++
+      "fn saved() -> (fn(T) -> T ^{c}) = copy\n}\n") == []
+  assert has_error("trait Method[T: ^{c}, ^c] {\n" ++
+      "fn copy(value: T) -> T\n" ++
+      "fn saved() -> (fn(T) -> T) = copy\n}\n", "default body is fn(T) -> T ^{c}")
+}
+
+test "a default closing only over a dictionary still requires its Capture contract" {
+  let header = "trait Empty[T: ^{c}, ^c] {\nfn make(n: Int) -> T\n"
+  let body = " = () => {\nlet value: T = make(n)\nvalue\n}\n}\n"
+  assert errors(header ++ "fn saved(n: Int) -> (fn() -> T ^{c})" ++ body) == []
+  assert has_error(header ++ "fn saved(n: Int) -> (fn() -> T)" ++ body, "default body is fn() -> T ^{c}")
+}
+
+test "complete trait applications survive interface export and reload" {
+  let producer = parsed(HEAD)
+  let (cx, _) = check_module(seed_prelude(cx_new(Some("model"), None)), producer, map.empty())
+  assert cx.diags == []
+  let exported = exports_of(cx, producer, "model", "model")
+  let tid = map.get(exported.traits_by_name, "Head").expect("exported trait")
+  let tr = types.trait_of(exported.trait_infos, tid)
+  assert len(tr.scope_params.captures) == 1
+  let (_, item_upper) = tr.assoc_bounds[0]
+  assert item_upper == [CaptureVar("c", tr.scope_params.captures[0].id)]
+  let consumer = parsed("use model.{Head, first}\n" ++
+      "pub fn forward[T: Head[d] + ^{d}, ^d](value: T) -> T.Item = first(value)\n")
+  let (read, _) = check_module(seed_prelude(cx_new(Some("consumer"), None)), consumer, map.from([("model", exported)]))
+  assert read.diags == []
+  let sig = map.get(read.fns, "forward").expect("consumer signature")
+  let c = CaptureVar("d", sig.scope_params.captures[0].id)
+  assert sig.constraints[0][0].args == [[c]]
+  match sig.ret {
+    TyAssoc(_, app, "Item", upper) -> { assert app.args == [[c]] && upper == [c] }
+    _ -> { assert false }
+  }
+  assert str.contains(types.sig_render(read.adts, read.traits, sig), "Head[^{d}]")
+  assert exported != exports_of(read, consumer, "consumer", "consumer")
+  let region = Scope { name = "s", id = 777 }
+  let replaced = scope_infer.contract(sig, map.empty(), map.from([(sig.scope_params.captures[0].id, [Region(region)])]))
+  assert replaced.constraints[0][0].args == [[Region(region)]]
+  match replaced.ret {
+    TyAssoc(_, app, "Item", upper) -> { assert app.args == [[Region(region)]] && upper == [Region(region)] }
+    _ -> { assert false }
+  }
+}
+
+test "projection and effect substitution retain complete arguments and member bounds" {
+  let s = Scope { name = "s", id = 1 }
+  let t = Scope { name = "t", id = 2 }
+  let c = CaptureVar("c", 3)
+  let app = TraitApplication { id = 77, args = [[Region(s), c]] }
+  let projection = TyAssoc(TyVar("T", 4), app, "Item", [c])
+  let replaced = types.subst_scopes(projection, map.from([(1, t)]), map.from([(3, [Region(t)])]))
+  assert replaced == TyAssoc(TyVar("T", 4), TraitApplication { id = 77, args = [[Region(t)]] }, "Item", [Region(t)])
+  assert capture.contains(types.ty_scope_refs(replaced), Region(t))
+  assert not types.ty_equal(projection, TyAssoc(TyVar("T", 4), app, "Item", []))
+  let row = types.EffAssoc("T", 4, app, "Read")
+  let changed = types.subst_capture_eff(row, map.from([(1, t)]), map.from([(3, [Region(t)])]))
+  let (_, _, row_app, _) = types.eff_assocs(changed)[0]
+  assert row_app.args == [[Region(t)]]
+  let fn_type = TyFn([], TyUnit, row, Function { scopes = [], bound = None })
+  assert types.subst_scopes(fn_type, map.empty(), map.from([(3, [Region(t)])])) != fn_type
+  assert capture.contains(types.ty_scope_refs(fn_type), Region(s))
+  let left = TyFn([], TyUnit, types.EffAssoc("T", 4,
+    TraitApplication { id = 77, args = [[Region(s)]] }, "Read"), Function { scopes = [s], bound = None })
+  let right = TyFn([], TyUnit, types.EffAssoc("T", 4,
+    TraitApplication { id = 77, args = [[Region(t)]] }, "Read"), Function { scopes = [t], bound = None })
+  assert types.ty_equal(left, right)
+  assert not capture.contains(types.ty_scope_refs(left), Region(s))
+  assert not types.ty_equal(TyFn([], TyInt, types.EIo, capture.empty_function()),
+    TyFn([], TyInt, types.eff_union([types.EIo, types.EffVar("r", 88)]), capture.empty_function()))
+}
+
+test "witness keys distinguish complete applications by identity rather than display names" {
+  let s = Scope { name = "same", id = 1 }
+  let t = Scope { name = "same", id = 2 }
+  let renamed = Scope { name = "other", id = 1 }
+  let left = TraitApplication { id = 77, args = [[Region(s)]] }
+  let right = TraitApplication { id = 77, args = [[Region(t)]] }
+  let alpha = TraitApplication { id = 77, args = [[Region(renamed), Region(s)]] }
+  assert capture.trait_equal(left, alpha)
+  assert capture.dictionary_key(4, left) == capture.dictionary_key(4, alpha)
+  assert capture.dictionary_key(4, left) != capture.dictionary_key(4, right)
+  assert capture.dictionary_key(4, left) != capture.dictionary_key(4, capture.closed_trait(77))
+  assert capture.trait_compare(left, alpha) == 0
+  assert capture.trait_compare(left, right) < 0
+}
+
+test "witness checking keeps Capture arguments invariant" {
+  let cx = checked(MEASURE ++ "type Token = { n: Int }\n" ++
+      "impl Measure[Token, ^{}] { fn measure(value: Token) -> Int = value.n }\n")
+  assert cx.diags == []
+  let imp = cx.local_impls[0]
+  let empty = TraitApplication { id = imp.trait_id, args = [[]] }
+  let s = Scope { name = "s", id = 987 }
+  let extra = TraitApplication { ..empty, args = [[Region(s)]] }
+  let (_, _, good) = trait_contract.witness_arguments(imp, empty, imp.subject, cx.adts, capture.empty_params())
+  let (_, _, bad) = trait_contract.witness_arguments(imp, extra, imp.subject, cx.adts, capture.empty_params())
+  assert good && not bad
+}
+
+test "impl dependency checks retain subwitness and member type support" {
+  assert has_error(MEASURE ++ "trait Other[T: ^{d}, ^d] { fn other(value: T) -> Int }\n" ++
+      "type Box[T] = { value: T }\n" ++
+      "impl[T: Other[d] + ^{c}, ^c, ^d] Measure[Box[T], c] {\n" ++
+      "fn measure(value: Box[T]) -> Int = 0\n}\n", "impl subwitness support is not covered")
+  assert has_error("trait Factory[T: ^{c}, ^c] { type Item\nfn make(value: T) -> T.Item }\n" ++
+      "impl[@s] Factory[Int, ^{}] {\ntype Item = fn(I64Buf@s) -> Int\n" ++
+      "fn make(value: Int) -> (fn(I64Buf@s) -> Int) = _b => value\n}\n",
+    "associated type `Item` has free support outside")
+}
+
+test "associated Mem bindings retain the impl Scope in exported metadata" {
+  let mem = parsed("pub effect Mem[@s] { fn allocate(n: Int) -> I64Buf@s }\n")
+  let (defined, _) = check_module(seed_prelude(cx_new(Some("std/mem"), None)), mem, map.empty())
+  assert defined.diags == []
+  let exported = exports_of(defined, mem, "std/mem", "std/mem")
+  let source = parsed("use std/mem.{Mem}\ntrait Reader[T: ^{c}, ^c] {\n" ++
+      "effect Read\nfn read(value: T) -> Int !T.Read\n}\n" ++
+      "impl[@s] Reader[I64Buf@s, ^{s}] {\neffect Read = !Mem[s]\n" ++
+      "fn read(value: I64Buf@s) -> Int !Mem[s] = 0\n}\n")
+  let (cx, _) = check_module(seed_prelude(cx_new(Some("model"), None)), source,
+    map.from([("std/mem", exported)]))
+  assert cx.diags == []
+  let imp = cx.local_impls[0]
+  let (_, row) = imp.eff_bindings[0]
+  assert types.eff_scopes(row)[0].scope.id == imp.scope_params.scopes[0].id
+  let surface = exports_of(cx, source, "model", "model")
+  assert surface.impls[0].trait_args == imp.trait_args
+  assert surface.impls[0].eff_bindings == imp.eff_bindings
+}
+
+test "a function's free type Scope support is independent of its value captures" {
+  let s = Scope { name = "s", id = 1 }
+  let value = TyFn([TyI64Buf(s)], TyInt, EPure, capture.empty_function())
+  assert trait_contract.capture_of(map.empty(), capture.empty_params(), value) == []
+  assert trait_contract.support(map.empty(), capture.empty_params(), value) == [Region(s)]
+}
+
+test "a concrete independent associated result sheds the declared projection bound" {
+  let cx = checked("type Token = { n: Int }\n" ++
+      "trait Cursor[T: ^{c}, ^c] {\ntype Cur: ^{c}\nfn cursor(value: T) -> T.Cur\n}\n" ++
+      "impl[^d] Cursor[Token, d] {\ntype Cur = Int\nfn cursor(value: Token) -> Int = value.n\n}\n")
+  assert cx.diags == []
+  let tid = map.get(cx.traits_by_name, "Cursor").expect("trait")
+  let aid = map.get(cx.adts_by_name, "Token").expect("subject")
+  let subject: Ty = types.TyAdt(aid, [], capture.empty_arguments())
+  let region = Scope { name = "s", id = 77 }
+  let projected = TyAssoc(subject, TraitApplication { id = tid, args = [[Region(region)]] }, "Cur", [Region(region)])
+  assert reduce_assoc(cx, projected) == TyInt
+}

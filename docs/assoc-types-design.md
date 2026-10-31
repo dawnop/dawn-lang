@@ -1,5 +1,7 @@
 # 关联类型设计 — trait 的 `type Item` 与投影 `T.Item`
 
+> 2026-10-31 捕获契约增量：关联类型现可声明有限捕获上界 `type Item: ^{c}`，裸成员默认为空；投影保存完整 trait Capture 实参，未归约时使用声明上界，具体化后使用实际绑定。类型默认、任意 trait bound 与成员泛型仍不开放。完整契约见 [Mem 捕获设计](mem-capture-scope-design.md#21-trait-capture-参数与关联成员)。下文原分期条文按此修订解释。
+
 > 状态：current（刀 1 落地 2026-08-02；刀 2 也已落地 2026-08-02：prelude Iter +
 > 五个 std impl + for..in 去特判，决策与偏差记录见 §6）
 >

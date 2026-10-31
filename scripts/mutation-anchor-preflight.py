@@ -60,6 +60,7 @@ ADAPTERS = {
     "lsp-semantic-tokens": (".",),
     "map-reuse-contract": (".",),
     "mem-contract": (".",),
+    "trait-capture-contract": (".",),
     "narrow-contract": (".",),
     "math-contract": (".",),
     "lsp-workspace-contract": ("selfhost",),
