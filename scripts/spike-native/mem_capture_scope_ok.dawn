@@ -5,7 +5,7 @@ use std/mem
 use std/mem.{Mem}
 
 type Holder[@s] = { b: I64Buf@s }
-type Source[@s] = { read: fn(Int) -> Int !Mem[s] }
+type Source[@s] = { read: fn(Int) -> Int !Mem[s] ^{s} }
 
 fn bind[T: ^{c}, ^c, !e](value: T, read: fn(T, Int) -> Int !e ^{c}) -> (fn(Int) -> Int !e ^{c}) =
   n => read(value, n)
@@ -13,13 +13,13 @@ fn bind[T: ^{c}, ^c, !e](value: T, read: fn(T, Int) -> Int !e ^{c}) -> (fn(Int) 
 fn local() -> Int = mem.with_mem([@s] () => {
   let held: Holder[s] = Holder { b = mem.new(1) }
   let bufs = [held.b, mem.new(2)]
-  let callback: fn(Int) -> Int !Mem[s] = bind(bufs[0], (b: I64Buf@s, n: Int) => {
+  let callback: fn(Int) -> Int !Mem[s] ^{s} = bind(bufs[0], (b: I64Buf@s, n: Int) => {
     let old = mem.at(b, 0)
     mem.set(b, 0, old + n)
     old
   })
   let source: Source[s] = Source { read = callback }
-  let size: fn() -> Int = () => len(bufs[1])
+  let size: fn() -> Int ^{s} = () => len(bufs[1])
   let first = source.read(1)
   first + source.read(1) + size()
 })

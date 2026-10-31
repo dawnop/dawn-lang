@@ -1,0 +1,69 @@
+# Concrete calls exercise the same static application through direct calls,
+# defaults, conditional dictionaries, method values and scoped effect bridges.
+# A Scope carried only by a trait argument must still reach the impl bridge.
+use std/mem
+use std/mem.{Mem}
+
+trait Measure[T: ^{c}, ^c] {
+  fn measure(value: T) -> Int
+  fn measured(value: T) -> (fn() -> Int ^{c}) = () => measure(value)
+}
+impl[@s] Measure[I64Buf@s, ^{s}] {
+  fn measure(value: I64Buf@s) -> Int = len(value)
+}
+fn read_size[T: Measure[c] + ^{c}, ^c](value: T) -> Int = measure(value)
+
+trait Head[C: ^{c}, ^c] {
+  type Item: ^{c}
+  fn first(values: C) -> C.Item
+}
+impl[T: ^{c}, ^c] Head[List[T], c] {
+  type Item = T
+  fn first(values: List[T]) -> T = values[0]
+}
+fn pick[C: Head[c] + ^{c}, ^c](values: C) -> C.Item = first(values)
+
+trait Stamp[T: ^{c}, ^c] { fn stamp(value: T) -> Int }
+impl[@s] Stamp[Int, ^{s}] { fn stamp(value: Int) -> Int = value + 1 }
+fn stamped[@s, T: Stamp[^{s}]](value: T, token: I64Buf@s) -> Int = stamp(value)
+
+trait Reader[T: ^{c}, ^c] {
+  effect Read
+  fn read_value(value: T) -> Int !T.Read
+  fn read_again(value: T) -> Int !T.Read = read_value(value)
+}
+impl[@s] Reader[I64Buf@s, ^{s}] {
+  effect Read = !Mem[s]
+  fn read_value(value: I64Buf@s) -> Int !Mem[s] = mem.at(value, 0)
+}
+fn read_through[T: Reader[c] + ^{c}, ^c](value: T) -> Int !T.Read = read_again(value)
+
+trait Empty[T: ^{c}, ^c] { fn empty_value() -> T }
+type EmptyAt[@s] = { value: Option[I64Buf@s] }
+impl[@s] Empty[EmptyAt[s], ^{s}] {
+  fn empty_value() -> EmptyAt[s] = EmptyAt { value = None }
+}
+impl Empty[Int, ^ { }] { fn empty_value() -> Int = 0 }
+fn factory[T: Empty[c] + ^{c}, ^c](tag: T) -> (fn() -> Int ^{c}) = {
+  let make: fn() -> T ^{c} = empty_value
+  () => {
+    let _value = make()
+    0
+  }
+}
+
+fn answer() -> Int = mem.with_mem([@s] () => {
+  let b = mem.new(3)
+  mem.set(b, 0, 7)
+  let later: fn() -> Int ^{s} = measured(b)
+  let tag: EmptyAt[s] = EmptyAt { value = None }
+  let make: fn() -> Int ^{s} = factory(tag)
+  later() + read_size(b) + len(pick([b])) + stamped(6, b) + read_through(b) + make()
+})
+
+pub fn main() -> Unit !io = {
+  if answer() != 23 { panic("trait call result mismatch") }
+  let closed = factory(0)
+  if closed() != 0 { panic("closed dictionary result mismatch") }
+  println("trait capture calls")
+}

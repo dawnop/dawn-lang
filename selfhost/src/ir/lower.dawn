@@ -14,22 +14,22 @@
 #      gets a CBox. If a backend has to re-derive it, it is not lowered.
 
 use check/capture
-use check/capture.{Arguments as CaptureArguments}
+use check/capture.{Arguments as CaptureArguments, Scope as CaptureScope, TraitApplication}
 use std/list
 use std/map
 use std/str
 use check/provenance as observation
 use check/types.{ev_record_name, ty_scope_refs, scope_key_name, ScopedEffect, TyI64Buf, TyF64Buf, EvidenceLabel, apply_scope_arguments, ev_pack_ty, fn_runtime_params, sig_runtime_params, EvidenceRole, ScopedLabelSlot, evidence_roles, evidence_labels, evidence_label_role, evidence_label_type, Intr,
   intrinsics,
-  subst,
+  subst, subst_scopes,
   reduce_via_bindings,
   peel_opaque,
   ty_loc,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyMap, TyJava,
   DICT_ADT_ID,
-  Sym, Sig, Eff, EPure, Traits, TraitI, ImplI, MethodSig,
-  eff_labels, eff_vars, eff_assocs, nev, atom_keys, sig_abi_eff,
+  Sym, Sig, Eff, EPure, EffAssoc, scoped_eff, Traits, TraitI, ImplI, MethodSig,
+  eff_vars, eff_assocs, nev, atom_keys, sig_abi_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty, erased_cell_ty, erased_ctl_ty,
   EV_PACK_ID, key_is_label, key_effect_id, label_key, var_key, assoc_key,
   VariableSlot, AssociatedSlot,
@@ -39,9 +39,10 @@ use check/types.{ev_record_name, ty_scope_refs, scope_key_name, ScopedEffect, Ty
   FROM_INT_ID, FROM_FLOAT_ID, is_lit_trait, LEN_ID,
   BIT_AND_ID, BIT_OR_ID, BIT_XOR_ID, SHL_ID, SHR_ID, USHR_ID, BIT_NOT_ID, is_bitwise_trait, is_shift_trait,
   is_eq_scalar, is_ord_scalar, is_hash_scalar, is_show_scalar, Impls, impl_at, has_impl_at,
-  is_ground, expandable, sub_goals
+  is_ground, expandable, witness_goals
 }
 use check/scope_infer
+use check/trait_contract
 use check/identity
 use check/tast_positions
 use check/tast.{CallSource, call_source,
@@ -706,7 +707,7 @@ fn has_own_display(st: LSt, t: Ty) -> Bool =
 ## impl and its method are known to be there.
 fn display_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
   let imp = impl_for(st, DISPLAY_ID, t)
-  let (st1, ds) = goal_dicts(st, sub_goals(st.impls, DISPLAY_ID, t))
+  let (st1, ds) = goal_dicts(st, dict_goals(st, capture.closed_trait(DISPLAY_ID), t))
   (st1, CCall(
     CImpl(owner_or(imp.owner, st1.owner), DISPLAY_ID, t, "display"), [x] ++ ds, TyString, CNoSite))
 }
@@ -1446,9 +1447,9 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
 ## drops ADT type arguments on purpose (it names v1 impl subjects, which are
 ## never generic), so it would give `Option[Int]` and `Option[String]` the
 ## same dictionary.
-fn dict_scopes(subject: Ty) -> List[capture.Scope] = {
+fn dict_scopes(app: capture.TraitApplication, subject: Ty) -> List[capture.Scope] = {
   var out: List[capture.Scope] = []
-  for member in ty_scope_refs(subject) {
+  for member in capture.union(ty_scope_refs(subject), capture.trait_support(app)) {
     match member { capture.Region(region) -> { out = out ++ [region] }, _ -> () }
   }
   out
@@ -1463,17 +1464,39 @@ fn scope_value(st: LSt, region: capture.Scope) -> CExpr = {
   panic("lower: missing instance key for Scope `" ++ region.name ++ "`")
 }
 
-fn impl_scopes(imp: ImplI, subject: Ty) -> List[capture.Scope] = {
-  let (bindings, _) = scope_infer.infer(imp.subject, subject, imp.scope_params.scopes, map.empty())
+fn impl_scopes(imp: ImplI, app: capture.TraitApplication, subject: Ty) -> List[capture.Scope] = {
+  let (bindings, _, _) = trait_contract.witness_equations(imp, app, subject)
   map(imp.scope_params.scopes, region => scope_infer.resolve(region, bindings))
 }
 
-fn impl_scope_values(st: LSt, imp: ImplI, subject: Ty) -> List[CExpr] =
-  map(impl_scopes(imp, subject), region => scope_value(st, region))
+fn impl_scope_values(st: LSt, imp: ImplI, app: capture.TraitApplication, subject: Ty) -> List[CExpr] =
+  map(impl_scopes(imp, app, subject), region => scope_value(st, region))
 
-fn dict_key(tid: Int, subject: Ty) -> String =
-  "dict$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++
-  join(map(dict_scopes(subject), region => "\$scope" ++ to_string(region.id)), "")
+fn dict_key(app: capture.TraitApplication, subject: Ty) -> String = {
+  var suffix = ""
+  for arg in app.args {
+    suffix = suffix ++ "\$cap"
+    for member in capture.normalize(arg) { suffix = suffix ++ match member {
+      capture.Region(region) -> "\$r" ++ to_string(region.id)
+      capture.CaptureVar(_, id) -> "\$c" ++ to_string(id)
+    } }
+  }
+  "dict$" ++ to_string(app.id) ++ "$" ++ ty_key_inst(subject) ++ suffix ++
+    join(map(dict_scopes(app, subject), region => "\$scope" ++ to_string(region.id)), "")
+}
+
+fn dict_goals(st: LSt, app: capture.TraitApplication, subject: Ty) -> List[(capture.TraitApplication, Ty)] = {
+  let goals = witness_goals(st.impls, app.id, subject)
+  match impl_at(st.impls, app.id, subject) {
+    None -> goals
+    Some(imp) -> {
+      if len(imp.scope_params.scopes) == 0 && len(imp.scope_params.captures) == 0 { return goals }
+      let (sm, cm, _) = trait_contract.witness_equations(imp, app, subject)
+      map(goals, entry => { let (bound, value) = entry
+        (capture.trait_subst(bound, sm, cm), subst_scopes(value, sm, cm)) })
+    }
+  }
+}
 
 ## Constructor shape is part of emitted identity, but not of semantic
 ## evidence lookup in dict_env. Keep singleton names and distinguish every
@@ -1590,14 +1613,14 @@ fn dict_ty() -> Ty = TyAdt(DICT_ADT_ID, [], capture.empty_arguments())
 ## This is every ground witness, plus a conditional impl whose subject still
 ## contains type variables but whose bounds contribute no sub-goals. Every
 ## slot is resolved here, so a backend only has to lay out pointers.
-fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
-  if len(dict_scopes(subject)) > 0 { return dict_expr(st, tid, subject) }
+fn dict_ref(st: LSt, app: capture.TraitApplication, subject: Ty) -> (LSt, CExpr) = {
+  if len(dict_scopes(app, subject)) > 0 { return dict_expr(st, app, subject) }
   # For a ground subject every sub-goal is ground too and a compile-time
   # constant. A zero-goal non-ground subject has none to pass. In both cases
   # the dictionary takes no arguments; `false` tells its slots to resolve any
   # ground sub-goals as constants instead of selecting parameters from it.
-  let (st1, key) = dict_def(st, tid, subject, sub_goals(st.impls, tid, subject), false)
-  (st1, CDictRef(key, tid, subject, dict_ty()))
+  let (st1, key) = dict_def(st, app, subject, dict_goals(st, app, subject), false)
+  (st1, CDictRef(key, app.id, subject, dict_ty()))
 }
 
 ## Register the definition of one dictionary, keyed so it is built once.
@@ -1609,17 +1632,17 @@ fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
 ## changes what the slots may *read*, not what shape they have.
 fn dict_def(
   st: LSt,
-  tid: Int,
+  app: capture.TraitApplication,
   subject: Ty,
-  goals: List[(Int, Ty)],
+  goals: List[(capture.TraitApplication, Ty)],
   param: Bool
 ) -> (LSt, String) = {
-  let nargs = (if param { len(goals) } else { 0 }) + len(dict_scopes(subject))
-  let key = dict_key(tid, subject) ++ dict_shape_suffix(nargs)
+  let nargs = (if param { len(goals) } else { 0 }) + len(dict_scopes(app, subject))
+  let key = dict_key(app, subject) ++ dict_shape_suffix(nargs)
   for d in st.dicts {
     if d.key == key { return (st, key) }
   }
-  let tr = trait_of(st.traits, tid)
+  let tr = trait_contract.applied(trait_of(st.traits, app.id), app)
   # reserve the key first: a slot body may itself reference this same
   # dictionary, and without the reservation that would recurse forever
   var st1 = LSt {
@@ -1627,7 +1650,7 @@ fn dict_def(
     dicts = st.dicts ++
       [CDictDef {
         key = key,
-        trait_id = tid,
+        trait_id = app.id,
         subject = subject,
         nargs = nargs,
         slots = []
@@ -1636,7 +1659,7 @@ fn dict_def(
   var slots: List[CDictSlot] = []
   for entry in tr.methods {
     let (mn, ms) = entry
-    let (st2, slot) = dict_slot(st1, tr, tid, subject, key, goals, param, mn, ms)
+    let (st2, slot) = dict_slot(st1, tr, app, app.id, subject, key, goals, param, mn, ms)
     st1 = st2
     slots = slots ++ [slot]
   }
@@ -1664,10 +1687,11 @@ fn dict_def(
 fn dict_slot(
   st: LSt,
   tr: TraitI,
+  app: capture.TraitApplication,
   tid: Int,
   subject: Ty,
   key: String,
-  goals: List[(Int, Ty)],
+  goals: List[(capture.TraitApplication, Ty)],
   param: Bool,
   mn: String,
   ms: MethodSig
@@ -1676,7 +1700,7 @@ fn dict_slot(
     let imp = impl_for(st, tid, subject)
     if provides(imp, mn) {
       let (st1, bridge) =
-        make_bridge(st, tr, tid, subject, owner_or(imp.owner, st.owner), mn, key, goals, param)
+        make_bridge(st, tr, app, tid, subject, owner_or(imp.owner, st.owner), mn, key, goals, param)
       return (st1, CSlotFn(st1.owner, bridge))
     }
   }
@@ -1702,22 +1726,20 @@ fn no_texprs() -> List[TExpr] = []
 ## pinned the impl's labels to the trait's row after bindings, so a label with
 ## no source is a lowering invariant break, not a user error -- panic loudly
 ## rather than emit a call one argument short.
-fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty, Int)] = {
+fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty, Int, Option[capture.Scope])] = {
   let sabi = sig_abi_eff(sg)
   let pabi = sig_abi_eff(psig)
-  let lts = eff_labels(sabi)
+  let lts = evidence_labels(sabi)
   let vts = eff_vars(sabi)
   let ats = eff_assocs(sabi)
-  var out: List[(Int, Ty, Ty, Int)] = []
-  for l in eff_labels(pabi) {
-    let (lid, _) = l
+  var out: List[(Int, Ty, Ty, Int, Option[capture.Scope])] = []
+  for label in evidence_labels(pabi) {
     var src = 0 - 1
-    var from: Ty = TyAdt(lid, [], capture.empty_arguments())
+    var from = evidence_label_type(label)
     var via = 0 - 1
     var i = 0
-    for wl in lts {
-      let (wid, _) = wl
-      if wid == lid && src < 0 { src = i }
+    for written in lts {
+      if evidence_label_role(written) == evidence_label_role(label) && src < 0 { src = i }
       i = i + 1
     }
     if src < 0 {
@@ -1727,12 +1749,11 @@ fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty, Int)] =
         for pr in imp.eff_bindings {
           let (bn, be) = pr
           if bn == an && src < 0 {
-            for bl in eff_labels(be) {
-              let (bid, _) = bl
-              if bid == lid && src < 0 {
+            for bound in evidence_labels(be) {
+              if evidence_label_role(bound) == evidence_label_role(label) && src < 0 {
                 src = len(lts) + len(vts) + j
                 from = erased_ev_ty()
-                via = label_key(lid)
+                via = label_key(label.id)
               }
             }
           }
@@ -1741,30 +1762,28 @@ fn impl_ev_sources(sg: Sig, imp: ImplI, psig: Sig) -> List[(Int, Ty, Ty, Int)] =
       }
     }
     if src < 0 { panic("lower: no evidence source for a devirtualised label") }
-    out = out ++ [(src, from, TyAdt(lid, [], capture.empty_arguments()), via)]
+    out = out ++ [(src, from, evidence_label_type(label), via, label.scope)]
   }
-  # An effect variable is not substituted by `subst_subject` -- it is the
-  # method's own binder, not the subject's -- so the impl's row carries the
-  # trait row's variables, in the same order, and each forwards the slot at its
-  # own index. Erased on both sides, so nothing is adapted across.
   var vi = 0
   for _v in eff_vars(pabi) {
-    out = out ++ [(len(lts) + vi, erased_ev_ty(), erased_ev_ty(), 0 - 1)]
+    let none_scope: Option[capture.Scope] = None
+    out = out ++ [(len(lts) + vi, erased_ev_ty(), erased_ev_ty(), 0 - 1, none_scope)]
     vi = vi + 1
   }
   out
 }
 
-## One selected slot on its way into the impl method's own layout: a walk to a
-## key when the source is a pack (`via >= 0`), the erasure cast otherwise. The
-## two readers of `impl_ev_sources` -- the direct call and the dictionary
-## bridge -- say it the same way here so they cannot drift.
-fn ev_select(v: CExpr, from: Ty, to: Ty, via: Int) -> CExpr =
-  if via >= 0 { ev_from_pack(ev_value(v), via) } else { adapt_out(ev_value(v), from, to) }
+## A projected Mem atom is selected with the same instance key as its impl.
+## Ordinary projected labels keep their existing pack lookup convention.
+fn ev_select(v: CExpr, from: Ty, to: Ty, via: Int, domain: Option[CExpr]) -> CExpr = {
+  if via < 0 { return adapt_out(ev_value(v), from, to) }
+  match domain {
+    Some(key) -> adapt_out(CIntrinsic("ev_get_scoped", [ev_value(v), CInt(via), key],
+      erased_ev_ty(), CNoSite), erased_ev_ty(), to)
+    None -> ev_from_pack(ev_value(v), via)
+  }
+}
 
-## The TExpr half of the selection: lower only the slots the impl's row
-## reads. Evidence expressions are locals, placeholders or checker errors --
-## nothing with an evaluation order to disturb.
 fn impl_evidence(
   st: LSt,
   sg: Sig,
@@ -1775,10 +1794,11 @@ fn impl_evidence(
   var st1 = st
   var out: List[CExpr] = []
   for pr in impl_ev_sources(sg, imp, psig) {
-    let (i, from, to, via) = pr
+    let (i, from, to, via, region) = pr
     let (st2, v) = lower_expr(st1, evid[i])
     st1 = st2
-    out = out ++ [ev_select(v, from, to, via)]
+    let domain = match region { Some(value) -> Some(scope_value(st1, value)), None -> None }
+    out = out ++ [ev_select(v, from, to, via, domain)]
   }
   (st1, out)
 }
@@ -1791,25 +1811,27 @@ fn impl_evidence(
 fn make_bridge(
   st: LSt,
   tr: TraitI,
+  app: capture.TraitApplication,
   tid: Int,
   subject: Ty,
   iowner: String,
   method: String,
   key: String,
-  goals: List[(Int, Ty)],
+  goals: List[(capture.TraitApplication, Ty)],
   param: Bool
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
   # only reached when the impl provides this method (dict_slot checked), so
   # the lookup cannot miss
   let imp0 = impl_for(st, tid, subject)
-  let psig = subst_subject(tr, sg, subject, imp0.assoc_bindings, imp0.eff_bindings)
+  let instance = trait_contract.instantiate_scopes(imp0, app, subject)
+  let psig = subst_subject(tr, sg, subject, instance.assoc_bindings, instance.eff_bindings)
   # `ty_key_inst`, not `ty_key`: a conditional impl's bridge names the
   # dictionary class it reads its arguments out of, so `Box[Int]` and
   # `Box[Box[Int]]` need different bridges. For a non-generic subject the two
   # spellings agree, which is why nothing that existed before changed name.
-  let name = "bridge$" ++ dict_key(tid, subject) ++ "$" ++ method ++
-    dict_shape_suffix((if param { len(goals) } else { 0 }) + len(dict_scopes(subject)))
+  let name = "bridge$" ++ dict_key(app, subject) ++ "$" ++ method ++
+    dict_shape_suffix((if param { len(goals) } else { 0 }) + len(dict_scopes(app, subject)))
   if list.any(st.lifted, f => f.name == name) {
     (st, name)
   } else {
@@ -1829,14 +1851,17 @@ fn make_bridge(
     # dictionaries come from.
     let (st3, dsym) = fresh_sym(st1)
     st1 = st3
-    let regions = dict_scopes(subject)
-    for region in impl_scopes(imp0, subject) {
+    let regions = dict_scopes(app, subject)
+    var scope_values: Map[Int, CExpr] = map.empty()
+    for region in impl_scopes(imp0, app, subject) {
       var index = 0
       while index < len(regions) && regions[index].id != region.id { index = index + 1 }
       if index == len(regions) { panic("lower: impl Scope is absent from its dictionary subject") }
       let offset = (if param { len(goals) } else { 0 }) + index
       let boxed = CDictArg(CLocal(dsym, dict_ty()), st1.owner, key, offset, erased_ev_ty())
-      args = args ++ [adapt_out(boxed, erased_ev_ty(), TyInt)]
+      let value = adapt_out(boxed, erased_ev_ty(), TyInt)
+      args = args ++ [value]
+      scope_values = map.insert(scope_values, region.id, value)
     }
     # A conditional impl's method is generic: it wants a dictionary per bound,
     # and the only place to get them is the dictionary this bridge was handed.
@@ -1861,12 +1886,12 @@ fn make_bridge(
     let sabi = sig_abi_eff(sg)
     var evps: List[CParam] = []
     var evlocals: List[CExpr] = []
-    for l in eff_labels(sabi) {
-      let (eid, _) = l
+    for l in evidence_labels(sabi) {
+      let label_type = evidence_label_type(l)
       let (stv, esym) = fresh_sym(st1)
       st1 = stv
-      evps = evps ++ [CParam { sym = esym, ty = TyAdt(eid, [], capture.empty_arguments()), mode = COwned }]
-      evlocals = evlocals ++ [CLocal(esym, TyAdt(eid, [], capture.empty_arguments()))]
+      evps = evps ++ [CParam { sym = esym, ty = label_type, mode = COwned }]
+      evlocals = evlocals ++ [CLocal(esym, label_type)]
     }
     for _v in eff_vars(sabi) {
       let (stv, esym) = fresh_sym(st1)
@@ -1881,9 +1906,10 @@ fn make_bridge(
       evlocals = evlocals ++ [CLocal(esym, erased_ev_ty())]
     }
     var ies: List[CExpr] = []
-    for pr in impl_ev_sources(sg, imp0, psig) {
-      let (i, from, to, via) = pr
-      ies = ies ++ [ev_select(evlocals[i], from, to, via)]
+    for pr in impl_ev_sources(sg, instance, psig) {
+      let (i, from, to, via, region) = pr
+      let domain = match region { Some(value) -> map.get(scope_values, value.id), None -> None }
+      ies = ies ++ [ev_select(evlocals[i], from, to, via, domain)]
     }
     let call = CCall(CImpl(iowner, tid, subject, method), args ++ ds ++ ies, psig.ret, CNoSite)
     let f = CFun {
@@ -2015,7 +2041,7 @@ fn make_prim_slot(
   tid: Int,
   subject: Ty,
   key: String,
-  goals: List[(Int, Ty)],
+  goals: List[(capture.TraitApplication, Ty)],
   param: Bool,
   method: String
 ) -> (LSt, String) = {
@@ -2107,8 +2133,8 @@ fn make_prim_slot(
 ## it, and the checker refuses that before lowering sees it. Asking first,
 ## rather than building and discovering, is what keeps the failure a question
 ## here instead of a half-built body to unwind.
-fn dict_available(st: LSt, tid: Int, t: Ty) -> Bool =
-  match map.get(st.dict_env, dict_key(tid, t)) {
+fn dict_available(st: LSt, app: capture.TraitApplication, t: Ty) -> Bool =
+  match map.get(st.dict_env, dict_key(app, t)) {
     Some(_) -> true
     None ->
       match t {
@@ -2117,12 +2143,12 @@ fn dict_available(st: LSt, tid: Int, t: Ty) -> Bool =
           if is_ground(t) || not expandable(t) {
             true
           } else {
-            goals_available(st, sub_goals(st.impls, tid, t))
+            goals_available(st, dict_goals(st, app, t))
           }
       }
   }
 
-fn goals_available(st: LSt, goals: List[(Int, Ty)]) -> Bool = {
+fn goals_available(st: LSt, goals: List[(capture.TraitApplication, Ty)]) -> Bool = {
   for g in goals {
     let (gt, gty) = g
     if not dict_available(st, gt, gty) { return false }
@@ -2130,7 +2156,7 @@ fn goals_available(st: LSt, goals: List[(Int, Ty)]) -> Bool = {
   true
 }
 
-fn goal_dicts(st: LSt, goals: List[(Int, Ty)]) -> (LSt, List[CExpr]) = {
+fn goal_dicts(st: LSt, goals: List[(capture.TraitApplication, Ty)]) -> (LSt, List[CExpr]) = {
   var st1 = st
   var out: List[CExpr] = []
   for g in goals {
@@ -2149,20 +2175,20 @@ fn goal_dicts(st: LSt, goals: List[(Int, Ty)]) -> (LSt, List[CExpr]) = {
 ## trait v2 shows: its dictionary is a construction, built from its
 ## arguments' -- and its arguments' may themselves be constructions. A
 ## zero-goal conditional impl is the constant exception handled below.
-fn dict_expr(st: LSt, tid: Int, t: Ty) -> (LSt, CExpr) =
-  match map.get(st.dict_env, dict_key(tid, t)) {
+fn dict_expr(st: LSt, app: capture.TraitApplication, t: Ty) -> (LSt, CExpr) =
+  match map.get(st.dict_env, dict_key(app, t)) {
     Some(d) -> (st, d)
     None ->
-      if len(dict_scopes(t)) > 0 {
-        let goals = sub_goals(st.impls, tid, t)
+      if len(dict_scopes(app, t)) > 0 {
+        let goals = dict_goals(st, app, t)
         let (with_goals, ds) = goal_dicts(st, goals)
-        let keys = map(dict_scopes(t), region => adapt_in(scope_value(st, region), TyInt, erased_ev_ty()))
-        let (ready, key) = dict_def(with_goals, tid, t, goals, true)
+        let keys = map(dict_scopes(app, t), region => adapt_in(scope_value(st, region), TyInt, erased_ev_ty()))
+        let (ready, key) = dict_def(with_goals, app, t, goals, true)
         (ready, CDictApply(key, ds ++ keys, dict_ty()))
       } else if is_ground(t) || not expandable(t) {
-        dict_ref(st, tid, t)
+        dict_ref(st, app, t)
       } else {
-        let goals = sub_goals(st.impls, tid, t)
+        let goals = dict_goals(st, app, t)
         # A conditional impl may mention type parameters without bounding any
         # of them. Its subject is non-ground, but its dictionary is still a
         # constant: none of those parameters contributes an argument. Keep
@@ -2170,10 +2196,10 @@ fn dict_expr(st: LSt, tid: Int, t: Ty) -> (LSt, CExpr) =
         # CDictApply here while dict_def records nargs = 0 makes the JVM emit
         # NEW against the singleton's private constructor.
         if len(goals) == 0 {
-          dict_ref(st, tid, t)
+          dict_ref(st, app, t)
         } else {
           let (st1, ds) = goal_dicts(st, goals)
-          let (st2, key) = dict_def(st1, tid, t, goals, true)
+          let (st2, key) = dict_def(st1, app, t, goals, true)
           (st2, CDictApply(key, ds, dict_ty()))
         }
       }
@@ -2257,7 +2283,7 @@ fn rel_at(st: LSt, rel: Rel, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
   if has_impl_at(st.impls, rel.tid, t) {
     let imp = impl_for(st, rel.tid, t)
     if provides(imp, rel.method) {
-      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, rel.tid, t))
+      let (st1, ds) = goal_dicts(st, dict_goals(st, capture.closed_trait(rel.tid), t))
       return (st1, CCall(
         CImpl(owner_or(imp.owner, st1.owner), rel.tid, t, rel.method), xs ++ ds, rel.ret, CNoSite))
     }
@@ -2282,15 +2308,15 @@ fn rel_at(st: LSt, rel: Rel, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
   # Not ground: what this relates depends on a type only the caller knows.
   # If a dictionary for the whole is in scope, that dictionary *is* the
   # answer -- go through it rather than guessing at the structure behind it.
-  match map.get(st.dict_env, dict_key(rel.tid, t)) {
+  match map.get(st.dict_env, dict_key(capture.closed_trait(rel.tid), t)) {
     Some(d) -> return rel_through_dict(st, rel, d, xs, t)
     None -> ()
   }
   # Otherwise spell the whole out over its parts, passing each part's
   # dictionary down. That is the same expansion the ground case gets, minus
   # the luxury of knowing what the parts are.
-  if expandable(t) && goals_available(st, sub_goals(st.impls, rel.tid, t)) {
-    let (st1, ds) = goal_dicts(st, sub_goals(st.impls, rel.tid, t))
+  if expandable(t) && goals_available(st, dict_goals(st, capture.closed_trait(rel.tid), t)) {
+    let (st1, ds) = goal_dicts(st, dict_goals(st, capture.closed_trait(rel.tid), t))
     let (st2, name) = struct_rel_fn(st1, rel, t)
     return (st2, CCall(CDirect(st2.owner, name), xs ++ ds, rel.ret, CNoSite))
   }
@@ -2343,8 +2369,8 @@ fn struct_rel_fn(st: LSt, rel: Rel, t: Ty) -> (LSt, String) = {
     xs = xs ++ [CLocal(sym, t)]
     k = k + 1
   }
-  let no_goals: List[(Int, Ty)] = []
-  let goals = if is_ground(t) { no_goals } else { sub_goals(st.impls, rel.tid, t) }
+  let no_goals: List[(capture.TraitApplication, Ty)] = []
+  let goals = if is_ground(t) { no_goals } else { dict_goals(st, capture.closed_trait(rel.tid), t) }
   var stD = st1
   var dps: List[CParam] = []
   var env: Map[String, CExpr] = map.empty()
@@ -3028,7 +3054,7 @@ fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
     # The structural default is not a different kind of dictionary, only one
     # whose slots the compiler supplies -- which is why deleting WStructural
     # changed nothing here.
-    WConcrete(tid, subject) -> dict_ref(st, tid.id, subject)
+    WConcrete(tid, subject) -> dict_ref(st, tid, subject)
     # ...and a non-ground subject is not a different kind either, only one
     # that cannot be a constant: same slots, built per use out of the
     # arguments' dictionaries.
@@ -3041,11 +3067,12 @@ fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
     # this case to `dict_ref` is what makes the two sides unable to disagree:
     # one call decides both the scaffold and the way it is reached.
     WApply(tid, subject, args) -> {
-      let goals = sub_goals(st.impls, tid.id, subject)
-      if len(goals) == 0 { return dict_ref(st, tid.id, subject) }
+      let goals = dict_goals(st, tid, subject)
+      if len(goals) == 0 { return dict_ref(st, tid, subject) }
       let (st1, ds) = witness_values(st, args)
-      let (st2, key) = dict_def(st1, tid.id, subject, goals, true)
-      (st2, CDictApply(key, ds, dict_ty()))
+      let (st2, key) = dict_def(st1, tid, subject, goals, true)
+      (st2, CDictApply(key, ds ++ map(dict_scopes(tid, subject), region =>
+          adapt_in(scope_value(st2, region), TyInt, erased_ev_ty())), dict_ty()))
     }
   }
 
@@ -3070,7 +3097,7 @@ fn enter_wit_env(st: LSt, w: WitRef) -> (LSt, Map[String, CExpr]) =
       var st1 = st
       var env = st.dict_env
       var i = 0
-      for g in sub_goals(st.impls, tid.id, subject) {
+      for g in dict_goals(st, tid, subject) {
         let (gt, gty) = g
         if i < len(args) {
           let (st2, d) = witness_value(st1, args[i])
@@ -3102,7 +3129,10 @@ fn lower_trait_call(
   ty: Ty,
   site: CSite
 ) -> (LSt, CExpr) = {
-  let tr = trait_of(st.traits, tid)
+  let app = match ws[0] {
+    WConcrete(application, _) | WApply(application, _, _) | WForward(_, application, _) -> application
+  }
+  let tr = trait_contract.applied(trait_of(st.traits, tid), app)
   let idx = method_index(tr, name)
   let sg = trait_method_sig(tr, name)
   if len(ws) == 0 {
@@ -3163,14 +3193,15 @@ fn lower_trait_call(
     # A conditional impl at a known subject still devirtualises -- which
     # body runs is settled; only the dictionaries it needs are values.
     WApply(_, subject, wargs) -> {
-      let imp = impl_for(st, tid, subject)
+      let raw_impl = impl_for(st, tid, subject)
+      let imp = trait_contract.instantiate_scopes(raw_impl, app, subject)
       if provides(imp, name) {
         let psig = subst_subject(tr, sg, subject, imp.assoc_bindings, imp.eff_bindings)
         let (st1, vs) = lower_args_to(st, args, psig.param_tys)
         let (st2, ds) = witness_values(st1, wargs)
         let (st3, ies) = impl_evidence(st2, sg, imp, psig, evid)
         return (st3, adapt_out(
-          CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ impl_scope_values(st3, imp, subject) ++ ds ++ ies,
+          CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ impl_scope_values(st3, raw_impl, app, subject) ++ ds ++ ies,
             psig.ret, site),
           psig.ret, ty))
       }
@@ -3181,17 +3212,18 @@ fn lower_trait_call(
         CCall(CMethod(d, tid, name, idx, len(es)), vs ++ es, sg.ret, site), sg.ret, ty))
     }
     WConcrete(_, subject) -> {
-      let imp = impl_for(st, tid, subject)
+      let raw_impl = impl_for(st, tid, subject)
+      let imp = trait_contract.instantiate_scopes(raw_impl, app, subject)
       if provides(imp, name) {
         # devirtualised: the impl's own method takes the concrete type, so
         # nothing is boxed. A conditional impl still wants its dictionaries,
         # and at a ground subject they are all statically known.
         let psig = subst_subject(tr, sg, subject, imp.assoc_bindings, imp.eff_bindings)
         let (st1, vs) = lower_args_to(st, args, psig.param_tys)
-        let (st2, ds) = goal_dicts(st1, sub_goals(st1.impls, tid, subject))
+        let (st2, ds) = goal_dicts(st1, dict_goals(st1, app, subject))
         let (st3, ies) = impl_evidence(st2, sg, imp, psig, evid)
         (st3, adapt_out(
-          CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ impl_scope_values(st3, imp, subject) ++ ds ++ ies,
+          CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ impl_scope_values(st3, raw_impl, app, subject) ++ ds ++ ies,
             psig.ret, site),
           psig.ret, ty))
       } else {
@@ -3199,7 +3231,7 @@ fn lower_trait_call(
         # other dictionary-passing function -- and the trait-shaped evidence
         # behind it, like any other effectful one
         let (st1, vs) = lower_args_to(st, args, sg.param_tys)
-        let (st2, d) = dict_ref(st1, tid, subject)
+        let (st2, d) = dict_ref(st1, app, subject)
         let (st3, es) = lower_evidence(st2, evid)
         (st3, adapt_out(
           CCall(CDefault(owner_or(tr.owner, st3.owner), tid, name), vs ++ [d] ++ es, sg.ret, site),
@@ -4570,12 +4602,12 @@ test "dictionary constructors and slots keep their argument shape in either requ
       }
     }
     let subject = if bridge { TyInt } else { TyTuple([TyInt]) }
-    let goals = [(EQ_ID, TyBool)]
+    let goals = [(capture.closed_trait(EQ_ID), TyBool)]
     for first in [false, true] {
-      let (a, first_key) = dict_def(start, EQ_ID, subject, goals, first)
-      let (b, second_key) = dict_def(a, EQ_ID, subject, goals, not first)
+      let (a, first_key) = dict_def(start, capture.closed_trait(EQ_ID), subject, goals, first)
+      let (b, second_key) = dict_def(a, capture.closed_trait(EQ_ID), subject, goals, not first)
       assert first_key != second_key
-      let (c, again) = dict_def(b, EQ_ID, subject, goals, first)
+      let (c, again) = dict_def(b, capture.closed_trait(EQ_ID), subject, goals, first)
       assert again == first_key && len(c.dicts) == len(b.dicts) && len(c.lifted) == len(b.lifted)
       var names: List[String] = []
       var arities: List[Int] = []
@@ -4595,8 +4627,8 @@ test "dictionary constructors and slots keep their argument shape in either requ
     }
   }
   # An empty argument list is the same scaffold in both modes.
-  let (a, singleton) = dict_def(initial, EQ_ID, TyInt, [], false)
-  let (b, empty_apply) = dict_def(a, EQ_ID, TyInt, [], true)
+  let (a, singleton) = dict_def(initial, capture.closed_trait(EQ_ID), TyInt, [], false)
+  let (b, empty_apply) = dict_def(a, capture.closed_trait(EQ_ID), TyInt, [], true)
   assert singleton == empty_apply && len(a.dicts) == len(b.dicts)
   assert dict_shape_suffix(0) != dict_shape_suffix(1)
   assert dict_shape_suffix(1) != dict_shape_suffix(2)
@@ -5352,7 +5384,7 @@ fn index_at(st: LSt, c: CExpr, i: CExpr, subject: Ty) -> (LSt, CExpr) =
       # be resolved at the `[]` and passed down; they are now the sub-goals of
       # `Index[Map[K, V]]`, which `lower_trait_call` has already put in scope.
       let sg = hamt_sig(st, "index")
-      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, INDEX_ID, subject))
+      let (st1, ds) = goal_dicts(st, dict_goals(st, capture.closed_trait(INDEX_ID), subject))
       let call = CCall(CDirect("std/hamt", "index"),
         [c, adapt_in(i, k, sg.param_tys[1])] ++ ds, sg.ret, CNoSite)
       (st1, adapt_out(call, sg.ret, v))
@@ -6322,3 +6354,33 @@ test "a written call's site is measured from its declaration, and a call nobody 
   let (_, unfiled, _) = sites_of(TFun { ..f, decl = "", base = -1 })
   assert unfiled == CNoSite
 }
+
+test "dictionary support includes Scope arguments outside the subject" {
+  let s = CaptureScope { name = "same", id = 1001 }
+  let t = CaptureScope { name = "same", id = 1002 }
+  let a = TraitApplication { id = 777, args = [[capture.Region(s)]] }
+  let b = TraitApplication { id = 777, args = [[capture.Region(t)]] }
+  assert dict_scopes(a, TyInt) == [s]
+  assert dict_key(a, TyInt) != dict_key(b, TyInt)
+  let reordered = TraitApplication { ..a, args = [[capture.Region(s), capture.Region(s)]] }
+  assert dict_key(a, TyInt) == dict_key(reordered, TyInt)
+}
+
+test "associated Mem bridge selects its scoped evidence from the projection pack" {
+  let s = CaptureScope { name = "s", id = 1001 }
+  let app = TraitApplication { id = 777, args = [[capture.Region(s)]] }
+  let base = trait_method_sig(trait_of(prelude_traits(), LEN_ID), "len")
+  let row = check_scoped_row(s)
+  let declared = Sig { ..base, eff = EffAssoc("T", 888, app, "Read") }
+  let concrete = Sig { ..base, eff = row }
+  let imp = ImplI { ..prelude_impls()[0], eff_bindings = [("Read", row)] }
+  let sources = impl_ev_sources(declared, imp, concrete)
+  assert len(sources) == 1
+  let (index, from, to, via, domain) = sources[0]
+  let expected = TyAdt(999, [], CaptureArguments { scopes = [s], captures = [] })
+  assert index == 0 && from == erased_ev_ty() && to == expected
+  assert via == label_key(999) && domain == Some(s)
+}
+
+fn check_scoped_row(s: capture.Scope) -> Eff =
+  scoped_eff(EPure, [ScopedEffect { id = 999, name = "Mem", scope = s }])

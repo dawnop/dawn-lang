@@ -157,8 +157,48 @@ fn learn_scope_argument(cx: Cx, s: Sig, declared: Ty, actual: Ty) -> (Cx, Bool) 
   let (bindings, ok) = scope_infer.infer(declared, actual, s.scope_params.scopes, cx.frame.scope_bindings)
   var captures = scope_infer.infer_captures(declared, actual, s.scope_params.captures, cx.frame.capture_bindings)
   let (contract_captures, capture_ok) = learn_trait_captures(cx, s, declared, actual, captures)
-  captures = contract_captures
+  captures = learn_type_captures(cx, s, declared, actual, contract_captures)
   (Cx { ..cx, frame = Frame { ..cx.frame, scope_bindings = scope_infer.normalized(bindings), capture_bindings = captures } }, ok && capture_ok)
+}
+
+fn learn_type_captures(cx: Cx, sig: Sig, declared: Ty, actual: Ty,
+  initial: Map[Int, capture.Capture]) -> Map[Int, capture.Capture] = {
+  if len(sig.scope_params.captures) == 0 { return initial }
+  var out = initial
+  match declared {
+    TyVar(_, id) -> {
+      let required = trait_contract.capture_of(cx.adts, cx.current_capture_params, actual)
+      # A forwarded application's arguments are equations. Its well-formedness
+      # already covers the subject, even when another declared value upper
+      # bound is wider. That upper must not enlarge the selected dictionary.
+      var fixed: capture.Capture = []
+      match actual {
+        TyVar(_, aid) -> {
+          let available = map.get(cx.current_tparam_bounds, aid).unwrap_or([])
+          for i in 0..len(sig.tparams) { if sig.tparams[i] == declared {
+            for app in bounds_of(sig, i) {
+              if list.any(available, b => b.id == app.id) {
+                fixed = capture.union(fixed, capture.trait_support(app))
+              }
+            }
+          } }
+        }
+        _ -> ()
+      }
+      let equations = fixed
+      let flex = list.filter(sig.scope_params.captures, c =>
+          not capture.contains(equations, capture.CaptureVar(c.name, c.id)))
+      for entry in sig.scope_params.bounds { let (vid, upper) = entry
+        if vid == id { out = scope_infer.infer_upper(upper, required, flex, out) } }
+    }
+    _ -> ()
+  }
+  let ds = match declared { TyFn(ps, ret, _, _) -> ps ++ [ret], _ -> type_args_of(declared) }
+  let ats = match actual { TyFn(ps, ret, _, _) -> ps ++ [ret], _ -> type_args_of(actual) }
+  if len(ds) == len(ats) {
+    for i in 0..len(ds) { out = learn_type_captures(cx, sig, ds[i], ats[i], out) }
+  }
+  out
 }
 
 fn learn_trait_captures(cx: Cx, sig: Sig, declared: Ty, actual: Ty,
@@ -212,7 +252,7 @@ fn learn_trait_type_bindings(cx: Cx, sig: Sig, bindings: Map[Int, Ty]) -> Cx = {
   for param in sig.tparams { match param {
     TyVar(_, id) -> match map.get(bindings, id) {
       Some(actual) -> { let (next, _) = learn_trait_captures(cx, sig, param, actual, captures)
-        captures = next }
+        captures = learn_type_captures(cx, sig, param, actual, next) }
       None -> ()
     }
     _ -> ()
@@ -1017,20 +1057,16 @@ pub(pkg) fn reduce_assoc(cx: Cx, t: Ty) -> Ty =
           match assoc_impl_of(cx, tid.id, s) {
             None -> keep
             Some(ii) -> {
+              let instance = trait_contract.instantiate(ii, tid, s)
               var bound: Option[Ty] = None
-              for pr in ii.assoc_bindings {
+              for pr in instance.assoc_bindings {
                 let (bn, bt) = pr
                 if bn == n { bound = Some(bt) }
               }
               match bound {
                 # a missing binding already errored at the impl; stay put
                 None -> keep
-                Some(bt) -> {
-                  let e0: Map[Int, Ty] = map.empty()
-                  let ee0: Map[Int, Eff] = map.empty()
-                  let (m2, em2, ok) = unify_into(cx, ii.subject, s, e0, ee0)
-                  if ok { reduce_assoc(cx, subst(bt, m2, em2)) } else { keep }
-                }
+                Some(bt) -> reduce_assoc(cx, bt)
               }
             }
           }
@@ -1071,7 +1107,7 @@ fn reduce_eff(cx: Cx, e: Eff, m: Map[Int, Ty]) -> Eff =
                   None -> keep
                   Some(ii) -> {
                     var bound: Option[Eff] = None
-                    for pr in ii.eff_bindings {
+                    for pr in trait_contract.instantiate(ii, t0, t).eff_bindings {
                       let (bn, be) = pr
                       if bn == n0 { bound = Some(be) }
                     }

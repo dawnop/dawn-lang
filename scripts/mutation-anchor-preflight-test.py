@@ -62,8 +62,8 @@ class PreflightTests(unittest.TestCase):
                                           "nargs = nargs,", "nargs = nargs ,")
         # The two-line anchor the bridge and prim mutants share a shape with.
         self.assert_registry_drift_is_red("dict-owner-contract", "bridge-shape", lower,
-                                          'let name = "bridge$" ++ dict_key(tid, subject)',
-                                          'let name = "bridge$" ++ dict_key(tid, changed_subject)')
+                                          'let name = "bridge$" ++ dict_key(app, subject)',
+                                          'let name = "bridge$" ++ dict_key(app, changed_subject)')
         self.assert_stale_registry_is_red("dict-owner-contract", "dictionary-shape", 0)
 
     def test_cold_reference_anchor_drift_is_caught(self):

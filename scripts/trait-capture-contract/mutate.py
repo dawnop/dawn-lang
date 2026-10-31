@@ -6,7 +6,25 @@ import sys
 CHECKER = "selfhost/src/check/checker.dawn"
 PASSES = "selfhost/src/check/passes.dawn"
 CONTRACT = "selfhost/src/check/trait_contract.dawn"
+LOWER = "selfhost/src/ir/lower.dawn"
 MUTATIONS = {
+    "erase-call-value-bounds": ((CHECKER,
+        "captures = learn_type_captures(cx, s, declared, actual, contract_captures)",
+        "captures = contract_captures"), (CHECKER,
+        "captures = learn_type_captures(cx, sig, param, actual, next)",
+        "captures = next")),
+    "erase-item-scope-instantiation": ((CONTRACT,
+        "let scoped = instantiate_scopes(imp, app, subject)",
+        "let scoped = imp"),),
+    "erase-effect-scope-instantiation": ((CHECKER,
+        "for pr in trait_contract.instantiate(ii, t0, t).eff_bindings {",
+        "for pr in ii.eff_bindings {"),),
+    "erase-dictionary-argument-support": ((LOWER,
+        "for member in capture.union(ty_scope_refs(subject), capture.trait_support(app)) {",
+        "for member in ty_scope_refs(subject) {"),),
+    "erase-scoped-bridge-evidence": ((LOWER,
+        "for label in evidence_labels(pabi) {",
+        "for label in list.filter(evidence_labels(pabi), atom => atom.scope == None) {"),),
     "erase-trait-binders": (("selfhost/src/front/parser.dawn",
         "kw.lo, close.hi, name.lo, name.hi, scope)))",
         "kw.lo, close.hi, name.lo, name.hi, no_scope_syntax())))"),),
@@ -29,8 +47,8 @@ MUTATIONS = {
         "if not capture.subset_in(actual, upper, cx1.current_capture_params.captures) {",
         "if false && not capture.subset_in(actual, upper, cx1.current_capture_params.captures) {"),),
     "widen-invariant-arguments": ((CONTRACT,
-        "ok = ok && capture.trait_equal(expected, app)",
-        "ok = ok && capture.subset(capture.trait_support(expected), capture.trait_support(app))"),),
+        "  capture.trait_equal(expected, app)",
+        "  capture.subset(capture.trait_support(expected), capture.trait_support(app))"),),
     "erase-associated-scope": ((PASSES,
         "} else { row = scoped }",
         "} else { row = EPure }"),),
