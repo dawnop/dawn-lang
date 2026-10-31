@@ -14,9 +14,9 @@ pub fn resolve(s: Scope, bindings: Map[Int, Scope]) -> Scope = {
   var current = s
   var seen: List[Int] = []
   while not list.contains(seen, current.id) {
-    seen = seen ++ [current.id]
     match map.get(bindings, current.id) {
-      Some(next) -> { current = next }
+      Some(next) -> { seen = seen ++ [current.id]
+        current = next }
       None -> return current
     }
   }
@@ -25,9 +25,13 @@ pub fn resolve(s: Scope, bindings: Map[Int, Scope]) -> Scope = {
 
 ## Normalize aliases so substitutions never depend on equation insertion order.
 pub fn normalized(bindings: Map[Int, Scope]) -> Map[Int, Scope] = {
-  var out: Map[Int, Scope] = map.empty()
-  for id in map.keys(bindings) {
-    out = map.insert(out, id, resolve(map.get(bindings, id).expect("scope binding"), bindings))
+  # Most equations already point at rigid regions. Reuse that persistent map
+  # and replace only aliases, rather than rebuilding it for every type read.
+  var out = bindings
+  for entry in map.entries(bindings) {
+    let (id, bound) = entry
+    let value = resolve(bound, bindings)
+    if value != bound { out = map.insert(out, id, value) }
   }
   out
 }
@@ -116,6 +120,7 @@ pub fn infer(d: Ty, a: Ty, flex: List[Scope], bindings: Map[Int, Scope]) -> (Map
 
 ## Apply Scope equations to a call contract while retaining capture variables.
 pub fn signature(s: Sig, bindings: Map[Int, Scope]) -> Sig = {
+  if len(bindings) == 0 { return s }
   let sm = normalized(bindings)
   let cm: Map[Int, capture.Capture] = map.empty()
   let p = s.scope_params
@@ -131,7 +136,11 @@ pub fn signature(s: Sig, bindings: Map[Int, Scope]) -> Sig = {
 
 ## Substitute capture contracts without inferring the environment of a value.
 pub fn contract(s: Sig, scopes: Map[Int, Scope], captures: Map[Int, capture.Capture]) -> Sig = {
+  # Ordinary calls have no equations. An empty substitution is the identity,
+  # including the signature's parameter vectors and capture bounds.
+  if len(scopes) == 0 && len(captures) == 0 { return s }
   let scoped = signature(s, scopes)
+  if len(captures) == 0 { return scoped }
   let sm: Map[Int, Scope] = map.empty()
   let p = scoped.scope_params
   let caps = map(p.captures, c => CaptureParam { ..c,
@@ -157,6 +166,29 @@ fn capture_bound(d: capture.Capture, a: capture.Capture, flex: List[CaptureParam
     }
   }
   bindings
+}
+
+test "scope normalization resolves aliases without changing the input equations" {
+  let a = Scope { name = "a", id = 1 }
+  let b = Scope { name = "b", id = 2 }
+  let c = Scope { name = "c", id = 3 }
+  let original = map.from([(a.id, b), (b.id, c)])
+  let flat = normalized(original)
+  assert map.get(flat, a.id) == Some(c)
+  assert map.get(flat, b.id) == Some(c)
+  assert map.get(original, a.id) == Some(b)
+  assert normalized(map.from([(b.id, c), (a.id, b)])) == flat
+}
+
+test "scope resolution preserves names and terminates repeated identities" {
+  let a = Scope { name = "a", id = 1 }
+  let renamed = Scope { name = "renamed", id = a.id }
+  assert resolve(a, map.from([(a.id, renamed)])) == renamed
+  let b = Scope { name = "b", id = 2 }
+  let cycle = map.from([(a.id, b), (b.id, a)])
+  assert resolve(a, cycle) == a
+  assert resolve(b, cycle) == b
+  assert normalized(cycle) == cycle
 }
 
 ## A wrapper can forward an explicit capture parameter before value inference exists.
