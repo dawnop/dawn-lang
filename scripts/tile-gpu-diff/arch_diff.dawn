@@ -93,7 +93,7 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, wrap_i32, nibble_word}
-use tileref/ref.{dtype_convert_ref, dtype_e2m1_ref, mmaf_scaled_ref, mmaf_scaled_packed_ref, view_atomic_bf16_ref}
+use tileref/ref.{e8m0_source_ref, dtype_convert_ref, dtype_e2m1_ref, mmaf_scaled_ref, mmaf_scaled_packed_ref, view_atomic_bf16_ref}
 use std/list
 use std/map
 use std/narrow
@@ -511,9 +511,9 @@ fn va_blocks() -> Int = VA_N / VA_TILE + 1
 pub fn case_name(i: Int) -> String =
   ["dtype_e4m3", "dtype_e5m2", "dtype_e8m0", "dtype_e2m1", "mmaf_scaled_e4m3",
     "view_atomic_bf16", "mmaf_scaled_e5m2", "mmaf_scaled_fp4_e8m0_v16",
-    "mmaf_scaled_fp4_e8m0_v32", "mmaf_scaled_fp4_e4m3_v16"][i]
+    "mmaf_scaled_fp4_e8m0_v32", "mmaf_scaled_fp4_e4m3_v16", "e8m0_source"][i]
 
-pub const CASES: Int = 10
+pub const CASES: Int = 11
 
 ## The index of the kernel called `name`, or -1 for a name this program does
 ## not know.
@@ -524,11 +524,11 @@ fn case_index(name: String) -> Int =
   }
 
 ## The number of output segments each kernel writes.
-fn case_segments(i: Int) -> Int = if i >= 4 { 1 } else { 2 }
+fn case_segments(i: Int) -> Int = if i == 10 { 4 } else if i >= 4 { 1 } else { 2 }
 
 ## The lanes in one segment of each kernel's output.
 fn case_lanes(i: Int) -> Int =
-  if i >= 6 {
+  if i >= 6 && i < 10 {
     SMM_D * SMM_D
   } else if i == 4 {
     MMS_M * MMS_N
@@ -541,7 +541,7 @@ fn case_lanes(i: Int) -> Int =
 ## The blocks each kernel is launched with. The block-scaled product names
 ## no block id at all and runs on one.
 fn case_grid(i: Int) -> Int =
-  if i == 4 || i >= 6 {
+  if i == 4 || (i >= 6 && i < 10) {
     1
   } else if i == 5 {
     va_blocks()
@@ -554,7 +554,9 @@ fn case_grid(i: Int) -> Int =
 ## sentinel in its tail says whether a write went past the end.
 fn case_bufs(i: Int) -> List[(String, List[Float])] = {
   let out = sentinel_buffer(case_segments(i) * case_lanes(i) + TAIL)
-  if i >= 6 {
+  if i == 10 {
+    [("f64", rounding.e8m0_inputs(DT_N)), ("f64", out)]
+  } else if i >= 6 && i < 10 {
     let packed = i != 6
     let dt = if packed { "i32" } else { "f8E5M2" }
     let scale = if i == 9 { "f8E4M3FN" } else { "f8E8M0FNU" }
@@ -592,7 +594,8 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
 fn oracle(i: Int, t: Trace, explicit: Bool) -> String = match t.result {
   None -> "missing-result"
   Some(v) -> {
-    if i >= 6 {
+    if i == 10 { return rounding.e8m0_check(v, DT_N, TAIL, SENTINEL) }
+    if i >= 6 && i < 10 {
       if len(v) != SMM_D * SMM_D + TAIL { return "length=${len(v)} expected=${SMM_D * SMM_D + TAIL}" }
       for lane in range(0, len(v)) {
         let want = if lane < SMM_D * SMM_D { smm_answer(smm_v(i), lane / SMM_D, lane % SMM_D) } else { SENTINEL }
@@ -628,6 +631,11 @@ fn oracle(i: Int, t: Trace, explicit: Bool) -> String = match t.result {
 fn bits(v: Float) -> String = bytes.to_hex(bytes.pack_floats([v], 8, bytes.Big))
 
 fn input_problem(i: Int, bufs: List[(String, List[Float])]) -> String = {
+  if i == 10 {
+    let (_, x) = bufs[0]
+    let (_, out) = bufs[1]
+    return if len(bufs) == 2 && len(x) == DT_N && len(out) == 4 * DT_N + TAIL { "pass" } else { "input e8m0_source length" }
+  }
   let bad = list.find(range(0, 3), j => {
     let (_, v) = bufs[j]
     len(v) != (if j == 2 { 2 * DT_N + TAIL } else if i == 3 && j == 0 { DT_N / 8 } else { DT_N })
@@ -661,7 +669,7 @@ fn oracle_selftest(control: String) -> Unit !io !Exit = {
   let proof = input_bits()
   io.println("oracle input-bits ${proof} e8m0=${len(E8M0_CONVERSION)} subnormal=12 signed_zero=2")
   if proof != "pass" { ok = false }
-  for i in [0, 1, 2, 3] {
+  for i in [0, 1, 2, 3, 10] {
     let original = case_bufs(i)
     let bufs = if control == "short-input" && i == 2 {
       let (dt, y) = original[1]
@@ -686,7 +694,7 @@ fn oracle_selftest(control: String) -> Unit !io !Exit = {
 
 fn scaled_oracle_selftest() -> Unit !io !Exit = {
   var ok = true
-  for i in range(6, CASES) {
+  for i in range(6, 10) {
     let clean = with_gpu_fake(case_kernels(i), () => stages(case_name(i), 1, case_bufs(i)))
     let result = oracle(i, clean, false)
     io.println("oracle tileref ${case_name(i)} ${result}")
@@ -697,7 +705,9 @@ fn scaled_oracle_selftest() -> Unit !io !Exit = {
 
 ## The reference table the fake device answers with, for one case.
 fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
-  if i >= 6 {
+  if i == 10 {
+    map.from([("e8m0_source", (2, last_out((dts, ins) => e8m0_source_ref(DT_N, dts, ins))))])
+  } else if i >= 6 && i < 10 {
     map.from([(case_name(i), (5, last_out((dts, ins) =>
         if i == 6 { mmaf_scaled_ref(SMM_D, SMM_D, SMM_D, smm_v(i), dts, ins) }
         else { mmaf_scaled_packed_ref(SMM_D, SMM_D, SMM_D, smm_v(i), dts, ins) })))])
@@ -725,7 +735,9 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
 ## the block size pass for one that honours it.
 fn shape_of(i: Int) -> String = {
   let idx = range(0, DT_N)
-  if i >= 6 {
+  if i == 10 {
+    rounding.e8m0_shape()
+  } else if i >= 6 && i < 10 {
     let v = smm_v(i)
     let sk = SMM_D / v
     let sa = smm_sa(v)
@@ -827,7 +839,7 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.rea
 fn usage() -> Unit !Exit !io = {
   io.eprintln("usage: arch_diff <kernel> <cubin> [<kernel> <cubin> ...], where <kernel> is one of"
       ++ " dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2m1 mmaf_scaled_e4m3 view_atomic_bf16"
-      ++ " mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16")
+      ++ " mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16 e8m0_source")
   io.exit(2)
 }
 
@@ -869,7 +881,7 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
   for i in order {
     let name = case_name(i)
     let bufs = case_bufs(i)
-    let input = if i < 4 { input_problem(i, bufs) } else { "pass" }
+    let input = if i < 4 || i == 10 { input_problem(i, bufs) } else { "pass" }
     if input != "pass" { io.eprintln(input)
       io.exit(1)
       return }

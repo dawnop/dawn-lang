@@ -693,6 +693,37 @@ fn narrow_from_f64(l0: L, dst: Int, to: String, shape: List[Int], x: Ref) -> L =
   emit(l15, Cast(result, "ftof", f32, ty, src))
 }
 
+# E8M0's zero mode truncates the magnitude to a power of two. RTZ32
+# preserves the side of every target threshold; RNE32 does not. All other
+# accepted sources widen exactly to f32. Integer comparisons make the
+# clamps independent of floating-point subnormal handling. The final
+# unsigned conversion receives positive values or a positive NaN only.
+fn e8m0_from_float(l0: L, dst: Int, op: String, from: String, shape: List[Int], x: Ref) -> L = {
+  let f32 = num_tile(shape, "f32")
+  let i32 = i32_tile(shape)
+  let mask = i1_tile(shape)
+  let (l1, carrier) = if from == "f32" { (l0, x) } else {
+    temporary(l0, d => Cast(d, if from == "f64" { "ftof_zero" } else { "ftof" }, num_tile(shape, from), f32, x))
+  }
+  let (l2, raw) = temporary(l1, d => Cast(d, "bitcast", f32, i32, carrier))
+  let (l3, sign_mask) = temporary(l2, d => ConstInt(d, i32, 0x7fffffff))
+  let (l4, magnitude) = temporary(l3, d => IntBin(d, "andi", i32, raw, sign_mask))
+  let (l5, low) = temporary(l4, d => ConstInt(d, i32, 0x00400000))
+  let (l6, below) = temporary(l5, d => CmpInt(d, "lt", i32, mask, magnitude, low))
+  let (l7, bounded_low) = temporary(l6, d => SelectTile(d, mask, i32, below, low, magnitude))
+  let (l8, high) = temporary(l7, d => ConstInt(d, i32, 0x7f000000))
+  let (l9, above) = temporary(l8, d => CmpInt(d, "gt", i32, mask, magnitude, high))
+  let (l10, bounded) = temporary(l9, d => SelectTile(d, mask, i32, above, high, bounded_low))
+  let (l11, infinity) = temporary(l10, d => ConstInt(d, i32, 0x7f800000))
+  let (l12, nan) = temporary(l11, d => CmpInt(d, "gt", i32, mask, magnitude, infinity))
+  let (l13, nan_bits) = temporary(l12, d => ConstInt(d, i32, 0x7fc00000))
+  let (l14, chosen) = temporary(l13, d => SelectTile(d, mask, i32, nan, nan_bits, bounded))
+  let (l15, positive) = temporary(l14, d => Cast(d, "bitcast", i32, f32, chosen))
+  let ty = num_tile(shape, "f8E8M0FNU")
+  let (l16, result) = define(l15, dst, ty)
+  emit(l16, Cast(result, op, f32, ty, positive))
+}
+
 # The shape of `shape`'s rank with every dimension 1: what a rank-0 value
 # reshapes to before it is broadcast over the whole tile, and what one
 # dimension's `iota` reshapes to with its own dimension put back.
@@ -1000,7 +1031,9 @@ fn lower_one(l0: L, op: TileOp) -> L = match op {
   }
   Convert(dst, op, from, to, shape, src) -> {
     let a = ref_of(l0, src, "${op} operand")
-    if op == "ftof" && from == "f64" && (to == "f8E5M2" || to == "f8E4M3FN" || to == "f4E2M1FN") {
+    if (op == "ftof" || op == "ftof_zero") && to == "f8E8M0FNU" && from != to {
+      e8m0_from_float(l0, dst, op, from, shape, a)
+    } else if op == "ftof" && from == "f64" && (to == "f8E5M2" || to == "f8E4M3FN" || to == "f4E2M1FN") {
       narrow_from_f64(l0, dst, to, shape, a)
     } else {
       let ty = num_tile(shape, to)
@@ -2228,4 +2261,58 @@ test "an explicit f32 conversion remains a separate rounding" {
       Convert(2, "ftof", "f32", "f8E5M2", [], 1)] }
   let k = lower(p)
   assert len(k.body) == 4
+}
+
+# A structural proof about the actual operand of the unsigned conversion.
+# An AND with a sign-free value is sign-free; both arms of a select must be.
+# Raw bitcasts and arbitrary integer operations provide no such proof.
+fn sign_free_bits(body: List[Instr], r: Ref) -> Bool = match r {
+  Arg(_p) -> false
+  Val(v) -> match list.find(body, i => list.contains(defines(i), v)) {
+    Some(ConstInt(_d, _t, n)) -> n >= 0 && n < 2147483648
+    Some(IntBin(_d, "andi", _t, a, b)) -> sign_free_bits(body, a) || sign_free_bits(body, b)
+    Some(SelectTile(_d, _mt, _t, _c, a, b)) -> sign_free_bits(body, a) && sign_free_bits(body, b)
+    _ -> false
+  }
+}
+
+test "E8M0 default and zero never send signed bits to the unsigned conversion" {
+  for from in ["f64", "f32", "tf32", "bf16", "f16", "f8E5M2", "f8E4M3FN", "f4E2M1FN", "f8E5M3FNU"] {
+    for op in ["ftof", "ftof_zero"] {
+      let p = TileProg { name = "e8m0", params = [], globals = [], hints = [], producer = None, debug = None,
+        ops = [ConstF(0, from, [2], -1.0), Convert(1, op, from, "f8E8M0FNU", [2], 0)] }
+      let (k, owners) = lower_spans(p)
+      match k.body[len(k.body) - 2] {
+        Cast(_d, got, f, t, Val(src)) -> {
+          assert got == op && f == Tile([2], Num("f32")) && t == Tile([2], Num("f8E8M0FNU"))
+          match list.find(k.body, i => list.contains(defines(i), src)) {
+            Some(Cast(_v, "bitcast", _i, _f, bits)) -> { assert sign_free_bits(k.body, bits) }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+      assert list.all(list.drop(owners, 1), o => o.op == 1)
+      assert defines_inside(k.body) == range(0, len(defines_inside(k.body)))
+      if from == "f64" {
+        match k.body[1] {
+          Cast(_d, mode, _f, _t, _s) -> { assert mode == "ftof_zero" }
+          _ -> { assert false }
+        }
+      }
+    }
+  }
+}
+
+test "E8M0 expansion keeps the owner inside a region and leaves Up distinct" {
+  let p = TileProg { name = "e8m0", params = [], globals = [], hints = [], producer = None, debug = None,
+    ops = [ConstI(0, "i1", [], 1), If([4], 0,
+      [ConstF(1, "f64", [2], 2.0), Convert(2, "ftof", "f64", "f8E8M0FNU", [2], 1), Yield([2])],
+      [ConstF(3, "f8E8M0FNU", [2], 1.0), Yield([3])])] }
+  let (k, owners) = lower_spans(p)
+  let nested = owners[1].inner[0]
+  assert list.all(list.take(list.drop(nested, 1), len(nested) - 2), o => o.op == 3)
+  let up = lower(TileProg { ..p, ops = [ConstF(0, "f64", [], 1.0), Convert(1, "ftof_pos_inf", "f64", "f8E8M0FNU", [], 0)] })
+  assert len(up.body) == 3
+  assert len(k.body) == len(owners) + 1
 }

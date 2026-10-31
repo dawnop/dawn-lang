@@ -3984,6 +3984,12 @@ pub fn dtype_convert_ref(n: Int, dtype: String, dtypes: List[String], ins: List[
       })
 }
 
+## Four segments of `e8m0_source`: direct default/TowardZero, followed by
+## explicit RNE32 then default/TowardZero. `ins` is `[x, out]`.
+pub fn e8m0_source_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] =
+  segments(ins[1], n, 4, (seg, i) =>
+      narrow.round_f8e8m0(if seg < 2 { ins[0][i] } else { narrow.round_f32(ins[0][i]) }))
+
 ## The two segments of `dtype_e2m1`: the packed nibbles of `ins[0]` read as
 ## f4E2M1FN values and widened to f64, and an f64 taken into the format and
 ## back. `ins` is `[x, y, out]`, `x` is an i32 buffer and `y` and `out` are
