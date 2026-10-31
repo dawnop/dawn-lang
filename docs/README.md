@@ -33,7 +33,7 @@ prints how many there are on every run.
 
 GPU 宿主尺寸上界：[gpu-host-overflow-design.md](gpu-host-overflow-design.md)。
 
-scaled MMA 组合与架构拒绝方案：[gpu-n6-scaled-mma-design.md](gpu-n6-scaled-mma-design.md)。
+scaled MMA 组合与架构拒绝覆盖：[gpu-n6-scaled-mma-design.md](gpu-n6-scaled-mma-design.md)。
 
 效果来源提案：[effect-provenance-design.md](effect-provenance-design.md)，按观察作用域保留逻辑调用，含来源负控与分期验收；语言机制尚未实现。
 
