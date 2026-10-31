@@ -465,9 +465,17 @@ It returns `Result[Bytes, AssembleError]` and takes the `Fs` and `Proc`
 effects, so a test answers both without an assembler. The failures are told
 apart: `AssemblerNotFound` (nothing could start `tileiras`), `AssemblerFailed`
 (a non-zero exit, with the arguments and what it printed on stderr),
-`NoCubin` (a zero exit and no output), `UnknownVersion` (a `--version` with no
-`V<number>`) and `Scratch` (the host refused a temporary file). Nothing is
-cached; an assembly takes well under a second.
+`NoCubin` (a zero exit and no output), `UnknownVersion` (a `--version` without
+one complete, unambiguous standard version record) and `Scratch` (the host
+refused a temporary file). Nothing is cached; an assembly takes well under a second.
+
+The version record is `Cuda compilation tools, release M.m, VM.m.p`, with
+ASCII decimal components and no leading zeros except `0`. The release must
+agree with the full version. Surrounding whitespace, LF and CRLF are accepted;
+incomplete versions, suffixes and duplicate records are rejected before the
+assembly subprocess starts. `UnknownVersion` retains the original stdout.
+Other complete versions keep the existing argument policy. A new vendor
+format needs an explicit contract and fixture before it is accepted.
 
 Where to get `tileiras`: it is in the CUDA Toolkit 13.4 and later
 (`<toolkit>/bin/tileiras`), and on PyPI as `nvidia-cuda-tileiras`, which needs
