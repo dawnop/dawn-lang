@@ -7,7 +7,7 @@ use check/capture
 use check/capture.{Scope, Params, CaptureParam}
 use check/types.{Ty, TyI64Buf, TyF64Buf, TyCaptured, TyFn, TyAdt, TyOpaque,
   TyTuple, TyList, TySet, TyArray, TyMap, Sig, Eff, fn_align,
-  eff_scopes, subst_scopes, subst_scope_eff }
+  eff_scopes, subst_scopes, subst_scope_eff, subst_capture_eff }
 
 ## Follow call-local equations without changing simultaneous type substitution.
 pub fn resolve(s: Scope, bindings: Map[Int, Scope]) -> Scope = {
@@ -132,6 +132,7 @@ pub fn signature_normalized(s: Sig, sm: Map[Int, Scope]) -> Sig = {
     captures = caps, bounds = map(p.bounds, b => { let (id, value) = b
       (id, capture.subst(value, sm, cm)) }) }
   Sig { ..s, scope_params = params,
+    constraints = map(s.constraints, bs => map(bs, b => capture.trait_subst(b, sm, cm))),
     param_tys = map(s.param_tys, t => subst_scopes(t, sm, cm)),
     ret = subst_scopes(s.ret, sm, cm), eff = subst_scope_eff(s.eff, sm) }
 }
@@ -156,11 +157,13 @@ pub fn contract_normalized(s: Sig, scopes: Map[Int, Scope], captures: Map[Int, c
     bounds = map(p.bounds, b => { let (id, value) = b
       (id, capture.subst(value, sm, captures)) }) }
   Sig { ..scoped, scope_params = params,
+    constraints = map(scoped.constraints, bs => map(bs, b => capture.trait_subst(b, sm, captures))),
+    eff = subst_capture_eff(scoped.eff, sm, captures),
     param_tys = map(scoped.param_tys, t => subst_scopes(t, sm, captures)),
     ret = subst_scopes(scoped.ret, sm, captures) }
 }
 
-fn capture_bound(d: capture.Capture, a: capture.Capture, flex: List[CaptureParam],
+pub fn infer_upper(d: capture.Capture, a: capture.Capture, flex: List[CaptureParam],
   initial: Map[Int, capture.Capture]) -> Map[Int, capture.Capture] = {
   var bindings = initial
   for member in d {
@@ -204,14 +207,14 @@ pub fn infer_captures(d: Ty, a: Ty, flex: List[CaptureParam],
   var bindings = initial
   match (d, a) {
     (TyFn(dps, dr, _, dc), TyFn(aps, ar, _, ac)) -> {
-      bindings = capture_bound(capture.bound(dc), capture.bound(ac), flex, bindings)
+      bindings = infer_upper(capture.bound(dc), capture.bound(ac), flex, bindings)
       if len(dps) == len(aps) {
         for i in 0..len(dps) { bindings = infer_captures(dps[i], aps[i], flex, bindings) }
         bindings = infer_captures(dr, ar, flex, bindings)
       }
     }
     (TyCaptured(dv, bound), TyCaptured(av, actual)) -> {
-      bindings = capture_bound(bound, actual, flex, bindings)
+      bindings = infer_upper(bound, actual, flex, bindings)
       bindings = infer_captures(dv, av, flex, bindings)
     }
     (TyList(dv), TyList(av)) | (TyArray(dv), TyArray(av)) | (TySet(dv), TySet(av)) ->

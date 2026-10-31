@@ -4495,9 +4495,9 @@ fn decl_symbol(analysed: Option[QCx], d: DocText, dc: Decl) -> Option[Json] !io 
     DFn(f) -> Some((f.name, true, f.lo, f.hi, f.nlo, f.nhi))
     DType(t) -> Some((t.name, false, t.lo, t.hi, t.nlo, t.nhi))
     DConst(name, _, _, _, lo, hi, nlo, nhi) -> Some((name, false, lo, hi, nlo, nhi))
-    DTrait(name, _, _, _, _, _, _, _, lo, hi, nlo, nhi) -> Some((name, false, lo, hi, nlo, nhi))
+    DTrait(name, _, _, _, _, _, _, _, lo, hi, nlo, nhi, _) -> Some((name, false, lo, hi, nlo, nhi))
     DEffect(e) -> Some((e.name, false, e.lo, e.hi, e.nlo, e.nhi))
-    DImpl(_, trait_name, tlo, thi, _, _, _, _, lo, hi, _) -> Some((trait_name, false, lo, hi, tlo, thi))
+    DImpl(_, trait_name, tlo, thi, _, _, _, _, lo, hi, _, _) -> Some((trait_name, false, lo, hi, tlo, thi))
     DUseJava(fqcn, lo, hi, nlo, nhi) -> {
       let simple = match str.last_index_of(fqcn, ".") {
         Some(i) -> str.drop(fqcn, i + 1)
@@ -6522,6 +6522,35 @@ fn doc_probe_text() -> String =
     "type Two = Yes | No",
     ""
   ], "\n")
+
+test "trait Capture binders and applications have editor identities" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") { Ok(sc) -> sc, Err(e) -> panic(std_load_error_text(e)) }
+    let st = def_probe_state(std)
+    let text = "trait Head[T: ^{c}, ^c] {\n" ++
+      "type Item: ^{c}\nfn first(value: T) -> T.Item\n}\n" ++
+      "fn forward[T: Head[d] + ^{d}, ^d](value: T) -> T.Item = first(value)\n"
+    let d = def_probe_doc_named(st, "trait_capture.dawn", text)
+    assert def_probe_at(st, d, text, "Head[T", 0).hover == "trait Head[T: ^{c}, ^c]"
+    let declaration = str.index_of(text, "^c]").expect("Capture declaration") + 1
+    for needle in ["^{c}", "^{c}\nfn"] {
+      let target = def_probe_at(st, d, text, needle, 2)
+      assert target.hover == "Capture parameter c"
+      assert target.def == Some((declaration, declaration + 1))
+    }
+    let argument = def_probe_at(st, d, text, "Head[d]", 5)
+    let binder = str.index_of(text, "^d]").expect("function Capture declaration") + 1
+    assert argument.hover == "Capture parameter d"
+    assert argument.def == Some((binder, binder + 1))
+    let analysis = analysis_of(st, d).expect("Capture analysis")
+    let qc = doc_qcx(st, d, analysis).expect("Capture query")
+    let tokens = semantic_tokens(qc, 0, len(text))
+    for offset in [declaration, binder, probe_offset(text, "Head[d]", 5)] {
+      let hits = filter(tokens, token => token.lo == offset)
+      assert len(hits) == 1 && hits[0].ty == 5
+    }
+  }))
+}
 
 test "hover puts a declaration's ## doc under the fence, and nothing else changes" {
   io.with_fs_real(() => io.with_env_real(() => {

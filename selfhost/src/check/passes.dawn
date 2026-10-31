@@ -9,6 +9,7 @@
 # here (check_module runs the passes in order); nothing here calls back up.
 
 use check/capture
+use check/trait_contract
 use std/str
 use std/list
 use std/map
@@ -26,7 +27,7 @@ use front/ast.{parameter_names, TScoped, TCaptured, TKindArg, no_scope_syntax,
   e_lo, e_hi
 }
 
-use check/types.{mem_runner_sig, ScopedEffect, scoped_eff, TyCaptured,
+use check/types.{ty_scope_refs, eff_scopes, eff_vars, mem_runner_sig, ScopedEffect, scoped_eff, TyCaptured,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyF64Buf, TyUnit, TyNever, TyError, TyVar,
   TyAssoc, TyAdt, TyList, TyJava,
   TyMap, TySet, TyArray, TyTuple, TyFn, TyOpaque, Eff, EPure, EIo, EffVar, ELabeled,
@@ -51,7 +52,7 @@ use check/identity
 use check/identity.{TypeDecl, TraitDecl, EffectDecl, FunctionDecl, ConstDecl, MethodDecl, Named, ImplHead,
   PathTable, path_table, path_table_add, path_table_get, path_table_claim, path_text }
 use check/cx.{
-  resolve_named_effect, declare_capture_params, bind_capture_params,
+  resolve_capture, resolve_trait_application, resolve_named_effect, declare_capture_params, bind_capture_params,
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
   package_of, exports_seen_by, pkg_private, pkg_private_err, private_name_err,
   cerr_h, cerr_o, fresh, fresh_effvar, mint, enter_decl_owner, leave_decl_owner,
@@ -1201,7 +1202,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
         nhi = 30
       }],
       is_record = true,
-      derives = [Bound { name = "Show", lo = 50, hi = 54 }],
+      derives = [Bound { args = [], name = "Show", lo = 50, hi = 54 }],
       alias_target = None,
       lo = 24,
       hi = 54,
@@ -1441,6 +1442,13 @@ fn resolve_ground_row(cx: Cx, atoms: List[String], nlo: Int, nhi: Int) -> (Cx, O
   for a in atoms {
     if effect_name.ambient(a) {
       row = EIo
+    } else if str.contains(a, "[") {
+      let (checked, scoped) = resolve_eff_at(cx1, [a], nlo, nhi)
+      cx1 = checked
+      if len(eff_scopes(scoped)) != 1 || len(eff_vars(scoped)) > 0 || len(eff_assocs(scoped)) > 0 {
+        cx1 = cerr(cx1, "an associated effect requires one known effect and a bound Scope", nlo, nhi)
+        bad = true
+      } else { row = scoped }
     } else {
       let (next, id) = resolve_named_effect(cx1, a, nlo, nhi)
       cx1 = next
@@ -1507,6 +1515,19 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
     let (cx2, tvar) = fresh_tvar(cx1, d.tp)
     let (cx3, tid) = mint(cx2, TraitDecl, d.name, d.nlo, d.nhi)
     cx1 = cx3
+    let saved_capture = cx1.current_capture_params
+    let saved_types = cx1.current_tparams
+    let tv_scope = map.insert(map.empty(), d.tp, tvar)
+    let (scoped, scope_params) = bind_capture_params(Cx { ..cx1,
+      current_tparams = tv_scope, current_capture_params = capture.empty_params() }, d.scope)
+    cx1 = scoped
+    var assoc_bounds: List[(String, capture.Capture)] = []
+    for member in d.assoc {
+      let names = member.bound.unwrap_or([])
+      let (checked, upper) = resolve_capture(cx1, names, member.nlo, member.nhi)
+      cx1 = checked
+      assoc_bounds = assoc_bounds ++ [(member.name, upper)]
+    }
     # associated types register before the methods, and the trait enters the
     # table provisionally with them, so a method signature can already project
     # its own trait (`C.Item` in resolve_assoc reads t.assoc by id)
@@ -1552,7 +1573,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
     }
     cx1 = Cx {
       ..cx1,
-      traits = map.insert(cx1.traits, tid, TraitI {
+      traits = map.insert(cx1.traits, tid, TraitI { scope_params = scope_params, assoc_bounds = assoc_bounds,
         id = tid,
         name = d.name,
         tvar = tvar,
@@ -1574,7 +1595,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
     }
     cx1 = Cx {
       ..cx1,
-      current_tparam_bounds = map.insert(cx1.current_tparam_bounds, tvid, [tid])
+      current_tparam_bounds = map.insert(cx1.current_tparam_bounds, tvid, [trait_contract.application(trait_of(cx1.traits, tid))])
     }
     var methods: List[(String, MethodSig)] = []
     # whether this trait's method names take a slot in the fn namespace; a
@@ -1614,7 +1635,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       cx1 = cx5
       let eparams = eff_params_of(cx1.current_eff_vars)
       cx1 = Cx { ..cx1, current_tparams = saved_tp, current_eff_vars = saved_ev }
-      let sig = Sig { scope_params = capture.empty_params(),
+      let sig = Sig { scope_params = scope_params,
         name = me.name,
         param_tys = ptys,
         param_names = map(me.params, p => p.name),
@@ -1624,7 +1645,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         eff = eff,
         is_builtin = false,
         tparams = [tvar],
-        constraints = [[tid]],
+        constraints = [[trait_contract.application(trait_of(cx1.traits, tid))]],
         eparams = eparams,
         owner = cx1.owner_class,
         trait_id = Some(tid),
@@ -1651,7 +1672,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       }
       methods = methods ++ [(me.name, MethodSig { sig = sig, has_default = has_default })]
     }
-    let info = TraitI {
+    let info = TraitI { scope_params = scope_params, assoc_bounds = assoc_bounds,
       id = tid,
       name = d.name,
       tvar = tvar,
@@ -1668,7 +1689,8 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       ..cx1,
       traits = map.insert(cx1.traits, tid, info),
       traits_by_name = map.insert(cx1.traits_by_name, d.name, tid),
-      local_traits = cx1.local_traits ++ [d.name]
+      local_traits = cx1.local_traits ++ [d.name],
+      current_tparams = saved_types, current_capture_params = saved_capture
     }
   }
   cx1
@@ -1689,7 +1711,7 @@ test "trait registration puts methods in the fn namespace" {
     hi = 38,
     nlo = 17,
     nhi = 20
-  }], [], [], VisPrivate, 0, 40, 6, 9)] }
+  }], [], [], VisPrivate, 0, 40, 6, 9, no_scope_syntax())] }
   var cx = seed_prelude(test_cx())
   cx = pass_register_traits(cx, m)
   assert len(cx.diags) == 0
@@ -1710,7 +1732,7 @@ test "trait registration puts methods in the fn namespace" {
     hi = 38,
     nlo = 17,
     nhi = 20
-  }], [], [], VisPrivate, 0, 40, 6, 9)] }
+  }], [], [], VisPrivate, 0, 40, 6, 9, no_scope_syntax())] }
   let cx2 = pass_register_traits(cx, m2)
   assert len(cx2.diags) == 1
   assert str.contains(cx2.diags[0].msg, "already a method of trait `Eq2`")
@@ -1720,7 +1742,7 @@ test "every prelude trait name is refused as a redefinition" {
   # the guard used to name three of the five by hand, so `trait Show` and
   # `trait Iter` came out as "defined twice" on a file that declares them once
   for name in prelude_trait_names() {
-    let m = Module { decls = [DTrait(name, "T", 10, 11, [], [], [], VisPrivate, 0, 40, 6, 9)] }
+    let m = Module { decls = [DTrait(name, "T", 10, 11, [], [], [], VisPrivate, 0, 40, 6, 9, no_scope_syntax())] }
     let cx = pass_register_traits(seed_prelude(test_cx()), m)
     assert len(cx.diags) == 1
     assert cx.diags[0].msg == "`" ++ name ++ "` is a prelude trait and cannot be redefined"
@@ -1890,6 +1912,13 @@ pub(pkg) fn pass_register_impls(
     cx1 = Cx { ..cx1, current_tparam_bounds = ibd }
     let (cx2, subject) = resolve_type(cx1, d.subject)
     cx1 = cx2
+    let (application_cx, app) = resolve_trait_application(cx1, tid, d.capture_args, d.tlo, d.thi)
+    let capture_contract = len(tr.scope_params.captures) > 0 || len(tr.scope_params.bounds) > 0 ||
+      list.any(d.eff_binds, binding => list.any(binding.atoms, atom => str.contains(atom, "[")))
+    cx1 = if capture_contract {
+      check_impl_capture_contract(application_cx, tr, app, subject, scope_params, d.tlo, d.thi)
+    } else { application_cx }
+    let applied = trait_contract.applied(tr, app)
     if subject == TyError {
       impl_sigs = refused_methods(impl_sigs, head, d.methods)
       continue
@@ -1920,9 +1949,9 @@ pub(pkg) fn pass_register_impls(
         }
     }
     if not trait_local && not subject_local {
-      cx1 = cerr_h(cx1, "orphan impl: `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+      cx1 = cerr_h(cx1, "orphan impl: `" ++ applied.name ++ "[" ++ ty_show(cx1.adts, subject) ++
           "]` may not live here", d.tlo, d.thi,
-        "an impl belongs to the module that declares `" ++ tr.name ++
+        "an impl belongs to the module that declares `" ++ applied.name ++
           "` or the one that declares `" ++ ty_show(cx1.adts, subject) ++ "`")
       impl_sigs = refused_methods(impl_sigs, head, d.methods)
       continue
@@ -1935,12 +1964,12 @@ pub(pkg) fn pass_register_impls(
           None -> ""
         }
         let hint = if prev.derived {
-          "`" ++ ty_show(cx1.adts, subject) ++ "` already derives " ++ tr.name ++
+          "`" ++ ty_show(cx1.adts, subject) ++ "` already derives " ++ applied.name ++
             "; drop the derive or this impl"
         } else {
           "the program allows one impl per trait and type"
         }
-        cx1 = cerr_h(cx1, "duplicate impl: `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+        cx1 = cerr_h(cx1, "duplicate impl: `" ++ applied.name ++ "[" ++ ty_show(cx1.adts, subject) ++
             "]` is already implemented" ++ where2, d.tlo, d.thi, hint)
         impl_sigs = refused_methods(impl_sigs, head, d.methods)
         continue
@@ -1950,11 +1979,14 @@ pub(pkg) fn pass_register_impls(
     if tid == EQ_ID || tid == HASH_ID {
       eq_hash_impls = eq_hash_impls ++ [(tid, subject, d.tlo, d.thi)]
     }
-    let (bindings_cx, assoc_bindings, eff_bindings) = impl_member_bindings(cx1, d, tr, subject)
+    let (bindings_cx, assoc_bindings, eff_bindings) = impl_member_bindings(cx1, d, applied, subject)
     cx1 = bindings_cx
+    if capture_contract {
+      cx1 = check_impl_dependencies(cx1, app, iconstraints, assoc_bindings, eff_bindings, d.tlo, d.thi)
+    }
     var inst: Map[Int, Ty] = map.empty()
     var trait_tvid = -1
-    match tr.tvar {
+    match applied.tvar {
       TyVar(_, vid) -> {
         inst = map.insert(inst, vid, subject)
         trait_tvid = vid
@@ -1962,14 +1994,14 @@ pub(pkg) fn pass_register_impls(
       _ -> ()
     }
     let em0: Map[Int, Eff] = map.empty()
-    let (sigs_cx, provided, method_sigs) = impl_method_sigs(cx1, d.methods, tr, head, tid,
+    let (sigs_cx, provided, method_sigs) = impl_method_sigs(cx1, d.methods, applied, head, tid,
       subject, trait_tvid, inst, em0, itvars, iconstraints, assoc_bindings, eff_bindings, impl_sigs)
     cx1 = sigs_cx
     impl_sigs = method_sigs
     let no_tp: Map[String, Ty] = map.empty()
     cx1 = Cx { ..cx1, current_tparams = no_tp, current_capture_params = capture.empty_params() }
-    cx1 = report_missing_methods(cx1, d, tr, subject, inst, em0, provided)
-    let info = ImplI { scope_params = scope_params,
+    cx1 = report_missing_methods(cx1, d, applied, subject, inst, em0, provided)
+    let info = ImplI { trait_args = app.args, scope_params = scope_params,
       trait_id = tid,
       subject = subject,
       tparams = itvars,
@@ -2025,7 +2057,7 @@ fn register_derived_impls(start: Cx, m: Module, shells: List[Option[Shell]]) -> 
           dhi = b.hi
         }
       }
-      let ii = ImplI { scope_params = capture.empty_params(),
+      let ii = ImplI { trait_args = [], scope_params = capture.empty_params(),
         trait_id = tid,
         subject = TyAdt(sh.adt, info.tparams, capture.empty_arguments()),
         tparams = info.tparams,
@@ -2048,6 +2080,63 @@ fn register_derived_impls(start: Cx, m: Module, shells: List[Option[Shell]]) -> 
     di = di + 1
   }
   cx1
+}
+
+fn check_impl_capture_contract(cx: Cx, tr: TraitI, app: capture.TraitApplication,
+  subject: Ty, params: capture.Params, lo: Int, hi: Int) -> Cx = {
+  var next = cx
+  let allowed = capture.trait_support(app)
+  let actual = trait_contract.capture_of(cx.adts, params, subject)
+  match trait_contract.subject_upper(tr, app) {
+    Some(upper) -> if not capture.subset_in(actual, upper, params.captures) {
+      next = cerr(next, "impl subject exceeds the trait's capture upper bound", lo, hi)
+    }
+    None -> ()
+  }
+  if not capture.subset_in(trait_contract.support(cx.adts, params, subject), allowed, params.captures) {
+    next = cerr(next, "impl subject support is not covered by its trait Capture arguments", lo, hi)
+  }
+  var determined = ty_scope_refs(subject)
+  for arg in app.args { if len(arg) == 1 { determined = capture.union(determined, arg) } }
+  for region in params.scopes {
+    if not capture.contains(determined, capture.Region(region)) {
+      next = cerr(next, "impl Scope `" ++ region.name ++ "` is not determined by the complete trait application", lo, hi)
+    }
+  }
+  for param in params.captures {
+    if not capture.contains(determined, capture.CaptureVar(param.name, param.id)) && param.bound == None {
+      next = cerr(next, "impl Capture `" ++ param.name ++ "` is not determined by the complete trait application", lo, hi)
+    }
+  }
+  next
+}
+
+## Dictionary dependencies are part of the public witness contract even when
+## an implementation only stores code. Member type support includes domains
+## in parameter types, independently of the member's value capture bound.
+fn check_impl_dependencies(cx: Cx, app: capture.TraitApplication,
+  constraints: List[List[capture.TraitApplication]], bindings: List[(String, Ty)],
+  rows: List[(String, Eff)], lo: Int, hi: Int) -> Cx = {
+  var next = cx
+  let allowed = capture.trait_support(app)
+  let params = cx.current_capture_params
+  for bounds in constraints { for bound in bounds {
+    if not capture.subset_in(capture.trait_support(bound), allowed, params.captures) {
+      next = cerr(next, "impl subwitness support is not covered by its trait Capture arguments", lo, hi)
+    }
+  } }
+  for binding in bindings { let (name, value) = binding
+    if not capture.subset_in(trait_contract.support(cx.adts, params, value), allowed, params.captures) {
+      next = cerr(next, "associated type `" ++ name ++ "` has free support outside the trait Capture arguments", lo, hi)
+    }
+  }
+  for binding in rows { let (name, row) = binding
+    let support = map(eff_scopes(row), atom => capture.Region(atom.scope))
+    if not capture.subset_in(support, allowed, params.captures) {
+      next = cerr(next, "associated effect `" ++ name ++ "` has a Scope outside the trait Capture arguments", lo, hi)
+    }
+  }
+  next
 }
 
 ## An impl's `type X = ...` and `effect E = !...` bindings against the trait's
@@ -2093,8 +2182,13 @@ fn impl_member_bindings(
     bound_ns = bound_ns ++ [ab.name]
     let (cxab, bt) = resolve_type(cx1, ab.tref)
     cx1 = cxab
+    let upper = trait_contract.member_upper(tr, capture.closed_trait(tr.id), ab.name)
+    let actual = trait_contract.capture_of(cx1.adts, cx1.current_capture_params, bt)
+    if not capture.subset_in(actual, upper, cx1.current_capture_params.captures) {
+      cx1 = cerr(cx1, "associated type `" ++ ab.name ++ "` exceeds its capture upper bound " ++ capture.show(upper), ab.nlo, ab.nhi)
+    }
     match bt {
-      TyAssoc(_, _, _) -> {
+      TyAssoc(_, _, _, _) -> {
         cx1 = cerr_h(cx1, "an associated type binding cannot be a projection", ab.nlo, ab.nhi,
           "bind `" ++ ab.name ++ "` to a concrete type or an impl parameter")
       }
@@ -2183,7 +2277,7 @@ fn impl_method_sigs(
   inst: Map[Int, Ty],
   em0: Map[Int, Eff],
   itvars: List[Ty],
-  iconstraints: List[List[Int]],
+  iconstraints: List[List[capture.TraitApplication]],
   assoc_bindings: List[(String, Ty)],
   eff_bindings: List[(String, Eff)],
   sigs0: PathTable[Option[Sig]]
@@ -2531,9 +2625,9 @@ test "impl registration enforces coherence and signature matching" {
     hi = 13,
     nlo = 0,
     nhi = 3
-  }], [], [], lo, lo + 20, no_scope_syntax())
+  }], [], [], lo, lo + 20, no_scope_syntax(), [])
   let m = Module { decls = [
-    DTrait("Eq4", "T", 10, 11, [tm], [], [], VisPrivate, 0, 40, 6, 9),
+    DTrait("Eq4", "T", 10, 11, [tm], [], [], VisPrivate, 0, 40, 6, 9, no_scope_syntax()),
     good_impl(50),
     good_impl(80)
   ] }
@@ -2547,8 +2641,8 @@ test "impl registration enforces coherence and signature matching" {
   assert len(cx.local_impls) == 1
   # a missing method reports with the expected render
   let m2 = Module { decls = [
-    DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name = "eq5" }], [], [], VisPrivate, 0, 40, 6, 9),
-    DImpl([], "Eq5", 50, 53, TNamed("Int", [], [], 54, 57), no_fn_decls(), [], [], 50, 70, no_scope_syntax())
+    DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name = "eq5" }], [], [], VisPrivate, 0, 40, 6, 9, no_scope_syntax()),
+    DImpl([], "Eq5", 50, 53, TNamed("Int", [], [], 54, 57), no_fn_decls(), [], [], 50, 70, no_scope_syntax(), [])
   ] }
   var cx2 = seed_prelude(test_cx())
   cx2 = pass_register_traits(cx2, m2)
@@ -2561,24 +2655,24 @@ test "impl registration enforces coherence and signature matching" {
 
 ## Resolve `[T: Ord + Show]` bounds against the visible traits, aligned per
 ## parameter (the Kotlin resolveBounds).
-pub(pkg) fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[Int]]) = {
+pub(pkg) fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[capture.TraitApplication]]) = {
   var all_empty = true
   for tp in tparams {
     if len(tp.bounds) > 0 { all_empty = false }
   }
   if all_empty {
-    let none: List[List[Int]] = []
+    let none: List[List[capture.TraitApplication]] = []
     return (cx, none)
   }
   var cx1 = cx
-  var out: List[List[Int]] = []
+  var out: List[List[capture.TraitApplication]] = []
   for tp in tparams {
     var bnames: List[String] = []
     for b in tp.bounds { bnames = bnames ++ [b.name] }
     if dup_names(bnames) {
       cx1 = cerr(cx1, "duplicate trait bound on `" ++ tp.name ++ "`", tp.lo, tp.hi)
     }
-    var ids: List[Int] = []
+    var ids: List[capture.TraitApplication] = []
     for b in tp.bounds {
       match map.get(cx1.traits_by_name, b.name) {
         None -> {
@@ -2589,11 +2683,18 @@ pub(pkg) fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[Li
           cx1 = cerr_h(cx1, "unknown trait: ${b.name}", b.lo, b.hi, hint)
         }
         Some(tid) -> {
+          let (checked, app) = resolve_trait_application(cx1, tid, b.args, b.lo, b.hi)
+          cx1 = checked
           var have = false
           for x in ids {
-            if x == tid { have = true }
+            if x.id == tid {
+              have = true
+              if not capture.trait_equal(x, app) {
+                cx1 = cerr(cx1, "conflicting Capture arguments for the same trait bound", b.lo, b.hi)
+              }
+            }
           }
-          if not have { ids = ids ++ [tid] }
+          if not have { ids = ids ++ [app] }
         }
       }
     }
@@ -2719,17 +2820,17 @@ test "Eq and Hash resolve as bounds like any other trait" {
   let cx = seed_prelude(test_cx())
   let tp = (names: List[String]) => [TypeParamDecl {
     name = "T",
-    bounds = map(names, n => Bound { name = n, lo = 0, hi = 1 }),
+    bounds = map(names, n => Bound { args = [], name = n, lo = 0, hi = 1 }),
     lo = 0,
     hi = 1
   }]
   let (cx1, bs) = resolve_bounds(cx, tp(["Eq", "Hash"]))
   assert len(cx1.diags) == 0
-  assert bs[0] == [EQ_ID, HASH_ID]
+  assert bs[0] == [capture.closed_trait(EQ_ID), capture.closed_trait(HASH_ID)]
   # and they compose with Ord, which shares the rail
   let (cx2, bs2) = resolve_bounds(cx, tp(["Ord", "Eq"]))
   assert len(cx2.diags) == 0
-  assert bs2[0] == [ORD_ID, EQ_ID]
+  assert bs2[0] == [capture.closed_trait(ORD_ID), capture.closed_trait(EQ_ID)]
 }
 
 ## What a signature records for one parameter's default (`Sig.param_defaults`):
@@ -2789,7 +2890,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
       name = "f",
       tparams = [TypeParamDecl {
         name = "T",
-        bounds = [Bound { name = "Ord", lo = 9, hi = 12 }],
+        bounds = [Bound { args = [], name = "Ord", lo = 9, hi = 12 }],
         lo = 6,
         hi = 12
       }],
@@ -3221,7 +3322,7 @@ fn ty_poisoned(t: Ty) -> Bool =
     TySet(e) -> ty_poisoned(e)
     TyArray(e) -> ty_poisoned(e)
     TyOpaque(_, _, _, args, _, _) -> list.any(args, a => ty_poisoned(a))
-    TyAssoc(s, _, _) -> ty_poisoned(s)
+    TyAssoc(s, _, _, _) -> ty_poisoned(s)
     TyTuple(es) -> list.any(es, e => ty_poisoned(e))
     TyFn(ps, r, _, _) -> list.any(ps, p => ty_poisoned(p)) || ty_poisoned(r)
   }
@@ -3291,8 +3392,8 @@ fn surface_ty_leaks(cx: Cx, root: Audience, t: Ty, sp: TySpan, path: String) -> 
       }
       out
     }
-    TyAssoc(subject, tid, name) -> {
-      let tr = trait_of(cx.traits, tid)
+    TyAssoc(subject, tid, name, _) -> {
+      let tr = trait_of(cx.traits, tid.id)
       let ta = trait_audience(tr)
       var out = no_leaks()
       if not audience_covers(ta, root) {
@@ -3369,7 +3470,7 @@ fn bound_span(tps: List[TypeParamDecl], i: Int, name: String, j: Int, fb: TySpan
 fn surface_constraints_leaks(
   cx: Cx,
   root: Audience,
-  constraints: List[List[Int]],
+  constraints: List[List[capture.TraitApplication]],
   tps: List[TypeParamDecl],
   path: String,
   fb: TySpan
@@ -3379,7 +3480,7 @@ fn surface_constraints_leaks(
   for bounds in constraints {
     var j = 0
     for tid in bounds {
-      let tr = trait_of(cx.traits, tid)
+      let tr = trait_of(cx.traits, tid.id)
       let a = trait_audience(tr)
       if not audience_covers(a, root) {
         out = out ++ [leak_at("trait", tr.name, a,
@@ -3694,14 +3795,14 @@ pub(pkg) fn pass_export_surface(cx: Cx, m: Module) -> Cx = {
         Some(r) -> { cx1 = surface_effect(cx1, r, e) }
         None -> ()
       }
-      DTrait(name, _, _, _, methods, _, _, vis, _, _, nlo, nhi) -> match vis_root(cx1, root, vis) {
+      DTrait(name, _, _, _, methods, _, _, vis, _, _, nlo, nhi, _) -> match vis_root(cx1, root, vis) {
         Some(r) -> { cx1 = surface_trait(cx1, r, name, methods, nlo, nhi) }
         None -> ()
       }
       # an impl has no `pub` to read: observability is decided from its head.
       # Derived impls have no written head to visit at all, and their surface
       # is the deriving type's, which is a root in its own right.
-      DImpl(tps, _, tlo, thi, _, _, assoc, _, ilo, ihi, _) -> {
+      DImpl(tps, _, tlo, thi, _, _, assoc, _, ilo, ihi, _, _) -> {
         cx1 = surface_impl(cx1, root, tps, assoc, tlo, thi, ilo, ihi)
       }
       _ -> ()
@@ -3998,9 +4099,9 @@ fn inject_selective(
 ## `derive Ord` on a generic type: one bound per type parameter, on the trait
 ## being derived. `Box[T]` orders exactly as far as `T` does, and saying so at
 ## the declaration is what the error this replaces could not do.
-fn derive_constraints(tparams: List[Ty], tid: Int) -> List[List[Int]] = {
-  var out: List[List[Int]] = []
-  for _tp in tparams { out = out ++ [[tid]] }
+fn derive_constraints(tparams: List[Ty], tid: Int) -> List[List[capture.TraitApplication]] = {
+  var out: List[List[capture.TraitApplication]] = []
+  for _tp in tparams { out = out ++ [[capture.closed_trait(tid)]] }
   out
 }
 

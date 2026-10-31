@@ -262,9 +262,9 @@ fn adapt_in(e: CExpr, actual: Ty, declared: Ty) -> CExpr =
   # A projection over a rigid subject is an erased slot exactly like the
   # TyVar it projects from (assoc-types-design.md 4.1).
   match peel_opaque(declared) {
-    TyVar(_, _) | TyAssoc(_, _, _) ->
+    TyVar(_, _) | TyAssoc(_, _, _, _) ->
       match peel_opaque(actual) {
-        TyVar(_, _) | TyAssoc(_, _, _) -> e
+        TyVar(_, _) | TyAssoc(_, _, _, _) -> e
         _ -> CBox(e, actual)
       }
     _ -> e
@@ -294,9 +294,9 @@ fn erased_builtin_sig(st: LSt, name: String) -> Option[Sig] =
 
 fn adapt_out(e: CExpr, declared: Ty, actual: Ty) -> CExpr =
   match peel_opaque(declared) {
-    TyVar(_, _) | TyAssoc(_, _, _) ->
+    TyVar(_, _) | TyAssoc(_, _, _, _) ->
       match peel_opaque(actual) {
-        TyVar(_, _) | TyAssoc(_, _, _) -> e
+        TyVar(_, _) | TyAssoc(_, _, _, _) -> e
         _ -> CUnbox(e, actual)
       }
     _ -> e
@@ -2936,7 +2936,7 @@ fn subject_of(w: WitRef) -> Ty =
   match w {
     WConcrete(_, s) -> s
     WApply(_, s, _) -> s
-    WForward(_) -> panic("lower: a forwarded witness has no subject")
+    WForward(_, _, _) -> panic("lower: a forwarded witness has no subject")
   }
 
 ## Does this call have to reach `prim_relation` rather than a method body?
@@ -2951,7 +2951,7 @@ fn primitive_witness(st: LSt, w: WitRef, tid: Int) -> Bool =
   match w {
     WConcrete(_, subject) -> primitive_subject(st, tid, subject)
     WApply(_, subject, _) -> primitive_subject(st, tid, subject)
-    WForward(_) -> false
+    WForward(_, _, _) -> false
   }
 
 fn primitive_subject(st: LSt, tid: Int, subject: Ty) -> Bool =
@@ -3024,11 +3024,11 @@ fn is_relation_op(op: TBinOp) -> Bool =
 ## A witness as a value, for the hidden trailing arguments of a generic call.
 fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
   match w {
-    WForward(sym) -> (st, CLocal(sym, TyAdt(-1, [], capture.empty_arguments())))
+    WForward(sym, _, _) -> (st, CLocal(sym, TyAdt(-1, [], capture.empty_arguments())))
     # The structural default is not a different kind of dictionary, only one
     # whose slots the compiler supplies -- which is why deleting WStructural
     # changed nothing here.
-    WConcrete(tid, subject) -> dict_ref(st, tid, subject)
+    WConcrete(tid, subject) -> dict_ref(st, tid.id, subject)
     # ...and a non-ground subject is not a different kind either, only one
     # that cannot be a constant: same slots, built per use out of the
     # arguments' dictionaries.
@@ -3041,10 +3041,10 @@ fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
     # this case to `dict_ref` is what makes the two sides unable to disagree:
     # one call decides both the scaffold and the way it is reached.
     WApply(tid, subject, args) -> {
-      let goals = sub_goals(st.impls, tid, subject)
-      if len(goals) == 0 { return dict_ref(st, tid, subject) }
+      let goals = sub_goals(st.impls, tid.id, subject)
+      if len(goals) == 0 { return dict_ref(st, tid.id, subject) }
       let (st1, ds) = witness_values(st, args)
-      let (st2, key) = dict_def(st1, tid, subject, goals, true)
+      let (st2, key) = dict_def(st1, tid.id, subject, goals, true)
       (st2, CDictApply(key, ds, dict_ty()))
     }
   }
@@ -3070,7 +3070,7 @@ fn enter_wit_env(st: LSt, w: WitRef) -> (LSt, Map[String, CExpr]) =
       var st1 = st
       var env = st.dict_env
       var i = 0
-      for g in sub_goals(st.impls, tid, subject) {
+      for g in sub_goals(st.impls, tid.id, subject) {
         let (gt, gty) = g
         if i < len(args) {
           let (st2, d) = witness_value(st1, args[i])
@@ -3115,7 +3115,7 @@ fn lower_trait_call(
   # on native, and a user-function call to a comptime fold's fuel. The impl's
   # own body (`list_len`) serves the dictionary slot of a generic `[C: Len]`.
   match ws[0] {
-    WForward(_) -> ()
+    WForward(_, _, _) -> ()
     WConcrete(_, subject) -> if is_len_primitive(tid, subject) { return list_len_call(st, args, ty, site) }
     WApply(_, subject, _) -> if is_len_primitive(tid, subject) { return list_len_call(st, args, ty, site) }
   }
@@ -3144,7 +3144,7 @@ fn lower_trait_call(
     return (LSt { ..st4, dict_env = saved }, value)
   }
   match ws[0] {
-    WForward(sym) -> {
+    WForward(sym, _, _) -> {
       # the dictionary slot has the trait's generic signature, so the
       # subject position is erased and the argument is boxed; the evidence
       # rides whole, in the trait row's own order
@@ -3669,7 +3669,7 @@ fn atom_reads(e: Eff) -> List[TExpr] = {
   }
   for a in eff_assocs(e) {
     let (_, sv, tid, member) = a
-    out = out ++ [XEvRead(assoc_key(tid), AssociatedSlot(sv, tid, member), 0, 0, erased_ev_ty(), None)]
+    out = out ++ [XEvRead(assoc_key(tid.id), AssociatedSlot(sv, tid, member), 0, 0, erased_ev_ty(), None)]
   }
   out
 }
@@ -5215,7 +5215,7 @@ fn lower_for_iter(
 ## exactly what the dictionary's bridge traffics in.
 fn iter_cur_ty(st: LSt, w: WitRef, ct: Ty) -> Ty =
   match w {
-    WForward(_) -> TyAssoc(ct, ITER_ID, "Cur")
+    WForward(_, _, _) -> TyAssoc(ct, capture.closed_trait(ITER_ID), "Cur", [])
     WConcrete(_, subject) -> iter_cur_binding(st, subject)
     WApply(_, subject, _) -> iter_cur_binding(st, subject)
   }

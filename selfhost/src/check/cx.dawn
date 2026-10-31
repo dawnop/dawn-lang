@@ -7,8 +7,9 @@
 # has no re-export: a name reachable from `checker` alone would pin the whole
 # 11k-line file under all of them.
 
-use check/capture.{Scope as CaptureScope, CaptureParam, Params as CaptureParams, Function as CaptureFunction, Arguments as CaptureArguments}
+use check/capture.{TraitApplication, Scope as CaptureScope, CaptureParam, Params as CaptureParams, Function as CaptureFunction, Arguments as CaptureArguments}
 use check/capture
+use check/trait_contract
 use std/str
 use std/list
 use std/map
@@ -16,7 +17,7 @@ use std/set
 use check/identity
 use check/identity.{Minted, Part, minted, minted_path, minted_show, free_pool}
 use front/token.{Diag, mk_diag, DiagOwner}
-use front/ast.{TScoped, TCaptured, TKindArg, ScopeSyntax, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
+use front/ast.{CaptureArg, TScoped, TCaptured, TKindArg, ScopeSyntax, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
 use check/types.{BtBuffer, with_capture_bound, TyCaptured,
   Adts, AdtI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
   no_eparam_names, fn_max_params,
@@ -129,7 +130,7 @@ pub(pkg) type Frame = {
   eff_witness: Map[Eff, (Int, Int, String)],
   current_sig: Option[Sig],
   # (tvar id, trait id) → dictionary symbol id
-  dict_syms: Map[(Int, Int), Int],
+  dict_syms: Map[capture.DictionaryKey, Int],
   lambda_stack: List[LambdaCx],
   loop_stack: List[Int],
   # inside a comptime block or a const initializer: no effect of any kind may
@@ -308,7 +309,7 @@ pub(pkg) type Cx = {
   # through a fresh current_tparams and no save/restore is needed). Feeds
   # `T.Item` resolution (assoc-types-design.md D2).
   # frame-triage: keyed by fresh TyVar ids, so a stale entry is unreachable (see above)
-  current_tparam_bounds: Map[Int, List[Int]],
+  current_tparam_bounds: Map[Int, List[capture.TraitApplication]],
   # frame-triage: declaration-scoped: a comptime block inside a test block is still in a test
   in_test: Bool,
   # A resolved observe call, not the mere availability of std/provenance.
@@ -854,7 +855,7 @@ pub(pkg) fn test_cx() -> Cx = cx_new(None, None)
 ## to the `len` primitive (docs/len-trait-design.md 3.1).
 pub(pkg) fn with_list_len(cx: Cx) -> Cx = {
   let tv = TyVar("T", -50)
-  let imp = ImplI { scope_params = capture.empty_params(),
+  let imp = ImplI { trait_args = [], scope_params = capture.empty_params(),
     trait_id = LEN_ID,
     subject = TyList(tv),
     tparams = [tv],
@@ -1291,9 +1292,9 @@ fn resolve_eff_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (C
         Some(x) -> x
         None -> []
       }
-      var owners: List[Int] = []
+      var owners: List[capture.TraitApplication] = []
       for tid in bs {
-        let members = trait_of(cx.traits, tid).eff_assoc
+        let members = trait_of(cx.traits, tid.id).eff_assoc
         for an in members {
           if an == name && not list.contains(owners, tid) { owners = owners ++ [tid] }
         }
@@ -1436,6 +1437,38 @@ pub(pkg) fn bind_capture_params(cx: Cx, syntax: ScopeSyntax) -> (Cx, capture.Par
     bounds = outer.bounds ++ own.bounds, fn_effects = outer.fn_effects ++ own.fn_effects } }, own)
 }
 
+pub(pkg) fn resolve_trait_application(cx: Cx, id: Int, arguments: List[CaptureArg],
+  lo: Int, hi: Int) -> (Cx, capture.TraitApplication) = {
+  let tr = trait_of(cx.traits, id)
+  var next = cx
+  if len(arguments) != len(tr.scope_params.captures) {
+    next = cerr(next, "trait `" ++ tr.name ++ "` requires " ++
+        to_string(len(tr.scope_params.captures)) ++ " Capture argument(s), got " ++
+        to_string(len(arguments)), lo, hi)
+  }
+  var values: List[capture.Capture] = []
+  for argument in arguments {
+    if argument.named && not list.any(cx.current_capture_params.captures, c => c.name == argument.members[0]) {
+      next = cerr(next, "a named trait Capture argument must name a Capture parameter", argument.lo, argument.hi)
+    }
+    let (checked, value) = resolve_capture(next, argument.members, argument.lo, argument.hi)
+    next = checked
+    values = values ++ [value]
+  }
+  let app = TraitApplication { id = id, args = values }
+  let cm = trait_contract.substitutions(tr, app)
+  for i in 0..len(tr.scope_params.captures) {
+    if i >= len(values) { continue }
+    match tr.scope_params.captures[i].bound {
+      Some(upper) -> if not capture.subset_in(values[i], capture.subst(upper, map.empty(), cm), cx.current_capture_params.captures) {
+        next = cerr(next, "trait Capture argument exceeds its declared upper bound", lo, hi)
+      }
+      None -> ()
+    }
+  }
+  (next, app)
+}
+
 pub(pkg) fn declare_capture_params(cx: Cx, syntax: ScopeSyntax, ts: List[Ty], es: List[Eff]) -> (Cx, capture.Params) = {
   var tp: Map[String, Ty] = map.empty()
   var ep: Map[String, Eff] = map.empty()
@@ -1521,7 +1554,7 @@ pub(pkg) fn write_alias(cx: Cx, name: String, value: Ty) -> Cx = Cx {
   ..cx, alias_resolved = map.insert(cx.alias_resolved, name, value)
 }
 
-pub(pkg) fn write_bounds(cx: Cx, id: Int, value: List[Int]) -> Cx = Cx {
+pub(pkg) fn write_bounds(cx: Cx, id: Int, value: List[capture.TraitApplication]) -> Cx = Cx {
   ..cx, current_tparam_bounds = map.insert(cx.current_tparam_bounds, id, value)
 }
 
@@ -1788,9 +1821,9 @@ fn resolve_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, T
         Some(x) -> x
         None -> []
       }
-      var owners: List[Int] = []
+      var owners: List[capture.TraitApplication] = []
       for tid in bs {
-        let members = trait_of(cx.traits, tid).assoc
+        let members = trait_of(cx.traits, tid.id).assoc
         for an in members {
           if an == name && not list.contains(owners, tid) { owners = owners ++ [tid] }
         }
@@ -1803,7 +1836,7 @@ fn resolve_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, T
         (cerr_h(cx, "`" ++ subj ++ "." ++ name ++ "` is ambiguous: more than one bound declares `" ++
             name ++ "`", lo, hi, "rename the associated type in one of the traits"), TyError)
       } else {
-        (cx, TyAssoc(v, owners[0], name))
+        (cx, TyAssoc(v, owners[0], name, trait_contract.member_upper(trait_of(cx.traits, owners[0].id), owners[0], name)))
       }
     }
   }

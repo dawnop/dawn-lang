@@ -200,3 +200,4 @@ echo "PASS  the evidence-borrow check goes red on owned evidence"
 
 # Domain identity is observable independently of the allocation handlers' bodies.
 python3 "$here/scope.py" --selftest
+python3 "$root/scripts/trait-capture-contract/run.py"

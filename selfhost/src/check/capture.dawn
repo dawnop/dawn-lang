@@ -4,6 +4,54 @@
 use std/list
 use std/map
 
+# A trait application is static even when its dictionary is erased at run time.
+# Keeping arguments beside the identity prevents bounds and projections from
+# selecting an unvalidated contract with the same implementation head.
+pub type TraitApplication = { id: Int, args: List[Capture] }
+pub alias TraitKey = (Int, List[List[(Int, Int)]])
+pub alias DictionaryKey = (Int, TraitKey)
+
+pub fn closed_trait(id: Int) -> TraitApplication = TraitApplication { id = id, args = [] }
+
+pub fn trait_equal(a: TraitApplication, b: TraitApplication) -> Bool = {
+  if a.id != b.id || len(a.args) != len(b.args) { return false }
+  for i in 0..len(a.args) { if not equal(a.args[i], b.args[i]) { return false } }
+  true
+}
+
+pub fn trait_subst(a: TraitApplication, sm: Map[Int, Scope], cm: Map[Int, Capture]) -> TraitApplication =
+  if len(a.args) == 0 { a } else { TraitApplication { ..a, args = map(a.args, c => subst(c, sm, cm)) } }
+
+pub fn trait_support(a: TraitApplication) -> Capture = {
+  var out: Capture = []
+  for arg in a.args { out = union(out, arg) }
+  out
+}
+
+pub fn trait_key(a: TraitApplication) -> TraitKey = (a.id, map(a.args, c => map(normalize(c), m => key(m))))
+pub fn dictionary_key(subject: Int, a: TraitApplication) -> DictionaryKey = (subject, trait_key(a))
+
+## Canonical ordering ignores display names, just like dictionary lookup.
+pub fn trait_compare(a: TraitApplication, b: TraitApplication) -> Int = {
+  if a.id != b.id { return if a.id < b.id { -1 } else { 1 } }
+  if len(a.args) != len(b.args) { return len(a.args) - len(b.args) }
+  for i in 0..len(a.args) {
+    let left = normalize(a.args[i])
+    let right = normalize(b.args[i])
+    if len(left) != len(right) { return len(left) - len(right) }
+    for j in 0..len(left) {
+      let (lk, li) = key(left[j])
+      let (rk, ri) = key(right[j])
+      if lk != rk { return lk - rk }
+      if li != ri { return if li < ri { -1 } else { 1 } }
+    }
+  }
+  0
+}
+
+pub fn trait_suffix(a: TraitApplication) -> String =
+  if len(a.args) == 0 { "" } else { "[" ++ join(map(a.args, c => show(c)), ", ") ++ "]" }
+
 pub type Scope = { name: String, id: Int }
 pub type Member = Region(scope: Scope) | CaptureVar(name: String, id: Int)
 pub alias Capture = List[Member]
