@@ -13,16 +13,15 @@
 # it has no `==`, no `Hash`, no `Show`, and two names for it see each other's
 # writes. Copy in with `from_list`, copy out with `to_list`.
 #
-# A buffer exists only under `Mem`. Every function that makes, reads or writes
-# one carries `!Mem`, `new` is the one operation of the effect, and `with_mem`
-# is the scope that answers it. `len` is pure: the length never changes. The
-# checker holds a buffer inside its scope with four rules that name this
-# effect (design doc 4.2): the result of `with_mem` cannot mention a buffer or
-# a function that carries `Mem`, only this module may install a handler for
-# `Mem`, no effect operation or handler variable may have a buffer type, and
-# neither a buffer nor a `Mem` function crosses a `use java` call. So
-# `with_mem` is pure whenever its body is, and a buffer cannot be read or
-# written once its scope has returned. Nothing in std uses it yet.
+# Every buffer names its allocation Scope: `I64Buf@s` or `F64Buf@s`.
+# Making, reading or writing one requires `!Mem[s]`; `len` is pure because
+# the length never changes. `with_mem` supplies a fresh instance to a
+# Scope-polymorphic callback. Its result and forwarded effects must not
+# mention that bound Scope, so the runner cannot return its allocated buffer.
+# Declared Scope parameters forward an existing domain rather than creating
+# another one. Copying between domains requires both domains' evidence.
+# Actual closure environments and control boundaries follow the capture
+# design's later cuts (docs/mem-capture-scope-design.md section 7).
 #
 # `at` and `set` assert a position, so an index outside `[0, len)` panics.
 # The range writes `fill` and `copy_from` panic too and never clamp: a write
@@ -49,58 +48,54 @@ use std/bytes.{Endian, Little, Big}
 
 ## The operations of `Mem`: a fresh buffer of either kind. The handler in [`with_mem`]
 ## answers it; nothing else may install one.
-pub effect Mem {
-  fn mem_alloc(n: Int) -> I64Buf
-  fn mem_alloc_f64(n: Int) -> F64Buf
+pub effect Mem[@s] {
+  fn mem_alloc(n: Int) -> I64Buf@s
+  fn mem_alloc_f64(n: Int) -> F64Buf@s
 }
 
 ## Runs `body` with a fresh memory scope. Every buffer made inside is private to
 ## this call, and the result cannot mention one (the checker enforces it). It
 ## is pure when `!e` is empty, so a computation that fills and reads buffers
 ## inside can still be folded and shared like any other pure call.
-pub fn with_mem[T, !e](body: fn() -> T !Mem !e) -> T !e = {
-  with handle Mem {
-    mem_alloc(n) => i64buf_new(n)
-    mem_alloc_f64(n) => f64buf_new(n)
-  }
-  body()
-}
+pub fn with_mem[R: ^{c}, ^c, !e: fn](
+  body: fn[@s]() -> R!(Mem[s] | e) ^{c}
+) -> R !e = mem_run(body)
 
 ## A buffer of `n` zeros. Panics when `n` is negative or above the limit.
-pub fn new(n: Int) -> I64Buf !Mem = mem_alloc(n)
+pub fn new[@s](n: Int) -> I64Buf@s !Mem[s] = mem_alloc(n)
 
 # The prelude's `len` is the `Len` trait (docs/len-trait-design.md); this is its
 # I64Buf impl, the number of elements. It never changes after `new`, so it stays
-# pure while `at` and `set` carry `!Mem`.
-impl Len[I64Buf] {
-  fn len(b: I64Buf) -> Int = i64buf_len(b)
+# pure while `at` and `set` carry `!Mem[s]`.
+impl[@s] Len[I64Buf@s] {
+  fn len(b: I64Buf@s) -> Int = i64buf_len(b)
 }
 
 ## The element at `i`. Panics when `i` is outside `[0, len(b))`.
-pub fn at(b: I64Buf, i: Int) -> Int !Mem = i64buf_at(b, i)
+pub fn at[@s](b: I64Buf@s, i: Int) -> Int !Mem[s] = i64buf_at(b, i)
 
 ## Stores `v` at `i`. Panics when `i` is outside `[0, len(b))`.
-pub fn set(b: I64Buf, i: Int, v: Int) -> Unit !Mem = i64buf_set(b, i, v)
+pub fn set[@s](b: I64Buf@s, i: Int, v: Int) -> Unit !Mem[s] = i64buf_set(b, i, v)
 
 ## Stores `v` in every position of `[from, to)`. Panics unless
 ## `0 <= from <= to <= len(b)`; it never clamps.
-pub fn fill(b: I64Buf, from: Int, to: Int, v: Int) -> Unit !Mem = i64buf_fill(b, from, to, v)
+pub fn fill[@s](b: I64Buf@s, from: Int, to: Int, v: Int) -> Unit !Mem[s] = i64buf_fill(b, from, to, v)
 
 ## Copies `n` elements from `src` starting at `src_at` to `dst` starting at
 ## `dst_at`. The destination comes first, as in `memcpy`. The ranges may overlap
 ## when both buffers are the same one: the result is as if the source were read
 ## in full before anything was written. Panics when `n` is negative or either
 ## range leaves its buffer; it never clamps.
-pub fn copy_from(dst: I64Buf, dst_at: Int, src: I64Buf, src_at: Int, n: Int) -> Unit !Mem =
+pub fn copy_from[@s,@t](dst: I64Buf@s, dst_at: Int, src: I64Buf@t, src_at: Int, n: Int) -> Unit!(Mem[s] | Mem[t]) =
   i64buf_copy_from(dst, dst_at, src, src_at, n)
 
 ## Copies `n` elements of `b` from `from` to `to_at`, within the same buffer.
 ## `copy_from` with one buffer, and as safe under overlap.
-pub fn copy_within(b: I64Buf, from: Int, to_at: Int, n: Int) -> Unit !Mem =
+pub fn copy_within[@s](b: I64Buf@s, from: Int, to_at: Int, n: Int) -> Unit !Mem[s] =
   i64buf_copy_from(b, to_at, b, from, n)
 
 ## A new buffer with the same contents. The two do not see each other's writes.
-pub fn clone(b: I64Buf) -> I64Buf !Mem = {
+pub fn clone[@s](b: I64Buf@s) -> I64Buf@s !Mem[s] = {
   let n = i64buf_len(b)
   let c = new(n)
   i64buf_copy_from(c, 0, b, 0, n)
@@ -108,7 +103,7 @@ pub fn clone(b: I64Buf) -> I64Buf !Mem = {
 }
 
 ## A new buffer holding `xs`, in order.
-pub fn from_list(xs: List[Int]) -> I64Buf !Mem = {
+pub fn from_list[@s](xs: List[Int]) -> I64Buf@s !Mem[s] = {
   let a = list_to_array(xs)
   let n = array_len(a)
   let b = new(n)
@@ -122,19 +117,19 @@ pub fn from_list(xs: List[Int]) -> I64Buf !Mem = {
 
 ## The elements of `b`, in order, as a list. It goes through the bulk byte
 ## path at width 8, which measures faster than a per-element loop on both backends.
-pub fn to_list(b: I64Buf) -> List[Int] !Mem =
+pub fn to_list[@s](b: I64Buf@s) -> List[Int] !Mem[s] =
   bytes.unpack_ints(to_bytes(b, 8), 8, true)
 
 ## Each element of `b` as `width` bytes, which must be 1, 2, 4 or 8. An element
 ## keeps its low `8 * width` bits, so the result of `pack_ints` on the same
 ## elements, byte for byte. Any other width panics.
-pub fn to_bytes(b: I64Buf, width: Int, order: Endian = Little) -> Bytes !Mem =
+pub fn to_bytes[@s](b: I64Buf@s, width: Int, order: Endian = Little) -> Bytes !Mem[s] =
   i64buf_pack(b, width, is_little(order))
 
 ## The bytes of `bs` as a buffer of `width`-byte integers, `signed` choosing
 ## sign or zero extension; the inverse of [`to_bytes`]. Panics on a width other
 ## than 1, 2, 4 or 8, and on a length that is not a multiple of `width`.
-pub fn from_bytes(bs: Bytes, width: Int, signed: Bool, order: Endian = Little) -> I64Buf !Mem = {
+pub fn from_bytes[@s](bs: Bytes, width: Int, signed: Bool, order: Endian = Little) -> I64Buf@s !Mem[s] = {
   i64buf_unpack(bs, width, signed, is_little(order))
 }
 
@@ -146,34 +141,34 @@ fn is_little(order: Endian) -> Bool = match order {
 # ---- F64Buf ----
 
 ## A buffer of `n` zeros (`+0.0`). Panics when `n` is negative or above the limit.
-pub fn f64_new(n: Int) -> F64Buf !Mem = mem_alloc_f64(n)
+pub fn f64_new[@s](n: Int) -> F64Buf@s !Mem[s] = mem_alloc_f64(n)
 
 # The F64Buf impl of `Len`, as for I64Buf above.
-impl Len[F64Buf] {
-  fn len(b: F64Buf) -> Int = f64buf_len(b)
+impl[@s] Len[F64Buf@s] {
+  fn len(b: F64Buf@s) -> Int = f64buf_len(b)
 }
 
 ## The element at `i`, bit for bit. Panics when `i` is outside `[0, len(b))`.
-pub fn f64_at(b: F64Buf, i: Int) -> Float !Mem = f64buf_at(b, i)
+pub fn f64_at[@s](b: F64Buf@s, i: Int) -> Float !Mem[s] = f64buf_at(b, i)
 
 ## Stores `v` at `i`, bit for bit. Panics when `i` is outside `[0, len(b))`.
-pub fn f64_set(b: F64Buf, i: Int, v: Float) -> Unit !Mem = f64buf_set(b, i, v)
+pub fn f64_set[@s](b: F64Buf@s, i: Int, v: Float) -> Unit !Mem[s] = f64buf_set(b, i, v)
 
 ## Stores `v` in every position of `[from, to)`. Panics unless
 ## `0 <= from <= to <= len(b)`; it never clamps.
-pub fn f64_fill(b: F64Buf, from: Int, to: Int, v: Float) -> Unit !Mem = f64buf_fill(b, from, to, v)
+pub fn f64_fill[@s](b: F64Buf@s, from: Int, to: Int, v: Float) -> Unit !Mem[s] = f64buf_fill(b, from, to, v)
 
 ## [`copy_from`] for doubles: the destination comes first, overlap is safe, and
 ## a range that leaves its buffer panics.
-pub fn f64_copy_from(dst: F64Buf, dst_at: Int, src: F64Buf, src_at: Int, n: Int) -> Unit !Mem =
+pub fn f64_copy_from[@s,@t](dst: F64Buf@s, dst_at: Int, src: F64Buf@t, src_at: Int, n: Int) -> Unit!(Mem[s] | Mem[t]) =
   f64buf_copy_from(dst, dst_at, src, src_at, n)
 
 ## [`copy_within`] for doubles.
-pub fn f64_copy_within(b: F64Buf, from: Int, to_at: Int, n: Int) -> Unit !Mem =
+pub fn f64_copy_within[@s](b: F64Buf@s, from: Int, to_at: Int, n: Int) -> Unit !Mem[s] =
   f64buf_copy_from(b, to_at, b, from, n)
 
 ## A new buffer with the same contents. The two do not see each other's writes.
-pub fn f64_clone(b: F64Buf) -> F64Buf !Mem = {
+pub fn f64_clone[@s](b: F64Buf@s) -> F64Buf@s !Mem[s] = {
   let n = f64buf_len(b)
   let c = f64_new(n)
   f64buf_copy_from(c, 0, b, 0, n)
@@ -181,7 +176,7 @@ pub fn f64_clone(b: F64Buf) -> F64Buf !Mem = {
 }
 
 ## A new buffer holding `xs`, in order.
-pub fn f64_from_list(xs: List[Float]) -> F64Buf !Mem = {
+pub fn f64_from_list[@s](xs: List[Float]) -> F64Buf@s !Mem[s] = {
   let a = list_to_array(xs)
   let n = array_len(a)
   let b = f64_new(n)
@@ -194,19 +189,19 @@ pub fn f64_from_list(xs: List[Float]) -> F64Buf !Mem = {
 }
 
 ## The elements of `b`, in order, as a list.
-pub fn f64_to_list(b: F64Buf) -> List[Float] !Mem =
+pub fn f64_to_list[@s](b: F64Buf@s) -> List[Float] !Mem[s] =
   bytes.unpack_floats(f64_to_bytes(b, 8), 8)
 
 ## Each element of `b` as `width` bytes, which must be 4 or 8, as `pack_floats`
 ## does: width 8 keeps the bits (a NaN's payload and sign, `-0.0`), width 4
 ## rounds to the nearest float. Any other width panics.
-pub fn f64_to_bytes(b: F64Buf, width: Int, order: Endian = Little) -> Bytes !Mem =
+pub fn f64_to_bytes[@s](b: F64Buf@s, width: Int, order: Endian = Little) -> Bytes !Mem[s] =
   f64buf_pack(b, width, is_little(order))
 
 ## The bytes of `bs` as a buffer of doubles read from `width`-byte floats (4 or
 ## 8); the inverse of [`f64_to_bytes`]. Panics on another width and on a length
 ## that is not a multiple of `width`.
-pub fn f64_from_bytes(bs: Bytes, width: Int, order: Endian = Little) -> F64Buf !Mem =
+pub fn f64_from_bytes[@s](bs: Bytes, width: Int, order: Endian = Little) -> F64Buf@s !Mem[s] =
   f64buf_unpack(bs, width, is_little(order))
 
 # ---- tests ----
@@ -229,7 +224,7 @@ fn unit_text[!e](f: fn() -> Unit !e) -> String !e =
   }
 
 test "a new buffer is all zeros, and set then at reads back" {
-  with_mem(() => {
+  with_mem([@mem_scope_1] () => {
     let b = new(5)
     assert len(b) == 5
     assert to_list(b) == [0, 0, 0, 0, 0]
@@ -246,7 +241,7 @@ test "a new buffer is all zeros, and set then at reads back" {
 }
 
 test "at and set assert a position, including one a 32-bit truncation would alias" {
-  with_mem(() => {
+  with_mem([@mem_scope_2] () => {
     let b = new(8)
     assert panic_text(() => at(b, 8)) == "I64Buf index 8 out of bounds for length 8"
     assert panic_text(() => at(b, -1)) == "I64Buf index -1 out of bounds for length 8"
@@ -268,7 +263,7 @@ test "at and set assert a position, including one a 32-bit truncation would alia
 }
 
 test "new refuses a negative length and a length above the limit" {
-  with_mem(() => {
+  with_mem([@mem_scope_3] () => {
     assert panic_text(() => len(new(-1))) == "I64Buf.new: negative length -1"
     assert panic_text(() => len(new(-9223372036854775808))) ==
       "I64Buf.new: negative length -9223372036854775808"
@@ -280,7 +275,7 @@ test "new refuses a negative length and a length above the limit" {
 }
 
 test "fill writes [from, to), and a range that leaves the buffer panics rather than clamps" {
-  with_mem(() => {
+  with_mem([@mem_scope_4] () => {
     let b = from_list([1, 2, 3, 4, 5])
     fill(b, 1, 4, 0)
     assert to_list(b) == [1, 0, 0, 0, 5]
@@ -303,7 +298,7 @@ test "fill writes [from, to), and a range that leaves the buffer panics rather t
 }
 
 test "copy_from moves a run between buffers, and copy_within is safe under overlap" {
-  with_mem(() => {
+  with_mem([@mem_scope_5] () => {
     let src = from_list([10, 11, 12, 13, 14, 15])
     let dst = new(6)
     copy_from(dst, 1, src, 2, 3)
@@ -327,7 +322,7 @@ test "copy_from moves a run between buffers, and copy_within is safe under overl
 }
 
 test "copy_from refuses every range that leaves a buffer, and writes nothing" {
-  with_mem(() => {
+  with_mem([@mem_scope_6] () => {
     let a = from_list([1, 2, 3, 4])
     let b = from_list([5, 6, 7])
     let head = "I64Buf.copy_from: range out of bounds ("
@@ -356,7 +351,7 @@ test "copy_from refuses every range that leaves a buffer, and writes nothing" {
 }
 
 test "clone is a buffer of its own, and from_list and to_list round-trip" {
-  with_mem(() => {
+  with_mem([@mem_scope_7] () => {
     let a = from_list([3, -1, 4, 1, 5])
     let c = clone(a)
     assert to_list(c) == [3, -1, 4, 1, 5]
@@ -377,7 +372,7 @@ test "clone is a buffer of its own, and from_list and to_list round-trip" {
 }
 
 test "from_list and to_list round-trip at the vector's block edges" {
-  with_mem(() => {
+  with_mem([@mem_scope_8] () => {
     for n in [0, 1, 2, 31, 32, 33, 64, 65, 1024, 1025] {
       var xs: List[Int] = []
       for i in 0..n { xs = xs ++ [i * i - 5] }
@@ -391,7 +386,7 @@ test "from_list and to_list round-trip at the vector's block edges" {
 }
 
 test "two names for one buffer see each other's writes" {
-  with_mem(() => {
+  with_mem([@mem_scope_9] () => {
     let a = new(3)
     let b = a
     set(b, 1, 42)
@@ -405,7 +400,7 @@ const NAN_PAYLOAD: Int = 0x7FF8000000000001
 const NEG_ZERO_BITS: Int = -9223372036854775808
 
 test "an F64Buf is zeros, reads back what was stored, and keeps the bits" {
-  with_mem(() => {
+  with_mem([@mem_scope_10] () => {
     let b = f64_new(4)
     assert len(b) == 4
     assert f64_to_list(b) == [0.0, 0.0, 0.0, 0.0]
@@ -422,7 +417,7 @@ test "an F64Buf is zeros, reads back what was stored, and keeps the bits" {
 }
 
 test "F64Buf at and set assert a position, and new refuses a bad length" {
-  with_mem(() => {
+  with_mem([@mem_scope_11] () => {
     let b = f64_new(8)
     assert panic_text(() => float_to_bits(f64_at(b, 8))) == "F64Buf index 8 out of bounds for length 8"
     assert panic_text(() => float_to_bits(f64_at(b, 4294967301))) ==
@@ -434,7 +429,7 @@ test "F64Buf at and set assert a position, and new refuses a bad length" {
 }
 
 test "F64Buf fill and copy are I64Buf's, with its panic wording under the other name" {
-  with_mem(() => {
+  with_mem([@mem_scope_12] () => {
     let b = f64_from_list([1.0, 2.0, 3.0, 4.0, 5.0])
     f64_fill(b, 1, 4, 0.5)
     assert f64_to_list(b) == [1.0, 0.5, 0.5, 0.5, 5.0]
@@ -455,7 +450,7 @@ test "F64Buf fill and copy are I64Buf's, with its panic wording under the other 
 }
 
 test "f64_clone is a buffer of its own, and the list conversions keep the bits" {
-  with_mem(() => {
+  with_mem([@mem_scope_13] () => {
     let nan = float_of_bits(NAN_PAYLOAD)
     let a = f64_from_list([3.5, -0.0, nan, 1.0e300])
     let c = f64_clone(a)
@@ -474,7 +469,7 @@ test "f64_clone is a buffer of its own, and the list conversions keep the bits" 
 }
 
 test "to_bytes and from_bytes are pack_ints and unpack_ints on a flat buffer" {
-  with_mem(() => {
+  with_mem([@mem_scope_14] () => {
     let xs = [0, 1, -1, 255, 256, -129, 65535, 2147483647, -2147483648, 4294967295,
       9223372036854775807, -9223372036854775808, 300, 0x0102030405060708]
     let b = from_list(xs)
@@ -502,7 +497,7 @@ test "to_bytes and from_bytes are pack_ints and unpack_ints on a flat buffer" {
 }
 
 test "the integer endpoints refuse a bad width and a ragged length with the pack wording" {
-  with_mem(() => {
+  with_mem([@mem_scope_15] () => {
     assert panic_text(() => len(to_bytes(from_list([1]), 3))) ==
       "bytes.pack: width 3 is not 1, 2, 4 or 8"
     assert panic_text(() => len(from_bytes(bytes.from_hex("0102").expect("hex"), 0, true))) ==
@@ -513,7 +508,7 @@ test "the integer endpoints refuse a bad width and a ragged length with the pack
 }
 
 test "f64_to_bytes and f64_from_bytes keep the bits at width 8 and round at width 4" {
-  with_mem(() => {
+  with_mem([@mem_scope_16] () => {
     let nan = float_of_bits(NAN_PAYLOAD)
     let xs = [1.5, -0.0, nan, 0.1, -3.25e200]
     let b = f64_from_list(xs)
@@ -540,7 +535,7 @@ test "f64_to_bytes and f64_from_bytes keep the bits at width 8 and round at widt
 # to free it, and none of them is a path an ordinary test would notice leaking.
 
 test "a panic caught while a buffer is live frees the buffer" {
-  with_mem(() => {
+  with_mem([@mem_scope_17] () => {
     let r = catch_panic(() => {
       let b = from_list([1, 2, 3])
       at(b, 3)
@@ -553,7 +548,7 @@ test "a panic caught while a buffer is live frees the buffer" {
 }
 
 test "a closure that captured a buffer frees it when the closure goes" {
-  with_mem(() => {
+  with_mem([@mem_scope_18] () => {
     let f = {
       let b = from_list([5, 6, 7])
       () => at(b, 1)

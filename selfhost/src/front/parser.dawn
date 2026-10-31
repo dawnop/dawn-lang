@@ -1901,11 +1901,17 @@ fn trait_method(p: P, st: St) -> PR[TraitMethod] = {
 fn effect_decl(p: P, st: St, vis: Vis, is_ctl: Bool) -> PR[Decl] = {
   let (st1, kw) = want(p, st, EFFECT, "`effect`")?
   let (st2, name) = want(p, st1, TYPEIDENT, "an effect name (uppercase)")?
-  if at_kind(p, st2, LBRACKET) {
+  if at_kind(p, st2, LBRACKET) && tok_at(p, st2.pos + 1, 0).kind != AT {
     return Err((st2, perr_h(p, st2, "an effect cannot declare type parameters",
       "v1 effects are bare labels; specialize at the declaration instead")))
   }
-  let st3 = skip_nl(p, st2)
+  let (after, axes) = type_params(p, st2)?
+  let (types, effects, scope) = axes
+  if len(types) > 0 || len(effects) > 0 {
+    return Err((after, perr_h(p, after, "an effect cannot declare type or effect parameters",
+      "only the compiler-owned Mem declaration takes a Scope parameter")))
+  }
+  let st3 = skip_nl(p, after)
   let (st4, _) = want(p, st3, LBRACE, "`{` (the effect body)")?
   var st5 = skip_nl(p, st4)
   var ops: List[EffectOp] = []
@@ -1919,6 +1925,7 @@ fn effect_decl(p: P, st: St, vis: Vis, is_ctl: Bool) -> PR[Decl] = {
     return Err((st7, pd("an effect must declare at least one operation", kw.lo, close.hi)))
   }
   Ok((st7, DEffect(EffectDeclR {
+    scope = scope,
     vis = vis,
     is_ctl = is_ctl,
     name = name.text,

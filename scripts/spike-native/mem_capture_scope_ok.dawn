@@ -4,29 +4,29 @@
 use std/mem
 use std/mem.{Mem}
 
-type Holder = { b: I64Buf }
-type Source = { read: fn(Int) -> Int !Mem }
+type Holder[@s] = { b: I64Buf@s }
+type Source[@s] = { read: fn(Int) -> Int !Mem[s] }
 
-fn bind[T](value: T, read: fn(T, Int) -> Int !e) -> (fn(Int) -> Int !e) =
+fn bind[T: ^{c}, ^c, !e](value: T, read: fn(T, Int) -> Int !e ^{c}) -> (fn(Int) -> Int !e ^{c}) =
   n => read(value, n)
 
-fn local() -> Int = mem.with_mem(() => {
-  let held = Holder { b = mem.new(1) }
+fn local() -> Int = mem.with_mem([@s] () => {
+  let held: Holder[s] = Holder { b = mem.new(1) }
   let bufs = [held.b, mem.new(2)]
-  let callback: fn(Int) -> Int !Mem = bind(bufs[0], (b: I64Buf, n: Int) => {
+  let callback: fn(Int) -> Int !Mem[s] = bind(bufs[0], (b: I64Buf@s, n: Int) => {
     let old = mem.at(b, 0)
     mem.set(b, 0, old + n)
     old
   })
-  let source = Source { read = callback }
+  let source: Source[s] = Source { read = callback }
   let size: fn() -> Int = () => len(bufs[1])
   let first = source.read(1)
   first + source.read(1) + size()
 })
 
-fn nested() -> Int = mem.with_mem(() => {
+fn nested() -> Int = mem.with_mem([@mem_scope_2] () => {
   let outer = mem.from_list([5, 6])
-  let result = mem.with_mem(() => {
+  let result = mem.with_mem([@mem_scope_3] () => {
     let inner = mem.new(2)
     mem.copy_from(inner, 0, outer, 0, 2)
     mem.set(outer, 0, mem.at(inner, 1))
@@ -36,13 +36,13 @@ fn nested() -> Int = mem.with_mem(() => {
 })
 
 # Every invocation creates fresh state; the returned environment holds only n.
-fn independent(n: Int) -> (fn(Int) -> Int) = x => mem.with_mem(() => {
+fn independent(n: Int) -> (fn(Int) -> Int) = x => mem.with_mem([@mem_scope_4] () => {
   let b = mem.new(1)
   mem.set(b, 0, n + x)
   mem.at(b, 0)
 })
 
-fn recursive(n: Int) -> Int = mem.with_mem(() => {
+fn recursive(n: Int) -> Int = mem.with_mem([@mem_scope_5] () => {
   let b = mem.from_list([n])
   if n == 0 { mem.at(b, 0) } else { mem.at(b, 0) + recursive(n - 1) }
 })
@@ -50,19 +50,19 @@ fn recursive(n: Int) -> Int = mem.with_mem(() => {
 effect Tick { fn tick() -> Int }
 ctl effect Ask { fn ask() -> Int }
 
-fn handler_capture() -> Int = mem.with_mem(() => {
+fn handler_capture() -> Int = mem.with_mem([@mem_scope_6] () => {
   let b = mem.from_list([9])
   with handle Tick { tick() => mem.at(b, 0) }
   tick()
 })
 
-fn control_inside() -> Int = mem.with_mem(() => {
+fn control_inside() -> Int = mem.with_mem([@mem_scope_7] () => {
   with handle Ask { ask() resume k => k(4) }
   let b = mem.from_list([3])
   mem.at(b, 0) + ask()
 })
 
-fn dropped_inside() -> Int = mem.with_mem(() => {
+fn dropped_inside() -> Int = mem.with_mem([@mem_scope_8] () => {
   with handle Ask { ask() resume k => 41 }
   let b = mem.new(1)
   let n = ask()
@@ -70,7 +70,7 @@ fn dropped_inside() -> Int = mem.with_mem(() => {
   mem.at(b, 0)
 })
 
-fn panic_inside() -> Int = mem.with_mem(() => {
+fn panic_inside() -> Int = mem.with_mem([@mem_scope_9] () => {
   let b = mem.new(1)
   match catch_panic(() => mem.at(b, 2)) {
     Ok(n) -> n
@@ -78,7 +78,7 @@ fn panic_inside() -> Int = mem.with_mem(() => {
   }
 })
 
-fn floats() -> List[Float] = mem.with_mem(() => {
+fn floats() -> List[Float] = mem.with_mem([@mem_scope_10] () => {
   let b = mem.f64_from_list([1.5, 2.5])
   mem.f64_to_list(b)
 })

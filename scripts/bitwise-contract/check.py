@@ -58,9 +58,9 @@ def cross_layer(work):
                 tests.append(f'\ntest "closeout integer oracle i{w} row {i}" {{')
                 if package == "tileinterp":
                     tests.extend([
-                        "  with_mem(() => {",
+                        "  with_mem([@s] () => {",
                         "    for checks in [false, true] {",
-                        "      let cx = Cx { bufs = [], lens = [], written = mem.new(0), params = [], dtypes = [], bid = [0, 0, 0], grid = [1, 1, 1], ub = checks }",
+                        "      let cx: Cx[s] = Cx { bufs = [], lens = [], written = mem.new(0), params = [], dtypes = [], bid = [0, 0, 0], grid = [1, 1, 1], ub = checks }",
                         "      var got: List[Int] = []",
                         f"      for n in {dawn_list(counts)} {{",
                         "        got = got ++ [" + ", ".join(

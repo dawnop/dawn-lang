@@ -59,6 +59,7 @@ ADAPTERS = {
     "lsp-resolution-coverage": (".",),
     "lsp-semantic-tokens": (".",),
     "map-reuse-contract": (".",),
+    "mem-contract": (".",),
     "narrow-contract": (".",),
     "math-contract": (".",),
     "lsp-workspace-contract": ("selfhost",),
@@ -90,6 +91,7 @@ EXCLUSIONS = {
 # registry, so an entry cannot outlive the reading it vouches for.
 # anchor-guard.py counts these as preflighted.
 REGISTRY_READERS = {
+    "mem-contract/scope.py": "mem-contract",
     "c-map/run.py": "c-map",
     "jvm-map/run.py": "jvm-map",
     "core-lint-contract/run.py": "core-lint-contract",

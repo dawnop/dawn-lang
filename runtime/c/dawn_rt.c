@@ -1927,13 +1927,37 @@ static bool dawn_ev_is_node(const void *p) {
   return node->tag == DAWN_TAG_EV_PACK && node->nfields == DAWN_EV_PACK_FIELDS;
 }
 
+/* A region's evidence key must survive generic forwarding and recursive
+ * reentry. It is a routing token, never an identity stored on a buffer. */
+static uint64_t dawn_scope_serial = 0;
+int64_t dawn_scope_new_key(void) {
+#ifdef __wasi__
+  uint64_t old = dawn_scope_serial;
+  if (old == INT64_MAX) dawn_panic(DAWN_LIT("scope evidence key space exhausted"));
+  dawn_scope_serial = old + 1;
+  return (int64_t)(old + 1);
+#else
+  uint64_t old = __atomic_load_n(&dawn_scope_serial, __ATOMIC_RELAXED);
+  for (;;) {
+    if (old == INT64_MAX) dawn_panic(DAWN_LIT("scope evidence key space exhausted"));
+    if (__atomic_compare_exchange_n(&dawn_scope_serial, &old, old + 1, false,
+                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+      return (int64_t)(old + 1);
+  }
+#endif
+}
+
 /* The evidence-pack walk; see the header, and `types.ev_pack_adt` for the
  * contract it implements. */
 void *dawn_ev_get(void *pack, int64_t key) {
+  return dawn_ev_get_scoped(pack, key, 0);
+}
+
+void *dawn_ev_get_scoped(void *pack, int64_t key, int64_t scope) {
   void *p = pack;
   while (dawn_ev_is_node(p)) {
     dawn_adt *node = (dawn_adt *)p;
-    if (node->fields[0].i == key) return node->fields[1].p;
+    if (node->fields[0].i == key && node->fields[3].i == scope) return node->fields[1].p;
     p = node->fields[2].p;
   }
   /* One unbroken literal on purpose: emitc's test reads this file out of
@@ -1973,6 +1997,7 @@ void *dawn_ev_append(void *front, void *back) {
     dawn_adt *src = (dawn_adt *)p;
     dawn_adt *node = dawn_adt_new(DAWN_TAG_EV_PACK, DAWN_EV_PACK_FIELDS, DAWN_EV_PACK_MASK);
     node->fields[0].i = src->fields[0].i;
+    node->fields[3].i = src->fields[3].i;
     node->fields[1].p = dawn_dup(src->fields[1].p);
     node->fields[2].p = NULL;
     if (prev == NULL) {

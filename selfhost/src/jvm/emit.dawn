@@ -24,12 +24,12 @@ use std/bytes
 use std/set
 use std/list
 use std/map
-use check/types.{Intr, Rt, RtStrings, RtBytes, RtArray, RtMem, RtIo, RtGpu, peel_opaque, cast_target,
+use check/types.{fn_runtime_params, sig_runtime_params, evidence_labels, evidence_label_type, Intr, Rt, RtStrings, RtBytes, RtArray, RtMem, RtIo, RtGpu, peel_opaque, cast_target,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyF64Buf, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, adt_of, adt_jvm_name, ctor_jvm_name,
   Sym, Sig, EPure, EIo, EffVar, prelude_adts,
-  eff_labels, nev, fn_arity, erased_ev_ty,
+  nev, fn_arity, erased_ev_ty,
   EV_PACK_ID, EV_MISS_MSG,
   Traits, TraitI, ImplI, trait_of, EQ_ID, HASH_ID,
   intrinsics,
@@ -54,7 +54,7 @@ use jvm/rtclasses.{
   PVEC_CLASS, ARRAY_CLASS,
   SHOW_CLASS, CTL_CLASS, supers_of, gen_show_class, gen_strings_class, gen_bytes_class,
   gen_array_class, gen_mem_class, gen_io_class, gen_gpu_class, gen_ctl_class, emitter_rt_methods,
-  RtMethod, invoke_rt, rt_array_new, rt_array_push, rt_array_to_java, rt_array_of_java,
+  RtMethod, invoke_rt, rt_scope_new_key, rt_array_new, rt_array_push, rt_array_to_java, rt_array_of_java,
   rt_bytes_concat, rt_bytes_literal, rt_ctl_enter, rt_ctl_yield, rt_io_cast, rt_io_list_names, rt_io_run,
   rt_show_quote, rt_show_show, rt_strings_code_points, rt_strings_cursor_slice,
   rt_strings_from_code_points, rt_strings_join
@@ -93,7 +93,7 @@ use java "org.objectweb.asm.ClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
 use std/io.{Fs, Exit, Console}
-use jvm/ops.{
+use jvm/ops.{OP_LCONST_0,
   ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC,
   COMPUTE_FRAMES, OP_AALOAD, OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY,
   OP_ARETURN, OP_ASTORE,
@@ -559,7 +559,7 @@ fn jmethod_desc(param_cls: List[String], ret_cls: String) -> String = {
 ## fn descriptor with the hidden dictionary params appended (dicts = Object).
 fn sig_desc_with_dicts(adts: Adts, s: Sig) -> String = {
   var ps = ""
-  for p in s.param_tys { ps = ps ++ desc_of(adts, p) }
+  for p in sig_runtime_params(s) { ps = ps ++ desc_of(adts, p) }
   var dicts = 0
   for c in s.constraints { dicts = dicts + len(c) }
   for _i in 0..dicts { ps = ps ++ "Ljava/lang/Object;" }
@@ -570,15 +570,15 @@ fn sig_desc_with_dicts(adts: Adts, s: Sig) -> String = {
   # one evidence parameter per declared effect, after the dictionaries. A
   # label's id is its evidence record's ADT id, so the descriptor is exact --
   # no erasure, and the field reads inside need no cast
-  for l in eff_labels(abi) {
-    let (eid, _) = l
+  for l in evidence_labels(abi) {
+    let eid = l.id
     ps = ps ++ desc_of(adts, TyAdt(eid, [], capture.empty_arguments()))
   }
   # ... one erased slot per effect variable, behind them (rule 丁), and one per
   # written projection behind those (rule 丙): which evidence fills either is
   # decided by the caller's instantiation, so Object is the only descriptor
   # every caller and callee can agree on
-  ps = ps ++ erased_ev_slots(nev(abi) - len(eff_labels(abi)))
+  ps = ps ++ erased_ev_slots(nev(abi) - len(evidence_labels(abi)))
   "(" ++ ps ++ ")" ++ desc_of(adts, s.ret)
 }
 
@@ -602,13 +602,13 @@ fn fn_desc_with_dicts(gx: GenCtx, s: Sig) -> String = sig_desc_with_dicts(gx.adt
 ## among the three is a VerifyError, not a diagnostic.
 fn trait_iface_desc(adts: Adts, s: Sig) -> String = {
   var ps = ""
-  for p in s.param_tys { ps = ps ++ desc_of(adts, p) }
+  for p in sig_runtime_params(s) { ps = ps ++ desc_of(adts, p) }
   let abi = sig_abi_eff(s)
-  for l in eff_labels(abi) {
-    let (eid, _) = l
+  for l in evidence_labels(abi) {
+    let eid = l.id
     ps = ps ++ desc_of(adts, TyAdt(eid, [], capture.empty_arguments()))
   }
-  ps = ps ++ erased_ev_slots(nev(abi) - len(eff_labels(abi)))
+  ps = ps ++ erased_ev_slots(nev(abi) - len(evidence_labels(abi)))
   "(" ++ ps ++ ")" ++ desc_of(adts, s.ret)
 }
 
@@ -999,7 +999,7 @@ fn emit_method_return(g: Gen) -> Unit !io = {
 
 fn tyfn_parts(t: Ty) -> (List[Ty], Ty) =
   match t {
-    TyFn(ps, r, _, _) -> (ps, r)
+    TyFn(_, r, _, _) -> (fn_runtime_params(t), r)
     _ -> panic("expected a fn type")
   }
 
@@ -2583,14 +2583,14 @@ fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, By
         # the same slot walk.
         m.visitVarInsn(OP_ALOAD, 0)
         let mabi = sig_abi_eff(ms.sig)
-        for l in eff_labels(mabi) {
-          let (eid, _) = l
+        for l in evidence_labels(mabi) {
+          let eid = l.id
           load_slot(m, TyAdt(eid, [], capture.empty_arguments()), slot)
           slot = slot + 1
         }
         # the erased slots -- rule 丁's variables and rule 丙's projections -- are
         # one reference each and pass through without a cast
-        for _k in 0..(nev(mabi) - len(eff_labels(mabi))) {
+        for _k in 0..(nev(mabi) - len(evidence_labels(mabi))) {
           m.visitVarInsn(OP_ALOAD, slot)
           slot = slot + 1
         }
@@ -2695,17 +2695,17 @@ fn gen_ccall(
       # method's definition side spells the same descriptors from its own
       # signature (sig_desc_with_dicts).
       let pabi = sig_abi_eff(psig)
-      var evtys = map(eff_labels(pabi), l => {
-        let (eid, _) = l
-        TyAdt(eid, [], capture.empty_arguments())
+      var evtys = map(evidence_labels(pabi), l => {
+        evidence_label_type(l)
       })
       # rule 丁's variables and rule 丙's projections are erased slots behind
       # the labels' exact ones, and they are part of the count the dictionary
       # split below subtracts -- reading only the labels made a variable's slot
       # look like a dictionary and put it in front of the evidence
-      for _k in 0..(nev(pabi) - len(eff_labels(pabi))) { evtys = evtys ++ [erased_ev_ty()] }
-      var ptys = psig.param_tys
-      for _d in 0..(len(args) - len(psig.param_tys) - len(evtys)) {
+      for _k in 0..(nev(pabi) - len(evidence_labels(pabi))) { evtys = evtys ++ [erased_ev_ty()] }
+      var ptys = psig.param_tys ++ map(imp.scope_params.scopes, _region => TyInt)
+      let value_count = len(ptys)
+      for _d in 0..(len(args) - value_count - len(evtys)) {
         ptys = ptys ++ [TyVar("D", 0)]
       }
       ptys = ptys ++ evtys
@@ -3741,7 +3741,11 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     g.mv.visitInsn(OP_ACONST_NULL)
     return (g, true)
   }
-  if name == "ev_get" {
+  if name == "scope_new_key" {
+    invoke_rt(g.mv, rt_scope_new_key())
+    return (g, true)
+  }
+  if name == "ev_get" || name == "ev_get_scoped" {
     # One lookup in an evidence pack (types.ev_pack_adt). The contract's
     # terminator test is "the runtime's own knowledge of shape", and here that
     # is `INSTANCEOF`: it answers false for null and false for the boxed Unit
@@ -3755,6 +3759,10 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     let key_desc = desc_of(gx.adts, c.fields[0].ty)
     let ev_desc = desc_of(gx.adts, c.fields[1].ty)
     var g1 = gen_cargs(gx, g, args)
+    if name == "ev_get" { g1.mv.visitInsn(OP_LCONST_0) }
+    let (gs, scope_slot) = alloc(g1, 2)
+    g1 = gs
+    g1.mv.visitVarInsn(OP_LSTORE, scope_slot)
     let (ga, key_slot) = alloc(g1, 2)
     g1 = ga
     g1.mv.visitVarInsn(OP_LSTORE, key_slot)
@@ -3771,6 +3779,10 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     g1.mv.visitJumpInsn(OP_IFEQ, miss)
     ev_field(g1, cls, p_slot, c.fields[0].name, key_desc)
     g1.mv.visitVarInsn(OP_LLOAD, key_slot)
+    g1.mv.visitInsn(OP_LCMP)
+    g1.mv.visitJumpInsn(OP_IFNE, step)
+    ev_field(g1, cls, p_slot, c.fields[3].name, key_desc)
+    g1.mv.visitVarInsn(OP_LLOAD, scope_slot)
     g1.mv.visitInsn(OP_LCMP)
     g1.mv.visitJumpInsn(OP_IFNE, step)
     ev_field(g1, cls, p_slot, c.fields[1].name, ev_desc)
@@ -3810,7 +3822,7 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     let cls = ctor_jvm_name(gx.adts, c)
     let key_desc = desc_of(gx.adts, c.fields[0].ty)
     let ev_desc = desc_of(gx.adts, c.fields[1].ty)
-    let ctor_desc = "(" ++ key_desc ++ ev_desc ++ ev_desc ++ ")V"
+    let ctor_desc = "(" ++ key_desc ++ ev_desc ++ ev_desc ++ key_desc ++ ")V"
     var g1 = gen_cargs(gx, g, args)
     let (ga, back_slot) = alloc(g1, 1)
     g1 = ga
@@ -3838,6 +3850,7 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     ev_field(g1, cls, p_slot, c.fields[0].name, key_desc)
     ev_field(g1, cls, p_slot, c.fields[1].name, ev_desc)
     g1.mv.visitVarInsn(OP_ALOAD, rev_slot)
+    ev_field(g1, cls, p_slot, c.fields[3].name, key_desc)
     g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", ctor_desc, false)
     g1.mv.visitVarInsn(OP_ASTORE, rev_slot)
     ev_field(g1, cls, p_slot, c.fields[2].name, ev_desc)
@@ -3859,6 +3872,7 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     ev_field(g1, cls, rev_slot, c.fields[0].name, key_desc)
     ev_field(g1, cls, rev_slot, c.fields[1].name, ev_desc)
     g1.mv.visitVarInsn(OP_ALOAD, acc_slot)
+    ev_field(g1, cls, rev_slot, c.fields[3].name, key_desc)
     g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", ctor_desc, false)
     g1.mv.visitVarInsn(OP_ASTORE, acc_slot)
     ev_field(g1, cls, rev_slot, c.fields[2].name, ev_desc)

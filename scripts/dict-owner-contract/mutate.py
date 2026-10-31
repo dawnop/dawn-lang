@@ -27,6 +27,9 @@ def drop_shape_suffix(kind):
     # mutant keeps the name and drops the shape suffix on the next line.
     old = ('let name = "' + kind + '$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method ++\n'
            '    dict_shape_suffix(if param { len(goals) } else { 0 })')
+    if kind == "bridge":
+        old = ('let name = "bridge$" ++ dict_key(tid, subject) ++ "$" ++ method ++\n'
+               '    dict_shape_suffix((if param { len(goals) } else { 0 }) + len(dict_scopes(subject)))')
     return (LOWER, old, old.split(' ++\n')[0])
 
 

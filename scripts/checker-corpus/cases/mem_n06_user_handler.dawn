@@ -1,29 +1,10 @@
-# checker.dawn: rule R2 (N6). Only std/mem may install a handler for `Mem`:
-# `with_mem` is the one place an allocation is answered, and a user handler
-# would make "who answers an allocation" depend on the code around it. The
-# second function is the shape the design worried about, a closure over a
-# buffer made under such a handler; today's row semantics already keep `Mem`
-# on that closure (so R1 would see it), and the handler is refused first anyway.
+# Only the memory kernel installs allocation evidence.
 use std/mem
 use std/mem.{Mem}
-
-pub fn user_handler() -> Int =
-  mem.with_mem(() => {
-    with handle Mem {
-      mem_alloc(n) => mem.new(n)
-      mem_alloc_f64(n) => mem.f64_new(n)
-    }
-    len(mem.new(4))
-  })
-
-pub fn sneaky() -> Int !Mem = {
-  let f = mem.with_mem(() => {
-    with handle Mem {
-      mem_alloc(n) => mem.new(n)
-      mem_alloc_f64(n) => mem.f64_new(n)
-    }
-    let b = mem.new(4)
-    () => mem.at(b, 0)
-  })
-  f()
-}
+pub fn user_handler() -> Int = mem.with_mem([@s] () => {
+  with handle Mem {
+    mem_alloc(n) => panic("unreachable")
+    mem_alloc_f64(n) => panic("unreachable")
+  }
+  len(mem.new(4))
+})

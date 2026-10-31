@@ -185,7 +185,7 @@ echo "PASS  Mem evidence is borrowed in the generated C"
 # The negative control: force the kernel's own evidence parameter owned (the
 # coherent flip of rc-mode-contract, `both`) and the same check has to go red,
 # or a regex that stopped matching would pass this section for ever.
-DAWN_RC_MODE_FLIPS="kernel:feistel:3:2=both" \
+DAWN_RC_MODE_FLIPS="kernel:feistel:4:3=both" \
   java -XX:-UsePerfData -Xss512m -jar "$jar" __emitc "$here/kernel.dawn" -o "$work/kernel_owned.c"
 if borrow_check "$work/kernel_owned.c" 2> "$work/borrow_neg.err"; then
   echo "FAIL: the evidence-borrow check passed on C that passes the evidence owned" >&2
@@ -197,3 +197,6 @@ if ! grep -q 'dawn_kernel__feistel' "$work/borrow_neg.err"; then
   exit 1
 fi
 echo "PASS  the evidence-borrow check goes red on owned evidence"
+
+# Domain identity is observable independently of the allocation handlers' bodies.
+python3 "$here/scope.py" --selftest

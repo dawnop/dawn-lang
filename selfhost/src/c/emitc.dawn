@@ -2202,6 +2202,10 @@ fn emit_intrinsic_values(st1: CSt, name: String, args: List[CExpr], ty: Ty, owne
     # dup is here: rc.dawn wraps no intrinsic result, and every other arm that
     # reads a value out of a structure it borrowed (`expect`) dups too.
     (st1, dup_expr("dawn_ev_get(" ++ a0 ++ ", " ++ cargs[1] ++ ")", ty))
+  } else if name == "scope_new_key" {
+    (st1, "dawn_scope_new_key()")
+  } else if name == "ev_get_scoped" {
+    (st1, dup_expr("dawn_ev_get_scoped(" ++ a0 ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ")", ty))
   } else if name == "ev_append" {
     # Two packs joined (types.ev_pack_adt), a call for the same reason the
     # lookup is: it has to recognise a node, and the header's `kind` byte is
@@ -3571,9 +3575,9 @@ test "the evidence-pack primitives the emitter calls are the ones the runtime ha
   let pack = ev_pack_adt()
   let fields = pack.ctors[0].fields
   assert len(pack.ctors) == 1
-  assert len(fields) == 3
+  assert len(fields) == 4
   assert str.contains(header, "#define DAWN_TAG_EV_PACK 0")
-  assert str.contains(header, "#define DAWN_EV_PACK_FIELDS 3")
+  assert str.contains(header, "#define DAWN_EV_PACK_FIELDS 4")
 
   # `ev_append` allocates, which the lookup does not, so it needs one number
   # the lookup never asked for: which slots `drop` must recurse into. Computed

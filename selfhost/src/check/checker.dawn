@@ -8,7 +8,8 @@
 # (resolveType / resolveEff / alias expansion / Map-Set key validity).
 
 use check/capture
-use check/capture.{Function as CaptureFunction}
+use check/scope_infer
+use check/capture.{Function as CaptureFunction, Scope as CaptureScope, Params as CaptureParams, CaptureParam}
 use std/str
 use std/list
 use std/map
@@ -48,7 +49,7 @@ use check/tast.{CallSource, call_source,
   TStmt, TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   TFun, TDefault, TConst, TModule, WitRef, WForward, WConcrete, WApply, x_lo, x_hi
 }
-use check/types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever, ty_equal, primitive_captures, fn_align, apply_scope_arguments, EScoped,
+use check/types.{ty_scope_refs, subst_scopes, sig_scope_arity, EvidenceLabel, evidence_labels, evidence_label_role, evidence_label_type, evidence_label_name, scope_key_name, ScopedLabelSlot, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever, ty_equal, primitive_captures, fn_align, apply_scope_arguments, EScoped,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes, ty_eff_vars,
   eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, scoped_eff, eff_scopes, eff_without_scopes, scoped_difference, eff_assocs,
@@ -61,7 +62,7 @@ use check/types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   ev_label_name, ev_assoc_name, ev_var_name,
   EV_PACK_ID, ev_pack_ty, ty_loc, ty_origin,
   AdtI, CtorI, FieldI, EffectI, TraitI, ImplI, Sym, Sig,
-  ty_show, ctor_render, fn_return_show, eff_ctl_labels, buffer_reach, ty_has_any_var, is_mem_effect, eff_names_mem, adt_of, trait_of, sig_render, subst, subst_eff, eff_show,
+  ty_show, ctor_render, fn_return_show, eff_ctl_labels, buffer_reach, is_mem_effect, eff_names_mem, adt_of, trait_of, sig_render, subst, subst_eff, eff_show,
   assoc_effect_advice,
   no_eparam_names, fn_max_params,
   ty_mentions_var, ty_map_children, ty_any_child,
@@ -115,6 +116,185 @@ use front/suggest
 use front/effect_name
 use front/parser
 use front/token.{Diag}
+
+fn scope_type(cx: Cx, t: Ty) -> Ty = {
+  if len(cx.frame.scope_bindings) == 0 && len(cx.frame.capture_bindings) == 0 { return t }
+  let cm = cx.frame.capture_bindings
+  subst_scopes(t, scope_infer.normalized(cx.frame.scope_bindings), cm)
+}
+
+fn fresh_scope_signature(cx: Cx, s: Sig) -> (Cx, Sig) = {
+  if len(s.scope_params.scopes) == 0 && len(s.scope_params.captures) == 0 { return (cx, s) }
+  var next = cx
+  var sm: Map[Int, capture.Scope] = map.empty()
+  for region in s.scope_params.scopes {
+    let (minted, id) = fresh(next)
+    next = minted
+    sm = map.insert(sm, region.id, CaptureScope { ..region, id = id })
+  }
+  var cm: Map[Int, capture.Capture] = map.empty()
+  var caps: List[capture.CaptureParam] = []
+  for cap in s.scope_params.captures {
+    let (minted, id) = fresh(next)
+    next = minted
+    cm = map.insert(cm, cap.id, [capture.CaptureVar(cap.name, id)])
+    caps = caps ++ [CaptureParam { ..cap, id = id }]
+  }
+  let instantiated = scope_infer.contract(s, sm, cm)
+  let params = instantiated.scope_params
+  var rebased: List[CaptureParam] = []
+  for i in 0..len(caps) { rebased = rebased ++ [CaptureParam { ..caps[i], bound = params.captures[i].bound }] }
+  (next, Sig { ..instantiated, scope_params = CaptureParams { ..params, captures = rebased } })
+}
+
+fn learn_scope_argument(cx: Cx, s: Sig, declared: Ty, actual: Ty) -> (Cx, Bool) = {
+  if len(s.scope_params.scopes) == 0 && len(s.scope_params.captures) == 0 { return (cx, true) }
+  let (bindings, ok) = scope_infer.infer(declared, actual, s.scope_params.scopes, cx.frame.scope_bindings)
+  let captures = scope_infer.infer_captures(declared, actual, s.scope_params.captures, cx.frame.capture_bindings)
+  (Cx { ..cx, frame = Frame { ..cx.frame, scope_bindings = bindings, capture_bindings = captures } }, ok)
+}
+
+fn finish_scope_signature(cx: Cx, s: Sig, lo: Int, hi: Int) -> (Cx, Sig) = {
+  var next = cx
+  var bindings = cx.frame.scope_bindings
+  for region in s.scope_params.scopes {
+    let resolved = scope_infer.resolve(region, bindings)
+    if resolved.id != region.id { continue }
+    let ambient = cx.current_capture_params.scopes
+    if len(ambient) == 0 {
+      next = cerr(next, "cannot infer Scope `" ++ region.name ++ "` without an active scope or a scoped argument", lo, hi)
+    } else {
+      bindings = map.insert(bindings, region.id, ambient[len(ambient) - 1])
+    }
+  }
+  next = Cx { ..next, frame = Frame { ..next.frame, scope_bindings = bindings } }
+  (next, scope_infer.contract(s, bindings, next.frame.capture_bindings))
+}
+
+fn bind_scope_keys(cx: Cx, regions: List[capture.Scope], lo: Int, hi: Int) -> (Cx, List[Int]) = {
+  var next = cx
+  var symbols: List[Int] = []
+  for region in regions {
+    let (declared, sid) = declare(next, scope_key_name(region.id), TyInt, false, lo, hi)
+    next = Cx { ..declared, frame = Frame { ..declared.frame,
+      scope_keys = map.insert(declared.frame.scope_keys, region.id, sid) } }
+    symbols = symbols ++ [sid]
+  }
+  (next, symbols)
+}
+
+fn scope_argument_values(cx: Cx, regions: List[capture.Scope], lo: Int, hi: Int) -> (Cx, List[TExpr]) = {
+  var next = cx
+  var values: List[TExpr] = []
+  for region in regions {
+    let atom = EvidenceLabel { id = 0, name = "", scope = Some(region) }
+    let (read, value) = evidence_domain_value(next, atom, lo, hi)
+    next = read
+    values = values ++ [value]
+  }
+  (next, values)
+}
+
+fn scoped_value_signature(ty: Ty) -> Sig = match ty {
+  TyFn(ps, ret, eff, sc) -> Sig { scope_params = capture_params_for(sc.scopes),
+    name = "scoped function", param_tys = ps, param_names = map(ps, _p => ""),
+    param_defaults = [], caller_params = [], ret = ret, eff = eff, is_builtin = false,
+    tparams = [], constraints = [], eparams = [], owner = None, trait_id = None,
+    op_of = None, inferring = false }
+  _ -> panic("scoped value signature requires a function")
+}
+
+fn capture_params_for(regions: List[capture.Scope]) -> capture.Params = {
+  let empty = capture.empty_params()
+  capture_params_scopes(empty, regions)
+}
+
+fn capture_params_scopes(empty: capture.Params, regions: List[capture.Scope]) -> capture.Params =
+  CaptureParams { ..empty, scopes = regions }
+
+fn check_scoped_value_call(cx: Cx, target: TExpr, ty: Ty, args: List[Expr],
+  pre0: Option[(Ty, TExpr)], lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
+  let (entry, template) = fresh_scope_signature(cx, scoped_value_signature(ty))
+  var next = entry
+  if len(args) != len(template.param_tys) {
+    let (checked, _) = check_args_plain(next, args, pre0)
+    return (cerr(checked, "this scoped function takes " ++ to_string(len(template.param_tys)) ++
+        " argument(s), got " ++ to_string(len(args)), lo, hi), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  var values: List[TExpr] = []
+  for i in 0..len(args) {
+    let expected = scope_type(next, template.param_tys[i])
+    let (checked, actual, value) = check_arg_at(next, args[i], i, pre0, Some(expected))
+    let (inferred, fits) = learn_scope_argument(checked, template, template.param_tys[i], actual)
+    next = inferred
+    let wanted = scope_type(next, expected)
+    if not fits || not assignable(next, actual, wanted) {
+      next = cerr(next, "argument type mismatch: expected " ++ ty_show(next.adts, wanted) ++
+          ", got " ++ ty_show(next.adts, actual), e_lo(args[i]), e_hi(args[i]))
+    }
+    values = values ++ [value]
+  }
+  var statements: List[TStmt] = []
+  for region in template.scope_params.scopes {
+    if scope_infer.resolve(region, next.frame.scope_bindings).id != region.id { continue }
+    let ambient = next.current_capture_params.scopes
+    if len(ambient) > 0 {
+      next = Cx { ..next, frame = Frame { ..next.frame,
+        scope_bindings = map.insert(next.frame.scope_bindings, region.id, ambient[len(ambient) - 1]) } }
+      continue
+    }
+    let (minted, id) = fresh(next)
+    let actual = CaptureScope { ..region, id = id }
+    let (keyed, symbols) = bind_scope_keys(minted, [actual], lo, hi)
+    next = Cx { ..keyed, frame = Frame { ..keyed.frame,
+      scope_bindings = map.insert(keyed.frame.scope_bindings, region.id, actual) } }
+    statements = statements ++ [TSLet(Some(symbols[0]), scope_key_name(id),
+      XCallBuiltin("scope_new_key", [], [], [], owner_off(cx, lo), owner_off(cx, hi), NO_NAME, TyInt),
+      owner_off(cx, lo), owner_off(cx, hi))]
+  }
+  let call = scope_infer.signature(template, next.frame.scope_bindings)
+  let (key_cx, keys) = scope_argument_values(next, call.scope_params.scopes, lo, hi)
+  let (packed, evidence, unanswered) = dyn_evidence_args(key_cx, call.eff, lo, hi)
+  next = record_effect(packed, eff_drop(call.eff, unanswered), lo, hi, "the scoped function")
+  let value = XApply(target, values ++ keys, evidence, owner_off(cx, lo), owner_off(cx, hi),
+    owner_off(cx, lo), call.ret, call_source(owner_off(cx, hi), "call"))
+  (next, call.ret, if len(statements) == 0 { value }
+  else { XBlock(statements, Some(value), owner_off(cx, lo), owner_off(cx, hi), call.ret) })
+}
+
+fn reject_scope_escape(cx: Cx, signature: Sig, actual: Ty, m: Map[Int, Ty], em: Map[Int, Eff], lo: Int, hi: Int) -> Cx = {
+  let bound = match actual { TyFn(_, _, _, contract) -> contract.scopes, _ -> [] }
+  var next = cx
+  for region in bound {
+    var escapes = false
+    for value in map.values(m) {
+      if capture.contains(ty_scope_refs(scope_type(cx, value)), capture.Region(region)) { escapes = true }
+    }
+    for row in map.values(em) {
+      if list.any(eff_scopes(row), atom => atom.scope.id == region.id) { escapes = true }
+    }
+    for parameter in signature.scope_params.captures {
+      let value = map.get(cx.frame.capture_bindings, parameter.id).unwrap_or([])
+      if capture.contains(value, capture.Region(region)) { escapes = true }
+    }
+    for parameter in signature.scope_params.scopes {
+      if scope_infer.resolve(parameter, cx.frame.scope_bindings).id == region.id { escapes = true }
+    }
+    if escapes {
+      next = cerr_h(next, "Scope `" ++ region.name ++ "` escapes its scoped callback", lo, hi,
+        "the callback's result and forwarded effects must be independent of its bound Scope; return copied data")
+    }
+  }
+  next
+}
+
+fn runtime_parameter_symbols(cx: Cx, s: Sig, parameters: List[Int]) -> List[Int] = {
+  var out = parameters
+  for region in list.take(s.scope_params.scopes, sig_scope_arity(s)) {
+    match map.get(cx.frame.scope_keys, region.id) { Some(sid) -> { out = out ++ [sid] }, None -> () }
+  }
+  out
+}
 
 # ---- scopes and symbols ----
 
@@ -374,18 +554,26 @@ fn ev_expr(
   hi: Int
 ) -> (Cx, Option[TExpr]) = {
   let key = evidence_role_key(origin)
-  let crossed = ev_crossed(cx, name)
-  let (cx1, found) = resolve_local(cx, name, lo, hi, false)
+  let (domain_cx, domain) = match origin {
+    ScopedLabelSlot(eid, scope) -> {
+      let label = EvidenceLabel { id = eid, name = "", scope = Some(capture_scope(cx, scope)) }
+      let (next, value) = evidence_domain_value(cx, label, lo, hi)
+      (next, Some(value))
+    }
+    _ -> (cx, None)
+  }
+  let crossed = ev_crossed(domain_cx, name)
+  let (cx1, found) = resolve_local(domain_cx, name, lo, hi, false)
   match found {
     Some(sid) ->
       if crossed {
-        (cx1, Some(XEvRead(key, origin, owner_off(cx, lo), owner_off(cx, hi), ty)))
+        (cx1, Some(XEvRead(key, origin, owner_off(cx, lo), owner_off(cx, hi), ty, domain)))
       } else {
         (cx1, Some(XLocal(sid, name, owner_off(cx, lo), owner_off(cx, hi), ty)))
       }
     None ->
       if len(cx1.frame.lambda_stack) > 0 {
-        (cx1, Some(XEvRead(key, origin, owner_off(cx, lo), owner_off(cx, hi), ty)))
+        (cx1, Some(XEvRead(key, origin, owner_off(cx, lo), owner_off(cx, hi), ty, domain)))
       } else {
         (cx1, None)
       }
@@ -406,7 +594,7 @@ test "evidence reads preserve distinct origins behind the same runtime key" {
     let isolated = Cx { ..base, frame = Frame { ..base.frame, lambda_stack = [closure] } }
     let (_, absent) = ev_expr(isolated, "missing_evidence", origin, erased_ev_ty(), 10, 11)
     match absent {
-      Some(XEvRead(k, saved, lo, hi, _)) -> {
+      Some(XEvRead(k, saved, lo, hi, _, _)) -> {
         assert k == key
         assert saved == origin
         assert lo == 10 && hi == 11
@@ -417,7 +605,7 @@ test "evidence reads preserve distinct origins behind the same runtime key" {
     let nested = Cx { ..declared, frame = Frame { ..declared.frame, lambda_stack = [closure] } }
     let (_, crossed) = ev_expr(nested, "outer_evidence", origin, erased_ev_ty(), 20, 21)
     match crossed {
-      Some(XEvRead(k, saved, lo, hi, _)) -> {
+      Some(XEvRead(k, saved, lo, hi, _, _)) -> {
         assert k == key
         assert saved == origin
         assert lo == 20 && hi == 21
@@ -679,6 +867,9 @@ fn sees_through(cx: Cx, owner: String) -> Bool =
 ## to be strict equality here while `unify_into` was covariant, so the two
 ## doors disagreed.
 pub(pkg) fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
+  let scoped = scope_type(cx, t)
+  let wanted = scope_type(cx, target)
+  if scoped != t || wanted != target { return assignable(cx, scoped, wanted) }
   if ty_equal(t, target) || is_errorish(t) || target == TyError { return true }
   match (t, target) {
     (TyCaptured(value, _), _) -> match primitive_captures(value) {
@@ -842,7 +1033,7 @@ fn reduce_ty_effs(cx: Cx, t: Ty, m: Map[Int, Ty]) -> Ty =
 
 ## A callee's signature type at a call site: its projections reduced, then
 ## the rows the call's bindings name.
-fn reduce_instantiated(cx: Cx, t: Ty, m: Map[Int, Ty]) -> Ty = reduce_ty_effs(cx, reduce_assoc(cx, t), m)
+fn reduce_instantiated(cx: Cx, t: Ty, m: Map[Int, Ty]) -> Ty = scope_type(cx, reduce_ty_effs(cx, reduce_assoc(cx, t), m))
 
 ## A declared type as `unify_into` compared it against an actual: the
 ## projections the declaration itself spells reduce under the bindings (its
@@ -854,7 +1045,7 @@ fn reduce_instantiated(cx: Cx, t: Ty, m: Map[Int, Ty]) -> Ty = reduce_ty_effs(cx
 ## comparison had seen `Node[Counter.Msg]` against `Node[Msg]` (#317). The
 ## rows reduce as before; only the type axis follows the comparison.
 fn as_unified(cx: Cx, d: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
-  reduce_ty_effs(cx, as_unified_types(cx, d, m, em), m)
+  scope_type(cx, reduce_ty_effs(cx, as_unified_types(cx, d, m, em), m))
 
 fn as_unified_types(cx: Cx, d: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
   match d {
@@ -4045,6 +4236,7 @@ pub(pkg) fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
     # spelled out rather than spread, so a field added to Frame has to be
     # answered for here instead of leaking through into the isolated body
     frame = Frame {
+      scope_bindings = map.empty(), capture_bindings = map.empty(), scope_keys = map.empty(),
       scopes = [fresh_scope],
       used_effects = [],
       eff_witness = empty_w,
@@ -4101,6 +4293,7 @@ test "an isolated context reports its own effects, then restores all ten fields"
   cx = Cx {
     ..cx,
     frame = Frame {
+      scope_bindings = map.empty(), capture_bindings = map.empty(), scope_keys = map.empty(),
       observation_scopes = [], observation_entry = false, origin_scope = None, trace_read = false,
       scopes = [outer_scope],
       # not EIo: the body below records EIo, and an outer record that already
@@ -4374,12 +4567,30 @@ pub(pkg) fn check_fn_value(
   initial: Cx,
   name: String,
   spelled: String,
-  f: Sig,
+  original: Sig,
   expected: Option[Ty],
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
-  var cx = used_signature(initial, f)
+  let (entry, fresh_sig) = fresh_scope_signature(initial, original)
+  var prepared = fresh_sig
+  var cx = used_signature(entry, prepared)
+  var binders = prepared.scope_params.scopes
+  if len(binders) > 0 {
+    match expected {
+      Some(TyFn(ps, r, e, contract)) -> if len(contract.scopes) == 0 {
+        let declared = TyFn(prepared.param_tys, prepared.ret, prepared.eff, capture.empty_function())
+        let actual = TyFn(ps, r, e, contract)
+        let (learned, _) = learn_scope_argument(cx, prepared, declared, actual)
+        let (finished, sig) = finish_scope_signature(learned, prepared, lo, hi)
+        cx = finished
+        prepared = sig
+        binders = []
+      }
+      _ -> ()
+    }
+  }
+  let f = prepared
   if observation.entry(f) {
     return (cerr_h(cx, "observe cannot be used as a function value", lo, hi,
       "call provenance.observe with a literal callback or structured with body"),
@@ -4432,7 +4643,7 @@ pub(pkg) fn check_fn_value(
     nbounds = nbounds + len(bounds_of(f, bi))
     bi = bi + 1
   }
-  let declared = TyFn(f.param_tys, f.ret, f.eff, capture.empty_function())
+  let declared = TyFn(f.param_tys, f.ret, f.eff, CaptureFunction { scopes = binders, bound = None })
   let eff_is_var = match f.eff {
     EffVar(_, _) -> true
     _ -> false
@@ -4442,6 +4653,9 @@ pub(pkg) fn check_fn_value(
   let symbol = emitted_fn_name(f, name)
   let node = (t: Ty) => XFnValue(f.owner, symbol, f.is_builtin, t, owner_off(initial, lo), owner_off(initial, hi))
   if len(f.tparams) == 0 && not eff_is_var {
+    if len(original.scope_params.scopes) > 0 {
+      return eta_bounded_fn_value(cx, name, f, fresh_sig, map.empty(), map.empty(), declared, lo, hi)
+    }
     return (cx, declared, node(declared))
   }
   let exp: Option[(List[Ty], Ty, Eff)] = match expected {
@@ -4496,16 +4710,8 @@ pub(pkg) fn check_fn_value(
   # the rows left `view` as a value typed `fn(C) -> C.View` (#317), a ground
   # type carrying a projection, which no concrete function type unifies with.
   let inst = reduce_instantiated(cx, subst(declared, m, em), m)
-  if nbounds > 0 {
-    return eta_bounded_fn_value(cx, name, f, m, em, inst, lo, hi)
-  }
-  # R1 also covers `with_mem` named as a value: a call through it later is
-  # a dynamic call whose callee the rule can no longer see
-  if f.name == "with_mem" && f.owner == Some("std/mem") {
-    match inst {
-      TyFn(_, vret, _, _) -> { cx = refuse_buffer_result(cx, vret, lo, hi) }
-      _ -> ()
-    }
+  if nbounds > 0 || len(original.scope_params.scopes) > 0 {
+    return eta_bounded_fn_value(cx, name, f, fresh_sig, m, em, inst, lo, hi)
   }
   (cx, inst, node(inst))
 }
@@ -4536,6 +4742,7 @@ fn eta_bounded_fn_value(
   cx: Cx,
   name: String,
   f: Sig,
+  template: Sig,
   m: Map[Int, Ty],
   em: Map[Int, Eff],
   inst: Ty,
@@ -4578,6 +4785,9 @@ fn eta_bounded_fn_value(
   # callee's parameters would let a wrapper shadow a module alias, and nothing
   # reads these names but a hover.
   cx1 = push_scope(cx1)
+  let contract = match inst { TyFn(_, _, _, contract) -> contract, _ -> capture.empty_function() }
+  let (keyed, key_symbols) = bind_scope_keys(cx1, contract.scopes, lo, hi)
+  cx1 = keyed
   var psyms: List[Int] = []
   var pnames: List[String] = []
   var args: List[TExpr] = []
@@ -4591,15 +4801,18 @@ fn eta_bounded_fn_value(
     args = args ++ [XLocal(sid, pn, owner_off(cx, lo), owner_off(cx, hi), pt)]
     j = j + 1
   }
+  let (with_keys, keys) = scope_argument_values(cx1, list.take(f.scope_params.scopes, sig_scope_arity(f)), lo, hi)
+  cx1 = with_keys
+  args = args ++ keys
   # This body is a named call, so its evidence slots follow the same layout
   # as a direct call. Keep the lambda open while resolving them: `ev_expr`
   # must read its caller's pack, including when no handler is in scope here.
-  let (cxe, evid, _, vinsts, _) = named_evidence_args(cx1, f, m, em, lo, hi)
+  let (cxe, evid, _, vinsts, _) = named_evidence_args(cx1, template, m, em, lo, hi)
   cx1 = cxe
   # A variable bound only in a parameter still owns an ABI slot. Charge its
   # instance on the callable row, as a direct call does, so the eventual
   # caller supplies that pack even when the declared row says only `!io`.
-  let wrapper_ty = TyFn(ips, iret, reduce_eff(cx1, eff_union([ieff] ++ vinsts), m), capture.empty_function())
+  let wrapper_ty = TyFn(ips, iret, reduce_eff(cx1, eff_union([ieff] ++ vinsts), m), contract)
   cx1 = pop_scope(cx1)
   let popped = cx1.frame.lambda_stack[len(cx1.frame.lambda_stack) - 1]
   let outer = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1)
@@ -4611,7 +4824,7 @@ fn eta_bounded_fn_value(
     } else {
       XCallFn(f.owner, emitted_fn_name(f, name), args, wits, evid, f.trait_id, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, iret, call_source(-1, "function-wrapper"))
     }
-  (cx1, wrapper_ty, XLambda(psyms, pnames, body, popped.captures, owner_off(cx, lo), owner_off(cx, hi), wrapper_ty, "function-wrapper"))
+  (cx1, wrapper_ty, XLambda(psyms ++ key_symbols, pnames ++ map(contract.scopes, region => scope_key_name(region.id)), body, popped.captures, owner_off(cx, lo), owner_off(cx, hi), wrapper_ty, "function-wrapper"))
 }
 
 ## `f` used as a value with nothing to instantiate it from (#428). What is
@@ -4781,7 +4994,7 @@ test "bounded fn values read ordered evidence from the caller and expose ABI-onl
       var i = 0
       for argument in evid {
         match argument {
-          XEvRead(key, origin, _, _, _) -> {
+          XEvRead(key, origin, _, _, _, _) -> {
             assert origin == origins[i]
             assert key == evidence_role_key(origin)
           }
@@ -4874,6 +5087,17 @@ pub(pkg) fn resolve_witness(
   requirer: String
 ) -> (Cx, Option[WitRef]) = {
   if is_errorish(t) { return (cx, no_wit()) }
+  var keyed = cx
+  for member in ty_scope_refs(t) {
+    match member {
+      capture.Region(region) -> {
+        let (next, _) = resolve_local(keyed, scope_key_name(region.id), lo, hi, false)
+        keyed = next
+      }
+      _ -> ()
+    }
+  }
+  let cx = keyed
   let trait_name = trait_of(cx.traits, trait_id).name
   # A projection is answered here, before any of the per-trait paths below,
   # because all of them would answer it wrong: the impl lookup cannot hit (no
@@ -7239,7 +7463,7 @@ fn capture_observation(cx: Cx, sid: Int, lo: Int, hi: Int) -> Cx = {
 fn check_scope_lambda(cx: Cx, params: List[LambdaParam], body: Expr, sugar: Bool,
   lo: Int, hi: Int, binders: List[ScopeBinder], expected: Option[Ty]) -> (Cx, Ty, TExpr) !io = {
   if len(binders) == 0 {
-    return check_lambda(cx, params, body, sugar, false, false, None, None, expected, lo, hi)
+    return check_lambda(cx, params, body, sugar, false, false, None, None, expected, lo, hi, [])
   }
   let saved = cx.current_capture_params
   let (scoped, own) = bind_capture_params(cx, ScopeSyntax { ..no_scope_syntax(), binders = binders })
@@ -7248,7 +7472,7 @@ fn check_scope_lambda(cx: Cx, params: List[LambdaParam], body: Expr, sugar: Bool
     Some(t) -> fn_align(t, TyFn([], TyUnit, EPure, contract))
     None -> None
   }
-  let (checked, ty, expr) = check_lambda(scoped, params, body, sugar, false, false, None, None, aligned, lo, hi)
+  let (checked, ty, expr) = check_lambda(scoped, params, body, sugar, false, false, None, None, aligned, lo, hi, own.scopes)
   let result = match ty { TyFn(ps, r, e, _) -> TyFn(ps, r, e, contract), _ -> ty }
   let value = match expr {
     XLambda(ps, ns, b, cs, a, z, _, role) -> XLambda(ps, ns, b, cs, a, z, result, role)
@@ -7269,7 +7493,7 @@ fn check_lambda(
   expected: Option[Ty],
   lo: Int,
   hi: Int
-) -> (Cx, Ty, TExpr) !io = {
+  , scopes: List[capture.Scope]) -> (Cx, Ty, TExpr) !io = {
   var cx1 = cx
   let observes = cx.frame.observation_entry
   let saved_scopes = cx.frame.observation_scopes
@@ -7369,6 +7593,8 @@ fn check_lambda(
     }
   }
   cx1 = push_scope(cx1)
+  let (keyed, scope_symbols) = bind_scope_keys(cx1, scopes, lo, hi)
+  cx1 = keyed
   var psyms: List[Int] = []
   var pnames: List[String] = []
   var j = 0
@@ -7414,8 +7640,8 @@ fn check_lambda(
   # travelling with the closure
   let lam_eff = eff_union(cx3.frame.used_effects)
   cx3 = Cx { ..cx3, frame = Frame { ..cx3.frame, used_effects = saved_used, eff_witness = saved_wit, observation_scopes = saved_scopes } }
-  let t = TyFn(ptys, bt, lam_eff, capture.empty_function())
-  (cx3, t, XLambda(psyms, pnames, bx, popped.captures, owner_off(cx, lo), owner_off(cx, hi), t, if arm { "handler" } else if sugar { "with" } else { "lambda" }))
+  let t = TyFn(ptys, bt, lam_eff, CaptureFunction { scopes = scopes, bound = None })
+  (cx3, t, XLambda(psyms ++ scope_symbols, pnames ++ map(scopes, r => scope_key_name(r.id)), bx, popped.captures, owner_off(cx, lo), owner_off(cx, hi), t, if arm { "handler" } else if sugar { "with" } else { "lambda" }))
 }
 
 fn fn_ty_parts(t: Ty) -> (List[Ty], Ty, Eff) =
@@ -7549,7 +7775,7 @@ fn check_rest(cx: Cx, rest: Expr, hid: Int, expected: Option[Ty]) -> (Cx, Ty, TE
   match rest {
     ELambda(params, body, sugar, rlo, rhi, _) ->
       check_lambda(cx, params, body, sugar, false, false, Some(hid), None,
-        rest_expected(expected), rlo, rhi)
+        rest_expected(expected), rlo, rhi, [])
     _ -> check_expr(cx, rest, rest_expected(expected))
   }
 
@@ -8174,7 +8400,7 @@ fn check_handle_arms(
           } else { None }
           cxa = Cx { ..cxa, frame = Frame { ..cxa.frame, origin_scope = authority } }
           let (cxb, at, ax) = check_lambda(cxa, origin_params(a), a.body, true, true, false,
-            Some(hid), None, Some(origin_arm_type(a, field.ty)), a.lo, a.hi)
+            Some(hid), None, Some(origin_arm_type(a, field.ty)), a.lo, a.hi, [])
           cxa = cxb
           let (_, aret, aeff) = fn_ty_parts(at)
           if not assignable(cxa, aret, fret) {
@@ -8282,7 +8508,7 @@ fn check_control_arm(
   let k_ty = TyFn([fret], answer, cont_row(reff), capture.empty_function())
   let kp = LambdaParam { name = kname, ann = None, lo = a.bhi - len(kname), hi = a.bhi }
   let (cxb, at, ax) = check_lambda(cx1, origin_params(a) ++ [kp], a.body, true, true, true,
-    Some(hid), None, Some(TyFn(origin_types(a, fptys) ++ [k_ty], answer, EPure, capture.empty_function())), a.lo, a.hi)
+    Some(hid), None, Some(TyFn(origin_types(a, fptys) ++ [k_ty], answer, EPure, capture.empty_function())), a.lo, a.hi, [])
   cx1 = cxb
   let (_, aret, aeff) = fn_ty_parts(at)
   if not assignable(cx1, aret, answer) {
@@ -8585,6 +8811,12 @@ fn check_apply(
       }
     }
     return (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  match ft {
+    TyFn(_, _, _, sc) -> if len(sc.scopes) > 0 {
+      return check_scoped_value_call(cx1, fx, ft, args, None, lo, hi)
+    }
+    _ -> ()
   }
   var is_fn = false
   var fps: List[Ty] = []
@@ -10067,7 +10299,7 @@ fn check_local_fn(
   # would only have the body echo it, and the function will not lower.
   let body_local_fn: Option[LocalFn] = if refused { None } else { Some(LocalFn { name = name, row = eff }) }
   let (cxd, actual, lam) =
-    check_lambda(cx1, params, body, false, false, false, None, body_local_fn, Some(ft), lo, hi)
+    check_lambda(cx1, params, body, false, false, false, None, body_local_fn, Some(ft), lo, hi, [])
   cx1 = cxd
   match actual {
     TyFn(_, ar, ae, _) -> {
@@ -10230,7 +10462,14 @@ fn default_call(
   }
   let none_tid: Option[Int] = None
   let pty = reduce_instantiated(cx, subst(s.param_tys[idx], m, em), m)
-  XCallFn(s.owner, emitted_fn_name(s, callee) ++ "\$default\$" ++ to_string(idx), prefix, wits, [], none_tid,
+  var keys: List[TExpr] = []
+  for region in list.take(s.scope_params.scopes, sig_scope_arity(s)) {
+    match map.get(cx.frame.scope_keys, region.id) {
+      Some(id) -> { keys = keys ++ [XLocal(id, scope_key_name(region.id), owner_off(cx, lo), owner_off(cx, hi), TyInt)] }
+      None -> { keys = keys ++ [XError(owner_off(cx, lo), owner_off(cx, hi))] }
+    }
+  }
+  XCallFn(s.owner, emitted_fn_name(s, callee) ++ "\$default\$" ++ to_string(idx), prefix ++ keys, wits, [], none_tid,
     owner_off(cx, lo), owner_off(cx, hi), NO_NAME, pty, call_source(-1, "default-argument"))
 }
 
@@ -10439,32 +10678,6 @@ test "dbg renders through Show, and says so when there is none" {
 ## top-level / std / builtin signature with two-round argument inference,
 ## trait witnesses and effect instantiation. `resolved_sig` bypasses locals
 ## (module-qualified calls); `pre0` is a pre-typed UFCS receiver at args[0].
-## R1 of the `Mem` scope (docs/mem-buffer-design.md 4.2): what `with_mem`
-## returns cannot reach a buffer. The scope is what makes the call pure, and a
-## buffer that outlived it could be written by code that is not under `Mem`.
-## The walk is `buffer_reach`, which goes through tuples, type arguments and
-## the fields of user types, and counts a function type whose row carries `Mem`
-## because such a value still holds a buffer. A type variable in the result is
-## refused too: the walk cannot see through it, and a caller of a generic
-## wrapper could pick a buffer for it (that call is the wrapper's, not
-## `with_mem`'s, so the rule would never see the instantiation).
-fn refuse_buffer_result(cx: Cx, ret: Ty, lo: Int, hi: Int) -> Cx =
-  match buffer_reach(cx.adts, cx.effect_infos, ret) {
-    None ->
-      # A type variable is a type some caller picks later, and that caller may
-      # pick a buffer; a generic wrapper around `with_mem` would let it out.
-      if ty_has_any_var(ret) {
-        cerr_h(cx, "the result of `with_mem` mentions a type variable, which a caller could instantiate with a buffer, in the type `" ++
-            ty_show(cx.adts, ret) ++ "`", lo, hi,
-          "a generic wrapper around `with_mem` would let a buffer out of its scope; give the result a concrete type")
-      } else { cx }
-    Some(path) ->
-      cerr_h(cx, "the result of `with_mem` cannot mention a buffer: " ++ path ++
-          ", in the type `" ++ ty_show(cx.adts, ret) ++ "`", lo, hi,
-        "a buffer is private to its `with_mem` scope; copy what is needed out " ++
-          "(`to_list`, or an `Int` read) and return that")
-  }
-
 fn check_call(
   cx: Cx,
   callee: String,
@@ -10500,7 +10713,7 @@ fn check_call(
       answer
     }
   }
-  let s = match sig {
+  let original = match sig {
     Some(s2) -> s2
     None -> {
       # still check the arguments so their subtrees get types/symbols
@@ -10521,7 +10734,10 @@ fn check_call(
         TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
     }
   }
-  cx1 = used_signature(cx1, s)
+  let (scoped_call, s0) = fresh_scope_signature(cx1, original)
+  cx1 = scoped_call
+  var s = s0
+  cx1 = used_signature(cx1, original)
   if observation.entry(s) { cx1 = Cx { ..cx1, observation_used = true } }
   if observation.entry(s) && not cx1.is_std_module {
     let literal = len(args) == 1 && match args[0] { ELambda(_, _, _, _, _, _) -> true, _ -> false }
@@ -10590,6 +10806,16 @@ fn check_call(
   cx1 = rounds_cx
   m = m_rounds
   em = em_rounds
+  if list.any(list.drop(cx1.diags, len(cx.diags)), d =>
+      str.starts_with(d.msg, "Scope `") && str.contains(d.msg, "escapes its scoped callback")) {
+    return (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  let (scoped_done, scoped_sig) = finish_scope_signature(cx1, s, clo, chi)
+  if len(scoped_done.diags) > len(cx1.diags) {
+    return (scoped_done, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  cx1 = scoped_done
+  s = scoped_sig
   # the named-call arity report, after the arguments so their own errors come
   # first (the all-positional path answered arity above and returned)
   if named_present && not args_broken &&
@@ -10742,16 +10968,11 @@ fn check_call(
   # the one instantiation choke point: a projection whose subject just became
   # concrete reduces here, so no ground type ever carries one (D3)
   let ret = reduce_instantiated(cx1, subst(s.ret, m, em), m)
-  # R1 of docs/mem-buffer-design.md 4.2: the result of `with_mem` is read after
-  # inference, when `T` is whatever the body and the expectation made it
-  if s.name == "with_mem" && s.owner == Some("std/mem") {
-    cx1 = refuse_buffer_result(cx1, ret, clo, chi)
-  }
   let (arranged_cx, arg_lets, txs2) =
     arrange_call_args(cx, cx1, s, callee, args0, slot_of, tx_slots, m, em, wits, not args_broken, lo, hi)
   cx1 = arranged_cx
   let (cxv, evs, unanswered, vinsts, adropped) =
-    named_evidence_args(cx1, s, m, em, clo, chi)
+    named_evidence_args(cx1, s0, m, em, clo, chi)
   cx1 = cxv
   # **Charged is what was supplied.** The declared row is not enough on its
   # own, because a declared `!io` absorbs the effect variables beside it
@@ -10808,7 +11029,12 @@ fn check_call(
             identity.path_text([identity.Named(identity.EffectDecl, effect_of(cx1, eid).name),
               identity.Named(identity.OperationDecl, s.name)]))) })
       }
-      None -> XCallFn(s.owner, emitted_fn_name(s, callee), txs2, wits, evs, s.trait_id, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, clo), ret, call_source(owner_off(cx, chi), "call"))
+      None -> {
+        let (key_cx, keys) = scope_argument_values(cx1, s.scope_params.scopes, clo, chi)
+        cx1 = key_cx
+        XCallFn(s.owner, emitted_fn_name(s, callee), txs2 ++ keys, wits, evs, s.trait_id,
+          owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, clo), ret, call_source(owner_off(cx, chi), "call"))
+      }
     }
   }
   let out = if len(arg_lets) > 0 { XBlock(arg_lets, Some(node), owner_off(cx, lo), owner_off(cx, hi), ret) } else { node }
@@ -10850,7 +11076,14 @@ fn check_local_value_call(
     None -> ()
   }
   let sym = sym_of(cx1, sid)
-  let lt = sym.ty
+  let lt = scope_type(cx1, sym.ty)
+  match lt {
+    TyFn(_, _, _, sc) -> if len(sc.scopes) > 0 {
+      return check_scoped_value_call(cx1, XLocal(sid, callee, owner_off(cx, clo), owner_off(cx, chi), lt),
+        lt, args, pre0, lo, hi)
+    }
+    _ -> ()
+  }
   if is_errorish(lt) {
     let (cxa, _) = check_args_plain(cx1, args, pre0)
     return (cxa, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
@@ -11246,7 +11479,8 @@ fn infer_call_arg(
   var cx1 = cx
   var m = m0
   var em = em0
-  let pt = s.param_tys[pidx[i]]
+  let template = s.param_tys[pidx[i]]
+  var pt = scope_type(cx1, template)
   let substd = reduce_instantiated(cx1, subst(pt, m, em), m)
   # lambdas only need their parameter types, and function values unify
   # piecewise — a partially concrete expected type still helps
@@ -11275,6 +11509,10 @@ fn infer_call_arg(
   # binding is offered to `unify_into` rather than made after it: the
   # union arm is a containment test over the *substituted* row, so a
   # binding that arrives late is a binding the test never sees.
+  let (scoped_arg, scope_ok) = learn_scope_argument(cx1, s, template, at)
+  cx1 = scoped_arg
+  pt = scope_type(cx1, template)
+  match fn_align(pt, at) { Some(aligned) -> { pt = aligned }, None -> () }
   let (em_sub, subtracted, why) = earg_row_subtract(cx1, s, pt, at, m, em)
   var m3 = m
   var em3 = em_sub
@@ -11282,7 +11520,7 @@ fn infer_call_arg(
   let (m4, em4, ok4) = unify_into(cx1, pt, at, m, em_sub)
   m3 = m4
   em3 = em4
-  ok = ok4
+  ok = ok4 && scope_ok
   # A subtraction that did not rescue the argument must leave nothing
   # behind: the argument is an error either way, and a stray binding for
   # `e` would answer the next argument's row with a row nothing chose.
@@ -11294,7 +11532,10 @@ fn infer_call_arg(
   }
   m = m3
   em = em3
-  if not ok {
+  let escaped = reject_scope_escape(cx1, s, at, m, em, e_lo(a), e_hi(a))
+  let scope_escape = len(escaped.diags) > len(cx1.diags)
+  cx1 = escaped
+  if not ok && not scope_escape {
     let h = match why {
       Some(w) -> w
       None -> {
@@ -11494,9 +11735,10 @@ fn evidence_args(cx: Cx, declared: Eff, lo: Int, hi: Int) -> (Cx, List[TExpr], L
   var cx1 = cx
   var out: List[TExpr] = []
   var unanswered: List[Int] = []
-  for l in eff_labels(declared) {
-    let (eid, _) = l
-    let (cx2, tx, answered) = resolve_label_evidence(cx1, eid, lo, hi)
+  for original in evidence_labels(declared) {
+    let l = instantiated_label(cx1, original)
+    let eid = l.id
+    let (cx2, tx, answered) = resolve_evidence_label(cx1, l, lo, hi)
     cx1 = cx2
     if not answered { unanswered = unanswered ++ [eid] }
     out = out ++ [tx]
@@ -11623,7 +11865,7 @@ fn evidence_var_args(
 ## and reported on, inside the arms themselves.
 fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExpr, List[Int]) = {
   var cx1 = cx
-  let ground = eff_labels(inst)
+  let ground = evidence_labels(inst)
   let vs = eff_vars(inst)
   let asx = eff_assocs(inst)
   # the environments this frame holds for the row's non-ground atoms, in row
@@ -11704,24 +11946,26 @@ fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExp
   var acc = tail
   var unanswered: List[Int] = []
   for l in ground {
-    let (eid, _) = l
+    let eid = l.id
     let (cxb, ev) =
       if report {
-        let (cxr, tx, answered) = resolve_label_evidence(cx1, eid, lo, hi)
+        let (cxr, tx, answered) = resolve_evidence_label(cx1, l, lo, hi)
         if not answered { unanswered = unanswered ++ [eid] }
         (cxr, tx)
       } else {
-        let nm = ev_local_name(cx1, eid)
-        let (cxs, found) = ev_expr(cx1, nm, LabelSlot(eid), TyAdt(eid, [], capture.empty_arguments()), lo, hi)
+        let nm = provider_name(cx1, l)
+        let (cxs, found) = ev_expr(cx1, nm, evidence_label_role(l), evidence_label_type(l), lo, hi)
         (cxs, match found {
           Some(tx) -> tx
           None -> XUnit(owner_off(cx, lo), owner_off(cx, hi))
         })
       }
     cx1 = cxb
+    let (key_cx, domain) = evidence_domain_value(cx1, l, lo, hi)
+    cx1 = key_cx
     acc = XCtor(EV_PACK_ID, 0,
-      [XInt(label_key(eid), owner_off(cx, lo), owner_off(cx, hi)), ev, acc],
-      [Some(0), Some(1), Some(2)], no_expr(), owner_off(cx, lo), owner_off(cx, hi), ev_pack_ty())
+      [XInt(label_key(eid), owner_off(cx, lo), owner_off(cx, hi)), ev, acc, domain],
+      [Some(0), Some(1), Some(2), Some(3)], no_expr(), owner_off(cx, lo), owner_off(cx, hi), ev_pack_ty())
   }
   (cx1, acc, unanswered)
 }
@@ -11756,18 +12000,64 @@ fn dyn_evidence_args(cx: Cx, feff: Eff, lo: Int, hi: Int) -> (Cx, List[TExpr], L
 ## still reported here, but for a named callee's own row and only outside every
 ## closure -- inside one it is reported at the call site instead, which is
 ## where a reader could actually name the call that went unanswered.
-fn resolve_label_evidence(cx: Cx, eid: Int, lo: Int, hi: Int) -> (Cx, TExpr, Bool) = {
+fn resolve_label_evidence(cx: Cx, eid: Int, lo: Int, hi: Int) -> (Cx, TExpr, Bool) =
+  resolve_evidence_label(cx, EvidenceLabel { id = eid, name = effect_of(cx, eid).name, scope = None }, lo, hi)
+
+fn capture_scope(cx: Cx, id: Int) -> capture.Scope = {
+  for scope in cx.current_capture_params.scopes { if scope.id == id { return scope } }
+  capture.scope_subst(capture_scope_identity(id), cx.frame.scope_bindings)
+}
+
+fn capture_scope_identity(id: Int) -> capture.Scope = CaptureScope { name = "s", id = id }
+
+fn instantiated_label(cx: Cx, label: EvidenceLabel) -> EvidenceLabel =
+  EvidenceLabel { ..label, scope = match label.scope {
+    Some(scope) -> Some(scope_infer.resolve(scope, cx.frame.scope_bindings))
+    None -> None
+  } }
+
+fn provider_name(cx: Cx, l: EvidenceLabel) -> String = match l.scope {
+  None -> ev_local_name(cx, l.id)
+  Some(_) -> evidence_label_name(EvidenceLabel { ..l, name = effect_of(cx, l.id).name })
+}
+
+fn evidence_domain_value(cx: Cx, l: EvidenceLabel, lo: Int, hi: Int) -> (Cx, TExpr) = match l.scope {
+  None -> (cx, XInt(0, owner_off(cx, lo), owner_off(cx, hi)))
+  Some(region) -> {
+    let name = scope_key_name(region.id)
+    match lookup(cx, name) {
+      Some(_) -> {
+        let (read, found) = resolve_local(cx, name, lo, hi, false)
+        match found {
+          Some(sid) -> (read, XLocal(sid, name, owner_off(cx, lo), owner_off(cx, hi), TyInt))
+          None -> (read, XError(owner_off(cx, lo), owner_off(cx, hi)))
+        }
+      }
+      None -> (cerr(cx, "no execution key for Scope `" ++ region.name ++ "`", lo, hi), XError(owner_off(cx, lo), owner_off(cx, hi)))
+    }
+  }
+}
+
+test "scoped evidence rejects a missing execution key in malformed metadata" {
+  let label = EvidenceLabel { id = 0, name = "Mem", scope = Some(CaptureScope { name = "s", id = 7 }) }
+  let (checked, value) = evidence_domain_value(test_cx(), label, 0, 1)
+  assert len(checked.diags) == 1
+  assert checked.diags[0].msg == "no execution key for Scope `s`"
+  match value { XError(_, _) -> (), _ -> panic("a missing domain cannot become the bare-label key") }
+}
+
+fn resolve_evidence_label(cx: Cx, l: EvidenceLabel, lo: Int, hi: Int) -> (Cx, TExpr, Bool) = {
+  let eid = l.id
   var cx1 = cx
-  let nm = ev_local_name(cx1, eid)
+  let nm = provider_name(cx1, l)
   # a local function's pack holds the labels its row declares and nothing else,
   # so a name resolving through the enclosing body is not evidence it can read
   # unless the row names it; the refusal is here rather than at run time (#43).
   # Inside comptime the refusal belongs to `leave_isolated`, as below.
   if not cx1.frame.isolated {
     match local_fn_missing_evidence(cx1, nm, (row) => {
-      for l in eff_labels(row) {
-        let (id, _) = l
-        if id == eid { return true }
+      for atom in evidence_labels(row) {
+        if atom.id == eid && atom.scope == l.scope { return true }
       }
       false
     }) {
@@ -11778,7 +12068,7 @@ fn resolve_label_evidence(cx: Cx, eid: Int, lo: Int, hi: Int) -> (Cx, TExpr, Boo
       None -> ()
     }
   }
-  let (cxa, found) = ev_expr(cx1, nm, LabelSlot(eid), TyAdt(eid, [], capture.empty_arguments()), lo, hi)
+  let (cxa, found) = ev_expr(cx1, nm, evidence_label_role(l), evidence_label_type(l), lo, hi)
   cx1 = cxa
   match found {
     Some(tx) -> (cx1, tx, true)
@@ -11789,7 +12079,11 @@ fn resolve_label_evidence(cx: Cx, eid: Int, lo: Int, hi: Int) -> (Cx, TExpr, Boo
       # is not withdrawn from the row either: `leave_isolated` reads the row
       # to find out what to refuse
       if not cx1.frame.isolated {
-        cx1 = unhandled_effect(cx1, eid, lo, hi)
+        cx1 = match l.scope {
+          Some(region) -> cerr_h(cx1, "no evidence for `" ++ l.name ++ "[" ++ region.name ++ "]`", lo, hi,
+            "declare !" ++ l.name ++ "[" ++ region.name ++ "]; an inner memory runner answers only its own Scope")
+          None -> unhandled_effect(cx1, eid, lo, hi)
+        }
         (cx1, XError(owner_off(cx, lo), owner_off(cx, hi)), false)
       } else {
         (cx1, XError(owner_off(cx, lo), owner_off(cx, hi)), true)
@@ -13522,7 +13816,7 @@ fn check_method_call(
   # function `f` is ALSO in scope the method spelling is ambiguous and errors
   # out; the value spellings (`value_form`) read the field (spec §2.4)
   match tt {
-    TyAdt(aid, targs, _) -> {
+    TyAdt(aid, targs, scope_args) -> {
       let ad = adt_of(cx1.adts, aid)
       if ad.is_record {
         let ci = adt_of(cx1.adts, aid).ctors[0]
@@ -13547,9 +13841,9 @@ fn check_method_call(
             ti = ti + 1
           }
           let em0: Map[Int, Eff] = map.empty()
-          let ftype = subst(ci.fields[fidx].ty, im, em0)
+          let ftype = apply_scope_arguments(subst(ci.fields[fidx].ty, im, em0), ad.scope_params, scope_args)
           match ftype {
-            TyFn(fps, fret, feff, _) -> {
+            TyFn(fps, fret, feff, contract) -> {
               # the field holds a function value, and a function type carries
               # no parameter names
               match first_named(args0) {
@@ -13580,6 +13874,7 @@ fn check_method_call(
                   TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
               }
               let fx = XField(tx, fidx, owner_off(cx, e_lo(target)), owner_off(cx, nhi), ftype)
+              if len(contract.scopes) > 0 { return check_scoped_value_call(cx1, fx, ftype, args, None, lo, hi) }
               if len(args) != len(fps) {
                 for a in args {
                   let (cxa, _, _) = check_expr(cx1, a, no_expected())
@@ -14783,7 +15078,8 @@ fn enter_fn(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
       scopes = []
     }
   }
-  bind_evidence(push_scope(cx1), s, nlo, nhi)
+  let (keyed, _) = bind_scope_keys(push_scope(cx1), s.scope_params.scopes, nlo, nhi)
+  bind_evidence(keyed, s, nlo, nhi)
 }
 
 ## Bind one hidden evidence parameter per declared effect in the signature, in
@@ -14800,11 +15096,11 @@ fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
   # the ABI row, not the declared one: a signature that binds `!e` in a
   # parameter takes its slot whether or not its own row mentions it
   let abi = sig_abi_eff(s)
-  for l in eff_labels(abi) {
-    let (eid, _) = l
-    let ev_name = ev_local_name(cx1, eid)
+  for l in evidence_labels(abi) {
+    let eid = l.id
+    let ev_name = provider_name(cx1, l)
     let (cx2, _) =
-      declare_evidence(cx1, ev_name, TyAdt(eid, [], capture.empty_arguments()), label_key(eid), nlo, nhi)
+      declare_evidence(cx1, ev_name, evidence_label_type(l), label_key(eid), nlo, nhi)
     cx1 = cx2
   }
   # one erased slot per effect variable written in the row, between the
@@ -14835,9 +15131,9 @@ fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
 fn ev_sym_list(cx: Cx, s: Sig) -> List[Int] = {
   let abi = sig_abi_eff(s)
   var out: List[Int] = []
-  for l in eff_labels(abi) {
-    let (eid, _) = l
-    match lookup(cx, ev_local_name(cx, eid)) {
+  for l in evidence_labels(abi) {
+    let eid = l.id
+    match lookup(cx, provider_name(cx, l)) {
       Some(sid) -> { out = out ++ [sid] }
       None -> ()
     }
@@ -15114,7 +15410,7 @@ pub(pkg) fn check_param_default(cx: Cx, d: FnDecl, s: Sig, k: Int) -> (Cx, TDefa
     }
   }
   let dsyms = dict_sym_list(cxd, dsig)
-  (pop_scope(cxd), TDefault { body = dx, param_syms = psyms, dict_syms = dsyms })
+  (pop_scope(cxd), TDefault { body = dx, param_syms = runtime_parameter_symbols(cxd, dsig, psyms), dict_syms = dsyms })
 }
 
 ## Re-word the diagnostics a default raised (from index `before` on) that are
@@ -15388,7 +15684,7 @@ pub(pkg) fn check_fn_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]
   (cx1, TFun {
     name = d.name,
     sig = s,
-    param_syms = psyms,
+    param_syms = runtime_parameter_symbols(cx1, s, psyms),
     dict_syms = dsyms,
     ev_syms = esyms,
     defaults = dtxs,
@@ -15452,7 +15748,7 @@ pub(pkg) fn check_fn_inferred_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[
     TFun {
       name = d.name,
       sig = sealed,
-      param_syms = psyms,
+      param_syms = runtime_parameter_symbols(cx3, sealed, psyms),
       dict_syms = dsyms,
       ev_syms = esyms,
       defaults = dtxs,
@@ -15493,7 +15789,7 @@ pub(pkg) fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> 
   (cx1, TFun {
     name = m2.name,
     sig = s,
-    param_syms = psyms,
+    param_syms = runtime_parameter_symbols(cx1, s, psyms),
     dict_syms = dsyms,
     ev_syms = esyms,
     defaults = [],
@@ -16256,7 +16552,8 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   for imd in module_impls(m) {
     # recover (trait id, subject) for codegen's mangled impl-method names;
     # both lookups re-run what registration already validated, diags discarded
-    let imp_key = impl_body_key(cx1, imd.trait_name, imd.subject)
+    let (impl_scope, _) = bind_capture_params(cx1, imd.scope)
+    let imp_key = impl_body_key(impl_scope, imd.trait_name, imd.subject)
     let impl_head = [identity.ImplHead(imd.trait_name,
       identity.type_shape(imd.subject, parameter_names(imd.tparams, imd.scope)))]
     for me in imd.methods {
@@ -17317,7 +17614,7 @@ fn fn_named(tm: TModule, name: String) -> TFun = {
 fn pack_node(t: TExpr) -> (Int, TExpr, TExpr) =
   match t {
     XCtor(aid, ci, ws, _, _, _, _, _) -> {
-      if aid != EV_PACK_ID || ci != 0 || len(ws) != 3 {
+      if aid != EV_PACK_ID || ci != 0 || len(ws) != 4 {
         panic("not an ev\$Pack constructor")
       }
       match ws[0] {

@@ -26,7 +26,7 @@ use front/ast.{parameter_names, TScoped, TCaptured, TKindArg, no_scope_syntax,
   e_lo, e_hi
 }
 
-use check/types.{TyCaptured,
+use check/types.{mem_runner_sig, ScopedEffect, scoped_eff, TyCaptured,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyF64Buf, TyUnit, TyNever, TyError, TyVar,
   TyAssoc, TyAdt, TyList, TyJava,
   TyMap, TySet, TyArray, TyTuple, TyFn, TyOpaque, Eff, EPure, EIo, EffVar, ELabeled,
@@ -1274,6 +1274,15 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
     }
     let (cx2, eid) = mint(cx1, EffectDecl, d.name, d.nlo, d.nhi)
     cx1 = cx2
+    let saved_capture = cx1.current_capture_params
+    let kernel = d.name == "Mem" && cx1.owner_class == Some("std/mem")
+    if (len(d.scope.binders) > 0 && not kernel) ||
+      (kernel && (len(d.scope.binders) != 1 || d.scope.binders[0].capture)) {
+      cx1 = cerr(cx1, "only std/mem.Mem declares exactly one Scope parameter", d.nlo, d.nhi)
+      continue
+    }
+    let (scoped_effect, params) = declare_capture_params(cx1, d.scope, [], [])
+    cx1 = scoped_effect
     let saved_tp = cx1.current_tparams
     let saved_ev = cx1.current_eff_vars
     let empty_tp: Map[String, Ty] = map.empty()
@@ -1294,7 +1303,7 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
             to_string(limit) ++ " parameters, but declares " ++ to_string(len(op.params)),
           op.nlo, op.nhi, "group parameters in a record; control handlers also take a continuation")
       }
-      cx1 = Cx { ..cx1, current_tparams = empty_tp, current_eff_vars = empty_ev }
+      cx1 = Cx { ..cx1, current_tparams = empty_tp, current_eff_vars = empty_ev, current_capture_params = params }
       var ptys: List[Ty] = []
       for p in op.params {
         # an operation call reads a handler's evidence and calls the arm's
@@ -1346,14 +1355,15 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       let idx = len(fields)
       fields = fields ++ [FieldI { name = op.name, ty = TyFn(ptys, ret, EPure, capture.empty_function()) }]
       op_names = op_names ++ [op.name]
-      let sig = Sig { scope_params = capture.empty_params(),
+      let sig = Sig { scope_params = params,
         name = op.name,
         param_tys = ptys,
         param_names = map(op.params, p => p.name),
         param_defaults = [],
         caller_params = [],
         ret = ret,
-        eff = ELabeled(EPure, [(eid, d.name)]),
+        eff = if kernel { scoped_eff(EPure, [ScopedEffect { id = eid, name = d.name, scope = params.scopes[0] }]) }
+        else { ELabeled(EPure, [(eid, d.name)]) },
         is_builtin = false,
         tparams = [],
         constraints = [],
@@ -1384,7 +1394,7 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
     # written header -- but it shares the effect's audience so that nothing
     # downstream has to special-case a record with no answer
     let ev_audience = vis_audience(cx1, d.vis)
-    let info = AdtI { scope_params = capture.empty_params(),
+    let info = AdtI { scope_params = params,
       id = eid,
       name = rec_name,
       is_record = true,
@@ -1398,6 +1408,8 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
     }
     cx1 = Cx {
       ..cx1,
+      current_capture_params = saved_capture,
+      bins = if kernel { map.insert(cx1.bins, "mem_run", mem_runner_sig(eid)) } else { cx1.bins },
       adts = map.insert(cx1.adts, eid, info),
       effects = map.insert(cx1.effects, d.name, eid),
       effect_infos = map.insert(cx1.effect_infos, eid, EffectI {

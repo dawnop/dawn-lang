@@ -22,7 +22,7 @@ use java "java.util.Objects"
 use java "java.lang.Long"
 use jvm/ops.{
   ACC_ABSTRACT, OP_DLOAD, OP_DRETURN, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
-  ACC_VOLATILE,
+  ACC_VOLATILE, ACC_SYNCHRONIZED,
   COMPUTE_FRAMES,
   OP_AALOAD,
   OP_AASTORE, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
@@ -989,6 +989,7 @@ fn mem_jump_if_neg(m: MethodVisitor, slot: Int, bad: Label) -> Unit !io = {
 pub fn gen_mem_class(supers: List[String]) -> Bytes !io = {
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, MEM_CLASS, obj())
+  gen_scope_new_key(cw)
   gen_buf_ops(cw, i64_kind())
   gen_buf_ops(cw, f64_kind())
   gen_buf_pack_int(cw)
@@ -997,6 +998,33 @@ pub fn gen_mem_class(supers: List[String]) -> Bytes !io = {
   gen_buf_unpack_float(cw)
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
+}
+
+fn gen_scope_new_key(cw: ClassWriter) -> Unit !io = {
+  Asm.fieldOn(cw, ACC_PRIVATE + ACC_STATIC, "scope_key", "J")
+  let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_SYNCHRONIZED,
+    "scope_new_key", "()J").expect("scope key method")
+  m.visitCode()
+  let available = Label.new()
+  m.visitFieldInsn(OP_GETSTATIC, MEM_CLASS, "scope_key", "J")
+  m.visitLdcInsn(Long.valueOf(9223372036854775807).expect("boxed"))
+  m.visitInsn(OP_LCMP)
+  m.visitJumpInsn(OP_IFNE, available)
+  m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  m.visitInsn(OP_DUP)
+  m.visitLdcInsn("scope evidence key space exhausted")
+  m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  m.visitInsn(OP_ATHROW)
+  m.visitLabel(available)
+  m.visitFieldInsn(OP_GETSTATIC, MEM_CLASS, "scope_key", "J")
+  m.visitInsn(OP_LCONST_1)
+  m.visitInsn(OP_LADD)
+  m.visitVarInsn(OP_LSTORE, 0)
+  m.visitVarInsn(OP_LLOAD, 0)
+  m.visitFieldInsn(OP_PUTSTATIC, MEM_CLASS, "scope_key", "J")
+  m.visitVarInsn(OP_LLOAD, 0)
+  m.visitInsn(OP_LRETURN)
+  close_mv(m)
 }
 
 fn buf_panic_name(k: BufKind, what: String) -> String = "panic_" ++ k.pre ++ "_" ++ what
@@ -5996,6 +6024,8 @@ pub fn rt_array_to_java() -> RtMethod =
 pub fn rt_array_of_java() -> RtMethod =
   rt(ARRAY_CLASS, "array_of_java", "(" ++ jlist_desc() ++ ")" ++ array_desc())
 
+pub fn rt_scope_new_key() -> RtMethod = rt(MEM_CLASS, "scope_new_key", "()J")
+
 pub fn rt_io_list_names() -> RtMethod =
   rt(IO_CLASS, "io_list_names", "(" ++ string_desc() ++ ")" ++ jlist_desc())
 
@@ -6072,6 +6102,7 @@ pub fn emitter_rt_methods() -> List[RtMethod] = [
   rt_array_push(),
   rt_array_to_java(),
   rt_array_of_java(),
+  rt_scope_new_key(),
   rt_io_list_names(),
   rt_io_run(),
   rt_io_cast(),

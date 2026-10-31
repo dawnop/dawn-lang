@@ -1,15 +1,14 @@
-# checker.dawn: rule R1 reaches a buffer through the field of a user record
-# and of a user variant (N3), with substitution for a generic wrapper.
+# Explicit nominal arguments accommodate the buffer before the runner exit.
 use std/mem
-
-pub type Box = { b: I64Buf }
-
-pub type Held = Empty | Full(buf: I64Buf)
-
+pub type Box[@s] = { b: I64Buf@s }
+pub type Held[@s] = Empty | Full(buf: I64Buf@s)
 pub type Wrap[T] = { inner: T }
-
-pub fn in_record() -> Box = mem.with_mem(() => Box { b= mem.new(4) })
-
-pub fn in_variant() -> Held = mem.with_mem(() => Full(buf= mem.new(4)))
-
-pub fn in_generic() -> Wrap[I64Buf] = mem.with_mem(() => Wrap { inner= mem.new(4) })
+fn in_record() = mem.with_mem([@s] () => {
+  let result: Box[s] = Box { b = mem.new(4) }
+  result
+})
+fn in_variant() = mem.with_mem([@s] () => {
+  let result: Held[s] = Full(buf = mem.new(4))
+  result
+})
+fn in_generic() = mem.with_mem([@s] () => Wrap { inner = mem.new(4) })
