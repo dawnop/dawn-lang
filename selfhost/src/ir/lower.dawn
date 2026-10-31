@@ -14,11 +14,12 @@
 #      gets a CBox. If a backend has to re-derive it, it is not lowered.
 
 use check/capture
+use check/capture.{Arguments as CaptureArguments}
 use std/list
 use std/map
 use std/str
 use check/provenance as observation
-use check/types.{Intr,
+use check/types.{ev_record_name, ty_scope_refs, scope_key_name, ScopedEffect, TyI64Buf, TyF64Buf, EvidenceLabel, apply_scope_arguments, ev_pack_ty, fn_runtime_params, sig_runtime_params, EvidenceRole, ScopedLabelSlot, evidence_roles, evidence_labels, evidence_label_role, evidence_label_type, Intr,
   intrinsics,
   subst,
   reduce_via_bindings,
@@ -31,7 +32,7 @@ use check/types.{Intr,
   eff_labels, eff_vars, eff_assocs, nev, atom_keys, sig_abi_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty, erased_cell_ty, erased_ctl_ty,
   EV_PACK_ID, key_is_label, key_effect_id, label_key, var_key, assoc_key,
-  LabelSlot, VariableSlot, AssociatedSlot,
+  VariableSlot, AssociatedSlot,
   Adts, adt_of, trait_of, prelude_adts, prelude_traits, prelude_impls, insert_impl,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   DISPLAY_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID, NEG_ID, is_arith_trait,
@@ -40,6 +41,7 @@ use check/types.{Intr,
   is_eq_scalar, is_ord_scalar, is_hash_scalar, is_show_scalar, Impls, impl_at, has_impl_at,
   is_ground, expandable, sub_goals
 }
+use check/scope_infer
 use check/identity
 use check/tast_positions
 use check/tast.{CallSource, call_source,
@@ -146,7 +148,7 @@ pub type LSt = {
   # Scoped to one Core function exactly like `dict_env`: a lifted body reaches
   # its own parameters and not the enclosing function's, so entering one
   # replaces this and leaving restores it.
-  ev_env: List[(Int, CExpr)],
+  ev_env: List[(EvidenceRole, CExpr)],
   # A lifted closure's own evidence slot: one erased pack, whatever its row
   # (`fn_value_evs`). It answers for any single atom, because it is the whole
   # chain rather than one node of it. None inside a named function, which has
@@ -392,13 +394,20 @@ fn lower_evidence(st: LSt, evid: List[TExpr]) -> (LSt, List[CExpr]) = {
 ## checker only mints `XEvRead` where the label is in the frame's own row, and
 ## `bind_evidence` gives every atom of that row a slot. The placeholder here is
 ## for the error paths that still lower.
-fn ev_slot(st: LSt, key: Int) -> CExpr = {
+fn ev_slot(st: LSt, key: Int, role: EvidenceRole, domain: Option[CExpr]) -> CExpr = {
   for p in st.ev_env {
     let (k, v) = p
-    if k == key { return v }
+    if k == role { return v }
   }
   match st.ev_own {
-    Some(pack) -> ev_from_pack(pack, key)
+    Some(pack) -> match role {
+      ScopedLabelSlot(eid, _) -> {
+        let instance = domain.expect("scoped evidence must carry its execution key")
+        let raw = CIntrinsic("ev_get_scoped", [pack, CInt(key), instance], erased_ev_ty(), CNoSite)
+        adapt_out(raw, erased_ev_ty(), TyAdt(eid, [], capture.empty_arguments()))
+      }
+      _ -> ev_from_pack(pack, key)
+    }
     None -> ev_placeholder()
   }
 }
@@ -1189,7 +1198,7 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 pub fn internal_intrinsics() -> List[String] = [
   "cmp", "hash", "java_eq", "java_hash", "show", "quote", "len",
   "str_of_int", "str_of_bool", "str_of_bytes",
-  "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_append",
+  "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_get_scoped", "scope_new_key", "ev_append",
   "cell_new", "cell_get", "cell_set", "cell_take",
   "ctl_yield", "ctl_run",
   "dbg_line"
@@ -1245,7 +1254,7 @@ pub fn inline_intrinsics() -> List[String] = [
   # the evidence-pack lookup, and the join two rows meeting in one slot need.
   # A loop with a shape test in it, so each is a call on native and emitted
   # for the JVM, and neither is a thing Core could have said for both
-  "ev_get", "ev_append",
+  "ev_get", "ev_get_scoped", "scope_new_key", "ev_append",
   # the handler-local slot. No runtime module owns it because the two
   # representations have nothing in common: a one-slot `Object[]` on the JVM,
   # where the collector handles the superseded value, and a counted one-field
@@ -1419,13 +1428,13 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
   # 3. the sizes the comments above quote. A count written in prose is what
   #    went wrong in `internal_intrinsics`, whose comment gave two different
   #    answers for the same list in the same paragraph.
-  assert len(inline) == 56
+  assert len(inline) == 58
   assert len(host) == 2
   assert len(gone) == 23
   assert len(staged) == 0
   # and the five groups account for all declared names, with none left over
   assert len(map.keys(it)) == 161
-  assert len(internal) == 23
+  assert len(internal) == 25
 }
 
 # ---- trait witnesses ----
@@ -1437,8 +1446,34 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
 ## drops ADT type arguments on purpose (it names v1 impl subjects, which are
 ## never generic), so it would give `Option[Int]` and `Option[String]` the
 ## same dictionary.
+fn dict_scopes(subject: Ty) -> List[capture.Scope] = {
+  var out: List[capture.Scope] = []
+  for member in ty_scope_refs(subject) {
+    match member { capture.Region(region) -> { out = out ++ [region] }, _ -> () }
+  }
+  out
+}
+
+fn scope_value(st: LSt, region: capture.Scope) -> CExpr = {
+  let name = scope_key_name(region.id)
+  for entry in st.syms {
+    let (id, symbol) = entry
+    if symbol.name == name { return CLocal(id, TyInt) }
+  }
+  panic("lower: missing instance key for Scope `" ++ region.name ++ "`")
+}
+
+fn impl_scopes(imp: ImplI, subject: Ty) -> List[capture.Scope] = {
+  let (bindings, _) = scope_infer.infer(imp.subject, subject, imp.scope_params.scopes, map.empty())
+  map(imp.scope_params.scopes, region => scope_infer.resolve(region, bindings))
+}
+
+fn impl_scope_values(st: LSt, imp: ImplI, subject: Ty) -> List[CExpr] =
+  map(impl_scopes(imp, subject), region => scope_value(st, region))
+
 fn dict_key(tid: Int, subject: Ty) -> String =
-  "dict$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject)
+  "dict$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++
+  join(map(dict_scopes(subject), region => "\$scope" ++ to_string(region.id)), "")
 
 ## Constructor shape is part of emitted identity, but not of semantic
 ## evidence lookup in dict_env. Keep singleton names and distinguish every
@@ -1556,6 +1591,7 @@ fn dict_ty() -> Ty = TyAdt(DICT_ADT_ID, [], capture.empty_arguments())
 ## contains type variables but whose bounds contribute no sub-goals. Every
 ## slot is resolved here, so a backend only has to lay out pointers.
 fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
+  if len(dict_scopes(subject)) > 0 { return dict_expr(st, tid, subject) }
   # For a ground subject every sub-goal is ground too and a compile-time
   # constant. A zero-goal non-ground subject has none to pass. In both cases
   # the dictionary takes no arguments; `false` tells its slots to resolve any
@@ -1578,7 +1614,7 @@ fn dict_def(
   goals: List[(Int, Ty)],
   param: Bool
 ) -> (LSt, String) = {
-  let nargs = if param { len(goals) } else { 0 }
+  let nargs = (if param { len(goals) } else { 0 }) + len(dict_scopes(subject))
   let key = dict_key(tid, subject) ++ dict_shape_suffix(nargs)
   for d in st.dicts {
     if d.key == key { return (st, key) }
@@ -1772,8 +1808,8 @@ fn make_bridge(
   # dictionary class it reads its arguments out of, so `Box[Int]` and
   # `Box[Box[Int]]` need different bridges. For a non-generic subject the two
   # spellings agree, which is why nothing that existed before changed name.
-  let name = "bridge$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method ++
-    dict_shape_suffix(if param { len(goals) } else { 0 })
+  let name = "bridge$" ++ dict_key(tid, subject) ++ "$" ++ method ++
+    dict_shape_suffix((if param { len(goals) } else { 0 }) + len(dict_scopes(subject)))
   if list.any(st.lifted, f => f.name == name) {
     (st, name)
   } else {
@@ -1793,6 +1829,15 @@ fn make_bridge(
     # dictionaries come from.
     let (st3, dsym) = fresh_sym(st1)
     st1 = st3
+    let regions = dict_scopes(subject)
+    for region in impl_scopes(imp0, subject) {
+      var index = 0
+      while index < len(regions) && regions[index].id != region.id { index = index + 1 }
+      if index == len(regions) { panic("lower: impl Scope is absent from its dictionary subject") }
+      let offset = (if param { len(goals) } else { 0 }) + index
+      let boxed = CDictArg(CLocal(dsym, dict_ty()), st1.owner, key, offset, erased_ev_ty())
+      args = args ++ [adapt_out(boxed, erased_ev_ty(), TyInt)]
+    }
     # A conditional impl's method is generic: it wants a dictionary per bound,
     # and the only place to get them is the dictionary this bridge was handed.
     var ds: List[CExpr] = []
@@ -2108,7 +2153,13 @@ fn dict_expr(st: LSt, tid: Int, t: Ty) -> (LSt, CExpr) =
   match map.get(st.dict_env, dict_key(tid, t)) {
     Some(d) -> (st, d)
     None ->
-      if is_ground(t) || not expandable(t) {
+      if len(dict_scopes(t)) > 0 {
+        let goals = sub_goals(st.impls, tid, t)
+        let (with_goals, ds) = goal_dicts(st, goals)
+        let keys = map(dict_scopes(t), region => adapt_in(scope_value(st, region), TyInt, erased_ev_ty()))
+        let (ready, key) = dict_def(with_goals, tid, t, goals, true)
+        (ready, CDictApply(key, ds ++ keys, dict_ty()))
+      } else if is_ground(t) || not expandable(t) {
         dict_ref(st, tid, t)
       } else {
         let goals = sub_goals(st.impls, tid, t)
@@ -3119,7 +3170,7 @@ fn lower_trait_call(
         let (st2, ds) = witness_values(st1, wargs)
         let (st3, ies) = impl_evidence(st2, sg, imp, psig, evid)
         return (st3, adapt_out(
-          CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ ds ++ ies,
+          CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ impl_scope_values(st3, imp, subject) ++ ds ++ ies,
             psig.ret, site),
           psig.ret, ty))
       }
@@ -3140,7 +3191,7 @@ fn lower_trait_call(
         let (st2, ds) = goal_dicts(st1, sub_goals(st1.impls, tid, subject))
         let (st3, ies) = impl_evidence(st2, sg, imp, psig, evid)
         (st3, adapt_out(
-          CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ ds ++ ies,
+          CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ impl_scope_values(st3, imp, subject) ++ ds ++ ies,
             psig.ret, site),
           psig.ret, ty))
       } else {
@@ -3164,10 +3215,7 @@ fn fresh_lam(st: LSt) -> (LSt, String) =
   (LSt { ..st, next_lam = st.next_lam + 1 }, "lambda$${to_string(st.next_lam)}")
 
 fn params_of_fn_ty(t: Ty) -> List[Ty] =
-  match t {
-    TyFn(ps, _, _, _) -> ps
-    _ -> []
-  }
+  fn_runtime_params(t)
 
 fn ret_of_fn_ty(t: Ty) -> Ty =
   match t {
@@ -3428,7 +3476,7 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
   # against a constructor's declared field types.
   let callee: Option[Sig] = sig_of(st1, owner, name)
   let decl_pts = match callee {
-    Some(sg) -> sg.param_tys
+    Some(sg) -> sig_runtime_params(sg)
     None -> []
   }
   let pts = params_of_fn_ty(ty)
@@ -3467,7 +3515,23 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
         [pp] -> CLocal(pp.sym, pp.ty)
         _ -> ev_placeholder()
       }
-      for k in atom_keys(sig_abi_eff(sg)) {
+      let labels = evidence_labels(sig_abi_eff(sg))
+      for label in labels {
+        let domain = match label.scope {
+          None -> CInt(0)
+          Some(region) -> {
+            var index = 0
+            while index < len(sg.scope_params.scopes) && sg.scope_params.scopes[index].id != region.id {
+              index = index + 1
+            }
+            if index == len(sg.scope_params.scopes) { panic("lower: unbound Scope in a function adapter") }
+            CLocal(ps[len(sg.param_tys) + index].sym, TyInt)
+          }
+        }
+        let raw = CIntrinsic("ev_get_scoped", [pack, CInt(label_key(label.id)), domain], erased_ev_ty(), CNoSite)
+        inner_evs = inner_evs ++ [adapt_out(raw, erased_ev_ty(), evidence_label_type(label))]
+      }
+      for k in list.drop(atom_keys(sig_abi_eff(sg)), len(labels)) {
         inner_evs = inner_evs ++ [ev_from_pack(pack, k)]
       }
     }
@@ -3534,7 +3598,9 @@ fn lift_builtin_value(st: LSt, name: String, ty: Ty) -> (LSt, CExpr) = {
     let (st3, sym) = fresh_sym(st2)
     st2 = st3
     ps = ps ++ [CParam { sym = sym, ty = pt, mode = COwned }]
-    args = args ++ [XLocal(sym, "", 0, 0, pt)]
+    if len(args) < len(match ty { TyFn(values, _, _, _) -> values, _ -> [] }) {
+      args = args ++ [XLocal(sym, "", 0, 0, pt)]
+    }
   }
   let (st4, evps) = fn_value_evs(st2)
   let own: Option[CExpr] =
@@ -3590,17 +3656,20 @@ fn lift_builtin_value(st: LSt, name: String, ty: Ty) -> (LSt, CExpr) = {
 ## way the checker writes a read of evidence a lambda does not hold itself.
 fn atom_reads(e: Eff) -> List[TExpr] = {
   var out: List[TExpr] = []
-  for l in eff_labels(e) {
-    let (eid, _) = l
-    out = out ++ [XEvRead(label_key(eid), LabelSlot(eid), 0, 0, TyAdt(eid, [], capture.empty_arguments()))]
+  for l in evidence_labels(e) {
+    let domain = match l.scope {
+      Some(region) -> Some(XLocal(region.id, "", 0, 0, TyInt))
+      None -> None
+    }
+    out = out ++ [XEvRead(label_key(l.id), evidence_label_role(l), 0, 0, evidence_label_type(l), domain)]
   }
   for v in eff_vars(e) {
     let (vid, _) = v
-    out = out ++ [XEvRead(var_key(vid), VariableSlot(vid), 0, 0, erased_ev_ty())]
+    out = out ++ [XEvRead(var_key(vid), VariableSlot(vid), 0, 0, erased_ev_ty(), None)]
   }
   for a in eff_assocs(e) {
     let (_, sv, tid, member) = a
-    out = out ++ [XEvRead(assoc_key(tid), AssociatedSlot(sv, tid, member), 0, 0, erased_ev_ty())]
+    out = out ++ [XEvRead(assoc_key(tid), AssociatedSlot(sv, tid, member), 0, 0, erased_ev_ty(), None)]
   }
   out
 }
@@ -3667,6 +3736,72 @@ test "a builtin taken as a value lowers as the call it wraps" {
   }
 }
 
+# The trusted runner installs allocation evidence before entering the rank-2
+# callback. Scope keys travel through the same physical function ABI as other
+# values; the arrays themselves keep their existing representation.
+fn mem_allocation_value(st: LSt, ty: Ty) -> (LSt, CExpr) = {
+  let (named, name) = fresh_lam(st)
+  let (with_arg, arg) = fresh_sym(named)
+  let (ready, evs) = fn_value_evs(with_arg)
+  let ret = ret_of_fn_ty(ty)
+  let primitive = match ret {
+    TyI64Buf(_) -> "i64buf_new"
+    TyF64Buf(_) -> "f64buf_new"
+    _ -> panic("Mem allocation evidence must return a scoped buffer")
+  }
+  let fun = CFun { definition = synthetic_definition("mem-allocation"), name = name,
+    owner = ready.owner, captures = [],
+    params = [CParam { sym = arg, ty = TyInt, mode = COwned }], dicts = [], evs = evs,
+    ret = ret, body = CIntrinsic(primitive, [CLocal(arg, TyInt)], ret, CNoSite),
+    is_test = false, impl_of = None, default_of = None, origin = "" }
+  (LSt { ..ready, lifted = ready.lifted ++ [fun] }, CClosure(name, ready.owner, [], ty))
+}
+
+fn lower_mem_run(st: LSt, args: List[TExpr], evidence: List[TExpr], ret: Ty, site: CSite) -> (LSt, CExpr) = {
+  let source = tex_ty(args[0])
+  let (region, row, result) = match source {
+    TyFn(ps, result, row, contract) -> {
+      if len(ps) != 0 || len(contract.scopes) != 1 { panic("invalid Mem runner callback") }
+      (contract.scopes[0], row, result)
+    }
+    _ -> panic("Mem runner callback is not a function")
+  }
+  var mem_id = -1
+  for entry in st.adts {
+    let (id, info) = entry
+    if info.owner == Some("std/mem") && info.name == ev_record_name("Mem") { mem_id = id }
+  }
+  if mem_id < 0 { panic("lower: Mem evidence declaration is absent") }
+  let atom = ScopedEffect { id = mem_id, name = "Mem", scope = region }
+  let info = adt_of(st.adts, atom.id)
+  let arguments = scope_arguments_for(region)
+  let record_ty = evidence_label_type(EvidenceLabel { id = atom.id, name = atom.name, scope = Some(region) })
+  let (with_body, body) = lower_expr(st, args[0])
+  let (with_evidence, packs) = lower_evidence(with_body, evidence)
+  var ready = with_evidence
+  var fields: List[CExpr] = []
+  let record = info.ctors[0]
+  for i in 0..(len(record.fields) - 1) {
+    let ty = apply_scope_arguments(record.fields[i].ty, info.scope_params, arguments)
+    let (allocated, value) = mem_allocation_value(ready, ty)
+    ready = allocated
+    fields = fields ++ [value]
+  }
+  fields = fields ++ [ev_placeholder()]
+  let (keyed, key_sym) = fresh_sym(ready)
+  let key = CLocal(key_sym, TyInt)
+  let tail = if len(packs) == 0 { ev_placeholder() } else { packs[0] }
+  let record_value = CCtor(atom.id, 0, fields, record_ty)
+  let pack = CCtor(EV_PACK_ID, 0,
+    [CInt(label_key(atom.id)), adapt_in(record_value, record_ty, erased_ev_ty()), tail, key], ev_pack_ty())
+  let call = CCall(CDynamic(body), [key, adapt_in(pack, ev_pack_ty(), erased_ev_ty())], result, site)
+  (keyed, CBlock([CSLet(key_sym, TyInt, CIntrinsic("scope_new_key", [], TyInt, CNoSite))],
+    Some(adapt_out(call, result, ret)), ret))
+}
+
+fn scope_arguments_for(region: capture.Scope) -> capture.Arguments =
+  CaptureArguments { scopes = [region], captures = [] }
+
 # ---- expressions ----
 
 # Named dispatch is shared by every lowering descent; keep its logic out of
@@ -3694,7 +3829,7 @@ fn lower_named_call(st: LSt, e: TExpr, tl: Bool) -> (LSt, CExpr) = match e {
         let call_st = if tl && is_self_fn(st, o, name) { LSt { ..st, self_tail = true } } else { st }
         match sig_of(call_st, o, name) {
           Some(sg) -> {
-            let (st1, vs) = lower_args_to(call_st, args, sg.param_tys)
+            let (st1, vs) = lower_args_to(call_st, args, sig_runtime_params(sg))
             # a generic function takes its dictionaries as hidden trailing
             # arguments, in bound order -- the order the callee declares --
             # and an effectful one its evidence, right behind them
@@ -3736,9 +3871,14 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     # the frame's own evidence for one atom -- which slot or which walk is
     # `ev_slot`'s question, and the type it arrives at is the ordinary erasure
     # rule rather than anything evidence-specific
-    XEvRead(key, _, _, _, ty) -> {
-      let raw = ev_slot(st, key)
-      (st, adapt_out(raw, cex_ty(raw), ty))
+    XEvRead(key, role, _, _, ty, domain) -> {
+      let (next, instance) = match domain {
+        Some(value) -> { let (done, lowered) = lower_expr(st, value)
+          (done, Some(lowered)) }
+        None -> (st, None)
+      }
+      let raw = ev_slot(next, key, role, instance)
+      (next, adapt_out(raw, cex_ty(raw), ty))
     }
     XExtern(sym, args, fallback, lo, hi, ty) ->
       lower_extern(st, sym, args, fallback, ty, site_at(st, lo, hi, lo))
@@ -3876,6 +4016,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     XListLit(elems, _, _, ty) -> lower_list_lit(st, elems, ty)
     XCallBuiltin(name, args, wits, evid, lo, hi, nlo, ty) -> {
       let site = source_site(st, lo, hi, nlo, call_source(if nlo == NO_NAME { NO_NAME } else { nlo + len(name) }, "call"))
+      if name == "mem_run" { return lower_mem_run(st, args, evid, ty, site) }
       # first, because its trailing argument is a line's head and not the
       # failure suffix `unsite` below would fold into a message
       if name == "dbg" {
@@ -5230,8 +5371,12 @@ fn index_at(st: LSt, c: CExpr, i: CExpr, subject: Ty) -> (LSt, CExpr) =
 ## one Perceus starts from.
 fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   var params: List[CParam] = []
+  if len(f.param_syms) != len(sig_runtime_params(f.sig)) {
+    panic("lower: parameter symbol count for " ++ owner ++ "." ++ f.name ++ " is " ++ to_string(len(f.param_syms)) ++
+        ", expected " ++ to_string(len(sig_runtime_params(f.sig))))
+  }
   var i = 0
-  for pt in f.sig.param_tys {
+  for pt in sig_runtime_params(f.sig) {
     params = params ++ [CParam { sym = f.param_syms[i], ty = pt, mode = COwned }]
     i = i + 1
   }
@@ -5252,8 +5397,8 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   # can find the slot its callee's row is asking for (`ev_forward`).
   # `checker.ev_sym_list` builds the symbols in `atom_keys` order -- labels,
   # then variables, then projections -- which is what lets these be zipped.
-  let f_keys = atom_keys(sig_abi_eff(f.sig))
-  var ev_env: List[(Int, CExpr)] = []
+  let f_keys = evidence_roles(sig_abi_eff(f.sig))
+  var ev_env: List[(EvidenceRole, CExpr)] = []
   var ki = 0
   for e in f.ev_syms {
     if ki < len(f_keys) {
@@ -5274,7 +5419,7 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
         name = f.name,
         caps = [],
         params = f.param_syms,
-        ptys = f.sig.param_tys,
+        ptys = sig_runtime_params(f.sig),
         fty = TyUnit,
         loop_id = lid
       })

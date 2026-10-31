@@ -1,16 +1,12 @@
-# checker.dawn: rule R3, the handler cell (N8). A cell whose type mentions a
-# buffer would keep one alive in a handler that outlives the scope.
-effect Tick {
-  fn tick() -> Unit
-}
-
+# A legal buffer annotation still reaches the handler cell's transport fence.
+use std/mem
+effect Tick { fn tick() -> Unit }
 fn body() -> Unit !Tick = tick()
-
-pub fn held() -> Int = {
+pub fn held() -> Int = mem.with_mem([@s] () => {
   with handle Tick {
-    var h: List[I64Buf] = []
+    var h: List[I64Buf@s] = []
     tick() => { h = h }
   }
   body()
   0
-}
+})

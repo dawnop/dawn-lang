@@ -1,5 +1,5 @@
 # A bcrypt-shaped kernel for `run.sh`'s evidence-borrow check: every helper is
-# `!Mem`, so each takes the Mem handler's evidence as a hidden parameter, and
+# `!Mem[s]`, so each takes the Mem handler's evidence as a hidden parameter, and
 # the hot loop reads and writes one buffer a few hundred thousand times. The
 # helpers only forward that evidence, so the native backend must pass it by
 # borrow (c/infer.seed): a dup and a drop of it around each `mem.at` is the 6x
@@ -12,7 +12,7 @@ const S1: Int = 274
 const S2: Int = 530
 const S3: Int = 786
 
-fn feistel(s: I64Buf, x: Int) -> Int !Mem = {
+fn feistel[@s](s: I64Buf@s, x: Int) -> Int !Mem[s] = {
   let a = mem.at(s, S0 + ((x >>> 24) & 0xFF))
   let b = mem.at(s, S1 + ((x >>> 16) & 0xFF))
   let c = mem.at(s, S2 + ((x >>> 8) & 0xFF))
@@ -20,7 +20,7 @@ fn feistel(s: I64Buf, x: Int) -> Int !Mem = {
   (((a + b) ^ c) + d) & 0xFFFFFFFF
 }
 
-fn rounds(s: I64Buf, l: Int, r: Int, i: Int) -> Int !Mem =
+fn rounds[@s](s: I64Buf@s, l: Int, r: Int, i: Int) -> Int !Mem[s] =
   if i == 16 {
     ((r ^ mem.at(s, 17)) << 32) | (l ^ mem.at(s, 16))
   } else {
@@ -29,7 +29,7 @@ fn rounds(s: I64Buf, l: Int, r: Int, i: Int) -> Int !Mem =
     rounds(s, r2, l2, i + 1)
   }
 
-fn schedule(s: I64Buf, l: Int, r: Int, k: Int, n: Int) -> Int !Mem =
+fn schedule[@s](s: I64Buf@s, l: Int, r: Int, k: Int, n: Int) -> Int !Mem[s] =
   if k == n { l ^ r } else {
     let p = rounds(s, l, r, 0)
     let nl = p >>> 32
@@ -39,14 +39,14 @@ fn schedule(s: I64Buf, l: Int, r: Int, k: Int, n: Int) -> Int !Mem =
     schedule(s, nl, nr, k + 1, n)
   }
 
-fn init(s: I64Buf, i: Int) -> Unit !Mem =
+fn init[@s](s: I64Buf@s, i: Int) -> Unit !Mem[s] =
   if i == 1042 { () } else {
     mem.set(s, i, (i * 2654435761 + 12345) & 0xFFFFFFFF)
     init(s, i + 1)
   }
 
 pub fn main() -> Unit !io = {
-  let r = mem.with_mem(() => {
+  let r = mem.with_mem([@s] () => {
     let s = mem.new(1042)
     init(s, 0)
     schedule(s, 1, 2, 0, 20000)

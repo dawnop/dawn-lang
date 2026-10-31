@@ -1,17 +1,19 @@
 # Known-bad acceptance baseline for #847, not a positive test.
 # See docs/mem-capture-scope-design.md section 8 for the required rejection.
 use std/mem
-type Source = { read: fn(Int) -> Int }
-fn bind[T](value: T, read: fn(T, Int) -> Int) -> (fn(Int) -> Int) =
+use std/mem.{Mem}
+type Source[@s] = { read: fn(Int) -> Int !Mem[s] }
+fn bind[T: ^{c}, ^c, !e](value: T, read: fn(T, Int) -> Int !e ^{c}) -> (fn(Int) -> Int !e ^{c}) =
   n => read(value, n)
 
-fn source() -> Source !io = mem.with_mem(() => {
+fn source() !io = mem.with_mem([@s] () => {
   let cursor = mem.new(1)
-  Source { read = bind(cursor, (b: I64Buf, n: Int) => mem.with_mem(() => {
+  let result: Source[s] = Source { read = bind(cursor, (b: I64Buf@s, n: Int) => mem.with_mem([@inner] () => {
     let offset = mem.at(b, 0)
     mem.set(b, 0, offset + n)
     offset
   })) }
+  result
 })
 
 pub fn main() -> Unit !io = {

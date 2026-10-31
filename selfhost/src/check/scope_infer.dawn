@@ -1,0 +1,183 @@
+# Scope instantiation is a separate axis from type and effect inference. Calls
+# freshen declaration parameters before collecting equations, so recursive
+# calls cannot accidentally bind a caller's rigid region or a previous call.
+use std/map
+use std/list
+use check/capture
+use check/capture.{Scope, Params, CaptureParam}
+use check/types.{Ty, TyI64Buf, TyF64Buf, TyCaptured, TyFn, TyAdt, TyOpaque,
+  TyTuple, TyList, TySet, TyArray, TyMap, Sig, Eff, fn_align,
+  eff_scopes, subst_scopes, subst_scope_eff }
+
+## Follow call-local equations without changing simultaneous type substitution.
+pub fn resolve(s: Scope, bindings: Map[Int, Scope]) -> Scope = {
+  var current = s
+  var seen: List[Int] = []
+  while not list.contains(seen, current.id) {
+    seen = seen ++ [current.id]
+    match map.get(bindings, current.id) {
+      Some(next) -> { current = next }
+      None -> return current
+    }
+  }
+  current
+}
+
+## Normalize aliases so substitutions never depend on equation insertion order.
+pub fn normalized(bindings: Map[Int, Scope]) -> Map[Int, Scope] = {
+  var out: Map[Int, Scope] = map.empty()
+  for id in map.keys(bindings) {
+    out = map.insert(out, id, resolve(map.get(bindings, id).expect("scope binding"), bindings))
+  }
+  out
+}
+
+fn bind(d: Scope, a: Scope, flex: List[Scope], bindings: Map[Int, Scope]) -> (Map[Int, Scope], Bool) = {
+  if not list.any(flex, s => s.id == d.id) { return (bindings, true) }
+  let actual = resolve(a, bindings)
+  match map.get(bindings, d.id) {
+    Some(prior) -> (bindings, capture.same_scope(resolve(prior, bindings), actual))
+    None -> if d.id == actual.id { (bindings, true) }
+    else { (map.insert(bindings, d.id, actual), true) }
+  }
+}
+
+fn scopes(ds: List[Scope], ats: List[Scope], flex: List[Scope], initial: Map[Int, Scope]) -> (Map[Int, Scope], Bool) = {
+  if len(ds) != len(ats) { return (initial, false) }
+  var bindings = initial
+  var ok = true
+  for i in 0..len(ds) {
+    let (next, fits) = bind(ds[i], ats[i], flex, bindings)
+    bindings = next
+    ok = ok && fits
+  }
+  (bindings, ok)
+}
+
+fn types(ds: List[Ty], ats: List[Ty], flex: List[Scope], initial: Map[Int, Scope]) -> (Map[Int, Scope], Bool) = {
+  if len(ds) != len(ats) { return (initial, false) }
+  var bindings = initial
+  var ok = true
+  for i in 0..len(ds) {
+    let (next, fits) = infer(ds[i], ats[i], flex, bindings)
+    bindings = next
+    ok = ok && fits
+  }
+  (bindings, ok)
+}
+
+fn effects(d: Eff, a: Eff, flex: List[Scope], initial: Map[Int, Scope]) -> (Map[Int, Scope], Bool) = {
+  var bindings = initial
+  var ok = true
+  for atom in eff_scopes(d) {
+    let candidates = filter(eff_scopes(a), other => other.id == atom.id)
+    if len(candidates) == 1 {
+      let (next, fits) = bind(atom.scope, candidates[0].scope, flex, bindings)
+      bindings = next
+      ok = ok && fits
+    }
+  }
+  (bindings, ok)
+}
+
+## Collect only declared flexible regions; ordinary unification checks structure.
+pub fn infer(d: Ty, a: Ty, flex: List[Scope], bindings: Map[Int, Scope]) -> (Map[Int, Scope], Bool) = {
+  match (d, a) {
+    (TyI64Buf(ds), TyI64Buf(ascope)) |
+      (TyF64Buf(ds), TyF64Buf(ascope)) -> bind(ds, ascope, flex, bindings)
+    (TyCaptured(value, _), _) -> infer(value, a, flex, bindings)
+    (_, TyCaptured(value, _)) -> infer(d, value, flex, bindings)
+    (TyList(x), TyList(y)) | (TySet(x), TySet(y)) | (TyArray(x), TyArray(y)) -> infer(x, y, flex, bindings)
+    (TyMap(k, v), TyMap(ak, av)) -> types([k, v], [ak, av], flex, bindings)
+    (TyTuple(ds), TyTuple(ats)) -> types(ds, ats, flex, bindings)
+    (TyAdt(id, ds, regions), TyAdt(aid, ats, aregions)) -> {
+      if id != aid { return (bindings, true) }
+      let (next, ok) = scopes(regions.scopes, aregions.scopes, flex, bindings)
+      let (done, fits) = types(ds, ats, flex, next)
+      (done, ok && fits)
+    }
+    (TyOpaque(id, _, _, ds, _, regions), TyOpaque(aid, _, _, ats, _, aregions)) -> {
+      if id != aid { return (bindings, true) }
+      let (next, ok) = scopes(regions.scopes, aregions.scopes, flex, bindings)
+      let (done, fits) = types(ds, ats, flex, next)
+      (done, ok && fits)
+    }
+    (TyFn(_, _, _, _), TyFn(aps, ar, ae, _)) -> match fn_align(d, a) {
+      Some(TyFn(dps, dr, de, _)) -> {
+        let (next, ok) = types(dps ++ [dr], aps ++ [ar], flex, bindings)
+        let (done, fits) = effects(de, ae, flex, next)
+        (done, ok && fits)
+      }
+      _ -> (bindings, true)
+    }
+    _ -> (bindings, true)
+  }
+}
+
+## Apply Scope equations to a call contract while retaining capture variables.
+pub fn signature(s: Sig, bindings: Map[Int, Scope]) -> Sig = {
+  let sm = normalized(bindings)
+  let cm: Map[Int, capture.Capture] = map.empty()
+  let p = s.scope_params
+  let caps = map(p.captures, c => CaptureParam { ..c,
+    bound = match c.bound { Some(value) -> Some(capture.subst(value, sm, cm)), None -> None } })
+  let params = Params { ..p, scopes = map(p.scopes, r => capture.scope_subst(r, sm)),
+    captures = caps, bounds = map(p.bounds, b => { let (id, value) = b
+      (id, capture.subst(value, sm, cm)) }) }
+  Sig { ..s, scope_params = params,
+    param_tys = map(s.param_tys, t => subst_scopes(t, sm, cm)),
+    ret = subst_scopes(s.ret, sm, cm), eff = subst_scope_eff(s.eff, sm) }
+}
+
+## Substitute capture contracts without inferring the environment of a value.
+pub fn contract(s: Sig, scopes: Map[Int, Scope], captures: Map[Int, capture.Capture]) -> Sig = {
+  let scoped = signature(s, scopes)
+  let sm: Map[Int, Scope] = map.empty()
+  let p = scoped.scope_params
+  let caps = map(p.captures, c => CaptureParam { ..c,
+    bound = match c.bound { Some(value) -> Some(capture.subst(value, sm, captures)), None -> None } })
+  let params = Params { ..p, captures = caps,
+    bounds = map(p.bounds, b => { let (id, value) = b
+      (id, capture.subst(value, sm, captures)) }) }
+  Sig { ..scoped, scope_params = params,
+    param_tys = map(scoped.param_tys, t => subst_scopes(t, sm, captures)),
+    ret = subst_scopes(scoped.ret, sm, captures) }
+}
+
+fn capture_bound(d: capture.Capture, a: capture.Capture, flex: List[CaptureParam],
+  initial: Map[Int, capture.Capture]) -> Map[Int, capture.Capture] = {
+  var bindings = initial
+  for member in d {
+    match member {
+      capture.CaptureVar(_, id) -> if list.any(flex, c => c.id == id) {
+        let prior = map.get(bindings, id).unwrap_or([])
+        bindings = map.insert(bindings, id, capture.union(prior, a))
+      }
+      _ -> ()
+    }
+  }
+  bindings
+}
+
+## A wrapper can forward an explicit capture parameter before value inference exists.
+pub fn infer_captures(d: Ty, a: Ty, flex: List[CaptureParam],
+  initial: Map[Int, capture.Capture]) -> Map[Int, capture.Capture] = {
+  var bindings = initial
+  match (d, a) {
+    (TyFn(dps, dr, _, dc), TyFn(aps, ar, _, ac)) -> {
+      bindings = capture_bound(capture.bound(dc), capture.bound(ac), flex, bindings)
+      if len(dps) == len(aps) {
+        for i in 0..len(dps) { bindings = infer_captures(dps[i], aps[i], flex, bindings) }
+        bindings = infer_captures(dr, ar, flex, bindings)
+      }
+    }
+    (TyCaptured(dv, bound), TyCaptured(av, actual)) -> {
+      bindings = capture_bound(bound, actual, flex, bindings)
+      bindings = infer_captures(dv, av, flex, bindings)
+    }
+    (TyList(dv), TyList(av)) | (TyArray(dv), TyArray(av)) | (TySet(dv), TySet(av)) ->
+      { bindings = infer_captures(dv, av, flex, bindings) }
+    _ -> ()
+  }
+  bindings
+}

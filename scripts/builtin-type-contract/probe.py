@@ -48,7 +48,7 @@ def java_command(jar, *args):
 
 def checker_is_complete(jar):
     source = (
-        "fn accepts(c: Char, b: Bytes, w: I64Buf, m: Map[String, Int], "
+        "fn accepts[@s](c: Char, b: Bytes, w: I64Buf@s, m: Map[String, Int], "
         "s: Set[Int]) -> Unit = ()\n"
         "fn rejects(x: Zzzzz) -> Unit = ()\n"
     )

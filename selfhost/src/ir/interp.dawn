@@ -1494,7 +1494,7 @@ fn interp_arms() -> List[String] = [
   # lowering's own intrinsics (lower.internal_intrinsics()); `hash` and
   # `java_hash` are the two it emits that are refused instead, below
   "cmp", "java_eq", "show", "quote", "str_of_int", "str_of_bool",
-  "str_of_bytes", "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_append",
+  "str_of_bytes", "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_get_scoped", "scope_new_key", "ev_append",
   "dbg_line",
   # user builtins
   "panic", "todo", "expect", "unwrap_or", "to_float", "to_int", "to_string",
@@ -1689,14 +1689,16 @@ const NO_ARM_LISTED: String = "listed in interp_arms but has no arm: "
 ## compiler* rather than raising a comptime diagnostic: a pack without a key
 ## its own reader named is lowering's bug, not the interpreted program's, and
 ## `lower.impl_ev_sources` treats the same class of break the same way.
-fn ev_get_value(pack: EvalValue, key: Int) -> EvalValue =
+fn ev_get_value(pack: EvalValue, key: Int) -> EvalValue = ev_get_scoped_value(pack, key, 0)
+
+fn ev_get_scoped_value(pack: EvalValue, key: Int, scope: Int) -> EvalValue =
   match pack {
     VAdt(aid, _, fields) ->
       if aid != EV_PACK_ID {
         panic(EV_MISS_MSG)
       } else {
         match fields[0] {
-          VInt(k) -> if k == key { fields[1] } else { ev_get_value(fields[2], key) }
+          VInt(k) -> if k == key && as_int(fields[3]) == scope { fields[1] } else { ev_get_scoped_value(fields[2], key, scope) }
           _ -> panic("comptime interpreter bug: an evidence pack's key is not an Int")
         }
       }
@@ -1705,7 +1707,7 @@ fn ev_get_value(pack: EvalValue, key: Int) -> EvalValue =
 
 ## One pack node, in the shape `lower.ev_build` conses them.
 fn ev_node(key: Int, ev: EvalValue, outer: EvalValue) -> EvalValue =
-  VAdt(EV_PACK_ID, 0, [VInt(key), ev, outer])
+  VAdt(EV_PACK_ID, 0, [VInt(key), ev, outer, VInt(0)])
 
 ## The evidence-pack join, on the interpreter's own values: the third
 ## implementation of `ev_append`, alongside the JVM's emitted static and
@@ -1726,7 +1728,7 @@ fn ev_append_value(front: EvalValue, back: EvalValue) -> EvalValue =
       if aid != EV_PACK_ID {
         back
       } else {
-        VAdt(EV_PACK_ID, 0, [fields[0], fields[1], ev_append_value(fields[2], back)])
+        VAdt(EV_PACK_ID, 0, [fields[0], fields[1], ev_append_value(fields[2], back), fields[3]])
       }
     _ -> back
   }
@@ -1853,6 +1855,11 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[EvalValue]
     # the ones lowering builds for a pure row -- which is why the terminator
     # matters more here than a hit does.
     Ok((st, env, ev_get_value(args[0], as_int(args[1]))))
+  } else if name == "scope_new_key" {
+    let next = st.allocated + 1
+    Ok((ESt { ..st, allocated = next }, env, VInt(next)))
+  } else if name == "ev_get_scoped" {
+    Ok((st, env, ev_get_scoped_value(args[0], as_int(args[1]), as_int(args[2]))))
   } else if name == "ev_append" {
     # the join, for the same reason the lookup has an arm: a `const` whose
     # body reaches a function value with two rows in one slot folds here, and
@@ -3903,4 +3910,16 @@ test "a repeated block span retains one result under the module quota" {
   let twice = keep_block(icx, once, CVInt(7), 1, 2)
   assert twice.payload == 16
   assert len(twice.out.blocks) == 1 && twice.out.diags == []
+}
+
+test "domain lookup and joins preserve independent instances of one atom" {
+  let s = VAdt(EV_PACK_ID, 0, [VInt(9), VInt(101), VUnit, VInt(1)])
+  let t = VAdt(EV_PACK_ID, 0, [VInt(9), VInt(202), VUnit, VInt(2)])
+  let bare = ev_node(9, VInt(303), VUnit)
+  let both = ev_append_value(s, ev_append_value(t, bare))
+  assert as_int(ev_get_scoped_value(both, 9, 1)) == 101
+  assert as_int(ev_get_scoped_value(both, 9, 2)) == 202
+  assert as_int(ev_get_value(both, 9)) == 303
+  assert as_int(ev_get_scoped_value(ev_append_value(t, s), 9, 1)) == 101
+  assert as_int(ev_get_scoped_value(ev_append_value(t, s), 9, 2)) == 202
 }

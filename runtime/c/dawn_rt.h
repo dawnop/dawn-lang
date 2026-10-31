@@ -1373,9 +1373,11 @@ int64_t dawn_int_of_float(double v); /* Float -> Int, saturating like D2L */
  * value and `rc.dawn` does not wrap intrinsics. Falling off the end panics:
  * a missing key is a broken compiler invariant, not an answer. */
 #define DAWN_TAG_EV_PACK 0 /* one constructor, so index 0 -- emitc pins it */
-#define DAWN_EV_PACK_FIELDS 3 /* key, ev, outer */
+#define DAWN_EV_PACK_FIELDS 4 /* key, ev, outer, scope */
 #define DAWN_EV_PACK_MASK 6 /* fields 1 and 2 are pointers, the key is not */
 void *dawn_ev_get(void *pack, int64_t key);
+void *dawn_ev_get_scoped(void *pack, int64_t key, int64_t scope);
+int64_t dawn_scope_new_key(void);
 
 /* The other half of the pack contract: two packs joined, `front`'s entries
  * first (`types.ev_pack_adt`). One slot can be handed two rows -- `!e := !e1

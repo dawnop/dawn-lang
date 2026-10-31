@@ -1,9 +1,7 @@
-# checker.dawn: a type variable inside a type argument or a tuple is the same
-# hole (N11 variant). `Option[T]` and `(Int, T)` hide the variable one level
-# down, where a check on the outermost constructor would not look.
+# Generic wrappers are legal; their callers cannot hide a region in a result.
 use std/mem
 use std/mem.{Mem}
-
-pub fn scope_opt[T](f: fn() -> Option[T] !Mem) -> Option[T] = mem.with_mem(f)
-
-pub fn scope_pair[T](f: fn() -> (Int, T) !Mem) -> (Int, T) = mem.with_mem(f)
+pub fn scope_opt[T: ^{c}, ^c](f: fn[@s]() -> Option[T] !Mem[s] ^{c}) -> Option[T] = mem.with_mem(f)
+pub fn scope_pair[T: ^{c}, ^c](f: fn[@s]() -> (Int, T) !Mem[s] ^{c}) -> (Int, T) = mem.with_mem(f)
+fn escaped_opt() = scope_opt([@s] () => Some(mem.new(4)))
+fn escaped_pair() = scope_pair([@s] () => (1, mem.new(4)))

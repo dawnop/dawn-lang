@@ -17,7 +17,7 @@ use check/identity
 use check/identity.{Minted, Part, minted, minted_path, minted_show, free_pool}
 use front/token.{Diag, mk_diag, DiagOwner}
 use front/ast.{TScoped, TCaptured, TKindArg, ScopeSyntax, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
-use check/types.{with_capture_bound, TyCaptured,
+use check/types.{BtBuffer, with_capture_bound, TyCaptured,
   Adts, AdtI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
   no_eparam_names, fn_max_params,
   Audience, PackageId, PkgRoot, PkgStd, PkgDep, package_display,
@@ -117,6 +117,10 @@ pub fn ty_span_kid(sp: TySpan, i: Int) -> TySpan =
 ## frame state, and scripts/checker-corpus/frame-triage.py fails the corpus
 ## gate on a field without one.
 pub(pkg) type Frame = {
+  # Instantiation variables are fresh for each call; runtime keys use ordinary symbols.
+  scope_bindings: Map[Int, capture.Scope],
+  capture_bindings: Map[Int, capture.Capture],
+  scope_keys: Map[Int, Int],
   # lexical scopes, innermost last; each maps name → symbol id
   scopes: List[Map[String, Int]],
   # effect bookkeeping for the body being checked
@@ -546,6 +550,7 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
     java_classes = map.empty(),
     jsig = jsig_refused(),
     frame = Frame {
+      scope_bindings = map.empty(), capture_bindings = map.empty(), scope_keys = map.empty(),
       scopes = [],
       used_effects = [],
       eff_witness = map.empty(),
@@ -1141,6 +1146,10 @@ pub(pkg) fn resolve_named_effect(cx: Cx, name: String, lo: Int, hi: Int) -> (Cx,
 ## A row carrying exactly one declared effect.
 pub(pkg) fn label_eff(cx: Cx, id: Int) -> Eff = ELabeled(EPure, [(id, effect_of(cx, id).name)])
 
+fn missing_mem_scope(cx: Cx, name: String, lo: Int, hi: Int) -> Cx =
+  cerr_h(cx, "`" ++ name ++ "` requires a Scope argument", lo, hi,
+    "write `" ++ name ++ "[s]` where `s` is a bound Scope")
+
 pub(pkg) fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff) = {
   var cx1 = cx
   var effs: List[Eff] = []
@@ -1175,7 +1184,8 @@ pub(pkg) fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx
       match id {
         Some(eid) -> {
           let info = effect_of(cx1, eid)
-          effs = effs ++ [ELabeled(EPure, [(eid, info.name)])]
+          if is_mem_effect(info) { cx1 = missing_mem_scope(cx1, a, lo, hi) }
+          else { effs = effs ++ [ELabeled(EPure, [(eid, info.name)])] }
         }
         None -> ()
       }
@@ -1188,6 +1198,13 @@ pub(pkg) fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx
       cx1 = cx2
       effs = effs ++ [e]
     } else {
+      match map.get(cx1.effects, a) {
+        Some(eid) -> if is_mem_effect(effect_of(cx1, eid)) {
+          cx1 = missing_mem_scope(cx1, a, lo, hi)
+          continue
+        }
+        None -> ()
+      }
       let declared = declared_effect(cx1, a)
       match declared {
         Some(row) -> { effs = effs ++ [row] }
@@ -1630,24 +1647,25 @@ fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
         TyFn(ps, rt, eff, CaptureFunction { scopes = own.scopes, bound = bound }))
     }
     TScoped(value, name, lo, hi) -> {
-      let (cx1, base) = resolve_type_for(cx, value, type_use)
-      let (cx2, scope) = resolve_scope(cx1, name, lo, hi)
-      let result = match base {
-        TyI64Buf(_) -> TyI64Buf(scope)
-        TyF64Buf(_) -> TyF64Buf(scope)
-        _ -> TyError
+      let (resolved, region) = resolve_scope(cx, name, lo, hi)
+      let base = match value { TNamed(n, args, eargs, _, _) ->
+          if len(args) == 0 && len(eargs) == 0 { n } else { "" }, _ -> "" }
+      match region {
+        Some(scope) -> {
+          let result = if base == "I64Buf" { TyI64Buf(scope) }
+          else if base == "F64Buf" { TyF64Buf(scope) } else { TyError }
+          if result != TyError { (record_span_at(resolved, lo, hi, [value]), result) }
+          else { (cerr(resolved, "only I64Buf and F64Buf take a Scope suffix", lo, hi), TyError) }
+        }
+        None -> (resolved, TyError)
       }
-      let cx3 = if base != TyError && result == TyError {
-        cerr(cx2, "only I64Buf and F64Buf take a Scope suffix", lo, hi)
-      } else { cx2 }
-      (record_span_at(cx3, lo, hi, [value]), result)
     }
     TCaptured(value, names, lo, hi) -> {
       let (cx1, base) = resolve_type_for(cx, value, type_use)
       let (cx2, bound) = resolve_capture(cx1, names, lo, hi)
       var cx3 = cx2
       match base {
-        TyI64Buf(Some(s)) | TyF64Buf(Some(s)) -> {
+        TyI64Buf(s) | TyF64Buf(s) -> {
           if not capture.contains(bound, capture.Region(s)) {
             cx3 = cerr(cx3, "a capture bound cannot erase a buffer's Scope", lo, hi)
           }
@@ -2158,6 +2176,10 @@ fn resolve_named(
           let (cx2, ty) = resolve_type(cx1, arg)
           cx1 = cx2
           args = args ++ [ty]
+        }
+        match info.build {
+          BtBuffer(_) -> return (cerr(cx1, "`" ++ name ++ "` requires an explicit Scope suffix", lo, hi), TyError)
+          _ -> ()
         }
         return (record_span_at(cx1, lo, hi, targs), builtin_type_apply(info, args))
       }

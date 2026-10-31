@@ -16,7 +16,7 @@
 # ADT ids and trait ids are separate namespaces (Option and Ord are both 0) that
 # happen to share one counter, so reserving two more trait ids costs two ADT ids.
 
-use check/capture.{Scope as CaptureScope, Function as CaptureFunction}
+use check/capture.{Scope as CaptureScope, Function as CaptureFunction, Arguments as CaptureArguments, Params as CaptureParams, CaptureParam}
 use check/capture
 use std/map
 use std/list
@@ -253,6 +253,30 @@ pub fn eff_assocs(e: Eff) -> List[(String, Int, Int, String)] =
     _ -> []
   }
 
+## The ABI label view includes domain atoms without merging their identities.
+pub type EvidenceLabel = { id: Int, name: String, scope: Option[capture.Scope] }
+
+## Preserve the old bare-label order, then the normalized scoped-label order.
+pub fn evidence_labels(e: Eff) -> List[EvidenceLabel] =
+  map(eff_labels(e), l => { let (id, name) = l
+    EvidenceLabel { id = id, name = name, scope = None } }) ++
+  map(eff_scopes(e), l => EvidenceLabel { id = l.id, name = l.name, scope = Some(l.scope) })
+
+## A scoped provider is distinct even when its effect declaration is the same.
+pub fn evidence_label_name(l: EvidenceLabel) -> String = match l.scope {
+  None -> ev_label_name(l.id, l.name)
+  Some(s) -> "ev\$${l.id}\$s${s.id}\$${l.name}"
+}
+
+## A domain parameter belongs to the evidence record as well as the row.
+pub fn evidence_label_type(l: EvidenceLabel) -> Ty = {
+  let scopes = match l.scope { Some(s) -> [s], None -> [] }
+  TyAdt(l.id, [], CaptureArguments { scopes = scopes, captures = [] })
+}
+
+## Scope keys are hidden values, never user-spellable bindings.
+pub fn scope_key_name(id: Int) -> String = "scope\$${id}"
+
 ## How many hidden evidence arguments a **named** callee's row is worth: one
 ## per written label (rule 甲), one per effect variable (rule 丁), one per
 ## associated-effect projection (rule 丙), in that order. The base -- pure or
@@ -270,7 +294,7 @@ pub fn eff_assocs(e: Eff) -> List[(String, Int, Int, String)] =
 ## catches: the JVM answers NoSuchMethodError and native reads the slot next
 ## door. Hence a second derivation anywhere is a defect, not an optimisation.
 pub fn nev(e: Eff) -> Int =
-  len(eff_labels(e)) + len(eff_vars(e)) + len(eff_assocs(e))
+  len(evidence_labels(e)) + len(eff_vars(e)) + len(eff_assocs(e))
 
 ## The key an atom is addressed by inside an evidence pack.
 ##
@@ -288,9 +312,8 @@ pub fn nev(e: Eff) -> Int =
 ## whose nodes were interchangeable would not be the thing being measured.
 pub fn atom_keys(e: Eff) -> List[Int] = {
   var out: List[Int] = []
-  for l in eff_labels(e) {
-    let (eid, _) = l
-    out = out ++ [label_key(eid)]
+  for l in evidence_labels(e) {
+    out = out ++ [label_key(l.id)]
   }
   for v in eff_vars(e) {
     let (vid, _) = v
@@ -321,15 +344,29 @@ pub fn assoc_key(tid: Int) -> Int = 3 * tid + 2
 ## ABI order even when multiple projections use the same runtime trait key.
 pub type EvidenceRole =
   | LabelSlot(id: Int)
+  | ScopedLabelSlot(id: Int, scope: Int)
   | VariableSlot(id: Int)
   | AssociatedSlot(subject: Int, trait_ref: Int, member: String)
 
 pub fn evidence_role_key(role: EvidenceRole) -> Int =
   match role {
-    LabelSlot(id) -> label_key(id)
+    LabelSlot(id) | ScopedLabelSlot(id, _) -> label_key(id)
     VariableSlot(id) -> var_key(id)
     AssociatedSlot(_, tr, _) -> assoc_key(tr)
   }
+
+## A named frame keeps semantic roles, including Scope, instead of flattened keys.
+pub fn evidence_roles(e: Eff) -> List[EvidenceRole] =
+  map(evidence_labels(e), l => evidence_label_role(l)) ++
+  map(eff_vars(e), v => { let (id, _) = v
+    VariableSlot(id) }) ++ map(eff_assocs(e), a => { let (_, v, t, n) = a
+      AssociatedSlot(v, t, n) })
+
+## The role preserves the second component until the runtime key is available.
+pub fn evidence_label_role(l: EvidenceLabel) -> EvidenceRole = match l.scope {
+  Some(s) -> ScopedLabelSlot(l.id, s.id)
+  None -> LabelSlot(l.id)
+}
 
 ## Compiler-owned evidence spellings.
 ## Empty display/member names are also useful for matching a proven prefix.
@@ -372,14 +409,46 @@ pub fn key_trait_id(k: Int) -> Int = (k - 2) / 3
 ## empty one. That is the price this knife exists to measure.
 pub fn fn_arity(t: Ty) -> Int =
   match peel_opaque(t) {
-    TyFn(ps, _, _, _) -> len(ps) + 1
+    TyFn(ps, _, _, sc) -> len(ps) + len(sc.scopes) + 1
     _ -> 0
   }
 
+## Runtime function interfaces required by a type, including bound Scope keys.
+pub fn ty_fn_arities(t: Ty) -> List[Int] = {
+  var out: List[Int] = []
+  var children: List[Ty] = []
+  match t {
+    TyFn(ps, r, _, _) -> { out = [fn_arity(t)]
+      children = ps ++ [r] }
+    TyAdt(_, args, _) -> { children = args }
+    TyOpaque(_, _, _, args, target, _) -> { children = args ++ [target] }
+    TyTuple(values) -> { children = values }
+    TyList(value) | TySet(value) | TyArray(value) | TyAssoc(value, _, _) | TyCaptured(value, _) -> { children = [value] }
+    TyMap(key, value) -> { children = [key, value] }
+    _ -> ()
+  }
+  for child in children { out = out ++ ty_fn_arities(child) }
+  out
+}
+
+## Scope arguments are physical Int slots before the function value's pack.
+pub fn fn_runtime_params(t: Ty) -> List[Ty] = match peel_opaque(t) {
+  TyFn(ps, _, _, sc) -> ps ++ map(sc.scopes, _s => TyInt)
+  _ -> []
+}
+
+## Hidden Scope arguments precede dictionaries; primitives erase this axis.
+pub fn sig_scope_arity(s: Sig) -> Int =
+  if s.is_builtin || s.op_of != None { 0 } else { len(s.scope_params.scopes) }
+
+## The physical value arguments of a named call, before its dictionaries.
+pub fn sig_runtime_params(s: Sig) -> List[Ty] =
+  s.param_tys ++ map(list.take(s.scope_params.scopes, sig_scope_arity(s)), _s => TyInt)
+
 ## The erased function interfaces a backend provides for function values,
-## by runtime arity: `dawn/rt/Fn0` through `Fn9` on the JVM (main.dawn emits
-## exactly this list). The C backend applies a closure of any arity, so this
-## is the narrower of the two and the one the language's limit is read from.
+## by ordinary runtime arity: `dawn/rt/Fn0` through `Fn9` on the JVM. Extra
+## bound Scope keys require additional interfaces in main.dawn without
+## widening the written value-parameter limit derived from this base table.
 ##
 ## The table is the source and the limits below are derived from it, because
 ## the limit used to be written down beside it: `main.dawn` emitted up to Fn9
@@ -712,10 +781,10 @@ pub type Ty =
 # a flat, mutable buffer of 64-bit integers (docs/mem-buffer-design.md): a
 # leaf like Bytes, JVM `long[]`, native `dawn_i64buf *`. No Eq, Hash, Ord or
 # Show, like Array: it is held by identity and changes in place.
-  | TyI64Buf(scope: Option[capture.Scope])
+  | TyI64Buf(scope: capture.Scope)
 # the same for 64-bit floats: JVM `double[]`, native `dawn_f64buf *`; the bits
 # are kept exactly (NaN payloads, -0.0)
-  | TyF64Buf(scope: Option[capture.Scope])
+  | TyF64Buf(scope: capture.Scope)
   | TyUnit
 # bottom type: the "return type" of panic/todo; usable as any type
   | TyNever
@@ -763,11 +832,6 @@ pub type Ty =
 # A written upper bound on a non-function value. Functions keep the same
 # information in TyFn, so every callable still has one representation.
   | TyCaptured(value: Ty, bound: capture.Capture)
-
-# The unscoped legacy API still uses one immutable primitive type value.
-# New region metadata must not make every builtin-table lookup allocate one.
-const LEGACY_I64_BUF: Ty = TyI64Buf(None)
-const LEGACY_F64_BUF: Ty = TyF64Buf(None)
 
 ## An opaque type as the language sees the *value* behind it.
 ##
@@ -883,6 +947,7 @@ pub type BuiltinTypeAccess =
 
 pub type BuiltinTypeBuild =
   | BtLeaf(ty: Ty)
+  | BtBuffer(floating: Bool)
   | BtList
   | BtMap
   | BtSet
@@ -908,8 +973,8 @@ pub fn builtin_type_inventory() -> List[BuiltinTypeI] = [
   BuiltinTypeI { name = "Bool", params = [], access = BtPublic, build = BtLeaf(TyBool) },
   BuiltinTypeI { name = "String", params = [], access = BtPublic, build = BtLeaf(TyString) },
   BuiltinTypeI { name = "Bytes", params = [], access = BtPublic, build = BtLeaf(TyBytes) },
-  BuiltinTypeI { name = "I64Buf", params = [], access = BtPublic, build = BtLeaf(LEGACY_I64_BUF) },
-  BuiltinTypeI { name = "F64Buf", params = [], access = BtPublic, build = BtLeaf(LEGACY_F64_BUF) },
+  BuiltinTypeI { name = "I64Buf", params = [], access = BtPublic, build = BtBuffer(false) },
+  BuiltinTypeI { name = "F64Buf", params = [], access = BtPublic, build = BtBuffer(true) },
   BuiltinTypeI { name = "Unit", params = [], access = BtPublic, build = BtLeaf(TyUnit) },
   BuiltinTypeI { name = "List", params = ["T"], access = BtPublic, build = BtList },
   BuiltinTypeI { name = "Map", params = ["K", "V"], access = BtPublic, build = BtMap },
@@ -995,7 +1060,8 @@ pub fn builtin_type_use(info: BuiltinTypeI) -> String =
   if info.access == BtReturnOnly { "return" } else { "any" }
 
 pub fn builtin_type_render(info: BuiltinTypeI) -> String =
-  if len(info.params) == 0 {
+  if match info.build { BtBuffer(_) -> true, _ -> false } { info.name ++ "@s" }
+  else if len(info.params) == 0 {
     info.name
   } else {
     info.name ++ "[" ++ join(info.params, ", ") ++ "]"
@@ -1005,6 +1071,7 @@ pub fn builtin_type_render(info: BuiltinTypeI) -> String =
 pub fn builtin_type_apply(info: BuiltinTypeI, args: List[Ty]) -> Ty =
   match info.build {
     BtLeaf(ty) -> ty
+    BtBuffer(_) -> TyError
     BtList -> TyList(args[0])
     BtMap -> TyMap(args[0], args[1])
     BtSet -> TySet(args[0])
@@ -1018,7 +1085,7 @@ pub fn ty_named(name: String) -> Option[Ty] =
   match builtin_type_at(name) {
     Some(info) ->
       if info.access == BtPublic && len(info.params) == 0 {
-        Some(builtin_type_apply(info, []))
+        match info.build { BtBuffer(_) -> None, _ -> Some(builtin_type_apply(info, [])) }
       } else {
         None
       }
@@ -1237,8 +1304,8 @@ fn ty_show_at(adts: Adts, t: Ty, group_fn: Bool, java_fqn: Bool) -> String =
     TyBool -> "Bool"
     TyString -> "String"
     TyBytes -> "Bytes"
-    TyI64Buf(s) -> "I64Buf" ++ scope_suffix(s)
-    TyF64Buf(s) -> "F64Buf" ++ scope_suffix(s)
+    TyI64Buf(s) -> "I64Buf@" ++ s.name
+    TyF64Buf(s) -> "F64Buf@" ++ s.name
     TyUnit -> "Unit"
     TyNever -> "Never"
     TyError -> "?"
@@ -1292,9 +1359,6 @@ fn capture_suffix(t: Ty) -> Bool = match t {
 }
 
 pub fn ty_show(adts: Adts, t: Ty) -> String = ty_show_at(adts, t, false, false)
-
-fn scope_suffix(s: Option[capture.Scope]) -> String =
-  match s { None -> "", Some(r) -> "@" ++ r.name }
 
 ## Render the return type of a function before appending that function's
 ## effect suffix. A non-pure outer function must group a returned function type
@@ -1543,7 +1607,7 @@ fn capture_names(c: capture.Capture) -> List[String] = map(c, m => match m {
 
 fn type_has_scope_name(t: Ty, name: String) -> Bool = {
   let here = match t {
-    TyI64Buf(Some(s)) | TyF64Buf(Some(s)) -> s.name == name
+    TyI64Buf(s) | TyF64Buf(s) -> s.name == name
     TyFn(_, _, e, sc) -> list.any(sc.scopes, s => s.name == name) ||
       list.contains(capture_names(capture.bound(sc)), name) ||
       list.any(eff_scopes(e), l => l.scope.name == name) || list.any(eff_vars(e), v => { let (_, n) = v
@@ -1558,7 +1622,7 @@ fn type_has_scope_name(t: Ty, name: String) -> Bool = {
 
 fn type_has_scope(t: Ty, id: Int) -> Bool = {
   let here = match t {
-    TyI64Buf(Some(s)) | TyF64Buf(Some(s)) -> s.id == id
+    TyI64Buf(s) | TyF64Buf(s) -> s.id == id
     TyFn(_, _, e, sc) -> list.any(sc.scopes, s => s.id == id) ||
       list.contains(capture_scope_ids(capture.bound(sc)), id) || list.any(eff_scopes(e), l => l.scope.id == id)
     TyCaptured(_, c) -> list.contains(capture_scope_ids(c), id)
@@ -1586,8 +1650,8 @@ fn subst_scopes_avoiding(t: Ty, sm: Map[Int, capture.Scope], cm: Map[Int, captur
   ts: List[Ty], es: List[Eff]) -> Ty = {
   if len(sm) == 0 && len(cm) == 0 && len(ts) == 0 && len(es) == 0 { return t }
   match t {
-    TyI64Buf(s) -> TyI64Buf(match s { Some(r) -> Some(capture.scope_subst(r, sm)), None -> None })
-    TyF64Buf(s) -> TyF64Buf(match s { Some(r) -> Some(capture.scope_subst(r, sm)), None -> None })
+    TyI64Buf(s) -> TyI64Buf(capture.scope_subst(s, sm))
+    TyF64Buf(s) -> TyF64Buf(capture.scope_subst(s, sm))
     TyCaptured(value, bound) -> with_capture_bound(subst_scopes_avoiding(value, sm, cm, ts, es), capture.subst(bound, sm, cm))
     TyAdt(id, args, a) -> TyAdt(id, map(args, x => subst_scopes_avoiding(x, sm, cm, ts, es)), capture.arguments_subst(a, sm, cm))
     TyOpaque(id, name, owner, args, target, a) -> TyOpaque(id, name, owner,
@@ -1651,13 +1715,6 @@ fn capture_equal_in(a: capture.Capture, b: capture.Capture, sm: Map[Int, capture
   }))
 }
 
-fn scope_option_equal(a: Option[capture.Scope], b: Option[capture.Scope], sm: Map[Int, capture.Scope]) -> Bool =
-  match (a, b) {
-    (None, None) -> true
-    (Some(s), Some(t)) -> scope_equal_in(s, t, sm)
-    _ -> false
-  }
-
 fn scope_arguments_equal(a: capture.Arguments, b: capture.Arguments, sm: Map[Int, capture.Scope]) -> Bool = {
   if len(a.scopes) != len(b.scopes) || len(a.captures) != len(b.captures) { return false }
   for i in 0..len(a.scopes) {
@@ -1685,11 +1742,10 @@ fn scope_effect_equal(a: Eff, b: Eff, sm: Map[Int, capture.Scope]) -> Bool = {
 pub fn ty_equal(a: Ty, b: Ty) -> Bool = a == b || ty_equal_in(a, b, map.empty())
 
 ## Only these representations determine a value's capture set without any
-## environment or field propagation. Legacy buffers deliberately have no
-## answer until the scoped Mem API replaces them.
+## environment or field propagation. A buffer carries its declared Scope.
 pub fn primitive_captures(t: Ty) -> Option[capture.Capture] = match t {
   TyInt | TyFloat | TyBool | TyString | TyBytes | TyUnit | TyNever -> Some([])
-  TyI64Buf(Some(s)) | TyF64Buf(Some(s)) -> Some([capture.Region(s)])
+  TyI64Buf(s) | TyF64Buf(s) -> Some([capture.Region(s)])
   TyCaptured(value, _) -> primitive_captures(value)
   _ -> None
 }
@@ -1701,7 +1757,7 @@ pub fn ty_scope_refs(t: Ty) -> capture.Capture = {
   var refs: capture.Capture = []
   var bound: List[capture.Scope] = []
   match t {
-    TyI64Buf(Some(s)) | TyF64Buf(Some(s)) -> { refs = [capture.Region(s)] }
+    TyI64Buf(s) | TyF64Buf(s) -> { refs = [capture.Region(s)] }
     TyFn(ps, ret, e, sc) -> {
       children = ps ++ [ret]
       refs = capture.bound(sc) ++ map(eff_scopes(e), l => capture.Region(l.scope))
@@ -1717,7 +1773,7 @@ pub fn ty_scope_refs(t: Ty) -> capture.Capture = {
     TyMap(key, value) -> { children = [key, value] }
     TyTuple(values) -> { children = values }
     TyInt | TyFloat | TyBool | TyString | TyBytes | TyUnit | TyNever | TyError |
-      TyVar(_, _) | TyJava(_, _) | TyI64Buf(None) | TyF64Buf(None) -> ()
+      TyVar(_, _) | TyJava(_, _) -> ()
   }
   for child in children { refs = capture.union(refs, ty_scope_refs(child)) }
   let binders = bound
@@ -1735,7 +1791,7 @@ fn argument_scope_refs(args: capture.Arguments) -> capture.Capture = {
 
 fn ty_equal_in(a: Ty, b: Ty, sm: Map[Int, capture.Scope]) -> Bool = {
   match (a, b) {
-    (TyI64Buf(s), TyI64Buf(t)) | (TyF64Buf(s), TyF64Buf(t)) -> scope_option_equal(s, t, sm)
+    (TyI64Buf(s), TyI64Buf(t)) | (TyF64Buf(s), TyF64Buf(t)) -> scope_equal_in(s, t, sm)
     (TyCaptured(x, c), TyCaptured(y, d)) -> ty_equal_in(x, y, sm) &&
       capture_equal_in(c, d, sm)
     (TyFn(ps, r, e, sc), TyFn(qs, t, f, tc)) -> {
@@ -2133,9 +2189,8 @@ pub fn is_mem_effect(i: EffectI) -> Bool = i.name == "Mem" && i.owner == Some("s
 
 ## Does this row carry the label of `std/mem`'s `Mem`?
 pub fn eff_names_mem(effs: Effects, e: Eff) -> Bool = {
-  for l in eff_labels(e) {
-    let (lid, _) = l
-    match map.get(effs, lid) {
+  for l in evidence_labels(e) {
+    match map.get(effs, l.id) {
       Some(i) -> if is_mem_effect(i) { return true }
       None -> ()
     }
@@ -2490,7 +2545,8 @@ pub fn ev_pack_adt() -> AdtI =
         fields = [
           FieldI { name = "key", ty = TyInt },
           FieldI { name = "ev", ty = erased_ev_ty() },
-          FieldI { name = "outer", ty = erased_ev_ty() }
+          FieldI { name = "outer", ty = erased_ev_ty() },
+          FieldI { name = "scope", ty = TyInt }
         ]
       }
     ],
@@ -4013,33 +4069,60 @@ fn keyed1(s: Sig, tt: Ty) -> Sig =
 
 ## The flat buffer families behind std/mem, apart from `builtins` so that
 ## function stays under the JIT's size limit (scripts/method-size-gate.py).
-fn buffer_sigs() -> List[Sig] = [
-  # The flat 64-bit buffer family (docs/mem-buffer-design.md 6.4). Every
-  # access is a bounds-checked panic, never a sentinel: std/mem is a thin
-  # wrapper over these six, and the range writes panic rather than clamp.
-  bsig("i64buf_new", [TyInt], ["n"], LEGACY_I64_BUF),
-  bsig("i64buf_len", [LEGACY_I64_BUF], ["b"], TyInt),
-  bsig("i64buf_at", [LEGACY_I64_BUF, TyInt], ["b", "i"], TyInt),
-  bsig("i64buf_set", [LEGACY_I64_BUF, TyInt, TyInt], ["b", "i", "v"], TyUnit),
-  bsig("i64buf_fill", [LEGACY_I64_BUF, TyInt, TyInt, TyInt], ["b", "from", "to", "v"], TyUnit),
-  bsig("i64buf_copy_from", [LEGACY_I64_BUF, TyInt, LEGACY_I64_BUF, TyInt, TyInt],
-    ["dst", "dst_at", "src", "src_at", "n"], TyUnit),
-  # The buffer endpoints of the bulk pack family (mem-buffer-design.md 7):
-  # `bytes_pack_int` and friends with a flat buffer where the boxed Array was.
-  bsig("i64buf_pack", [LEGACY_I64_BUF, TyInt, TyBool], ["b", "width", "little"], TyBytes),
-  bsig("i64buf_unpack", [TyBytes, TyInt, TyBool, TyBool], ["b", "width", "signed", "little"],
-    LEGACY_I64_BUF),
-  # The same six for doubles, bits kept (NaN payloads, -0.0).
-  bsig("f64buf_new", [TyInt], ["n"], LEGACY_F64_BUF),
-  bsig("f64buf_len", [LEGACY_F64_BUF], ["b"], TyInt),
-  bsig("f64buf_at", [LEGACY_F64_BUF, TyInt], ["b", "i"], TyFloat),
-  bsig("f64buf_set", [LEGACY_F64_BUF, TyInt, TyFloat], ["b", "i", "v"], TyUnit),
-  bsig("f64buf_fill", [LEGACY_F64_BUF, TyInt, TyInt, TyFloat], ["b", "from", "to", "v"], TyUnit),
-  bsig("f64buf_copy_from", [LEGACY_F64_BUF, TyInt, LEGACY_F64_BUF, TyInt, TyInt],
-    ["dst", "dst_at", "src", "src_at", "n"], TyUnit),
-  bsig("f64buf_pack", [LEGACY_F64_BUF, TyInt, TyBool], ["b", "width", "little"], TyBytes),
-  bsig("f64buf_unpack", [TyBytes, TyInt, TyBool], ["b", "width", "little"], LEGACY_F64_BUF)
-]
+fn buffer_sig(scopes: List[capture.Scope], name: String, params: List[Ty], names: List[String], ret: Ty) -> Sig = {
+  let empty = capture.empty_params()
+  Sig { ..bsig(name, params, names, ret), scope_params = CaptureParams { ..empty, scopes = scopes } }
+}
+
+fn buffer_sigs() -> List[Sig] = {
+  let s = CaptureScope { name = "s", id = -30 }
+  let t = CaptureScope { name = "t", id = -31 }
+  let integer = TyI64Buf(s)
+  let floating = TyF64Buf(s)
+  [
+    # The flat 64-bit buffer family (docs/mem-buffer-design.md 6.4). Every
+    # access is a bounds-checked panic, never a sentinel: std/mem is a thin
+    # wrapper over these six, and the range writes panic rather than clamp.
+    buffer_sig([s], "i64buf_new", [TyInt], ["n"], integer),
+    buffer_sig([s], "i64buf_len", [integer], ["b"], TyInt),
+    buffer_sig([s], "i64buf_at", [integer, TyInt], ["b", "i"], TyInt),
+    buffer_sig([s], "i64buf_set", [integer, TyInt, TyInt], ["b", "i", "v"], TyUnit),
+    buffer_sig([s], "i64buf_fill", [integer, TyInt, TyInt, TyInt], ["b", "from", "to", "v"], TyUnit),
+    buffer_sig([s, t], "i64buf_copy_from", [integer, TyInt, TyI64Buf(t), TyInt, TyInt],
+      ["dst", "dst_at", "src", "src_at", "n"], TyUnit),
+    # The buffer endpoints of the bulk pack family (mem-buffer-design.md 7):
+    # `bytes_pack_int` and friends with a flat buffer where the boxed Array was.
+    buffer_sig([s], "i64buf_pack", [integer, TyInt, TyBool], ["b", "width", "little"], TyBytes),
+    buffer_sig([s], "i64buf_unpack", [TyBytes, TyInt, TyBool, TyBool], ["b", "width", "signed", "little"],
+      integer),
+    # The same six for doubles, bits kept (NaN payloads, -0.0).
+    buffer_sig([s], "f64buf_new", [TyInt], ["n"], floating),
+    buffer_sig([s], "f64buf_len", [floating], ["b"], TyInt),
+    buffer_sig([s], "f64buf_at", [floating, TyInt], ["b", "i"], TyFloat),
+    buffer_sig([s], "f64buf_set", [floating, TyInt, TyFloat], ["b", "i", "v"], TyUnit),
+    buffer_sig([s], "f64buf_fill", [floating, TyInt, TyInt, TyFloat], ["b", "from", "to", "v"], TyUnit),
+    buffer_sig([s, t], "f64buf_copy_from", [floating, TyInt, TyF64Buf(t), TyInt, TyInt],
+      ["dst", "dst_at", "src", "src_at", "n"], TyUnit),
+    buffer_sig([s], "f64buf_pack", [floating, TyInt, TyBool], ["b", "width", "little"], TyBytes),
+    buffer_sig([s], "f64buf_unpack", [TyBytes, TyInt, TyBool], ["b", "width", "little"], floating)
+  ]
+}
+
+## The runner primitive uses the declaring Mem identity, never a name-only key.
+pub fn mem_runner_sig(eid: Int) -> Sig = {
+  let result = TyVar("R", -36)
+  let scope = CaptureScope { name = "s", id = -37 }
+  let c = capture.CaptureVar("c", -38)
+  let e = EffVar("e", -1)
+  let body = TyFn([], result, scoped_eff(e, [ScopedEffect { id = eid, name = "Mem", scope = scope }]),
+    CaptureFunction { scopes = [scope], bound = Some([c]) })
+  let empty = capture.empty_params()
+  Sig { ..bsig("mem_run", [body], ["body"], result),
+    eff = e, eparams = [e], tparams = [result], constraints = [[]],
+    scope_params = CaptureParams { ..empty,
+      captures = [CaptureParam { name = "c", id = -38, bound = None }],
+      bounds = [(-36, [c])], fn_effects = [-1] } }
+}
 
 ## The builtin function table (port of Types.kt BUILTINS, same order).
 # Keep each table factory below the JVM JIT method-size limit.
@@ -5445,8 +5528,8 @@ test "any-variable reaches every position and says no to a closed type" {
   assert not ty_has_any_var(TyList(TyInt))
   assert not ty_has_any_var(TyTuple([TyInt, TyBool]))
   assert not ty_has_any_var(TyFn([TyInt], TyString, EPure, capture.empty_function()))
-  assert not ty_has_any_var(TyI64Buf(None))
-  assert not ty_has_any_var(TyF64Buf(None))
+  assert not ty_has_any_var(TyI64Buf(CaptureScope { name = "s", id = 1 }))
+  assert not ty_has_any_var(TyF64Buf(CaptureScope { name = "s", id = 1 }))
 }
 
 ## The wall's own test. Six walks used to spell the variant list out apiece, so
@@ -5947,4 +6030,18 @@ test "bitwise prelude slots keep count projections and their own effect evidence
       assert tr.assoc == [shift_amount_name(tid)]
     }
   }
+}
+
+test "evidence layout keeps two instances of one effect distinct" {
+  let s = CaptureScope { name = "s", id = 11 }
+  let t = CaptureScope { name = "s", id = 12 }
+  let row = scoped_eff(EPure, [ScopedEffect { id = 23, name = "Mem", scope = s },
+    ScopedEffect { id = 23, name = "Mem", scope = t }])
+  assert nev(row) == 2
+  let labels = evidence_labels(row)
+  assert len(labels) == 2
+  assert evidence_label_name(labels[0]) != evidence_label_name(labels[1])
+  assert evidence_label_role(labels[0]) != evidence_label_role(labels[1])
+  assert evidence_label_type(labels[0]) != evidence_label_type(labels[1])
+  assert evidence_roles(row) == [ScopedLabelSlot(23, 11), ScopedLabelSlot(23, 12)]
 }

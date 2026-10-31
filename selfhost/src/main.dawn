@@ -77,7 +77,7 @@ use jvm/rtclasses.{
 }
 use check/types.{prelude_adts, adt_of, adt_jvm_name, trait_of, OPTION_ID, RESULT_ID,
   FOREIGN_ERROR_ID, EV_PACK_ID, ORD_ID,
-  prelude_trait_ids, bounds_of, fn_interface_arities,
+  prelude_trait_ids, bounds_of, fn_interface_arities, ty_fn_arities,
   Ty, TyFn, TyUnit, Sig, Traits, Adts, Impls, sig_abi_eff
 }
 use jvm/emit.{emit_module, emit_module_mapped, gen_trait_interface, gen_provenance_sites, JModMap}
@@ -318,6 +318,34 @@ fn collect_program_roots(
 ## (`__emit --map`, docs/source-span-map-design.md section 13); "" otherwise.
 ## The classes are the same either way: `emit_module_mapped` writes the plain
 ## emission's and reads the map off a second one.
+# Scope keys extend erased closure arity without changing the source value limit.
+fn scoped_fn_interfaces(modules: List[lower.LMod], adts: Adts, observed: Bool) -> List[(String, Bytes)] !io = {
+  var arities: Set[Int] = set.empty()
+  let base = fn_interface_arities()
+  var types: List[Ty] = []
+  for adt in map.values(adts) {
+    for ctor in adt.ctors { for field in ctor.fields { types = types ++ [field.ty] } }
+  }
+  for module in modules {
+    for symbol in map.values(module.syms) { types = types ++ [symbol.ty] }
+    for pair in module.fns ++ module.tests {
+      let (primary, lifts) = pair
+      for fun in [primary] ++ lifts {
+        types = types ++ [fun.ret] ++ map(fun.params, p => p.ty)
+      }
+      for fun in lifts {
+        if len(fun.dicts) == 0 { arities = set.insert(arities, len(fun.params) + len(fun.evs)) }
+      }
+    }
+  }
+  for ty in types { for arity in ty_fn_arities(ty) { arities = set.insert(arities, arity) } }
+  var out: List[(String, Bytes)] = []
+  for arity in sort(set.to_list(arities)) {
+    if not list.contains(base, arity) { out = out ++ [(fn_iface(arity), gen_fn_interface(arity, observed))] }
+  }
+  out
+}
+
 # Lower and analyze pristine calls before selecting Plain optimization.
 # Keeping this phase separate also keeps the driver below HugeMethodLimit.
 fn lower_program_modes(
@@ -734,6 +762,7 @@ fn collect_program_full(
       tests_info = tests_info ++ [(cm.class_name, cm.mod_path, names)]
     }
   }
+  classes = classes ++ scoped_fn_interfaces(std_lm ++ user_lm, adts, needs_observation)
   for outer in vendor.vendored_outers() {
     classes = classes ++ vendor.rt_class_family(outer)
   }

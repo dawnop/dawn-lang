@@ -1,0 +1,40 @@
+use std/mem
+use std/mem.{Mem}
+fn forward[R: ^{c}, ^c, !e: fn](f: fn[@s]() -> R!(Mem[s] | e) ^{c}) -> R !e = mem.with_mem(f)
+fn recursive(n: Int) -> Int = forward([@s] () => {
+  let b = mem.from_list([n])
+  if n == 0 { mem.at(b, 0) } else { mem.at(b, 0) + recursive(n - 1) }
+})
+fn nested() -> Int = mem.with_mem([@outer] () => {
+  let a = mem.from_list([5, 6])
+  let answer = mem.with_mem([@inner] () => {
+    let b = mem.new(2)
+    mem.copy_from(b, 0, a, 0, 2)
+    mem.set(a, 0, mem.at(b, 1))
+    mem.at(b, 0)
+  })
+  answer + mem.at(a, 0)
+})
+fn call[^c](f: fn() -> Int ^{c}) -> Int = f()
+
+type Allocator = { create: fn[@u](Int) -> I64Buf@u !Mem[u] }
+fn factory() -> Int = mem.with_mem([@s] () => {
+  let allocate: fn(Int) -> I64Buf@s !Mem[s] = mem.new
+  let read: fn(I64Buf@s, Int) -> Int !Mem[s] = mem.at
+  let b = allocate(2)
+  let size: fn() -> Int ^{s} = () => len(b)
+  if call(size) != 2 { panic("local capture substitution lost the buffer") }
+  let copy: fn(I64Buf@s, Int, I64Buf@s, Int, Int) -> Unit !Mem[s] = mem.copy_from
+  copy(b, 0, b, 0, 2)
+  let allocate_any = mem.new
+  let second = allocate_any(3)
+  if len(second) != 3 { panic("allocation value selected the wrong scope") }
+  let record: Allocator = Allocator { create = mem.new }
+  if len(record.create(4)) != 4 { panic("scoped field call selected the wrong scope") }
+  read(b, 0) + len(b)
+})
+pub fn main() -> Unit !io = {
+  println(to_string(recursive(4)))
+  println(to_string(nested()))
+  println(to_string(factory()))
+}

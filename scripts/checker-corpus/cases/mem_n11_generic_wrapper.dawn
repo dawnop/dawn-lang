@@ -1,11 +1,5 @@
-# checker.dawn: R1 on a generic wrapper around `with_mem` (N11). Inside `scope`
-# the result is the type variable `T`, which the walk cannot see through, and
-# the call that picks `T := I64Buf` is a call to `scope`, not to `with_mem`.
-# The rule refuses the variable itself.
+# A polymorphic wrapper forwards the final contract; the unsafe caller fails.
 use std/mem
 use std/mem.{Mem}
-
-pub fn scope[T](f: fn() -> T !Mem) -> T = mem.with_mem(f)
-
-# the instantiation that would have let a buffer out
-pub fn escaped() -> Int = len(scope(() => mem.new(4)))
+pub fn scope[T: ^{c}, ^c](f: fn[@s]() -> T !Mem[s] ^{c}) -> T = mem.with_mem(f)
+pub fn escaped() -> Int = len(scope([@s] () => mem.new(4)))

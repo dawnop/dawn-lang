@@ -70,8 +70,8 @@ MUTATIONS = {
     ),),
     "bounds-unchecked": ((
         INTERP,
-        'fn check_addr(cx: Cx, buf: Int, off: Int, what: String) -> Unit =\n  if off < 0 || off >= cx.lens[buf] {',
-        'fn check_addr(cx: Cx, buf: Int, off: Int, what: String) -> Unit =\n  if false && (off < 0 || off >= cx.lens[buf]) {',
+        'fn check_addr[@s](cx: Cx[s], buf: Int, off: Int, what: String) -> Unit =\n  if off < 0 || off >= cx.lens[buf] {',
+        'fn check_addr[@s](cx: Cx[s], buf: Int, off: Int, what: String) -> Unit =\n  if false && (off < 0 || off >= cx.lens[buf]) {',
     ),),
     "mma-drops-term": ((
         MMA,

@@ -1,0 +1,37 @@
+# Compile this suffix with jvm/emit so the probe exercises the actual emitter,
+# then run its class on the same pack and runtime classes as a user program.
+
+fn scope_abi_fixture() -> Bytes !io = {
+  let erased = erased_ev_ty()
+  let first = CCtor(EV_PACK_ID, 0, [CInt(21), CBox(CInt(11), TyInt), CUnit, CInt(1)], TyAdt(EV_PACK_ID, [], capture.empty_arguments()))
+  let second = CCtor(EV_PACK_ID, 0, [CInt(21), CBox(CInt(22), TyInt), first, CInt(2)], TyAdt(EV_PACK_ID, [], capture.empty_arguments()))
+  let bare = CCtor(EV_PACK_ID, 0, [CInt(21), CBox(CInt(33), TyInt), second, CInt(0)], TyAdt(EV_PACK_ID, [], capture.empty_arguments()))
+  let joined = CIntrinsic("ev_append", [first, bare], erased, CNoSite)
+  let one = CUnbox(CIntrinsic("ev_get_scoped", [joined, CInt(21), CInt(1)], erased, CNoSite), TyInt)
+  let two = CUnbox(CIntrinsic("ev_get_scoped", [joined, CInt(21), CInt(2)], erased, CNoSite), TyInt)
+  let zero = CUnbox(CIntrinsic("ev_get", [joined, CInt(21)], erased, CNoSite), TyInt)
+  let fresh = CBinary(CNe, CIntrinsic("scope_new_key", [], TyInt, CNoSite),
+    CIntrinsic("scope_new_key", [], TyInt, CNoSite), TyBool)
+  let value = CBinary(CAdd, CBinary(CMul, one, CInt(10000), TyInt),
+    CBinary(CAdd, CBinary(CMul, two, CInt(100), TyInt), zero, TyInt), TyInt)
+  let body = CIf(fresh, value, Some(CInt(0)), TyInt)
+  let gx = GenCtx { observation = false, observed_mode = false, logical = map.empty(),
+    next_sym = 10, class_name = "ScopeEvidenceProbe", args_owner = "", adts = prelude_adts(), traits = map.empty(),
+    impl_table = map.empty(), prog_fns = map.empty(), intrs = intrinsics(),
+    dicts = [], live = None, consts = map.empty(), blocks = map.empty(), mapping = false }
+  let g = Gen { prov_callback = -1, prov_declaration = "", prov_tail = [],
+    mv = scratch_mv(), lift_descs = map.empty(), syms = map.empty(), slots = map.empty(), next_slot = 0,
+    method_ret = TyUnit, rets_null = false, cloops = [], sam_ctr = 0, pending_sam = [], clos_ctr = 0,
+    closures = [], sam_classes = [], const_fields = [], const_by_key = map.empty(), marks = [], jrows = [], jfns = [] }
+  let cf = CFun { definition = synthetic_definition("scope-evidence-probe"),
+    name = "read", owner = "ScopeEvidenceProbe", captures = [], params = [], dicts = [], evs = [], ret = TyInt,
+    body = body, is_test = false, impl_of = None, default_of = None, origin = "read" }
+  let no_supers: List[String] = []
+  let cw = AsmWriter.of(COMPUTE_FRAMES, no_supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, "ScopeEvidenceProbe", obj())
+  let _ = gen_cbody(gx, g, cw, cf, "read", "()J", false)
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+pub fn main() -> Unit !io = println(bytes.to_hex(scope_abi_fixture()))

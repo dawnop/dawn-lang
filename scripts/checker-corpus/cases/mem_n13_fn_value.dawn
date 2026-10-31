@@ -1,10 +1,7 @@
-# checker.dawn: `with_mem` named as a value (N13). A later `w(...)` is a
-# dynamic call, so the rule has to fire where the name is used. The annotation
-# makes the instantiation concrete, so the buffer itself is what is refused.
+# A runner alias may return an outer buffer, but cannot relabel its allocation.
 use std/mem
 use std/mem.{Mem}
-
-pub fn escaped() -> Int = {
-  let w: fn(fn() -> I64Buf !Mem) -> I64Buf = mem.with_mem
-  len(w(() => mem.new(4)))
+pub fn escaped[@outer]() -> Int = {
+  let w: fn(fn[@s]() -> I64Buf@outer !Mem[s]) -> I64Buf@outer = mem.with_mem
+  len(w([@inner] () => mem.new(4)))
 }

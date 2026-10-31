@@ -3,24 +3,24 @@
 use std/mem
 use std/mem.{Mem}
 
-type Box = { b: I64Buf }
+type Box[@s] = { b: I64Buf@s }
 
 # a helper takes the buffer and says it uses `Mem`
-fn bump(b: I64Buf, i: Int) -> Unit !Mem = mem.set(b, i, mem.at(b, i) + 1)
+fn bump[@s](b: I64Buf@s, i: Int) -> Unit !Mem[s] = mem.set(b, i, mem.at(b, i) + 1)
 
 # lists and records hold buffers inside the scope
-pub fn inside() -> Int = mem.with_mem(() => {
+pub fn inside() -> Int = mem.with_mem([@s] () => {
   let bufs = [mem.new(2), mem.new(3)]
-  let bx = Box { b= mem.new(1) }
+  let bx: Box[s] = Box { b = mem.new(1) }
   bump(bufs[0], 1)
   bump(bx.b, 0)
   mem.at(bufs[0], 1) + mem.at(bx.b, 0) + len(bufs[1])
 })
 
 # the inner scope reads and writes the outer one's buffer
-pub fn nested() -> Int = mem.with_mem(() => {
+pub fn nested() -> Int = mem.with_mem([@mem_scope_2] () => {
   let outer = mem.new(2)
-  let r = mem.with_mem(() => {
+  let r = mem.with_mem([@mem_scope_3] () => {
     let inner = mem.new(2)
     mem.set(outer, 0, 5)
     mem.copy_from(inner, 0, outer, 0, 2)
@@ -30,10 +30,10 @@ pub fn nested() -> Int = mem.with_mem(() => {
 })
 
 # a list of Int, and an Int, are fine results
-pub fn as_list() -> List[Int] = mem.with_mem(() => mem.to_list(mem.from_list([1, 2, 3])))
+pub fn as_list() -> List[Int] = mem.with_mem([@mem_scope_4] () => mem.to_list(mem.from_list([1, 2, 3])))
 
 # a function that does not mention Mem in its row may be returned
-pub fn plain_fn() -> fn(Int) -> Int = mem.with_mem(() => (x: Int) => x + 1)
+pub fn plain_fn() -> fn(Int) -> Int = mem.with_mem([@mem_scope_5] () => (x: Int) => x + 1)
 
 # the scope is pure, so a pure function can hold it
 pub fn pure_caller() -> Int = inside() + nested()
@@ -43,7 +43,7 @@ effect Tick {
   fn tick() -> Int
 }
 
-pub fn with_other() -> Int = mem.with_mem(() => {
+pub fn with_other() -> Int = mem.with_mem([@mem_scope_6] () => {
   with handle Tick { tick() => 3 }
   let b = mem.new(1)
   mem.set(b, 0, tick())
@@ -51,10 +51,10 @@ pub fn with_other() -> Int = mem.with_mem(() => {
 })
 
 # a wrapper whose result type is concrete is fine: nothing a caller can pick
-pub fn scope_int(f: fn() -> Int !Mem) -> Int = mem.with_mem(f)
+pub fn scope_int(f: fn[@s]() -> Int !Mem[s]) -> Int = mem.with_mem(f)
 
 # so is naming `with_mem` as a value at a concrete type
 pub fn as_value() -> Int = {
-  let w: fn(fn() -> Int !Mem) -> Int = mem.with_mem
-  w(() => mem.at(mem.new(1), 0))
+  let w: fn(fn[@s]() -> Int !Mem[s]) -> Int = mem.with_mem
+  w([@s] () => mem.at(mem.new(1), 0))
 }

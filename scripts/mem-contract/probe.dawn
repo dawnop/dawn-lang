@@ -1,4 +1,4 @@
-# The I64Buf and F64Buf contract probe: one user program, run on both backends, whose
+# The I64Buf@s and F64Buf@s contract probe: one user program, run on both backends, whose
 # output has to equal expected.txt line for line. Every panic is printed as its
 # message, because the message is a value once `catch_panic` hands it back and
 # the two backends must not disagree on it.
@@ -25,11 +25,11 @@ fn unit_text[!e](f: fn() -> Unit !e) -> String !e =
   }
 
 ## The elements as one line, so a value test is one `println`.
-fn show(b: I64Buf) -> String !Mem = "${mem.to_list(b)}"
+fn show[@s](b: I64Buf@s) -> String !Mem[s] = "${mem.to_list(b)}"
 
 ## A zeroed buffer reads back as zeros everywhere: native has to clear what
 ## malloc does not, and the check has to look at every slot.
-fn zero_line() -> String !Mem = {
+fn zero_line[@s]() -> String !Mem[s] = {
   let z = mem.new(1000)
   var nonzero = 0
   var i = 0
@@ -40,7 +40,7 @@ fn zero_line() -> String !Mem = {
   "len=${len(z)} nonzero=${nonzero} empty=${len(mem.new(0))}"
 }
 
-fn extremes_line() -> String !Mem = {
+fn extremes_line[@s]() -> String !Mem[s] = {
   let b = mem.new(3)
   mem.set(b, 0, 9223372036854775807)
   mem.set(b, 1, -9223372036854775808)
@@ -51,7 +51,7 @@ fn extremes_line() -> String !Mem = {
 ## The index panics. 2^32 + 5 is the aliasing probe: truncated to 32 bits it is
 ## 5, a real slot of the 8-element buffer, so a check made after the
 ## truncation reads slot 5 instead of panicking.
-fn index_lines() -> List[String] !Mem = {
+fn index_lines[@s]() -> List[String] !Mem[s] = {
   let b = mem.new(8)
   [
     int_text(() => mem.at(b, 8)),
@@ -68,7 +68,7 @@ fn index_lines() -> List[String] !Mem = {
   ]
 }
 
-fn new_lines() -> List[String] !Mem = [
+fn new_lines[@s]() -> List[String] !Mem[s] = [
   int_text(() => len(mem.new(-1))),
   int_text(() => len(mem.new(-9223372036854775808))),
   int_text(() => len(mem.new(2147483640))),
@@ -76,7 +76,7 @@ fn new_lines() -> List[String] !Mem = [
   int_text(() => len(mem.new(9223372036854775807)))
 ]
 
-fn fill_lines() -> List[String] !Mem = {
+fn fill_lines[@s]() -> List[String] !Mem[s] = {
   let b = mem.from_list([1, 2, 3, 4, 5])
   mem.fill(b, 1, 4, 0)
   let first = show(b)
@@ -97,7 +97,7 @@ fn fill_lines() -> List[String] !Mem = {
 
 ## memmove semantics and every refused range. The overlapping runs are the
 ## ones a forward element-by-element copy gets wrong.
-fn copy_lines() -> List[String] !Mem = {
+fn copy_lines[@s]() -> List[String] !Mem[s] = {
   let src = mem.from_list([10, 11, 12, 13, 14, 15])
   let dst = mem.new(6)
   mem.copy_from(dst, 1, src, 2, 3)
@@ -127,7 +127,7 @@ fn copy_lines() -> List[String] !Mem = {
   ]
 }
 
-fn clone_line() -> String !Mem = {
+fn clone_line[@s]() -> String !Mem[s] = {
   let a = mem.from_list([3, -1, 4, 1, 5])
   let c = mem.clone(a)
   mem.set(c, 0, 100)
@@ -137,7 +137,7 @@ fn clone_line() -> String !Mem = {
 
 ## Primes below 1000 by a sieve in one buffer: reads and writes interleaved in
 ## loops, the shape the buffer exists for.
-fn sieve_line() -> String !Mem = {
+fn sieve_line[@s]() -> String !Mem[s] = {
   let n = 1000
   let b = mem.new(n)
   mem.fill(b, 2, n, 1)
@@ -168,7 +168,7 @@ fn sieve_line() -> String !Mem = {
 ## A 64-bit congruential generator written into a buffer, then folded with a
 ## multiplier. Both steps wrap, so the line is the same only if the two
 ## backends wrap alike and every store and load keeps all 64 bits.
-fn lcg_line() -> String !Mem = {
+fn lcg_line[@s]() -> String !Mem[s] = {
   let n = 4096
   let b = mem.new(n)
   var s = 12345
@@ -189,7 +189,7 @@ fn lcg_line() -> String !Mem = {
 
 ## Shifting a window the way a sliding-window decoder does: overlap copies in
 ## a loop, each one moving the whole window by one place.
-fn window_line() -> String !Mem = {
+fn window_line[@s]() -> String !Mem[s] = {
   let n = 64
   let w = mem.new(n)
   var i = 0
@@ -201,7 +201,7 @@ fn window_line() -> String !Mem = {
   "${show(w)}"
 }
 
-fn big_line() -> String !Mem = {
+fn big_line[@s]() -> String !Mem[s] = {
   let n = 1048576
   let b = mem.new(n)
   mem.fill(b, 0, n, 3)
@@ -214,7 +214,7 @@ fn big_line() -> String !Mem = {
   "sum=${sum}"
 }
 
-# ---- F64Buf ----
+# ---- F64Buf@s ----
 
 const NAN_BITS: Int = 0x7FF8000000000001
 
@@ -224,16 +224,16 @@ fn float_text[!e](f: fn() -> Float !e) -> String !e =
     Err(e) -> e.message
   }
 
-fn f64_hex(b: F64Buf, width: Int, order: bytes.Endian) -> String !Mem =
+fn f64_hex[@s](b: F64Buf@s, width: Int, order: bytes.Endian) -> String !Mem[s] =
   bytes.to_hex(mem.f64_to_bytes(b, width, order))
 
-fn f64_bits(b: F64Buf) -> String !Mem = {
+fn f64_bits[@s](b: F64Buf@s) -> String !Mem[s] = {
   var out: List[Int] = []
   for x in mem.f64_to_list(b) { out = out ++ [to_bits(x)] }
   "${out}"
 }
 
-fn f64_zero_line() -> String !Mem = {
+fn f64_zero_line[@s]() -> String !Mem[s] = {
   let z = mem.f64_new(1000)
   var nonzero = 0
   var i = 0
@@ -246,7 +246,7 @@ fn f64_zero_line() -> String !Mem = {
 
 ## The bits that arithmetic would lose: -0.0, a NaN with a payload and a sign,
 ## the infinities, the smallest subnormal.
-fn f64_bits_line() -> String !Mem = {
+fn f64_bits_line[@s]() -> String !Mem[s] = {
   let b = mem.f64_new(6)
   mem.f64_set(b, 0, -0.0)
   let nan: Float = from_bits(NAN_BITS)
@@ -261,7 +261,7 @@ fn f64_bits_line() -> String !Mem = {
   "${first} ${f64_bits(c)} ${f64_bits(mem.f64_from_list(mem.f64_to_list(b)))}"
 }
 
-fn f64_panic_lines() -> List[String] !Mem = {
+fn f64_panic_lines[@s]() -> List[String] !Mem[s] = {
   let b = mem.f64_new(8)
   let a = mem.f64_new(4)
   let c = mem.f64_new(3)
@@ -278,7 +278,7 @@ fn f64_panic_lines() -> List[String] !Mem = {
   ]
 }
 
-fn f64_overlap_line() -> String !Mem = {
+fn f64_overlap_line[@s]() -> String !Mem[s] = {
   let up = mem.f64_from_list([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
   mem.f64_copy_within(up, 0, 2, 4)
   let down = mem.f64_from_list([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
@@ -293,7 +293,7 @@ fn f64_overlap_line() -> String !Mem = {
 const SAMPLE: List[Int] = [0, 1, -1, 255, 256, -129, 65535, 2147483647, -2147483648, 4294967295,
   9223372036854775807, -9223372036854775808, 300, 72623859790382856]
 
-fn endpoint_lines() -> List[String] !Mem = {
+fn endpoint_lines[@s]() -> List[String] !Mem[s] = {
   let b = mem.from_list(SAMPLE)
   var out: List[String] = []
   for w in [1, 2, 4, 8] {
@@ -309,7 +309,7 @@ fn endpoint_lines() -> List[String] !Mem = {
   out
 }
 
-fn endpoint_panic_lines() -> List[String] !Mem = {
+fn endpoint_panic_lines[@s]() -> List[String] !Mem[s] = {
   let b = mem.from_list([1, 2])
   let f = mem.f64_from_list([1.0, 2.0])
   let odd = bytes.from_hex("0102030405").expect("hex")
@@ -323,7 +323,7 @@ fn endpoint_panic_lines() -> List[String] !Mem = {
   ]
 }
 
-fn f64_endpoint_lines() -> List[String] !Mem = {
+fn f64_endpoint_lines[@s]() -> List[String] !Mem[s] = {
   let nan: Float = from_bits(NAN_BITS)
   let b = mem.f64_from_list([1.5, -0.0, nan, 0.1, -3.25e200])
   var out: List[String] = []
@@ -342,9 +342,9 @@ fn f64_endpoint_lines() -> List[String] !Mem = {
 
 ## 1M elements out to bytes and back, both buffer kinds, at every width that
 ## keeps the value. The values come from a 64-bit generator, so every byte of
-## every element is exercised, and an F64Buf element is a bit pattern taken as
+## every element is exercised, and an F64Buf@s element is a bit pattern taken as
 ## it comes (NaNs of every payload, subnormals, infinities included).
-fn million_lines() -> List[String] !Mem = {
+fn million_lines[@s]() -> List[String] !Mem[s] = {
   let n = 1048576
   let b = mem.new(n)
   let f = mem.f64_new(n)
@@ -397,13 +397,13 @@ ctl effect Ask {
   fn ask() -> Int
 }
 
-fn ask_body() -> Int !Ask !Mem = {
+fn ask_body[@s]() -> Int !Ask !Mem[s] = {
   let b = mem.from_list([1, 2, 3])
   let n = ask()
   mem.at(b, 0) + n
 }
 
-fn dropped_line() -> String !Mem = {
+fn dropped_line[@s]() -> String !Mem[s] = {
   let r = {
     with handle Ask { ask() resume k => 41 }
     ask_body()
@@ -412,24 +412,24 @@ fn dropped_line() -> String !Mem = {
 }
 
 pub fn main() -> Unit !io = {
-  println("zero     ${mem.with_mem(() => zero_line())}")
-  println("extremes ${mem.with_mem(() => extremes_line())}")
-  for line in mem.with_mem(() => index_lines()) { println("index    ${line}") }
-  for line in mem.with_mem(() => new_lines()) { println("new      ${line}") }
-  for line in mem.with_mem(() => fill_lines()) { println("fill     ${line}") }
-  for line in mem.with_mem(() => copy_lines()) { println("copy     ${line}") }
-  println("clone    ${mem.with_mem(() => clone_line())}")
-  println("sieve    ${mem.with_mem(() => sieve_line())}")
-  println("lcg      ${mem.with_mem(() => lcg_line())}")
-  println("window   ${mem.with_mem(() => window_line())}")
-  println("big      ${mem.with_mem(() => big_line())}")
-  println("f64zero  ${mem.with_mem(() => f64_zero_line())}")
-  println("f64bits  ${mem.with_mem(() => f64_bits_line())}")
-  for line in mem.with_mem(() => f64_panic_lines()) { println("f64panic ${line}") }
-  println("f64move  ${mem.with_mem(() => f64_overlap_line())}")
-  for line in mem.with_mem(() => endpoint_lines()) { println("bytes    ${line}") }
-  for line in mem.with_mem(() => endpoint_panic_lines()) { println("bytespan ${line}") }
-  for line in mem.with_mem(() => f64_endpoint_lines()) { println("bytes    ${line}") }
-  for line in mem.with_mem(() => million_lines()) { println("million  ${line}") }
-  println("dropped  ${mem.with_mem(() => dropped_line())}")
+  println("zero     ${mem.with_mem([@s] () => zero_line())}")
+  println("extremes ${mem.with_mem([@mem_scope_2] () => extremes_line())}")
+  for line in mem.with_mem([@mem_scope_3] () => index_lines()) { println("index    ${line}") }
+  for line in mem.with_mem([@mem_scope_4] () => new_lines()) { println("new      ${line}") }
+  for line in mem.with_mem([@mem_scope_5] () => fill_lines()) { println("fill     ${line}") }
+  for line in mem.with_mem([@mem_scope_6] () => copy_lines()) { println("copy     ${line}") }
+  println("clone    ${mem.with_mem([@mem_scope_7] () => clone_line())}")
+  println("sieve    ${mem.with_mem([@mem_scope_8] () => sieve_line())}")
+  println("lcg      ${mem.with_mem([@mem_scope_9] () => lcg_line())}")
+  println("window   ${mem.with_mem([@mem_scope_10] () => window_line())}")
+  println("big      ${mem.with_mem([@mem_scope_11] () => big_line())}")
+  println("f64zero  ${mem.with_mem([@mem_scope_12] () => f64_zero_line())}")
+  println("f64bits  ${mem.with_mem([@mem_scope_13] () => f64_bits_line())}")
+  for line in mem.with_mem([@mem_scope_14] () => f64_panic_lines()) { println("f64panic ${line}") }
+  println("f64move  ${mem.with_mem([@mem_scope_15] () => f64_overlap_line())}")
+  for line in mem.with_mem([@mem_scope_16] () => endpoint_lines()) { println("bytes    ${line}") }
+  for line in mem.with_mem([@mem_scope_17] () => endpoint_panic_lines()) { println("bytespan ${line}") }
+  for line in mem.with_mem([@mem_scope_18] () => f64_endpoint_lines()) { println("bytes    ${line}") }
+  for line in mem.with_mem([@mem_scope_19] () => million_lines()) { println("million  ${line}") }
+  println("dropped  ${mem.with_mem([@mem_scope_20] () => dropped_line())}")
 }
