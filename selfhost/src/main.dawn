@@ -321,27 +321,33 @@ fn collect_program_roots(
 # Scope keys extend erased closure arity without changing the source value limit.
 fn scoped_fn_interfaces(modules: List[lower.LMod], adts: Adts, observed: Bool) -> List[(String, Bytes)] !io = {
   var arities: Set[Int] = set.empty()
-  let base = fn_interface_arities()
-  var types: List[Ty] = []
-  for adt in map.values(adts) {
-    for ctor in adt.ctors { for field in ctor.fields { types = types ++ [field.ty] } }
-  }
+  let base = set.from(fn_interface_arities())
+  # These walks only collect a set. The map's insertion order would require
+  # sorting every entry, and an intermediate type vector would be discarded.
+  arities = map.fold(adts, arities, (found, _id, adt) => {
+    var next = found
+    for ctor in adt.ctors {
+      for field in ctor.fields { next = ty_fn_arities(field.ty, base, next) }
+    }
+    next
+  })
   for module in modules {
-    for symbol in map.values(module.syms) { types = types ++ [symbol.ty] }
+    arities = map.fold(module.syms, arities, (found, _id, symbol) => ty_fn_arities(symbol.ty, base, found))
     for pair in module.fns ++ module.tests {
       let (primary, lifts) = pair
       for fun in [primary] ++ lifts {
-        types = types ++ [fun.ret] ++ map(fun.params, p => p.ty)
+        arities = ty_fn_arities(fun.ret, base, arities)
+        for p in fun.params { arities = ty_fn_arities(p.ty, base, arities) }
       }
       for fun in lifts {
-        if len(fun.dicts) == 0 { arities = set.insert(arities, len(fun.params) + len(fun.evs)) }
+        let arity = len(fun.params) + len(fun.evs)
+        if len(fun.dicts) == 0 && not set.has(base, arity) { arities = set.insert(arities, arity) }
       }
     }
   }
-  for ty in types { for arity in ty_fn_arities(ty) { arities = set.insert(arities, arity) } }
   var out: List[(String, Bytes)] = []
   for arity in sort(set.to_list(arities)) {
-    if not list.contains(base, arity) { out = out ++ [(fn_iface(arity), gen_fn_interface(arity, observed))] }
+    out = out ++ [(fn_iface(arity), gen_fn_interface(arity, observed))]
   }
   out
 }
