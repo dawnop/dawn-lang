@@ -258,9 +258,25 @@ pub type EvidenceLabel = { id: Int, name: String, scope: Option[capture.Scope] }
 
 ## Preserve the old bare-label order, then the normalized scoped-label order.
 pub fn evidence_labels(e: Eff) -> List[EvidenceLabel] =
-  map(eff_labels(e), l => { let (id, name) = l
-    EvidenceLabel { id = id, name = name, scope = None } }) ++
-  map(eff_scopes(e), l => EvidenceLabel { id = l.id, name = l.name, scope = Some(l.scope) })
+  match e {
+    ELabeled(_, labels) -> map(labels, l => { let (id, name) = l
+      EvidenceLabel { id = id, name = name, scope = None } })
+    EScoped(base, scopes) -> {
+      let scoped = map(scopes, l => EvidenceLabel { id = l.id, name = l.name, scope = Some(l.scope) })
+      let labels = eff_labels(base)
+      if len(labels) == 0 { scoped }
+      else { map(labels, l => { let (id, name) = l
+        EvidenceLabel { id = id, name = name, scope = None } }) ++ scoped }
+    }
+    _ -> []
+  }
+
+## Counting slots needs no materialized label records or concatenated vectors.
+pub fn evidence_label_count(e: Eff) -> Int = match e {
+  ELabeled(_, labels) -> len(labels)
+  EScoped(base, scopes) -> len(eff_labels(base)) + len(scopes)
+  _ -> 0
+}
 
 ## A scoped provider is distinct even when its effect declaration is the same.
 pub fn evidence_label_name(l: EvidenceLabel) -> String = match l.scope {
@@ -294,7 +310,7 @@ pub fn scope_key_name(id: Int) -> String = "scope\$${id}"
 ## catches: the JVM answers NoSuchMethodError and native reads the slot next
 ## door. Hence a second derivation anywhere is a defect, not an optimisation.
 pub fn nev(e: Eff) -> Int =
-  len(evidence_labels(e)) + len(eff_vars(e)) + len(eff_assocs(e))
+  evidence_label_count(e) + len(eff_vars(e)) + len(eff_assocs(e))
 
 ## The key an atom is addressed by inside an evidence pack.
 ##
