@@ -139,9 +139,9 @@ pub fn assembler_defect(tileiras: String, gpu_name: String, prog: TileProg) -> O
 ## nothing could start (missing, not executable), `AssemblerFailed` a run that
 ## exited non-zero (`args` is what it was given, `stderr` what it printed),
 ## `NoCubin` a run that exited zero and left no output file, and
-## `UnknownVersion` a `--version` whose text has no `V<number>` to key
-## [`tileiras_args`] on. `Scratch` is the host refusing the temporary
-## directory or a file in it.
+## `UnknownVersion` a `--version` whose text has no unique, complete standard
+## version record to key [`tileiras_args`] on (see [`assemble`]). `Scratch` is
+## the host refusing the temporary directory or a file in it.
 pub type AssembleError =
   | AssemblerNotFound(path: String, detail: String)
   | AssemblerFailed(args: List[String], status: Int, stderr: String)
@@ -156,24 +156,43 @@ pub fn explain(e: AssembleError) -> String = match e {
   AssemblerFailed(args, status, stderr) ->
     "tileiras ${join(args, " ")} exited with status ${status}: ${str.trim(stderr)}"
   NoCubin(path) -> "tileiras exited with status 0 but wrote no cubin at `${path}`"
-  UnknownVersion(output) -> "`tileiras --version` printed no `V<version>`: ${str.trim(output)}"
+  UnknownVersion(output) -> "`tileiras --version` did not print one valid version record: ${str.trim(output)}"
   Scratch(detail) -> "scratch files for tileiras: ${detail}"
 }
 
-# The version `tileiras --version` prints after the `V` of its
-# "release 13.4, V13.4.92" line, or None.
-fn version_of(output: String) -> Option[String] =
-  match str.rsplit_once(output, ", V") {
-    Some((_before, rest)) -> {
-      let line = match str.split_once(rest, "\n") {
-        Some((l, _more)) -> l
-        None -> rest
+# Canonical components keep numeric aliases from bypassing exact defect keys.
+fn version_component(s: String) -> Bool =
+  not str.is_empty(s) && (s == "0" || not str.starts_with(s, "0"))
+  && list.all(str.chars(s), c => str.contains("0123456789", c))
+
+fn version_record(line: String) -> Option[String] =
+  match str.split_once(line, ", V") {
+    Some((release, v)) -> {
+      let parts = str.split(v, ".")
+      if len(parts) == 3 && list.all(parts, version_component)
+        && release == "Cuda compilation tools, release ${parts[0]}.${parts[1]}" {
+        Some(v)
+      } else {
+        None
       }
-      let v = str.trim(line)
-      if str.is_empty(v) { None } else { Some(v) }
     }
     None -> None
   }
+
+# Count all candidate records, including malformed ones; a second record must
+# not override the identity used for a correctness workaround.
+fn version_of(output: String) -> Option[String] = {
+  var version: Option[String] = None
+  var records = 0
+  for raw in str.split(output, "\n") {
+    let line = str.trim(raw)
+    if str.starts_with(line, "Cuda compilation tools") || str.contains(line, ", V") {
+      records = records + 1
+      version = version_record(line)
+    }
+  }
+  if records == 1 { version } else { None }
+}
 
 # Run `tileiras argv`, stdout and stderr each into a file under `dir`: the
 # status and both texts, or the reason it could not start.
@@ -248,6 +267,13 @@ fn clean(dir: String) -> Unit !Fs = {
 ## says which assembler this is, [`tileiras_args`] picks the arguments for that
 ## version and target, and the cubin is read back. The temporary directory is
 ## removed whatever the outcome.
+##
+## Version output must contain exactly one `Cuda compilation tools, release
+## M.m, VM.m.p` record. Components are ASCII decimal without leading zeros
+## except `0`; the release must agree with the version. Surrounding whitespace,
+## LF and CRLF are accepted. Incomplete, suffixed or duplicate records are
+## `UnknownVersion`, with the original stdout, before assembly starts. Other
+## complete versions retain the ordinary argument policy.
 ##
 ## An assembler that cannot be started, one that exits non-zero, one that
 ## leaves no file and one whose version text cannot be read are four
@@ -395,6 +421,56 @@ fn made(r: Result[String, ForeignError]) -> String = match r {
 fn version_lines() -> String =
   "echo \"tileiras: fake\"\necho \"Cuda compilation tools, release 13.4, V13.4.92\"\n"
 
+# The pinned assembler's version banner is a positive identity fixture.
+fn pinned_version_output() -> String =
+  "tileiras: NVIDIA (R) Cuda Tile IR optimizing assembler\n"
+  ++ "Copyright (c) 2005-2026 NVIDIA Corporation\n"
+  ++ "Built on Tue_Sep__1_09:35:26_PDT_2026\n"
+  ++ "Cuda compilation tools, release 13.4, V13.4.92\n"
+  ++ "Build local.local.38855100_\n"
+
+fn bad_version_outputs() -> List[String] = [
+  "",
+  "garbage\n",
+  "Cuda compilation tools, release 13.4, Vgarbage\n",
+  "Cuda compilation tools, release 13.4, V13.4\n",
+  "Cuda compilation tools, release 13.4, V13.4.\n",
+  "Cuda compilation tools, release 13.4, V13..92\n",
+  "Cuda compilation tools, release 13.4, V13.4.92-extra\n",
+  "Cuda compilation tools, release 13.4, V13.4.92 extra\n",
+  "Cuda compilation tools, release 13.4, V13.4.92.1\n",
+  "Cuda compilation tools, release 13.4, V\n",
+  "Cuda compilation tools, release 13.4, V13.4.-1\n",
+  "Cuda compilation tools, release 13.4, V13.4.９２\n",
+  "Cuda compilation tools, release 013.4, V013.4.92\n",
+  "Cuda compilation tools, release 13.04, V13.04.92\n",
+  "Cuda compilation tools, release 13.4, V13.4.092\n",
+  "Cuda compilation tools, release 13.3, V13.4.92\n",
+  "other program, V13.4.92\n",
+  "Cuda compilation tools, release 13.4, V13.4.92\nCuda compilation tools, release 13.4, V13.4.93\n",
+  "Cuda compilation tools, release 13.4, V13.4.92\nCuda compilation tools, release 13.4, V13.4.92\n",
+  "Cuda compilation tools, release 13.4, Vgarbage\nCuda compilation tools, release 13.4, V13.4.92\n",
+  "Cuda compilation tools, release 13.4, V13.4.92\nCuda compilation tools, release 13.4\n",
+]
+
+test "version identity requires one complete canonical record" {
+  assert version_of(pinned_version_output()) == Some("13.4.92")
+  assert version_of("\r\n\t Cuda compilation tools, release 13.4, V13.4.92 \t\r\nBuild x\r\n") == Some("13.4.92")
+  assert version_of("Cuda compilation tools, release 13.4, V13.4.93") == Some("13.4.93")
+  assert version_of("Cuda compilation tools, release 14.0, V14.0.0\n") == Some("14.0.0")
+  for output in bad_version_outputs() {
+    assert version_of(output) == None
+  }
+}
+
+# A successful assembly records its invocation outside assemble's scratch
+# directory, so cleanup cannot hide an incorrectly started subprocess.
+fn sentinel_assembler(output: String) -> String =
+  "if [ \"\$1\" = \"--version\" ]; then printf '%s' '" ++ str.replace(output, "'", "'\\''") ++ "'; exit 0; fi\n"
+  ++ "printf '%s' invoked > \"\$0.assembled\"\n"
+  ++ "for a in \"\$@\"; do if [ \"\$prev\" = \"-o\" ]; then out=\"\$a\"; fi; prev=\"\$a\"; done\n"
+  ++ "printf '%s' \"\$*\" > \"\$out\"\n"
+
 # A stand-in whose body (after the shebang) is `body`, in a fresh directory;
 # `f` gets its path, and the directory is removed afterwards.
 fn with_fake[T](body: String, f: fn(String) -> T !Fs !Proc) -> T !Fs !Proc = {
@@ -420,6 +496,61 @@ fn leftovers() -> List[String] !Fs = {
     Ok(names) -> list.filter(names, n => str.starts_with(n, "tileir-asm-"))
     Err(_e) -> []
   }
+}
+
+test "assemble rejects bad version identities before the assembly sentinel and preserves stdout" {
+  with_fs_real(() => with_proc_real(() => {
+    for output in bad_version_outputs() {
+      let before = leftovers()
+      let (answer, invoked) = with_fake(sentinel_assembler(output), path => {
+        let r = assemble(repro_558(), "sm_100", path)
+        let marker = "${path}.assembled"
+        let seen = match read_file(marker) {
+          Ok(_text) -> true
+          Err(_e) -> false
+        }
+        let _d = delete(marker)
+        (r, seen)
+      })
+      assert invoked == false
+      match answer {
+        Err(UnknownVersion(raw)) -> { assert raw == output }
+        _ -> { assert false }
+      }
+      assert leftovers() == before
+    }
+  }))
+}
+
+test "assemble preserves the version target and program argument policy through a real subprocess" {
+  with_fs_real(() => with_proc_real(() => {
+    for (output, gpu_name, prog, expected) in [
+      (pinned_version_output(), "sm_100", repro_558(), "--gpu-name sm_100 --opt-level 0 -o "),
+      (pinned_version_output(), "sm_90", repro_558(), "--gpu-name sm_90 --opt-level 0 -o "),
+      (pinned_version_output(), "sm_100", straight_line(), "--gpu-name sm_100 -o "),
+      (pinned_version_output(), "sm_86", repro_558(), "--gpu-name sm_86 -o "),
+      ("Cuda compilation tools, release 13.4, V13.4.93\n", "sm_100", repro_558(), "--gpu-name sm_100 -o "),
+      ("\tCuda compilation tools, release 13.4, V13.4.92 \r\n", "sm_90", repro_558(), "--gpu-name sm_90 --opt-level 0 -o "),
+    ] {
+      let before = leftovers()
+      let (answer, invoked) = with_fake(sentinel_assembler(output), path => {
+        let r = assemble(prog, gpu_name, path)
+        let marker = "${path}.assembled"
+        let seen = match read_file(marker) {
+          Ok(text) -> text == "invoked"
+          Err(_e) -> false
+        }
+        let _d = delete(marker)
+        (r, seen)
+      })
+      assert invoked
+      match answer {
+        Ok(cubin) -> { assert bytes.slice(cubin, 0, len(bytes.utf8(expected))) == bytes.utf8(expected) }
+        _ -> { assert false }
+      }
+      assert leftovers() == before
+    }
+  }))
 }
 
 test "assemble hands tileiras the program's bytes and the arguments tileiras_args picks, and answers the cubin" {
@@ -487,7 +618,7 @@ test "assemble: a zero exit that wrote no file is NoCubin" {
   }))
 }
 
-test "assemble: a --version with no V<number> is UnknownVersion, and a failing --version is AssemblerFailed" {
+test "assemble: an unreadable version is UnknownVersion, and a failing --version is AssemblerFailed" {
   with_fs_real(() => with_proc_real(() => {
     match with_fake("echo garbage\n", path => assemble(fake_program(), "sm_86", path)) {
       Err(UnknownVersion(out)) -> { assert str.trim(out) == "garbage" }
@@ -506,6 +637,7 @@ test "assemble: a --version with no V<number> is UnknownVersion, and a failing -
 test "explain says which assembler step failed" {
   assert explain(AssemblerNotFound("/x/tileiras", "no such file")) == "could not run tileiras at `/x/tileiras`: no such file"
   assert explain(AssemblerFailed(["--gpu-name", "sm_90"], 1, "bad\n")) == "tileiras --gpu-name sm_90 exited with status 1: bad"
+  assert explain(UnknownVersion("bad\n")) == "`tileiras --version` did not print one valid version record: bad"
   assert version_of("a\nCuda compilation tools, release 13.4, V13.4.92\nBuild x\n") == Some("13.4.92")
   assert version_of("nothing") == None
 }

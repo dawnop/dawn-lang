@@ -35,6 +35,8 @@ GPU 宿主尺寸上界：[gpu-host-overflow-design.md](gpu-host-overflow-design.
 
 scaled MMA 组合与架构拒绝覆盖：[gpu-n6-scaled-mma-design.md](gpu-n6-scaled-mma-design.md)。
 
+装配器版本身份严格拒绝：[gpu-assemble-version-design.md](gpu-assemble-version-design.md)。
+
 效果来源提案：[effect-provenance-design.md](effect-provenance-design.md)，按观察作用域保留逻辑调用，含来源负控与分期验收；语言机制尚未实现。
 
 ## 当前全仓审查（v2）
