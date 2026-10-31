@@ -124,7 +124,7 @@ fn scope_type(cx: Cx, t: Ty) -> Ty = {
   }
   if len(cx.frame.scope_bindings) == 0 && len(cx.frame.capture_bindings) == 0 { return t }
   let cm = cx.frame.capture_bindings
-  subst_scopes(t, scope_infer.normalized(cx.frame.scope_bindings), cm)
+  subst_scopes(t, cx.frame.scope_bindings, cm)
 }
 
 fn fresh_scope_signature(cx: Cx, s: Sig) -> (Cx, Sig) = {
@@ -155,10 +155,13 @@ fn learn_scope_argument(cx: Cx, s: Sig, declared: Ty, actual: Ty) -> (Cx, Bool) 
   if len(s.scope_params.scopes) == 0 && len(s.scope_params.captures) == 0 { return (cx, true) }
   let (bindings, ok) = scope_infer.infer(declared, actual, s.scope_params.scopes, cx.frame.scope_bindings)
   let captures = scope_infer.infer_captures(declared, actual, s.scope_params.captures, cx.frame.capture_bindings)
-  (Cx { ..cx, frame = Frame { ..cx.frame, scope_bindings = bindings, capture_bindings = captures } }, ok)
+  (Cx { ..cx, frame = Frame { ..cx.frame, scope_bindings = scope_infer.normalized(bindings), capture_bindings = captures } }, ok)
 }
 
 fn finish_scope_signature(cx: Cx, s: Sig, lo: Int, hi: Int) -> (Cx, Sig) = {
+  if len(s.scope_params.scopes) == 0 {
+    return (cx, scope_infer.contract_normalized(s, cx.frame.scope_bindings, cx.frame.capture_bindings))
+  }
   var next = cx
   var bindings = cx.frame.scope_bindings
   for region in s.scope_params.scopes {
@@ -171,8 +174,9 @@ fn finish_scope_signature(cx: Cx, s: Sig, lo: Int, hi: Int) -> (Cx, Sig) = {
       bindings = map.insert(bindings, region.id, ambient[len(ambient) - 1])
     }
   }
+  bindings = scope_infer.normalized(bindings)
   next = Cx { ..next, frame = Frame { ..next.frame, scope_bindings = bindings } }
-  (next, scope_infer.contract(s, bindings, next.frame.capture_bindings))
+  (next, scope_infer.contract_normalized(s, bindings, next.frame.capture_bindings))
 }
 
 fn bind_scope_keys(cx: Cx, regions: List[capture.Scope], lo: Int, hi: Int) -> (Cx, List[Int]) = {
@@ -244,19 +248,19 @@ fn check_scoped_value_call(cx: Cx, target: TExpr, ty: Ty, args: List[Expr],
     let ambient = next.current_capture_params.scopes
     if len(ambient) > 0 {
       next = Cx { ..next, frame = Frame { ..next.frame,
-        scope_bindings = map.insert(next.frame.scope_bindings, region.id, ambient[len(ambient) - 1]) } }
+        scope_bindings = scope_infer.normalized(map.insert(next.frame.scope_bindings, region.id, ambient[len(ambient) - 1])) } }
       continue
     }
     let (minted, id) = fresh(next)
     let actual = CaptureScope { ..region, id = id }
     let (keyed, symbols) = bind_scope_keys(minted, [actual], lo, hi)
     next = Cx { ..keyed, frame = Frame { ..keyed.frame,
-      scope_bindings = map.insert(keyed.frame.scope_bindings, region.id, actual) } }
+      scope_bindings = scope_infer.normalized(map.insert(keyed.frame.scope_bindings, region.id, actual)) } }
     statements = statements ++ [TSLet(Some(symbols[0]), scope_key_name(id),
       XCallBuiltin("scope_new_key", [], [], [], owner_off(cx, lo), owner_off(cx, hi), NO_NAME, TyInt),
       owner_off(cx, lo), owner_off(cx, hi))]
   }
-  let call = scope_infer.signature(template, next.frame.scope_bindings)
+  let call = scope_infer.signature_normalized(template, next.frame.scope_bindings)
   let (key_cx, keys) = scope_argument_values(next, call.scope_params.scopes, lo, hi)
   let (packed, evidence, unanswered) = dyn_evidence_args(key_cx, call.eff, lo, hi)
   next = record_effect(packed, eff_drop(call.eff, unanswered), lo, hi, "the scoped function")
