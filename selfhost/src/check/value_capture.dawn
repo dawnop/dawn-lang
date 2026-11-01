@@ -1,0 +1,229 @@
+# Expression typing hides ordinary environment representations, so dependency
+# edges must follow resolved values rather than the free names in their types.
+# This layer records those edges and storage locations while keeping the graph
+# solver independent of checker diagnostics and the runtime evidence layout.
+use std/map
+use std/list
+use check/capture
+use check/capture.{Scope, Params}
+use check/data_capture
+use check/environment
+use check/environment.{Node, Location, Graph}
+use check/cx.{Cx, Frame, cerr_h, owner_off, cx_new}
+use check/types.{Ty, TyVar, TyAdt, TyI64Buf, EffVar, EvidenceRole, ScopedLabelSlot, VariableSlot, AssociatedSlot,
+  evidence_role_key }
+use check/tast.{WitRef, WForward, WConcrete, WApply, TExpr, XLocal, XLambda, XCtor, XListLit, XTupleLit, XIf,
+  XMatch, XBlock, XField, XEvRead, XCallBuiltin, TLEExpr, TLESpread, TLEIf, tex_ty, x_lo, x_hi }
+
+fn node(value: Option[capture.Capture], name: String, lo: Int, hi: Int) -> environment.Node =
+  Node { value = value.unwrap_or([]), known = value != None,
+    edges = [], name = name, lo = lo, hi = hi }
+
+pub(pkg) fn symbol_node(cx: Cx, id: Int) -> environment.Node = {
+  let sym = map.get(cx.syms, id).expect("captured symbol")
+  match sym.dict_of {
+    Some(entry) -> { let (app, _) = entry
+      return node(Some(capture.trait_support(app)), sym.name, sym.dlo, sym.dhi) }
+    None -> ()
+  }
+  match sym.cell_of {
+    Some(entry) -> { let (_, contents) = entry
+      return node(data_capture.support_bound(cx.adts, cx.current_capture_params, contents), sym.name, sym.dlo, sym.dhi) }
+    None -> ()
+  }
+  node(data_capture.value_bound(cx.adts, cx.current_capture_params, sym.ty), sym.name, sym.dlo, sym.dhi)
+}
+
+pub(pkg) fn ensure(cx: Cx, ids: List[Int]) -> Cx = {
+  var graph = cx.frame.environment
+  var changed = false
+  for id in ids { if not map.has(graph.nodes, id) {
+    graph = environment.bind(graph, id, symbol_node(cx, id))
+    changed = true
+  } }
+  if not changed { return cx }
+  Cx { ..cx, frame = Frame { ..cx.frame, environment = graph } }
+}
+
+fn merge_nodes(a: environment.Node, b: environment.Node) -> environment.Node = {
+  var edges = a.edges
+  for id in b.edges { if not list.contains(edges, id) { edges = edges ++ [id] } }
+  Node { ..a, value = capture.union(a.value, b.value), known = a.known && b.known, edges = edges }
+}
+
+fn erased_record(cx: Cx, ty: Ty) -> Bool = match ty {
+  TyAdt(id, _, _) -> match map.get(cx.adts, id) {
+    Some(info) -> not capture.is_representation(info.scope_params)
+    None -> false
+  }
+  _ -> false
+}
+
+# A frozen snapshot retains the selected evidence. Ordinary function bodies
+# use their caller's pack and never enter this path merely by mentioning a row.
+fn frozen_origin(cx: Cx, role: EvidenceRole, lo: Int, hi: Int) -> environment.Node = {
+  var result = node(Some([]), "frozen evidence", lo, hi)
+  match role {
+    ScopedLabelSlot(_, id) -> {
+      for region in cx.current_capture_params.scopes { if region.id == id {
+        result = Node { ..result, value = [capture.Region(region)] }
+      } }
+    }
+    VariableSlot(_) | AssociatedSlot(_, _, _) -> { result = Node { ..result, known = false } }
+    _ -> ()
+  }
+  let key = evidence_role_key(role)
+  var i = len(cx.frame.scopes) - 1
+  while i >= 0 {
+    for id in map.values(cx.frame.scopes[i]) {
+      let sym = map.get(cx.syms, id).expect("evidence symbol")
+      if sym.ev_of == Some(key) { return Node { ..result, edges = [id] } }
+    }
+    i = i - 1
+  }
+  result
+}
+
+pub(pkg) fn expression(cx: Cx, expr: TExpr, frozen: Bool) -> environment.Node = {
+  let ty = tex_ty(expr)
+  var result = node(data_capture.value_bound(cx.adts, cx.current_capture_params, ty), "value", x_lo(expr), x_hi(expr))
+  var children: List[TExpr] = []
+  match expr {
+    XLocal(id, name, _, _, _) -> return Node { ..result, known = true, value = [], edges = [id], name = name }
+    XLambda(_, _, _, captures, _, _, _, _) -> return Node { ..result, edges = captures }
+    XCtor(_, _, values, _, spread, _, _, _) -> {
+      # Erased evidence records have no public data summary. Their actual
+      # fields are present at construction and retain every frozen edge.
+      if erased_record(cx, ty) { result = Node { ..result, value = [], known = true } }
+      children = values
+      match spread { Some(value) -> { children = children ++ [value] }, None -> () }
+    }
+    XListLit(elements, _, _, _) -> {
+      for element in elements { match element {
+        TLEExpr(value) | TLESpread(value) -> { children = children ++ [value] }
+        TLEIf(arms) -> { for arm in arms { children = children ++ [arm.body] } }
+      } }
+    }
+    XTupleLit(values, _, _, _) -> { children = values }
+    XIf(_, yes, no, _, _, _) -> { children = [yes]
+      match no { Some(other) -> { children = children ++ [other] }, None -> () } }
+    XMatch(_, arms, _, _, _) -> { for arm in arms { children = children ++ [arm.body] } }
+    XBlock(_, tail, _, _, _) -> { match tail { Some(value) -> { children = [value] }, None -> () } }
+    XField(target, _, _, _, _) -> {
+      if erased_record(cx, tex_ty(target)) { children = [target] }
+    }
+    XEvRead(_, role, lo, hi, _, _) -> if frozen { return frozen_origin(cx, role, lo, hi) }
+    XCallBuiltin(_, args, _, _, _, _, _, _) -> match ty {
+      TyVar(_, 0) -> { children = args }
+      _ -> ()
+    }
+    _ -> ()
+  }
+  for child in children { result = merge_nodes(result, expression(cx, child, frozen)) }
+  result
+}
+
+pub(pkg) fn bind(cx: Cx, id: Int, value: TExpr, frozen: Bool) -> Cx = {
+  let actual = expression(cx, value, frozen)
+  var next = ensure(cx, actual.edges)
+  let sym = map.get(cx.syms, id).expect("bound symbol")
+  let base = if sym.ev_of != None { node(Some([]), sym.name, sym.dlo, sym.dhi) }
+  else { symbol_node(cx, id) }
+  let combined = merge_nodes(base, actual)
+  let graph = environment.bind(next.frame.environment, id, Node { ..combined, name = sym.name, lo = sym.dlo, hi = x_hi(value) })
+  next = Cx { ..next, frame = Frame { ..next.frame, environment = graph } }
+  next
+}
+
+pub(pkg) fn install(cx: Cx, id: Int, contents: Ty) -> Cx = {
+  let sym = map.get(cx.syms, id).expect("storage symbol")
+  var support = map(cx.current_capture_params.scopes, s => capture.Region(s))
+  for param in cx.current_capture_params.captures {
+    support = capture.union(support, [capture.CaptureVar(param.name, param.id)])
+  }
+  let effects = map(map.values(cx.current_eff_vars), row => match row { EffVar(_, id) -> id, _ -> -1 })
+  let place = Location { support = support, types = map.values(cx.current_tparams), effects = effects, contents = contents,
+    name = sym.name, lo = sym.dlo, hi = sym.dhi }
+  Cx { ..cx, frame = Frame { ..cx.frame, environment = environment.install(cx.frame.environment, id, place) } }
+}
+
+pub(pkg) fn write(cx: Cx, id: Int, value: Ty, lo: Int, hi: Int) -> Cx = {
+  let place = match environment.location(cx.frame.environment, id) {
+    Some(found) -> found
+    None -> return cx
+  }
+  let valid = match data_capture.support_at(cx.adts, cx.current_capture_params, place.types, value, place.effects) {
+    Some(support) -> capture.subset_in(support, place.support, cx.current_capture_params.captures)
+    None -> false
+  }
+  if valid { return cx }
+  cerr_h(cx, "value escapes the installation lifetime of `" ++ place.name ++ "`", lo, hi,
+    "the stored value's complete type support must fit the location created at " ++ to_string(place.lo + cx.owner_lo))
+}
+
+pub(pkg) fn witness_support(witness: WitRef) -> capture.Capture = match witness {
+  WForward(_, app, _) | WConcrete(app, _) -> capture.trait_support(app)
+  WApply(app, _, children) -> {
+    var result = capture.trait_support(app)
+    for child in children { result = capture.union(result, witness_support(child)) }
+    result
+  }
+}
+
+pub(pkg) fn carried(cx: Cx, id: Int, source: Int, contents: Ty) -> Cx = {
+  let sym = map.get(cx.syms, id).expect("staged cell")
+  let own = node(data_capture.support_bound(cx.adts, cx.current_capture_params, contents), sym.name, sym.dlo, sym.dhi)
+  let graph = environment.alias_location(environment.bind(cx.frame.environment, id, own), id, source)
+  Cx { ..cx, frame = Frame { ..cx.frame, environment = graph } }
+}
+
+# Witness origins explain a static obligation without inventing runtime slots.
+pub(pkg) fn record_witness(cx: Cx, support: capture.Capture, name: String, lo: Int, hi: Int) -> Cx = {
+  if len(support) == 0 { return cx }
+  let graph = cx.frame.environment
+  let origin = node(Some(support), "witness " ++ name, owner_off(cx, lo), owner_off(cx, hi))
+  Cx { ..cx, frame = Frame { ..cx.frame,
+    environment = Graph { ..graph, witnesses = graph.witnesses ++ [origin] } } }
+}
+
+pub(pkg) fn describe(cx: Cx, value: TExpr, member: capture.Member) -> String = {
+  let answer = match value { XLambda(_, _, body, _, _, _, _, _) -> body, _ -> value }
+  let retained = expression(cx, answer, false)
+  let prepared = ensure(cx, retained.edges)
+  let path = environment.origin(prepared.frame.environment, retained.edges, member)
+  var steps = map(path, step => "`" ++ step.name ++ "` at " ++ to_string(step.lo + cx.owner_lo))
+  for witness in prepared.frame.environment.witnesses {
+    if not capture.contains(witness.value, member) { continue }
+    let inside = witness.lo >= x_lo(answer) && witness.hi <= x_hi(answer)
+    let through = list.any(path, step => witness.lo >= step.lo && witness.hi <= step.hi)
+    if inside || through {
+      steps = steps ++ ["`" ++ witness.name ++ "` at " ++ to_string(witness.lo + cx.owner_lo)]
+      break
+    }
+  }
+  if len(steps) == 0 { return "" }
+  "\nvalue dependency: " ++ join(steps, " -> ")
+}
+
+test "storage writes retain the original lifetime through aliases" {
+  let s = Scope { name = "s", id = 11 }
+  let t = Scope { name = "s", id = 12 }
+  let initial = cx_new(Some("model"), None)
+  let place = Location { support = [capture.Region(s)], types = [], effects = [],
+    contents = TyI64Buf(s), name = "saved", lo = 2, hi = 3 }
+  let graph = environment.alias_location(environment.install(environment.empty(), 1, place), 2, 1)
+  let cx = Cx { ..initial, current_capture_params = Params { ..capture.empty_params(), scopes = [s, t] },
+    frame = Frame { ..initial.frame, environment = graph } }
+  assert write(cx, 1, TyI64Buf(s), 4, 5).diags == []
+  assert write(cx, 2, TyI64Buf(s), 4, 5).diags == []
+  assert len(write(cx, 1, TyI64Buf(t), 4, 5).diags) == 1
+  assert len(write(cx, 2, TyI64Buf(t), 4, 5).diags) == 1
+}
+
+pub(pkg) fn describe_unknown(cx: Cx, roots: List[Int]) -> String = {
+  let path = environment.unknown_origin(cx.frame.environment, roots)
+  if len(path) == 0 { return "" }
+  "\nvalue dependency: " ++ join(map(path,
+    step => "`" ++ step.name ++ "` at " ++ to_string(step.lo + cx.owner_lo)), " -> ") ++
+    " has no complete support proof"
+}

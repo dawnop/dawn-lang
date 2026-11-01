@@ -8,7 +8,7 @@ EMIT = "selfhost/src/jvm/emit.dawn"
 RUNTIME = "runtime/c/dawn_rt.c"
 MUTATIONS = {
     "allow-scope-escape": ((CHECKER,
-        "  let escaped = reject_scope_escape(cx1, s, at, m, em, e_lo(a), e_hi(a))",
+        "  let escaped = reject_scope_escape(cx1, s, at, m, em, ax, e_lo(a), e_hi(a))",
         "  let escaped = cx1"),
         ("selfhost/src/check/types.dawn",
          "    if list.any(ty_scope_refs(source), member => match member {",

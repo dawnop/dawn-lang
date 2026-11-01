@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 628f13744c10f547 -->
+<!-- doc-check: translation-of docs/spec.md @ f2018e4f78afae65 -->
 
 # Dawn Language Specification
 
@@ -2459,6 +2459,24 @@ outside effect position, and is refused everywhere inside one (§6.3).
 
 #### 6.2.1 Mem scopes and captures (settled, pending implementation)
 
+Ordinary closures hide their environment representation. Their capture contract C
+unions the reachable value dependencies V of captured ordinary values, rather
+than those values' type-only free Scope support F. The public function arrow
+retains free Scopes in its parameters, result, calling row and C. Moving a closure
+checks that public contract without reopening hidden ordinary fields. Thus an
+empty-value-capture phantom or an empty-environment function with a scoped input
+may be hidden in an otherwise independent closure; delivering either original
+type directly still checks F and refuses escape. This does not provide an
+existential Scope, Scope renaming or implicit arguments. Real resources, permitted
+mutable cells, frozen evidence and continuations keep their dependencies.
+
+A Type bound T:^{c} limits V(T) only. The generic bind factory proves its result
+using V(T), the reader environment and its calling row. Dictionaries separately
+contribute their complete witness contract W; ordinary hiding does not eliminate
+W or weaken S(Subject) contained in W. Cell writes check full delivery support,
+invariant content and the location's installation lifetime, including aliases
+and handler or staged channels. Computation defaults remain staged in this slice.
+
 A trait witness's static contract contains the trait identity, subject, Capture arguments and
 subwitnesses. The union W of Capture arguments must cover the subject's reachable captures and
 free Scope support in its complete type. Subject and Item bounds, subwitnesses and Scope keys must
@@ -4574,6 +4592,10 @@ two together; one module too many or too few fails it):
   whose row carries `Mem`, or any type variable; only `std/mem` may install a handler for `Mem`; an effect
   operation's signature and a handler's `var` may not contain a buffer; a function
   value carrying `Mem` may not cross a `use java` call)
+  The handler cell restriction in the preceding list is superseded by the
+  installation lifetime rule in §6.2.1. Cells installed and used within a buffer's
+  Scope may retain that buffer. Writes and aliases preserve full support and
+  invariant contents.
   **The current four rules do not close hidden-capture and purity gaps.**
   Their settled replacement is pending implementation in §6.2.1; the current
   restrictions above are not a complete guarantee against escape.

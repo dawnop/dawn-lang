@@ -57,9 +57,26 @@ pub type Member = Region(scope: Scope) | CaptureVar(name: String, id: Int)
 pub alias Capture = List[Member]
 pub type CaptureParam = { name: String, id: Int, bound: Option[Capture] }
 pub type Function = { scopes: List[Scope], bound: Option[Capture] }
+# Representation parameters and generated introductions share a data contract.
+# Keeping the duty explicit prevents computation defaults from restricting a
+# constructor or silently changing an unrestricted data parameter's meaning.
+pub type Quantification = Computational | DataRepresentation(types: List[Int]) | DataIntroduction(types: List[Int])
+pub type Envelope = OpaqueHeadV1(types: Int, scopes: Int, captures: Int)
+
+pub fn opaque_head(types: Int, scopes: Int, captures: Int) -> Option[Envelope] =
+  Some(OpaqueHeadV1(types, scopes, captures))
+
+pub type Summary = {
+  value_parameters: List[Int], value: Capture,
+  support_parameters: List[Int], support: Capture
+}
 pub type Params = {
+  quantification: Quantification,
   scopes: List[Scope], captures: List[CaptureParam],
-  bounds: List[(Int, Capture)], fn_effects: List[Int]
+  bounds: List[(Int, Capture)], fn_effects: List[Int],
+  # Complete support facts come only from well-formed trait applications.
+  # They are proof context, never a strengthening of an ordinary value bound.
+  support_facts: List[(Int, Capture)]
 }
 pub type Arguments = { scopes: List[Scope], captures: List[Capture] }
 const EMPTY_ARGUMENTS: Arguments = Arguments { scopes = [], captures = [] }
@@ -85,8 +102,27 @@ pub fn argument_names(a: Arguments) -> List[String] =
 
 const EMPTY_FUNCTION: Function = Function { scopes = [], bound = None }
 pub fn empty_function() -> Function = EMPTY_FUNCTION
-const EMPTY_PARAMS: Params = Params { scopes = [], captures = [], bounds = [], fn_effects = [] }
+const EMPTY_PARAMS: Params = Params { quantification = Computational,
+  scopes = [], captures = [], bounds = [], fn_effects = [], support_facts = [] }
 pub fn empty_params() -> Params = EMPTY_PARAMS
+
+pub fn data_params(p: Params, types: List[Int]) -> Params =
+  Params { ..p, quantification = DataRepresentation(types) }
+
+pub fn introduction(p: Params) -> Params = match p.quantification {
+  DataRepresentation(types) -> Params { ..p, quantification = DataIntroduction(types) }
+  _ -> p
+}
+
+pub fn is_representation(p: Params) -> Bool = match p.quantification {
+  DataRepresentation(_) -> true
+  _ -> false
+}
+
+pub fn representation_types(p: Params) -> List[Int] = match p.quantification {
+  DataRepresentation(types) | DataIntroduction(types) -> types
+  Computational -> []
+}
 
 fn key(m: Member) -> (Int, Int) = match m {
   Region(s) -> (0, s.id)

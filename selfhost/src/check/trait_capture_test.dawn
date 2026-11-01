@@ -8,6 +8,7 @@ use check/capture.{Scope, TraitApplication, Region, CaptureVar, Function}
 use check/types
 use check/types.{Ty, TyInt, TyUnit, TyVar, TyI64Buf, TyFn, TyAssoc, EPure}
 use check/trait_contract
+use check/data_capture
 use check/scope_infer
 use check/cx.{Cx, cx_new}
 use check/passes.{seed_prelude}
@@ -295,8 +296,8 @@ test "associated Mem bindings retain the impl Scope in exported metadata" {
 test "a function's free type Scope support is independent of its value captures" {
   let s = Scope { name = "s", id = 1 }
   let value = TyFn([TyI64Buf(s)], TyInt, EPure, capture.empty_function())
-  assert trait_contract.capture_of(map.empty(), capture.empty_params(), value) == []
-  assert trait_contract.support(map.empty(), capture.empty_params(), value) == [Region(s)]
+  assert data_capture.value_bound(map.empty(), capture.empty_params(), value) == Some([])
+  assert trait_contract.support(map.empty(), capture.empty_params(), value) == Some([Region(s)])
 }
 
 test "a concrete independent associated result sheds the declared projection bound" {

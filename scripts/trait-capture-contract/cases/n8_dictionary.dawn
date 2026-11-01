@@ -1,0 +1,13 @@
+# Explicit contracts exercise data introduction and nominal boundaries.
+use std/mem
+type EmptyAt[@s] = { value: Option[I64Buf@s] }
+trait Empty[T: ^{c}, ^c] { fn empty_value() -> T }
+impl[@s] Empty[EmptyAt[s], ^{s}] { fn empty_value() -> EmptyAt[s] = EmptyAt { value = None } }
+fn factory[T: Empty[c] + ^{c}, ^c](tag: T) = {
+  let make: fn() -> T ^{c} = empty_value
+  () => { let _value = make()
+    0 }
+}
+fn attempted() !io = mem.with_mem([@s] () => { let tag: EmptyAt[s] = EmptyAt { value = None }
+  factory(tag) })
+pub fn main() -> Unit !io = println("probe")

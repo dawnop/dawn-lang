@@ -1,0 +1,14 @@
+# Ordinary environments and delivered type support have separate contracts.
+use std/mem
+opaque type Marker[T] = Int
+fn bind[T: ^{c}, ^c, !e](value: T, read: fn(T, Int) -> Int !e ^{c}) -> (fn(Int) -> Int !e ^{c}) = n => read(value, n)
+fn escaped() -> (fn(Int) -> Int) = mem.with_mem([@s] () => {
+  let value: Marker[I64Buf@s] = 7
+  let read: fn(Marker[I64Buf@s], Int) -> Int = (p: Marker[I64Buf@s], delta: Int) => {
+    let n: Int = p
+    n + delta
+  }
+  bind(value, read)
+})
+pub fn main() -> Unit !io = { let f = escaped()
+  println(to_string(f(4))) }

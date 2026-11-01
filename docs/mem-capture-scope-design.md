@@ -119,16 +119,36 @@ assoc_effect_atom := effect_name ['[' scope_name ']']
 用 `Γ; Δ ⊢ x: T ! E ▷ C` 表示：活跃域集合 Δ 中，表达式 x 返回 T，求值需 E，
 结果可达域依赖的上界为 C。`cap(T)` 包含 T 的域、环境与所有可达字段的依赖；
 `free_scope(T, E, C)` 还包括参数类型、效果行等契约里出现的静态域。
-实际值依赖、函数环境依赖与完整类型的自由域不是同一集合，但出口三者都必须合法。
+V(T) is the reachable value capture upper bound. F(T) is the free Scope support
+of the complete public type contract, and S(T) = V(T) union F(T). Both components
+may overlap. A boundary checks the type delivered there and its support. Function
+contracts represent hidden environment dependencies with C; nominal data and
+opaque values retain their complete arguments and structural summary or public
+envelope. A value bound on T does not prove that its unknown full support fits it.
 
 - Int、Float、String、Bytes、Unit 等独立不可变值的 cap 为空。
   `cap(I64Buf@s) = cap(F64Buf@s) = {s}`，即使长度为零或只作 `len` 也如此。
 - tuple、List、Option、Result、记录、变体的 cap 为可达成分之并。
   泛型字段先代换再求依赖；ADT 递归用有限集合的最小不动点，不能遇环就返回空。
   没有字段路径精度时保守取整个值的上界，投影不能把未知依赖变为空。
-- 函数值的环境 C 为所有自由捕获值、被捕获的格子、字典和证据包的 cap 之并。
-  参数/返回类型与 E 中的自由域也必须在存放处可命名，但不自动算成捕获环境。
-  lambda 的调用行由体推出；局部命名 fn 同样计算环境，其行仍按显式签名检查。
+- An ordinary lambda, local function or synthesized ordinary closure obtains C
+  from its resolved graph of free values, functions, cells, witnesses and evidence.
+  An ordinary value contributes V only. Its type-only F does not enter C.
+  A function contributes its declared or inferred environment; a dictionary
+  contributes its complete witness contract W; frozen evidence contributes its
+  support. Permitted cells retain their installation lifetime, invariant content
+  contract and alias identity.
+- Closure formation checks the captured values' well-formed types and the body.
+  Moving the closure checks its complete public arrow and C, without reopening
+  hidden ordinary fields to add F. This limited hiding neither exposes an
+  existential Scope nor renames a Scope or adds an implicit parameter. It cannot
+  hide V, witness W or frozen evidence. Free Scopes still present in parameters,
+  results and calling rows remain visible.
+- A Phantom[Buf@s] or an empty-environment fn(Buf@s)->Int may be captured by an
+  otherwise independent ordinary closure whose public arrow omits s. Delivering
+  either original type directly still refuses escape. A pure calling row does
+  not prove an empty environment. Lambda rows are inferred; local named functions
+  check their written calling contract.
 - `T: ^{c}` bounds reachable value captures. Function and impl parameters, trait subjects,
   and associated type outputs default to empty capture contracts. Data, transparent alias
   and opaque representation parameters do not acquire that default. Explicit bounds remain
@@ -154,7 +174,12 @@ fn bind[T: ^{c}, ^c, !e](value: T,
   n => read(value, n)
 ```
 
-调用时 c 至少容纳 value 与 read 的依赖，e 由 read 实例化。
+At a call, c covers V(T) and read's environment; e preserves read's calling row.
+T:^{c} does not prove F(T) is contained in c. The result arrow retains every free
+Scope in e and c. When T has only type support, V(T), read's environment and e
+may be empty, allowing c to be empty. The hidden input type does not automatically
+enter result support. Captured witnesses and evidence still contribute their
+public support.
 给定域 s 的缓冲及读取函数，结果不会变成 `fn(Int) -> Int ^{}`，也不会变成纯函数。
 上界可比实际环境宽；调用方不得根据未导出的函数体把它缩小。
 高阶调用、递归调用和命名函数转值都实例化同一个契约；把运行器改名或装入记录不绕过规则。
@@ -177,7 +202,11 @@ Capture 在 trait 应用上第一版按不变实参检查；同一个 trait 的�
 
 方法转函数值、默认方法调用、字典应用与转发、opaque 函数表、模块导出/再载入使用同一捕获与自由域契约。缓存和类型打印保存 trait Capture 参数、应用实参、成员上界；不保留无 Capture 信息的旧接口读取分支。
 
-解释性注：W 的独立证明是 A 的明确新增约束，不能假装从旧 `T:^{c}` 自动推出。它会保守拒绝某些实际只存代码、但类型里仍有局部域的字典逃逸；这符合现行“free_scope 也不得越界”的裁决。若要允许该类擦除，需要另证支持消除规则，不在本刀悄做优化。
+The premise S(Subject) contained in W is independent of T's value bound.
+N8 conservatively refuses a dictionary whose public contract retains a local
+Scope, even when its runtime representation stores code only. Ordinary closure
+hiding of an ordinary value's type-only F does not eliminate witness W.
+Backend erasure, devirtualization and scalar method results cannot narrow W.
 
 
 
@@ -210,10 +239,66 @@ without opening private fields, and missing envelope metadata is not interpreted
 Interfaces, caches, documentation and language server types retain quantification duties,
 explicit bounds, envelope metadata and static identities.
 
-These data summaries and opaque envelopes belong to the next K3b-2 slice. The call
-instantiation slice does not claim to implement them. Before enabling computation defaults,
+The second K3b-2 slice implements data summaries and opaque envelopes with explicit
+contracts while computation defaults remain disabled. Before enabling computation defaults,
 a real seed closure audit must cover the actual compiler and library migration. Control
 boundaries and domain discharge remain in K4.
+
+### 3.3 Finite summaries and declaration duties
+
+The second K3b-2 slice keeps computation defaults staged. Its declaration
+contracts distinguish data representation and data introduction from computation.
+A generated constructor inherits the parent declaration's Type parameters and
+explicit bounds. A user function, derived method or default argument computation
+keeps its computation contract. This distinction adds no Scope or Capture axis.
+
+A data summary has two components: reachable value captures and complete free
+support. Each component is a finite union of projections of declared Type
+parameters and declared Scope or Capture identities. Projections belong to the
+summary representation and are substituted with actual Type arguments. They are
+not surface capture arguments or implicit binders. Function environments enter
+the value component; function parameters, results and calling rows also enter
+complete support. All nominal arguments remain in complete support, including
+phantom arguments. Transparent aliases retain only the dependencies left after
+expansion.
+
+Declaration dependencies form a graph. Each strongly connected component is
+solved by monotone union over that finite domain, with dependency components
+settled first. Empty is an iteration lower bound, never an answer to an
+unresolved edge. Applying a settled summary substitutes its projections instead
+of recursively expanding instantiated fields. This also covers recursive calls
+whose Type arguments grow structurally. Declaration order cannot affect the
+settled result.
+
+Explicit data constraints are obligations at both declaration and application.
+An unrestricted representation parameter cannot prove an empty capture bound.
+Header obligations which depend on an unfinished declaration component are
+checked after its summaries settle and before body checking. An alias or field
+cannot become well formed merely because one client later chooses Int.
+
+Opaque envelopes use the public head, including every Type argument's value
+captures and explicit Scope and Capture arguments. Complete support also retains
+the arguments' free domains. The owner proves that the representation fits the
+envelope. Client dependency checks do not open the hidden target. Exported
+contracts retain declaration duties, explicit bounds and settled summaries or
+the opaque head envelope. Missing required metadata refuses the interface or
+invalidates its cached product; it cannot supply an empty summary.
+
+Actual environments use a separate graph of resolved value identities, closure
+captures, dictionaries, evidence and mutable cells. Joining or recursively
+referring to values preserves these edges. Cell writes retain the cell's
+installation scope and invariant content contract. Solving this graph does not
+replace the type summary, and a pure calling row does not erase an environment.
+The value and support summary components answer different questions. Ordinary
+value capture uses value; boundary well-formedness, witness premises and nominal
+results use complete support. A single traversal of all dependencies cannot
+replace both. Ordinary Type value bounds do not prove complete support; each
+trait support premise has an independent source.
+
+Validation uses explicit contracts for the M and N programs while computation
+defaults remain disabled. Independent mutations must build and execute their
+owning semantic oracle. The later default activation still requires the actual
+seed closure audit, and K4 retains domain discharge and control boundaries.
 
 
 ## 4. 运行器与按域 Mem 消解
@@ -264,16 +349,23 @@ fn poke[@s](b: I64Buf@s, n: Int) -> Unit !Mem[s] =
 
 ## 5. 传播、存储与全部出口
 
-每个存储位置有安装/创建时的有效域集合 L。写入的值要求其 cap 和类型/效果中的
-自由域均在 L 内；目标类型的捕获 bound 与行也必须容纳来源。不能只看本函数返回值。
-别名指向同一格子时共用位置约束，不因在更深词法块拿到别名就延长其寿命。
+Every boundary checks the delivered type's complete S and residual effects.
+For an ordinary function value this is its public arrow and environment contract,
+without reopening hidden ordinary environment fields. Direct nominal values,
+arrow parameters, results and rows, opaque envelopes, witness W and cell contents
+retain their full checks. Each storage location has the active Scope set L from
+installation or creation. Writes must fit L and the invariant content contract;
+aliases share that lifetime even when read in a deeper block. A cell write has no
+closure hiding step, so empty V alone cannot justify an escaping F. External
+storage without a capture contract accepts only delivery types without local
+support.
 
 | 通道 | 必须证明的条件 |
 |---|---|
 | Mem s 的正常返回、提前 return、`?` 的答案、分支答案 | 结果类型、cap、残余行均不含新 s |
 | 写入外层 handler var、可变闭包格子、聚合更新 | 来源依赖在该位置有效域内，Unit 返回不豁免 |
 | effect 操作的参数/答案、转发及 handler 臂 | 接收端契约与安装寿命覆盖全部依赖 |
-| lambda、局部 fn、泛型工厂、字典、合成闭包 | 传递环境依赖，不只扫描显式参数/返回类型 |
+| Ordinary lambdas, local functions, factories, dictionaries and synthesized closures | Preserve V environment edges, witness W, frozen evidence and cell lifetimes; check the complete public arrow |
 | opaque、模块导出与接口再载入 | 不遗失隐藏表示的上界，不封装新 s 为未声明身份 |
 | Java 参数、SAM、Object/List bridge 以及其他无捕获契约的外部存储 | 只接受空捕获且无局部自由域；io 不代替域证明 |
 
@@ -391,6 +483,15 @@ identity and constructor layout. A projected Mem atom is read from the caller's 
 pack with that same instance key. Capture sets have no runtime slots. Actual environment
 inference, ordinary empty defaults, standard library migration and the remaining exit
 checks follow this slice; control boundaries and domain discharge remain in K4.
+
+The second slice adds data introduction duties, finite declaration summaries,
+opaque head envelopes and actual value and storage dependency graphs. Ordinary
+closure environments merge V; delivered types retain S, witnesses retain W, and
+storage retains its original installation contract. Explicit callback contracts
+and closed scalar witness premises preserve the necessary scoped library uses.
+Computation defaults stay disabled. Their switch and the remaining library
+migration require a real audit of the compiler's seed closure before the next
+slice proceeds.
 
 两后端可以擦除静态域，不要求缓冲运行时增加域 id，也不承诺证据布局或 emit 零变化。
 必须验证 at/set 仍是直接原语，重新量 bcrypt 与 tileinterp；K1 无性能实测，不作速度承诺。

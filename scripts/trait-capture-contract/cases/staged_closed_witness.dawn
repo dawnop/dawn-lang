@@ -1,0 +1,24 @@
+# A complete closed witness premise is independent of an ordinary value bound.
+use std/gpu.{ScalarDtype}
+type Marker[T] = { n: Int }
+type Slot[T] = { value: Marker[T] }
+impl[T] StagedVar[Marker[T]] {
+  type Cell = Slot[T]
+  fn var_open(value: Marker[T]) -> Slot[T] = Slot { value = value }
+  fn var_get(cell: Slot[T]) -> Marker[T] = cell.value
+  fn var_set(cell: Slot[T], value: Marker[T]) -> Unit = ()
+}
+type Cond = { n: Int }
+impl StagedCond[Cond] {
+  fn staged_if(c: Cond, yes: fn() -> Unit, no: fn() -> Unit) -> Unit = yes()
+}
+fn carried[T: ScalarDtype + ^{}](value: Marker[T]) -> Int = {
+  let condition = Cond { n = 1 }
+  var marker = value
+  if condition { marker = marker }
+  marker.n
+}
+pub fn main() -> Unit !io = {
+  let value: Marker[Int] = Marker { n = 3 }
+  println(to_string(carried(value)))
+}

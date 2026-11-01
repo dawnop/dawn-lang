@@ -1,0 +1,145 @@
+# Value dependencies form a finite graph over resolved symbols. Reachability
+# computes its least union fixed point without expanding recursive types or
+# reopening a closure's hidden ordinary field types. Storage aliases retain
+# one installation location rather than acquiring a later reader's lifetime.
+use std/map
+use std/list
+use std/set
+use check/capture
+use check/capture.{Scope}
+use check/types.{Ty, TyInt}
+
+pub type Node = { value: capture.Capture, known: Bool, edges: List[Int], name: String, lo: Int, hi: Int }
+pub type Location = { support: capture.Capture, types: List[Ty], effects: List[Int], contents: Ty, name: String, lo: Int, hi: Int }
+pub type Graph = { witnesses: List[Node], nodes: Map[Int, Node], locations: Map[Int, Location], aliases: Map[Int, Int] }
+
+pub fn empty() -> Graph = Graph { witnesses = [], nodes = map.empty(), locations = map.empty(), aliases = map.empty() }
+
+pub fn bind(graph: Graph, id: Int, node: Node) -> Graph =
+  Graph { ..graph, nodes = map.insert(graph.nodes, id, node) }
+
+pub fn link(graph: Graph, id: Int, dependencies: List[Int]) -> Graph = match map.get(graph.nodes, id) {
+  Some(node) -> {
+    var edges = node.edges
+    for source in dependencies { if not list.contains(edges, source) { edges = edges ++ [source] } }
+    bind(graph, id, Node { ..node, edges = edges })
+  }
+  None -> graph
+}
+
+pub fn install(graph: Graph, id: Int, location: Location) -> Graph =
+  Graph { ..graph, locations = map.insert(graph.locations, id, location), aliases = map.insert(graph.aliases, id, id) }
+
+pub fn alias_location(graph: Graph, target: Int, source: Int) -> Graph = match map.get(graph.aliases, source) {
+  Some(origin) -> Graph { ..graph, aliases = map.insert(graph.aliases, target, origin) }
+  None -> graph
+}
+
+pub fn location(graph: Graph, id: Int) -> Option[Location] = match map.get(graph.aliases, id) {
+  Some(origin) -> map.get(graph.locations, origin)
+  None -> None
+}
+
+# A finite union equation X_i = own_i union union_j X_j has the reachability
+# solution below. Marking a visited symbol skips duplicate work, not its other
+# edges: every discovered edge is still queued, including recursive components.
+pub type Solution = { value: capture.Capture, known: Bool }
+
+pub fn dependencies(graph: Graph, roots: List[Int]) -> Solution = {
+  if len(roots) == 0 { return Solution { value = [], known = true } }
+  var seen: Set[Int] = set.empty()
+  var pending: Map[Int, Int] = map.empty()
+  var end = 0
+  for root in roots { pending = map.insert(pending, end, root)
+    end = end + 1 }
+  var cursor = 0
+  var result: capture.Capture = []
+  var known = true
+  while cursor < end {
+    let id = map.get(pending, cursor).expect("dependency work item")
+    cursor = cursor + 1
+    if set.has(seen, id) { continue }
+    seen = set.insert(seen, id)
+    match map.get(graph.nodes, id) {
+      Some(node) -> {
+        result = capture.union(result, node.value)
+        known = known && node.known
+        for edge in node.edges { if not set.has(seen, edge) {
+          pending = map.insert(pending, end, edge)
+          end = end + 1
+        } }
+      }
+      None -> { known = false }
+    }
+  }
+  Solution { value = result, known = known }
+}
+
+pub fn permits_location(graph: Graph, id: Int, support: capture.Capture) -> Bool =
+  match location(graph, id) {
+    Some(place) -> capture.subset(support, place.support)
+    None -> false
+  }
+
+# The first predecessor path gives a stable diagnostic explanation without
+# changing the solved set. The queue follows source capture order.
+fn explanation(graph: Graph, roots: List[Int], member: Option[capture.Member]) -> List[Node] = {
+  var seen: Set[Int] = set.empty()
+  var pending: Map[Int, (Int, List[Node])] = map.empty()
+  var end = 0
+  for root in roots { pending = map.insert(pending, end, (root, []))
+    end = end + 1 }
+  var cursor = 0
+  while cursor < end {
+    let (id, path) = map.get(pending, cursor).expect("origin work item")
+    cursor = cursor + 1
+    if set.has(seen, id) { continue }
+    seen = set.insert(seen, id)
+    match map.get(graph.nodes, id) {
+      Some(node) -> {
+        let next = path ++ [node]
+        let found = match member { Some(atom) -> capture.contains(node.value, atom), None -> not node.known }
+        if found { return next }
+        for edge in node.edges { pending = map.insert(pending, end, (edge, next))
+          end = end + 1 }
+      }
+      None -> ()
+    }
+  }
+  []
+}
+
+pub fn origin(graph: Graph, roots: List[Int], member: capture.Member) -> List[Node] =
+  explanation(graph, roots, Some(member))
+
+pub fn unknown_origin(graph: Graph, roots: List[Int]) -> List[Node] =
+  explanation(graph, roots, None)
+
+test "recursive value components retain the resource behind a late edge" {
+  let s = Scope { name = "s", id = 9 }
+  let blank = Node { value = [], known = true, edges = [], name = "local", lo = 0, hi = 1 }
+  let graph = bind(bind(bind(empty(), 1, Node { ..blank, edges = [2] }),
+    2, Node { ..blank, edges = [1, 3] }), 3, Node { ..blank, value = [capture.Region(s)], name = "buffer" })
+  assert dependencies(graph, [1]) == Solution { value = [capture.Region(s)], known = true }
+  assert dependencies(graph, [2]) == Solution { value = [capture.Region(s)], known = true }
+  assert map(origin(graph, [1], capture.Region(s)), node => node.name) == ["local", "local", "buffer"]
+}
+
+test "cell aliases retain the original installation lifetime" {
+  let s = Scope { name = "s", id = 9 }
+  let t = Scope { name = "s", id = 10 }
+  let place = Location { support = [capture.Region(s)], types = [], effects = [], contents = TyInt, name = "saved", lo = 2, hi = 3 }
+  let graph = alias_location(install(empty(), 1, place), 2, 1)
+  assert permits_location(graph, 2, [capture.Region(s)])
+  assert not permits_location(graph, 2, [capture.Region(t)])
+  assert location(graph, 1) == location(graph, 2)
+  assert not permits_location(graph, 3, [])
+}
+
+test "unknown support explanations follow finite value dependencies" {
+  let root = Node { value = [], known = true, edges = [2], name = "outer", lo = 0, hi = 1 }
+  let hidden = Node { value = [], known = false, edges = [1], name = "cell", lo = 2, hi = 3 }
+  let graph = bind(bind(empty(), 1, root), 2, hidden)
+  assert map(unknown_origin(graph, [1]), node => node.name) == ["outer", "cell"]
+  assert not dependencies(graph, [1]).known
+}

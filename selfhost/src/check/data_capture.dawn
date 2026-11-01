@@ -1,0 +1,557 @@
+# Nominal dependencies are summarized over declaration parameters, rather than
+# expanded through instantiated recursive fields. The finite projection domain
+# separates reachable value captures from complete static support and lets an
+# opaque head keep its contract without exposing its representation.
+use std/map
+use std/list
+use std/set
+use check/capture
+use check/capture.{Summary, Scope, Region, Params, Arguments, Function}
+use check/types.{Ty, TyVar, TyI64Buf, TyF64Buf, TyCaptured, TyFn, TyAdt, TyOpaque,
+  TyTuple, TyList, TySet, TyArray, TyMap, TyAssoc, TyInt, TyUnit, Adts, AdtI, CtorI, FieldI, AWorld, Eff, EffVar, scoped_eff, ScopedEffect, EPure,
+  eff_scopes, eff_assocs, eff_vars, type_args_of }
+
+pub type Projection = { parameters: List[Int], atoms: capture.Capture, known: Bool }
+
+pub fn declaration_params(params: capture.Params, types: List[Ty]) -> capture.Params = {
+  var ids: List[Int] = []
+  for value in types { match value { TyVar(_, id) -> { ids = ids ++ [id] }, _ -> () } }
+  capture.data_params(params, ids)
+}
+
+fn empty_projection() -> Projection = Projection { parameters = [], atoms = [], known = true }
+
+fn positions(a: List[Int], b: List[Int]) -> List[Int] = {
+  var out = a
+  for i in b { if not list.contains(out, i) { out = out ++ [i] } }
+  sort(out)
+}
+
+fn join(a: Projection, b: Projection) -> Projection = Projection {
+  parameters = positions(a.parameters, b.parameters),
+  atoms = capture.union(a.atoms, b.atoms), known = a.known && b.known
+}
+
+fn atoms(value: capture.Capture) -> Projection =
+  Projection { parameters = [], atoms = value, known = true }
+
+fn argument_support(args: capture.Arguments) -> capture.Capture = {
+  var out = map(args.scopes, s => capture.Region(s))
+  for value in args.captures { out = capture.union(out, value) }
+  out
+}
+
+fn effect_support(row: Eff) -> capture.Capture = {
+  var out = map(eff_scopes(row), s => capture.Region(s.scope))
+  for entry in eff_assocs(row) { let (_, _, app, _) = entry
+    out = capture.union(out, capture.trait_support(app)) }
+  out
+}
+
+fn lookup(adts: Adts, working: Map[Int, capture.Summary], id: Int) -> Option[capture.Summary] =
+  match map.get(working, id) {
+    Some(summary) -> Some(summary)
+    None -> match map.get(adts, id) { Some(info) -> info.capture_summary, None -> None }
+  }
+
+fn substitute_atoms(info: AdtI, args: capture.Arguments, value: capture.Capture) -> capture.Capture = {
+  if len(value) == 0 { return value }
+  var sm: Map[Int, capture.Scope] = map.empty()
+  var cm: Map[Int, capture.Capture] = map.empty()
+  for i in 0..len(info.scope_params.scopes) { if i < len(args.scopes) {
+    sm = map.insert(sm, info.scope_params.scopes[i].id, args.scopes[i]) } }
+  for i in 0..len(info.scope_params.captures) { if i < len(args.captures) {
+    cm = map.insert(cm, info.scope_params.captures[i].id, args.captures[i]) } }
+  capture.subst(value, sm, cm)
+}
+
+fn project(adts: Adts, working: Map[Int, capture.Summary], params: capture.Params,
+  formals: List[Ty], value: Ty, reachable: Bool, effect_formals: List[Int] = []) -> Projection = {
+  var out = empty_projection()
+  var children: List[Ty] = []
+  match value {
+    TyVar(_, id) -> {
+      for i in 0..len(formals) { match formals[i] {
+        TyVar(_, formal_id) -> if formal_id == id {
+          return Projection { parameters = [i], atoms = [], known = true } }
+        _ -> ()
+      } }
+      if not reachable {
+        for entry in params.support_facts { let (vid, upper) = entry
+          if vid == id { return atoms(upper) } }
+        return Projection { ..out, known = false }
+      }
+      for entry in params.bounds { let (vid, upper) = entry
+        if vid == id {
+          var chosen = upper
+          for fact in params.support_facts { let (subject, bound) = fact
+            if subject == id && capture.subset_in(bound, chosen, params.captures) { chosen = bound }
+          }
+          return atoms(chosen)
+        }
+      }
+      if list.contains(capture.representation_types(params), id) {
+        return Projection { ..out, known = false }
+      }
+    }
+    TyI64Buf(scope) | TyF64Buf(scope) -> { out = atoms([capture.Region(scope)]) }
+    TyCaptured(inner, bound) -> { out = atoms(bound)
+      children = [inner] }
+    TyFn(ps, ret, row, contract) -> {
+      out = atoms(capture.bound(contract))
+      if not reachable {
+        for variable in eff_vars(row) { let (id, _) = variable
+          if not list.contains(effect_formals, id) { out = Projection { ..out, known = false } }
+        }
+        out = join(out, atoms(effect_support(row)))
+        children = ps ++ [ret]
+      }
+      for child in children { out = join(out, project(adts, working, params, formals, child, reachable, effect_formals)) }
+      let bound = contract.scopes
+      return Projection { ..out, atoms = list.filter(out.atoms, member => match member {
+        capture.Region(scope) -> not list.any(bound, s => capture.same_scope(scope, s))
+        _ -> true
+      }) }
+    }
+    TyAdt(id, args, axes) -> {
+      let info = match map.get(adts, id) {
+        Some(found) -> found
+        None -> return Projection { ..out, known = false }
+      }
+      let summary = match lookup(adts, working, id) {
+        Some(found) -> found
+        None -> return Projection { ..out, known = false }
+      }
+      let dependencies = if reachable { summary.value_parameters } else { summary.support_parameters }
+      out = atoms(substitute_atoms(info, axes, if reachable { summary.value } else { summary.support }))
+      for index in dependencies {
+        if index < 0 || index >= len(args) { return Projection { ..out, known = false } }
+        out = join(out, project(adts, working, params, formals, args[index], reachable, effect_formals))
+      }
+    }
+    TyOpaque(_, _, _, args, _, axes, envelope) -> {
+      if not valid_envelope(envelope, len(args), axes) { return Projection { ..out, known = false } }
+      out = atoms(argument_support(axes))
+      children = args
+    }
+    TyAssoc(subject, application, _, upper) -> {
+      out = atoms(upper)
+      if not reachable { out = join(out, atoms(capture.trait_support(application)))
+        children = [subject] }
+    }
+    TyList(inner) | TySet(inner) | TyArray(inner) -> { children = [inner] }
+    TyMap(key, inner) -> { children = [key, inner] }
+    TyTuple(values) -> { children = values }
+    _ -> ()
+  }
+  for child in children { out = join(out, project(adts, working, params, formals, child, reachable, effect_formals)) }
+  out
+}
+
+fn declared_summary(adts: Adts, working: Map[Int, capture.Summary], info: AdtI) -> Option[capture.Summary] = {
+  var value = empty_projection()
+  var support = atoms(argument_support(capture.arguments(info.scope_params)))
+  for i in 0..len(info.tparams) { support = join(support,
+    Projection { parameters = [i], atoms = [], known = true }) }
+  # Nominal declaration rows have no application axis and may only be
+  # instantiated without evidence. Their declared binders cannot add a Scope.
+  let effects = map(info.bound_eparams, row => match row { EffVar(_, id) -> id, _ -> -1 })
+  for ctor in info.ctors { for field in ctor.fields {
+    value = join(value, project(adts, working, info.scope_params, info.tparams, field.ty, true))
+    support = join(support, project(adts, working, info.scope_params, info.tparams, field.ty, false, effects))
+  } }
+  if not value.known || not support.known { return None }
+  Some(Summary { value_parameters = value.parameters, value = value.atoms,
+    support_parameters = support.parameters, support = support.atoms })
+}
+
+fn references(value: Ty, out: List[Int]) -> List[Int] = {
+  var found = out
+  var children = type_args_of(value)
+  match value {
+    TyAdt(id, _, _) -> { found = positions(found, [id]) }
+    TyFn(ps, ret, _, _) -> { children = ps ++ [ret] }
+    TyCaptured(inner, _) -> { children = [inner] }
+    _ -> ()
+  }
+  for child in children { found = references(child, found) }
+  found
+}
+
+# Tarjan's explicit DFS frames keep declaration depth off the native stack.
+# Edges point at dependencies, so completed components are already in solve order.
+fn components(graph: Map[Int, List[Int]]) -> List[List[Int]] = {
+  var visit: Map[Int, Int] = map.empty()
+  var low: Map[Int, Int] = map.empty()
+  var active: Set[Int] = set.empty()
+  var stack: Map[Int, Int] = map.empty()
+  var size = 0
+  var work: Map[Int, (Int, Int)] = map.empty()
+  var depth = 0
+  var result: List[List[Int]] = []
+  for root in sort(map.keys(graph)) { if not map.has(visit, root) {
+    let index = len(visit)
+    visit = map.insert(visit, root, index)
+    low = map.insert(low, root, index)
+    active = set.insert(active, root)
+    stack = map.insert(stack, size, root)
+    size = size + 1
+    work = map.insert(work, depth, (root, 0))
+    depth = depth + 1
+    while depth > 0 {
+      let (node, position) = map.get(work, depth - 1).expect("data DFS frame")
+      let edges = map.get(graph, node).expect("data dependencies")
+      if position < len(edges) {
+        work = map.insert(work, depth - 1, (node, position + 1))
+        let child = edges[position]
+        match map.get(visit, child) {
+          None -> {
+            let next = len(visit)
+            visit = map.insert(visit, child, next)
+            low = map.insert(low, child, next)
+            active = set.insert(active, child)
+            stack = map.insert(stack, size, child)
+            size = size + 1
+            work = map.insert(work, depth, (child, 0))
+            depth = depth + 1
+          }
+          Some(index) -> if set.has(active, child) && index < map.get(low, node).expect("data low") {
+            low = map.insert(low, node, index)
+          }
+        }
+      } else {
+        depth = depth - 1
+        let lowest = map.get(low, node).expect("data low")
+        if lowest == map.get(visit, node).expect("data index") {
+          var component: List[Int] = []
+          var popping = true
+          while popping {
+            size = size - 1
+            let child = map.get(stack, size).expect("data active node")
+            active = set.remove(active, child)
+            component = component ++ [child]
+            if child == node { popping = false }
+          }
+          result = result ++ [sort(component)]
+        }
+        if depth > 0 {
+          let (parent, _) = map.get(work, depth - 1).expect("data parent")
+          if lowest < map.get(low, parent)
+            .expect("parent low") { low = map.insert(low, parent, lowest) }
+        }
+      }
+    }
+  } }
+  result
+}
+
+pub fn settle(adts: Adts) -> Adts = {
+  var declarations: List[Int] = []
+  for entry in map.entries(adts) { let (id, info) = entry
+    if capture.is_representation(info.scope_params) { declarations = declarations ++ [id] } }
+  settle_declarations(adts, declarations)
+}
+
+pub fn settle_owned(adts: Adts, owner: Option[String]) -> Adts = {
+  var declarations: List[Int] = []
+  for entry in map.entries(adts) { let (id, info) = entry
+    if info.owner == owner && capture.is_representation(info.scope_params) { declarations = declarations ++ [id] } }
+  settle_declarations(adts, declarations)
+}
+
+fn settle_declarations(adts: Adts, declarations: List[Int]) -> Adts = {
+  var pending: Set[Int] = set.empty()
+  for id in declarations { let info = map.get(adts, id).expect("local data declaration")
+    if info.capture_summary == None { pending = set.insert(pending, id) } }
+  if len(pending) == 0 { return adts }
+  let nodes = pending
+  var graph: Map[Int, List[Int]] = map.empty()
+  for id in sort(set.to_list(pending)) {
+    let info = map.get(adts, id).expect("pending data declaration")
+    var edges: List[Int] = []
+    for ctor in info.ctors { for field in ctor.fields { edges = references(field.ty, edges) } }
+    graph = map.insert(graph, id, list.filter(edges, edge => set.has(nodes, edge)))
+  }
+  var working: Map[Int, capture.Summary] = map.empty()
+  var result = adts
+  for component in components(graph) {
+    for id in component { working = map.insert(working, id, Summary {
+      value_parameters = [], value = [], support_parameters = [], support = [] }) }
+    var changed = true
+    var complete = true
+    while changed && complete {
+      changed = false
+      for id in component {
+        let next = match declared_summary(result, working, map.get(result, id).expect("data declaration")) {
+          Some(value) -> value
+          None -> { complete = false
+            break }
+        }
+        if next != map.get(working, id).expect("data lower bound") {
+          working = map.insert(working, id, next)
+          changed = true
+        }
+      }
+    }
+    for id in component {
+      let info = map.get(result, id).expect("settled data declaration")
+      if not complete { working = map.remove(working, id) }
+      result = map.insert(result, id, AdtI { ..info, capture_summary = if complete { map.get(working, id) } else { None } })
+    }
+  }
+  result
+}
+
+fn bound(adts: Adts, params: capture.Params, value: Ty, reachable: Bool) -> Option[capture.Capture] = {
+  let expression = project(adts, map.empty(), params, [], value, reachable)
+  if not expression.known || len(expression.parameters) > 0 { None } else { Some(expression.atoms) }
+}
+
+# A storage location may retain the support of Type binders already in scope
+# when it was installed. This proves lexical validity there, not S(T) <= c.
+pub fn support_at(adts: Adts, params: capture.Params, types: List[Ty], value: Ty, effects: List[Int] = []) -> Option[capture.Capture] = {
+  let result = project(adts, map.empty(), params, types, value, false, effects)
+  if result.known { Some(result.atoms) } else { None }
+}
+
+pub fn value_bound(adts: Adts, params: capture.Params, value: Ty) -> Option[capture.Capture] =
+  bound(adts, params, value, true)
+
+pub fn support_bound(adts: Adts, params: capture.Params, value: Ty) -> Option[capture.Capture] =
+  bound(adts, params, value, false)
+
+# An input trait application supplies this independent premise. Every variable
+# retained by its complete subject type is covered by W. Concrete atoms remain
+# checked separately; assuming a variable fact cannot erase a written Scope.
+pub fn assume_support(params: capture.Params, subject: Ty, upper: capture.Capture) -> capture.Params = {
+  var result = params
+  match subject {
+    TyVar(_, id) -> {
+      if not list.any(result.support_facts, fact => { let (vid, bound) = fact
+        vid == id && capture.equal(bound, upper) }) {
+        result = Params { ..result, support_facts = result.support_facts ++ [(id, upper)] }
+      }
+    }
+    _ -> {
+      let children = match subject {
+        TyFn(ps, ret, _, _) -> ps ++ [ret]
+        TyCaptured(inner, _) | TyAssoc(inner, _, _, _) -> [inner]
+        _ -> type_args_of(subject)
+      }
+      for child in children { result = assume_support(result, child, upper) }
+    }
+  }
+  result
+}
+
+pub fn support_permits(adts: Adts, params: capture.Params, value: Ty, upper: capture.Capture) -> Bool = {
+  let facts = list.filter(params.support_facts, fact => { let (_, bound) = fact
+    capture.subset_in(bound, upper, params.captures) })
+  match support_bound(adts, Params { ..params, support_facts = facts }, value) {
+    Some(actual) -> capture.subset_in(actual, upper, params.captures)
+    None -> false
+  }
+}
+
+pub fn permits(adts: Adts, params: capture.Params, value: Ty, upper: capture.Capture) -> Bool = {
+  match value_bound(adts, params, value) {
+    Some(actual) -> if capture.subset_in(actual, upper, params.captures) { return true }
+    None -> ()
+  }
+  # A separate complete support premise is also a value upper bound. The
+  # reverse implication is invalid, as the independent support oracle checks.
+  support_permits(adts, params, value, upper)
+}
+
+# Each parameter projection is covered by the corresponding public head
+# argument. The remaining atoms must be declared in that same head. This is
+# a symbolic proof over the declaration, not an expansion at client use sites.
+pub fn opaque_representation_permits(adts: Adts, params: capture.Params,
+  types: List[Ty], effects: List[Eff], target: Ty) -> Bool = {
+  let allowed = argument_support(capture.arguments(params))
+  let rows = map(effects, row => match row { EffVar(_, id) -> id, _ -> -1 })
+  for reachable in [true, false] {
+    let proof = project(adts, map.empty(), params, types, target, reachable, rows)
+    if not proof.known || not capture.subset_in(proof.atoms, allowed, params.captures) ||
+      not list.all(proof.parameters, position => position >= 0 && position < len(types)) { return false }
+  }
+  true
+}
+
+pub fn valid_envelope(envelope: Option[capture.Envelope], types: Int, axes: capture.Arguments) -> Bool =
+  match envelope {
+    Some(capture.OpaqueHeadV1(ts, ss, cs)) -> ts == types && ss == len(axes.scopes) && cs == len(axes.captures)
+    None -> false
+  }
+
+pub fn valid_summary(info: AdtI) -> Bool = match info.capture_summary {
+  Some(summary) -> list.all(summary.value_parameters ++ summary.support_parameters,
+    position => position >= 0 && position < len(info.tparams))
+  None -> false
+}
+
+# Interface validation visits public contracts, never an opaque target. Type
+# arguments are finite syntax trees; nominal fields are checked at their roots.
+pub fn valid_type(adts: Adts, value: Ty) -> Bool = {
+  var children = type_args_of(value)
+  match value {
+    TyOpaque(_, _, _, args, _, axes, envelope) ->
+      if not valid_envelope(envelope, len(args), axes) { return false }
+    TyAdt(id, args, axes) -> match map.get(adts, id) {
+      Some(info) -> if not valid_summary(info) || len(args) != len(info.tparams) ||
+        len(axes.scopes) != len(info.scope_params.scopes) ||
+        len(axes.captures) != len(info.scope_params.captures) { return false }
+      None -> return false
+    }
+    TyFn(ps, ret, _, _) -> { children = ps ++ [ret] }
+    TyCaptured(inner, _) | TyAssoc(inner, _, _, _) -> { children = [inner] }
+    _ -> ()
+  }
+  list.all(children, child => valid_type(adts, child))
+}
+
+fn test_info(id: Int, parameters: List[Ty], fields: List[Ty], axes: capture.Params) -> AdtI = {
+  var members: List[FieldI] = []
+  var index = 0
+  for field in fields {
+    members = members ++ [FieldI { name = "field${index}", ty = field }]
+    index = index + 1
+  }
+  AdtI { capture_summary = None, scope_params = declaration_params(axes, parameters), id = id, name = "Data${id}",
+    is_record = true, tparams = parameters, eparams = [],
+    ctors = [CtorI { adt = id, name = "Data${id}", fields = members }], derives = [],
+    owner = None, audience = AWorld, bound_eparams = [] }
+}
+
+test "data summaries distinguish phantom support from reachable values" {
+  let t = TyVar("T", 11)
+  let axes = capture.data_params(capture.empty_params(), [11])
+  let adts = settle(map.from([(1, test_info(1, [t], [TyInt], axes)),
+    (2, test_info(2, [t], [t], axes))]))
+  let region = Scope { name = "s", id = 90 }
+  let phantom = TyAdt(1, [TyI64Buf(region)], capture.empty_arguments())
+  let box = TyAdt(2, [TyI64Buf(region)], capture.empty_arguments())
+  assert value_bound(adts, capture.empty_params(), phantom) == Some([])
+  assert support_bound(adts, capture.empty_params(), phantom) == Some([Region(region)])
+  assert value_bound(adts, capture.empty_params(), box) == Some([Region(region)])
+  assert not permits(adts, axes, t, [])
+  assert permits(adts, axes, TyAdt(1, [t], capture.empty_arguments()), [])
+  assert len(axes.captures) == 0
+  assert capture.representation_types(capture.introduction(axes)) == [11]
+}
+
+test "function fields separate empty environments from parameter and row support" {
+  let region = Scope { name = "s", id = 90 }
+  let function = TyFn([TyI64Buf(region)], TyUnit, EPure, capture.empty_function())
+  let adts = settle(map.from([(1, test_info(1, [], [function], capture.empty_params()))]))
+  let value = TyAdt(1, [], capture.empty_arguments())
+  assert value_bound(adts, capture.empty_params(), value) == Some([])
+  assert support_bound(adts, capture.empty_params(), value) == Some([Region(region)])
+  let row = scoped_eff(EPure, [ScopedEffect { id = 12, name = "Read", scope = region }])
+  let latent = TyFn([], TyInt, row, capture.empty_function())
+  assert value_bound(adts, capture.empty_params(), latent) == Some([])
+  assert support_bound(adts, capture.empty_params(), latent) == Some([Region(region)])
+}
+
+test "mutual summaries retain growing arguments through their least fixed point" {
+  let t = TyVar("T", 11)
+  let u = TyVar("U", 12)
+  let s = Scope { name = "s", id = 31 }
+  let r = Scope { name = "r", id = 32 }
+  let left = capture.data_params(Params { ..capture.empty_params(), scopes = [s] }, [11])
+  let right = capture.data_params(Params { ..capture.empty_params(), scopes = [r] }, [12])
+  let child = TyAdt(2, [TyList(t)], Arguments { scopes = [s], captures = [] })
+  let callback = TyFn([], TyInt, EPure, Function { scopes = [], bound = Some([Region(r)]) })
+  let back = TyAdt(1, [callback], Arguments { scopes = [r], captures = [] })
+  let a = test_info(1, [t], [child], left)
+  let b = test_info(2, [u], [u, back], right)
+  let adts = settle(map.from([(1, a), (2, b)]))
+  let other = settle(map.from([(2, b), (1, a)]))
+  assert map.get(adts, 1)
+    .expect("left").capture_summary == map.get(other, 1)
+    .expect("left").capture_summary
+  let summary = map.get(adts, 1).expect("left").capture_summary.expect("summary")
+  assert summary.value_parameters == [0]
+  assert summary.value == [Region(s)]
+  let actual = Scope { name = "actual", id = 90 }
+  let value = TyAdt(1, [TyInt], Arguments { scopes = [actual], captures = [] })
+  assert value_bound(adts, capture.empty_params(), value) == Some([Region(actual)])
+}
+
+test "a missing nominal summary remains unknown rather than empty" {
+  let raw = map.from([(1, test_info(1, [], [TyInt], capture.empty_params()))])
+  let value = TyAdt(1, [], capture.empty_arguments())
+  assert value_bound(raw, capture.empty_params(), value) == None
+  assert not permits(raw, capture.empty_params(), value, [])
+  assert value_bound(settle(raw), capture.empty_params(), value) == Some([])
+}
+
+test "opaque value contracts use the public head instead of its hidden target" {
+  let region = Scope { name = "s", id = 90 }
+  let hidden = TyFn([], TyInt, EPure, Function { scopes = [], bound = Some([Region(region)]) })
+  let value = TyOpaque(1, "Marker", "owner", [TyInt], hidden, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
+  let empty: Adts = map.empty()
+  assert value_bound(empty, capture.empty_params(), value) == Some([])
+  let parameter = TyOpaque(1, "Hidden", "owner", [TyI64Buf(region)], TyInt, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
+  assert value_bound(empty, capture.empty_params(), parameter) == Some([Region(region)])
+  let missing = TyOpaque(1, "Hidden", "owner", [TyInt], TyInt, capture.empty_arguments(), None)
+  assert value_bound(empty, capture.empty_params(), missing) == None
+  assert not valid_envelope(capture.opaque_head(0, 1, 0), 0, capture.empty_arguments())
+}
+
+test "local solving does not reconstruct an imported opaque representation" {
+  let hidden = AdtI { ..test_info(1, [], [], capture.empty_params()), owner = Some("producer") }
+  let opaque = TyOpaque(2, "Hidden", "producer", [], TyAdt(1, [], capture.empty_arguments()),
+    capture.empty_arguments(), capture.opaque_head(0, 0, 0))
+  let local = AdtI { ..test_info(3, [], [opaque], capture.empty_params()), owner = Some("consumer") }
+  let result = settle_owned(map.from([(1, hidden), (3, local)]), Some("consumer"))
+  assert map.get(result, 1).expect("hidden").capture_summary == None
+  assert value_bound(result, capture.empty_params(), TyAdt(3, [], capture.empty_arguments())) == Some([])
+}
+
+test "ordinary value bounds cannot prove complete support without a witness premise" {
+  let t = TyVar("T", 11)
+  let c = capture.CaptureVar("c", 12)
+  let params = Params { ..capture.empty_params(), bounds = [(11, [c])] }
+  let empty: Adts = map.empty()
+  assert value_bound(empty, params, t) == Some([c])
+  assert support_bound(empty, params, t) == None
+  assert not support_permits(empty, params, t, [c])
+  let proved = assume_support(params, t, [c])
+  assert support_bound(empty, proved, t) == Some([c])
+  assert support_permits(empty, proved, t, [c])
+  let s = Scope { name = "s", id = 13 }
+  let phantom = test_info(1, [t], [TyInt], declaration_params(capture.empty_params(), [t]))
+  let adts = settle(map.from([(1, phantom)]))
+  assert support_bound(adts, params, TyAdt(1, [TyI64Buf(s)], capture.empty_arguments())) == Some([Region(s)])
+}
+
+test "an abstract calling row is not a complete support proof" {
+  let empty: Adts = map.empty()
+  let row = EffVar("e", 7)
+  let value = TyFn([], TyInt, row, capture.empty_function())
+  let params = Params { ..capture.empty_params(), fn_effects = [7] }
+  assert value_bound(empty, params, value) == Some([])
+  assert support_bound(empty, params, value) == None
+  assert not support_permits(empty, params, value, [])
+  assert support_at(empty, params, [], value, [7]) == Some([])
+}
+
+test "unresolved data dependencies are refused without publishing a lower bound" {
+  let info = test_info(1, [], [TyAdt(2, [], capture.empty_arguments())], capture.empty_params())
+  let resolved = settle(map.from([(1, info)]))
+  assert map.get(resolved, 1).expect("data").capture_summary == None
+  assert value_bound(resolved, capture.empty_params(), TyAdt(1, [], capture.empty_arguments())) == None
+}
+
+test "opaque definitions prove both components against their public head" {
+  let t = TyVar("T", 11)
+  let s = Scope { name = "s", id = 12 }
+  let absent = Scope { name = "other", id = 13 }
+  let params = declaration_params(Params { ..capture.empty_params(), scopes = [s] }, [t])
+  let adts = settle(map.from([(1, test_info(1, [t], [t], params))]))
+  assert opaque_representation_permits(adts, params, [t], [], TyAdt(1, [t], Arguments { scopes = [s], captures = [] }))
+  assert opaque_representation_permits(adts, params, [t], [], TyFn([t], TyInt, EPure, capture.empty_function()))
+  assert not opaque_representation_permits(adts, params, [t], [], TyI64Buf(absent))
+  assert not opaque_representation_permits(adts, params, [t], [], TyVar("Unknown", 99))
+}

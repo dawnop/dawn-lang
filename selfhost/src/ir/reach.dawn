@@ -449,7 +449,7 @@ fn mentions_list(ty: Ty) -> Bool =
     TySet(t) | TyArray(t) -> mentions_list(t)
     TyMap(k, v) -> mentions_list(k) || mentions_list(v)
     TyTuple(ts) -> any_mentions_list(ts)
-    TyOpaque(_, _, _, args, target, _) -> any_mentions_list(args) || mentions_list(target)
+    TyOpaque(_, _, _, args, target, _, _) -> any_mentions_list(args) || mentions_list(target)
     TyAssoc(subject, _, _, _) -> mentions_list(subject)
     TyFn(ps, ret, _, _) -> any_mentions_list(ps) || mentions_list(ret)
     TyAdt(_, args, _) -> any_mentions_list(args)
@@ -476,7 +476,7 @@ fn any_mentions_list(ts: List[Ty]) -> Bool = {
 fn folded_may_hold_list(ty: Ty) -> Bool =
   match ty {
     TyInt | TyFloat | TyBool | TyString | TyBytes | TyUnit | TyNever | TyError -> false
-    TyOpaque(_, _, _, _, target, _) -> folded_may_hold_list(target)
+    TyOpaque(_, _, _, _, target, _, _) -> folded_may_hold_list(target)
     _ -> true
   }
 
@@ -509,7 +509,7 @@ fn type_use(st0: Rch, ty: Ty) -> Rch = {
 fn descriptor_use(st: Rch, ty: Ty) -> Rch =
   match ty {
     TyJava(name, _) -> java_class_use(st, name)
-    TyOpaque(_, _, _, _, target, _) -> descriptor_use(st, target)
+    TyOpaque(_, _, _, _, target, _, _) -> descriptor_use(st, target)
     _ -> st
   }
 
@@ -520,7 +520,7 @@ fn type_adts(st: Rch, ty: Ty) -> Rch =
     TyList(t) | TySet(t) | TyArray(t) -> type_adts(st, t)
     TyMap(k, v) -> type_adts(type_adts(st, k), v)
     TyTuple(ts) -> types_adts(st, ts)
-    TyOpaque(_, _, _, args, target, _) -> type_adts(types_adts(st, args), target)
+    TyOpaque(_, _, _, args, target, _, _) -> type_adts(types_adts(st, args), target)
     TyAssoc(subject, _, _, _) -> type_adts(st, subject)
     TyFn(ps, ret, eff, _) -> {
       var s = type_adts(types_adts(st, ps), ret)

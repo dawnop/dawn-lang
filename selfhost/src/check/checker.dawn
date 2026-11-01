@@ -8,6 +8,9 @@
 # (resolveType / resolveEff / alias expansion / Map-Set key validity).
 
 use check/capture
+use check/data_capture
+use check/environment
+use check/value_capture
 use check/scope_infer
 use check/trait_contract
 use check/capture.{Function as CaptureFunction, Scope as CaptureScope, Params as CaptureParams, CaptureParam}
@@ -63,7 +66,7 @@ use check/types.{ty_scope_refs, subst_scopes, sig_scope_arity, EvidenceLabel, ev
   ev_label_name, ev_assoc_name, ev_var_name,
   EV_PACK_ID, ev_pack_ty, ty_loc, ty_origin,
   AdtI, CtorI, FieldI, EffectI, TraitI, ImplI, Sym, Sig,
-  ty_show, ctor_render, fn_return_show, eff_ctl_labels, buffer_reach, is_mem_effect, eff_names_mem, adt_of, trait_of, sig_render, subst, subst_eff, eff_show,
+  ty_show, ctor_render, fn_return_show, eff_ctl_labels, is_mem_effect, eff_names_mem, adt_of, trait_of, sig_render, subst, subst_eff, eff_show,
   assoc_effect_advice,
   no_eparam_names, fn_max_params,
   ty_mentions_var, ty_map_children, ty_any_child,
@@ -95,7 +98,7 @@ use check/cx.{
   cx_new, test_cx, with_list_len, check_value_arity,
   cerr, cerr_h, cerr_o, owned_by, unowned, measured_from, owner_off, owner_at, eff_witness_at, fresh,
   enter_decl_owner, leave_decl_owner, mint_cursor, module_pool, alias_shadow, effect_of, resolve_eff_at,
-  resolve_type, resolve_return_type,
+  resolve_type, resolve_return_type, discharge_capture_obligations,
   is_const_serializable,
   const_refusal_hint, no_sig,
   TySpan,
@@ -167,7 +170,10 @@ fn learn_type_captures(cx: Cx, sig: Sig, declared: Ty, actual: Ty,
   var out = initial
   match declared {
     TyVar(_, id) -> {
-      let required = trait_contract.capture_of(cx.adts, cx.current_capture_params, actual)
+      let required = match data_capture.value_bound(cx.adts, cx.current_capture_params, actual) {
+        Some(value) -> value
+        None -> return initial
+      }
       # A forwarded application's arguments are equations. Its well-formedness
       # already covers the subject, even when another declared value upper
       # bound is wider. That upper must not enlarge the selected dictionary.
@@ -224,6 +230,31 @@ fn learn_trait_captures(cx: Cx, sig: Sig, declared: Ty, actual: Ty,
         index = index + 1
       }
     }
+    (TyVar(_, _), _) -> {
+      for i in 0..len(sig.tparams) { if sig.tparams[i] == declared {
+        for required in bounds_of(sig, i) {
+          let selected = match impl_at(cx.impl_table, required.id, actual) {
+            Some(implementation) -> trait_contract.subject_application(implementation, actual)
+            None -> None
+          }
+          match selected {
+            Some(provided) -> if len(required.args) == len(provided.args) {
+              for j in 0..len(required.args) {
+                out = scope_infer.infer_upper(required.args[j], provided.args[j], sig.scope_params.captures, out)
+              }
+            }
+            None -> if len(required.args) == 1 {
+              # This is the application's independent support obligation,
+              # rather than the ordinary value bound on the same Type.
+              match data_capture.support_bound(cx.adts, cx.current_capture_params, actual) {
+                Some(support) -> { out = scope_infer.infer_upper(required.args[0], support, sig.scope_params.captures, out) }
+                None -> ()
+              }
+            }
+          }
+        }
+      } }
+    }
     (TyFn(ps, ret, _, _), TyFn(aps, ar, _, _)) -> {
       let ds = ps ++ [ret]
       let ats = aps ++ [ar]
@@ -258,6 +289,23 @@ fn learn_trait_type_bindings(cx: Cx, sig: Sig, bindings: Map[Int, Ty]) -> Cx = {
     _ -> ()
   } }
   Cx { ..cx, frame = Frame { ..cx.frame, capture_bindings = captures } }
+}
+
+fn check_type_capture_arguments(cx: Cx, sig: Sig, types: Map[Int, Ty], effects: Map[Int, Eff],
+  lo: Int, hi: Int) -> Cx = {
+  if len(sig.scope_params.bounds) == 0 { return cx }
+  var next = cx
+  for entry in sig.scope_params.bounds { let (id, upper) = entry
+    match map.get(types, id) {
+      Some(actual) -> if not data_capture.permits(cx.adts, cx.current_capture_params,
+        reduce_instantiated(cx, subst(actual, types, effects), types), upper) {
+        next = cerr_h(next, "type argument for `" ++ sig.name ++ "` exceeds its capture bound " ++ capture.show(upper),
+          lo, hi, "the argument must satisfy the explicit value capture contract")
+      }
+      None -> ()
+    }
+  }
+  next
 }
 
 fn finish_scope_signature(cx: Cx, s: Sig, lo: Int, hi: Int) -> (Cx, Sig) = {
@@ -372,7 +420,7 @@ fn check_scoped_value_call(cx: Cx, target: TExpr, ty: Ty, args: List[Expr],
   else { XBlock(statements, Some(value), owner_off(cx, lo), owner_off(cx, hi), call.ret) })
 }
 
-fn reject_scope_escape(cx: Cx, signature: Sig, actual: Ty, m: Map[Int, Ty], em: Map[Int, Eff], lo: Int, hi: Int) -> Cx = {
+fn reject_scope_escape(cx: Cx, signature: Sig, actual: Ty, m: Map[Int, Ty], em: Map[Int, Eff], value: TExpr, lo: Int, hi: Int) -> Cx = {
   let bound = match actual { TyFn(_, _, _, contract) -> contract.scopes, _ -> [] }
   var next = cx
   for region in bound {
@@ -392,7 +440,8 @@ fn reject_scope_escape(cx: Cx, signature: Sig, actual: Ty, m: Map[Int, Ty], em: 
     }
     if escapes {
       next = cerr_h(next, "Scope `" ++ region.name ++ "` escapes its scoped callback", lo, hi,
-        "the callback's result and forwarded effects must be independent of its bound Scope; return copied data")
+        "the callback's result and forwarded effects must be independent of its bound Scope; return copied data" ++
+          value_capture.describe(cx, value, capture.Region(region)))
     }
   }
   next
@@ -462,7 +511,11 @@ fn declare_sym(
     ev_of = None,
     cell_of = cell
   }
+  # A declaration has only its symbol contract. Materialize that node when
+  # ensure first needs it; bindings still record their actual edges eagerly.
   var cx3 = write_symbol(cx2, id, sym)
+  match cell { Some(entry) -> { let (_, contents) = entry
+    cx3 = value_capture.install(cx3, id, contents) }, None -> () }
   if name != "_" {
     let inner2 = map.insert(cx3.frame.scopes[len(cx3.frame.scopes) - 1], name, id)
     let scopes2 = list.take(cx3.frame.scopes, len(cx3.frame.scopes) - 1) ++ [inner2]
@@ -694,7 +747,7 @@ fn ev_expr(
 
 test "evidence reads preserve distinct origins behind the same runtime key" {
   let base = push_scope(test_cx())
-  let closure = LambdaCx { observes = false, boundary = len(base.frame.scopes), expected_ret = None,
+  let closure = LambdaCx { static_captures = [], observes = false, boundary = len(base.frame.scopes), expected_ret = None,
     captures = [], sugar = false, arm = false, ctl = false, local_fn = None, handler_of = None,
     staged_kind = OrdinaryClosure, staged = map.empty() }
   let origins: List[EvidenceRole] = [LabelSlot(71), VariableSlot(72),
@@ -992,6 +1045,12 @@ pub(pkg) fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
     }
     _ -> ()
   }
+  match target {
+    TyOpaque(_, _, ow, _, tgt, _, _) -> if sees_through(cx, ow) {
+      return assignable(cx, t, tgt)
+    }
+    _ -> ()
+  }
   match t {
     TyCaptured(value, bound) -> match target {
       TyCaptured(want, upper) -> capture.subset_in(bound, upper, cx.current_capture_params.captures) && assignable(cx, value, want)
@@ -1005,11 +1064,11 @@ pub(pkg) fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
       }
       _ -> false
     }
-    TyOpaque(_, _, ow, _, tgt, _) ->
+    TyOpaque(_, _, ow, _, tgt, _, _) ->
       if sees_through(cx, ow) { assignable(cx, tgt, target) } else { false }
     _ ->
       match target {
-        TyOpaque(_, _, ow, _, tgt, _) ->
+        TyOpaque(_, _, ow, _, tgt, _, _) ->
           if sees_through(cx, ow) { assignable(cx, t, tgt) } else { false }
         _ -> false
       }
@@ -1193,10 +1252,10 @@ fn unify_dir(
   # without this peel (and the one in the TyOpaque arm below) the conversion
   # held everywhere except at a call.
   match actual {
-    TyOpaque(_, _, aow, _, atgt, _) ->
+    TyOpaque(_, _, aow, _, atgt, _, _) ->
       match declared {
         # same type: match structurally, below
-        TyOpaque(_, _, _, _, _, _) -> ()
+        TyOpaque(_, _, _, _, _, _, _) -> ()
         # a type variable BINDS rather than converts: `Some(c)` at a Cursor is
         # an `Option[Cursor]`, not an `Option[Int]`. Seeing through a type is
         # not the same as forgetting it
@@ -1210,7 +1269,7 @@ fn unify_dir(
       match map.get(m, id) {
         None -> (map.insert(m, id, actual), em, true)
         Some(bound) ->
-          if bound == actual {
+          if ty_equal(bound, actual) {
             (m, em, true)
           } else {
             # The variable is already bound to an opaque type, and the actual
@@ -1221,7 +1280,7 @@ fn unify_dir(
             # one the conversion held everywhere except under a type
             # constructor, which is where a checked constructor puts it.
             match bound {
-              TyOpaque(_, _, ow, _, tgt, _) ->
+              TyOpaque(_, _, ow, _, tgt, _, _) ->
                 if sees_through(cx, ow) {
                   unify_dir(cx, tgt, actual, m, em, flip)
                 } else {
@@ -1295,9 +1354,9 @@ fn unify_dir(
     # target drops (`opaque type Phantom[T] = Unit`) is invisible there, so
     # comparing targets made every `Phantom[_]` one type. The ids must agree
     # first: two opaque types over the same target are still two types.
-    TyOpaque(did, _, dow, dargs, dtgt, dscope) ->
+    TyOpaque(did, _, dow, dargs, dtgt, dscope, _) ->
       match actual {
-        TyOpaque(aid, _, _, aargs, _, ascope) -> {
+        TyOpaque(aid, _, _, aargs, _, ascope, _) -> {
           if not capture.arguments_equal(dscope, ascope) { return (m, em, false) }
           if did != aid || len(dargs) != len(aargs) { return (m, em, false) }
           var m1 = m
@@ -1505,7 +1564,7 @@ fn ty_rows_at(t: Ty, place: String) -> List[(Eff, String)] =
       for e2 in es { out = out ++ ty_rows_at(e2, place) }
       out
     }
-    TyOpaque(_, _, _, args, tgt, _) -> {
+    TyOpaque(_, _, _, args, tgt, _, _) -> {
       var out: List[(Eff, String)] = []
       for a in args { out = out ++ ty_rows_at(a, place) }
       out ++ ty_rows_at(tgt, place)
@@ -1844,7 +1903,7 @@ pub(pkg) fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option
       # `resolve_witness` peels before calling here, but only the outermost
       # type, so without this arm a `(Celsius, Int)` key walked past the Float
       # ban that `(Float, Int)` is caught by.
-      TyOpaque(_, _, _, _, tgt, _) -> structural_gap(cx, tid, tgt, seen)
+      TyOpaque(_, _, _, _, tgt, _, _) -> structural_gap(cx, tid, tgt, seen)
       # A projection is a gap, and unlike a type parameter it is one nothing
       # can close: a bound applies to a type parameter, and `C.Item` is not
       # one. Without this arm the `_` below called it "no gap", the goal was
@@ -1962,9 +2021,9 @@ test "unification binds and checks variables" {
   let (m3, em3, ok3) = unify_into(cx, TyFn([t], TyUnit, e, capture.empty_function()), TyFn([TyInt], TyUnit, EIo, capture.empty_function()), m1, em1)
   assert ok3
   assert map.get(em3, 101) == Some(EIo)
-  let phantom_t = TyOpaque(7, "Phantom", "m", [t], TyUnit, capture.empty_arguments())
-  let phantom_int = TyOpaque(7, "Phantom", "m", [TyInt], TyUnit, capture.empty_arguments())
-  let phantom_string = TyOpaque(7, "Phantom", "m", [TyString], TyUnit, capture.empty_arguments())
+  let phantom_t = TyOpaque(7, "Phantom", "m", [t], TyUnit, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
+  let phantom_int = TyOpaque(7, "Phantom", "m", [TyInt], TyUnit, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
+  let phantom_string = TyOpaque(7, "Phantom", "m", [TyString], TyUnit, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
   let (m4, _, ok4) = unify_into(cx, phantom_t, phantom_int, m0, em0)
   assert ok4
   assert map.get(m4, 100) == Some(TyInt)
@@ -1978,14 +2037,14 @@ test "const-serializability" {
   assert not is_const_serializable(cx, TyMap(TyInt, TyInt), set.empty())
   assert not is_const_serializable(cx, TyVar("T", 5), set.empty())
   # an opaque type is its target's answer ...
-  let meters = TyOpaque(8, "Meters", "m", [], TyInt, capture.empty_arguments())
+  let meters = TyOpaque(8, "Meters", "m", [], TyInt, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
   assert is_const_serializable(cx, meters, set.empty())
   assert is_const_serializable(cx, TyList(meters), set.empty())
   # ... except where the target is a position in the backend's own
   # representation, which Core has no way to write down (SEM-04). Same shape,
   # same target, only the declaring module and the name differ.
-  let cursor = TyOpaque(9, "Cursor", "std/cursor", [], TyInt, capture.empty_arguments())
-  let impostor = TyOpaque(9, "Cursor", "m", [], TyInt, capture.empty_arguments())
+  let cursor = TyOpaque(9, "Cursor", "std/cursor", [], TyInt, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
+  let impostor = TyOpaque(9, "Cursor", "m", [], TyInt, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
   assert not is_const_serializable(cx, cursor, set.empty())
   assert not is_const_serializable(cx, TyList(cursor), set.empty())
   assert not is_const_serializable(cx, TyTuple([TyInt, cursor]), set.empty())
@@ -2205,7 +2264,7 @@ fn capture_witness(cx: Cx, sym: Int) -> Cx = {
 ## path and the witness below cannot disagree about which type answers.
 fn ord_subject(cx: Cx, t: Ty) -> Ty =
   match t {
-    TyOpaque(_, _, _, _, tgt, _) ->
+    TyOpaque(_, _, _, _, tgt, _, _) ->
       if has_impl_at(cx.impl_table, ORD_ID, t) { t } else { ord_subject(cx, tgt) }
     _ -> t
   }
@@ -2224,7 +2283,7 @@ pub(pkg) fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[
   # every other trait, and the reason `'a' < 'b'` is Int's `<`. This path is
   # the specialised one the `<` family takes, so it needed saying twice.
   match t {
-    TyOpaque(_, _, _, _, tgt, _) -> {
+    TyOpaque(_, _, _, _, tgt, _, _) -> {
       if not has_impl_at(cx.impl_table, ORD_ID, t) { return resolve_ord_witness(cx, tgt, lo, hi) }
     }
     _ -> ()
@@ -2968,7 +3027,7 @@ test "loop jumps respect lambda boundaries" {
     ..cx,
     frame = Frame {
       ..cx.frame,
-      lambda_stack = [LambdaCx { observes = false,
+      lambda_stack = [LambdaCx { static_captures = [], observes = false,
         boundary = 0,
         expected_ret = None,
         captures = [],
@@ -3116,6 +3175,7 @@ test "field access follows record shape with substitution" {
   let (cx0, tv) = fresh_tvar(cx, "T")
   let (cx1, aid) = fresh(cx0)
   let info = AdtI { scope_params = capture.empty_params(),
+    capture_summary = None,
     id = aid,
     name = "Box",
     is_record = true,
@@ -4342,6 +4402,7 @@ pub(pkg) fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
     # spelled out rather than spread, so a field added to Frame has to be
     # answered for here instead of leaking through into the isolated body
     frame = Frame {
+      environment = environment.empty(),
       scope_bindings = map.empty(), capture_bindings = map.empty(), scope_keys = map.empty(),
       scopes = [fresh_scope],
       used_effects = [],
@@ -4399,6 +4460,7 @@ test "an isolated context reports its own effects, then restores all ten fields"
   cx = Cx {
     ..cx,
     frame = Frame {
+      environment = environment.empty(),
       scope_bindings = map.empty(), capture_bindings = map.empty(), scope_keys = map.empty(),
       observation_scopes = [], observation_entry = false, origin_scope = None, trace_read = false,
       scopes = [outer_scope],
@@ -4414,7 +4476,7 @@ test "an isolated context reports its own effects, then restores all ten fields"
         owner = None, trait_id = None, op_of = None, inferring = false
       }),
       dict_syms = outer_dicts,
-      lambda_stack = [LambdaCx { observes = false,
+      lambda_stack = [LambdaCx { static_captures = [], observes = false,
         boundary = 3, expected_ret = None, captures = [], sugar = false, arm = false,
         ctl = false, local_fn = None, handler_of = None,
         staged_kind = OrdinaryClosure,
@@ -4815,9 +4877,12 @@ pub(pkg) fn check_fn_value(
   # the same bindings its types substituted under (SEM-13 path). Reducing only
   # the rows left `view` as a value typed `fn(C) -> C.View` (#317), a ground
   # type carrying a projection, which no concrete function type unifies with.
+  cx = learn_trait_type_bindings(cx, f, m)
+  let selected_sig = scope_infer.contract_normalized(f, cx.frame.scope_bindings, cx.frame.capture_bindings)
+  cx = check_type_capture_arguments(cx, selected_sig, m, em, lo, hi)
   let inst = reduce_instantiated(cx, subst(declared, m, em), m)
   if nbounds > 0 || len(original.scope_params.scopes) > 0 {
-    return eta_bounded_fn_value(cx, name, f, fresh_sig, m, em, inst, lo, hi)
+    return eta_bounded_fn_value(cx, name, selected_sig, fresh_sig, m, em, inst, lo, hi)
   }
   (cx, inst, node(inst))
 }
@@ -4855,7 +4920,7 @@ fn eta_bounded_fn_value(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
-  let ctx = LambdaCx { observes = false,
+  let ctx = LambdaCx { static_captures = [], observes = false,
     boundary = len(cx.frame.scopes),
     expected_ret = None,
     captures = [],
@@ -4924,7 +4989,17 @@ fn eta_bounded_fn_value(
   let outer = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1)
   cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, lambda_stack = outer } }
   if not ok { return (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi))) }
-  let wrapper_ty = TyFn(ips, iret, wrapper_eff, default_capture_contract(cx1, contract, popped.captures))
+  cx1 = check_environment(cx1, popped.captures, false, lo, hi)
+  var witness_captures: capture.Capture = []
+  for witness in wits { witness_captures = capture.union(witness_captures, value_capture.witness_support(witness)) }
+  let base_contract = if len(popped.static_captures) == 0 { contract } else {
+    CaptureFunction { ..contract, bound = Some(capture.union(capture.bound(contract), popped.static_captures)) }
+  }
+  let actual_contract = default_capture_contract(cx1, base_contract, popped.captures)
+  let wrapper_contract = if len(witness_captures) == 0 { actual_contract } else {
+    CaptureFunction { ..actual_contract, bound = Some(capture.union(capture.bound(actual_contract), witness_captures)) }
+  }
+  let wrapper_ty = TyFn(ips, iret, wrapper_eff, wrapper_contract)
   let body =
     if f.is_builtin {
       XCallBuiltin(name, args, wits, evid, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, iret)
@@ -5116,6 +5191,31 @@ test "bounded fn values read ordered evidence from the caller and expose ABI-onl
 
 ## A constructor used bare as a function value: `map(xs, Some)`. Generics come
 ## from the expected fn type (the Kotlin checkCtorValue).
+fn ctor_signature(info: AdtI, constructor: CtorI, args: capture.Arguments) -> Sig =
+  Sig { scope_params = capture.introduction(info.scope_params), name = constructor.name,
+    param_tys = map(constructor.fields, field => field.ty),
+    param_names = map(constructor.fields, field => field.name), param_defaults = [], caller_params = [],
+    ret = TyAdt(info.id, info.tparams, args), eff = EPure,
+    is_builtin = false, tparams = info.tparams, constraints = [], eparams = [],
+    owner = info.owner, trait_id = None, op_of = None, inferring = false }
+
+# A nominal result supplies equations for the constructor's declared axes.
+# Its function fields may accept a smaller environment without changing the
+# result application. This does not infer covariance between nominal values.
+fn constructor_context(cx: Cx, template: Sig, expected: Ty) -> Cx = {
+  if len(template.scope_params.captures) == 0 { return cx }
+  let axes = match (template.ret, expected) {
+    (TyAdt(id, _, _), TyAdt(other, _, args)) -> if id == other { args } else { return cx }
+    _ -> return cx
+  }
+  if len(axes.captures) != len(template.scope_params.captures) { return cx }
+  var bindings = cx.frame.capture_bindings
+  for i in 0..len(template.scope_params.captures) {
+    bindings = map.insert(bindings, template.scope_params.captures[i].id, axes.captures[i])
+  }
+  Cx { ..cx, frame = Frame { ..cx.frame, capture_bindings = bindings } }
+}
+
 pub(pkg) fn check_ctor_value(
   cx: Cx,
   aid: Int,
@@ -5133,7 +5233,10 @@ pub(pkg) fn check_ctor_value(
   }
   var params: List[Ty] = []
   for f in ci.fields { params = params ++ [f.ty] }
-  let ret = TyAdt(a.id, a.tparams, capture.empty_arguments())
+  let ret = TyAdt(a.id, a.tparams, capture.arguments(a.scope_params))
+  let (entry, template) = fresh_scope_signature(cx, ctor_signature(a, ci, capture.arguments(a.scope_params)))
+  var next = constructor_context(entry, template, eret)
+  params = template.param_tys
   let node = (t: Ty) => XCtorValue(aid, cslot, owner_off(cx, lo), owner_off(cx, hi), t)
   if len(eps) != len(params) {
     let expected_text = ty_show(cx.adts, TyFn(eps, eret, eeff, capture.empty_function()))
@@ -5142,10 +5245,6 @@ pub(pkg) fn check_ctor_value(
         " field(s), but " ++ expected_text ++ " is expected", lo, hi,
       "constructor: " ++ hint_text), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
   }
-  if len(a.tparams) == 0 {
-    let t0 = TyFn(params, ret, EPure, capture.empty_function())
-    return (cx, t0, node(t0))
-  }
   var m: Map[Int, Ty] = map.empty()
   var em: Map[Int, Eff] = map.empty()
   var i = 0
@@ -5153,14 +5252,18 @@ pub(pkg) fn check_ctor_value(
     let arg = eps[i]
     let concrete = is_concrete(cx, arg)
     if concrete {
-      let (m2, em2, _) = unify_into(cx, d, arg, m, em)
+      let (inferred, _) = learn_scope_argument(next, template, d, arg)
+      next = inferred
+      let (m2, em2, _) = unify_into(next, scope_type(next, d), arg, m, em)
       m = m2
       em = em2
     }
     i = i + 1
   }
   if is_concrete(cx, eret) {
-    let (m3, em3, _) = unify_into(cx, ret, eret, m, em)
+    let (inferred, _) = learn_scope_argument(next, template, template.ret, eret)
+    next = inferred
+    let (m3, em3, _) = unify_into(next, scope_type(next, template.ret), eret, m, em)
     m = m3
     em = em3
   }
@@ -5176,10 +5279,12 @@ pub(pkg) fn check_ctor_value(
         ci.name ++ "` used as a value", lo, hi,
       "annotate the surrounding context, or wrap it in a lambda"), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
   }
+  let (finished, instantiated) = finish_scope_signature(next, template, lo, hi)
+  next = check_type_capture_arguments(finished, instantiated, m, em, lo, hi)
   var ips: List[Ty] = []
-  for d in params { ips = ips ++ [subst(d, m, em)] }
-  let t1 = TyFn(ips, subst(ret, m, em), EPure, capture.empty_function())
-  (cx, t1, node(t1))
+  for value in instantiated.param_tys { ips = ips ++ [subst(value, m, em)] }
+  let t1 = TyFn(ips, subst(instantiated.ret, m, em), EPure, capture.empty_function())
+  (next, t1, node(t1))
 }
 
 ## Satisfy one trait requirement at a use site (the general resolveWitness):
@@ -5190,6 +5295,41 @@ pub(pkg) fn resolve_witness(cx: Cx, trait_id: Int, t: Ty, lo: Int, hi: Int,
   resolve_application(cx, capture.closed_trait(trait_id), t, lo, hi, requirer)
 
 pub(pkg) fn resolve_application(cx: Cx, application: capture.TraitApplication,
+  t: Ty, lo: Int, hi: Int, requirer: String) -> (Cx, Option[WitRef]) = {
+  let (checked, witness) = resolve_application_in(cx, application, t, lo, hi, requirer)
+  match witness {
+    Some(value) -> (capture_static_witness(checked, value_capture.witness_support(value),
+      trait_of(checked.traits, application.id).name, lo, hi), witness)
+    None -> (checked, witness)
+  }
+}
+
+fn capture_static_witness(cx: Cx, support: capture.Capture, name: String, lo: Int, hi: Int) -> Cx = {
+  if len(support) == 0 || len(cx.frame.lambda_stack) == 0 { return cx }
+  var stack: List[LambdaCx] = []
+  var retained: capture.Capture = []
+  for closure in cx.frame.lambda_stack {
+    var free: capture.Capture = []
+    for member in support {
+      var depth = -1
+      match member {
+        capture.Region(region) -> {
+          let name = scope_key_name(region.id)
+          for i in 0..len(cx.frame.scopes) {
+            if map.has(cx.frame.scopes[i], name) { depth = i }
+          }
+        }
+        _ -> ()
+      }
+      if depth < closure.boundary { free = capture.union(free, [member]) }
+    }
+    retained = capture.union(retained, free)
+    stack = stack ++ [LambdaCx { ..closure, static_captures = capture.union(closure.static_captures, free) }]
+  }
+  value_capture.record_witness(Cx { ..cx, frame = Frame { ..cx.frame, lambda_stack = stack } }, retained, name, lo, hi)
+}
+
+fn resolve_application_in(cx: Cx, application: capture.TraitApplication,
   t: Ty, lo: Int, hi: Int, requirer: String) -> (Cx, Option[WitRef]) = {
   let trait_id = application.id
   let contract = trait_of(cx.traits, trait_id)
@@ -5202,8 +5342,7 @@ pub(pkg) fn resolve_application(cx: Cx, application: capture.TraitApplication,
   }
   let explicit_contract = len(application.args) > 0 || len(contract.scope_params.bounds) > 0
   if explicit_contract && not given {
-    let support = trait_contract.support(cx.adts, cx.current_capture_params, t)
-    if not capture.subset_in(support, capture.trait_support(application), cx.current_capture_params.captures) {
+    if not data_capture.support_permits(cx.adts, cx.current_capture_params, t, capture.trait_support(application)) {
       return (cerr(cx, "trait witness does not cover its subject support", lo, hi), no_wit())
     }
   }
@@ -5257,7 +5396,7 @@ pub(pkg) fn resolve_application(cx: Cx, application: capture.TraitApplication,
   # user or library declares. GHC's GeneralizedNewtypeDeriving and every
   # newtype-like feature surveyed draw the line the same way.
   match t {
-    TyOpaque(_, _, _, _, tgt, _) -> {
+    TyOpaque(_, _, _, _, tgt, _, _) -> {
       if not has_impl_at(cx.impl_table, trait_id, t) {
         if opaque_inherits(trait_id) {
           return resolve_application(cx, application, tgt, lo, hi, requirer)
@@ -5369,7 +5508,7 @@ pub(pkg) fn resolve_application(cx: Cx, application: capture.TraitApplication,
           let scalar_order = trait_id == ORD_ID && not is_adt(t)
           let nongeneric = not scalar_order && is_nongeneric_adt(cx, t)
           let literal_opaque = (trait_id == FROM_INT_ID || trait_id == FROM_FLOAT_ID) && match t {
-            TyOpaque(_, _, _, _, _, _) -> true
+            TyOpaque(_, _, _, _, _, _, _) -> true
             _ -> false
           }
           let hint = if literal_opaque {
@@ -5752,7 +5891,7 @@ fn see_through_expected(cx: Cx, needs: Bool, expected: Option[Ty]) -> Option[Ty]
     None
   } else {
     match expected {
-      Some(TyOpaque(_, _, ow, _, tgt, _)) -> if sees_through(cx, ow) { Some(tgt) } else { None }
+      Some(TyOpaque(_, _, ow, _, tgt, _, _)) -> if sees_through(cx, ow) { Some(tgt) } else { None }
       _ -> None
     }
   }
@@ -6313,7 +6452,7 @@ fn lit_kind_hint(cx: Cx, lit: Expr, t: Ty) -> String = {
     "`" ++ ts ++ "` takes integer literals"
   } else {
     match t {
-      TyAdt(_, _, _) | TyOpaque(_, _, _, _, _, _) ->
+      TyAdt(_, _, _) | TyOpaque(_, _, _, _, _, _, _) ->
         "there are no implicit conversions; a literal becomes `" ++ ts ++ "` only through `" ++
         impl_shape(cx, if fl { "FromFloat" } else { "FromInt" }, t) ++ "`, written in the module declaring it"
       _ -> "there are no implicit conversions"
@@ -6395,7 +6534,7 @@ fn lit_target(cx: Cx, t: Ty, is_float: Bool) -> LitTarget = {
   match t {
     TyInt -> LitDefault
     TyFloat -> if is_float { LitDefault } else { LitToFloat }
-    TyOpaque(_, _, ow, _, tgt, _) ->
+    TyOpaque(_, _, ow, _, tgt, _, _) ->
       if sees_through(cx, ow) {
         lit_target(cx, tgt, is_float)
       } else if has_impl_at(cx.impl_table, tid, t) {
@@ -6410,7 +6549,7 @@ fn lit_target(cx: Cx, t: Ty, is_float: Bool) -> LitTarget = {
 
 fn lit_peel(cx: Cx, t: Ty) -> Ty =
   match t {
-    TyOpaque(_, _, ow, _, tgt, _) -> if sees_through(cx, ow) { lit_peel(cx, tgt) } else { t }
+    TyOpaque(_, _, ow, _, tgt, _, _) -> if sees_through(cx, ow) { lit_peel(cx, tgt) } else { t }
     _ -> t
   }
 
@@ -6863,7 +7002,7 @@ fn arith_missing_hint(cx: Cx, tid: Int, t: Ty) -> String = {
   match t {
     TyString -> if tid == ADD_ID { "`++` concatenates strings" } else { arith_own_type_hint(tid) }
     TyList(_) -> if tid == ADD_ID { "`++` concatenates lists" } else { arith_own_type_hint(tid) }
-    TyOpaque(id, _, _, _, _, _) ->
+    TyOpaque(id, _, _, _, _, _, _) ->
       if id == CHAR_OPAQUE_ID {
         "an opaque type does not inherit its target's arithmetic; convert with char.code first"
       } else {
@@ -6889,7 +7028,7 @@ fn impl_shape(cx: Cx, trait_name: String, t: Ty) -> String = {
       let a = adt_of(cx.adts, aid)
       (a.name, map(a.tparams, tp => ty_show(cx.adts, tp)))
     }
-    TyOpaque(id, name, _, args, _, _) -> (name, opaque_param_names(cx, id, len(args)))
+    TyOpaque(id, name, _, args, _, _, _) -> (name, opaque_param_names(cx, id, len(args)))
     _ -> (ty_show(cx.adts, t), [])
   }
   if len(params) == 0 {
@@ -7709,7 +7848,7 @@ fn check_lambda(
   let exp_ret: Option[Ty] =
     if have_exp && is_concrete(cx1, eret) { Some(eret) } else { None }
   let ctx =
-    LambdaCx { observes = observes,
+    LambdaCx { static_captures = [], observes = observes,
       boundary = len(cx1.frame.scopes),
       expected_ret = exp_ret,
       captures = [],
@@ -7778,7 +7917,8 @@ fn check_lambda(
   # travelling with the closure
   let lam_eff = eff_union(cx3.frame.used_effects)
   cx3 = Cx { ..cx3, frame = Frame { ..cx3.frame, used_effects = saved_used, eff_witness = saved_wit, observation_scopes = saved_scopes } }
-  let contract = default_capture_contract(cx3, CaptureFunction { scopes = scopes, bound = None }, popped.captures)
+  cx3 = check_environment(cx3, popped.captures, handler_of != None, lo, hi)
+  let contract = default_capture_contract(cx3, CaptureFunction { scopes = scopes, bound = if len(popped.static_captures) == 0 { None } else { Some(popped.static_captures) } }, popped.captures)
   let t = TyFn(ptys, bt, lam_eff, contract)
   (cx3, t, XLambda(psyms ++ scope_symbols, pnames ++ map(scopes, r => scope_key_name(r.id)), bx, popped.captures, owner_off(cx, lo), owner_off(cx, hi), t, if arm { "handler" } else if sugar { "with" } else { "lambda" }))
 }
@@ -7789,27 +7929,23 @@ fn checking_trait_capture_default(cx: Cx) -> Bool = match cx.frame.current_sig {
 }
 
 fn default_capture_contract(cx: Cx, contract: capture.Function, symbols: List[Int]) -> capture.Function = {
-  let signature = match cx.frame.current_sig {
-    Some(value) -> value
-    None -> return contract
-  }
-  if not checking_trait_capture_default(cx) { return contract }
-  var captured: capture.Capture = []
-  for id in symbols {
-    let value = sym_of(cx, id)
-    captured = capture.union(captured, trait_contract.capture_of(cx.adts, signature.scope_params, value.ty))
-    match value.dict_of {
-      Some(entry) -> { let (app, _) = entry
-        captured = capture.union(captured, capture.trait_support(app)) }
-      None -> ()
-    }
-    match value.cell_of {
-      Some(entry) -> { let (_, contents) = entry
-        captured = capture.union(captured, trait_contract.capture_of(cx.adts, signature.scope_params, contents)) }
-      None -> ()
-    }
-  }
+  let prepared = value_capture.ensure(cx, symbols)
+  let solved = environment.dependencies(prepared.frame.environment, symbols)
+  let captured = list.filter(capture.union(capture.bound(contract), solved.value), member => match member {
+    capture.Region(region) -> not list.any(contract.scopes, own => capture.same_scope(own, region))
+    _ -> true
+  })
+  if len(captured) == 0 && not checking_trait_capture_default(cx) { return contract }
   CaptureFunction { ..contract, bound = Some(captured) }
+}
+
+fn check_environment(cx: Cx, symbols: List[Int], internal: Bool, lo: Int, hi: Int) -> Cx = {
+  let prepared = value_capture.ensure(cx, symbols)
+  let solved = environment.dependencies(prepared.frame.environment, symbols)
+  if solved.known || internal { return prepared }
+  cerr_h(prepared, "cannot prove the captured value environment from its contract", lo, hi,
+    "ordinary values need a value upper bound; cells, dictionaries and frozen evidence retain complete support" ++
+      value_capture.describe_unknown(prepared, symbols))
 }
 
 fn fn_ty_parts(t: Ty) -> (List[Ty], Ty, Eff) =
@@ -7893,17 +8029,6 @@ fn declare_cells(cx: Cx, cells: List[HandlerCell], hid: Int) -> (Cx, List[TStmt]
   for c in cells {
     let (cxa, t) = resolve_type(cx1, c.ann)
     cx1 = cxa
-    # R3 of docs/mem-buffer-design.md 4.2: a cell outlives the code that wrote
-    # it, so a buffer kept in one could be read after its scope returned
-    match buffer_reach(cx1.adts, cx1.effect_infos, t) {
-      Some(path) -> {
-        cx1 = cerr_h(cx1, "the state variable `" ++ c.name ++ "` cannot hold a buffer: " ++ path ++
-            ", in the type `" ++ ty_show(cx1.adts, t) ++ "`", c.nlo, c.nhi,
-          "a buffer is private to its `with_mem` scope; keep Ints in the cell and " ++
-            "the buffer in a local")
-      }
-      None -> ()
-    }
     let (cxb, it, ix) = check_expr(cx1, c.init, Some(t))
     cx1 = cxb
     # the same sentence a `let` with an annotation gets, deliberately: a cell's
@@ -7923,7 +8048,8 @@ fn declare_cells(cx: Cx, cells: List[HandlerCell], hid: Int) -> (Cx, List[TStmt]
   for c in cells {
     let (cxc, sid) =
       declare_sym(cx1, c.name, erased_cell_ty(), false, Some((hid, tys[i])), c.nlo, c.nhi)
-    cx1 = cxc
+    cx1 = value_capture.bind(cxc, sid, inits[i], false)
+    cx1 = value_capture.write(cx1, sid, tys[i], c.nlo, c.nhi)
     stmts = stmts ++ [TSLet(Some(sid), c.name, cell_new(cx, inits[i], c.lo, c.hi), owner_off(cx, c.lo), owner_off(cx, c.hi))]
     i = i + 1
   }
@@ -8406,6 +8532,7 @@ fn check_handle(
   }
   let ev_node = XCtor(eid, 0, arm_nodes ++ [arm_env], slots ++ [Some(len(slots))],
     no_expr(), owner_off(cx, lo), owner_off(cx, hi), ev_ty)
+  cx1 = value_capture.bind(cx1, ev_sym, ev_node, true)
   cx1 = pop_scope(cx1)
   # ... and the block is charged with what the remainder does *minus* E, which
   # this very call just answered
@@ -9197,7 +9324,13 @@ fn check_let(
     cx1 = cerr(cx1, "cannot bind Never (this expression does not return)", e_lo(init), e_hi(init))
     t = TyError
   }
-  let (cxc, sid) = declare(cx1, name, t, mutable, lo, hi)
+  let (declared, sid) = declare(cx1, name, t, mutable, lo, hi)
+  var cxc = declared
+  if name != "_" { cxc = value_capture.bind(cxc, sid, ix, false) }
+  if mutable {
+    cxc = value_capture.install(cxc, sid, t)
+    cxc = value_capture.write(cxc, sid, it, e_lo(init), e_hi(init))
+  }
   # `_` binds nothing: codegen discards the value (sym None)
   let bind: Option[Int] = if name == "_" { None } else { Some(sid) }
   (cxc, TSLet(bind, name, ix, owner_off(cx, lo), owner_off(cx, hi)))
@@ -9288,6 +9421,7 @@ fn check_assign(
           # cleared unconditionally: a right-hand side that never read the
           # cell must not leave the mark standing for the next assignment
           cx1 = Cx { ..cxb, take_cell = None }
+          cx1 = value_capture.write(cx1, sid, vt, e_lo(value), e_hi(value))
           let compatible = assignable(cx1, vt, ct)
           if not compatible {
             let declared_text = ty_show(cx1.adts, ct)
@@ -9304,7 +9438,7 @@ fn check_assign(
               "declare it as var " ++ name ++ " = ... if it needs to change")
           }
           let (cxb, vt, vx) = check_expr(cx1, value, Some(sym.ty))
-          cx1 = cxb
+          cx1 = value_capture.write(cxb, sid, vt, e_lo(value), e_hi(value))
           if not assignable(cx1, vt, sym.ty) {
             let declared_text = ty_show(cx1.adts, sym.ty)
             let actual_text = ty_show(cx1.adts, vt)
@@ -9573,7 +9707,7 @@ fn mint_staged_cell(cx: Cx, id: Int, sym: Sym, kind: StagedKind, lo: Int, hi: In
     ev_of = None,
     cell_of = None
   })
-  (cx3, StagedCell { orig = id, cell = cid, ty = t, wit = w, use_lo = lo, use_hi = hi })
+  (value_capture.carried(cx3, cid, id, t), StagedCell { orig = id, cell = cid, ty = t, wit = w, use_lo = lo, use_hi = hi })
 }
 
 ## The outermost closure frame a `var` found at scope `i` crosses that is a
@@ -9723,8 +9857,18 @@ fn staged_call(cx: Cx, tid: Int, mname: String, subject: Ty, args: List[TExpr], 
   }
   let m: Map[Int, Ty] = map.from([(tvid, subject)])
   let em: Map[Int, Eff] = map.empty()
-  let callee_eff = reduce_eff(cx, s.eff, m)
-  let (cx1, evs, unanswered, vinsts, adropped) = named_evidence_args(cx, s, m, em, lo, hi)
+  var checked = cx
+  for i in 0..len(args) { if i < len(s.param_tys) {
+    let wanted = reduce_instantiated(cx, subst(s.param_tys[i], m, em), m)
+    let actual = tex_ty(args[i])
+    if not assignable(cx, actual, wanted) {
+      checked = cerr_h(checked, "staged argument type mismatch: expected " ++ ty_show(cx.adts, wanted) ++
+          ", got " ++ ty_show(cx.adts, actual), lo, hi,
+        "generated callbacks obey their declared environment and invariant cell contracts")
+    }
+  } }
+  let callee_eff = reduce_eff(checked, s.eff, m)
+  let (cx1, evs, unanswered, vinsts, adropped) = named_evidence_args(checked, s, m, em, lo, hi)
   let charged = eff_union([callee_eff] ++ vinsts)
   let cx2 = record_effect(cx1, eff_drop_assocs(eff_drop(charged, unanswered), adropped), lo, hi,
     mname)
@@ -9749,7 +9893,7 @@ fn staged_read(cx: Cx, sc: StagedCell, name: String, lo: Int, hi: Int) -> (Cx, T
 fn staged_write(cx: Cx, sc: StagedCell, name: String, value: Expr, nlo: Int, nhi: Int, lo: Int,
   hi: Int) -> (Cx, TStmt) !io = {
   let (cx1, vt, vx) = check_expr(cx, value, Some(sc.ty))
-  var cx2 = cx1
+  var cx2 = value_capture.write(cx1, sc.cell, vt, e_lo(value), e_hi(value))
   if not assignable(cx2, vt, sc.ty) {
     cx2 = cerr(cx2, "`" ++ name ++ "` is " ++ ty_show(cx2.adts, sc.ty) ++ ", cannot assign " ++
         ty_show(cx2.adts, vt), e_lo(value), e_hi(value))
@@ -9781,7 +9925,7 @@ fn check_staged_body(cx: Cx, pat: Pattern, item: Ty, body: Expr, lo: Int,
   let saved_wit = cx1.frame.eff_witness
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   let d = len(cx1.frame.loop_stack)
-  let ctx = LambdaCx { observes = false,
+  let ctx = LambdaCx { static_captures = [], observes = false,
     boundary = len(cx1.frame.scopes),
     expected_ret = Some(TyUnit),
     captures = [],
@@ -9845,7 +9989,8 @@ fn check_staged_body(cx: Cx, pat: Pattern, item: Ty, body: Expr, lo: Int,
     }
   }
   let bx2 = if len(pre) == 0 { bx } else { XBlock(pre, Some(bx), x_lo(bx), x_hi(bx), TyUnit) }
-  let t = TyFn([item], TyUnit, lam_eff, capture.empty_function())
+  cx3 = check_environment(cx3, popped.captures, false, e_lo(body), e_hi(body))
+  let t = TyFn([item], TyUnit, lam_eff, default_capture_contract(cx3, CaptureFunction { scopes = [], bound = if len(popped.static_captures) == 0 { None } else { Some(popped.static_captures) } }, popped.captures))
   (cx3, XLambda([psym], [pname], bx2, popped.captures, owner_off(cx, e_lo(body)),
     owner_off(cx, e_hi(body)), t, "for-body"), lam_eff, popped.staged)
 }
@@ -9966,7 +10111,7 @@ fn check_staged_arm(cx: Cx, body: Expr, cells: Map[Int, StagedCell], expected: O
   let saved_used = cx.frame.used_effects
   let saved_wit = cx.frame.eff_witness
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
-  let ctx = LambdaCx { observes = false,
+  let ctx = LambdaCx { static_captures = [], observes = false,
     boundary = len(cx.frame.scopes), expected_ret = Some(TyUnit), captures = [],
     sugar = false, arm = false, ctl = false, local_fn = None, handler_of = None,
     staged_kind = StagedBranch(lo, hi), staged = cells
@@ -9980,8 +10125,10 @@ fn check_staged_arm(cx: Cx, body: Expr, cells: Map[Int, StagedCell], expected: O
   cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame,
     lambda_stack = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1),
     used_effects = saved_used, eff_witness = saved_wit } }
+  cx1 = check_environment(cx1, popped.captures, false, e_lo(body), e_hi(body))
+  let contract = default_capture_contract(cx1, CaptureFunction { scopes = [], bound = if len(popped.static_captures) == 0 { None } else { Some(popped.static_captures) } }, popped.captures)
   (cx1, bt, XLambda([], [], bx, popped.captures, owner_off(cx, e_lo(body)), owner_off(cx, e_hi(body)),
-    TyFn([], bt, row, capture.empty_function()), "if-body"), row, popped.staged)
+    TyFn([], bt, row, contract), "if-body"), row, popped.staged)
 }
 
 ## A branch may infer its result from its sibling. Only the result tail is
@@ -10003,7 +10150,7 @@ fn staged_result_arm(cx: Cx, lam: TExpr, t: Ty, slot: Int, wit: WitRef, lo: Int,
   let saved_used = cx.frame.used_effects
   let saved_wit = cx.frame.eff_witness
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
-  let ctx = LambdaCx { observes = false,
+  let ctx = LambdaCx { static_captures = [], observes = false,
     boundary = len(cx.frame.scopes), expected_ret = Some(TyUnit), captures = caps,
     sugar = false, arm = false, ctl = false, local_fn = None, handler_of = None,
     staged_kind = StagedBranch(lo, hi), staged = map.empty()
@@ -10019,7 +10166,9 @@ fn staged_result_arm(cx: Cx, lam: TExpr, t: Ty, slot: Int, wit: WitRef, lo: Int,
   let restored = Cx { ..charged, frame = Frame { ..charged.frame, used_effects = saved_used,
     eff_witness = saved_wit,
     lambda_stack = list.take(charged.frame.lambda_stack, len(charged.frame.lambda_stack) - 1) } }
-  (restored, XLambda([], [], store, popped.captures ++ [slot], llo, lhi, TyFn([], TyUnit, row, capture.empty_function()), "if-result"), row)
+  let checked = value_capture.write(restored, slot, t, lo, hi)
+  let contract = default_capture_contract(checked, CaptureFunction { scopes = [], bound = if len(popped.static_captures) == 0 { None } else { Some(popped.static_captures) } }, popped.captures ++ [slot])
+  (checked, XLambda([], [], store, popped.captures ++ [slot], llo, lhi, TyFn([], TyUnit, row, contract), "if-result"), row)
 }
 
 ## Evaluate the condition once. Typed result slots are opened empty, written
@@ -10068,7 +10217,9 @@ fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], ex
         Some(w) -> {
           let slot_ty = reduce_assoc(cx1, TyAssoc(result, capture.closed_trait(STAGED_RESULT_ID), "Slot", []))
           let (cxs, slot) = hidden_local(cx1, "\$result", slot_ty, lo, hi)
-          let (cxo, open) = staged_call(cxs, STAGED_RESULT_ID, "result_open", result, [], w,
+          let located = value_capture.install(cxs, slot, result)
+          let installed = value_capture.carried(located, slot, slot, result)
+          let (cxo, open) = staged_call(installed, STAGED_RESULT_ID, "result_open", result, [], w,
             slot_ty, lo, hi, NO_NAME)
           cx1 = cxo
           stmts = stmts ++ [TSLet(Some(slot), "\$result", open, olo, ohi)]
@@ -10487,6 +10638,7 @@ fn check_local_fn(
     }
     _ -> ()
   }
+  cx1 = value_capture.bind(cx1, sid, lam, false)
   match lam {
     XLambda(psyms, pnames, bx, caps, ..) -> {
       var caps2: List[Int] = []
@@ -11076,6 +11228,7 @@ fn check_call(
     cx1 = learn_trait_type_bindings(cx1, s, m)
     s = scope_infer.contract_normalized(s, cx1.frame.scope_bindings, cx1.frame.capture_bindings)
   }
+  cx1 = check_type_capture_arguments(cx1, s, m, em, clo, chi)
   # trait bounds: each (type parameter, bound) pair needs a dictionary
   var wits: List[WitRef] = []
   var any_constraint = false
@@ -11705,7 +11858,7 @@ fn infer_call_arg(
   }
   m = m3
   em = em3
-  let escaped = reject_scope_escape(cx1, s, at, m, em, e_lo(a), e_hi(a))
+  let escaped = reject_scope_escape(cx1, s, at, m, em, ax, e_lo(a), e_hi(a))
   let scope_escape = len(escaped.diags) > len(cx1.diags)
   cx1 = escaped
   if not ok && not scope_escape {
@@ -12546,15 +12699,23 @@ fn check_ctor_call(
   }
   let (aid, cslot) = key.expect("ctor")
   let ad = adt_of(cx1.adts, aid)
-  let scope_args = match expected {
-    Some(TyAdt(id, _, args)) -> if id == aid { args } else { capture.arguments(ad.scope_params) }
-    _ -> capture.arguments(ad.scope_params)
-  }
   let original = ad.ctors[cslot]
-  let ci = CtorI { ..original, fields = map(original.fields, f => FieldI { ..f,
-    ty = apply_scope_arguments(f.ty, ad.scope_params, scope_args) }) }
+  let (introduced, template) = fresh_scope_signature(cx1,
+    ctor_signature(ad, original, capture.arguments(ad.scope_params)))
+  cx1 = introduced
+  match expected { Some(value) -> { cx1 = constructor_context(cx1, template, value) }, None -> () }
+  match expected {
+    Some(TyAdt(id, _, _)) -> if id == aid {
+      let (inferred, _) = learn_scope_argument(cx1, template, template.ret, expected.expect("constructor context"))
+      cx1 = inferred
+    }
+    _ -> ()
+  }
+  var fields: List[FieldI] = []
+  for i in 0..len(original.fields) { fields = fields ++ [FieldI { ..original.fields[i], ty = template.param_tys[i] }] }
+  let ci = CtorI { ..original, fields = fields }
   let n = len(ci.fields)
-  let self_ty = TyAdt(ad.id, ad.tparams, scope_args)
+  let self_ty = scope_type(cx1, template.ret)
   var exp_is_fn = false
   var exp_fn_ps: List[Ty] = []
   var exp_fn_ret = TyUnit
@@ -12644,7 +12805,7 @@ fn check_ctor_call(
     None -> ()
   }
   let (slots_cx, idx_of, atx0, slots, args_broken) = ctor_arg_slots(cx1, ci, cargs)
-  let (rounds_cx, m5, em5, atx) = infer_ctor_args(slots_cx, ci, cargs, idx_of, m, em, atx0)
+  let (rounds_cx, m5, em5, atx) = infer_ctor_args(slots_cx, ci, template, cargs, idx_of, m, em, atx0)
   cx1 = rounds_cx
   m = m5
   em = em5
@@ -12741,7 +12902,9 @@ fn check_ctor_call(
       None -> { written = written ++ [XError(owner_off(cx, lo), owner_off(cx, hi))] }
     }
   }
-  let rt = subst(self_ty, m, em)
+  let (finished, constructor) = finish_scope_signature(cx1, template, lo, hi)
+  cx1 = check_type_capture_arguments(finished, constructor, m, em, lo, hi)
+  let rt = subst(constructor.ret, m, em)
   (cx1, rt, XCtor(aid, cslot, written, slots, spread_tx, owner_off(cx, lo), owner_off(cx, hi), rt))
 }
 
@@ -12926,6 +13089,7 @@ fn ctor_arg_slots(
 fn infer_ctor_args(
   start: Cx,
   ci: CtorI,
+  template: Sig,
   cargs: List[Arg],
   idx_of: List[Int],
   m0: Map[Int, Ty],
@@ -12947,7 +13111,7 @@ fn infer_ctor_args(
     let lit_wait = idx >= 0 && is_lit_atom(a.e) &&
       not is_concrete(cx1, subst(ci.fields[idx].ty, m, em))
     if idx >= 0 && not already && not needs_expected(cx1, a.e) && not lit_wait {
-      let (cxa, m1, em1, ax) = infer_ctor_arg(cx1, ci, a, idx, m, em)
+      let (cxa, m1, em1, ax) = infer_ctor_arg(cx1, ci, template, a, idx, m, em)
       cx1 = cxa
       m = m1
       em = em1
@@ -12960,7 +13124,7 @@ fn infer_ctor_args(
   while true {
     let k = first_pending_ctor_lit(cargs, atx, idx_of)
     if k < 0 { break }
-    let (cxa, m1, em1, ax) = infer_ctor_arg(cx1, ci, cargs[k], idx_of[k], m, em)
+    let (cxa, m1, em1, ax) = infer_ctor_arg(cx1, ci, template, cargs[k], idx_of[k], m, em)
     cx1 = cxa
     m = m1
     em = em1
@@ -12989,7 +13153,7 @@ fn infer_ctor_args(
     }
     if first < 0 { break }
     let at_k = if pick >= 0 { pick } else { first }
-    let (cxa, m1, em1, ax) = infer_ctor_arg(cx1, ci, cargs[at_k], idx_of[at_k], m, em)
+    let (cxa, m1, em1, ax) = infer_ctor_arg(cx1, ci, template, cargs[at_k], idx_of[at_k], m, em)
     cx1 = cxa
     m = m1
     em = em1
@@ -13003,6 +13167,7 @@ fn infer_ctor_args(
 fn infer_ctor_arg(
   cx: Cx,
   ci: CtorI,
+  template: Sig,
   a: Arg,
   idx: Int,
   m0: Map[Int, Ty],
@@ -13010,12 +13175,14 @@ fn infer_ctor_arg(
 ) -> (Cx, Map[Int, Ty], Map[Int, Eff], TExpr) !io = {
   var cx1 = cx
   let declared = ci.fields[idx].ty
-  let sub = subst(declared, m0, em0)
+  let sub = scope_type(cx1, subst(declared, m0, em0))
   let concrete = is_concrete(cx1, sub)
   let exp2: Option[Ty] = if concrete { Some(sub) } else { None }
   let (cxa, at, ax) = check_expr(cx1, a.e, exp2)
-  cx1 = cxa
-  let (m3, em3, ok) = unify_into(cx1, declared, at, m0, em0)
+  let (learned, fits) = learn_scope_argument(cxa, template, declared, at)
+  cx1 = learned
+  let (m3, em3, unified) = unify_into(cx1, scope_type(cx1, declared), at, m0, em0)
+  let ok = fits && unified
   if not ok {
     let declared_text = ty_show(cx1.adts, subst(declared, m3, em3))
     let actual_text = ty_show(cx1.adts, at)
@@ -15230,12 +15397,19 @@ fn enter_fn(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
     }
     ti = ti + 1
   }
+  var proof_params = s.scope_params
+  for i in 0..len(s.tparams) { for application in bounds_of(s, i) {
+    let tr = trait_of(cx.traits, application.id)
+    if len(application.args) > 0 || len(tr.scope_params.bounds) > 0 {
+      proof_params = data_capture.assume_support(proof_params, s.tparams[i], capture.trait_support(application))
+    }
+  } }
   var cx1 = Cx {
     ..entry,
     current_tparams = tp,
     current_eff_vars = ev,
-    current_capture_params = s.scope_params,
-    frame = Frame { ..cx.frame, current_sig = Some(s) }
+    current_capture_params = proof_params,
+    frame = Frame { ..cx.frame, current_sig = Some(s), environment = environment.empty() }
   }
   cx1 = bind_dicts(cx1, s, nlo, nhi)
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
@@ -16133,6 +16307,24 @@ pub(pkg) fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]
   cx1 = pass_effects(cx1, m)
   cx1 = pass_ctor_fields(cx1, m, shells)
   cx1 = pass_resolve_aliases(cx1)
+  cx1 = Cx { ..cx1, adts = data_capture.settle_owned(cx1.adts, cx1.owner_class), summaries_pending = false }
+  for info in map.values(cx1.adts) {
+    if info.owner == cx1.owner_class && capture.is_representation(info.scope_params) && info.capture_summary == None {
+      cx1 = cerr(cx1, "cannot prove the data capture contract for `" ++ info.name ++ "`", 0, 0)
+    }
+  }
+  for envelope_alias in map.values(cx1.aliases) {
+    if envelope_alias.is_opaque && envelope_alias.owner == cx1.owner_class.unwrap_or("") && envelope_alias.target != None {
+      match map.get(cx1.alias_resolved, envelope_alias.name) {
+        Some(target) -> if not data_capture.opaque_representation_permits(cx1.adts,
+          envelope_alias.scope_params, envelope_alias.tparams, envelope_alias.eparams, target) {
+          cx1 = cerr(cx1, "opaque representation exceeds the public head envelope of `" ++ envelope_alias.name ++ "`", envelope_alias.nlo, envelope_alias.nhi)
+        }
+        None -> ()
+      }
+    }
+  }
+  cx1 = discharge_capture_obligations(cx1)
   cx1 = pass_register_traits(cx1, m)
   let (cxb, impl_sigs) = pass_register_impls(cx1, m, shells)
   cx1 = cxb
@@ -18626,7 +18818,7 @@ fn arm_cx() -> Cx =
       ..cx,
       frame = Frame {
         ..cx.frame,
-        lambda_stack = [LambdaCx { observes = false,
+        lambda_stack = [LambdaCx { static_captures = [], observes = false,
           boundary = 0,
           expected_ret = None,
           captures = [],

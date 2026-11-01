@@ -48,7 +48,7 @@ pub fn desc_of(adts: Adts, t: Ty) -> String =
   match t {
     TyCaptured(value, _) -> desc_of(adts, value)
     # an opaque type has no representation of its own -- it IS its target
-    TyOpaque(_, _, _, _, tgt, _) -> desc_of(adts, tgt)
+    TyOpaque(_, _, _, _, tgt, _, _) -> desc_of(adts, tgt)
     TyInt -> "J"
     TyFloat -> "D"
     TyBool -> "Z"
@@ -113,7 +113,7 @@ pub type JvmRepr =
 pub fn jvm_repr(t: Ty) -> JvmRepr =
   match t {
     TyCaptured(value, _) -> jvm_repr(value)
-    TyOpaque(_, _, _, _, tgt, _) -> jvm_repr(tgt)
+    TyOpaque(_, _, _, _, tgt, _, _) -> jvm_repr(tgt)
     TyInt -> RLong
     TyFloat -> RDouble
     TyBool -> RBool
@@ -193,7 +193,7 @@ test "a Unit is an ordinary reference, and only the bottom types are void" {
   # every shape below was a ClassFormatError while `Unit` said `V`: `V` is a
   # return descriptor and the JVM rejects it in a parameter or a field
   assert desc_of(adts, TyUnit) == "Ldawn/rt/Unit;"
-  assert desc_of(adts, TyOpaque(0, "Handle", "m", [], TyUnit, capture.empty_arguments())) == "Ldawn/rt/Unit;"
+  assert desc_of(adts, TyOpaque(0, "Handle", "m", [], TyUnit, capture.empty_arguments(), capture.opaque_head(0, 0, 0))) == "Ldawn/rt/Unit;"
   assert method_desc(adts, [TyUnit, TyInt], TyBool) == "(Ldawn/rt/Unit;J)Z"
   assert slots_of(TyUnit) == 1
   assert is_ref(TyUnit)
@@ -244,8 +244,8 @@ test "an impl static is qualified by module when the module is not its class" {
   assert impl_symbol(adts, "main", Some("std/x"), "Render", TyInt, "render") ==
     "dawn\$impl\$std\$x\$Render\$Int\$render"
   # and a type another module declared carries that module too
-  let t = TyOpaque(9, "Tag", "c", [], TyInt, capture.empty_arguments())
-  let u = TyOpaque(10, "Tag", "d", [], TyInt, capture.empty_arguments())
+  let t = TyOpaque(9, "Tag", "c", [], TyInt, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
+  let u = TyOpaque(10, "Tag", "d", [], TyInt, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
   assert impl_symbol(adts, "a", Some("a"), "Render", t, "render") !=
     impl_symbol(adts, "a", Some("a"), "Render", u, "render")
   assert impl_symbol(adts, "c", Some("a"), "Render", t, "render") ==
@@ -537,7 +537,7 @@ pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
   match t {
     # opacity hides the representation from other modules, not from the
     # language: an opaque Int hashes, compares and renders as that Int
-    TyOpaque(_, _, _, _, tgt, _) -> hash_of(m, tgt)
+    TyOpaque(_, _, _, _, tgt, _, _) -> hash_of(m, tgt)
     TyCaptured(value, _) -> hash_of(m, value)
     TyInt -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
     TyFloat -> {
@@ -1005,7 +1005,7 @@ pub fn subject_name(adts: Adts, t: Ty) -> String =
     TyArray(_) -> "Array"
     TyUnit -> "Unit"
     # an opaque type is its own subject -- its impl is not its target's
-    TyOpaque(_, name, _, _, _, _) -> name
+    TyOpaque(_, name, _, _, _, _, _) -> name
     _ -> panic("invalid impl subject")
   }
 
@@ -1033,7 +1033,7 @@ pub fn subject_ref(adts: Adts, here: String, t: Ty) -> String =
       let a = adt_of(adts, aid)
       owner_qualified(here, a.owner, a.name)
     }
-    TyOpaque(_, name, owner, _, _, _) -> owner_qualified(here, Some(owner), name)
+    TyOpaque(_, name, owner, _, _, _, _) -> owner_qualified(here, Some(owner), name)
     _ -> subject_name(adts, t)
   }
 
@@ -1067,7 +1067,7 @@ pub fn dict_class(owner: String, key: String) -> String =
 ## Recover the concrete type from an erased Object on the stack (unerase).
 pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
   match t {
-    TyOpaque(_, _, _, _, tgt, _) -> emit_unerase(m, adts, tgt)
+    TyOpaque(_, _, _, _, tgt, _, _) -> emit_unerase(m, adts, tgt)
     TyCaptured(value, _) -> emit_unerase(m, adts, value)
     TyInt -> {
       m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")

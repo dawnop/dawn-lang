@@ -33,10 +33,10 @@ MUTATIONS = {
     # 1 -- an opaque type's representation is not part of its surface
     "recurse-opaque-representation": (
         PASSES,
-        "    TyOpaque(id, name, owner, args, _, _) -> {\n"
+        "    TyOpaque(id, name, owner, args, _, _, _) -> {\n"
         "      let a = opaque_audience(cx, id, name, owner)\n"
         "      var out = no_leaks()\n",
-        "    TyOpaque(id, name, owner, args, rep, _) -> {\n"
+        "    TyOpaque(id, name, owner, args, rep, _, _) -> {\n"
         "      let a = opaque_audience(cx, id, name, owner)\n"
         "      var out = surface_ty_leaks(cx, root, rep, sp, path ++ \" representation\")\n",
     ),
@@ -58,11 +58,11 @@ MUTATIONS = {
     # said for the mutant to be the existential reading rather than a typo.
     "opaque-args-existential": (
         CHECKER,
-        "    TyOpaque(_, _, ow, _, tgt, _) ->\n"
+        "    TyOpaque(_, _, ow, _, tgt, _, _) ->\n"
         "      if sees_through(cx, ow) { assignable(cx, tgt, target) } else { false }\n",
-        "    TyOpaque(_, _, ow, _, tgt, _) ->\n"
+        "    TyOpaque(_, _, ow, _, tgt, _, _) ->\n"
         "      match target {\n"
-        "        TyOpaque(_, _, _, _, ttgt, _) -> tgt == ttgt\n"
+        "        TyOpaque(_, _, _, _, ttgt, _, _) -> tgt == ttgt\n"
         "        _ -> if sees_through(cx, ow) { assignable(cx, tgt, target) } else { false }\n"
         "      }\n",
     ),

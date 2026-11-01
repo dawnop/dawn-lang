@@ -4,68 +4,14 @@
 use std/map
 use std/list
 use check/capture
+use check/data_capture
 use check/scope_infer
 use check/capture.{TraitApplication}
-use check/types.{MethodSig, ImplI, Ty, TyVar, TyI64Buf, TyF64Buf, TyCaptured, TyFn, TyAdt, TyOpaque,
-  TyTuple, TyList, TySet, TyArray, TyMap, TyAssoc, Adts, TraitI, Eff,
-  subst, subst_scopes, subst_capture_eff, apply_scope_arguments, ty_scope_refs, type_args_of, ty_equal }
+use check/types.{MethodSig, ImplI, Ty, TyVar, TyAdt, TyOpaque, Adts, TraitI, Eff,
+  subst, subst_scopes, subst_capture_eff, type_args_of, ty_equal }
 
-pub fn capture_of(adts: Adts, params: capture.Params, t: Ty) -> capture.Capture =
-  capture_in(adts, params, t, [])
-
-fn capture_in(adts: Adts, params: capture.Params, t: Ty, seen: List[Int]) -> capture.Capture = {
-  var out: capture.Capture = []
-  var children: List[Ty] = []
-  match t {
-    TyVar(_, id) -> {
-      for entry in params.bounds { let (vid, upper) = entry
-        if vid == id { out = capture.union(out, upper) } }
-    }
-    TyI64Buf(s) | TyF64Buf(s) -> { out = [capture.Region(s)] }
-    TyCaptured(value, upper) -> { out = upper
-      children = [value] }
-    TyFn(_, _, _, contract) -> { out = capture.bound(contract) }
-    TyAssoc(_, _, _, upper) -> { out = upper }
-    TyList(value) | TySet(value) | TyArray(value) -> { children = [value] }
-    TyMap(key, value) -> { children = [key, value] }
-    TyTuple(values) -> { children = values }
-    TyOpaque(_, _, _, args, target, contract) -> {
-      children = args ++ [target]
-      for arg in contract.captures { out = capture.union(out, arg) }
-    }
-    TyAdt(id, args, contract) -> {
-      # Union parameter support before following a recursive edge. A repeated
-      # constructor cannot turn its symbolic arguments into an empty set.
-      for arg in args { out = capture.union(out, capture_in(adts, params, arg, seen)) }
-      for arg in contract.captures { out = capture.union(out, arg) }
-      if not list.contains(seen, id) {
-        match map.get(adts, id) {
-          Some(a) -> {
-            var tm: Map[Int, Ty] = map.empty()
-            for i in 0..len(a.tparams) {
-              match a.tparams[i] {
-                TyVar(_, vid) -> if i < len(args) { tm = map.insert(tm, vid, args[i]) }
-                _ -> ()
-              }
-            }
-            let em: Map[Int, Eff] = map.empty()
-            for ctor in a.ctors { for field in ctor.fields {
-              let value = apply_scope_arguments(subst(field.ty, tm, em), a.scope_params, contract)
-              out = capture.union(out, capture_in(adts, params, value, seen ++ [id]))
-            } }
-          }
-          None -> ()
-        }
-      }
-    }
-    _ -> ()
-  }
-  for child in children { out = capture.union(out, capture_in(adts, params, child, seen)) }
-  out
-}
-
-pub fn support(adts: Adts, params: capture.Params, value: Ty) -> capture.Capture =
-  capture.union(capture_of(adts, params, value), ty_scope_refs(value))
+pub fn support(adts: Adts, params: capture.Params, value: Ty) -> Option[capture.Capture] =
+  data_capture.support_bound(adts, params, value)
 
 pub fn substitutions(tr: TraitI, app: TraitApplication) -> Map[Int, capture.Capture] = {
   var cm: Map[Int, capture.Capture] = map.empty()
@@ -153,6 +99,20 @@ pub fn witness_equations(imp: ImplI, app: TraitApplication, subject: Ty) -> (Map
   (sm, cm, ok)
 }
 
+# Only equations determined by the subject can select a fixed application.
+# An unresolved impl binder remains unresolved; a capture set never supplies
+# an arbitrary Scope identity or a partition across independent parameters.
+pub fn subject_application(imp: ImplI, subject: Ty) -> Option[TraitApplication] = {
+  let (sm, fits) = scope_infer.infer(imp.subject, subject, imp.scope_params.scopes, map.empty())
+  if not fits { return None }
+  let cm = subject_captures(imp.subject, subject, imp.scope_params.captures, map.empty())
+  for region in imp.scope_params.scopes {
+    if scope_infer.resolve(region, sm).id == region.id { return None }
+  }
+  for param in imp.scope_params.captures { if not map.has(cm, param.id) { return None } }
+  Some(capture.trait_subst(TraitApplication { id = imp.trait_id, args = imp.trait_args }, sm, cm))
+}
+
 pub fn witness_arguments(imp: ImplI, app: TraitApplication, subject: Ty,
   adts: Adts, params: capture.Params) -> (Map[Int, capture.Scope], Map[Int, capture.Capture], Bool) = {
   let (sm, cm, equations_ok) = witness_equations(imp, app, subject)
@@ -169,8 +129,7 @@ pub fn witness_arguments(imp: ImplI, app: TraitApplication, subject: Ty,
   ok = ok && ty_equal(subst_scopes(subst(imp.subject, tm, em), sm, cm), subject)
   for entry in imp.scope_params.bounds { let (id, upper) = entry
     match map.get(tm, id) {
-      Some(value) -> { ok = ok && capture.subset_in(capture_of(adts, params, value),
-        capture.subst(upper, sm, cm), params.captures) }
+      Some(value) -> { ok = ok && data_capture.permits(adts, params, value, capture.subst(upper, sm, cm)) }
       None -> ()
     }
   }
@@ -198,7 +157,7 @@ fn subject_captures(formal: Ty, actual: Ty, flex: List[capture.CaptureParam],
   var cm = initial
   match (formal, actual) {
     (TyAdt(_, _, declared), TyAdt(_, _, provided)) |
-      (TyOpaque(_, _, _, _, _, declared), TyOpaque(_, _, _, _, _, provided)) -> {
+      (TyOpaque(_, _, _, _, _, declared, _), TyOpaque(_, _, _, _, _, provided, _)) -> {
       cm = argument_captures(declared.captures, provided.captures, flex, cm)
     }
     _ -> ()

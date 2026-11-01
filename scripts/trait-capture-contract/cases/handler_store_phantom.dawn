@@ -1,0 +1,20 @@
+# Ordinary environments and delivered type support have separate contracts.
+use std/mem
+type Phantom[T] = { n: Int }
+effect Store {
+  fn save(read: fn() -> Int) -> Unit
+  fn fetch() -> (fn() -> Int)
+}
+pub fn main() -> Unit !io = {
+  with handle Store {
+    var saved: fn() -> Int = () => -1
+    save(read) => { saved = read }
+    fetch() => saved
+  }
+  mem.with_mem([@s] () => {
+    let p: Phantom[I64Buf@s] = Phantom { n = 7 }
+    save(() => p.n)
+  })
+  let f = fetch()
+  println(to_string(f()))
+}

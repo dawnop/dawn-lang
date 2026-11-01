@@ -525,7 +525,7 @@ pub fn ty_key(t: Ty) -> String =
     TyAdt(id, _, _) -> "Adt${to_string(id)}"
     # the id alone is not enough: two instantiations of one opaque type share
     # it, and an impl at each has to get its own name
-    TyOpaque(id, _, _, _, tgt, _) -> "Op" ++ to_string(id) ++ "_" ++ ty_key(tgt)
+    TyOpaque(id, _, _, _, tgt, _, _) -> "Op" ++ to_string(id) ++ "_" ++ ty_key(tgt)
     TyVar(_, id) -> "Var${to_string(id)}"
     # never a key: reduction is eager and projections cannot be impl subjects,
     # so a projection reaching a symbol name is a compiler bug, not a program
@@ -565,7 +565,7 @@ pub fn subject_key(t: Ty) -> String =
     # constructor, so the declared subject `Box[T]` and the instantiated
     # `Box[Int]` are one impl and have to spell one name. The target moves
     # under substitution, so it cannot be part of the spelling.
-    TyOpaque(id, _, _, _, _, _) -> "Op${to_string(id)}"
+    TyOpaque(id, _, _, _, _, _, _) -> "Op${to_string(id)}"
     _ -> ty_key(t)
   }
 
@@ -662,7 +662,7 @@ pub fn ty_key_inst(t: Ty) -> String =
     # opaque type with none keeps the spelling `ty_key` already gave it
     # (`args_key([])` is empty) and nothing emitted today is renamed. They
     # cannot be left out: `Phantom[Int]` and `Phantom[String]` share a target.
-    TyOpaque(id, _, _, args, tgt, _) ->
+    TyOpaque(id, _, _, args, tgt, _, _) ->
       "Op" ++ to_string(id) ++ "_" ++ ty_key_inst(tgt) ++ args_key(args)
     TyFn(ps, r, _, _) -> "Fn" ++ to_string(fn_arity(t)) ++ args_key(ps) ++ "_r" ++ ty_key_inst(r)
     _ -> ty_key(t)

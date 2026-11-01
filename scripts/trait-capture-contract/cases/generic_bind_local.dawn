@@ -1,0 +1,13 @@
+# Ordinary environments and delivered type support have separate contracts.
+use std/mem
+type Phantom[T] = { n: Int }
+fn bind[T: ^{c}, ^c, !e](value: T, read: fn(T, Int) -> Int !e ^{c}) -> (fn(Int) -> Int !e ^{c}) = n => read(value, n)
+pub fn main() -> Unit !io = {
+  let n = mem.with_mem([@s] () => {
+    let p: Phantom[I64Buf@s] = Phantom { n = 7 }
+    let read: fn(Phantom[I64Buf@s], Int) -> Int = (p: Phantom[I64Buf@s], n: Int) => p.n + n
+    let f = bind(p, read)
+    f(4)
+  })
+  println(to_string(n))
+}

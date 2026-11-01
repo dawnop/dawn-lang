@@ -1,0 +1,19 @@
+# A Unit answer cannot hide the environment passed through a named helper.
+use std/mem
+effect Store {
+  fn save(read: fn(Int) -> Int) -> Unit
+  fn fetch() -> (fn(Int) -> Int)
+}
+fn store_later(read: fn(Int) -> Int) -> Unit !Store = save(read)
+pub fn main() -> Unit !io = {
+  with handle Store {
+    var saved: fn(Int) -> Int = _n => -1
+    save(read) => { saved = read }
+    fetch() => saved
+  }
+  mem.with_mem([@s] () => {
+    let cursor = mem.new(3)
+    store_later(n => len(cursor) + n)
+  })
+  println(to_string(fetch()(1)))
+}

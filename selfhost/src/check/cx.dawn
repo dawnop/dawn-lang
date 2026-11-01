@@ -9,6 +9,8 @@
 
 use check/capture.{TraitApplication, Scope as CaptureScope, CaptureParam, Params as CaptureParams, Function as CaptureFunction, Arguments as CaptureArguments}
 use check/capture
+use check/data_capture
+use check/environment
 use check/trait_contract
 use std/str
 use std/list
@@ -42,6 +44,7 @@ use front/effect_name
 ## (resolution results live in Cx.alias_resolved, the in-flight set in
 ## Cx.alias_resolving).
 pub type AliasE = {
+  capture_envelope: Option[capture.Envelope],
   scope_params: capture.Params,
   name: String,
   tparams: List[Ty],
@@ -118,6 +121,8 @@ pub fn ty_span_kid(sp: TySpan, i: Int) -> TySpan =
 ## frame state, and scripts/checker-corpus/frame-triage.py fails the corpus
 ## gate on a field without one.
 pub(pkg) type Frame = {
+  # Resolved value and storage dependencies belong to this function attempt.
+  environment: environment.Graph,
   # Instantiation variables are fresh for each call; runtime keys use ordinary symbols.
   # Writers normalize aliases so type reads can substitute without walking the map.
   scope_bindings: Map[Int, capture.Scope],
@@ -165,7 +170,16 @@ pub(pkg) type Frame = {
 }
 
 ## The checker state: every mutable member of the Kotlin Checker class.
+pub(pkg) type CaptureObligation = {
+  declaration: String, value: Ty, upper: capture.Capture,
+  caller: capture.Params, lo: Int, hi: Int
+}
+
 pub(pkg) type Cx = {
+  # frame-triage: header obligations wait for data summaries, then are consumed before body checking
+  capture_obligations: List[CaptureObligation],
+  # frame-triage: module header phase; bodies and their isolated frames share the settled table
+  summaries_pending: Bool,
   # frame-triage: an output: what the isolated body reports must outlive it
   diags: List[Diag],
   # The declaration whose bindings are being minted, and how many each
@@ -450,6 +464,8 @@ pub(pkg) type LambdaCx =
     boundary: Int,
     expected_ret: Option[Ty],
     captures: List[Int],
+    # Witnesses retain their public W even when no dictionary object is emitted.
+    static_captures: capture.Capture,
     sugar: Bool,
     observes: Bool,
     # `settled` / `unsettled` used to sit here: which of the labels this
@@ -514,7 +530,8 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
     Some(o) -> o == "std" || str.starts_with(o, "std/")
     None -> false
   }
-  Cx { current_capture_params = capture.empty_params(),
+  Cx { capture_obligations = [], summaries_pending = true,
+    current_capture_params = capture.empty_params(),
     diags = [],
     # Outside every declaration until one is entered.
     owner_decl = free_pool(owner_class.unwrap_or("")),
@@ -552,6 +569,7 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
     java_classes = map.empty(),
     jsig = jsig_refused(),
     frame = Frame {
+      environment = environment.empty(),
       scope_bindings = map.empty(), capture_bindings = map.empty(), scope_keys = map.empty(),
       scopes = [],
       used_effects = [],
@@ -1437,6 +1455,24 @@ pub(pkg) fn bind_capture_params(cx: Cx, syntax: ScopeSyntax) -> (Cx, capture.Par
     bounds = outer.bounds ++ own.bounds, fn_effects = outer.fn_effects ++ own.fn_effects } }, own)
 }
 
+# Complete input applications are independent premises during header checking
+# too. Value bounds alone never create these facts.
+pub(pkg) fn with_capture_premises(cx: Cx) -> Cx = {
+  var params = cx.current_capture_params
+  for value in map.values(cx.current_tparams) { match value {
+    TyVar(_, id) -> {
+      for app in map.get(cx.current_tparam_bounds, id).unwrap_or([]) {
+        let tr = trait_of(cx.traits, app.id)
+        if len(app.args) > 0 || len(tr.scope_params.bounds) > 0 {
+          params = data_capture.assume_support(params, value, capture.trait_support(app))
+        }
+      }
+    }
+    _ -> ()
+  } }
+  Cx { ..cx, current_capture_params = params }
+}
+
 pub(pkg) fn resolve_trait_application(cx: Cx, id: Int, arguments: List[CaptureArg],
   lo: Int, hi: Int) -> (Cx, capture.TraitApplication) = {
   let tr = trait_of(cx.traits, id)
@@ -1752,10 +1788,11 @@ fn resolve_kind_application(cx: Cx, qual: Option[String], name: String,
   }
   if len(params.scopes) == 0 && len(params.captures) == 0 &&
     not list.any(written, t => match t { TKindArg(_, _, _) -> true, _ -> false }) {
-    return match qual {
+    let (resolved, value) = match qual {
       Some(q) -> resolve_qual(cx, q, name, written, eargs, lo, hi)
       None -> resolve_named(cx, name, written, eargs, lo, hi, type_use)
     }
+    return (if resolved.summaries_pending { resolved } else { discharge_capture_obligations(resolved) }, value)
   }
   var args: List[TypeRef] = []
   var kinds: List[List[String]] = []
@@ -1795,10 +1832,51 @@ fn resolve_kind_application(cx: Cx, qual: Option[String], name: String,
   let actual = CaptureArguments { scopes = scopes, captures = captures }
   let result = match substituted {
     TyAdt(id, ts, _) -> TyAdt(id, ts, actual)
-    TyOpaque(id, n, owner, ts, target, _) -> TyOpaque(id, n, owner, ts, target, actual)
+    TyOpaque(id, n, owner, ts, target, _, envelope) -> TyOpaque(id, n, owner, ts, target, actual, envelope)
     _ -> substituted
   }
-  (resolved, result)
+  next = resolved
+  var obligations: List[CaptureObligation] = []
+  for obligation in resolved.capture_obligations {
+    obligations = obligations ++ [if obligation.lo == lo && obligation.hi == hi {
+      CaptureObligation { ..obligation, upper = capture.subst(obligation.upper, sm, cm) }
+    } else { obligation }]
+  }
+  next = Cx { ..next, capture_obligations = obligations }
+  for i in 0..len(params.captures) { match params.captures[i].bound {
+    Some(upper) -> if not capture.subset_in(captures[i], capture.subst(upper, sm, cm), next.current_capture_params.captures) {
+      next = cerr(next, "capture argument for `" ++ name ++ "` exceeds its declared upper bound", lo, hi)
+    }
+    None -> ()
+  } }
+  (if next.summaries_pending { next } else { discharge_capture_obligations(next) }, result)
+}
+
+fn type_capture_obligations(cx: Cx, name: String, params: capture.Params,
+  formals: List[Ty], args: List[Ty], lo: Int, hi: Int) -> Cx = {
+  if len(params.bounds) == 0 { return cx }
+  var obligations = cx.capture_obligations
+  for i in 0..len(formals) { if i < len(args) { match formals[i] {
+    TyVar(_, id) -> { for entry in params.bounds { let (vid, upper) = entry
+      if vid == id { obligations = obligations ++ [CaptureObligation {
+        declaration = name, value = args[i], upper = upper,
+        caller = cx.current_capture_params, lo = lo, hi = hi }] }
+    } }
+    _ -> ()
+  } } }
+  Cx { ..cx, capture_obligations = obligations }
+}
+
+pub(pkg) fn discharge_capture_obligations(cx: Cx) -> Cx = {
+  var next = Cx { ..cx, capture_obligations = [] }
+  for obligation in cx.capture_obligations {
+    if not data_capture.permits(cx.adts, obligation.caller, obligation.value, obligation.upper) {
+      next = cerr_h(next, "type argument for `" ++ obligation.declaration ++ "` exceeds its capture bound " ++
+          capture.show(obligation.upper), obligation.lo, obligation.hi,
+        "every application must satisfy the declaration's explicit value capture contract")
+    }
+  }
+  next
 }
 
 ## `T.Item` -- the subject must be a type parameter in scope, and exactly one
@@ -1902,7 +1980,7 @@ fn resolve_qual(
         i = i + 1
       }
       let kids = if al.is_opaque { targs } else { no_trefs() }
-      return (record_span_at(cx2, lo, hi, kids), wrap_opaque(al, args, subst(target, m2, em0)))
+      return (record_span_at(type_capture_obligations(cx2, al.name, al.scope_params, al.tparams, args, lo, hi), lo, hi, kids), wrap_opaque(al, args, subst(target, m2, em0)))
     }
     None -> ()
   }
@@ -1924,7 +2002,7 @@ fn resolve_qual(
         cx1 = cx2
         args = args ++ [t]
       }
-      (record_span_at(cx1, lo, hi, targs), TyAdt(aid, args, capture.empty_arguments()))
+      (record_span_at(type_capture_obligations(cx1, info.name, info.scope_params, info.tparams, args, lo, hi), lo, hi, targs), TyAdt(aid, args, capture.empty_arguments()))
     }
     None -> {
       let pool = map.keys(exp.types_by_name) ++ map.keys(exp.aliases)
@@ -2183,7 +2261,7 @@ fn resolve_named(
       # an opaque type keeps the arguments as its children; a transparent one
       # expands into a target the author did not write here, so it has none
       let kids = if al.is_opaque { targs } else { no_trefs() }
-      return (record_span_at(cx2, lo, hi, kids), wrap_opaque(al, args, subst(target, m, em)))
+      return (record_span_at(type_capture_obligations(cx2, al.name, al.scope_params, al.tparams, args, lo, hi), lo, hi, kids), wrap_opaque(al, args, subst(target, m, em)))
     }
     None -> ()
   }
@@ -2262,7 +2340,7 @@ fn resolve_named(
         cx1 = cx2
         args = args ++ [t]
       }
-      (record_span_at(cx1, lo, hi, targs), TyAdt(aid, args, capture.empty_arguments()))
+      (record_span_at(type_capture_obligations(cx1, info.name, info.scope_params, info.tparams, args, lo, hi), lo, hi, targs), TyAdt(aid, args, capture.empty_arguments()))
     }
   }
 }
@@ -2274,7 +2352,7 @@ fn resolve_named(
 ## arguments it was applied to — which the target cannot always give back,
 ## since a target need not mention every parameter.
 pub fn wrap_opaque(al: AliasE, args: List[Ty], target: Ty) -> Ty =
-  if al.is_opaque { TyOpaque(al.id, al.name, al.owner, args, target, capture.empty_arguments()) } else { target }
+  if al.is_opaque { TyOpaque(al.id, al.name, al.owner, args, target, capture.empty_arguments(), al.capture_envelope) } else { target }
 
 ## The std types whose representation means different things on the two
 ## backends, and so cannot be written down in Core.
@@ -2311,7 +2389,7 @@ fn backend_dependent_repr(owner: String, name: String) -> Bool =
 ## spelling out.
 pub fn const_refusal_hint(t: Ty) -> String =
   match t {
-    TyOpaque(_, nm, own, _, _, _) ->
+    TyOpaque(_, nm, own, _, _, _, _) ->
       if backend_dependent_repr(own, nm) {
         "a cursor is a position in the backend's own representation of a " ++
           "string, and the two backends do not agree on it, so there is no " ++
@@ -2355,7 +2433,7 @@ pub(pkg) fn is_const_literal_type(adts: Adts, t: Ty, visited: Set[Int]) -> Bool 
     # Serializability is a question about the representation, so an opaque
     # type is exactly as serializable as its target -- unless the target's
     # *meaning* is the backend's rather than the language's.
-    TyOpaque(_, nm, own, _, tgt, _) ->
+    TyOpaque(_, nm, own, _, tgt, _, _) ->
       if backend_dependent_repr(own, nm) {
         false
       } else {

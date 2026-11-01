@@ -1949,6 +1949,24 @@ fn light(c: Color) -> Int =
 
 #### 6.2.1 Mem 域与捕获（已裁定，待实现）
 
+Ordinary closures hide their environment representation. Their capture contract C
+unions the reachable value dependencies V of captured ordinary values, rather
+than those values' type-only free Scope support F. The public function arrow
+retains free Scopes in its parameters, result, calling row and C. Moving a closure
+checks that public contract without reopening hidden ordinary fields. Thus an
+empty-value-capture phantom or an empty-environment function with a scoped input
+may be hidden in an otherwise independent closure; delivering either original
+type directly still checks F and refuses escape. This does not provide an
+existential Scope, Scope renaming or implicit arguments. Real resources, permitted
+mutable cells, frozen evidence and continuations keep their dependencies.
+
+A Type bound T:^{c} limits V(T) only. The generic bind factory proves its result
+using V(T), the reader environment and its calling row. Dictionaries separately
+contribute their complete witness contract W; ordinary hiding does not eliminate
+W or weaken S(Subject) contained in W. Cell writes check full delivery support,
+invariant content and the location's installation lifetime, including aliases
+and handler or staged channels. Computation defaults remain staged in this slice.
+
 trait 见证的静态契约含 trait identity、主体、Capture 实参与子见证。Capture 实参并集 W
 必须覆盖主体可达捕获与完整类型自由域的 support；impl 的主体/Item 上界、子见证和 Scope 键
 也须由 W 覆盖。Capture 无运行时槽，Scope 键沿既有字典参数传递。默认方法在定义处
@@ -3589,6 +3607,10 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   [`mem-buffer-design.md`](mem-buffer-design.md)）。缓冲只存在于 `with_mem` 之内：读写缓冲的函数带 `!Mem`，
   检查器按 `std/mem` 的 `Mem` 这个效果拒绝四类逃逸（`with_mem` 的结果类型不得含缓冲、带 `Mem` 的函数类型或任何类型变量；
   只有 `std/mem` 能为 `Mem` 装 handler；效果操作的签名与 handler 的 `var` 不得含缓冲；带 `Mem` 的函数值不得越过 `use java`）。
+  The handler cell restriction in the preceding list is superseded by the
+  installation lifetime rule in §6.2.1. Cells installed and used within a buffer's
+  Scope may retain that buffer. Writes and aliases preserve full support and
+  invariant contents.
   **现行四规则不足以封住隐藏捕获及纯度缺口**；已裁定、待实现的替代语义见 §6.2.1，
   不能把上述实现限制读作完整的不可逃逸保证。
 - `std/gpu`：GPU 的宿主层，`Gpu` 效果与设备缓冲（§12.6）

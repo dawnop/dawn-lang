@@ -1,0 +1,9 @@
+# An explicit contract isolates this propagation or boundary rule.
+use std/mem
+trait Measure[T: ^{c}, ^c] {
+  fn measure(value: T) -> Int
+  fn measured(value: T) -> (fn() -> Int ^{c}) = () => measure(value)
+}
+impl[@s] Measure[I64Buf@s, ^{s}] { fn measure(value: I64Buf@s) -> Int = len(value) }
+fn closed[T: Measure[^{}] + ^{}](value: T) -> Int = measure(value)
+pub fn main() -> Unit !io = { let _ = mem.with_mem([@s] () => closed(mem.new(3))) }
