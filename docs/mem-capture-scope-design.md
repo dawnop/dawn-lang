@@ -493,6 +493,15 @@ Computation defaults stay disabled. Their switch and the remaining library
 migration require a real audit of the compiler's seed closure before the next
 slice proceeds.
 
+The computation default audit checks both bootstrap edges. The recorded seed
+builds the compiler against its matching standard library. That compiler must
+then build the real compiler closure against the migrated current library.
+Passing the first edge does not establish the second. Omitted value bounds
+must not become complete support premises during this audit. Required source
+contracts must be representable without implicit Capture arguments, name
+exemptions or an older API fallback. Computation defaults remain disabled
+until this closure is established.
+
 两后端可以擦除静态域，不要求缓冲运行时增加域 id，也不承诺证据布局或 emit 零变化。
 必须验证 at/set 仍是直接原语，重新量 bcrypt 与 tileinterp；K1 无性能实测，不作速度承诺。
 诊断须能给出 `cursor -> Holder.buffer -> read -> Source.read -> scope exit` 的来源链，
