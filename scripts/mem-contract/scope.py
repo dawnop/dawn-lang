@@ -120,6 +120,21 @@ def main():
                 source = "scope_escape.dawn" if name == "allow-scope-escape" else "scope_relabel.dawn"
                 # The original refusal must be lost. A build error never reaches here.
                 check(mutant, source, work / "check.log", 0)
+                if name == "allow-scope-escape":
+                    # Keep each delivered type in the fixture. The broken
+                    # exit check must admit it, so a separate earlier refusal
+                    # cannot conceal a missing propagation assertion.
+                    for case in ["m1_box", "m1_option", "m1_result_ok", "m1_result_err",
+                                 "m2_explicit_field", "m2_inferred_environment",
+                                 "m3_opaque_marker", "m5_phantom", "m7_parameter", "m8_effect",
+                                 "m9_recursive", "m9_mutual", "n1_relay", "n2_default",
+                                 "n3_defer", "n4_item", "n5_item", "n5_list", "n5_default",
+                                 "n7_packed", "n8_dictionary", "n13_stored",
+                                 "k3_direct", "k3_generic", "k3_list", "k3_record",
+                                 "k3_repro", "k3_stored", "k3_len_capture",
+                                 "list_filter_escape"]:
+                        check(mutant, "../trait-capture-contract/cases/" + case + ".dawn",
+                              work / (case + ".log"), 0)
                 killed = True
             if not killed:
                 raise RuntimeError(f"survived: {name}")

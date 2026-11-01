@@ -49,6 +49,7 @@ SOURCES = (
     "selfhost/src/check/cx.dawn",
     "selfhost/src/check/passes.dawn",
     "selfhost/src/check/checker*.dawn",
+    "selfhost/src/check/value_capture.dawn",
     # the unused-import diagnostic, which the checker raises last
     "selfhost/src/check/import_use.dawn",
 )

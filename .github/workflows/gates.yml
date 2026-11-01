@@ -402,7 +402,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 24188s (the most this file's `3x` claims may add up to)
+# push-total: 26708s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2371,7 +2371,7 @@ jobs:
       # value once `catch_panic` hands it back, so both backends and the
       # sanitized native build are held to one expected.txt, and the native
       # accessors are checked to stay `static inline` (docs/mem-buffer-design.md).
-      # About 6s: one JVM run, two native builds of a small probe, one assembly.
+      # Capture propagation runs in its dedicated jobs below.
       - name: I64Buf contract
         run: ./scripts/mem-contract/run.sh
 
@@ -2720,6 +2720,80 @@ jobs:
       # both RC modes and all mutants, and runs real simple tokenizer queries.
       - name: SQLite native values, lifetimes, transactions and simple FTS
         run: ./scripts/sqlite-contract/run.sh --native
+
+  # Capture propagation has two disjoint control shards and a complete
+  # source matrix per frontend. The standalone command still runs every check.
+  contracts-4:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-4') }}
+    runs-on: ubuntu-latest
+    # Measured 2026-11-01: 296.46s for this complete invocation.
+    # Reserve twice that wall time and 50s setup, rounded up to 5s.
+    # budget: 3x 645s planning value for capture contracts
+    timeout-minutes: 33
+    steps:
+      - uses: actions/checkout@v4
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Capture mutations 1 of 2
+        run: python3 scripts/trait-capture-contract/run.py --controls-shard 1/2
+
+  contracts-5:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-5') }}
+    runs-on: ubuntu-latest
+    # Measured 2026-11-01: 282.58s for this complete invocation.
+    # Reserve twice that wall time and 50s setup, rounded up to 5s.
+    # budget: 3x 620s planning value for capture contracts
+    timeout-minutes: 31
+    steps:
+      - uses: actions/checkout@v4
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Capture mutations 2 of 2
+        run: python3 scripts/trait-capture-contract/run.py --controls-shard 2/2
+
+  contracts-6:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-6') }}
+    runs-on: ubuntu-latest
+    # Measured 2026-11-01: 305.10s for this complete invocation.
+    # Reserve twice that wall time and 50s setup, rounded up to 5s.
+    # budget: 3x 665s planning value for capture contracts
+    timeout-minutes: 34
+    steps:
+      - uses: actions/checkout@v4
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Capture contracts on the JVM
+        run: python3 scripts/trait-capture-contract/run.py --calls-backend jvm
+
+  contracts-7:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-7') }}
+    runs-on: ubuntu-latest
+    # Measured 2026-11-01: 269.62s for this complete invocation.
+    # Reserve twice that wall time and 50s setup, rounded up to 5s.
+    # budget: 3x 590s planning value for capture contracts
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Capture contracts on native
+        run: python3 scripts/trait-capture-contract/run.py --calls-backend native
 
   # Slice C's classpath contract owns a fixture-only Maven repository and
   # private caches, so it cannot share dependency state with the broad test

@@ -1,0 +1,199 @@
+# Interface checks must work from public contracts even when private fields
+# are unavailable. These source strings keep capture syntax out of the seed's
+# own input while exercising the actual checker and exported table products.
+use std/map
+use std/list
+use std/str
+use check/capture
+use check/types.{TyOpaque, AdtI, Sig, insert_impl}
+use check/cx.{Cx, ModExports, AliasE, cx_new}
+use check/passes.{seed_prelude}
+use check/checker.{check_module, exports_of}
+use front/parser
+use front/ast
+
+fn parsed(source: String) -> ast.Module = {
+  let (module, errors) = parser.parse_module(source)
+  if len(errors) > 0 { panic(errors[0].msg) }
+  module
+}
+
+fn produced(source: String) -> ModExports !io = {
+  let module = parsed(source)
+  let (cx, _) = check_module(seed_prelude(cx_new(Some("producer"), None)), module, map.empty())
+  if len(cx.diags) > 0 { panic(cx.diags[0].msg) }
+  exports_of(cx, module, "producer", "producer")
+}
+
+fn consumed(source: String, surface: ModExports) -> Cx !io = {
+  # The driver carries checked impls before checking a consumer module.
+  var entry = seed_prelude(cx_new(Some("consumer"), None))
+  for implementation in surface.impls {
+    entry = Cx { ..entry, impl_table = insert_impl(entry.impl_table, implementation) }
+  }
+  let (cx, _) = check_module(entry, parsed(source), map.from([("producer", surface)]))
+  cx
+}
+
+fn metadata_error(cx: Cx) -> Bool =
+  list.any(cx.diags, d => str.contains(d.msg, "incomplete capture contract metadata"))
+
+const MODEL: String = "type Repr[T] = { value: T }\n" ++
+  "pub opaque type Hidden[T] = Repr[T]\n" ++
+  "pub fn wrap[T: ^{c}, ^c](value: T) -> Hidden[T] = Repr { value = value }\n" ++
+  "pub fn unwrap[T: ^{c}, ^c](value: Hidden[T]) -> T = {\n" ++
+  "let repr: Repr[T] = value\nrepr.value\n}\n" ++
+  "pub fn zero() -> Int = 0\n"
+
+const ZERO: String = "use producer\npub fn read() -> Int = producer.zero()\n"
+
+test "opaque imports retain public contracts without private fields or summaries" {
+  let surface = produced(MODEL)
+  var infos = surface.adt_infos
+  for entry in map.entries(infos) { let (id, info) = entry
+    if info.name == "Repr" { infos = map.insert(infos, id, AdtI { ..info,
+      capture_summary = None, ctors = [] }) }
+  }
+  let hidden = ModExports { ..surface, adt_infos = infos }
+  assert consumed("use producer\n" ++
+      "pub fn read(value: producer.Hidden[Int]) -> Int = producer.unwrap(value)\n", hidden).diags == []
+}
+
+test "opaque imports refuse a missing declaration envelope" {
+  let surface = produced(MODEL)
+  let opaque = map.get(surface.aliases, "Hidden").expect("opaque alias")
+  let broken = ModExports { ..surface, aliases = map.insert(surface.aliases, "Hidden",
+    AliasE { ..opaque, capture_envelope = None }) }
+  assert metadata_error(consumed(ZERO, broken))
+  assert consumed(ZERO, surface).diags == []
+}
+
+test "opaque function contracts retain their envelope independently of aliases" {
+  let surface = produced(MODEL)
+  let wrap = map.get(surface.fns, "wrap").expect("wrap")
+  let missing = match wrap.ret {
+    TyOpaque(id, name, owner, args, target, axes, _) -> TyOpaque(id, name, owner, args, target, axes, None)
+    _ -> panic("wrap must return an opaque type")
+  }
+  let broken = ModExports { ..surface, fns = map.insert(surface.fns, "wrap", Sig { ..wrap, ret = missing }) }
+  assert metadata_error(consumed(ZERO, broken))
+}
+
+test "opaque Scope metadata cannot disappear from an exported application" {
+  let surface = produced("pub opaque type Scoped[@s] = fn(I64Buf@s) -> Int\n" ++
+      "pub fn same[@s](value: Scoped[s]) -> Scoped[s] = value\n" ++
+      "pub fn zero() -> Int = 0\n")
+  let same = map.get(surface.fns, "same").expect("same")
+  let missing = match same.ret {
+    TyOpaque(id, name, owner, args, target, _, envelope) ->
+      TyOpaque(id, name, owner, args, target, capture.empty_arguments(), envelope)
+    _ -> panic("same must return an opaque type")
+  }
+  let broken = ModExports { ..surface, fns = map.insert(surface.fns, "same", Sig { ..same, ret = missing }) }
+  assert metadata_error(consumed(ZERO, broken))
+  assert consumed(ZERO, surface).diags == []
+}
+
+test "public data interfaces require their settled dependency summary" {
+  let surface = produced("pub type Box[T] = { value: T }\npub fn zero() -> Int = 0\n")
+  let id = map.get(surface.types_by_name, "Box").expect("Box")
+  let info = map.get(surface.adt_infos, id).expect("Box info")
+  let broken = ModExports { ..surface, adt_infos = map.insert(surface.adt_infos, id,
+    AdtI { ..info, capture_summary = None }) }
+  assert metadata_error(consumed(ZERO, broken))
+  assert consumed(ZERO, surface).diags == []
+}
+
+test "data interface duties stay separate from computation contracts" {
+  let surface = produced("pub type Box[T] = { value: T }\n" ++
+      "pub fn wrap[T: ^{c}, ^c](value: T) -> Box[T] = Box { value = value }\n")
+  let id = map.get(surface.types_by_name, "Box").expect("Box")
+  let info = map.get(surface.adt_infos, id).expect("Box info")
+  assert len(capture.representation_types(info.scope_params)) == 1
+  assert len(info.scope_params.captures) == 0
+  assert map.get(surface.fns, "wrap")
+    .expect("wrap").scope_params.quantification == capture.Computational
+  assert info.capture_summary.expect("summary").value_parameters == [0]
+  assert info.capture_summary.expect("summary").value == []
+}
+
+fn messages(source: String) -> List[String] !io = {
+  let (cx, _) = check_module(seed_prelude(cx_new(Some("contract"), None)), parsed(source), map.empty())
+  map(cx.diags, d => d.msg)
+}
+
+fn capture_refusal(source: String) -> Bool !io =
+  list.any(messages(source), message => str.contains(message, "exceeds its capture bound"))
+
+test "explicit data and alias bounds apply before expansion on every kind path" {
+  let closed = "type Closed[T: ^{}] = { value: T }\n"
+  assert capture_refusal(closed ++ "fn bad[@s](value: Closed[I64Buf@s]) -> Unit = ()\n")
+  assert capture_refusal(closed ++ "alias Bad[T] = Closed[T]\n")
+  assert capture_refusal(closed ++ "type Bad[T] = { field: Closed[T] }\n")
+  assert capture_refusal(closed ++ "opaque type Bad[T] = Closed[T]\n")
+  assert messages(closed ++ "alias Good[T: ^{}] = Closed[T]\n" ++
+      "fn good(value: Good[Int]) -> Int = value.value\n") == []
+  assert capture_refusal("type Closed[T: ^{}, ^c] = { value: T }\n" ++
+      "fn bad[@s](value: Closed[I64Buf@s, ^{s}]) -> Unit = ()\n")
+  assert list.any(messages("type Limited[T: ^{c}, ^c: ^{}] = { value: T }\n" ++
+      "fn bad[@s](value: Limited[Int, ^{s}]) -> Unit = ()\n"),
+    message => str.contains(message, "capture argument for `Limited` exceeds its declared upper bound"))
+}
+
+test "explicit computation bounds reject values while ordinary defaults remain staged" {
+  let closed = "fn closed[T: ^{}](value: T) -> T = value\n"
+  assert capture_refusal(closed ++ "fn bad[@s](value: I64Buf@s) -> I64Buf@s = closed(value)\n")
+  assert messages("fn open[T: ^{c}, ^c](value: T) -> T = value\n" ++
+      "fn good[@s](value: I64Buf@s) -> I64Buf@s = open(value)\n") == []
+  assert messages("fn staged[T](value: T) -> T = value\n" ++
+      "fn good[@s](value: I64Buf@s) -> I64Buf@s = staged(value)\n") == []
+}
+
+test "constructor introduction inherits bounds and all parent axes when used as a value" {
+  assert capture_refusal("type Closed[T: ^{}] = { value: T }\n" ++
+      "fn bad[@s](value: I64Buf@s) -> Unit = { let _ = Closed { value = value } }\n")
+  assert messages("type At[T, @s, ^c] = Wrap(value: T, read: fn() -> Int ^{c})\n" ++
+      "fn good[@s](value: I64Buf@s) -> At[I64Buf@s, s, ^{s}] = {\n" ++
+      "let make: fn(I64Buf@s, fn() -> Int ^{s}) -> At[I64Buf@s, s, ^{s}] = Wrap\n" ++
+      "make(value, () => 3)\n}\n") == []
+}
+
+test "opaque owner conversion checks the full function representation contract" {
+  assert messages("opaque type Hidden = fn() -> Int\n" ++
+      "fn pack(read: fn() -> Int) -> Hidden = read\n") == []
+  assert len(messages("opaque type Hidden = fn() -> Int\n" ++
+      "fn bad[@s](read: fn() -> Int ^{s}) -> Hidden = read\n")) > 0
+  assert messages("opaque type Packed[^c] = fn() -> Int ^{c}\n" ++
+      "fn pack[^c](read: fn() -> Int ^{c}) -> Packed[c] = read\n") == []
+}
+
+test "complete witness premises validate header obligations across an interface" {
+  let source = "pub trait Empty[T: ^{d}, ^d] { fn empty_value() -> T }\n" ++
+    "pub type Closed[T: ^{}] = { value: T }\n" ++
+    "pub type Token = { n: Int }\n" ++
+    "impl Empty[Token, ^{}] { fn empty_value() -> Token = Token { n = 0 } }\n" ++
+    "pub fn close[T: Empty[^{}] + ^{c}, ^c](value: T) -> Closed[T] = Closed { value = value }\n"
+  assert messages(source) == []
+  let surface = produced(source)
+  let consumer = "use producer.{close, Token}\n" ++
+    "fn example() -> Int = { let value = close(Token { n = 7 })\nvalue.value.n }\n"
+  let loaded = consumed(consumer, surface)
+  if len(loaded.diags) > 0 { panic(join(map(loaded.diags, d => d.msg), "\n")) }
+  assert loaded.diags == []
+  assert capture_refusal("type Closed[T: ^{}] = { value: T }\n" ++
+      "fn bad[T: ^{c}, ^c](value: T) -> Closed[T] = Closed { value = value }\n")
+}
+
+test "constructor contexts retain complete Capture equations before field inference" {
+  let source = "type Cell[^c] = { read: fn() -> Int ^{c} }\n" ++
+    "type Made[^c] = Make(read: fn() -> Int ^{c})\n" ++
+    "fn widen[@s, ^d](read: fn() -> Int ^{d}) -> Cell[^{s, d}] = Cell { read = read }\n" ++
+    "fn maker[@s, ^d]() -> (fn(fn() -> Int ^{d}) -> Made[^{s, d}]) = Make\n"
+  let (cx, _) = check_module(seed_prelude(cx_new(Some("model"), None)), parsed(source), map.empty())
+  if len(cx.diags) > 0 { panic(join(map(cx.diags, d => d.msg), "\n")) }
+  assert cx.diags == []
+  let invalid = source ++ "fn no_widen[@s, ^d](value: Cell[d]) -> Cell[^{s, d}] = value\n"
+  let (refused, _) = check_module(seed_prelude(cx_new(Some("model"), None)), parsed(invalid), map.empty())
+  assert len(refused.diags) == 1
+  assert str.contains(refused.diags[0].msg, "declares return type")
+}

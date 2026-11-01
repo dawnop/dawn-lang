@@ -1,0 +1,11 @@
+# Ordinary environments and delivered type support have separate contracts.
+use std/mem
+use std/mem.{Mem}
+type Phantom[T] = { n: Int }
+fn allocate[@s](p: Phantom[I64Buf@s]) -> I64Buf@s !Mem[s] = mem.new(p.n)
+fn escaped() -> (fn() -> Int) = mem.with_mem([@s] () => {
+  let p: Phantom[I64Buf@s] = Phantom { n = 3 }
+  () => mem.with_mem([@t] () => len(allocate(p)))
+})
+pub fn main() -> Unit !io = { let f = escaped()
+  println(to_string(f())) }

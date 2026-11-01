@@ -9,6 +9,7 @@
 # here (check_module runs the passes in order); nothing here calls back up.
 
 use check/capture
+use check/data_capture
 use check/trait_contract
 use std/str
 use std/list
@@ -36,7 +37,7 @@ use check/types.{ty_scope_refs, eff_scopes, eff_vars, mem_runner_sig, ScopedEffe
   eff_subsumes, eff_suffix, eff_show, eff_labels, eff_assocs, eff_params_of, subst_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
   EffectI, ev_record_name, erased_ev_ty,
-  AdtI, CtorI, FieldI,
+  Adts, AdtI, CtorI, FieldI,
   TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, no_eparam_names, ty_show, fn_return_show,
   sig_render, subst, assoc_effect_advice,
   reduce_via_bindings, ty_named, builtin_type_at, builtin_type_name_reserved,
@@ -51,7 +52,7 @@ use check/types.{ty_scope_refs, eff_scopes, eff_vars, mem_runner_sig, ScopedEffe
 use check/identity
 use check/identity.{TypeDecl, TraitDecl, EffectDecl, FunctionDecl, ConstDecl, MethodDecl, Named, ImplHead,
   PathTable, path_table, path_table_add, path_table_get, path_table_claim, path_text }
-use check/cx.{
+use check/cx.{with_capture_premises,
   resolve_capture, resolve_trait_application, resolve_named_effect, declare_capture_params, bind_capture_params,
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
   package_of, exports_seen_by, pkg_private, pkg_private_err, private_name_err,
@@ -500,7 +501,7 @@ fn derived_field_ok(cx: Cx, tid: Int, own: List[Ty], t: Ty) -> Bool =
             # Only the relations fall through (`opaque_inherits`), so a field
             # of an opaque type is printable only through an impl written on
             # it: checker.resolve_witness says why `Show` does not.
-            TyOpaque(_, _, _, _, tgt, _) ->
+            TyOpaque(_, _, _, _, tgt, _, _) ->
               if opaque_inherits(tid) { derived_field_ok(cx, tid, own, tgt) } else { false }
             _ -> false
           }
@@ -512,7 +513,7 @@ fn derived_field_ok(cx: Cx, tid: Int, own: List[Ty], t: Ty) -> Bool =
 ## Pass 0 (the top of the Kotlin check()): prelude ADTs with their constructors,
 ## prelude traits with their methods in the fn namespace, prelude Ord impls.
 pub(pkg) fn seed_prelude(cx: Cx) -> Cx = {
-  var cx1 = cx
+  var cx1 = Cx { ..cx, adts = data_capture.settle_owned(cx.adts, None) }
   # Option/Result/ForeignError and their constructors
   var abn = cx1.adts_by_name
   var cbn = cx1.ctors_by_name
@@ -780,7 +781,10 @@ pub(pkg) fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
         cx1 = scoped_cx
         cx1 = Cx {
           ..cx1,
-          aliases = map.insert(cx1.aliases, d.name, AliasE { scope_params = scope_params,
+          aliases = map.insert(cx1.aliases, d.name, AliasE { scope_params = data_capture.declaration_params(scope_params, tvs),
+            capture_envelope = if d.is_opaque {
+              capture.opaque_head(len(tvs), len(scope_params.scopes), len(scope_params.captures))
+            } else { None },
             name = d.name,
             tparams = tvs,
             eparams = evs,
@@ -895,7 +899,8 @@ pub(pkg) fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
     }
     let (scoped_cx, scope_params) = declare_capture_params(cx1, d.scope, tvs, [])
     cx1 = scoped_cx
-    let info = AdtI { scope_params = scope_params,
+    let info = AdtI { scope_params = data_capture.declaration_params(scope_params, tvs),
+      capture_summary = None,
       id = aid,
       name = d.name,
       is_record = d.is_record,
@@ -1396,6 +1401,7 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
     # downstream has to special-case a record with no answer
     let ev_audience = vis_audience(cx1, d.vis)
     let info = AdtI { scope_params = params,
+      capture_summary = None,
       id = eid,
       name = rec_name,
       is_record = true,
@@ -1597,6 +1603,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       ..cx1,
       current_tparam_bounds = map.insert(cx1.current_tparam_bounds, tvid, [trait_contract.application(trait_of(cx1.traits, tid))])
     }
+    cx1 = with_capture_premises(cx1)
     var methods: List[(String, MethodSig)] = []
     # whether this trait's method names take a slot in the fn namespace; a
     # declared trait is always injecting, so the guards below never fire today
@@ -1910,6 +1917,7 @@ pub(pkg) fn pass_register_impls(
       ibi = ibi + 1
     }
     cx1 = Cx { ..cx1, current_tparam_bounds = ibd }
+    cx1 = with_capture_premises(cx1)
     let (cx2, subject) = resolve_type(cx1, d.subject)
     cx1 = cx2
     let (application_cx, app) = resolve_trait_application(cx1, tid, d.capture_args, d.tlo, d.thi)
@@ -1940,7 +1948,7 @@ pub(pkg) fn pass_register_impls(
       if n == d.trait_name { trait_local = true }
     }
     let subject_local = match subject {
-      TyOpaque(_, _, ow, _, _, _) -> Some(ow) == cx1.owner_class
+      TyOpaque(_, _, ow, _, _, _, _) -> Some(ow) == cx1.owner_class
       _ ->
         match head_of(subject) {
           Some(HAdt(aid)) -> set.has(local_adts, aid)
@@ -2086,14 +2094,15 @@ fn check_impl_capture_contract(cx: Cx, tr: TraitI, app: capture.TraitApplication
   subject: Ty, params: capture.Params, lo: Int, hi: Int) -> Cx = {
   var next = cx
   let allowed = capture.trait_support(app)
-  let actual = trait_contract.capture_of(cx.adts, params, subject)
   match trait_contract.subject_upper(tr, app) {
-    Some(upper) -> if not capture.subset_in(actual, upper, params.captures) {
+    Some(upper) -> if not data_capture.permits(cx.adts, params, subject, upper) {
       next = cerr(next, "impl subject exceeds the trait's capture upper bound", lo, hi)
     }
     None -> ()
   }
-  if not capture.subset_in(trait_contract.support(cx.adts, params, subject), allowed, params.captures) {
+  let proved = data_capture.assume_support(params, subject, allowed)
+  next = Cx { ..next, current_capture_params = proved }
+  if not data_capture.support_permits(cx.adts, proved, subject, allowed) {
     next = cerr(next, "impl subject support is not covered by its trait Capture arguments", lo, hi)
   }
   var determined = ty_scope_refs(subject)
@@ -2126,7 +2135,7 @@ fn check_impl_dependencies(cx: Cx, app: capture.TraitApplication,
     }
   } }
   for binding in bindings { let (name, value) = binding
-    if not capture.subset_in(trait_contract.support(cx.adts, params, value), allowed, params.captures) {
+    if not data_capture.support_permits(cx.adts, params, value, allowed) {
       next = cerr(next, "associated type `" ++ name ++ "` has free support outside the trait Capture arguments", lo, hi)
     }
   }
@@ -2183,8 +2192,7 @@ fn impl_member_bindings(
     let (cxab, bt) = resolve_type(cx1, ab.tref)
     cx1 = cxab
     let upper = trait_contract.member_upper(tr, capture.closed_trait(tr.id), ab.name)
-    let actual = trait_contract.capture_of(cx1.adts, cx1.current_capture_params, bt)
-    if not capture.subset_in(actual, upper, cx1.current_capture_params.captures) {
+    if not data_capture.permits(cx1.adts, cx1.current_capture_params, bt, upper) {
       cx1 = cerr(cx1, "associated type `" ++ ab.name ++ "` exceeds its capture upper bound " ++ capture.show(upper), ab.nlo, ab.nhi)
     }
     match bt {
@@ -2770,6 +2778,7 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = 
       fbi = fbi + 1
     }
     cx1 = Cx { ..cx1, current_tparam_bounds = fbd }
+    cx1 = with_capture_premises(cx1)
     let (cx3, eff) = resolve_eff_at(cx1, d.effs, d.nlo, d.nhi)
     cx1 = cx3
     let inferring = match d.ret {
@@ -3321,7 +3330,7 @@ fn ty_poisoned(t: Ty) -> Bool =
     TyMap(k, v) -> ty_poisoned(k) || ty_poisoned(v)
     TySet(e) -> ty_poisoned(e)
     TyArray(e) -> ty_poisoned(e)
-    TyOpaque(_, _, _, args, _, _) -> list.any(args, a => ty_poisoned(a))
+    TyOpaque(_, _, _, args, _, _, _) -> list.any(args, a => ty_poisoned(a))
     TyAssoc(s, _, _, _) -> ty_poisoned(s)
     TyTuple(es) -> list.any(es, e => ty_poisoned(e))
     TyFn(ps, r, _, _) -> list.any(ps, p => ty_poisoned(p)) || ty_poisoned(r)
@@ -3377,7 +3386,7 @@ fn surface_ty_leaks(cx: Cx, root: Audience, t: Ty, sp: TySpan, path: String) -> 
       if not audience_covers(a, root) { out = [leak_at("type", "Array", a, path, sp)] }
       out ++ surface_ty_leaks(cx, root, e, ty_span_kid(sp, 0), path ++ " array element")
     }
-    TyOpaque(id, name, owner, args, _, _) -> {
+    TyOpaque(id, name, owner, args, _, _, _) -> {
       let a = opaque_audience(cx, id, name, owner)
       var out = no_leaks()
       if not audience_covers(a, root) { out = [leak_at("type", name, a, path, sp)] }
@@ -3858,6 +3867,43 @@ fn substrate_use(path: String) -> String =
 ## Resolve module imports: whole-module `use` decls become aliases; selective
 ## `use m.{...}` decls inject the named pub members (the Kotlin processImports).
 ## `env` maps modPath → exports for every module checked before this one.
+fn capture_signature_valid(adts: Adts, sig: Sig) -> Bool =
+  list.all(sig.param_tys ++ [sig.ret], value => data_capture.valid_type(adts, value))
+
+fn capture_interface_valid(exp: ModExports) -> Bool = {
+  for sig in map.values(exp.fns) { if not capture_signature_valid(exp.adt_infos, sig) { return false } }
+  for value in map.values(exp.consts) { if not data_capture.valid_type(exp.adt_infos, value) { return false } }
+  for id in map.values(exp.types_by_name) {
+    let info = match map.get(exp.adt_infos, id) { Some(value) -> value, None -> return false }
+    if capture.is_representation(info.scope_params) {
+      if not data_capture.valid_summary(info) { return false }
+      for ctor in info.ctors { for field in ctor.fields {
+        if not data_capture.valid_type(exp.adt_infos, field.ty) { return false }
+      } }
+    } else {
+      # Evidence records carry erased ABI fields; operation signatures above
+      # carry the public contracts. Their runtime layout is not a data summary.
+      if not map.has(exp.effect_infos, id) { return false }
+    }
+  }
+  for entry in map.entries(exp.aliases) { let (name, ae) = entry
+    if ae.is_opaque {
+      if not data_capture.valid_envelope(ae.capture_envelope, len(ae.tparams), capture.arguments(ae.scope_params)) {
+        return false
+      }
+    } else { match map.get(exp.alias_resolved, name) {
+      Some(value) -> if not data_capture.valid_type(exp.adt_infos, value) { return false }
+      None -> return false
+    } }
+  }
+  for id in map.values(exp.traits_by_name) { match map.get(exp.trait_infos, id) {
+    Some(info) -> { for entry in info.methods { let (_, method) = entry
+      if not capture_signature_valid(exp.adt_infos, method.sig) { return false } } }
+    None -> return false
+  } }
+  true
+}
+
 pub(pkg) fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
   var cx1 = cx
   for u in module_uses(m) {
@@ -3887,6 +3933,11 @@ pub(pkg) fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx 
       # read after this -- selective import, qualified access, the body's
       # `module_exports` -- sees the filtered tables and asks nothing again.
       Some(e) -> exports_seen_by(e, package_of(cx))
+    }
+    if not capture_interface_valid(exp) {
+      cx1 = cerr_h(cx1, "module `" ++ u.path ++ "` has incomplete capture contract metadata", u.nlo, u.nhi,
+        "recheck the declaring module; required data summaries and opaque head envelopes cannot be omitted")
+      continue
     }
     # graft the exporter's table fragments into this checker's id tables
     var adts2 = cx1.adts

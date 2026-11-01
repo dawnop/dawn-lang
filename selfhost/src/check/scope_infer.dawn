@@ -97,7 +97,7 @@ pub fn infer(d: Ty, a: Ty, flex: List[Scope], bindings: Map[Int, Scope]) -> (Map
       let (done, fits) = types(ds, ats, flex, next)
       (done, ok && fits)
     }
-    (TyOpaque(id, _, _, ds, _, regions), TyOpaque(aid, _, _, ats, _, aregions)) -> {
+    (TyOpaque(id, _, _, ds, _, regions, _), TyOpaque(aid, _, _, ats, _, aregions, _)) -> {
       if id != aid { return (bindings, true) }
       let (next, ok) = scopes(regions.scopes, aregions.scopes, flex, bindings)
       let (done, fits) = types(ds, ats, flex, next)
@@ -129,8 +129,9 @@ pub fn signature_normalized(s: Sig, sm: Map[Int, Scope]) -> Sig = {
   let caps = map(p.captures, c => CaptureParam { ..c,
     bound = match c.bound { Some(value) -> Some(capture.subst(value, sm, cm)), None -> None } })
   let params = Params { ..p, scopes = map(p.scopes, r => capture.scope_subst(r, sm)),
-    captures = caps, bounds = map(p.bounds, b => { let (id, value) = b
-      (id, capture.subst(value, sm, cm)) }) }
+    captures = caps, support_facts = map(p.support_facts, b => { let (id, value) = b
+      (id, capture.subst(value, sm, cm)) }), bounds = map(p.bounds, b => { let (id, value) = b
+        (id, capture.subst(value, sm, cm)) }) }
   Sig { ..s, scope_params = params,
     constraints = map(s.constraints, bs => map(bs, b => capture.trait_subst(b, sm, cm))),
     param_tys = map(s.param_tys, t => subst_scopes(t, sm, cm)),
@@ -154,6 +155,8 @@ pub fn contract_normalized(s: Sig, scopes: Map[Int, Scope], captures: Map[Int, c
   let caps = map(p.captures, c => CaptureParam { ..c,
     bound = match c.bound { Some(value) -> Some(capture.subst(value, sm, captures)), None -> None } })
   let params = Params { ..p, captures = caps,
+    support_facts = map(p.support_facts, b => { let (id, value) = b
+      (id, capture.subst(value, sm, captures)) }),
     bounds = map(p.bounds, b => { let (id, value) = b
       (id, capture.subst(value, sm, captures)) }) }
   Sig { ..scoped, scope_params = params,

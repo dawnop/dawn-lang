@@ -1,0 +1,36 @@
+# Generated callbacks retain resources and invariant cell support.
+effect Store {
+  fn record(body: fn() -> Unit !io) -> Unit
+  fn emit(value: Int) -> Unit
+  fn fetch() -> (fn() -> Unit !io)
+}
+use std/mem
+type Phantom[T] = { n: Int }
+
+type Cond = { n: Int }
+impl StagedCond[Cond] {
+  effect StagedCond = !Store
+  fn staged_if(c: Cond, yes: fn() -> Unit !Store, no: fn() -> Unit !Store) -> Unit !Store = record(() => {
+    with handle Store {
+      record(body) => ()
+      fetch() => () => ()
+      emit(value) => println(to_string(value))
+    }
+    yes()
+  })
+}
+pub fn main() -> Unit !io = {
+  with handle Store {
+    var saved: fn() -> Unit !io = () => ()
+    record(body) => { saved = body }
+    fetch() => saved
+    emit(value) => println(to_string(value))
+  }
+  mem.with_mem([@s] () => {
+    let p: Phantom[I64Buf@s] = Phantom { n = 3 }
+    let condition = Cond { n = 1 }
+    if condition { emit(p.n) }
+  })
+  let f = fetch()
+  f()
+}

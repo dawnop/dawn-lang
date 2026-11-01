@@ -1,0 +1,10 @@
+# Pure calling rows isolate the K3 propagation rule from domain discharge.
+use std/mem
+type Source[^c] = { read: fn(Int) -> Int ^{c} }
+fn bind[T: ^{c}, ^c](value: T, read: fn(T, Int) -> Int ^{c}) -> (fn(Int) -> Int ^{c}) =
+  n => read(value, n)
+fn escaped() !io = mem.with_mem([@s] () => {
+  let b = mem.new(3)
+  Source { read = bind(b, (value: I64Buf@s, n: Int) => len(value) + n) }
+})
+pub fn main() -> Unit !io = { let _ = escaped() }

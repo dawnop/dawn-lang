@@ -1,0 +1,14 @@
+# An explicit contract isolates this propagation or boundary rule.
+use std/mem
+trait Measure[T: ^{c}, ^c] {
+  fn measure(value: T) -> Int
+  fn measured(value: T) -> (fn() -> Int ^{c}) = () => measure(value)
+}
+impl[@s] Measure[I64Buf@s, ^{s}] { fn measure(value: I64Buf@s) -> Int = len(value) }
+type Repr[^c] = { size: fn() -> Int ^{c} }
+opaque type Packed[^c] = Repr[c]
+fn pack[T: Measure[c] + ^{c}, ^c](value: T) -> Packed[c] = Repr { size = () => measure(value) }
+fn attempt() !io = mem.with_mem([@s] () => {
+  pack(mem.new(3))
+})
+pub fn main() -> Unit !io = { let _ = attempt() }

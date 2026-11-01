@@ -1,0 +1,26 @@
+# Ordinary environments and delivered type support have separate contracts.
+use std/mem
+type Phantom[T] = { n: Int }
+effect Store {
+  fn save(read: fn() -> Int) -> Unit
+  fn fetch() -> (fn() -> Int)
+}
+type Cond = { n: Int }
+impl StagedCond[Cond] {
+  effect StagedCond = !Store
+  fn staged_if(c: Cond, on_true: fn() -> Unit !Store, on_false: fn() -> Unit !Store) -> Unit !Store = on_true()
+}
+pub fn main() -> Unit !io = {
+  with handle Store {
+    var saved: fn() -> Int = () => -1
+    save(read) => { saved = read }
+    fetch() => saved
+  }
+  mem.with_mem([@s] () => {
+    let b = mem.new(3)
+    let cond = Cond { n = 0 }
+    if cond { save(() => len(b)) }
+  })
+  let f = fetch()
+  println(to_string(f()))
+}

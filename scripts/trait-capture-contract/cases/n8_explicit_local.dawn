@@ -1,0 +1,19 @@
+# Ordinary environments and delivered type support have separate contracts.
+use std/mem
+type PhantomAt[@s] = { n: Int }
+trait Empty[T: ^{c}, ^c] { fn empty_value() -> T }
+impl[@s] Empty[PhantomAt[s], ^{s}] {
+  fn empty_value() -> PhantomAt[s] = PhantomAt { n = 7 }
+}
+fn factory[@s](tag: PhantomAt[s]) -> (fn() -> Int ^{s}) = {
+  let make: fn() -> PhantomAt[s] ^{s} = empty_value
+  () => { let _value = make()
+    0 }
+}
+fn escaped() -> Int = mem.with_mem([@s] () => {
+  let p: PhantomAt[s] = PhantomAt { n = 7 }
+  let f = factory(p)
+  f()
+})
+pub fn main() -> Unit !io = { let n = escaped()
+  println(to_string(n)) }

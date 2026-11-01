@@ -1,0 +1,12 @@
+# An explicit contract isolates this propagation or boundary rule.
+use std/mem
+trait Head[C: ^{c}, ^c] {
+  type Item: ^{c}
+  fn first(values: C) -> C.Item
+  fn later(values: C) -> (fn() -> C.Item ^{c}) = { let value = first(values)
+    () => value }
+}
+impl[T: ^{c}, ^c] Head[List[T], c] { type Item = T
+  fn first(values: List[T]) -> T = values[0] }
+fn pick[C: Head[c] + ^{c}, ^c](values: C) -> C.Item = first(values)
+pub fn main() -> Unit !io = { println(to_string(mem.with_mem([@s] () => len(pick([mem.new(3)]))))) }

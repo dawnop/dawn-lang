@@ -1,0 +1,16 @@
+# A complete result application fixes constructor axes while arrow fields widen.
+use std/mem
+type Cell[^c] = { read: fn() -> Int ^{c} }
+type Made[^c] = Make(read: fn() -> Int ^{c})
+fn widen[@s, ^d](read: fn() -> Int ^{d}) -> Cell[ ^{d, s}] = Cell { read = read }
+fn maker[@s, ^d]() -> (fn(fn() -> Int ^{d}) -> Made[ ^{d, s}]) = Make
+pub fn main() -> Unit !io = {
+  let answer = mem.with_mem([@s] () => {
+    let closed: fn() -> Int = () => 3
+    let cell: Cell[^{s}] = Cell { read = closed }
+    let make: fn(fn() -> Int) -> Made[ ^{s}] = Make
+    let value = make(() => 4)
+    cell.read() + match value { Make(read) -> read() }
+  })
+  println(to_string(answer))
+}
