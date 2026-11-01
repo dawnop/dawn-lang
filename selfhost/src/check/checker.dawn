@@ -1,3 +1,4 @@
+use check/tast
 # The Dawn checker, in Dawn (P3b; port of check/Checker.kt per
 # docs/selfhost-checker.md). This file grows pass by pass; the state record Cx
 # carries every mutable member of the Kotlin Checker, and functions return
@@ -13,7 +14,7 @@ use check/environment
 use check/value_capture
 use check/scope_infer
 use check/trait_contract
-use check/capture.{Function as CaptureFunction, Scope as CaptureScope, Params as CaptureParams, CaptureParam}
+use check/capture.{Function as CaptureFunction, Scope as CaptureScope, Params as CaptureParams, CaptureParam, TraitApplication}
 use std/str
 use std/list
 use std/map
@@ -5291,8 +5292,28 @@ pub(pkg) fn check_ctor_value(
 ## rigid type parameter → the caller's dictionary is forwarded (and captured by
 ## every enclosing lambda); concrete subject → coherence gives the unique impl.
 pub(pkg) fn resolve_witness(cx: Cx, trait_id: Int, t: Ty, lo: Int, hi: Int,
-  requirer: String) -> (Cx, Option[WitRef]) =
-  resolve_application(cx, capture.closed_trait(trait_id), t, lo, hi, requirer)
+  requirer: String) -> (Cx, Option[WitRef]) = {
+  let tr = trait_of(cx.traits, trait_id)
+  var app = capture.closed_trait(trait_id)
+  match t {
+    TyVar(_, id) -> { for given in map.get(cx.current_tparam_bounds, id).unwrap_or([]) {
+      if given.id == trait_id { app = given }
+    } }
+    _ -> match impl_at(cx.impl_table, trait_id, t) {
+      Some(imp) -> match trait_contract.subject_application(imp, t) {
+        Some(known) -> { app = known }
+        None -> if len(tr.scope_params.captures) == 1 {
+          match data_capture.support_bound(cx.adts, cx.current_capture_params, t) {
+            Some(support) -> { app = TraitApplication { id = trait_id, args = [support] } }
+            None -> ()
+          }
+        }
+      }
+      None -> ()
+    }
+  }
+  resolve_application(cx, app, t, lo, hi, requirer)
+}
 
 pub(pkg) fn resolve_application(cx: Cx, application: capture.TraitApplication,
   t: Ty, lo: Int, hi: Int, requirer: String) -> (Cx, Option[WitRef]) = {
@@ -7122,8 +7143,8 @@ fn check_index(cx: Cx, target: Expr, index: Expr, lo: Int, hi: Int) -> (Cx, Ty, 
       (cx3, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
     }
     Some(wr) -> {
-      let want_idx = reduce_assoc(cx2, TyAssoc(tt, capture.closed_trait(INDEX_ID), "Idx", []))
-      let result = reduce_assoc(cx2, TyAssoc(tt, capture.closed_trait(INDEX_ID), "Item", []))
+      let want_idx = reduce_assoc(cx2, TyAssoc(tt, tast.witness_application(wr), "Idx", trait_contract.member_upper(trait_of(cx2.traits, INDEX_ID), tast.witness_application(wr), "Idx")))
+      let result = reduce_assoc(cx2, TyAssoc(tt, tast.witness_application(wr), "Item", trait_contract.member_upper(trait_of(cx2.traits, INDEX_ID), tast.witness_application(wr), "Item")))
       let (cx3, it, ix) = check_expr(cx2, index, Some(want_idx))
       if it != want_idx && not is_errorish(it) {
         let expected_text = ty_show(cx3.adts, want_idx)
@@ -9532,9 +9553,10 @@ fn check_for(
             "for..in")
           cx1 = cxw
           match w {
-            Some(_) -> {
+            Some(wr) -> {
               wit = w
-              let item = reduce_assoc(cx1, TyAssoc(ft, capture.closed_trait(ITER_ID), "Item", []))
+              let app = tast.witness_application(wr)
+              let item = reduce_assoc(cx1, TyAssoc(ft, app, "Item", trait_contract.member_upper(trait_of(cx1.traits, ITER_ID), app, "Item")))
               loop_t = item
             }
             None -> ()
@@ -11224,7 +11246,7 @@ fn check_call(
         "that takes the result"),
       TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
   }
-  if len(s.scope_params.captures) > 0 && list.any(s.constraints, bs => list.any(bs, b => len(b.args) > 0)) {
+  if len(s.scope_params.captures) > 0 {
     cx1 = learn_trait_type_bindings(cx1, s, m)
     s = scope_infer.contract_normalized(s, cx1.frame.scope_bindings, cx1.frame.capture_bindings)
   }

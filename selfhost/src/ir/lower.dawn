@@ -5247,13 +5247,14 @@ fn lower_for_iter(
 ## exactly what the dictionary's bridge traffics in.
 fn iter_cur_ty(st: LSt, w: WitRef, ct: Ty) -> Ty =
   match w {
-    WForward(_, _, _) -> TyAssoc(ct, capture.closed_trait(ITER_ID), "Cur", [])
-    WConcrete(_, subject) -> iter_cur_binding(st, subject)
-    WApply(_, subject, _) -> iter_cur_binding(st, subject)
+    WForward(_, app, _) -> TyAssoc(ct, app, "Cur", trait_contract.member_upper(trait_of(st.traits, ITER_ID), app, "Cur"))
+    WConcrete(app, subject) -> iter_cur_binding(st, app, subject)
+    WApply(app, subject, _) -> iter_cur_binding(st, app, subject)
   }
 
-fn iter_cur_binding(st: LSt, subject: Ty) -> Ty = {
-  for pr in impl_for(st, ITER_ID, subject).assoc_bindings {
+fn iter_cur_binding(st: LSt, app: capture.TraitApplication, subject: Ty) -> Ty = {
+  let imp = trait_contract.instantiate_scopes(impl_for(st, ITER_ID, subject), app, subject)
+  for pr in imp.assoc_bindings {
     let (bn, bt) = pr
     if bn == "Cur" { return bt }
   }

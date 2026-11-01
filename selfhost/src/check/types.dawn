@@ -16,7 +16,7 @@
 # ADT ids and trait ids are separate namespaces (Option and Ord are both 0) that
 # happen to share one counter, so reserving two more trait ids costs two ADT ids.
 
-use check/capture.{Scope as CaptureScope, Function as CaptureFunction, Arguments as CaptureArguments, Params as CaptureParams, CaptureParam}
+use check/capture.{Scope as CaptureScope, Function as CaptureFunction, Arguments as CaptureArguments, Params as CaptureParams, CaptureParam, TraitApplication}
 use check/capture
 use std/map
 use std/list
@@ -3489,7 +3489,7 @@ fn prelude_trait(tid: Int, name: String, tv: Ty, m: String, sig: Sig) -> TraitI 
 
 ## The prelude traits: Ord (id 0) whose `cmp` backs `< <= > >=` beyond scalars,
 ## Eq (id 1) behind `==`/`!=`, and Hash (id 2), which nothing calls yet.
-pub fn prelude_traits() -> Traits = {
+fn prelude_trait_definitions() -> Traits = {
   let tv = TyVar("T", -10)
   let cmp_sig = Sig { scope_params = capture.empty_params(),
     name = "cmp",
@@ -4009,7 +4009,7 @@ pub fn is_show_scalar(t: Ty) -> Bool = {
 
 ## Ord over the natively ordered scalars, Eq/Hash over every scalar, Show over
 ## the printable ones: the impls that ship with the language.
-pub fn prelude_impls() -> List[ImplI] = {
+fn prelude_impl_definitions() -> List[ImplI] = {
   var out = map(ord_scalars(), t => prelude_impl(ORD_ID, t))
   for t in eq_scalars() {
     out = out ++ [prelude_impl(EQ_ID, t)]
@@ -4314,7 +4314,7 @@ fn collection_sigs(t: Ty, a: Ty, k: Ty, v: Ty, e: Eff) -> List[Sig] = {
   ]
 }
 
-pub fn builtins() -> Map[String, Sig] = {
+fn builtin_definitions() -> Map[String, Sig] = {
   let t = TyVar("T", -1)
   let u = TyVar("U", -2)
   let a = TyVar("A", -3)
@@ -4336,12 +4336,12 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("float_ceil", [TyFloat], ["x"], TyFloat),
     bsig("float_trunc", [TyFloat], ["x"], TyFloat),
     bsig("float_round_even", [TyFloat], ["x"], TyFloat),
-    tp1(bsig("list_len", [TyList(t)], ["xs"], TyInt), t),
-    tp1(bsig("get", [TyList(t), TyInt], ["xs", "i"], opt_ty(t)), t),
+    callback_captures(tp1(bsig("list_len", [TyList(t)], ["xs"], TyInt), t)),
+    callback_captures(tp1(bsig("get", [TyList(t), TyInt], ["xs", "i"], opt_ty(t)), t)),
     bsig("range", [TyInt, TyInt], ["from", "to"], TyList(TyInt)),
-    effp1(tp1(bsig("sort_by", [TyList(t), TyFn([t, t], TyInt, e, capture.empty_function())], ["xs", "cmp"], TyList(t)), t), e),
-    sited(tp1(bsig("expect", [opt_ty(t), TyString, ty_loc()], ["o", "msg", "at"], t), t)),
-    tp1(bsig("unwrap_or", [opt_ty(t), t], ["o", "fallback"], t), t),
+    callback_captures(effp1(tp1(bsig("sort_by", [TyList(t), TyFn([t, t], TyInt, e, capture.empty_function())], ["xs", "cmp"], TyList(t)), t), e)),
+    callback_captures(sited(tp1(bsig("expect", [opt_ty(t), TyString, ty_loc()], ["o", "msg", "at"], t), t))),
+    callback_captures(tp1(bsig("unwrap_or", [opt_ty(t), t], ["o", "fallback"], t), t)),
     tp1b(bsig("to_string", [t], ["x"], TyString), t, SHOW_ID),
     # The debug print (docs/source-location-design.md section 6): `x` back,
     # and `[<path>:<line>:<col>] <argument text> = <show(x)>` on stderr. Pure
@@ -4874,7 +4874,7 @@ pub fn builtins() -> Map[String, Sig] = {
     eff1(bsig("gpu_close_host", [], [], TyUnit), EIo),
 
   ]
-  sigs = sigs ++ collection_sigs(t, a, k, v, e)
+  sigs = sigs ++ map(collection_sigs(t, a, k, v, e), s => if len(s.tparams) > 0 { callback_captures(s) } else { s })
   sigs = sigs ++ provenance_builtins()
   for s in sigs { out = map.insert(out, s.name, s) }
   out
@@ -6144,3 +6144,67 @@ test "evidence layout keeps two instances of one effect distinct" {
   assert evidence_label_type(labels[0]) != evidence_label_type(labels[1])
   assert evidence_roles(row) == [ScopedLabelSlot(23, 11), ScopedLabelSlot(23, 12)]
 }
+
+# Prelude computations obey the same omitted value bound as source code.
+# Open protocols declare their axes here; normalization preserves those bounds
+# and never creates complete support facts from ordinary value bounds.
+fn computation_params(p: capture.Params, ts: List[Ty]) -> capture.Params = {
+  var ids: List[Int] = []
+  for value in ts { match value { TyVar(_, id) -> { ids = ids ++ [id] }, _ -> () } }
+  capture.computation(p, ids)
+}
+fn computation_sig(s: Sig) -> Sig = Sig { ..s, scope_params = computation_params(s.scope_params, s.tparams) }
+pub fn prelude_traits() -> Traits = {
+  let zero: capture.Capture = []
+  var out: Traits = map.empty()
+  for entry in map.entries(prelude_trait_definitions()) {
+    let (id, tr) = entry
+    var upper = tr.assoc_bounds
+    for name in tr.assoc { if not list.any(upper, item => { let (label, _) = item
+      label == name }) { upper = upper ++ [(name, zero)] } }
+    let opened = id == LEN_ID || id == ITER_ID || id == INDEX_ID
+    let variable = capture.CaptureVar("dep", -91)
+    let own = if opened { CaptureParams { ..tr.scope_params,
+      captures = [CaptureParam { name = "dep", id = -91, bound = None }],
+      bounds = [(match tr.tvar { TyVar(_, vid) -> vid, _ -> -1 }, [variable])] }
+    } else { computation_params(tr.scope_params, [tr.tvar]) }
+    if opened { upper = map(tr.assoc, name => (name, [variable])) }
+    let methods = map(tr.methods, item => {
+      let (name, method) = item
+      let base = method.sig
+      let app = TraitApplication { id = id, args = [[variable]] }
+      let sig = if opened { Sig { ..base, scope_params = own,
+        constraints = [[app]],
+        param_tys = map(base.param_tys, ty => capture_projection(ty, id, app, [variable])),
+        ret = capture_projection(base.ret, id, app, [variable]) }
+      } else { computation_sig(base) }
+      (name, MethodSig { ..method, sig = sig })
+    })
+    out = map.insert(out, id, TraitI { ..tr, scope_params = own, assoc_bounds = upper, methods = methods })
+  }
+  out
+}
+pub fn prelude_impls() -> List[ImplI] = map(prelude_impl_definitions(), imp => {
+  if imp.trait_id == INDEX_ID {
+    let variable = capture.CaptureVar("dep", -92)
+    let bounds = map(imp.tparams, t => (match t { TyVar(_, id) -> id, _ -> -1 }, [variable]))
+    ImplI { ..imp, trait_args = [[variable]], scope_params = CaptureParams { ..imp.scope_params,
+      captures = [CaptureParam { name = "dep", id = -92, bound = None }], bounds = bounds } }
+  } else { ImplI { ..imp, scope_params = computation_params(imp.scope_params, imp.tparams) } }
+})
+pub fn builtins() -> Map[String, Sig] = {
+  var out: Map[String, Sig] = map.empty()
+  for entry in map.entries(builtin_definitions()) {
+    let (name, sig) = entry
+    out = map.insert(out, name, computation_sig(sig))
+  }
+  out
+}
+
+fn capture_projection(value: Ty, tid: Int, app: capture.TraitApplication, upper: capture.Capture) -> Ty =
+  match value {
+    TyAssoc(subject, prior, name, _) -> if prior.id == tid {
+      TyAssoc(capture_projection(subject, tid, app, upper), app, name, upper)
+    } else { ty_map_children(value, t => capture_projection(t, tid, app, upper)) }
+    _ -> ty_map_children(value, t => capture_projection(t, tid, app, upper))
+  }

@@ -489,9 +489,8 @@ opaque head envelopes and actual value and storage dependency graphs. Ordinary
 closure environments merge V; delivered types retain S, witnesses retain W, and
 storage retains its original installation contract. Explicit callback contracts
 and closed scalar witness premises preserve the necessary scoped library uses.
-Computation defaults stay disabled. Their switch and the remaining library
-migration require a real audit of the compiler's seed closure before the next
-slice proceeds.
+This slice originally kept computation defaults disabled while the next
+slice audited the real compiler seed closure.
 
 The computation default audit checks both bootstrap edges. The recorded seed
 builds the compiler against its matching standard library. That compiler must
@@ -499,8 +498,23 @@ then build the real compiler closure against the migrated current library.
 Passing the first edge does not establish the second. Omitted value bounds
 must not become complete support premises during this audit. Required source
 contracts must be representable without implicit Capture arguments, name
-exemptions or an older API fallback. Computation defaults remain disabled
-until this closure is established.
+exemptions or an older API fallback. The audit passed both edges and reached
+a byte identical B and C fixed point with the recorded seed. Computation
+defaults and the necessary library contracts can therefore move together.
+
+Omitted Type value bounds are now empty in functions, impls and trait
+subjects. Data representation parameters and their generated introductions
+retain their own quantification. This creates no complete support premise.
+Len, Iter and Index declare a Capture axis; their associated type bounds and
+all impl applications retain that axis. Operator elaboration selects the
+complete application from an existing given, a subject equation or known
+complete support, then checks the ordinary invariant witness obligations.
+
+Concrete list cursor helpers and persistent container operations declare
+explicit value contracts. Their bodies inspect the representation directly
+without manufacturing an abstract witness from a value upper bound. Public
+trait calls still require complete subject support. Unrelated container
+relations and global reactor storage keep their closed contracts.
 
 两后端可以擦除静态域，不要求缓冲运行时增加域 id，也不承诺证据布局或 emit 零变化。
 必须验证 at/set 仍是直接原语，重新量 bcrypt 与 tileinterp；K1 无性能实测，不作速度承诺。

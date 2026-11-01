@@ -2475,7 +2475,11 @@ using V(T), the reader environment and its calling row. Dictionaries separately
 contribute their complete witness contract W; ordinary hiding does not eliminate
 W or weaken S(Subject) contained in W. Cell writes check full delivery support,
 invariant content and the location's installation lifetime, including aliases
-and handler or staged channels. Computation defaults remain staged in this slice.
+and handler or staged channels. Omitted Type value bounds in computation
+contracts are now empty. Data representations and generated introductions
+retain their declared quantification. Len, Iter and Index declare explicit
+Capture arguments; their complete witness support obligation remains independent
+of an ordinary value bound.
 
 A trait witness's static contract contains the trait identity, subject, Capture arguments and
 subwitnesses. The union W of Capture arguments must cover the subject's reachable captures and

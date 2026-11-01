@@ -16,20 +16,12 @@
 
 # ---- iteration ----
 #
-# Everything that walks a whole list, here and in the compiler, goes through
-# the impl below. `for x in xs` desugars to the same four methods (lower.dawn's
-# lower_for_iter, #44 knife 2) rather than to an index loop, and so does every
-# sequential helper in this file — the unqualified `iter_*` calls resolve to
-# the prelude trait's methods and devirtualise straight back here.
+# The public Iter witness and concrete list helpers share these cursor bodies.
+# Ordinary helpers need only the elements' value bounds. They do not construct
+# an abstract witness whose complete subject support would require an
+# independent premise. The representation boundary stays in one place when
+# the cursor changes.
 #
-# The difference is not style: an index walk hardwires "this collection can be
-# randomly indexed", which costs nothing on today's flat representation and
-# O(log n) on the tree D3 replaces it with — measured 8-18x slower and widening
-# with n. Behind a cursor, the representation changes and its callers do not.
-#
-# A cursor is an index today because the representation is flat. When it stops
-# being flat, `Cur` and these four bodies change and nothing else does.
-
 # std/modules.txt puts `str` before `list`, and std/fmt already imports it, so
 # this edge is the allowed direction. It is here for the rendering witness below,
 # which needs a string length that allocates nothing.
@@ -37,14 +29,19 @@ use std/str
 
 alias Cur = Int
 
-impl[T] Iter[List[T]] {
+fn cursor_start[T: ^{dep}, ^dep](xs: List[T]) -> Int = 0
+fn cursor_done[T: ^{dep}, ^dep](xs: List[T], c: Int) -> Bool = c >= list_len(xs)
+fn cursor_next[T: ^{dep}, ^dep](xs: List[T], c: Int) -> Int = c + 1
+fn cursor_get[T: ^{dep}, ^dep](xs: List[T], c: Int) -> T =
+  get(xs, c).expect("cursor within list")
+
+impl[T: ^{dep}, ^dep] Iter[List[T], dep] {
   type Cur = Int
   type Item = T
-
-  fn iter_start(xs: List[T]) -> Int = 0
-  fn iter_done(xs: List[T], c: Int) -> Bool = c >= list_len(xs)
-  fn iter_next(xs: List[T], c: Int) -> Int = c + 1
-  fn iter_get(xs: List[T], c: Int) -> T = xs[c]
+  fn iter_start(xs: List[T]) -> Int = cursor_start(xs)
+  fn iter_done(xs: List[T], c: Int) -> Bool = cursor_done(xs, c)
+  fn iter_next(xs: List[T], c: Int) -> Int = cursor_next(xs, c)
+  fn iter_get(xs: List[T], c: Int) -> T = cursor_get(xs, c)
 }
 
 # ---- queries ----
@@ -53,51 +50,51 @@ impl[T] Iter[List[T]] {
 ## every container; this is the other half, spelled the same way for all of
 ## them (CONTRIBUTING §naming). It asks the cursor rather than comparing a
 ## count, so it stays O(1) on a representation whose length is not.
-pub fn is_empty[T](xs: List[T]) -> Bool = iter_done(xs, iter_start(xs))
+pub fn is_empty[T: ^{dep}, ^dep](xs: List[T]) -> Bool = cursor_done(xs, cursor_start(xs))
 
 # ---- sequential walks ----
 
 fn map_go[T: ^{c}, U: ^{c}, ^c, !e](xs: List[T], f: fn(T) -> U !e ^{c}, c: Cur, acc: List[U]) -> List[U] !e =
-  if iter_done(xs, c) { acc }
-  else { map_go(xs, f, iter_next(xs, c), acc ++ [f(iter_get(xs, c))]) }
+  if cursor_done(xs, c) { acc }
+  else { map_go(xs, f, cursor_next(xs, c), acc ++ [f(cursor_get(xs, c))]) }
 
 ## `f` applied to every element, in order.
 pub fn map[T: ^{c}, U: ^{c}, ^c, !e](xs: List[T], f: fn(T) -> U !e ^{c}) -> List[U] !e = {
   let empty: List[U] = []
-  map_go(xs, f, iter_start(xs), empty)
+  map_go(xs, f, cursor_start(xs), empty)
 }
 
 fn filter_go[T: ^{c}, ^c, !e](xs: List[T], f: fn(T) -> Bool !e ^{c}, c: Cur, acc: List[T]) -> List[T] !e =
-  if iter_done(xs, c) { acc }
+  if cursor_done(xs, c) { acc }
   else {
-    let x = iter_get(xs, c)
-    filter_go(xs, f, iter_next(xs, c), if f(x) { acc ++ [x] } else { acc })
+    let x = cursor_get(xs, c)
+    filter_go(xs, f, cursor_next(xs, c), if f(x) { acc ++ [x] } else { acc })
   }
 
 ## The elements satisfying `f`, in order.
 pub fn filter[T: ^{c}, ^c, !e](xs: List[T], f: fn(T) -> Bool !e ^{c}) -> List[T] !e = {
   let empty: List[T] = []
-  filter_go(xs, f, iter_start(xs), empty)
+  filter_go(xs, f, cursor_start(xs), empty)
 }
 
-fn fold_go[T, A](xs: List[T], f: fn(A, T) -> A !e, c: Cur, acc: A) -> A !e =
-  if iter_done(xs, c) { acc }
-  else { fold_go(xs, f, iter_next(xs, c), f(acc, iter_get(xs, c))) }
+fn fold_go[T: ^{dep}, A: ^{dep}, ^dep](xs: List[T], f: fn(A, T) -> A !e ^{dep}, c: Cur, acc: A) -> A !e =
+  if cursor_done(xs, c) { acc }
+  else { fold_go(xs, f, cursor_next(xs, c), f(acc, cursor_get(xs, c))) }
 
 ## Reduce from the left: `f(f(f(init, x0), x1), ...)`.
-pub fn fold[T, A](xs: List[T], init: A, f: fn(A, T) -> A !e) -> A !e =
-  fold_go(xs, f, iter_start(xs), init)
+pub fn fold[T: ^{dep}, A: ^{dep}, ^dep](xs: List[T], init: A, f: fn(A, T) -> A !e ^{dep}) -> A !e =
+  fold_go(xs, f, cursor_start(xs), init)
 
-fn find_go[T](xs: List[T], f: fn(T) -> Bool !e, c: Cur) -> Option[T] !e =
-  if iter_done(xs, c) { None }
+fn find_go[T: ^{dep}, ^dep](xs: List[T], f: fn(T) -> Bool !e ^{dep}, c: Cur) -> Option[T] !e =
+  if cursor_done(xs, c) { None }
   else {
-    let x = iter_get(xs, c)
-    if f(x) { Some(x) } else { find_go(xs, f, iter_next(xs, c)) }
+    let x = cursor_get(xs, c)
+    if f(x) { Some(x) } else { find_go(xs, f, cursor_next(xs, c)) }
   }
 
 ## The first element satisfying `f`, or `None`.
-pub fn find[T](xs: List[T], f: fn(T) -> Bool !e) -> Option[T] !e =
-  find_go(xs, f, iter_start(xs))
+pub fn find[T: ^{dep}, ^dep](xs: List[T], f: fn(T) -> Bool !e ^{dep}) -> Option[T] !e =
+  find_go(xs, f, cursor_start(xs))
 
 # ---- membership and quantifiers ----
 #
@@ -110,24 +107,24 @@ pub fn find[T](xs: List[T], f: fn(T) -> Bool !e) -> Option[T] !e =
 # They walk with the same four-function cursor everything else here does, so
 # "stops early" survives the representation change D3 makes.
 
-fn any_go[T](xs: List[T], f: fn(T) -> Bool !e, c: Cur) -> Bool !e =
-  if iter_done(xs, c) { false }
-  else if f(iter_get(xs, c)) { true }
-  else { any_go(xs, f, iter_next(xs, c)) }
+fn any_go[T: ^{dep}, ^dep](xs: List[T], f: fn(T) -> Bool !e ^{dep}, c: Cur) -> Bool !e =
+  if cursor_done(xs, c) { false }
+  else if f(cursor_get(xs, c)) { true }
+  else { any_go(xs, f, cursor_next(xs, c)) }
 
 ## Whether `f` holds for at least one element. `false` for the empty list.
 ## Short-circuits: `f` runs on the elements up to the first that satisfies it
 ## and no further, which is observable when `f` has an effect.
-pub fn any[T](xs: List[T], f: fn(T) -> Bool !e) -> Bool !e = any_go(xs, f, iter_start(xs))
+pub fn any[T: ^{dep}, ^dep](xs: List[T], f: fn(T) -> Bool !e ^{dep}) -> Bool !e = any_go(xs, f, cursor_start(xs))
 
-fn all_go[T](xs: List[T], f: fn(T) -> Bool !e, c: Cur) -> Bool !e =
-  if iter_done(xs, c) { true }
-  else if f(iter_get(xs, c)) { all_go(xs, f, iter_next(xs, c)) }
+fn all_go[T: ^{dep}, ^dep](xs: List[T], f: fn(T) -> Bool !e ^{dep}, c: Cur) -> Bool !e =
+  if cursor_done(xs, c) { true }
+  else if f(cursor_get(xs, c)) { all_go(xs, f, cursor_next(xs, c)) }
   else { false }
 
 ## Whether `f` holds for every element. `true` for the empty list.
 ## Short-circuits at the first element that fails, as [`any`] does.
-pub fn all[T](xs: List[T], f: fn(T) -> Bool !e) -> Bool !e = all_go(xs, f, iter_start(xs))
+pub fn all[T: ^{dep}, ^dep](xs: List[T], f: fn(T) -> Bool !e ^{dep}) -> Bool !e = all_go(xs, f, cursor_start(xs))
 
 ## Whether `f` holds for no element. `true` for the empty list.
 ## Short-circuits at the first element that satisfies `f`, as [`any`] does.
@@ -137,12 +134,12 @@ pub fn all[T](xs: List[T], f: fn(T) -> Bool !e) -> Bool !e = all_go(xs, f, iter_
 ## question it is, and puts the negation where a reader has to unwind it.
 ## Defined as that negation, so the short-circuit and the empty-list answer are
 ## [`any`]'s by construction rather than by a second walk agreeing with it.
-pub fn none[T](xs: List[T], f: fn(T) -> Bool !e) -> Bool !e = not any(xs, f)
+pub fn none[T: ^{dep}, ^dep](xs: List[T], f: fn(T) -> Bool !e ^{dep}) -> Bool !e = not any(xs, f)
 
 fn index_go[T: Eq](xs: List[T], x: T, c: Cur, i: Int) -> Option[Int] =
-  if iter_done(xs, c) { None }
-  else if eq(iter_get(xs, c), x) { Some(i) }
-  else { index_go(xs, x, iter_next(xs, c), i + 1) }
+  if cursor_done(xs, c) { None }
+  else if eq(cursor_get(xs, c), x) { Some(i) }
+  else { index_go(xs, x, cursor_next(xs, c), i + 1) }
 
 ## The index of the first element equal to `x`, or `None`.
 ##
@@ -155,7 +152,7 @@ fn index_go[T: Eq](xs: List[T], x: T, c: Cur, i: Int) -> Option[Int] =
 ## currency is [`str.index_of`]'s -- `Option[Int]`, never a `-1`, which is the
 ## one sentinel this library does not hand out.
 pub fn index_of[T: Eq](xs: List[T], x: T) -> Option[Int] =
-  index_go(xs, x, iter_start(xs), 0)
+  index_go(xs, x, cursor_start(xs), 0)
 
 ## Whether some element equals `x`. Stops at the first match; the same answer
 ## as `index_of(xs, x)` being `Some`, and the same walk.
@@ -190,39 +187,39 @@ pub fn unique[T: Eq + Hash](xs: List[T]) -> List[T] = set_to_list(set_from(xs))
 # an ordered tree cuts a range by splitting in O(log n) rather than by copying
 # elements one at a time, and reverses by walking its own structure backwards.
 
-fn slice_go[T](xs: List[T], i: Int, stop: Int, acc: List[T]) -> List[T] =
+fn slice_go[T: ^{dep}, ^dep](xs: List[T], i: Int, stop: Int, acc: List[T]) -> List[T] =
   if i >= stop { acc }
   else { slice_go(xs, i + 1, stop, acc ++ [get(xs, i).expect("index below length")]) }
 
 fn clamp(n: Int, hi: Int) -> Int = if n < 0 { 0 } else { if n > hi { hi } else { n } }
 
 ## The first `n` elements; `n` is clamped into range, so this never panics.
-pub fn take[T](xs: List[T], n: Int) -> List[T] = {
+pub fn take[T: ^{dep}, ^dep](xs: List[T], n: Int) -> List[T] = {
   let empty: List[T] = []
-  slice_go(xs, 0, clamp(n, len(xs)), empty)
+  slice_go(xs, 0, clamp(n, list_len(xs)), empty)
 }
 
 ## Everything after the first `n` elements; `n` is clamped into range.
-pub fn drop[T](xs: List[T], n: Int) -> List[T] = {
+pub fn drop[T: ^{dep}, ^dep](xs: List[T], n: Int) -> List[T] = {
   let empty: List[T] = []
-  slice_go(xs, clamp(n, len(xs)), len(xs), empty)
+  slice_go(xs, clamp(n, list_len(xs)), list_len(xs), empty)
 }
 
 ## The elements in `[from, to)`. Both ends are clamped into range, so
 ## out-of-bounds indices never panic; `from >= to` yields the empty list.
-pub fn slice[T](xs: List[T], from: Int, to: Int) -> List[T] = {
+pub fn slice[T: ^{dep}, ^dep](xs: List[T], from: Int, to: Int) -> List[T] = {
   let empty: List[T] = []
-  slice_go(xs, clamp(from, len(xs)), clamp(to, len(xs)), empty)
+  slice_go(xs, clamp(from, list_len(xs)), clamp(to, list_len(xs)), empty)
 }
 
-fn reverse_go[T](xs: List[T], i: Int, acc: List[T]) -> List[T] =
+fn reverse_go[T: ^{dep}, ^dep](xs: List[T], i: Int, acc: List[T]) -> List[T] =
   if i < 0 { acc }
   else { reverse_go(xs, i - 1, acc ++ [get(xs, i).expect("index below length")]) }
 
 ## A reversed copy; the input is not changed.
-pub fn reverse[T](xs: List[T]) -> List[T] = {
+pub fn reverse[T: ^{dep}, ^dep](xs: List[T]) -> List[T] = {
   let empty: List[T] = []
-  reverse_go(xs, len(xs) - 1, empty)
+  reverse_go(xs, list_len(xs) - 1, empty)
 }
 
 ## Ascending stable sort; elements need `Ord`. Delegates to `sort_by` with the
@@ -235,38 +232,38 @@ pub fn sort[T: Ord](xs: List[T]) -> List[T] = sort_by(xs, (a, b) => cmp(a, b))
 # both observable (effectful keys, ties), both inherited from the retired
 # builtin. The direction is a Bool rather than a ±1 multiplier because `cmp`
 # contracts sign, not magnitude: scaling its result could overflow.
-fn best_by_go[T, K: Ord](
-  xs: List[T], key: fn(T) -> K !e, c: Cur, bx: T, bk: K, greater: Bool
+fn best_by_go[T: ^{dep}, K: Ord, ^dep](
+  xs: List[T], key: fn(T) -> K !e ^{dep}, c: Cur, bx: T, bk: K, greater: Bool
 ) -> T !e =
-  if iter_done(xs, c) { bx }
+  if cursor_done(xs, c) { bx }
   else {
-    let x = iter_get(xs, c)
+    let x = cursor_get(xs, c)
     let k = key(x)
     let cp = cmp(k, bk)
     let better = if greater { cp > 0 } else { cp < 0 }
-    if better { best_by_go(xs, key, iter_next(xs, c), x, k, greater) }
-    else { best_by_go(xs, key, iter_next(xs, c), bx, bk, greater) }
+    if better { best_by_go(xs, key, cursor_next(xs, c), x, k, greater) }
+    else { best_by_go(xs, key, cursor_next(xs, c), bx, bk, greater) }
   }
 
 ## The first element whose key is greatest; `None` when empty. Keys need `Ord`;
 ## `key` runs once per element.
-pub fn max_by[T, K: Ord](xs: List[T], key: fn(T) -> K !e) -> Option[T] !e = {
-  let c = iter_start(xs)
-  if iter_done(xs, c) { None }
+pub fn max_by[T: ^{dep}, K: Ord, ^dep](xs: List[T], key: fn(T) -> K !e ^{dep}) -> Option[T] !e = {
+  let c = cursor_start(xs)
+  if cursor_done(xs, c) { None }
   else {
-    let x0 = iter_get(xs, c)
-    Some(best_by_go(xs, key, iter_next(xs, c), x0, key(x0), true))
+    let x0 = cursor_get(xs, c)
+    Some(best_by_go(xs, key, cursor_next(xs, c), x0, key(x0), true))
   }
 }
 
 ## The first element whose key is least; `None` when empty. Keys need `Ord`;
 ## `key` runs once per element.
-pub fn min_by[T, K: Ord](xs: List[T], key: fn(T) -> K !e) -> Option[T] !e = {
-  let c = iter_start(xs)
-  if iter_done(xs, c) { None }
+pub fn min_by[T: ^{dep}, K: Ord, ^dep](xs: List[T], key: fn(T) -> K !e ^{dep}) -> Option[T] !e = {
+  let c = cursor_start(xs)
+  if cursor_done(xs, c) { None }
   else {
-    let x0 = iter_get(xs, c)
-    Some(best_by_go(xs, key, iter_next(xs, c), x0, key(x0), false))
+    let x0 = cursor_get(xs, c)
+    Some(best_by_go(xs, key, cursor_next(xs, c), x0, key(x0), false))
   }
 }
 
@@ -291,10 +288,10 @@ pub fn min[T: Ord](xs: List[T]) -> Option[T] = min_by(xs, x => x)
 # is no single "position i" to share between them.
 
 fn eq_go[T: Eq](a: List[T], b: List[T], ca: Cur, cb: Cur) -> Bool =
-  if iter_done(a, ca) {
+  if cursor_done(a, ca) {
     true
-  } else if eq(iter_get(a, ca), iter_get(b, cb)) {
-    eq_go(a, b, iter_next(a, ca), iter_next(b, cb))
+  } else if eq(cursor_get(a, ca), cursor_get(b, cb)) {
+    eq_go(a, b, cursor_next(a, ca), cursor_next(b, cb))
   } else {
     false
   }
@@ -302,34 +299,34 @@ fn eq_go[T: Eq](a: List[T], b: List[T], ca: Cur, cb: Cur) -> Bool =
 ## Same length, and equal elements in order.
 impl[T: Eq] Eq[List[T]] {
   fn eq(a: List[T], b: List[T]) -> Bool =
-    if len(a) != len(b) { false } else { eq_go(a, b, iter_start(a), iter_start(b)) }
+    if list_len(a) != list_len(b) { false } else { eq_go(a, b, cursor_start(a), cursor_start(b)) }
 }
 
 fn hash_go[T: Hash](xs: List[T], c: Cur, acc: Int) -> Int =
-  if iter_done(xs, c) {
+  if cursor_done(xs, c) {
     acc
   } else {
-    hash_go(xs, iter_next(xs, c), acc * 31 + hash(iter_get(xs, c)))
+    hash_go(xs, cursor_next(xs, c), acc * 31 + hash(cursor_get(xs, c)))
   }
 
 impl[T: Hash] Hash[List[T]] {
-  fn hash(xs: List[T]) -> Int = hash_go(xs, iter_start(xs), 1)
+  fn hash(xs: List[T]) -> Int = hash_go(xs, cursor_start(xs), 1)
 }
 
 fn cmp_go[T: Ord](a: List[T], b: List[T], ca: Cur, cb: Cur) -> Int =
-  if iter_done(a, ca) {
-    if iter_done(b, cb) { 0 } else { -1 }
-  } else if iter_done(b, cb) {
+  if cursor_done(a, ca) {
+    if cursor_done(b, cb) { 0 } else { -1 }
+  } else if cursor_done(b, cb) {
     1
   } else {
-    let c = cmp(iter_get(a, ca), iter_get(b, cb))
-    if c != 0 { c } else { cmp_go(a, b, iter_next(a, ca), iter_next(b, cb)) }
+    let c = cmp(cursor_get(a, ca), cursor_get(b, cb))
+    if c != 0 { c } else { cmp_go(a, b, cursor_next(a, ca), cursor_next(b, cb)) }
   }
 
 ## Lexicographic: the first differing element decides, and a prefix is less
 ## than what extends it.
 impl[T: Ord] Ord[List[T]] {
-  fn cmp(a: List[T], b: List[T]) -> Int = cmp_go(a, b, iter_start(a), iter_start(b))
+  fn cmp(a: List[T], b: List[T]) -> Int = cmp_go(a, b, cursor_start(a), cursor_start(b))
 }
 
 # The pieces, not the text: `acc ++ show(...)` per element recopied the whole
@@ -338,10 +335,10 @@ impl[T: Ord] Ord[List[T]] {
 # characters, because `join` is a single builder (dawn/rt/Strings.join). The
 # separator no longer needs the `first` flag either -- `join` places it.
 fn show_go[T: Show](xs: List[T], c: Cur, acc: List[String]) -> List[String] =
-  if iter_done(xs, c) {
+  if cursor_done(xs, c) {
     acc
   } else {
-    show_go(xs, iter_next(xs, c), acc ++ [show(iter_get(xs, c))])
+    show_go(xs, cursor_next(xs, c), acc ++ [show(cursor_get(xs, c))])
   }
 
 ## `[e0, e1]`, each element in its nested form -- so a String element is
@@ -349,7 +346,7 @@ fn show_go[T: Show](xs: List[T], c: Cur, acc: List[String]) -> List[String] =
 impl[T: Show] Show[List[T]] {
   fn show(xs: List[T]) -> String = {
     let parts: List[String] = []
-    "[" ++ join(show_go(xs, iter_start(xs), parts), ", ") ++ "]"
+    "[" ++ join(show_go(xs, cursor_start(xs), parts), ", ") ++ "]"
   }
 }
 
@@ -577,9 +574,9 @@ test "for over a List walks every element once, in order" {
 # its List impl. A call on a List never reaches this body: lowering collapses
 # `Len` at a List to the `len` primitive, so the call sites cost what the old
 # builtin cost. The body serves the dictionary slot of a generic `[C: Len]`,
-# and calls the internal name, because `len(xs)` here would resolve to this very
+# and calls the internal name, because `list_len(xs)` here would resolve to this very
 # impl.
-impl[T] Len[List[T]] {
+impl[T: ^{dep}, ^dep] Len[List[T], dep] {
   fn len(xs: List[T]) -> Int = list_len(xs)
 }
 

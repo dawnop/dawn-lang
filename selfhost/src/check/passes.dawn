@@ -53,7 +53,7 @@ use check/identity
 use check/identity.{TypeDecl, TraitDecl, EffectDecl, FunctionDecl, ConstDecl, MethodDecl, Named, ImplHead,
   PathTable, path_table, path_table_add, path_table_get, path_table_claim, path_text }
 use check/cx.{with_capture_premises,
-  resolve_capture, resolve_trait_application, resolve_named_effect, declare_capture_params, bind_capture_params,
+  resolve_capture, resolve_trait_application, resolve_named_effect, declare_capture_params, bind_computation_params,
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
   package_of, exports_seen_by, pkg_private, pkg_private_err, private_name_err,
   cerr_h, cerr_o, fresh, fresh_effvar, mint, enter_decl_owner, leave_decl_owner,
@@ -1524,7 +1524,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
     let saved_capture = cx1.current_capture_params
     let saved_types = cx1.current_tparams
     let tv_scope = map.insert(map.empty(), d.tp, tvar)
-    let (scoped, scope_params) = bind_capture_params(Cx { ..cx1,
+    let (scoped, scope_params) = bind_computation_params(Cx { ..cx1,
       current_tparams = tv_scope, current_capture_params = capture.empty_params() }, d.scope)
     cx1 = scoped
     var assoc_bounds: List[(String, capture.Capture)] = []
@@ -1900,7 +1900,7 @@ pub(pkg) fn pass_register_impls(
     }
     let empty_ev: Map[String, Eff] = map.empty()
     cx1 = Cx { ..cx1, current_tparams = tp_scope, current_eff_vars = empty_ev, current_capture_params = capture.empty_params() }
-    let (scoped_cx, scope_params) = bind_capture_params(cx1, d.scope)
+    let (scoped_cx, scope_params) = bind_computation_params(cx1, d.scope)
     cx1 = scoped_cx
     let (cxbnd, iconstraints) = resolve_bounds(cx1, d.tparams)
     cx1 = cxbnd
@@ -2759,7 +2759,7 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = 
       ev_scope = map.insert(ev_scope, ep.name, v)
     }
     cx1 = Cx { ..cx1, current_tparams = tp_scope, current_eff_vars = ev_scope, current_capture_params = capture.empty_params() }
-    let (scoped_cx, scope_params) = bind_capture_params(cx1, d.scope)
+    let (scoped_cx, scope_params) = bind_computation_params(cx1, d.scope)
     cx1 = scoped_cx
     # bounds resolve before the parameter types, so a `T.Item` in one can
     # find its trait (assoc-types-design.md D2)

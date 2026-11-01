@@ -1965,7 +1965,11 @@ using V(T), the reader environment and its calling row. Dictionaries separately
 contribute their complete witness contract W; ordinary hiding does not eliminate
 W or weaken S(Subject) contained in W. Cell writes check full delivery support,
 invariant content and the location's installation lifetime, including aliases
-and handler or staged channels. Computation defaults remain staged in this slice.
+and handler or staged channels. Omitted Type value bounds in computation
+contracts are now empty. Data representations and generated introductions
+retain their declared quantification. Len, Iter and Index declare explicit
+Capture arguments; their complete witness support obligation remains independent
+of an ordinary value bound.
 
 trait 见证的静态契约含 trait identity、主体、Capture 实参与子见证。Capture 实参并集 W
 必须覆盖主体可达捕获与完整类型自由域的 support；impl 的主体/Item 上界、子见证和 Scope 键

@@ -1455,6 +1455,22 @@ pub(pkg) fn bind_capture_params(cx: Cx, syntax: ScopeSyntax) -> (Cx, capture.Par
     bounds = outer.bounds ++ own.bounds, fn_effects = outer.fn_effects ++ own.fn_effects } }, own)
 }
 
+## Computation declarations give each omitted Type value bound the empty set.
+## The data declaration path deliberately uses bind_capture_params directly.
+pub(pkg) fn bind_computation_params(cx: Cx, syntax: ScopeSyntax) -> (Cx, capture.Params) = {
+  let (checked, own) = bind_capture_params(cx, syntax)
+  var ids: List[Int] = []
+  for value in map.values(cx.current_tparams) { match value {
+    TyVar(_, id) -> { ids = ids ++ [id] }
+    _ -> ()
+  } }
+  let defaulted = capture.computation(own, ids)
+  let full = checked.current_capture_params
+  let added = list.drop(defaulted.bounds, len(own.bounds))
+  (Cx { ..checked, current_capture_params = CaptureParams { ..full, bounds = full.bounds ++ added } },
+    defaulted)
+}
+
 # Complete input applications are independent premises during header checking
 # too. Value bounds alone never create these facts.
 pub(pkg) fn with_capture_premises(cx: Cx) -> Cx = {
