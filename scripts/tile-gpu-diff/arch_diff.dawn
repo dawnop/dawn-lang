@@ -468,7 +468,15 @@ fn smm_a() -> List[Float] = list.map(range(0, SMM_D * SMM_D), t =>
 fn smm_b() -> List[Float] = list.map(range(0, SMM_D * SMM_D), t =>
     to_float((3 * (t / SMM_D) + t % SMM_D) % 5 - 2))
 
-fn smm_v(i: Int) -> Int = if i == 7 || i == 9 { 16 } else { 32 }
+fn smm_v(i: Int) -> Int = if i == 7 || i == 9 || i == 12 { 16 } else { 32 }
+
+fn square_scaled(i: Int) -> Bool = (i >= 6 && i < 10) || i == 11 || i == 12
+
+fn accumulator_case(i: Int) -> Bool = i == 11 || i == 12
+
+# Independent integer accumulator oracle; the reference constructs its own
+# initial value and the device builds a tile from iota.
+fn smm_acc(lane: Int) -> Int = if lane % 2 == 0 { lane + 1 } else { -lane - 1 }
 
 fn smm_sa(v: Int) -> List[Float] = list.map(range(0, SMM_D * (SMM_D / v)), t =>
     pow2((t / (SMM_D / v) + t % (SMM_D / v)) % 3))
@@ -511,9 +519,10 @@ fn va_blocks() -> Int = VA_N / VA_TILE + 1
 pub fn case_name(i: Int) -> String =
   ["dtype_e4m3", "dtype_e5m2", "dtype_e8m0", "dtype_e2m1", "mmaf_scaled_e4m3",
     "view_atomic_bf16", "mmaf_scaled_e5m2", "mmaf_scaled_fp4_e8m0_v16",
-    "mmaf_scaled_fp4_e8m0_v32", "mmaf_scaled_fp4_e4m3_v16", "e8m0_source"][i]
+    "mmaf_scaled_fp4_e8m0_v32", "mmaf_scaled_fp4_e4m3_v16", "e8m0_source",
+    "mmaf_scaled_e5m2_acc", "mmaf_scaled_fp4_e8m0_v16_acc"][i]
 
-pub const CASES: Int = 11
+pub const CASES: Int = 13
 
 ## The index of the kernel called `name`, or -1 for a name this program does
 ## not know.
@@ -528,7 +537,7 @@ fn case_segments(i: Int) -> Int = if i == 10 { 4 } else if i >= 4 { 1 } else { 2
 
 ## The lanes in one segment of each kernel's output.
 fn case_lanes(i: Int) -> Int =
-  if i >= 6 && i < 10 {
+  if square_scaled(i) {
     SMM_D * SMM_D
   } else if i == 4 {
     MMS_M * MMS_N
@@ -541,7 +550,7 @@ fn case_lanes(i: Int) -> Int =
 ## The blocks each kernel is launched with. The block-scaled product names
 ## no block id at all and runs on one.
 fn case_grid(i: Int) -> Int =
-  if i == 4 || (i >= 6 && i < 10) {
+  if i == 4 || square_scaled(i) {
     1
   } else if i == 5 {
     va_blocks()
@@ -556,8 +565,8 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
   let out = sentinel_buffer(case_segments(i) * case_lanes(i) + TAIL)
   if i == 10 {
     [("f64", rounding.e8m0_inputs(DT_N)), ("f64", out)]
-  } else if i >= 6 && i < 10 {
-    let packed = i != 6
+  } else if square_scaled(i) {
+    let packed = i != 6 && i != 11
     let dt = if packed { "i32" } else { "f8E5M2" }
     let scale = if i == 9 { "f8E4M3FN" } else { "f8E8M0FNU" }
     [(dt, if packed { smm_words(smm_a()) } else { smm_a() }),
@@ -595,10 +604,12 @@ fn oracle(i: Int, t: Trace, explicit: Bool) -> String = match t.result {
   None -> "missing-result"
   Some(v) -> {
     if i == 10 { return rounding.e8m0_check(v, DT_N, TAIL, SENTINEL) }
-    if i >= 6 && i < 10 {
+    if square_scaled(i) {
       if len(v) != SMM_D * SMM_D + TAIL { return "length=${len(v)} expected=${SMM_D * SMM_D + TAIL}" }
       for lane in range(0, len(v)) {
-        let want = if lane < SMM_D * SMM_D { smm_answer(smm_v(i), lane / SMM_D, lane % SMM_D) } else { SENTINEL }
+        let want = if lane < SMM_D * SMM_D {
+          smm_answer(smm_v(i), lane / SMM_D, lane % SMM_D) + (if accumulator_case(i) { to_float(smm_acc(lane)) } else { 0.0 })
+        } else { SENTINEL }
         if not same(v[lane], want) { return "lane=${lane} got=${v[lane]} expected=${want}" }
       }
       return "pass"
@@ -694,7 +705,7 @@ fn oracle_selftest(control: String) -> Unit !io !Exit = {
 
 fn scaled_oracle_selftest() -> Unit !io !Exit = {
   var ok = true
-  for i in range(6, 10) {
+  for i in [6, 7, 8, 9, 11, 12] {
     let clean = with_gpu_fake(case_kernels(i), () => stages(case_name(i), 1, case_bufs(i)))
     let result = oracle(i, clean, false)
     io.println("oracle tileref ${case_name(i)} ${result}")
@@ -707,10 +718,10 @@ fn scaled_oracle_selftest() -> Unit !io !Exit = {
 fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
   if i == 10 {
     map.from([("e8m0_source", (2, last_out((dts, ins) => e8m0_source_ref(DT_N, dts, ins))))])
-  } else if i >= 6 && i < 10 {
+  } else if square_scaled(i) {
     map.from([(case_name(i), (5, last_out((dts, ins) =>
-        if i == 6 { mmaf_scaled_ref(SMM_D, SMM_D, SMM_D, smm_v(i), dts, ins) }
-        else { mmaf_scaled_packed_ref(SMM_D, SMM_D, SMM_D, smm_v(i), dts, ins) })))])
+        if i == 6 || i == 11 { mmaf_scaled_ref(SMM_D, SMM_D, SMM_D, smm_v(i), dts, ins, accumulator_case(i)) }
+        else { mmaf_scaled_packed_ref(SMM_D, SMM_D, SMM_D, smm_v(i), dts, ins, accumulator_case(i)) })))])
   } else if i == 0 {
     map.from([("dtype_e4m3", (3, last_out((dts, ins) => dtype_convert_ref(DT_N, "f8E4M3FN", dts, ins))))])
   } else if i == 1 {
@@ -737,7 +748,7 @@ fn shape_of(i: Int) -> String = {
   let idx = range(0, DT_N)
   if i == 10 {
     rounding.e8m0_shape()
-  } else if i >= 6 && i < 10 {
+  } else if square_scaled(i) {
     let v = smm_v(i)
     let sk = SMM_D / v
     let sa = smm_sa(v)
@@ -748,8 +759,17 @@ fn shape_of(i: Int) -> String = {
         len(list.filter(range(1, sk), q => sb[q * SMM_D + c] != sb[c])) > 0))
     # |a|<=3, |b|<=2, sa<=4, sb<=8, K=64: even the sum of
     # absolute products is bounded by 12288, independently of fold order.
+    let acc_bound = if accumulator_case(i) { SMM_D * SMM_D } else { 0 }
+    let acc_shape = if accumulator_case(i) {
+      let qs = range(0, SMM_D * SMM_D)
+      " acc_nonzero=${len(list.filter(qs, q => smm_acc(q) != 0))}"
+        ++ " acc_positive=${len(list.filter(qs, q => smm_acc(q) > 0))}"
+        ++ " acc_negative=${len(list.filter(qs, q => smm_acc(q) < 0))}"
+        ++ " acc_unique_magnitudes=${len(list.filter(qs, q => magnitude(to_float(smm_acc(q))) == to_float(q + 1)))}"
+        ++ " acc_transpose_differs=${len(list.filter(qs, q => smm_acc(q) != smm_acc((q % SMM_D) * SMM_D + q / SMM_D)))}"
+    } else { "" }
     "scale_blocks=${sk} rows_with_split_scale=${split_a} cols_with_split_scale=${split_b}"
-      ++ " bound_inside_2p24=${if SMM_D * 3 * 2 * 4 * 8 < 16777216 { 1 } else { 0 }}"
+      ++ " bound_inside_2p24=${if SMM_D * 3 * 2 * 4 * 8 + acc_bound < 16777216 { 1 } else { 0 }}" ++ acc_shape
   } else if i == 5 {
     let x = va_x()
     let counts = list.map(range(0, VA_BINS), j =>
@@ -839,7 +859,8 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.rea
 fn usage() -> Unit !Exit !io = {
   io.eprintln("usage: arch_diff <kernel> <cubin> [<kernel> <cubin> ...], where <kernel> is one of"
       ++ " dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2m1 mmaf_scaled_e4m3 view_atomic_bf16"
-      ++ " mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16 e8m0_source")
+      ++ " mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16 e8m0_source"
+      ++ " mmaf_scaled_e5m2_acc mmaf_scaled_fp4_e8m0_v16_acc")
   io.exit(2)
 }
 
