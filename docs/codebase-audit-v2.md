@@ -4,6 +4,11 @@
 > “机器权威的当前四状态层”是 99 项 finding 处置的唯一当前状态源，详细证据在
 > `docs/codebase-audit-v2/`。
 >
+> native 状态导引（2026-11-08）：[native-backend-plan.md](native-backend-plan.md) 与
+> [native-driver-plan.md](native-driver-plan.md) 的状态摘要绑定 main 实现，区分既有 C extern、
+> 驱动能力与尚未交付的安装默认入口、Java 包文档闭合；std 跳转与加载来源见
+> [std-audit.md](std-audit.md)。旧方案的阶段等待与估时不作为当前任务清单；本导引不改 finding 分区。
+>
 > 审查方式：六专题并行只读审查 + 主审去重、静态复核和少量无副作用探针。
 > 最高风险效果项按要求只记录静态可能性，未做动态利用验证。
 

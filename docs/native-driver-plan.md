@@ -1,7 +1,21 @@
 # B 线：native 驱动补全 + 把后端契约摆到明面上
 
-> 状态：**七刀已结**（2026-08-03 立项，任务 #128；K-B1–K-B5 与 K-B7 落地，K-B6 明确推迟，
-> 刀表见 §2）。本文是 B 线的落地记录 + 刀表。
+> 状态：**B 线落地记录**（2026-08-03 立项，任务 #128；现状于 2026-11-08 核对）。
+> K-B1 的实现见 [intrinsic-parity.py](../scripts/intrinsic-parity.py)；K-B2/K-B3 的命令接线见
+> [nmain.dawn](../selfhost/src/nmain.dawn)；K-B4 的测试驱动见 [ctestrun.dawn](../selfhost/src/c/ctestrun.dawn)；
+> K-B5 的常量发射见 [emitc.dawn](../selfhost/src/c/emitc.dawn)；K-B7 的发布配方见
+> [release-native.sh](../scripts/release-native.sh)。
+> K-B6 当时推迟，后由独立的 [C extern 方案](ffi-extern-design.md) 交付 F0–F3；
+> main 的 `95fd4a96` / `fa79b4f1` / `1870ef6f` 分别对应语法与后端、包内 C 源构建、sqlite 契约。
+> `use c` 不是现行语法；F4 的完整语法门禁扩展仍未结账。
+>
+> native 的 fmt/doc/test/lsp 接线已在 [nmain.dawn](../selfhost/src/nmain.dawn)，
+> 但仓库 [bin/dawn](../bin/dawn) 仍启动 JVM。安装入口默认 native 的后续方向是直接安装现有驱动，
+> JVM 使用者显式调用同版本 `java -jar`；尚不能宣告交付，也不新增后端分派或静默回退。
+> native doc 的 Java 元数据上下文也尚未实现，建站边界见
+> [native-backend-plan.md](native-backend-plan.md) 的状态摘要。
+> 下文刀表、D4/D7 与估时按 2026-08-03/04 的历史范围阅读，不是今日任务或余量；
+> 2026-10-04 的「C FFI 未立项」补记已由上述交付取代。
 >
 > **为什么在这儿而不在别处**：B 线原来的备忘录只存在于任务 #128 的描述里，仓库中没有
 > 任何一份 B 线文档；A 线（[jvm-base-plan.md](jvm-base-plan.md)）的备忘录已经因为一次
@@ -41,7 +55,7 @@ B 线的驱动是**能力补全，不是纯洁性**：不是「把 java 赶出�
 | **K-B3** | `lsp`（`lsp.dawn` + `lspq.dawn` + `lspc.dawn`，2,877 行），并让 lsp 差分真的覆盖 native | 加能力 + 加门禁 | **已做**（§11–§15） |
 | **K-B4** | `test`（`testrun.dawn`；JVM 侧靠生成一个 test main 类，native 侧要另一条路） | 加能力 + 加门禁 | **已做**（§18–§21） |
 | **K-B5** | 结构化 comptime 常量落到 native（`emitc.const_literal` 原来直接 panic） | 加能力 + 加门禁 | **已做**（§17） |
-| **K-B6** | C FFI（native 侧的 java FFI 对位物；立项时的暂定拼写 `use c` 已否，见 D7） | 加语法 | **推迟**（裁决 D7=(b)，理由见下） |
+| **K-B6** | C FFI（立项时暂定 `use c`，历史裁决见 D7；现行拼写是 `extern c`） | 加语法 | **当时推迟，后由 F0–F3 交付**（[设计与落地记录](ffi-extern-design.md)；实现及 main 提交见本文状态摘要，F4 未结） |
 | **K-B7** | native 二进制进 release artifact | 加产物 + 加门禁 | **已做**（§22） |
 
 > 刀表的**内容**来自任务 #128 的描述。原始 issue body 在写这份文档时取不到
@@ -54,7 +68,7 @@ B 线的驱动是**能力补全，不是纯洁性**：不是「把 java 赶出�
 > 章节号区间，而那些小节当时**根本不存在**。指向不存在证据的前向引用不会让任何门禁变红，只会让下一个
 > 读表的人以为有据可查——所以往这张表里写章节号，写完请点开验它存在。
 
-**裁决 D7（K-B6 的形态）= (b) 明确推迟。** `use c` 是新语法，落地即
+**历史裁决 D7（2026-08-04，K-B6 的形态）= (b) 明确推迟。** `use c` 是新语法，落地即
 `Emit-Change(parse *)`，而签名/语法变更要走种子纪律的三期两发布（`docs/bootstrap.md`）。
 今天没有任何真实 native 程序需要它：native 后端**拒绝** `use java`（`jsig_refused`），
 但整个编译器闭包与 `packages/` 都不需要 C 侧的外部函数，`pkgfetch` 要下载就 spawn

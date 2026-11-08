@@ -1,23 +1,35 @@
 # std 审计:交付方式调研、优雅性判据、现状体检与 S5 开题
 
-> 状态:**S5 已开工并完成大半;本文降为判据与欠账台账**。写于 2026-07-30(S4 进行中),
-> 那句「动手等 S4 落地后排期」的等待条件**当日就到期了**(native fixpoint B==C)。
-> §4 骨架五条的今天:**4.1 分层已做**(`bf87ef4` fspath 降成 `packages/fspath`;
-> `b346e7b` 用 `internal_std_modules` 拦住 hamt/pvec)、**4.2 迭代协议已 trait 化**
-> (`5d45b1e` + `05ff60c`,`Iter` 成第五个 prelude trait,按名解析的 `iter_sig` 退休)、
-> **4.5 缝 3 已做**(`b72eabd`)、**4.4 做了一半**(`912a984` 的 `dawn doc --stdlib` 已出,
-> std 的 go-to-def 未修——根因仍是 `lspq.dawn` 的 `module_ast_by_class` 交回
-> `def_path=None`)、**4.3 io 表面设计整条未动**,而它现在挡着 LSP-04
-> ([audit/lsp-robustness-design.md](audit/lsp-robustness-design.md) 要的
-> `io_stdin_ready` 正是这条该产出的东西)。
+> 状态：**S5 判据与历史台账，现状于 2026-11-08 核对**。本文写于 2026-07-30，
+> 等待 S4 的条件当日已由 native 自举达成（main `83def2d`，
+> [native-fixpoint.sh](../scripts/native-fixpoint.sh)）。§4 五条的后续状态如下：
+>
+> - **4.1 分层已落地**：`bf87ef4` / `b346e7b`；实现见
+>   [packages/fspath](../packages/fspath) 与 [passes.dawn](../selfhost/src/check/passes.dawn) 的内部 std 模块检查。
+> - **4.2 迭代协议已 trait 化**：`5d45b1e` / `05ff60c`；现行协议见
+>   [types.dawn](../selfhost/src/check/types.dawn) 的 `Iter` 与 [list.dawn](../std/list.dawn)，不再等按名解析的 `iter_sig` 退休。
+> - **4.4 文档与 std 跳转已有交付**：`912a984` 的
+>   [doc.dawn](../selfhost/src/doc.dawn) 提供 `doc --stdlib`；main `ea72ae9e` 的
+>   [lspq.dawn](../selfhost/src/lsp/lspq.dawn) 用登记的源身份保留 std 定义位置，
+>   内嵌库阅读与客户端能力边界见 [lsp-std-source-design.md](lsp-std-source-design.md)。
+> - **4.5 嵌入与来源收口已有交付**：`b72eabd` 的 [stdsrc.dawn](../selfhost/src/embed/stdsrc.dawn)；
+>   后续 main `933ad345` 与 [stdlib.dawn](../selfhost/src/driver/stdlib.dawn) 统一
+>   `--std` → 非空 `DAWN_STD` → 内嵌副本，并禁止逐模块混用来源，见
+>   [std-dir-loading-design.md](std-dir-loading-design.md)。旧 cwd 优先的 skew 不再是待办。
+> - **4.3 不再是整条未动**：[std/io](../std/io.dawn) 已有 `stdin_ready`，
+>   [server.dawn](../selfhost/src/lsp/server.dawn) 已使用它，LSP-04 的关账见
+>   [lsp-robustness-design.md](audit/lsp-robustness-design.md)。后续 io 补件见 main `f0a0bb36` 与
+>   [io-prims-design.md](io-prims-design.md)；这些交付不等于本文设想的整体 io 表面审计全部完成。
 >
 > **另有一批 std API 补件已于 2026-07-31–08-02 落地,走的是 re-audit 的 RD 通道
 > (§六 triage 的 C 批并入 #78),不是本文 §4 的条目**:spec §4.8 的断言/问询/钳位三判据
 > (`fd5e0bf`)、str 词缀族(`575076b`)、list 量词层(`4f74cba`)、bytes hex + base64
 > (`4f7f4d3`)、cursor↔Int 桥(`677762b`)、fspath 四函数(`604c879`),另新增 `std/fmt`
-> (`b6cb9808`)。**仍在册的欠账**:§4.3 整条、§4.4 的 go-to-def、§4.5 记的「`--std` 目录
-> 优先」skew 口子,以及等破坏窗口的 RD-06 命名族与 RD-09 参数序。
-> §5 的两条纪律仍生效;§6「为什么现在不动手」整节已成历史。
+> (`b6cb9808`)。当时记作等窗口的 RD-06 命名族已有后续改名，见
+> [stdlib-naming.md](stdlib-naming.md) §五；RD-09 的补件实现见
+> [fspath.dawn](../packages/fspath/src/fspath.dawn)，不沿用当年的等窗口清单作当前排期。
+> 下文 §1–§6 保留 2026-07-30 的调研、骨架与当时的等待理由；其中「待实现」「未排期」
+> 及 io/跳转/目录优先的缺口均按当时日期阅读，不能覆盖上述现状。新增 std 的边界仍按 §2 判据。
 >
 > 起因是缝 3(「native 编译器怎么拿到 std」,native-backend-plan §14.10)的调研,
 > 调研出的判据回头照了一遍自己的 std,照出的东西够格开一个 S5。
