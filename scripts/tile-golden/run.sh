@@ -549,6 +549,7 @@ kernels=(
   hint_entry hint_memory hint_view
   alloca_scratch alloca_two alloca_ctl mmaf_scaled_e4m3
   mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16 mmaf_scaled_fp4_e5m3_v32
+  mmaf_scaled_e5m2_acc mmaf_scaled_fp4_e8m0_v16_acc
   view_transpose view_max_pool view_conv2d view_padding view_pad_i32
   view_dyn_transpose view_tensor_shape view_index_space
   view_conv1d view_token_embed view_atomic view_atomic_bf16 view_stride_pad view_gather_pad
@@ -1000,7 +1001,7 @@ check_global_syms_symbols() { # cubin
 # between.
 kernel_arch() { # kernel
   case "$1" in
-    matmul_f16_sm100|matmul_i8_sm100|matmul_sm100|flash_bf16_sm100_d64|flash_bf16_sm100_d128|dtype_e4m3|dtype_e5m2|dtype_e8m0|e8m0_source|dtype_e2m1|mmaf_scaled_e4m3|mmaf_scaled_e5m2|mmaf_scaled_fp4_e8m0_v16|mmaf_scaled_fp4_e8m0_v32|mmaf_scaled_fp4_e4m3_v16) echo sm_100 ;;
+    matmul_f16_sm100|matmul_i8_sm100|matmul_sm100|flash_bf16_sm100_d64|flash_bf16_sm100_d128|dtype_e4m3|dtype_e5m2|dtype_e8m0|e8m0_source|dtype_e2m1|mmaf_scaled_e4m3|mmaf_scaled_e5m2|mmaf_scaled_fp4_e8m0_v16|mmaf_scaled_fp4_e8m0_v32|mmaf_scaled_fp4_e4m3_v16|mmaf_scaled_e5m2_acc|mmaf_scaled_fp4_e8m0_v16_acc) echo sm_100 ;;
     dtype_e5m3|mmaf_scaled_e5m3|mmaf_scaled_fp4_e5m3_v32) echo sm_107 ;;
     matmul_f16_sm90|matmul_i8_sm90|matmul_sm90|flash_bf16_sm90_d64|flash_bf16_sm90_d128) echo sm_90 ;;
     view_atomic_bf16) echo sm_89 ;;

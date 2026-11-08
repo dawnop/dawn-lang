@@ -1005,8 +1005,9 @@ i4_green=(dtype_i16 dtype_i64 dtype_tf32 pack_roundtrip)
 # supported`), which T13 measured and could not follow with a device.
 # sm_89 is its floor and the lowest in this list.
 arch_kernels=(dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2m1 mmaf_scaled_e4m3 view_atomic_bf16
-  mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16 e8m0_source)
-arch_floors=(sm_90 sm_90 sm_100 sm_100 sm_100 sm_89 sm_100 sm_100 sm_100 sm_100 sm_100)
+  mmaf_scaled_e5m2 mmaf_scaled_fp4_e8m0_v16 mmaf_scaled_fp4_e8m0_v32 mmaf_scaled_fp4_e4m3_v16 e8m0_source
+  mmaf_scaled_e5m2_acc mmaf_scaled_fp4_e8m0_v16_acc)
+arch_floors=(sm_90 sm_90 sm_100 sm_100 sm_100 sm_89 sm_100 sm_100 sm_100 sm_100 sm_100 sm_100 sm_100)
 # The attribute kernels of knife T4, in the order attr_diff takes them. Its
 # subject is the ATTRIBUTE DOMAINS and not the opcode table: the knife adds
 # no opcode at all, and every one of these eight computes the same thing
@@ -1647,6 +1648,7 @@ else
     case "$kernel" in
       e8m0_source) fields="source_bits single_vs_two segments" ;;
       dtype_e2m1) fields="encodings off_grid saturating" ;;
+      mmaf_scaled_*_acc) fields="scale_blocks rows_with_split_scale cols_with_split_scale bound_inside_2p24 acc_nonzero acc_positive acc_negative acc_unique_magnitudes acc_transpose_differs" ;;
       mmaf_scaled_*) fields="scale_blocks rows_with_split_scale cols_with_split_scale bound_inside_2p24" ;;
       view_atomic_bf16) fields="bins_hit blocks max_count exact_in_bf16" ;;
       *) fields="off_grid rounded_on_upload host_nan beyond_max" ;;
@@ -3450,6 +3452,38 @@ PY_SCALED_BYTES
   done
 else
   echo "SKIP  scaled writer numerical controls: all scaled MMA combinations require sm_100"
+fi
+
+# Keep the five argument interface and change only the generated accumulator.
+# Every fault is a legal f32 tile, so assembly rejection cannot kill it.
+if [ "$(arch_level "$gpu_name")" -ge 100 ]; then
+  scaled_acc_targets=(mmaf_scaled_e5m2_acc mmaf_scaled_fp4_e8m0_v16_acc)
+  for tag in scaled-acc-dropped scaled-acc-transposed scaled-acc-negated; do
+    case "$tag" in
+      scaled-acc-dropped) replacement='  broadcast(f_const(F32, 0.0), [SMM_D, SMM_D])' ;;
+      scaled-acc-transposed) replacement='  c.transpose()' ;;
+      scaled-acc-negated) replacement='  f_const(F32, 0.0) - c' ;;
+    esac
+    cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
+    python3 "$here/mutate.py" "$asm_proj/src/main.dawn" "$tag" \
+      $'  c\n}\n\nfn scaled_e5m2_acc' "$(printf '%s\n}\n\nfn scaled_e5m2_acc' "$replacement")"
+    cp "$asm_proj/src/main.dawn" "$work/$tag.source"
+    for k in "${scaled_acc_targets[@]}"; do
+      "$root/bin/dawn" run "$asm_proj" -- "$k" --bytecode "$work/$tag-$k.tilebc" > "$work/$tag-$k.record.log" 2>&1 ||
+        { cat "$work/$tag-$k.record.log" >&2; fail "$tag: $k failed recording"; }
+      assemble_golden "$k" "$work/$tag-$k.tilebc" "$work/$tag-$k.cubin"
+    done
+    scaled_writer_verdict "$tag" "$(IFS=,; printf '%s' "${scaled_acc_targets[*]}")"
+    awk '
+      /^kernel / {k=$2; target=(k=="mmaf_scaled_e5m2_acc" || k=="mmaf_scaled_fp4_e8m0_v16_acc")}
+      /^  oracle tileref / && target {if($3!="pass") bad=1; ref[k]=1}
+      /^  oracle device / && target {if($3!~/^lane=/) bad=1; wrong[k]=1}
+      END {for(k in ref) if(!wrong[k]) bad=1; if(length(ref)!=2 || length(wrong)!=2) bad=1; exit bad}
+    ' "$work/$tag.out" || fail "$tag: both independent accumulator oracles must reject named device lanes"
+  done
+  cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
+else
+  echo "SKIP  scaled accumulator numerical controls: require sm_100"
 fi
 
 # Rejecting signed inputs models a missing magnitude step without feeding

@@ -4038,8 +4038,9 @@ pub fn dtype_e2m1_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> L
 ## of the two shapes, which is why it is an argument here and not something
 ## this could read off the buffers.
 ##
-## The accumulator is zero and is therefore not a parameter: the kernel
-## builds it with `f_const` and no host buffer carries it.
+## No host buffer carries the accumulator. By default it is zero;
+## `lane_acc` selects the nonzero corpus, whose row-major lane `q` starts
+## at `q + 1` for even `q` and `-q - 1` for odd `q`.
 ##
 ## THE FOLD ORDER IS NOT PINNED, and the corpus is what makes that harmless.
 ## The device accumulates in f32 in an order the dialect does not specify,
@@ -4049,7 +4050,7 @@ pub fn dtype_e2m1_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> L
 ## exact and therefore associative. What is left for the device to be wrong
 ## about is the scaling itself.
 pub fn mmaf_scaled_ref(m: Int, k: Int, n: Int, v: Int, dtypes: List[String],
-  ins: List[List[Float]]) -> List[Float] = {
+  ins: List[List[Float]], lane_acc: Bool = false) -> List[Float] = {
   let a = ins[0]
   let b = ins[1]
   let sa = ins[2]
@@ -4058,7 +4059,8 @@ pub fn mmaf_scaled_ref(m: Int, k: Int, n: Int, v: Int, dtypes: List[String],
   segments(ins[4], m * n, 1, (_seg, idx) => {
     let i = idx / n
     let j = idx % n
-    list.fold(range(0, k), 0.0, (acc, kk) =>
+    let initial = if lane_acc { to_float((idx + 1) * (1 - 2 * (idx % 2))) } else { 0.0 }
+    list.fold(range(0, k), initial, (acc, kk) =>
         acc + (a[i * k + kk] * sa[i * sk + kk / v]) * (b[kk * n + j] * sb[(kk / v) * n + j]))
   })
 }
@@ -4067,12 +4069,24 @@ pub fn mmaf_scaled_ref(m: Int, k: Int, n: Int, v: Int, dtypes: List[String],
 ## words, eight low-first nibbles per word. Decode on the host before the
 ## scalar reference; no device unpack, reshape or writer is reused here.
 pub fn mmaf_scaled_packed_ref(m: Int, k: Int, n: Int, v: Int, dtypes: List[String],
-  ins: List[List[Float]]) -> List[Float] = {
+  ins: List[List[Float]], lane_acc: Bool = false) -> List[Float] = {
   let a = list.map(range(0, m * k), i =>
       narrow.f4e2m1_of_bits(nibble_at(wrap_i32(to_int(ins[0][i / 8])), i % 8)))
   let b = list.map(range(0, k * n), i =>
       narrow.f4e2m1_of_bits(nibble_at(wrap_i32(to_int(ins[1][i / 8])), i % 8)))
-  mmaf_scaled_ref(m, k, n, v, dtypes, [a, b, ins[2], ins[3], ins[4]])
+  mmaf_scaled_ref(m, k, n, v, dtypes, [a, b, ins[2], ins[3], ins[4]], lane_acc)
+}
+
+test "scaled MMA adds signed lane accumulators and preserves the guard" {
+  let dt = ["f8E5M2", "f8E5M2", "f8E8M0FNU", "f8E8M0FNU", "f64"]
+  let r = mmaf_scaled_ref(2, 2, 2, 2, dt,
+    [[1.0, 2.0, -1.0, 3.0], [2.0, 1.0, 1.0, -2.0], [2.0, 1.0], [1.0, 2.0],
+      [0.0, 0.0, 0.0, 0.0, -12345.0]], true)
+  assert r == [9.0, -14.0, 4.0, -18.0, -12345.0]
+  let packed = mmaf_scaled_packed_ref(1, 8, 2, 4, ["i32", "i32", "f8E8M0FNU", "f8E8M0FNU", "f64"],
+    [[to_float(0x22222222)], [to_float(0x44444444), to_float(0x44444444)],
+      [1.0, 2.0], [2.0, 1.0, 1.0, 2.0], [0.0, 0.0, -12345.0]], true)
+  assert packed == [33.0, 38.0, -12345.0]
 }
 
 test "packed scaled MMA decodes words before applying both scale blocks" {
