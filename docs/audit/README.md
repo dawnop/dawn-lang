@@ -2,14 +2,15 @@
 
 > 状态：**historical** —— 这是 2026-07-25 全仓审查
 > （[../codebase-audit.md](../codebase-audit.md)）衍生材料与当时依赖/排期的历史索引，不是当前
-> TODO 队列，也不复制任何设计任务进度。当前 97 项 finding 状态只读
+> TODO 队列，也不复制任何设计任务进度。当前 99 项 finding 状态只读
 > [审查 v2 总纲](../codebase-audit-v2.md)；各材料的生命周期与任务结果只读其文件头和正文。
 > 本索引只保留路径、覆盖、材料类型、破坏性边界，以及理解历史方案所需的依赖关系。
 
-> **动手前先读 [native-plan-overlap.md](native-plan-overlap.md)。**
+> native 当前实现与后续边界先读 [native-backend-plan.md](../native-backend-plan.md) 的状态摘要；
+> [native-plan-overlap.md](native-plan-overlap.md) 保留当时的重合登记。
 > [`../native-backend-plan.md`](../native-backend-plan.md)（07-25 在 main 上定稿）
 > 与本目录是**独立写出来的两条线**，有九处撞车。那份台账逐条记了谁让位、
-> 谁冻结、谁要改写。本文的排期已经按它调整过：**不重合的先做，重合的冻结。**
+> 谁冻结、谁要改写。本文的历史排期当时按它调整为：**不重合的先做，重合的冻结。**
 
 > **2026-07-30 第二轮复审**：[re-audit-2026-07-30.md](re-audit-2026-07-30.md) ——
 > 结构/语法/纯洁性三维度 53 条新发现（与本目录零重复，6 条标注为已追踪项的新侧面），

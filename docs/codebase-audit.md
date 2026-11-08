@@ -1,7 +1,11 @@
 # Dawn 代码库设计与实现审查
 
 > 状态：**historical** —— 2026-07-25 全仓审查与逐条处置台账；原证据、结论和排期完整
-> 保留，但不再按它推进。当前风险与 97 项状态以 [审查 v2 总纲](codebase-audit-v2.md)为准。
+> 保留，但不再按它推进。当前风险与 99 项状态以 [审查 v2 总纲](codebase-audit-v2.md)为准。
+> native 状态于 2026-11-08 核对：共享 IR、自举、C extern 与驱动能力的实现依据见
+> [native-backend-plan.md](native-backend-plan.md) 和 [native-driver-plan.md](native-driver-plan.md)
+> 的状态摘要；std 文档、跳转与来源收口见 [std-audit.md](std-audit.md)。
+> 下文 ARCH-03/ARCH-04、§15 与 native 重合登记中的阶段等待和估时均是历史记录，不是今日余量。
 >
 > 审查日期：2026-07-25
 > 审查对象：当前仓库 `main` 工作树（工具版本 `dawn 0.11.0 (selfhost)`）

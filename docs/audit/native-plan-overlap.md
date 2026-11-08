@@ -4,6 +4,13 @@
 > 与本目录九份设计方案在哪里撞上了**，以及每一处该怎么处理。
 >
 > 它是一份台账，不是方案。方案在各自的文档里，这里只写「谁让位、谁冻结、谁要改」。
+>
+> **2026-11-08 状态导引**：下文记录的是 2026-07-25 两条线的重合与当时的等待条件，
+> 不再以「等 Core IR / 集合迁移 / native 自举」派发任务。当前实现依据与后续边界见
+> [native-backend-plan.md](../native-backend-plan.md)、[native-driver-plan.md](../native-driver-plan.md)
+> 的状态摘要；std 后续交付见 [std-audit.md](../std-audit.md)。文中的 `use c`、阶段估时和冻结顺序
+> 保留为历史方案，现行 C extern 见 [ffi-extern-design.md](../ffi-extern-design.md)；
+> 当前 finding 处置只读 [审查 v2 总纲](../codebase-audit-v2.md)。
 
 ## 零、为什么需要这份台账
 

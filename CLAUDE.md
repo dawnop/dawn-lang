@@ -117,10 +117,12 @@ C 翻译单元。背景与分期见
 
 > **第二后端已经在跑了。** native 后端（Core IR → C）自 2026-07-30 起自举，
 > `scripts/native-fixpoint.sh` 验 B==C。所以这里曾经写的「真要第二后端，得先有
-> backend-neutral 的 lowered IR 与 FFI capability」两个前置都已被事实推翻：
-> 共享 IR 就是 Core IR，已经在用；**FFI capability 根本不是前置**——全仓 `use c`
-> 至今 0 处，native 后端靠**拒绝** `use java`（`emitc.dawn:575` 的 `CForeign` 分支）
-> 加二十来个 io intrinsic 就走完了自举。
+> backend-neutral 的 lowered IR 与 FFI capability」应按实际交付边界阅读：
+> 共享 IR 是 [Core IR](selfhost/src/ir/core.dawn)；C FFI 不是 2026-07-30 自举的前置，
+> 当时靠拒绝 `use java` 加 io intrinsic 走完自举。**C FFI 此后已有独立交付**，现行拼写是
+> `extern c`，不是 `use c`；main 的 `95fd4a96` / `fa79b4f1` / `1870ef6f` 分别交付语法与后端、
+> 包内 C 源构建和 sqlite 契约，见 [ffi-extern-design.md](docs/ffi-extern-design.md) 与
+> [packages/sqlite](packages/sqlite)。这不表示 native 支持 Java 互操作。
 >
 > 仍然成立的是**工作量**那半边：`tast.dawn` 的 `TJavaCall` 直接携带 JVM 类名、
 > descriptor、SAM 与 List bridge；checker 靠 Java 反射解析 `use java`；
@@ -129,7 +131,8 @@ C 翻译单元。背景与分期见
 > 计划见 [docs/native-backend-plan.md](docs/native-backend-plan.md)，调研见
 > [docs/llvm-backend-research.md](docs/llvm-backend-research.md)、
 > [docs/collections-dejava-research.md](docs/collections-dejava-research.md)，
-> 现状记录在 docs/codebase-audit.md 的 ARCH-03/ARCH-04。
+> 当前状态导引见 [native-backend-plan.md](docs/native-backend-plan.md) 与
+> [codebase-audit-v2.md](docs/codebase-audit-v2.md)；旧审查的 ARCH-03/ARCH-04 按历史日期阅读。
 
 Kotlin 实现（compiler/，1170 项测试、386 个黄金文件）已随 `kotlin-final` tag
 整体归档——考古看那个 tag，别在 main 找。

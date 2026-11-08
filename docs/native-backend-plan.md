@@ -1,19 +1,33 @@
 # native 后端计划
 
-> 状态：**current —— 计划 2026-07-25 定稿，Phase −1…6 已全部完成**，本文现在是它的落地
-> 日志（进度表在 §7，逐阶段的关账记在 §14.x）。**Phase 6（native 自举）于 2026-07-30 达成**
-> ——§14.23，提交 `83def2d`，门禁 `scripts/native-fixpoint.sh`（A==B、B==C，外加一次裸目录
-> smoke）。重排后的 S0–S4 也已全部结清（§11.4）。
+> 状态：**current —— 自举主线的落地日志，现状于 2026-11-08 核对**。2026-07-25 的
+> Phase −1…6 与重排后的 S0–S4 记录保留在 §7、§11.4、§14.x。
+> **Phase 6（native 自举）于 2026-07-30 达成**（§14.23，main 提交 `83def2d`）；
+> 当前源码与出口门见 [nmain.dawn](../selfhost/src/nmain.dawn)、
+> [native-fixpoint.sh](../scripts/native-fixpoint.sh)。共享 IR 已是
+> [Core IR](../selfhost/src/ir/core.dawn)，不再是第二后端的待建前置。
 >
-> 仍开着的只有两件：Phase 5 的 C FFI（**未立项**，判词见
-> [native-driver-plan.md](native-driver-plan.md) §2 的 K-B6 / D7；下文 Phase 5 一节里的
-> `use c` 是 07-25 定稿时的计划拼写，已被否掉，见 D7）与 S5「std 收口」
-> （见 [std-audit.md](std-audit.md)）。
+> **原 Phase 5 的 C FFI 已有独立交付**：F0–F3 的公开头、`extern c`、包内 C 源构建与
+> sqlite 包见 [ffi-extern-design.md](ffi-extern-design.md)；main 的实现是
+> [dawn_ffi.h](../runtime/c/dawn_ffi.h)、[externs.dawn](../selfhost/src/ir/externs.dawn)、
+> [cdriver.dawn](../selfhost/src/c/cdriver.dawn) 与 [packages/sqlite](../packages/sqlite)。
+> F1/F2/F3 对应 `95fd4a96` / `fa79b4f1` / `1870ef6f`；完整语法门禁扩展仍留 F4。
+> 下文 `use c` 只保留为历史拼写，不是当前或待实现语法。
+>
+> **后续边界**：native 驱动已有 fmt/doc/test/lsp（[nmain.dawn](../selfhost/src/nmain.dawn)），
+> 仓库 [bin/dawn](../bin/dawn) 仍以 JVM 自举；安装入口默认 native 尚未交付，后续方向是直接安装
+> 现有 native 驱动，JVM 使用者显式调用同版本 `java -jar`，不自动回退。
+> 建站 [package-docs.sh](../site/package-docs.sh) 对 web-jvm 仍调用 JVM doc；其公开
+> [input_source](../packages/web-jvm/src/server.dawn) 签名包含 `InputStream`。
+> Java 包文档闭合的后续方向是只给 native doc 提供版本锁定的 class 元数据，保持完整检查与
+> 公开签名；这项尚未实现，不能靠删页面或复用旧 JSON 计作完成。
+> std 的后续状态见 [std-audit.md](std-audit.md)，不再把旧 S5 清单整份视为待办。
 >
 > 上游决策见 [llvm-backend-research.md](llvm-backend-research.md) §10、
 > [runtime-intrinsics-design.md](runtime-intrinsics-design.md)、
 > [collections-dejava-research.md](collections-dejava-research.md) §9。
-> 本文只回答一件事:**从今天到 native 自举，按什么顺序做、每步怎么验。**
+> 下文的阶段顺序、工程量与估时是 **2026-07-25–07-30 的历史方案**，不是今日余量或性能承诺；
+> 当时回答的是「到 native 自举按什么顺序做、每步怎么验」。后续带日期的记录按各自日期阅读。
 
 ## 1. 决策总表(已拍板，不再重开)
 

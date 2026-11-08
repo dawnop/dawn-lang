@@ -105,9 +105,9 @@ comptime 字节常量设计：[comptime-bytes-design.md](comptime-bytes-design.m
 | [tutorial.zh-CN.md](tutorial.zh-CN.md) | current | 上面那篇的**中文译本**。改教程先改英文，再改这里；两者不脱节由 `doc-check.py` 的 transl 检查盯着。 |
 | [codebase-audit.md](codebase-audit.md) | historical | 2026-07-25 的全仓审查，76 条逐条带当时的处置结论；保留证据与排期，不作当前风险台账。 |
 | [audit/README.md](audit/README.md) | historical | 上面那份旧审查遗留待办的历史作业计划：十三份材料的索引、依赖、修复顺序与“不做”理由均保留；当前顺序看审查 v2。 |
-| [audit/native-plan-overlap.md](audit/native-plan-overlap.md) | current | 上面那批待办与 native-backend-plan.md 的**撞车登记**：谁让位、谁冻结、谁要改写。动 `audit/` 里任何一份之前先读它。 |
-| [native-backend-plan.md](native-backend-plan.md) | current | native 后端的分阶段计划（Phase −1 → 6）与落地日志。**Phase −1…6 全部完成**，Phase 6（native 自举）于 2026-07-30 达成（§14.23，提交 `83def2d`，`scripts/native-fixpoint.sh` 验 B==C + 裸目录 smoke）；重排后的 S0–S4 也已结清。仍开着的只有 C FFI（未立项，见 [native-driver-plan.md](native-driver-plan.md) D7）与 S5「std 收口」（[std-audit.md](std-audit.md)）。 |
-| [native-driver-plan.md](native-driver-plan.md) | current | **B 线**：native 驱动补全 + 把后端契约摆到明面上——K-B 刀表、「5,373 行零 `use java`」的核对、以及那条最重要的更正：几条差分脚本的被测方原本写死 `./bin/dawn`，**接上线不会自动覆盖 native**（已由 `native-cli-diff.sh` 修掉）。**七刀已结**：K-B1–K-B5 与 K-B7 落地（逐刀带红演示与阴性对照），K-B6（C FFI）未立项（D7）。 |
+| [audit/native-plan-overlap.md](audit/native-plan-overlap.md) | current | 2026-07-25 审查方案与 native 计划的重合登记；文件头链接当前实现与后续边界，下文冻结顺序按历史阅读。 |
+| [native-backend-plan.md](native-backend-plan.md) | current | native 自举主线的历史方案与落地日志；状态摘要绑定 main 源码及提交，覆盖共享 Core IR、自举与后续 C extern F0–F3，并区分安装默认入口和 Java 包文档的待办边界。旧阶段估时不作今日余量。 |
+| [native-driver-plan.md](native-driver-plan.md) | current | B 线驱动补全与后端契约的落地记录。K-B1–K-B5、K-B7 的实现及 K-B6 后续独立 C extern 交付见文件头源码与提交；保留当年刀表和 D7 推迟理由，安装默认入口仍是后续工作。 |
 | [c-tu-split-design.md](c-tu-split-design.md) | current | 裁决 ffi-llvm 4.c：emitc 仍发一份文本，由共享头与 K 个以分界行隔开的段组成（拼回去仍是合法单 TU），K 只取决于程序大小（nmain 实测 15），切点按发射顺序累计字节等分，脚本与驱动切成 K 个 `.c` 并行 cc，不开 LTO。外部 runner实测 4 核编整个 dawnc 69.4 → 14.7 s、产物运行时间不变、产物与并行度无关；ThinLTO 快 16% 但字节随目标文件路径变，交给 4.a。刀序：发分界行、脚本并行、驱动并行（等 Proc spawn/wait）；**刀 1、刀 2 已落地**（2026-10-05，`scripts/cc-units.sh`，本机 4 核编 nmain 82.4 → 16.6 s，§十）。 |
 | [native-inline-design.md](native-inline-design.md) | current | native 性能线刀 1：`dawn_idiv`/`dawn_imod` 进 `dawn_rt.h` 内联（标量循环非 LTO 下 0.755 → 0.147 s，发射的 C 与 cc 时间不变，已落地）；RC 快路径（dup、递减型 drop）做成 `-DDAWN_RT_INLINE_RC` 开关（自举负载 −21%，但 nmain cc CPU +83%）；10-11 裁决：用户构建与 release-native 默认开，CI 测试构建仍关，nightly 门盯发布配置；`-flto` 评估结论不做默认（nmain 4 核 11 → 48 s，ThinLTO 字节随路径变）。 |
 | [native-opt-level-design.md](native-opt-level-design.md) | current | `dawnc build`、`run`、`test` 的 cc 优化级别开关：只开 `-O0`/`-O1`/`-O2`，默认三处都仍是 -O2（测试档与发布档同 flag），不进 `dawn.toml`、不透传任意 cc 参数；已落地；flash_attn 的 `dawnc build` 集群实测 -O2 约 30 s、-O1 约 17 s、-O0 约 8 s，输出逐字节相同，推到生产机 -O0 约 10 s，贴着 B 路重开线。 |
@@ -167,7 +167,7 @@ comptime 字节常量设计：[comptime-bytes-design.md](comptime-bytes-design.m
 | [delete-outcome-design.md](delete-outcome-design.md) | current | LIB-07 的定稿：`io.delete` 以 `Deleted` / `NotFound` / `Err` 区分成功、缺失与 host refusal，底层仍保留 Bool intrinsic ABI。 |
 | [cli-arity-design.md](cli-arity-design.md) | current | TOOL-04 的定稿契约：`check`/`fmt` 为 1..N，`test`/`doc` 的 selector 互斥，`build`/`emitc` 恰一个 target；两端保留独立 argv parser，由绝对 exit/stdout/stderr oracle 防止共谋假绿。 |
 | [run-argv-boundary-design.md](run-argv-boundary-design.md) | current | TOOL-03 的定稿契约：`run` 只在 target 前解析 compiler option，以 `--` 开启逐字透传的 program argv；JVM 一次顺序解析且 dependency re-exec 保留原始 rest，两端独立 parser 由绝对 oracle 约束。 |
-| [std-audit.md](std-audit.md) | current | std 的交付方式、优雅性判据与欠账台账（S5）。骨架五条已做掉大半，仍在册的欠账逐条写在它的状态行里。 |
+| [std-audit.md](std-audit.md) | current | std 交付方式、判据与 S5 历史骨架；文件头按 main 实现核对分层、Iter、文档与跳转、加载来源及 io 补件，不把旧等待条件当作当前待办。 |
 | [stdlib-impl-notes.md](stdlib-impl-notes.md) | current | std 里几个函数**为什么长成这样**：被否掉的写法、实测数字、逼出今天形状的两后端分歧。std 的 `##` 注释只留契约，这些话从那里搬来。 |
 | [site-home-design.md](site-home-design.md) | current | 首页「Horizon」落到站点生成器：一片天的结构、仅首页的亮暗两套 token 与切换、动效清单（reduced motion 与无脚本的终态）、每个数字的生产者（`scripts/site-figures.sh` 经环境变量注入，空则构建红）、GPU 源码从 `examples/projects/gpu_fake` 切出、JetBrains Mono 自托管、唯一外部脚本 `home.js`；偏离定稿与不做的。 |
 | [gpu-page-newapi-design.md](gpu-page-newapi-design.md) | current | GPU 页按 `tileir` 0.8.0 补「写一个 kernel」一节：七个要点各配 `kernels.dawn` 里哪段被门禁覆盖的真代码（vadd、softmax、matmul、histogram 的函数与派发臂，保维归约指回 flash_attn 调用图），占用率规则只写一句不新增 kernel；迁移表、别的 kernel 调用图、性能数字不上页的理由。 |
