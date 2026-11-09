@@ -39,7 +39,7 @@ What the lock pins and what it does not:
 Why the compiler is in the pack at all: it was the one tool the steps took
 from /usr/bin, so an external run's bundle said `cc` = gcc 11.4 on a
 remote runner and gcc 13.3 on a workstation for the same commit. What CI runs is
-ubuntu-latest's `cc`, gcc 13.3.0, whose sanitizer, libgcc_s and libstdc++
+ubuntu-24.04's `cc`, gcc 13.3.0, whose sanitizer, libgcc_s and libstdc++
 runtimes Ubuntu 24.04 builds from gcc 14.2.0; the lock pins conda-forge
 builds of exactly that pairing. The pairing is not cosmetic: gcc 13.3's own
 libasan dies with AddressSanitizer:DEADLYSIGNAL on a kernel with 32 bits of

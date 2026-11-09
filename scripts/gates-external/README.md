@@ -141,7 +141,7 @@ from (`npm_caches`), npm checks every tarball it takes from the cache against
 that lockfile's integrity fields, and MANIFEST records the tree digest of the
 cache that was built, which `verify` holds it to.
 
-The C compiler is what ubuntu-latest's `cc` is: gcc 13.3.0, with the
+The C compiler is what ubuntu-24.04's `cc` is: gcc 13.3.0, with the
 sanitizer, libgcc_s and libstdc++ runtimes Ubuntu 24.04 builds from gcc
 14.2.0. The lock pins it as ten conda-forge packages (`conda_toolchains`,
 121 MiB) with a glibc 2.34 sysroot, so what they link starts on a host from

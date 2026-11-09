@@ -14,8 +14,9 @@ local meaning would be a guess. So the accepted shape is closed, and anything
 outside it is an error before any job starts:
 
   * top-level keys: name, on, jobs
-  * job keys: runs-on (ubuntu-latest), timeout-minutes, steps, needs, and
-    an `if:` of exactly one of the shapes in JOB_CONDITIONS
+  * job keys: runs-on (ubuntu-24.04, or ubuntu-latest for historical commits),
+    timeout-minutes, steps, needs, and an `if:` of exactly one of the shapes
+    in JOB_CONDITIONS
   * step keys: name, id, run, uses, with, env, and an `if:` of the one shape
     `steps.<earlier id>.outputs.<key> == '<literal>'`
   * `${{ }}` expressions: `runner.temp`, `needs.<needed gate job>.result` and
@@ -340,15 +341,15 @@ def parse(gates_text, action_text=None):
             raise PlanError(f"job plan: outputs are {sorted(outputs)}, not all and jobs")
     for job_id, job in jobs_doc.items():
         where = f"job {job_id}"
-        if job_id == PLAN_JOB:
-            continue  # not a gate; substituted whole by `external-all`
         if not isinstance(job, dict):
             raise PlanError(f"{where} is not a mapping")
+        if job.get("runs-on") not in ("ubuntu-24.04", "ubuntu-latest"):
+            raise PlanError(f"{where}: runs-on {job.get('runs-on')!r}")
+        if job_id == PLAN_JOB:
+            continue  # not a gate; substituted whole by `external-all`
         extra = set(job) - JOB_KEYS
         if extra:
             raise PlanError(f"{where}: unsupported keys {sorted(extra)}")
-        if job.get("runs-on") != "ubuntu-latest":
-            raise PlanError(f"{where}: runs-on {job.get('runs-on')!r}")
         timeout = job.get("timeout-minutes")
         if not isinstance(timeout, int) or timeout <= 0:
             raise PlanError(f"{where}: timeout-minutes {timeout!r}")
@@ -543,12 +544,13 @@ def self_test(repo):
                           {"name": "x", "run": "echo a",
                            "env": {"D": "${{ runner.temp }}/d"}}]),
                 "b": job([{"run": "echo b"}], needs=["a"], **{"if": "${{ always() }}"})})
-    try:
-        plan = parse(good, ok_action)
-        if run_commands(plan) != [("a", "echo a"), ("b", "echo b")]:
-            failures.append(f"accepted plan has the wrong commands: {run_commands(plan)}")
-    except PlanError as error:
-        failures.append(f"refused a supported document: {error}")
+    for runner in ("ubuntu-24.04", "ubuntu-latest"):
+        try:
+            plan = parse(good.replace("ubuntu-latest", runner), ok_action)
+            if run_commands(plan) != [("a", "echo a"), ("b", "echo b")]:
+                failures.append(f"{runner} plan has the wrong commands: {run_commands(plan)}")
+        except PlanError as error:
+            failures.append(f"refused a supported {runner} document: {error}")
 
     refused = {
         "unknown uses": doc({"a": job([{"uses": "actions/checkout@v5"}])}),
@@ -565,7 +567,9 @@ def self_test(repo):
             "b": job([{"run": "echo"}], needs=["a"], **{"if": "${{ success() }}"})}),
         "job condition without needs": doc({"a": job([{"run": "echo"}], **{"if": "always()"})}),
         "needs unknown job": doc({"a": job([{"run": "echo"}], needs=["zz"])}),
-        "other runner": doc({"a": dict(job([{"run": "echo"}]), **{"runs-on": "windows-latest"})}),
+        "Windows runner": doc({"a": job([{"run": "echo"}], **{"runs-on": "windows-latest"})}),
+        "unsupported Ubuntu runner": doc({"a": job([{"run": "echo"}], **{"runs-on": "ubuntu-26.04"})}),
+        "runner expression": doc({"a": job([{"run": "echo"}], **{"runs-on": "${{ matrix.os }}"})}),
         "expression in run": doc({"a": job([{"run": "echo ${{ github.sha }}"}])}),
         "other expression in env": doc({"a": job([{"run": "echo", "env": {"X": "${{ github.ref }}"}}])}),
         "unknown with input": doc({"a": job([{"uses": "actions/checkout@v4",
@@ -585,7 +589,7 @@ def self_test(repo):
         failures.append(f"accepted: {label}")
 
     # The #168 shape: a plan job, gate jobs selected by its outputs.
-    plan_job = {"runs-on": "ubuntu-latest", "timeout-minutes": 3,
+    plan_job = {"runs-on": "ubuntu-24.04", "timeout-minutes": 3,
                 "outputs": {"all": "${{ steps.plan.outputs.all }}",
                             "jobs": "${{ steps.plan.outputs.jobs }}"},
                 "steps": [{"uses": "actions/checkout@v4"},
@@ -651,7 +655,14 @@ def self_test(repo):
         base.update(jobs_over)
         return doc(base)
 
+    tier_refusals_start = len(refused)
     refused.update({
+        "a plan job on Ubuntu 26.04": tier_with(
+            plan=dict(plan_job, **{"runs-on": "ubuntu-26.04"})),
+        "a plan job on Windows": tier_with(
+            plan=dict(plan_job, **{"runs-on": "windows-latest"})),
+        "a plan job with a runner expression": tier_with(
+            plan=dict(plan_job, **{"runs-on": "${{ matrix.os }}"})),
         "a gate job naming another job's id": tier_with(
             a=job([{"run": "echo a"}], needs=["plan"], **{"if": selected("b")})),
         "a gate job condition with an extra clause": tier_with(
@@ -689,7 +700,7 @@ def self_test(repo):
             c=job([{"run": "echo", "env": {"R": "${{ needs.zz.result }}"}}],
                   needs=["plan", "a"], **{"if": selected_always("c")})),
     })
-    for label in list(refused)[-14:]:
+    for label in list(refused)[tier_refusals_start:]:
         try:
             parse(refused[label], ok_action)
         except PlanError:
