@@ -1,0 +1,23 @@
+# The callback fixes the declared impl Scope before Item is finalized.
+use std/mem
+use std/mem.{Mem}
+type Range = { n: Int }
+impl[@s] StagedIter[Range, ^{s}] {
+  type Item = I64Buf@s
+  effect StagedIter = !Mem[s]
+  fn staged_for(range: Range, body: fn(I64Buf@s) -> Unit !Mem[s] ^{s}) -> Unit !Mem[s] = {
+    let value = mem.new(range.n)
+    body(value)
+  }
+}
+pub fn main() -> Unit !io = {
+  let answer = mem.with_mem([@s] () => {
+    let buffer = mem.new(3)
+    let range = Range { n = 2 }
+    for item in range {
+      if len(buffer) + len(item) != 5 { panic("incorrect Item") }
+    }
+    11
+  })
+  println(to_string(answer))
+}

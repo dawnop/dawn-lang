@@ -50,6 +50,17 @@ test "Mem scope substitution renames a binder before capturing a replacement" {
     }
     _ -> { assert false }
   }
+  let nested = TyFn([], source, EPure, capture.empty_function())
+  let nested_replaced = types.subst_scopes(nested, map.from([(2, bound)]),
+    map.from([(3, [Region(bound)])]))
+  assert capture.contains(types.ty_scope_refs(nested_replaced), Region(bound))
+  match nested_replaced {
+    TyFn([], TyFn(_, _, _, child), _, _) -> {
+      assert child.scopes[0].id != bound.id
+      assert child.scopes[0].name != bound.name
+    }
+    _ -> { assert false }
+  }
 }
 
 test "Mem scope printing groups a captured function returned by a captured arrow" {

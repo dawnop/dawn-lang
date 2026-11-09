@@ -1,0 +1,25 @@
+# Scoped result slots are opened, written and read in the same runner.
+use std/mem
+use std/mem.{Mem}
+type Cond[@s] = { n: Int }
+impl[@s] StagedCond[Cond[s], ^{s}] {
+  effect StagedCond = !Mem[s]
+  fn staged_if(cond: Cond[s], yes: fn() -> Unit !Mem[s] ^{s}, no: fn() -> Unit !Mem[s] ^{s}) -> Unit !Mem[s] =
+    if cond.n > 0 { yes() } else { no() }
+}
+type Marker[@s] = { n: Int }
+impl[@s] StagedResult[Marker[s], ^{s}] {
+  type Slot = I64Buf@s
+  effect StagedResult = !Mem[s]
+  fn result_open() -> I64Buf@s !Mem[s] = mem.new(1)
+  fn result_get(cell: I64Buf@s) -> Marker[s] !Mem[s] = Marker { n = mem.at(cell, 0) }
+  fn result_set(cell: I64Buf@s, value: Marker[s]) -> Unit !Mem[s] = mem.set(cell, 0, value.n)
+}
+pub fn main() -> Unit !io = {
+  let answer = mem.with_mem([@s] () => {
+    let condition: Cond[s] = Cond { n = 0 }
+    let marker: Marker[s] = if condition { Marker { n = 3 } } else { Marker { n = 4 } }
+    marker.n
+  })
+  println(to_string(answer))
+}

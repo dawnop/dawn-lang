@@ -152,8 +152,8 @@ envelope. A value bound on T does not prove that its unknown full support fits i
 - `T: ^{c}` bounds reachable value captures. Function and impl parameters, trait subjects,
   and associated type outputs default to empty capture contracts. Data, transparent alias
   and opaque representation parameters do not acquire that default. Explicit bounds remain
-  mandatory at every application. These computation defaults remain staged until the later
-  K3b-2 slice enables them with the required standard library migration.
+  mandatory at every application. The third K3b-2 slice enables these computation
+  defaults together with the required standard library migration.
 - 未写捕获后缀的显式一等函数类型默认 `^{}`；局部无注解 let/lambda 推断集合。
   顶层/导出签名不从实现体偷偷推导非空公共捕获契约；需显式参数与上界。
   聚合的隐含字段依赖照常存在，不能用省略后缀清空它。
@@ -239,15 +239,15 @@ without opening private fields, and missing envelope metadata is not interpreted
 Interfaces, caches, documentation and language server types retain quantification duties,
 explicit bounds, envelope metadata and static identities.
 
-The second K3b-2 slice implements data summaries and opaque envelopes with explicit
-contracts while computation defaults remain disabled. Before enabling computation defaults,
-a real seed closure audit must cover the actual compiler and library migration. Control
+The second K3b-2 slice implemented data summaries and opaque envelopes using
+explicit contracts. The third slice enables computation defaults and migrates the
+required library contracts after auditing the real compiler seed closure. Control
 boundaries and domain discharge remain in K4.
 
 ### 3.3 Finite summaries and declaration duties
 
-The second K3b-2 slice keeps computation defaults staged. Its declaration
-contracts distinguish data representation and data introduction from computation.
+Declaration contracts distinguish data representation and data introduction
+from computation. This distinction is retained when computation defaults activate.
 A generated constructor inherits the parent declaration's Type parameters and
 explicit bounds. A user function, derived method or default argument computation
 keeps its computation contract. This distinction adds no Scope or Capture axis.
@@ -295,10 +295,10 @@ results use complete support. A single traversal of all dependencies cannot
 replace both. Ordinary Type value bounds do not prove complete support; each
 trait support premise has an independent source.
 
-Validation uses explicit contracts for the M and N programs while computation
-defaults remain disabled. Independent mutations must build and execute their
-owning semantic oracle. The later default activation still requires the actual
-seed closure audit, and K4 retains domain discharge and control boundaries.
+Validation retains the explicit M and N programs and adds separate omitted
+computation contracts. Independent mutations must build and execute their
+owning semantic oracle. The actual seed closure audit precedes activation,
+and K4 retains domain discharge and control boundaries.
 
 
 ## 4. 运行器与按域 Mem 消解
@@ -489,9 +489,32 @@ opaque head envelopes and actual value and storage dependency graphs. Ordinary
 closure environments merge V; delivered types retain S, witnesses retain W, and
 storage retains its original installation contract. Explicit callback contracts
 and closed scalar witness premises preserve the necessary scoped library uses.
-Computation defaults stay disabled. Their switch and the remaining library
-migration require a real audit of the compiler's seed closure before the next
-slice proceeds.
+This slice originally kept computation defaults disabled while the next
+slice audited the real compiler seed closure.
+
+The computation default audit checks both bootstrap edges. The recorded seed
+builds the compiler against its matching standard library. That compiler must
+then build the real compiler closure against the migrated current library.
+Passing the first edge does not establish the second. Omitted value bounds
+must not become complete support premises during this audit. Required source
+contracts must be representable without implicit Capture arguments, name
+exemptions or an older API fallback. The audit passed both edges and reached
+a byte identical B and C fixed point with the recorded seed. Computation
+defaults and the necessary library contracts can therefore move together.
+
+Omitted Type value bounds are now empty in functions, impls and trait
+subjects. Data representation parameters and their generated introductions
+retain their own quantification. This creates no complete support premise.
+Len, Iter and Index declare a Capture axis; their associated type bounds and
+all impl applications retain that axis. Operator elaboration selects the
+complete application from an existing given, a subject equation or known
+complete support, then checks the ordinary invariant witness obligations.
+
+Concrete list cursor helpers and persistent container operations declare
+explicit value contracts. Their bodies inspect the representation directly
+without manufacturing an abstract witness from a value upper bound. Public
+trait calls still require complete subject support. Unrelated container
+relations and global reactor storage keep their closed contracts.
 
 两后端可以擦除静态域，不要求缓冲运行时增加域 id，也不承诺证据布局或 emit 零变化。
 必须验证 at/set 仍是直接原语，重新量 bcrypt 与 tileinterp；K1 无性能实测，不作速度承诺。
@@ -559,6 +582,25 @@ opaque/trait/导出再载入、函数转值与 wrapper 运行器、未知控制�
 这些在 K1 无法作为“已接受反例”运行，不伪称已测试。规则实现时逐条配负控，
 例如抹掉导出 capture、合并 s/t、内层减掉外域 Mem、清空 k 环境，分别应让专门用例红。
 
+## Equivalent computation reuse
+
+Performance work preserves the value and complete support obligations above.
+Only immutable prelude declarations may be shared across modules in a compilation.
+Each module still starts with its own names, declaration owner and frame, and
+each call still instantiates fresh Scope and Capture identities. Neither checked
+contexts nor solved substitutions belong in the shared declaration templates.
+
+An empty projection may share one immutable value. An unresolved projection stays
+unknown. A local expression records its symbol dependency before asking for any
+type projection; following that dependency still reaches resources, dictionaries
+and invariant storage. Projection probes distinguish value from complete support,
+support premises and declaration summary revisions.
+
+Measurements retain the complete sample batch. Tool process observations separate
+native compilation, JVM compilation, program execution and disassembly. Their
+instrumentation overhead is kept separate from acceptance measurements. Peak RSS
+of one process and sampled aggregate resident memory have distinct meanings.
+
 ## 不做的（理由）
 
 - 不只禁具体缓冲的 lambda 捕获：刚性泛型 T、字典、间接聚合和续延都能藏环境。
@@ -570,3 +612,59 @@ opaque/trait/导出再载入、函数转值与 wrapper 运行器、未知控制�
 - 不做任意 rank-N、exists、一般依赖类型或捕获隧穿：受限 Scope 量化已覆盖 runner，扩大范围没有客户证据。
 - 不开放跨 Mem 边界的栈捕获：第一版用可导出的控制行上界收口，不把健全性推到后续刀。
 - 不保留旧 Mem API 兼容层，不在 K1 修改编译器、std 或迁移客户：本刀只把实现目标与反例固定下来。
+
+
+### Explicit staged protocol applications
+
+StagedVar, StagedResult, StagedCond and StagedIter each declare one Capture
+parameter c. The subject value bound, Cell/Slot/Item value upper bounds and
+Cond/Iter callback environment bounds refer to that parameter. Complete
+subject and associated output support must fit the selected witness W.
+Closed implementations write an explicit empty Capture argument.
+
+Staged syntax uses ordinary complete application equations. A given or a
+subject-determined implementation application is invariant. An implementation
+that quantifies its Capture axis can infer that declared axis from the subject
+and all actual callback contracts together. Condition arms contribute jointly;
+checking order cannot select different witnesses. An iterator's Item and row
+remain tied to the same application while callback obligations are settled.
+Unresolved support is not empty. Cyclic obligations require a finite least
+fixed point; an ambiguous application is refused.
+
+The selected application instantiates every method type, associated output,
+calling row and dictionary. Staged lowering uses the ordinary witness path,
+with no zero-axis fallback. Capture parameters add no runtime slots; Scope
+keys continue to use the existing dictionary ABI.
+
+Cell content support and installation lifetimes remain independent of these
+application checks. Their isolated tests execute the production carried,
+environment and function compatibility paths without unrelated dictionaries.
+Ordinary closure environments still combine V; cells, witnesses and frozen
+evidence retain their complete support duties. No method-level generic
+parameters, covariance, implicit axes or additional effect parameters are
+introduced by these protocols.
+
+
+A cell's resolved witness can be reused by more than one generated arm. Every
+method use records its runtime dictionaries and static support in the consuming
+closure through the ordinary witness capture routines. Acquiring a witness while
+opening a cell does not replace that use obligation. Nested closures retain each
+forwarded dictionary, including dictionaries nested inside an applied witness.
+
+
+### Concrete collection and tree clients
+
+A value bound on a message parameter does not prove the full support needed by
+an abstract Len, Index, Iter, Tree or Eq witness. Concrete list queries and
+higher order walks can use ordinary value contracts instead. The tree walk
+accepts an explicit child function; its existing Tree entry remains a wrapper
+with the original complete witness requirement. No witness is converted into a
+weaker ordinary value.
+
+A DOM reply carries node data, event names and payload kinds. It carries no
+message value or message callback. The reply boundary can copy that data into a
+closed tree before reconciliation, while event routing keeps the original tree
+and callback. This is a data projection, not a cast or a dictionary exemption.
+The projected and original trees must produce identical patch bytes whenever
+both complete applications are available. Message callbacks must not execute
+during the projection.

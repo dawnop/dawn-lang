@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ f2018e4f78afae65 -->
+<!-- doc-check: translation-of docs/spec.md @ a91ebf54d7e2d05a -->
 
 # Dawn Language Specification
 
@@ -1023,8 +1023,8 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   and are invariant. Different arguments for the same trait on one subject are rejected;
   coherence remains unique by trait and subject head. Its methods enter the module function namespace
   (callable directly, by UFCS, or in a pipeline).
-  The ordinary T empty capture default and required std migration activate in K3b-2;
-  K3b-1 supplies the new contract surface and static checks.
+  Omitted Type value bounds in computation contracts are empty. Data
+  representation parameters and generated introductions retain their own duty.
 - **Injection is a per-trait property**: whether a trait's method names occupy the function
   namespace is decided by that trait. Today a `trait` declaration always injects, and the six
   built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` inject too; **the twenty-one whose method name the
@@ -1059,7 +1059,7 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   accepts a closed set from the Prelude).
 - **`Iter`** declares two associated types and four methods (associated types are covered further
   down this section):
-  `trait Iter[C] { type Cur  type Item  fn iter_start(it: C) -> C.Cur
+  `trait Iter[C: ^{dep}, ^dep] { type Cur: ^{dep}  type Item: ^{dep}  fn iter_start(it: C) -> C.Cur
   fn iter_done(it: C, c: C.Cur) -> Bool  fn iter_next(it: C, c: C.Cur) -> C.Cur
   fn iter_get(it: C, c: C.Cur) -> C.Item }` — four cursor methods rather than a `next` that
   returns a pair, so that one step forces no allocation (the shape of the cursor is up to the
@@ -1070,23 +1070,23 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   prelude names — **they can be shadowed by a declaration in this module** (§10.3).
   The parameter names come from this declaration (named arguments, §4.3): the receiver is `it`
   and the cursor is `c`, so a caller writes `xs.iter_done(c = k)`.
-- **`Len`** declares one method and no associated types: `trait Len[C] { fn len(x: C) -> Int }`.
+- **`Len`** declares one method and no associated types: `trait Len[C: ^{dep}, ^dep] { fn len(x: C) -> Int }`.
   `len(c)` and `c.len()` find the impl by the receiver's type; the impl for `List` ships with std,
-  and a user type gets `len` by writing `impl Len[T]`. The name `len` is injected with the prelude
+  and a user type gets `len` by writing `impl Len[T, ^{}]`. The name `len` is injected with the prelude
   (the entry above), but an `fn len` inside an impl body is not a top-level declaration of the
   module and **shadows nothing**, which is the point of it: a module may write `len` for its own
   type while `len(xs)` on a `List` in the same module keeps working. At a `List`, `Len` is the
   language's `len` primitive, not a call on the impl's method; the impl body serves only the
-  dictionary slot of a `[C: Len]` bound, and calls an internal name (calling itself is
+  dictionary slot of a `[C: Len[^{}]]` bound, and calls an internal name (calling itself is
   unconditional self-recursion, which the checker rejects).
 - **`Index`** declares two associated types and one method:
-  `trait Index[C] { type Idx  type Item  fn index(c: C, i: C.Idx) -> C.Item }`.
+  `trait Index[C: ^{dep}, ^dep] { type Idx: ^{dep}  type Item: ^{dep}  fn index(c: C, i: C.Idx) -> C.Item }`.
   The language provides impls for `List` (`Idx = Int`) and `Map` (`Idx = key type`); a user type
   that implements `Index` can use `[]` (example in §4.8). The method name `index` does **not**
   enter the function namespace (see the injection rule above), and appears only in impl bodies,
-  in documentation and in error messages. A type has exactly one index type — `Index` is a
-  single-parameter trait, so a second kind of subscript on the same container (slicing, say)
-  cannot be written.
+  in documentation and in error messages. A type has exactly one index type: `Index` has
+  one Type subject and one invariant Capture argument. A second kind of subscript on the
+  same container, such as slicing, cannot be selected through a different index type.
 - **`Display`** declares one method and no associated types:
   `trait Display[T] { fn display(x: T) -> String }`. It is the **top-level rendering** layer:
   `to_string(x)` and `"${x}"` use the impl when there is one, and otherwise render by the
@@ -1123,9 +1123,18 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   the compile-time rule of §1.5) and `FromFloat[Float]`, and no `FromFloat[Int]`. In generic code
   a `0` under `[T: FromInt]` is `from_int(0)`. Both names are taken in trait and effect position
   from now on as well.
+Each staged protocol below has one explicit Capture argument. A closed impl writes
+`^{}`. The subject value bound and associated output upper bound use this argument;
+complete subject and output support must also fit the selected witness. Cond and
+Iter callbacks use the same bound. Quantified applications solve all actual callback
+obligations jointly, while fixed applications remain invariant. Unknown support is
+never an empty environment. Item, row and method instantiation retain the same
+application across module boundaries. Cell content support and installation lifetime
+checks remain independent of ordinary closure value captures.
+
 - **`StagedIter`** and **`StagedVar`** (behind the staged `for`, §4.7):
-  `trait StagedIter[R] { type Item  effect StagedIter = !()  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter) -> Unit !R.StagedIter }`,
-  `trait StagedVar[T] { type Cell  effect StagedVar = !()  fn var_open(v: T) -> T.Cell !T.StagedVar  fn var_get(c: T.Cell) -> T !T.StagedVar  fn var_set(c: T.Cell, v: T) -> Unit !T.StagedVar }`.
+  `trait StagedIter[R: ^{c}, ^c] { type Item: ^{c}  effect StagedIter = !()  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter ^{c}) -> Unit !R.StagedIter }`,
+  `trait StagedVar[T: ^{c}, ^c] { type Cell: ^{c}  effect StagedVar = !()  fn var_open(v: T) -> T.Cell !T.StagedVar  fn var_get(c: T.Cell) -> T !T.StagedVar  fn var_set(c: T.Cell, v: T) -> Unit !T.StagedVar }`.
   The language consumes both traits' method names, so they do **not** enter the function
   namespace. Neither can be derived. Each has one associated effect named like the trait and
   pure by default, as the arithmetic and literal traits have, so generic code over a type that
@@ -1133,13 +1142,13 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   provides no impl of either for any type. Both names are taken in trait and effect
   position from now on as well.
 - **`StagedCond`** (behind staged `if`, §4.6):
-  `trait StagedCond[C] { effect StagedCond = !()  fn staged_if(c: C, on_true: fn() -> Unit !C.StagedCond, on_false: fn() -> Unit !C.StagedCond) -> Unit !C.StagedCond }`.
+  `trait StagedCond[C: ^{c}, ^c] { effect StagedCond = !()  fn staged_if(c: C, on_true: fn() -> Unit !C.StagedCond ^{c}, on_false: fn() -> Unit !C.StagedCond ^{c}) -> Unit !C.StagedCond }`.
   Its method name does not inject, it cannot be derived, and its same-named associated effect
   defaults to pure; generic code projects `!C.StagedCond`. The language provides no impl,
   including for Bool; opaque types do not inherit the underlying impl. The name is reserved
   in trait and effect declaration positions.
 - **`StagedResult`** (staged `if` results, §4.6):
-  `trait StagedResult[T] { type Slot  effect StagedResult = !()  fn result_open() -> T.Slot !T.StagedResult  fn result_set(s: T.Slot, v: T) -> Unit !T.StagedResult  fn result_get(s: T.Slot) -> T !T.StagedResult }`.
+  `trait StagedResult[T: ^{c}, ^c] { type Slot: ^{c}  effect StagedResult = !()  fn result_open() -> T.Slot !T.StagedResult  fn result_set(s: T.Slot, v: T) -> Unit !T.StagedResult  fn result_get(s: T.Slot) -> T !T.StagedResult }`.
   The result type T chooses the slot independently of the condition. Open takes no initial value;
   both arms assign the slot, and get is legal only after merging. Methods do not inject, it cannot
   be derived, and its same-named associated effect defaults to pure. Host scalars have no built-in
@@ -1205,17 +1214,17 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
     methods put `c: C` in position 0 for exactly this reason.
 
 ```dawn compile
-trait Head[C] {
-  type Item
+trait Head[C: ^{c}, ^c] {
+  type Item: ^{c}
   fn first(c: C) -> Option[C.Item]
 }
 
-impl[T] Head[List[T]] {
+impl[T: ^{c}, ^c] Head[List[T], c] {
   type Item = T
   fn first(c: List[T]) -> Option[T] = get(c, 0)
 }
 
-fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at instantiation
+fn head_or[C: Head[c] + ^{c}, ^c](c: C, d: C.Item) -> C.Item =   # the projection reduces at instantiation
   match first(c) { Some(x) -> x, None -> d }        # head_or([1], 9) is Int
 ```
 - **Associated effects** (design and verdicts in
@@ -1916,7 +1925,7 @@ while queue.non_empty() { ... }
   calls to `iter_start/iter_done/iter_next/iter_get`, and the
   element type is that impl's `Item`. The five std containers
   (`List`/`String`/`Bytes`/`Map`/`Set`) iterate out of the box; a parameter bound by
-  `[C: Iter]` in a generic function is equally `for`-able (dictionary forwarding). The
+  `[C: Iter[^{}]]` in a generic function is equally `for`-able (dictionary forwarding). The
   iteration order is the impl's cursor order (`String` by code point, `Map`/`Set` the same
   as `entries`/`to_list`).
 - **Staged `for`**: when the type of `e` implements `StagedIter`, `for pattern in e { body }` is
@@ -1934,8 +1943,8 @@ while queue.non_empty() { ... }
   implements both `Iter` and `StagedIter` cannot be iterated by `for`.
 
   ```dawn
-  var acc = zeros(o)                    # Tile[Float]; tileir provides StagedVar[Tile[D]]
-  for k in d_range(0, K / T) {          # tileir provides StagedIter[DRange]
+  var acc = zeros(o)                    # Tile[Float]; tileir provides StagedVar[Tile[D], ^{}]
+  for k in d_range(0, K / T) {          # tileir provides StagedIter[DRange[B], c]
     acc = mmaf(load_at(a, [k]), load_at(b, [k]), acc)
   }
   store_cell(o, acc)
@@ -1976,7 +1985,7 @@ An impl for a user type:
 ```dawn
 type Grid = { w: Int, cells: List[Int] }
 
-impl Index[Grid] {
+impl Index[Grid, ^{}] {
   type Idx = (Int, Int)
   type Item = Int
   fn index(g: Grid, p: (Int, Int)) -> Int = {
@@ -1988,7 +1997,7 @@ impl Index[Grid] {
 let g = Grid { w = 3, cells = [1, 2, 3, 4, 5, 6] }
 let v = g[(2, 1)]                                 # 6
 
-fn first[C: Index](c: C, i: C.Idx) -> C.Item = c[i]   # a generic consumer
+fn first[C: Index[^{}]](c: C, i: C.Idx) -> C.Item = c[i]   # a generic consumer
 ```
 
 **The three out-of-range criteria.** The language promises three out-of-range policies only,
@@ -2475,7 +2484,11 @@ using V(T), the reader environment and its calling row. Dictionaries separately
 contribute their complete witness contract W; ordinary hiding does not eliminate
 W or weaken S(Subject) contained in W. Cell writes check full delivery support,
 invariant content and the location's installation lifetime, including aliases
-and handler or staged channels. Computation defaults remain staged in this slice.
+and handler or staged channels. Omitted Type value bounds in computation
+contracts are now empty. Data representations and generated introductions
+retain their declared quantification. Len, Iter and Index declare explicit
+Capture arguments; their complete witness support obligation remains independent
+of an ordinary value bound.
 
 A trait witness's static contract contains the trait identity, subject, Capture arguments and
 subwitnesses. The union W of Capture arguments must cover the subject's reachable captures and
@@ -2484,14 +2497,14 @@ also fit W. Captures have no runtime slots; Scope keys follow the existing dicti
 Default methods are checked at their definition under rigid subject and Capture parameters,
 without inferring a wider contract from a use site. Interfaces, module reloads, projections and
 substitution retain complete applications, with no legacy reader that drops Capture information.
-The ordinary T empty default and required std migration remain for K3b-2; K3b-1 adds the new
-surface, representation and static contract checks while retaining existing program behavior.
+The ordinary Type empty value default and required library contracts activate
+together in the third K3b-2 slice, following the real seed closure audit.
 
-**This section is pending implementation.** The current compiler still accepts #847.
-The current `!Mem` and result-type checks have closure-environment escape and
-peek/poke purity gaps. The following target semantics replace those rules.
-Surface spelling and full constraints are in
-[mem-capture-scope-design.md](mem-capture-scope-design.md) (Chinese).
+**This section describes the settled contract.** Computation defaults, data
+summaries and actual dependency propagation are implemented in K3b-2. The
+remaining exits are a separate slice; domain discharge and control boundaries
+remain in K4. This does not claim that #847 is complete. Surface spelling and
+full constraints are in [mem-capture-scope-design.md](mem-capture-scope-design.md).
 
 - Each `with_mem` activation introduces a fresh scope s distinct from every other
   activation. Buffers, reachable aggregates, generic instances and function
@@ -2520,12 +2533,12 @@ Surface spelling and full constraints are in
 
 
 K2 provides the type and syntax foundation. K3a supplies fresh domains, allocation
-domains and the complete Mem[s] contract. K3b-1 supplies trait Capture syntax and
-static contracts, while leaving the ordinary T empty default inactive and std unchanged.
-Actual environments and exits remain for K3b-2; domain discharge and control boundaries
-remain for K4. The 13-case baseline now rejects ten cases and still accepts
-len_capture, ctl_cross and ctl_store. This cut preserves that baseline and does not
-complete #847. Scope and Capture have separate identities and
+domains and the complete Mem[s] contract. K3b-1 provides trait Capture syntax and static contracts. K3b-2 adds actual
+environments, data summaries, computation defaults and required library contracts.
+The remaining exits are a separate slice. Domain discharge and control boundaries
+remain in K4; ctl_cross and ctl_store keep their established baseline. This
+staging does not claim that #847 is complete.
+Scope and Capture have separate identities and
 parameter axes rather than being value types. Function environment bounds and
 calling effects are stored separately. Internal Scope binders compare modulo
 alpha renaming; substitution must avoid capture of both identities and printed names.
@@ -2552,12 +2565,11 @@ Nominal scope arguments use `Holder[s]`; capture arguments may name a capture
 parameter or use `^{s, c}`. Formatting sorts and deduplicates capture sets
 without comments and preserves comments inside a set.
 
-Explicit type applications check kinds and perform static substitution in this
-stage. Inferring scope and capture constraints from call arguments, propagating
-free captures, checking exits, generating fresh runner scopes and addressing
-evidence by scope are connected in later cuts. Omitted capture annotations keep
-the existing acceptance set; the empty default for ordinary T does not reject
-old acceptance oracles early.
+Explicit applications check kinds and substitute static contracts. Calls infer
+declared axes from arguments and result expectations. Omitted computation Type
+value bounds are empty; data representation and generated introduction contracts
+retain their separate duty. Remaining exits and K4 obligations follow their
+respective implementation slices.
 
 ### 6.3 Effect polymorphism
 

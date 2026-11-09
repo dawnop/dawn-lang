@@ -85,11 +85,15 @@ fn frozen_origin(cx: Cx, role: EvidenceRole, lo: Int, hi: Int) -> environment.No
 }
 
 pub(pkg) fn expression(cx: Cx, expr: TExpr, frozen: Bool) -> environment.Node = {
+  match expr {
+    XLocal(id, name, lo, hi, _) -> return Node { value = [], known = true, edges = [id], name = name,
+      lo = lo, hi = hi }
+    _ -> ()
+  }
   let ty = tex_ty(expr)
   var result = node(data_capture.value_bound(cx.adts, cx.current_capture_params, ty), "value", x_lo(expr), x_hi(expr))
   var children: List[TExpr] = []
   match expr {
-    XLocal(id, name, _, _, _) -> return Node { ..result, known = true, value = [], edges = [id], name = name }
     XLambda(_, _, _, captures, _, _, _, _) -> return Node { ..result, edges = captures }
     XCtor(_, _, values, _, spread, _, _, _) -> {
       # Erased evidence records have no public data summary. Their actual
@@ -226,4 +230,22 @@ pub(pkg) fn describe_unknown(cx: Cx, roots: List[Int]) -> String = {
   "\nvalue dependency: " ++ join(map(path,
     step => "`" ++ step.name ++ "` at " ++ to_string(step.lo + cx.owner_lo)), " -> ") ++
     " has no complete support proof"
+}
+
+test "local value edges retain unknown origins and real resources without a type projection" {
+  let initial = cx_new(Some("model"), None)
+  let s = Scope { name = "s", id = 11 }
+  let unknown = node(None, "unresolved", 2, 3)
+  let graph = environment.bind(environment.bind(environment.empty(), 1, unknown),
+    2, node(Some([capture.Region(s)]), "buffer", 4, 5))
+  let cx = Cx { ..initial, current_capture_params = capture.data_params(capture.empty_params(), [12]),
+    frame = Frame { ..initial.frame, environment = graph } }
+  let opaque = expression(cx, XLocal(1, "alias", 6, 7, TyVar("T", 12)), false)
+  assert opaque.known && opaque.value == [] && opaque.edges == [1]
+  assert opaque.name == "alias" && opaque.lo == 6 && opaque.hi == 7
+  assert not environment.dependencies(graph, opaque.edges).known
+  assert environment.unknown_origin(graph, opaque.edges)[0].name == "unresolved"
+  let resource = expression(cx, XLocal(2, "held", 8, 9, TyI64Buf(s)), false)
+  assert resource.value == [] && resource.edges == [2]
+  assert environment.dependencies(graph, resource.edges).value == [capture.Region(s)]
 }

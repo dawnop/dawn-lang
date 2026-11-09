@@ -19,43 +19,43 @@
 use std/io
 
 ## A map with no entries. The key/value types come from the use site.
-pub fn empty[K, V]() -> Map[K, V] = map_empty()
+pub fn empty[K: ^{dep}, V: ^{dep}, ^dep]() -> Map[K, V] = map_empty()
 
 ## A map from a list of (key, value) pairs; a repeated key keeps the last value.
-pub fn from[K: Eq + Hash, V](entries: List[(K, V)]) -> Map[K, V] = map_from(entries)
+pub fn from[K: Eq + Hash, V: ^{dep}, ^dep](entries: List[(K, V)]) -> Map[K, V] = map_from(entries)
 
 ## A copy with `key` bound to `value`; an existing key keeps its insertion position.
-pub fn insert[K: Eq + Hash, V](m: Map[K, V], key: K, value: V) -> Map[K, V] =
+pub fn insert[K: Eq + Hash, V: ^{dep}, ^dep](m: Map[K, V], key: K, value: V) -> Map[K, V] =
   map_insert(m, key, value)
 
 ## A copy without `key`; absent keys are fine.
-pub fn remove[K: Eq + Hash, V](m: Map[K, V], key: K) -> Map[K, V] = map_remove(m, key)
+pub fn remove[K: Eq + Hash, V: ^{dep}, ^dep](m: Map[K, V], key: K) -> Map[K, V] = map_remove(m, key)
 
 ## The value bound to `key`, or `None`.
-pub fn get[K: Eq + Hash, V](m: Map[K, V], key: K) -> Option[V] = map_get(m, key)
+pub fn get[K: Eq + Hash, V: ^{dep}, ^dep](m: Map[K, V], key: K) -> Option[V] = map_get(m, key)
 
 ## Whether `key` is bound.
-pub fn has[K: Eq + Hash, V](m: Map[K, V], key: K) -> Bool = map_has(m, key)
+pub fn has[K: Eq + Hash, V: ^{dep}, ^dep](m: Map[K, V], key: K) -> Bool = map_has(m, key)
 
 # The prelude's `len` is the `Len` trait (docs/len-trait-design.md); this is its
 # Map impl, the number of entries.
-impl[K, V] Len[Map[K, V]] {
+impl[K: ^{dep}, V: ^{dep}, ^dep] Len[Map[K, V], dep] {
   fn len(m: Map[K, V]) -> Int = map_size(m)
 }
 
 ## Whether there are no entries. Cheaper to read than `len(m) == 0` and, since
 ## the trie keeps its own count, no cheaper to compute -- the point is that one
 ## question has one spelling across every container (CONTRIBUTING §naming).
-pub fn is_empty[K, V](m: Map[K, V]) -> Bool = map_size(m) == 0
+pub fn is_empty[K: ^{dep}, V: ^{dep}, ^dep](m: Map[K, V]) -> Bool = map_size(m) == 0
 
 ## The keys, in insertion order.
-pub fn keys[K, V](m: Map[K, V]) -> List[K] = map_keys(m)
+pub fn keys[K: ^{dep}, V: ^{dep}, ^dep](m: Map[K, V]) -> List[K] = map_keys(m)
 
 ## The values, in insertion order of their keys.
-pub fn values[K, V](m: Map[K, V]) -> List[V] = map_values(m)
+pub fn values[K: ^{dep}, V: ^{dep}, ^dep](m: Map[K, V]) -> List[V] = map_values(m)
 
 ## The (key, value) pairs, in insertion order.
-pub fn entries[K, V](m: Map[K, V]) -> List[(K, V)] = map_entries(m)
+pub fn entries[K: ^{dep}, V: ^{dep}, ^dep](m: Map[K, V]) -> List[(K, V)] = map_entries(m)
 
 ## Every entry combined into one value: `f(acc, k, v)`, starting from `init`.
 ## This walks the trie itself -- no entry list, no pair per entry -- which is
@@ -67,7 +67,7 @@ pub fn entries[K, V](m: Map[K, V]) -> List[(K, V)] = map_entries(m)
 ## pair, so the walk allocates nothing per entry; the row rides through `f`
 ## the way `list.fold`'s does. Unbounded like the other readers: visiting
 ## entries hashes and compares no keys.
-pub fn fold[K, V, A](m: Map[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e =
+pub fn fold[K: ^{dep}, V: ^{dep}, A: ^{dep}, ^dep](m: Map[K, V], init: A, f: fn(A, K, V) -> A !e ^{dep}) -> A !e =
   map_fold(m, init, f)
 
 # ---- Eq / Hash for Map ----
@@ -142,7 +142,7 @@ impl[K: Show, V: Show] Show[Map[K, V]] {
 ## step. If std/hamt ever grows a real cursor, `Cur` changes here and no
 ## caller does. Doneness asks the map, not the list: `len`/`get` are this
 ## module's map operations, and the entry count is the same number.
-impl[K: Eq + Hash, V] Iter[Map[K, V]] {
+impl[K: Eq + Hash, V: ^{dep}, ^dep] Iter[Map[K, V], dep] {
   type Cur = (List[(K, V)], Int)
   type Item = (K, V)
 

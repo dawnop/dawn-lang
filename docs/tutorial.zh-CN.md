@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 9c384750400b0b64 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 398a6af83a6aaf5d -->
 
 # Dawn 教程
 
@@ -933,7 +933,7 @@ nothing
 ```dawn run
 type Grid = { w: Int, cells: List[Int] }
 
-impl Index[Grid] {
+impl Index[Grid, ^{}] {
   type Idx = (Int, Int)
   type Item = Int
   fn index(g: Grid, p: (Int, Int)) -> Int = {
@@ -944,7 +944,7 @@ impl Index[Grid] {
 
 type Countdown = { from: Int }
 
-impl Iter[Countdown] {
+impl Iter[Countdown, ^{}] {
   type Cur = Int
   type Item = Int
   fn iter_start(it: Countdown) -> Int = it.from

@@ -1,0 +1,207 @@
+# Staged syntax must settle the same complete application that its method,
+# associated types and callback environments use. Source strings keep the
+# public Capture syntax outside the bootstrap compiler's own declarations.
+use std/map
+use std/list
+use check/capture
+use check/capture.{TraitApplication, Function as CaptureFunction, Scope}
+use check/types.{TyFn, TyUnit, EffAssoc, EPure, insert_impl, trait_of, prelude_traits, STAGED_VAR_ID,
+  STAGED_RESULT_ID, STAGED_COND_ID, STAGED_ITER_ID }
+use check/cx.{Cx, ModExports, test_cx, cx_new}
+use check/passes.{seed_prelude}
+use check/checker.{check_module, exports_of}
+use check/trait_contract
+use check/tast.{TModule, TExpr, XBlock, XCallFn, XLambda, TSExpr, TSLet, TSAssign, WForward, WConcrete, WApply, WitRef}
+use front/parser
+
+fn checked(source: String) -> (Cx, TModule) !io = {
+  let (module, errors) = parser.parse_module(source)
+  if len(errors) > 0 { panic(errors[0].msg) }
+  let exports: Map[String, ModExports] = map.empty()
+  check_module(seed_prelude(test_cx()), module, exports)
+}
+
+const PAYLOAD: String = "type Payload[@s] = { read: fn() -> Int ^{s} }\n"
+
+test "staged applications solve callback Scope equations before finalizing Item" {
+  let source = PAYLOAD ++ "type Range = { n: Int }\n" ++
+    "trait Touch[T: ^{c}, ^c] { fn touch(value: T) -> Int }\n" ++
+    "impl[@s] Touch[Payload[s], ^{s}] { fn touch(value: Payload[s]) -> Int = 1 }\n" ++
+    "impl[@s] StagedIter[Range, ^{s}] {\n" ++
+    "type Item = Payload[s]\n" ++
+    "fn staged_for(range: Range, body: fn(Payload[s]) -> Unit ^{s}) -> Unit =\n" ++
+    "body(Payload { read = () => range.n })\n}\n" ++
+    "fn visit[@s](value: Payload[s], range: Range) -> Unit = {\n" ++
+    "for item in range { let _ = value.read() + touch(item) }\n}\n"
+  let (cx, _) = checked(source)
+  assert cx.diags == []
+}
+
+test "staged condition applications combine both arm environments" {
+  let source = PAYLOAD ++ "type Cond = { n: Int }\n" ++
+    "impl[^c] StagedCond[Cond, c] {\n" ++
+    "fn staged_if(cond: Cond, yes: fn() -> Unit ^{c}, no: fn() -> Unit ^{c}) -> Unit =\n" ++
+    "if cond.n > 0 { yes() } else { no() }\n}\n" ++
+    "fn visit[@s, @t](cond: Cond, left: Payload[s], right: Payload[t]) -> Unit = {\n" ++
+    "if cond { let _ = left.read() } else { let _ = right.read() }\n" ++
+    "if cond { let _ = right.read() } else { let _ = left.read() }\n()\n}\n"
+  let (cx, tm) = checked(source)
+  assert cx.diags == []
+  var applications: List[capture.TraitApplication] = []
+  for function in tm.fns { if function.name == "visit" {
+    match function.body { XBlock(statements, _, ..) -> {
+      for statement in statements { match statement {
+        TSExpr(XBlock(inner, _, ..), ..) -> {
+          for generated in inner { match generated {
+            TSExpr(XCallFn(_, _, _, witnesses, _, Some(tid), ..), ..) -> if tid == STAGED_COND_ID {
+              for witness in witnesses { match witness {
+                WForward(_, app, _) | WConcrete(app, _) | WApply(app, _, _) -> {
+                  applications = applications ++ [app]
+                }
+              } }
+            }
+            _ -> ()
+          } }
+        }
+        _ -> ()
+      } }
+    }, _ -> () }
+  } }
+  assert len(applications) == 2
+  assert capture.trait_equal(applications[0], applications[1])
+  assert len(applications[0].args) == 1
+  assert len(applications[0].args[0]) == 2
+}
+
+test "staged associated outputs and callback rows retain their declared application" {
+  let traits = prelude_traits()
+  for tid in [STAGED_VAR_ID, STAGED_RESULT_ID, STAGED_COND_ID, STAGED_ITER_ID] {
+    let tr = trait_of(traits, tid)
+    assert len(tr.scope_params.captures) == 1
+    let app = TraitApplication { id = tid,
+      args = [[capture.CaptureVar(tr.scope_params.captures[0].name, tr.scope_params.captures[0].id)]] }
+    for member in tr.assoc { assert list.any(tr.assoc_bounds, entry => {
+      let (name, upper) = entry
+      name == member && capture.equal(upper, app.args[0])
+    }) }
+    for entry in tr.methods { let (_, method) = entry
+      assert method.sig.constraints == [[app]]
+      assert match method.sig.eff { EffAssoc(_, _, row_app, _) -> capture.trait_equal(row_app, app), _ -> false }
+      for parameter in method.sig.param_tys { match parameter {
+        TyFn(_, _, row, contract) -> {
+          assert capture.equal(capture.bound(contract), app.args[0])
+          assert match row { EffAssoc(_, _, row_app, _) -> capture.trait_equal(row_app, app), _ -> false }
+        }
+        _ -> ()
+      } }
+    }
+  }
+}
+
+test "fixed staged applications cannot widen to callback support" {
+  let source = "type Cond = { n: Int }\n" ++
+    "impl StagedCond[Cond, ^{}] {\n" ++
+    "fn staged_if(cond: Cond, yes: fn() -> Unit ^{}, no: fn() -> Unit ^{}) -> Unit = yes()\n}\n"
+  let (cx, _) = checked(source)
+  assert cx.diags == []
+  let tr = trait_of(cx.traits, STAGED_COND_ID)
+  let (_, method) = tr.methods[0]
+  var tested = false
+  for implementation in cx.local_impls { if implementation.trait_id == STAGED_COND_ID {
+    let callback = TyFn([], TyUnit, EPure, CaptureFunction { scopes = [],
+      bound = Some([capture.Region(Scope { name = "caller", id = 47001 })]) })
+    let app = trait_contract.call_application(tr, implementation, implementation.subject,
+      method.sig.param_tys, [implementation.subject, callback, callback], cx.adts, capture.empty_params())
+    assert app == Some(TraitApplication { id = STAGED_COND_ID, args = [[]] })
+    tested = true
+  } }
+  assert tested
+}
+
+test "staged interfaces retain complete applications across module boundaries" {
+  let source = "pub type Cond = { n: Int }\n" ++
+    "impl[^c] StagedCond[Cond, c] {\n" ++
+    "fn staged_if(cond: Cond, yes: fn() -> Unit ^{c}, no: fn() -> Unit ^{c}) -> Unit = yes()\n}\n"
+  let (module, errors) = parser.parse_module(source)
+  assert errors == []
+  let (producer, _) = check_module(seed_prelude(cx_new(Some("producer"), None)), module, map.empty())
+  assert producer.diags == []
+  let surface = exports_of(producer, module, "producer", "producer")
+  assert len(surface.impls) == 1
+  let implementation = surface.impls[0]
+  assert len(implementation.trait_args) == 1
+  assert capture.equal(implementation.trait_args[0],
+    [capture.CaptureVar(implementation.scope_params.captures[0].name, implementation.scope_params.captures[0].id)])
+  let consumer = "use producer.{Cond}\n" ++ PAYLOAD ++
+    "fn visit[@s](condition: Cond, value: Payload[s]) -> Unit = {\n" ++
+    "if condition { let _ = value.read() }\n}\n"
+  let (imported, parse_errors) = parser.parse_module(consumer)
+  assert parse_errors == []
+  var entry = seed_prelude(cx_new(Some("consumer"), None))
+  for imp in surface.impls { entry = Cx { ..entry, impl_table = insert_impl(entry.impl_table, imp) } }
+  let (result, _) = check_module(entry, imported, map.from([("producer", surface)]))
+  assert result.diags == []
+}
+
+fn witness_symbols(witnesses: List[WitRef]) -> List[Int] = {
+  var result: List[Int] = []
+  for witness in witnesses { match witness {
+    WForward(sym, _, _) -> { result = result ++ [sym] }
+    WApply(_, _, children) -> { result = result ++ witness_symbols(children) }
+    _ -> ()
+  } }
+  result
+}
+
+# The fixture's witnesses all originate in its outer function. Each generated
+# closure must carry them through every enclosing closure, including reused cells.
+fn cell_witness_captures(term: TExpr) -> (Bool, List[Int]) = {
+  var required: List[Int] = []
+  var children: List[TExpr] = []
+  match term {
+    XLambda(_, _, body, captures, ..) -> {
+      let (valid, symbols) = cell_witness_captures(body)
+      return (valid && list.all(symbols, sym => list.contains(captures, sym)), symbols)
+    }
+    XCallFn(_, _, args, witnesses, ..) -> { required = witness_symbols(witnesses)
+      children = args }
+    XBlock(statements, tail, ..) -> {
+      for statement in statements { match statement {
+        TSLet(_, _, value, ..) | TSExpr(value, ..) | TSAssign(_, _, value, ..) -> { children = children ++ [value] }
+        _ -> ()
+      } }
+      match tail { Some(value) -> { children = children ++ [value] }, None -> () }
+    }
+    _ -> ()
+  }
+  var valid = true
+  for child in children { let (complete, symbols) = cell_witness_captures(child)
+    valid = valid && complete
+    required = required ++ symbols }
+  (valid, required)
+}
+
+test "staged calls retain runtime dictionaries of conditional cell witnesses" {
+  let source = "trait Closed[T] { fn code(value: T) -> Int }\n" ++
+    "type Marker[T] = { value: T }\ntype Cell[T] = { value: Marker[T] }\n" ++
+    "impl[T: Closed] StagedVar[Marker[T], ^{}] {\n" ++
+    "type Cell = Cell[T]\n" ++
+    "fn var_open(value: Marker[T]) -> Cell[T] = Cell { value = value }\n" ++
+    "fn var_get(cell: Cell[T]) -> Marker[T] = cell.value\n" ++
+    "fn var_set(cell: Cell[T], value: Marker[T]) -> Unit = ()\n}\n" ++
+    "type Cond = { n: Int }\nimpl StagedCond[Cond, ^{}] {\n" ++
+    "fn staged_if(cond: Cond, yes: fn() -> Unit ^{}, no: fn() -> Unit ^{}) -> Unit = yes()\n}\n" ++
+    "fn carried[T: Closed](value: Marker[T], condition: Cond) -> Int = {\n" ++
+    "let invoke = () => { var state = value\n" ++
+    "if condition { state = state } else { state = state }\n0\n}\ninvoke()\n}\n"
+  let (cx, module) = checked(source)
+  assert cx.diags == []
+  var tested = false
+  for function in module.fns { if function.name == "carried" {
+    let (complete, symbols) = cell_witness_captures(function.body)
+    assert len(symbols) > 0
+    assert complete
+    tested = true
+  } }
+  assert tested
+}

@@ -261,8 +261,8 @@ class PreflightTests(unittest.TestCase):
         # only when contracts-2 reached it.
         self.assert_registry_drift_is_red("tea-reconciler-contract", "walk-path-not-extended",
                                           "packages/tea-core/src/walk.dawn",
-                                          "go(ks[i], path ++ [i], acc, f)",
-                                          "go(ks[i], path ++ [i], acc,  f)")
+                                          "go(child, path ++ [i], acc, f, children)",
+                                          "go(child, path ++ [i], acc,  f, children)")
         self.assert_registry_drift_is_red("tea-reconciler-contract", "relate-ignores-the-key",
                                           "packages/tea-dom/src/node.dawn",
                                           "if t1 != t2 || k1 != k2 {", "if k1 != k2 || t1 != t2 {")

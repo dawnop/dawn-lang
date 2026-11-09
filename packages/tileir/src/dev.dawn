@@ -1005,14 +1005,14 @@ pub effect Dev {
 # `body` bracketed by the two call marks, under the public function's own
 # name. Only the public surface is wrapped: a private helper's operations
 # belong to the public call that reached it.
-fn called[T](name: String, at: Loc, body: fn() -> T !Dev) -> T !Dev = called_at(name, Some(at), body)
+fn called[T: ^{c}, ^c](name: String, at: Loc, body: fn() -> T !Dev ^{c}) -> T !Dev = called_at(name, Some(at), body)
 
 # `called` for an operation with no site of its own: what a trait method
 # reaches (an operator, a `var`, a bare float literal), which takes no
 # `caller()` default.
-fn called_bare[T](name: String, body: fn() -> T !Dev) -> T !Dev = called_at(name, None, body)
+fn called_bare[T: ^{c}, ^c](name: String, body: fn() -> T !Dev ^{c}) -> T !Dev = called_at(name, None, body)
 
-fn called_at[T](name: String, at: Option[Loc], body: fn() -> T !Dev) -> T !Dev = {
+fn called_at[T: ^{c}, ^c](name: String, at: Option[Loc], body: fn() -> T !Dev ^{c}) -> T !Dev = {
   t_call_enter(name, at)
   let r = body()
   t_call_exit()
@@ -1025,7 +1025,7 @@ fn called_at[T](name: String, at: Option[Loc], body: fn() -> T !Dev) -> T !Dev =
 # through this and through nothing else, so a handler can tell the two apart
 # (`prog.trace_calls` keeps the calls inside a body as children of the region
 # call).
-fn user_body[T](f: fn() -> T !Dev) -> T !Dev = {
+fn user_body[T: ^{c}, ^c](f: fn() -> T !Dev ^{c}) -> T !Dev = {
   t_body_enter()
   let r = f()
   t_body_exit()
@@ -2703,7 +2703,7 @@ fn set_rec[D](c: Carry[D], t: Tile[D]) -> Unit !Dev = {
 # The carries `body` sets, in the order they were made, found by a trial:
 # `region` opens and closes the region around the body with nothing
 # carried, and the recording is restored afterwards.
-fn trial(region: fn() -> Unit !Dev) -> List[Int] !Dev = {
+fn trial[^c](region: fn() -> Unit !Dev ^{c}) -> List[Int] !Dev = {
   t_trial_begin()
   region()
   t_trial_end()
@@ -2719,7 +2719,7 @@ fn carry_sets(cs: List[Int], hs: List[Int]) -> Unit !Dev = {
 
 # A `for` over the index range `[lower, upper)` by `step` carrying what
 # `body` sets (`trial`). Private: `d_range` is the spelling.
-fn loop_carrying(lower: Idx, upper: Idx, step: Idx, unsigned: Bool, body: fn(Idx) -> Unit !Dev) -> Unit !Dev = {
+fn loop_carrying[^c](lower: Idx, upper: Idx, step: Idx, unsigned: Bool, body: fn(Idx) -> Unit !Dev ^{c}) -> Unit !Dev = {
   let lo: Int = lower
   let up: Int = upper
   let st: Int = step
@@ -2794,10 +2794,10 @@ pub fn d_range[B: RangeBound](lower: B, upper: B, step: Step[B] = One, unsigned_
 ## What `d_range` answers: the range, not yet recorded, and where it was written.
 pub type DRange[B] = { lower: B, upper: B, step: Step[B], unsigned: Bool, at: Loc }
 
-impl[B: RangeBound] StagedIter[DRange[B]] {
+impl[B: RangeBound, ^c] StagedIter[DRange[B], c] {
   type Item = Idx
   effect StagedIter = !Dev
-  fn staged_for(r: DRange[B], body: fn(Idx) -> Unit !Dev) -> Unit !Dev = called("d_range", r.at, () => {
+  fn staged_for(r: DRange[B], body: fn(Idx) -> Unit !Dev ^{c}) -> Unit !Dev = called("d_range", r.at, () => {
     let lo = range_idx(r.lower)
     let up = range_idx(r.upper)
     let st = match r.step {
@@ -2810,7 +2810,7 @@ impl[B: RangeBound] StagedIter[DRange[B]] {
 
 ## A tile a `for` over a `d_range` carries, as `var`: `var acc = zeros(c)`
 ## and `acc = mma(.., acc)` in the body are `carry`, `get` and `set`.
-impl[D] StagedVar[Tile[D]] {
+impl[D] StagedVar[Tile[D], ^{}] {
   type Cell = Carry[D]
   effect StagedVar = !Dev
   fn var_open(v: Tile[D]) -> Carry[D] !Dev = called_bare("carry", () => carry_rec(v))
@@ -2818,9 +2818,9 @@ impl[D] StagedVar[Tile[D]] {
   fn var_set(c: Carry[D], v: Tile[D]) -> Unit !Dev = called_bare("set", () => set_rec(c, v))
 }
 
-impl[D: TileCondDtype] StagedCond[Tile[D]] {
+impl[D: TileCondDtype, ^c] StagedCond[Tile[D], c] {
   effect StagedCond = !Dev
-  fn staged_if(c: Tile[D], on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !Dev) -> Unit !Dev =
+  fn staged_if(c: Tile[D], on_true: fn() -> Unit !Dev ^{c}, on_false: fn() -> Unit !Dev ^{c}) -> Unit !Dev =
     called_bare("if", () => {
       let format: Dtype[D] = cond_dtype()
       let dt = dtype_name(format)
@@ -2834,7 +2834,7 @@ impl[D: TileCondDtype] StagedCond[Tile[D]] {
 ## Only the generated arms write it; reading before both arms merge fails.
 pub opaque type ResultSlot[D] = Int
 
-impl[D] StagedResult[Tile[D]] {
+impl[D] StagedResult[Tile[D], ^{}] {
   type Slot = ResultSlot[D]
   effect StagedResult = !Dev
   fn result_open() -> ResultSlot[D] !Dev = called_bare("result_open", () => {
@@ -3058,7 +3058,7 @@ impl FromInt[Idx] {
 ## `at` comes BEFORE `body`, the one place a defaulted parameter does: a
 ## trailing block (`d_loop { .. }`) fills the last parameter, so a `caller()`
 ## default after it would take the block.
-pub fn d_loop(at: Loc = caller(), body: fn() -> Tile[Bool] !Dev) -> Unit !Dev = called("d_loop", at, () => {
+pub fn d_loop[^c](at: Loc = caller(), body: fn() -> Tile[Bool] !Dev ^{c}) -> Unit !Dev = called("d_loop", at, () => {
   let none: List[Int] = []
   let cs = trial(() => {
     let _inside = t_while_begin(none)
@@ -3159,7 +3159,7 @@ fn axis_of(dim: Int, rank: Int) -> Int = if dim < 0 { rank + dim } else { dim }
 ## exact, or a tolerance, is. Integer addition modulo 2^32 is exactly
 ## associative and commutative, so an integer sum's answer does not depend
 ## on the order at all.
-pub fn d_reduce[D](t: Tile[D], identity: Float, body: fn(Tile[D], Tile[D]) -> Tile[D] !Dev,
+pub fn d_reduce[D, ^c](t: Tile[D], identity: Float, body: fn(Tile[D], Tile[D]) -> Tile[D] !Dev ^{c},
   dim: Int = -1, at: Loc = caller()) -> Tile[D] !Dev = called("d_reduce", at, () => {
     let h: Int = t
     let (dt, shape) = row_of(h)
@@ -3178,8 +3178,8 @@ pub fn d_reduce[D](t: Tile[D], identity: Float, body: fn(Tile[D], Tile[D]) -> Ti
 ## and the lane it came from must travel together through one fold. `body`
 ## takes the accumulator of each and then the element of each, and answers
 ## the new accumulator of each.
-pub fn d_reduce2[A](values: Tile[A], idxs: Tile[I32], value_identity: Float, index_identity: Int,
-  body: fn(Tile[A], Tile[I32], Tile[A], Tile[I32]) -> (Tile[A], Tile[I32]) !Dev,
+pub fn d_reduce2[A, ^c](values: Tile[A], idxs: Tile[I32], value_identity: Float, index_identity: Int,
+  body: fn(Tile[A], Tile[I32], Tile[A], Tile[I32]) -> (Tile[A], Tile[I32]) !Dev ^{c},
   dim: Int = -1, at: Loc = caller()) -> (Tile[A], Tile[I32]) !Dev = called("d_reduce2", at, () => {
     let hv: Int = values
     let hi: Int = idxs
@@ -3223,7 +3223,7 @@ pub fn d_reduce2[A](values: Tile[A], idxs: Tile[I32], value_identity: Float, ind
 ## need is COMMUTATIVITY: every element keeps its side of the accumulator,
 ## which is why a non-commutative body (an affine composition, "the last
 ## value that carried a flag") is legal here and is not under `reduce`.
-pub fn d_scan[D](t: Tile[D], identity: Float, body: fn(Tile[D], Tile[D]) -> Tile[D] !Dev,
+pub fn d_scan[D, ^c](t: Tile[D], identity: Float, body: fn(Tile[D], Tile[D]) -> Tile[D] !Dev ^{c},
   dim: Int = -1, reverse: Bool = false, at: Loc = caller()) -> Tile[D] !Dev = called("d_scan", at, () => {
     let h: Int = t
     let (dt, shape) = row_of(h)
@@ -3252,8 +3252,8 @@ pub fn d_scan[D](t: Tile[D], identity: Float, body: fn(Tile[D], Tile[D]) -> Tile
 ## sentence in the dialect's prose is the only thing that says otherwise
 ## and nothing enforces it, so this is recorded as a measurement and the
 ## kernels that need it name it.
-pub fn d_scan2[D](a: Tile[D], b: Tile[D], a_identity: Float, b_identity: Float,
-  body: fn(Tile[D], Tile[D], Tile[D], Tile[D]) -> (Tile[D], Tile[D]) !Dev,
+pub fn d_scan2[D, ^c](a: Tile[D], b: Tile[D], a_identity: Float, b_identity: Float,
+  body: fn(Tile[D], Tile[D], Tile[D], Tile[D]) -> (Tile[D], Tile[D]) !Dev ^{c},
   dim: Int = -1, reverse: Bool = false, at: Loc = caller()) -> (Tile[D], Tile[D]) !Dev = called("d_scan2", at, () => {
     let ha: Int = a
     let hb: Int = b
@@ -3286,13 +3286,13 @@ pub fn d_scan2[D](a: Tile[D], b: Tile[D], a_identity: Float, b_identity: Float,
 ## atomics and contain loops. The selected memory token is an if result;
 ## a branch that does not advance the chain yields the entry token. Pure
 ## branches retain their original result list without an extra token.
-pub fn d_if(cond: Tile[Bool], on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !Dev, at: Loc = caller()) -> Unit !Dev = called("d_if", at, () => {
+pub fn d_if[^c](cond: Tile[Bool], on_true: fn() -> Unit !Dev ^{c}, on_false: fn() -> Unit !Dev ^{c}, at: Loc = caller()) -> Unit !Dev = called("d_if", at, () => {
   let c: Int = cond
   if_rec(c, on_true, on_false)
 })
 
 # Both spellings use the same trials, carry order and region boundaries.
-fn result_trial(region: fn() -> Unit !Dev) -> (List[Int], List[Int]) !Dev = {
+fn result_trial[^c](region: fn() -> Unit !Dev ^{c}) -> (List[Int], List[Int]) !Dev = {
   t_trial_begin()
   region()
   let results = t_result_writes()
@@ -3300,7 +3300,7 @@ fn result_trial(region: fn() -> Unit !Dev) -> (List[Int], List[Int]) !Dev = {
   (cs, results)
 }
 
-fn if_rec(c: Int, on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !Dev) -> Unit !Dev = {
+fn if_rec[^c](c: Int, on_true: fn() -> Unit !Dev ^{c}, on_false: fn() -> Unit !Dev ^{c}) -> Unit !Dev = {
   let none: List[Int] = []
   # one trial per branch: each starts from what the carries held outside
   let (on_t, rt) = result_trial(() => {
@@ -3467,7 +3467,7 @@ pub fn blocks_of[D](p: Param[D], dim: Int, at: Loc = caller()) -> Idx !Dev = cal
 ## This is the only client of `t_tok_get` / `t_tok_set` / `t_tok_join`, and
 ## the only thing in this package that makes the token graph a graph. A
 ## body that just issues its stores in order gets the line it already had.
-pub fn d_fork2(a: fn() -> Unit !Dev, b: fn() -> Unit !Dev, at: Loc = caller()) -> Unit !Dev = called("d_fork2", at, () => {
+pub fn d_fork2[^c](a: fn() -> Unit !Dev ^{c}, b: fn() -> Unit !Dev ^{c}, at: Loc = caller()) -> Unit !Dev = called("d_fork2", at, () => {
   let start = t_tok_get()
   user_body(a)
   let after_a = t_tok_get()
@@ -4300,7 +4300,7 @@ fn int_greatest(dtype: String) -> Int = match dtype {
 # operations answered, and the typed surface passes position, dtype and
 # operation name through without touching them.
 
-fn under_counter[T](body: fn() -> T !Dev) -> T = {
+fn under_counter[T: ^{c}, ^c](body: fn() -> T !Dev ^{c}) -> T = {
   with handle Dev {
     var next: Int = 100
     var carries: List[Int] = []
@@ -4782,7 +4782,7 @@ fn row_in(rows: List[(Int, String, List[Int])], h: Int) -> (String, List[Int]) =
 # operand's format and shape back (`t_shape_of`); a handle answered twice
 # (every load is 1) has the row of the last answer. The reads are not
 # logged: they record nothing.
-fn logged(body: fn() -> Unit !Dev) -> List[String] = {
+fn logged[^c](body: fn() -> Unit !Dev ^{c}) -> List[String] = {
   with handle Dev {
     var log: List[String] = []
     var rows: List[(Int, String, List[Int])] = []

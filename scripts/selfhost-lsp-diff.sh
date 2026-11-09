@@ -168,13 +168,13 @@ type Span = { n: Int }
 
 fn span(n: Int) -> Span = Span { n = n }
 
-impl StagedIter[Span] {
+impl StagedIter[Span, ^{}] {
   type Item = Val
   effect StagedIter = !io
-  fn staged_for(r: Span, body: fn(Val) -> Unit !io) -> Unit !io = body(Val { name = "i" })
+  fn staged_for(r: Span, body: fn(Val) -> Unit !io ^{}) -> Unit !io = body(Val { name = "i" })
 }
 
-impl StagedVar[Val] {
+impl StagedVar[Val, ^{}] {
   type Cell = Slot
   effect StagedVar = !io
   fn var_open(v: Val) -> Slot !io = Slot { tag = v.name }
@@ -196,6 +196,10 @@ pub fn loops(xs: List[Int]) -> Unit !io = {
   }
 }
 EOF
+
+# This is a valid range-hover fixture, so a protocol header refusal must not
+# silently turn the staged-body queries into recovery-only coverage.
+DAWN_STD="${DAWN_STD:-$ROOT/std}" "$SELF" check "$OUT/proj/src/ranges.dawn"
 
 # A std opaque type written in a signature: hover names it, and definition
 # names the declaration's own name in std's file (#589).

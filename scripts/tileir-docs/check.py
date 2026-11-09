@@ -135,7 +135,7 @@ def check_operations(table_text, dev_text, prog_text, features_text):
     # through top-level function exports. Each still owes one operation row.
     blocks = re.findall(
         r"^impl[^\n]*\b(?:BitAnd|BitOr|BitXor|BitNot|Shl|Shr|Ushr|StagedCond|StagedResult)"
-        r"\[Tile\[\w+\]\]\s*\{(.*?)^\}", dev_text, re.M | re.S)
+        r"\[Tile\[\w+\](?:,\s*[^\n\]]+)?\]\s*\{(.*?)^\}", dev_text, re.M | re.S)
     operators = [method for block in blocks for method in re.findall(r"^  fn (\w+)\(", block, re.M)]
     surface = set(dev) | set(prog) | set(operators)
     both = sorted(set(dev) & set(prog))

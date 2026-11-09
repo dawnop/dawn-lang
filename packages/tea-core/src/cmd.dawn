@@ -173,21 +173,22 @@ fn drain[Mo, M](
   asked: List[FetchReq],
   step: fn(Mo, M) -> (Mo, Cmd[M]) !e,
 ) -> (Mo, List[FetchReq]) !e =
-  if i >= len(q) {
-    (m, asked)
-  } else {
-    let (next, c) = step(m, q[i])
-    let more = msgs(c)
-    let wanted = fetches(c)
-    let now = spent + len(more) + len(wanted)
-    if now > CMD_FOLD_LIMIT {
-      panic(
-        "tea_core/cmd: a turn's commands asked for more than "
-          ++ to_string(CMD_FOLD_LIMIT)
-          ++ " messages",
-      )
-    } else {
-      drain(next, q ++ more, i + 1, now, asked ++ wanted, step)
+  match get(q, i) {
+    None -> (m, asked)
+    Some(message) -> {
+      let (next, c) = step(m, message)
+      let more = msgs(c)
+      let wanted = fetches(c)
+      let now = spent + list.fold(more, 0, (count, _message) => count + 1) + len(wanted)
+      if now > CMD_FOLD_LIMIT {
+        panic(
+          "tea_core/cmd: a turn's commands asked for more than "
+            ++ to_string(CMD_FOLD_LIMIT)
+            ++ " messages",
+        )
+      } else {
+        drain(next, q ++ more, i + 1, now, asked ++ wanted, step)
+      }
     }
   }
 

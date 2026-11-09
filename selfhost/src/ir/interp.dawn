@@ -392,6 +392,9 @@ pub type ConstScope = {
 ## std's bodies stay in their own tables (`by_owner`, `std_fns`), so only
 ## their scopes and constants are here.
 pub type CtWorld = {
+  # Compiler-owned dispatch declarations are immutable for this compilation.
+  # Instantiated calls, lexical owners and user constants remain separate.
+  intrs: Map[String, Intr],
   # owner → direct functions, as `by_owner` holds std's
   owners: Map[String, Map[String, TFun]],
   # impl methods and trait defaults, by the identity Core names them with
@@ -415,7 +418,7 @@ pub fn ct_world_empty() -> CtWorld = {
   let no_scopes: Map[String, ConstScope] = map.empty()
   let no_consts: Map[String, Map[String, ConstValue]] = map.empty()
   let no_sigs: Map[(String, String), Sig] = map.empty()
-  CtWorld { owners = no_owners, impl_fns = no_impls(), sigs = no_sigs, syms = no_syms,
+  CtWorld { intrs = intrinsics(), owners = no_owners, impl_fns = no_impls(), sigs = no_sigs, syms = no_syms,
     scopes = no_scopes, consts = no_consts, payload = 0 }
 }
 
@@ -3419,7 +3422,7 @@ fn module_icx(
     limits = opts,
     pending = set.empty(),
     folding = "",
-    intrs = intrinsics()
+    intrs = world.intrs
   }
 }
 
@@ -3588,6 +3591,7 @@ fn first_line(s: String) -> String =
 ## and no probe gets far enough to look.
 fn probe_icx() -> ICx = {
   let cx = cx_new(None, None)
+  let world = ct_world_empty()
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
   let no_owner_of: Map[String, String] = map.empty()
@@ -3608,14 +3612,14 @@ fn probe_icx() -> ICx = {
     prog_fns = map.empty(),
     impl_fns = no_impls(),
     syms = no_syms,
-    world = ct_world_empty(),
+    world = world,
     scope = alone("probe"),
     body = "probe",
     max_depth = MAX_CALL_DEPTH,
     limits = ct_default(),
     pending = set.empty(),
     folding = "",
-    intrs = intrinsics()
+    intrs = world.intrs
   }
 }
 

@@ -40,13 +40,13 @@ store_cell(o, acc / l)
 ### D1 语言只认两个 prelude trait，格子类型由值的类型选
 
 ```dawn
-trait StagedIter[R] {
-  type Item
+trait StagedIter[R: ^{c}, ^c] {
+  type Item: ^{c}
   effect StagedIter = !()
-  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter) -> Unit !R.StagedIter
+  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter ^{c}) -> Unit !R.StagedIter
 }
-trait StagedVar[T] {
-  type Cell
+trait StagedVar[T: ^{c}, ^c] {
+  type Cell: ^{c}
   effect StagedVar = !()
   fn var_open(v: T) -> T.Cell !T.StagedVar
   fn var_get(c: T.Cell) -> T !T.StagedVar
@@ -97,12 +97,16 @@ prelude 内部移动，不改任何程序的 id）。两者 `injects: false`，�
 - 嵌套 staged 循环：内层提到外层 staged 体之外的 `var` 时复用外层格子（穿过，不另开）；外层体内声明的 `var` 由内层自己开。
 - 外层 `let` 不是格子，照 §4.5 按值捕获。
 
-**收集方式（偏离设计稿，见 §3 偏离 A）**：不在检查体之前用 `name_refs` 预先遍历，而是在唯一一遍检查体的过程中惰性收集。
+Cells are collected lazily by ordinary name resolution rather than a separate
+`name_refs` walk. The Item application and the actual body environment form one
+finite obligation problem. Each tentative application checks from the same immutable
+entry context. Only the stable body's diagnostics and generated nodes are retained;
+provisional symbols and diagnostics do not accumulate across iterations.
 
 否决的替代：
 - **只收被赋值的**，只读的按值捕获：`staged_for` 的体交给用户 impl，可能被留存后调用；这正是 §4.10 `with` 糖区拒读 `var` 的理由。
 - **同名即算（不看遮蔽）**：对被体内 `let` 遮蔽的外层 `var` 误报。
-- **两遍检查（先试查体，记录哪些 `var` 被写）**：诊断重复、检查状态要回滚。
+- A separate pass that discovers only writes would omit read-only cells. Application fixed point checks instead retain ordinary lexical resolution and restart from the same entry context.
 
 ### D4 体内的名字仍解析到原 `var` 的符号
 
@@ -141,12 +145,13 @@ prelude 内部移动，不改任何程序的 id）。两者 `injects: false`，�
 
 ## 3. 实现中对设计稿的偏离（已获批准）
 
-**偏离 A：格子集合惰性收集，不预先跑 `name_refs`。** 设计稿 D3 说遍历复用 `checker.name_refs` 并补赋值目标名。实测 `name_refs`
-是调用图的过近似：`x.f()` 会把方法名 `f` 记成一个引用（它要服务 UFCS 排序，宁多勿漏）。拿它做格子集合，外层恰好有个
-`var f` 时就会多开一个没用到的格子，若其类型没有 `StagedVar` 还会多报一条错误。改成在唯一一遍检查体时，由 `resolve_local`
-在名字首次跨过 staged 帧时铸格子（`resolve_staged`/`mint_staged_cell`），体检查完后按声明序排出要打开的那些
-（`staged_opens`）。作用域规则、读写都算、体内自声明不算、声明序这四条语义与 D3/D5 完全相同；精度更高，且不需要第二套作用域遍历。
-风险是首次提及序可能漏进携带序，对策是排序放在体检查之后、只看 `dlo`，并有专门的测试（§6 第 1 条）与变异负控（M1）。
+**A: collect cells through ordinary lexical name resolution.** `name_refs` is a
+call graph approximation and includes method names, so it can invent a cell for an
+unrelated outer variable with the same spelling. `resolve_local` creates a cell only
+when the symbol crosses a staged frame. After the application reaches its fixed
+point, `staged_opens` orders the retained cells by the original declaration position.
+Read-only cells, shadowing, locally declared variables and nested staged frames keep
+the same rules. Tests separately protect declaration order and application stability.
 
 **偏离 B：格子有自己的局部符号，但共享原 `var` 的声明位置。** D2 的 `let x$ = var_open(x)` 本身就需要一个局部符号承载格子，
 lowering 读的是它。体内的名字照 D4 解析到原 `var`；格子符号的 `name` 与原 `var` 相同，`dlo`/`dhi` 拷贝原 `var` 的声明位置，
@@ -178,7 +183,7 @@ lowering 读的是它。体内的名字照 D4 解析到原 `var`；格子符号�
   宿主 `Int` 的 `var` 只在首次提及处报一次。
 - `scripts/spike-native/staged_for.dawn` 两后端对拍（JVM、C、ASan）：`Span` 是记录式迭代器（体只跑一次、格子的开/写打成转写），
   `Times` 是宿主上跑 n 遍的迭代器、格子放在 handler 状态里（`fib(10)` 得 55）；`Num` 同时实现两个 trait，在同一个循环里既被迭代又被携带（`both` 得 75）；含嵌套 staged、staged 里套宿主 `for`、
-  宿主 `for` 里套 staged、只读 `var`、遮蔽、泛型 `[R: StagedIter]`。
+  Host loops may contain staged loops; tests also cover read-only cells, shadowing and `[R: StagedIter[^{}]]`.
 - `scripts/checker-corpus/cases/staged_for.dawn`：D6 每条文案逐字。
 - LSP（`lsp/server.dawn`）：体内读、写、循环后读的引用是同一组，悬停 `var acc: V`，定义落点与普通读相同，循环变量是绑定。
 
@@ -194,12 +199,14 @@ lowering 读的是它。体内的名字照 D4 解析到原 `var`；格子符号�
 
 ## 7. 一致性之外的开放问题
 
-0. **泛型携带受 D6 限制**：`fn f[T: StagedIter + StagedVar](t: T) { var acc = t; for i in t { acc = .. } }` 被拒。
-   体要付 `T.StagedVar`，迭代器的行只声明 `T.StagedIter`，两个不同的投影互不包含（corpus 用例 `generic_carry`）。
-   具体类型（tileir 的 `!Dev` 两边相同）不受影响。要放开，得让 `staged_for` 的体行多带一个效果变量，或者允许 impl 声明
-   两者等同，留待有真实泛型 kernel 时再议。
+0. **Generic carrying remains subject to D6**: `fn f[T: StagedIter[^{}] + StagedVar[^{}]](t: T) { var acc = t; for i in t { acc = .. } }` is rejected.
+   The body requires `T.StagedVar`, while the iterator declares only `T.StagedIter`;
+   distinct projections do not subsume each other (corpus case `generic_carry`).
+   Concrete tileir types use the same `!Dev` row for both and are unaffected.
+   A more general body row needs a separate effect parameter or a declared equality
+   between these projections, to be considered when an actual generic kernel needs it.
 
-1. `lit` 初值：`StagedVar[Tile[D]]` 的 `var_open` 走 `carry`，拒无格式初值；第一刀初值写 `f_const`，等 GPU 格式标签调研再定。
+1. A `lit` initializer reaches `carry` through `StagedVar[Tile[D], ^{}].var_open` and needs a format. Use `f_const` until format tag inference is settled.
 2. `d_for` 名字是否作为 `d_span` 的别名保留：**已决（tileir 0.11 S2）**：不保留，`d_for` 删除，`d_range` 一个名字（见 tileir-011-design §2.1）。
 3. 悬停是否追加「carried by the staged loop」一行。
 

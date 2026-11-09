@@ -42,7 +42,7 @@ use check/types.{ty_scope_refs, eff_scopes, eff_vars, mem_runner_sig, ScopedEffe
   sig_render, subst, assoc_effect_advice,
   reduce_via_bindings, ty_named, builtin_type_at, builtin_type_name_reserved,
   hard_reserved_builtin_type_name, peel_opaque,
-  prelude_impls, prelude_trait_ids, fn_max_params, ctl_max_op_params,
+  prelude_trait_ids, fn_max_params, ctl_max_op_params,
   prelude_trait_names, is_prelude_trait_name, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, opaque_inherits, eq_scalars, hash_scalars, ord_scalars, Head, head_of, impl_at,
   derivable_traits, derivable_named, derivable_names, adt_derives,
@@ -53,7 +53,7 @@ use check/identity
 use check/identity.{TypeDecl, TraitDecl, EffectDecl, FunctionDecl, ConstDecl, MethodDecl, Named, ImplHead,
   PathTable, path_table, path_table_add, path_table_get, path_table_claim, path_text }
 use check/cx.{with_capture_premises,
-  resolve_capture, resolve_trait_application, resolve_named_effect, declare_capture_params, bind_capture_params,
+  resolve_capture, resolve_trait_application, resolve_named_effect, declare_capture_params, bind_computation_params,
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
   package_of, exports_seen_by, pkg_private, pkg_private_err, private_name_err,
   cerr_h, cerr_o, fresh, fresh_effvar, mint, enter_decl_owner, leave_decl_owner,
@@ -532,7 +532,7 @@ pub(pkg) fn seed_prelude(cx: Cx) -> Cx = {
   }
   # prelude impls over the native scalars
   var it = cx1.impl_table
-  for i in prelude_impls() { it = insert_impl(it, i) }
+  for i in cx.prelude.impls { it = insert_impl(it, i) }
   var cx2 = Cx {
     ..cx1,
     adts_by_name = abn,
@@ -1524,7 +1524,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
     let saved_capture = cx1.current_capture_params
     let saved_types = cx1.current_tparams
     let tv_scope = map.insert(map.empty(), d.tp, tvar)
-    let (scoped, scope_params) = bind_capture_params(Cx { ..cx1,
+    let (scoped, scope_params) = bind_computation_params(Cx { ..cx1,
       current_tparams = tv_scope, current_capture_params = capture.empty_params() }, d.scope)
     cx1 = scoped
     var assoc_bounds: List[(String, capture.Capture)] = []
@@ -1727,7 +1727,7 @@ test "trait registration puts methods in the fn namespace" {
   assert len(tr.methods) == 1
   let s = map.get(cx.fns, "eq2").expect("in fn namespace")
   assert s.trait_id == Some(tid)
-  assert sig_render(cx.adts, cx.traits, s) == "fn eq2[T: Eq2](a: T, b: T) -> Bool"
+  assert sig_render(cx.adts, cx.traits, s) == "fn eq2[T: Eq2 + ^{}](a: T, b: T) -> Bool"
   # a second trait with the same method name collides
   let m2 = Module { decls = [DTrait("Eq3", "T", 10, 11, [TraitMethod {
     name = "eq2",
@@ -1822,12 +1822,12 @@ pub(pkg) fn head_owner(h: Head) -> Option[String] =
     HList -> Some("std/list")
     HMap -> Some("std/map")
     HSet -> Some("std/set")
-    # claimed for the same reason (#44 knife 2): `impl Iter[String]` lives in
-    # std/str and `impl Iter[Bytes]` in std/bytes, and these two lines are
+    # claimed for the same reason (#44 knife 2): `impl Iter[String, ^{}]` lives in
+    # std/str and `impl Iter[Bytes, ^{}]` in std/bytes, and these two lines are
     # what makes each legal rather than an orphan
     HString -> Some("std/str")
     HBytes -> Some("std/bytes")
-    # `impl Len[I64Buf]` lives in std/mem, next to the buffer operations
+    # `impl Len[I64Buf, ^{}]` lives in std/mem, next to the buffer operations
     HI64Buf -> Some("std/mem")
     HF64Buf -> Some("std/mem")
     _ -> None
@@ -1900,7 +1900,7 @@ pub(pkg) fn pass_register_impls(
     }
     let empty_ev: Map[String, Eff] = map.empty()
     cx1 = Cx { ..cx1, current_tparams = tp_scope, current_eff_vars = empty_ev, current_capture_params = capture.empty_params() }
-    let (scoped_cx, scope_params) = bind_capture_params(cx1, d.scope)
+    let (scoped_cx, scope_params) = bind_computation_params(cx1, d.scope)
     cx1 = scoped_cx
     let (cxbnd, iconstraints) = resolve_bounds(cx1, d.tparams)
     cx1 = cxbnd
@@ -2759,7 +2759,7 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = 
       ev_scope = map.insert(ev_scope, ep.name, v)
     }
     cx1 = Cx { ..cx1, current_tparams = tp_scope, current_eff_vars = ev_scope, current_capture_params = capture.empty_params() }
-    let (scoped_cx, scope_params) = bind_capture_params(cx1, d.scope)
+    let (scoped_cx, scope_params) = bind_computation_params(cx1, d.scope)
     cx1 = scoped_cx
     # bounds resolve before the parameter types, so a `T.Item` in one can
     # find its trait (assoc-types-design.md D2)
@@ -2932,7 +2932,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
   let (cx1, sigs) = pass_fn_signatures(cx, m)
   assert len(cx1.diags) == 0
   assert sigs.paths == [path_text([Named(FunctionDecl, "f")]), path_text([Named(FunctionDecl, "g")])]
-  assert sig_render(cx1.adts, cx1.traits, fn_header(sigs, "f")) == "fn f[T: Ord](x: T) -> T"
+  assert sig_render(cx1.adts, cx1.traits, fn_header(sigs, "f")) == "fn f[T: Ord + ^{}](x: T) -> T"
   assert fn_header(sigs, "g").inferring
   assert fn_header(sigs, "g").eff == EIo
   assert map.get(cx1.fns, "g") == Some(fn_header(sigs, "g"))

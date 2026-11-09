@@ -101,7 +101,7 @@
 # ---- observation and immutable snapshots: compiler-owned std/provenance entries ----
 
 # The named std declarations, not a user's text spelling, select these.
-fn provenance_observe[T, !e](body: fn(Int) -> T !e) -> T !(e | io) # comptime: rejected
+fn provenance_observe[T: ^{}, !e](body: fn(Int) -> T !e) -> T !(e | io) # comptime: rejected
 fn provenance_note(scope: Int, origin: String) -> Unit !io # comptime: rejected
 fn provenance_completed(scope: Int) -> String !io # comptime: rejected
 fn provenance_checkpoint(scope: Int) -> String !io # comptime: rejected
@@ -138,15 +138,15 @@ pub fn catch_fault[T: ^{c}, ^c, !e](f: fn() -> T !e ^{c}) -> Result[T, ForeignEr
 pub fn catch_panic[T: ^{c}, ^c, !e](f: fn() -> T !e ^{c}) -> Result[T, ForeignError] !e # comptime: rejected
 
 ## abandon the computation a continuation would have resumed, running every bracket release inside it; the one-shot ticket is spent, so resuming afterwards panics
-pub fn discard[T, U, !e](k: fn(T) -> U !e) -> Unit !e # comptime: rejected
+pub fn discard[T: ^{}, U: ^{}, !e](k: fn(T) -> U !e) -> Unit !e # comptime: rejected
 
 # ---- option -- the two the prelude type is worth having ----
 
 ## unwrap a Some or panic with a message
-pub fn expect[T](o: Option[T], msg: String, at: Loc = caller()) -> T
+pub fn expect[T: ^{c}, ^c](o: Option[T], msg: String, at: Loc = caller()) -> T
 
 ## the Some value, or a fallback for None
-pub fn unwrap_or[T](o: Option[T], fallback: T) -> T
+pub fn unwrap_or[T: ^{c}, ^c](o: Option[T], fallback: T) -> T
 
 # ---- conversion -- between the scalars, and out to text ----
 
@@ -157,7 +157,7 @@ pub fn to_float(n: Int) -> Float
 pub fn to_int(x: Float) -> Int
 
 ## render any printable value (numbers, strings, derive Show data)
-pub fn to_string[T: Show](x: T) -> String
+pub fn to_string[T: Show + ^{}](x: T) -> String
 
 # ---- debugging -- the one pure entry that writes ----
 #
@@ -166,7 +166,7 @@ pub fn to_string[T: Show](x: T) -> String
 # refuses it in std and in a `[deps]` package, and refuses it as a value.
 
 ## write `[path:line:col] <argument text> = <show>` to stderr and hand the argument back
-pub fn dbg[T: Show](x: T) -> T
+pub fn dbg[T: Show + ^{}](x: T) -> T
 
 # ---- list -- what the language needs before std exists ----
 #
@@ -180,16 +180,16 @@ pub fn dbg[T: Show](x: T) -> T
 # List, into the one `len` primitive.
 
 ## number of elements; the body of std/list's `impl Len[List[T]]`
-fn list_len[T](xs: List[T]) -> Int
+fn list_len[T: ^{c}, ^c](xs: List[T]) -> Int
 
 ## element at an index; None when out of bounds
-pub fn get[T](xs: List[T], i: Int) -> Option[T]
+pub fn get[T: ^{c}, ^c](xs: List[T], i: Int) -> Option[T]
 
 ## the integers from..to (exclusive)
 pub fn range(from: Int, to: Int) -> List[Int]
 
 ## stable sort with a two-argument cmp function
-pub fn sort_by[T, !e](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e
+pub fn sort_by[T: ^{c}, ^c, !e](xs: List[T], cmp: fn(T, T) -> Int !e ^{c}) -> List[T] !e
 
 # ---- string -- text in, numbers out ----
 #
@@ -391,60 +391,60 @@ fn f64buf_unpack[@s](b: Bytes, width: Int, little: Bool) -> F64Buf@s # comptime:
 # it is `call_named` refusing std/hamt's Core.
 
 ## the empty map
-fn map_empty[K, V]() -> Map[K, V] # comptime: rejected
+fn map_empty[K: ^{c}, V: ^{c}, ^c]() -> Map[K, V] # comptime: rejected
 
 ## a map built from a list of key-value pairs
-fn map_from[K: Eq + Hash, V](entries: List[(K, V)]) -> Map[K, V] # comptime: rejected
+fn map_from[K: Eq + Hash + ^{c}, V: ^{c}, ^c](entries: List[(K, V)]) -> Map[K, V] # comptime: rejected
 
 ## the map with one key bound, replacing whatever it was bound to
-fn map_insert[K: Eq + Hash, V](m: Map[K, V], key: K, value: V) -> Map[K, V] # comptime: rejected
+fn map_insert[K: Eq + Hash + ^{c}, V: ^{c}, ^c](m: Map[K, V], key: K, value: V) -> Map[K, V] # comptime: rejected
 
 ## the map without one key
-fn map_remove[K: Eq + Hash, V](m: Map[K, V], key: K) -> Map[K, V] # comptime: rejected
+fn map_remove[K: Eq + Hash + ^{c}, V: ^{c}, ^c](m: Map[K, V], key: K) -> Map[K, V] # comptime: rejected
 
 ## what a key is bound to, if anything
-fn map_get[K: Eq + Hash, V](m: Map[K, V], key: K) -> Option[V] # comptime: rejected
+fn map_get[K: Eq + Hash + ^{c}, V: ^{c}, ^c](m: Map[K, V], key: K) -> Option[V] # comptime: rejected
 
 ## whether a key is bound
-fn map_has[K: Eq + Hash, V](m: Map[K, V], key: K) -> Bool # comptime: rejected
+fn map_has[K: Eq + Hash + ^{c}, V: ^{c}, ^c](m: Map[K, V], key: K) -> Bool # comptime: rejected
 
 ## number of bindings
-fn map_size[K, V](m: Map[K, V]) -> Int # comptime: rejected
+fn map_size[K: ^{c}, V: ^{c}, ^c](m: Map[K, V]) -> Int # comptime: rejected
 
 ## the bound keys
-fn map_keys[K, V](m: Map[K, V]) -> List[K] # comptime: rejected
+fn map_keys[K: ^{c}, V: ^{c}, ^c](m: Map[K, V]) -> List[K] # comptime: rejected
 
 ## what the keys are bound to
-fn map_values[K, V](m: Map[K, V]) -> List[V] # comptime: rejected
+fn map_values[K: ^{c}, V: ^{c}, ^c](m: Map[K, V]) -> List[V] # comptime: rejected
 
 ## the bindings, as key-value pairs
-fn map_entries[K, V](m: Map[K, V]) -> List[(K, V)] # comptime: rejected
+fn map_entries[K: ^{c}, V: ^{c}, ^c](m: Map[K, V]) -> List[(K, V)] # comptime: rejected
 
 ## reduce over the bindings with an accumulator
-fn map_fold[K, V, A, !e](m: Map[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e # comptime: rejected
+fn map_fold[K: ^{c}, V: ^{c}, A: ^{c}, ^c, !e](m: Map[K, V], init: A, f: fn(A, K, V) -> A !e ^{c}) -> A !e # comptime: rejected
 
 # ---- set -- the same trie, keyed on its elements ----
 
 ## the empty set
-fn set_empty[T]() -> Set[T] # comptime: rejected
+fn set_empty[T: ^{c}, ^c]() -> Set[T] # comptime: rejected
 
 ## a set of a list's elements
-fn set_from[T: Eq + Hash](xs: List[T]) -> Set[T] # comptime: rejected
+fn set_from[T: Eq + Hash + ^{c}, ^c](xs: List[T]) -> Set[T] # comptime: rejected
 
 ## the set with one element added
-fn set_insert[T: Eq + Hash](s: Set[T], x: T) -> Set[T] # comptime: rejected
+fn set_insert[T: Eq + Hash + ^{c}, ^c](s: Set[T], x: T) -> Set[T] # comptime: rejected
 
 ## the set without one element
-fn set_remove[T: Eq + Hash](s: Set[T], x: T) -> Set[T] # comptime: rejected
+fn set_remove[T: Eq + Hash + ^{c}, ^c](s: Set[T], x: T) -> Set[T] # comptime: rejected
 
 ## whether an element is in the set
-fn set_has[T: Eq + Hash](s: Set[T], x: T) -> Bool # comptime: rejected
+fn set_has[T: Eq + Hash + ^{c}, ^c](s: Set[T], x: T) -> Bool # comptime: rejected
 
 ## number of elements
-fn set_size[T](s: Set[T]) -> Int # comptime: rejected
+fn set_size[T: ^{c}, ^c](s: Set[T]) -> Int # comptime: rejected
 
 ## the elements, as a list
-fn set_to_list[T](s: Set[T]) -> List[T] # comptime: rejected
+fn set_to_list[T: ^{c}, ^c](s: Set[T]) -> List[T] # comptime: rejected
 
 # ---- array -- the one collection primitive a backend implements ----
 #
@@ -453,34 +453,34 @@ fn set_to_list[T](s: Set[T]) -> List[T] # comptime: rejected
 # it is the HAMT's bitmap operation and nothing else uses it.
 
 ## a new empty array
-fn array_new[T]() -> Array[T]
+fn array_new[T: ^{c}, ^c]() -> Array[T]
 
 ## number of slots
-fn array_len[T](a: Array[T]) -> Int
+fn array_len[T: ^{c}, ^c](a: Array[T]) -> Int
 
 ## the element in a slot
-fn array_get[T](a: Array[T], i: Int) -> T
+fn array_get[T: ^{c}, ^c](a: Array[T], i: Int) -> T
 
 ## the array with one element appended
-fn array_push[T](a: Array[T], x: T) -> Array[T]
+fn array_push[T: ^{c}, ^c](a: Array[T], x: T) -> Array[T]
 
 ## the array with one slot overwritten; the array goes in owned, so a unique one is written in place
-fn array_with[T](a: Array[T], i: Int, x: T) -> Array[T] # owned: 0, 2
+fn array_with[T: ^{c}, ^c](a: Array[T], i: Int, x: T) -> Array[T] # owned: 0, 2
 
 ## array_get for a caller about to overwrite the slot: a unique array transfers the slot's own reference out
-fn array_steal[T](a: Array[T], i: Int) -> T
+fn array_steal[T: ^{c}, ^c](a: Array[T], i: Int) -> T
 
 ## the array followed by every element of another; extends in place when the array ends where its store's used region ends
-fn array_extend[T](a: Array[T], b: Array[T]) -> Array[T]
+fn array_extend[T: ^{c}, ^c](a: Array[T], b: Array[T]) -> Array[T]
 
 ## the elements in [from, to) as a new array; panics when the range is not inside [0, len] or from > to
-fn array_slice[T](a: Array[T], from: Int, to: Int) -> Array[T]
+fn array_slice[T: ^{c}, ^c](a: Array[T], from: Int, to: Int) -> Array[T]
 
 ## every element of a list, in order, as one flat array
-fn list_to_array[T](xs: List[T]) -> Array[T]
+fn list_to_array[T: ^{c}, ^c](xs: List[T]) -> Array[T]
 
 ## a list holding every element of an array, in order
-fn array_to_list[T](a: Array[T]) -> List[T]
+fn array_to_list[T: ^{c}, ^c](a: Array[T]) -> List[T]
 
 ## the number of set bits in an Int
 fn popcount(n: Int) -> Int # comptime: rejected
@@ -515,10 +515,10 @@ fn io_read_line() -> Option[String] !io # comptime: rejected
 fn reactor_state_has() -> Bool !io # comptime: rejected
 
 ## the installed reactor root, erased behind std/reactor's one private type
-fn reactor_state_get[T]() -> T !io # comptime: rejected
+fn reactor_state_get[T: ^{}]() -> T !io # comptime: rejected
 
 ## replace the installed reactor root
-fn reactor_state_set[T](state: T) -> Unit !io # comptime: rejected
+fn reactor_state_set[T: ^{}](state: T) -> Unit !io # comptime: rejected
 
 ## the CUDA driver primitives std/gpu's production handler writes over; each
 ## answers Result itself, a driver failure being a ForeignError of kind cuda.<CUresult>
@@ -647,4 +647,4 @@ fn io_run(argv: List[String], out_path: String, err_path: String) -> Int !io # c
 # ---- interop -- the one escape from the type system ----
 
 ## reclaim an erased Java Object as a concrete reference type T, taken from the expected type at the call site (interop escape; a runtime CHECKCAST guards it, and a miss is an Err rather than a throw)
-pub fn cast[T](x: java.lang.Object) -> Result[T, ForeignError] # comptime: rejected
+pub fn cast[T: ^{}](x: java.lang.Object) -> Result[T, ForeignError] # comptime: rejected

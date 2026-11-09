@@ -62,8 +62,8 @@ trap cleanup EXIT
 # One caution about reading a red command as an attribution: `dawn test` on
 # the oracle project also runs `tea_core/diff`'s own blocks, since it depends
 # on the package. So that command going red says the mutant was seen, not that
-# the 484 pairs saw it. Measured over all 30 mutants here, the oracle command
-# reds for 26 and the inline suites red for all 30.
+# the 484 pairs saw it. Measured over all 32 mutants here, the oracle command
+# reds for 26 and the inline suites red for all 32.
 #
 # Ordered so that a mutant the terminal already sees still costs one run.
 check() {
@@ -119,6 +119,8 @@ mutants=(
   # list that fell back to indices pairs two different elements as one.
   relate-ignores-the-key
   key-is-not-carried-through-rekid
+  wire-projection-drops-key
+  wire-projection-erases-event
 )
 
 # The list and the registry are one set in one order, so a mutant cannot be

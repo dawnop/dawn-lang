@@ -1,0 +1,32 @@
+# Both arms contribute to one application independently of source order.
+use std/mem
+type Cond = { n: Int }
+impl[^c] StagedCond[Cond, c] {
+  fn staged_if(cond: Cond, yes: fn() -> Unit ^{c}, no: fn() -> Unit ^{c}) -> Unit =
+    if cond.n > 0 { yes() } else { no() }
+}
+fn visit[@s,@t](left: I64Buf@s, right: I64Buf@t) -> Int = {
+  let first = Cond { n = 1 }
+  if first {
+    if len(left) != 3 { panic("left") }
+  } else {
+    if len(right) != 2 { panic("right") }
+  }
+  let second = Cond { n = 0 }
+  if second {
+    if len(right) != 2 { panic("right") }
+  } else {
+    if len(left) != 3 { panic("left") }
+  }
+  13
+}
+pub fn main() -> Unit !io = {
+  let answer = mem.with_mem([@s] () => {
+    let left = mem.new(3)
+    mem.with_mem([@t] () => {
+      let right = mem.new(2)
+      visit(left, right)
+    })
+  })
+  println(to_string(answer))
+}

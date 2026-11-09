@@ -106,6 +106,19 @@ const EMPTY_PARAMS: Params = Params { quantification = Computational,
   scopes = [], captures = [], bounds = [], fn_effects = [], support_facts = [] }
 pub fn empty_params() -> Params = EMPTY_PARAMS
 
+## Value defaults depend on quantification duty. Representation parameters
+## and their generated introduction rules retain their parent's contract.
+pub fn computation(p: Params, types: List[Int]) -> Params = {
+  if len(types) == 0 || p.quantification != Computational { return p }
+  let zero: Capture = []
+  var bounds = p.bounds
+  for id in types {
+    if not list.any(bounds, entry => { let (vid, _) = entry
+      vid == id }) { bounds = bounds ++ [(id, zero)] }
+  }
+  Params { ..p, bounds = bounds }
+}
+
 pub fn data_params(p: Params, types: List[Int]) -> Params =
   Params { ..p, quantification = DataRepresentation(types) }
 
@@ -135,6 +148,7 @@ pub fn same_scope(a: Scope, b: Scope) -> Bool = a.id == b.id
 pub fn contains(c: Capture, m: Member) -> Bool = list.any(c, x => key(x) == key(m))
 
 pub fn normalize(c: Capture) -> Capture = {
+  if len(c) <= 1 { return c }
   var out: Capture = []
   for m in c { if not contains(out, m) { out = out ++ [m] } }
   sort_by(out, (a, b) => {

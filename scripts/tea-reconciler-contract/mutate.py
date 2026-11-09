@@ -85,21 +85,21 @@ MUTATIONS = {
     # The walk, which routing is written on.
     "walk-visits-children-first": ((
         WALK,
-        'kids_go(kids(w), path, 0, f(acc, w, path), f)',
-        'f(kids_go(kids(w), path, 0, acc, f), w, path)',
+        'kids_go(children(w), path, 0, f(acc, w, path), f, children)',
+        'f(kids_go(children(w), path, 0, acc, f, children), w, path)',
     ),),
     "walk-path-not-extended": ((
         WALK,
-        'go(ks[i], path ++ [i], acc, f)',
-        'go(ks[i], path, acc, f)',
+        'go(child, path ++ [i], acc, f, children)',
+        'go(child, path, acc, f, children)',
     ),),
 
     # The vocabulary's side of the contract. Core is only ever as right as the
     # three functions it delegates to, so they get mutants of their own.
     "kids-drops-the-styled-child": ((
         WIDGET,
-        '      Styled(_, c) -> [c]',
-        '      Styled(_, c) -> []',
+        '    Styled(_, c) -> [c]',
+        '    Styled(_, c) -> []',
     ),),
     "rekid-styled-loses-its-style": ((
         WIDGET,
@@ -195,6 +195,18 @@ MUTATIONS = {
         '      Elem(t, p, o, _, k) -> Elem(tag = t, props = p, on = o, kids = ks, key = k)',
         '      Elem(t, p, o, _, _) -> Elem(tag = t, props = p, on = o, kids = ks, key = None)',
     ),),
+    # The closed wire projection must preserve every observable node field.
+    "wire-projection-drops-key": ((
+        NODE,
+        'kids = list.map(ks, child => wire_tree(child)), key = key)',
+        'kids = list.map(ks, child => wire_tree(child)), key = None)',
+    ),),
+    "wire-projection-erases-event": ((
+        NODE,
+        'event = listener.event, payload = listener.payload',
+        'event = "", payload = listener.payload',
+    ),),
+
 }
 
 

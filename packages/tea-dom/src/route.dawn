@@ -14,8 +14,8 @@
 # argument, and this module is the second instance of it.
 
 use std/list
-use tea_core/walk.{fold_preorder}
-use node.{Node, Text, Elem, On, NoData, Value, deliver}
+use tea_core/walk.{fold_preorder_with}
+use node.{children, Node, Text, Elem, On, NoData, Value, deliver}
 
 ## Every node that listens for something, paired with the address
 ## `tea_core/diff` addresses it by and the listeners it declares. Pre-order,
@@ -25,7 +25,7 @@ use node.{Node, Text, Elem, On, NoData, Value, deliver}
 ## This is what the bridge needs at the boundary: the host attaches a listener
 ## exactly where this says one exists, and hands back the address it fired at.
 pub fn listeners[M](root: Node[M]) -> List[(List[Int], List[On[M]])] =
-  fold_preorder(root, [], (acc, n, path) =>
+  fold_preorder_with(root, children, [], (acc, n, path) =>
       match n {
         Text(_) -> acc
         Elem(_, _, on, _, _) -> if list.is_empty(on) { acc } else { acc ++ [(path, on)] }
@@ -66,7 +66,7 @@ fn node_at[M](n: Node[M], path: List[Int], i: Int) -> Option[Node[M]] =
       Text(_) -> None
       Elem(_, _, _, ks, _) -> {
         let k = path[i]
-        if k < 0 || k >= len(ks) { None } else { node_at(ks[k], path, i + 1) }
+        match get(ks, k) { None -> None, Some(child) -> node_at(child, path, i + 1) }
       }
     }
   }

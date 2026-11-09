@@ -1156,8 +1156,8 @@ def mutate_p5_mark_parse_float(mirror, dump, interp, lower, header, export):
     )
 
 
-SORT_BY_BOUND = "fn sort_by[T, !e](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
-SORT_BY_UNBOUND = "fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
+SORT_BY_BOUND = "fn sort_by[T: ^{c}, ^c, !e](xs: List[T], cmp: fn(T, T) -> Int !e ^{c}) -> List[T] !e"
+SORT_BY_UNBOUND = "fn sort_by[T: ^{c}, ^c](xs: List[T], cmp: fn(T, T) -> Int !e ^{c}) -> List[T] !e"
 
 
 def mutate_p6_unbind_sort_by(mirror, dump, interp, lower, header, export):
