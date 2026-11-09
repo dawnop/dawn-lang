@@ -8,8 +8,8 @@
 # walk the same list.
 
 use std/list
-use tea_core/walk.{fold_preorder}
-use widget.{Bold, Widget, Text, Styled, Row, Column, Button}
+use tea_core/walk.{fold_preorder_with}
+use widget.{children, Bold, Widget, Text, Styled, Row, Column, Button}
 
 ## Every button in the tree, in pre-order: label and the message pressing
 ## it sends. The n-th entry is what `press(w, n)` resolves (1-based).
@@ -19,7 +19,7 @@ use widget.{Bold, Widget, Text, Styled, Row, Column, Button}
 ## contract: core has no way to ask a node for its label, so a router written
 ## against a core trait would have had to give the label up.
 pub fn buttons[M](w: Widget[M]) -> List[(String, M)] =
-  fold_preorder(w, [], (acc, n, path) =>
+  fold_preorder_with(w, children, [], (acc, n, path) =>
       match n {
         Button(l, m) -> acc ++ [(l, m)]
         _ -> acc
@@ -30,7 +30,7 @@ pub fn buttons[M](w: Widget[M]) -> List[(String, M)] =
 ## this -- it numbers -- but a host that hands back a node rather than an
 ## ordinal dispatches on exactly these addresses, with no second scheme.
 pub fn addressed[M](w: Widget[M]) -> List[(List[Int], M)] =
-  fold_preorder(w, [], (acc, n, path) =>
+  fold_preorder_with(w, children, [], (acc, n, path) =>
       match n {
         Button(_, m) -> acc ++ [(path, m)]
         _ -> acc
@@ -40,11 +40,9 @@ pub fn addressed[M](w: Widget[M]) -> List[(List[Int], M)] =
 ## or `None` when there is no such button.
 pub fn press[M](w: Widget[M], n: Int) -> Option[M] = {
   let bs = buttons(w)
-  if n < 1 || n > len(bs) {
-    None
-  } else {
-    let (_, msg) = bs[n - 1]
-    Some(msg)
+  match get(bs, n - 1) {
+    None -> None
+    Some((_, message)) -> Some(message)
   }
 }
 

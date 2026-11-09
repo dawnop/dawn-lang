@@ -23,21 +23,28 @@ Unit 语句无 `else` 补空臂，值形式必须有 `else`；`else if` 是 else
 协议形状（声明示意，prelude 由编译器提供）：
 
 ```text
-trait StagedCond[C] {
+trait StagedCond[C: ^{c}, ^c] {
   effect StagedCond = !()
   fn staged_if(c: C,
-    on_true: fn() -> Unit !C.StagedCond,
-    on_false: fn() -> Unit !C.StagedCond) -> Unit !C.StagedCond
+    on_true: fn() -> Unit !C.StagedCond ^{c},
+    on_false: fn() -> Unit !C.StagedCond ^{c}) -> Unit !C.StagedCond
 }
 ```
 
 id 从既有表尾追加为 25，不重编号；`injects: false`，方法名不进入函数命名空间，
 不可 derive，不提供 Bool impl，不继承 opaque 底层 impl。trait 与 effect 声明位置保留该名字。
-泛型 `[C: StagedCond]` 使用现有 witness、字典及关联效果证据。两臂实际效果（包括生成的
-get/set）必须包含在 `C.StagedCond` 内；open/writeback 在外层按普通规则计效果。
+Generic `[C: StagedCond[^{}]]` uses the existing witness, dictionary and associated
+effect evidence. Both arm effects, including generated get/set operations, must fit
+`C.StagedCond`. Open and writeback charge their effects in the enclosing context.
 
 包实现没有为此放开具体泛型头特化。`impl StagedCond[Tile[Bool]]` 不合法，应由包级
 `TileCondDtype[D]` 的非空纯见证方法限定 Bool，再写条件 impl；记录器仍核实 i1 与 rank-0。
+
+The complete condition application is selected after both actual arm environments
+and generated result writes are known. A quantified Capture axis combines these
+obligations jointly; reversing the arms cannot change its result. A fixed given or
+implementation application remains invariant. The same application instantiates
+callback contracts, associated effects, method types and the selected witness.
 
 ## 3. 格子与合流
 
@@ -70,12 +77,12 @@ Unit 语句继续原无结果路径；非 Unit 尾值不能静默丢弃。宿主
 
 | 结果槽形状 | 可表达性与代价 | 选择 |
 |---|---|---|
-| 新 prelude `StagedResult[T]`，关联 Slot，open/set/get | 三个普通单参数 trait 方法；Slot 只属于结果类型，open 无值实参，由检查器在已知 T 处直接解 witness；可把未赋值槽与已有初始化 carry 区分 | 采用 |
+| Prelude `StagedResult[T, c]` with Slot and open/set/get | Three ordinary trait methods; Slot belongs to the result type, and open solves its witness from the known T without a value argument. Uninitialized result slots stay distinct from initialized carry cells. | Adopted |
 | 给 StagedVar 增加无初值 open | 同样能用已有 Cell 表达，但所有既有 impl 都要处理未初始化状态，普通 var_get/var_set 与结果的确定赋值及合流读混在同一协议 | 不采用；不是兼容性理由，而是状态纪律不同 |
 
 ```text
-trait StagedResult[T] {
-  type Slot
+trait StagedResult[T: ^{c}, ^c] {
+  type Slot: ^{c}
   effect StagedResult = !()
   fn result_open() -> T.Slot !T.StagedResult
   fn result_set(s: T.Slot, v: T) -> Unit !T.StagedResult
@@ -125,7 +132,7 @@ S2 增加只给 Bool 的 `TileCondDtype` 资格，让条件 impl 与显式 `d_if
 迁移 foldif、foldif_debug 与 carry_extent 后，先通过第 7 节不变性门，再接值形式。
 未修改、重录任何既有 MLIR/tilebc/debug golden。Carry 的次序与纯 if 的 token 状态不变。
 
-`StagedResult[Tile[D]]` 的关联 Slot 是独立 `ResultSlot[D]`，不是 Carry 的未初始化哨兵。
+`StagedResult[Tile[D], ^{}].Slot` is an independent `ResultSlot[D]` rather than a sentinel in Carry.
 记录器保存 `Option[Int]`、ready 和写次数；完整 trial 快照包含这份状态。每臂 trial 只收集
 入口已存在、尚未完成而在本臂写过的槽，嵌套 if 不会提前合并父槽。两臂写集合按创建序取并集。
 正式 then 结束后收集结果，切 else 前清空这些槽；未赋值即拒绝，不能复用 then 值冒充 else。

@@ -1,4 +1,4 @@
-# `[]` behind a `[C: Index]` bound: the dictionary track.
+# `[]` behind a `[C: Index[^{}]]` bound: the dictionary track.
 #
 # This file is not optional and index_ok.dawn says why. Every other subscript
 # in the corpus devirtualises -- the subject is known at the call, so lowering
@@ -37,7 +37,7 @@ use std/map
 
 pub type Grid = { w: Int, cells: List[Int] }
 
-impl Index[Grid] {
+impl Index[Grid, ^{}] {
   type Idx = (Int, Int)
   type Item = Int
   fn index(g: Grid, p: (Int, Int)) -> Int = {
@@ -48,15 +48,15 @@ impl Index[Grid] {
 
 ## The generic consumer. `C` is fixed by parameter 0, which is not a
 ## projection; `C.Idx` and `C.Item` only participate in checking (#119 D6).
-fn first[C: Index](c: C, i: C.Idx) -> C.Item = c[i]
+fn first[C: Index[^{}]](c: C, i: C.Idx) -> C.Item = c[i]
 
 ## ...and one that never indexes anything itself, so its witness is forwarded
 ## rather than resolved: the dictionary crosses one more call boundary.
-fn relay[C: Index](c: C, i: C.Idx) -> C.Item = first(c, i)
+fn relay[C: Index[^{}]](c: C, i: C.Idx) -> C.Item = first(c, i)
 
 ## The same, through a closure, so the dictionary is captured rather than
 ## passed -- lambdas capture witnesses like any other hidden argument.
-fn through_lambda[C: Index](c: C, i: C.Idx) -> C.Item = {
+fn through_lambda[C: Index[^{}]](c: C, i: C.Idx) -> C.Item = {
   let f = (x: C) => first(x, i)
   f(c)
 }
@@ -75,11 +75,11 @@ fn through_lambda[C: Index](c: C, i: C.Idx) -> C.Item = {
 ## want of a consumer. What #123 fixed is the inconsistency around it -- all
 ## four prelude relations now refuse a projection subject at check time in one
 ## wording, and the hint they print is the shape of this function.
-fn both[A: Index, B: Index](a: A, ai: A.Idx, b: B, bi: B.Idx) -> (A.Item, B.Item) =
+fn both[A: Index[^{}], B: Index[^{}]](a: A, ai: A.Idx, b: B, bi: B.Idx) -> (A.Item, B.Item) =
   (first(a, ai), first(b, bi))
 
 pub fn main() -> Unit !io = {
-  let g = Grid { w= 3, cells= [1, 2, 3, 4, 5, 6] }
+  let g = Grid { w = 3, cells = [1, 2, 3, 4, 5, 6] }
   let xs = [10, 20, 30]
   let ms: Map[String, Int] = map.from([("a", 1), ("b", 2)])
   let ss = ["p", "q"]

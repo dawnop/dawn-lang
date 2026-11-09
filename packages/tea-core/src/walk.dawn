@@ -18,22 +18,23 @@ use tree.{Tree, Rel, Unrelated, Same, kids}
 ## Pre-order fold with the path in hand: `f` sees the accumulator, the node,
 ## and the node's address from the root. The root's address is the empty path.
 pub fn fold_preorder[W: Tree, A](w: W, init: A, f: fn(A, W, List[Int]) -> A) -> A =
-  go(w, [], init, f)
+  fold_preorder_with(w, kids, init, f)
 
-fn go[W: Tree, A](w: W, path: List[Int], acc: A, f: fn(A, W, List[Int]) -> A) -> A =
-  kids_go(kids(w), path, 0, f(acc, w, path), f)
+## Pre-order fold using a concrete child function. The node and callback
+## need value contracts; this entry does not construct an abstract witness.
+pub fn fold_preorder_with[W, A](w: W, children: fn(W) -> List[W], init: A,
+  f: fn(A, W, List[Int]) -> A) -> A = go(w, [], init, f, children)
 
-fn kids_go[W: Tree, A](
-  ks: List[W],
-  path: List[Int],
-  i: Int,
-  acc: A,
-  f: fn(A, W, List[Int]) -> A,
-) -> A =
-  if i >= len(ks) {
-    acc
-  } else {
-    kids_go(ks, path, i + 1, go(ks[i], path ++ [i], acc, f), f)
+fn go[W, A](w: W, path: List[Int], acc: A, f: fn(A, W, List[Int]) -> A,
+  children: fn(W) -> List[W]) -> A =
+  kids_go(children(w), path, 0, f(acc, w, path), f, children)
+
+fn kids_go[W, A](ks: List[W], path: List[Int], i: Int, acc: A,
+  f: fn(A, W, List[Int]) -> A, children: fn(W) -> List[W]) -> A =
+  match get(ks, i) {
+    None -> acc
+    Some(child) -> kids_go(ks, path, i + 1,
+      go(child, path ++ [i], acc, f, children), f, children)
   }
 
 # A test vocabulary of its own, and the smallest one this package has: the walk

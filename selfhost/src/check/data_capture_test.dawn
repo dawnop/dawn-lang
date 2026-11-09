@@ -140,13 +140,13 @@ test "explicit data and alias bounds apply before expansion on every kind path" 
     message => str.contains(message, "capture argument for `Limited` exceeds its declared upper bound"))
 }
 
-test "explicit computation bounds reject values while ordinary defaults remain staged" {
+test "computation defaults reject values while explicit capture bounds remain open" {
   let closed = "fn closed[T: ^{}](value: T) -> T = value\n"
   assert capture_refusal(closed ++ "fn bad[@s](value: I64Buf@s) -> I64Buf@s = closed(value)\n")
   assert messages("fn open[T: ^{c}, ^c](value: T) -> T = value\n" ++
       "fn good[@s](value: I64Buf@s) -> I64Buf@s = open(value)\n") == []
-  assert messages("fn staged[T](value: T) -> T = value\n" ++
-      "fn good[@s](value: I64Buf@s) -> I64Buf@s = staged(value)\n") == []
+  assert capture_refusal("fn staged[T](value: T) -> T = value\n" ++
+      "fn bad[@s](value: I64Buf@s) -> I64Buf@s = staged(value)\n")
 }
 
 test "constructor introduction inherits bounds and all parent axes when used as a value" {
@@ -196,4 +196,29 @@ test "constructor contexts retain complete Capture equations before field infere
   let (refused, _) = check_module(seed_prelude(cx_new(Some("model"), None)), parsed(invalid), map.empty())
   assert len(refused.diags) == 1
   assert str.contains(refused.diags[0].msg, "declares return type")
+}
+
+test "ordinary function defaults reject domain values without changing data introduction" {
+  assert capture_refusal("fn wrap[T](value: T) -> T = value\n" ++
+      "fn bad[@s](value: I64Buf@s) -> I64Buf@s = wrap(value)\n")
+  assert messages("type Box[T] = { value: T }\n" ++
+      "fn good[@s](value: I64Buf@s) -> Box[I64Buf@s] = Box { value = value }\n") == []
+}
+
+test "impl Type defaults constrain application arguments independently of witness support" {
+  let head = "trait Measure[T: ^{c}, ^c] { fn measure(value: T) -> Int }\n" ++
+    "type Box[T] = { value: T }\n"
+  let call_site = "fn scoped[@s](value: I64Buf@s) -> Int = measure(Box { value = value })\n"
+  assert list.any(messages(head ++
+      "impl[T, ^c] Measure[Box[T], c] { fn measure(value: Box[T]) -> Int = 0 }\n" ++ call_site),
+    message => str.contains(message, "Capture arguments do not match the impl application"))
+  assert messages(head ++
+      "impl[T: ^{c}, ^c] Measure[Box[T], c] { fn measure(value: Box[T]) -> Int = 0 }\n" ++ call_site) == []
+}
+
+test "trait subject defaults stay empty when the witness Capture axis is open" {
+  let implementation = "impl[@s] Measure[I64Buf@s, ^{s}] { fn measure(value: I64Buf@s) -> Int = 0 }\n"
+  assert list.any(messages("trait Measure[T, ^c] { fn measure(value: T) -> Int }\n" ++ implementation),
+    message => str.contains(message, "impl subject exceeds the trait's capture upper bound"))
+  assert messages("trait Measure[T: ^{c}, ^c] { fn measure(value: T) -> Int }\n" ++ implementation) == []
 }

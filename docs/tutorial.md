@@ -1000,7 +1000,7 @@ and four cursor methods, and it is what `for x in c` walks:
 ```dawn run
 type Grid = { w: Int, cells: List[Int] }
 
-impl Index[Grid] {
+impl Index[Grid, ^{}] {
   type Idx = (Int, Int)
   type Item = Int
   fn index(g: Grid, p: (Int, Int)) -> Int = {
@@ -1011,7 +1011,7 @@ impl Index[Grid] {
 
 type Countdown = { from: Int }
 
-impl Iter[Countdown] {
+impl Iter[Countdown, ^{}] {
   type Cur = Int
   type Item = Int
   fn iter_start(it: Countdown) -> Int = it.from

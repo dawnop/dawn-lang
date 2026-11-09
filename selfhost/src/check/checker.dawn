@@ -8,12 +8,13 @@
 # (resolveType / resolveEff / alias expansion / Map-Set key validity).
 
 use check/capture
+use check/tast
 use check/data_capture
 use check/environment
 use check/value_capture
 use check/scope_infer
 use check/trait_contract
-use check/capture.{Function as CaptureFunction, Scope as CaptureScope, Params as CaptureParams, CaptureParam}
+use check/capture.{Function as CaptureFunction, Scope as CaptureScope, Params as CaptureParams, CaptureParam, TraitApplication}
 use std/str
 use std/list
 use std/map
@@ -53,7 +54,7 @@ use check/tast.{CallSource, call_source,
   TStmt, TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   TFun, TDefault, TConst, TModule, WitRef, WForward, WConcrete, WApply, x_lo, x_hi
 }
-use check/types.{ty_scope_refs, subst_scopes, sig_scope_arity, EvidenceLabel, evidence_labels, evidence_label_role, evidence_label_type, evidence_label_name, scope_key_name, ScopedLabelSlot, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever, ty_equal, primitive_captures, fn_align, apply_scope_arguments, EScoped,
+use check/types.{ty_scope_refs, subst_scopes, sig_scope_arity, EvidenceLabel, evidence_labels, evidence_label_role, evidence_label_type, evidence_label_name, scope_key_name, ScopedLabelSlot, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever, TyI64Buf, ty_equal, primitive_captures, fn_align, apply_scope_arguments, EScoped,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes, ty_eff_vars,
   eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, scoped_eff, eff_scopes, eff_without_scopes, scoped_difference, eff_assocs,
@@ -95,7 +96,7 @@ use check/cx.{
   write_symbol, write_signature, write_bounds,
   bind_capture_params, AliasE, Cx, Frame, LambdaCx, LocalFn, StagedCell, StagedKind, OrdinaryClosure, StagedLoop, StagedBranch, ModExports, package_of, pkg_private, pkg_private_export,
   pkg_private_err, private_name_diagnostic,
-  cx_new, test_cx, with_list_len, check_value_arity,
+  cx_new, test_cx, prelude_tables, with_list_len, check_value_arity,
   cerr, cerr_h, cerr_o, owned_by, unowned, measured_from, owner_off, owner_at, eff_witness_at, fresh,
   enter_decl_owner, leave_decl_owner, mint_cursor, module_pool, alias_shadow, effect_of, resolve_eff_at,
   resolve_type, resolve_return_type, discharge_capture_obligations,
@@ -1909,7 +1910,7 @@ pub(pkg) fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option
       # one. Without this arm the `_` below called it "no gap", the goal was
       # accepted, and lowering then asked for its dictionary key -- where
       # `ty_key` panics on exactly this variant. That is the whole of #123:
-      # `c[i] == c[j]` under `[C: Index]` passed the checker and crashed the
+      # `c[i] == c[j]` under `[C: Index[^{}]]` passed the checker and crashed the
       # compiler, directly and inside a tuple.
       TyAssoc(_, _, _, _) -> Some(t)
       # A rigid type parameter is not a gap in the structure -- whether `T`
@@ -5291,8 +5292,39 @@ pub(pkg) fn check_ctor_value(
 ## rigid type parameter → the caller's dictionary is forwarded (and captured by
 ## every enclosing lambda); concrete subject → coherence gives the unique impl.
 pub(pkg) fn resolve_witness(cx: Cx, trait_id: Int, t: Ty, lo: Int, hi: Int,
-  requirer: String) -> (Cx, Option[WitRef]) =
-  resolve_application(cx, capture.closed_trait(trait_id), t, lo, hi, requirer)
+  requirer: String) -> (Cx, Option[WitRef]) = {
+  let tr = trait_of(cx.traits, trait_id)
+  if len(tr.scope_params.captures) == 0 {
+    return resolve_application(cx, capture.closed_trait(trait_id), t, lo, hi, requirer)
+  }
+  match t {
+    TyVar(_, id) -> {
+      for given in map.get(cx.current_tparam_bounds, id).unwrap_or([]) {
+        if given.id == trait_id { return resolve_application(cx, given, t, lo, hi, requirer) }
+      }
+      let subject = ty_show(cx.adts, t)
+      return (cerr_h(cx, requirer ++ " requires a complete `" ++ tr.name ++
+          "` bound for `" ++ subject ++ "`", lo, hi,
+        "declare the Capture axis explicitly, for example [" ++ subject ++ ": " ++
+          tr.name ++ "[c] + ^{c}, ^c]"), no_wit())
+    }
+    _ -> ()
+  }
+  match impl_at(cx.impl_table, trait_id, t) {
+    Some(imp) -> {
+      match trait_contract.call_application(tr, imp, t, [], [], cx.adts, cx.current_capture_params) {
+        Some(app) -> return resolve_application(cx, app, t, lo, hi, requirer)
+        None -> ()
+      }
+      (cerr(cx, "cannot infer the complete Capture application of `" ++ tr.name ++
+          "` from its subject support", lo, hi), no_wit())
+    }
+    None -> {
+      let subject = ty_show(cx.adts, t)
+      (cerr(cx, requirer ++ " requires an impl of `" ++ tr.name ++ "` for `" ++ subject ++ "`", lo, hi), no_wit())
+    }
+  }
+}
 
 pub(pkg) fn resolve_application(cx: Cx, application: capture.TraitApplication,
   t: Ty, lo: Int, hi: Int, requirer: String) -> (Cx, Option[WitRef]) = {
@@ -5826,13 +5858,19 @@ test "a subject containing a rigid variable takes its arguments' witnesses" {
   # Nothing in scope for `T`, so the synthesised impl has no argument witness
   # to build from and says so, exactly as a conditional impl would. It used to
   # fall back to `WConcrete` and leave lowering the erased runtime walk.
-  let (cx1, w1) = resolve_witness(cx, EQ_ID, opt_ty(tv), 0, 4, "`f`")
+  let (unknown, missing) = resolve_witness(cx, EQ_ID, opt_ty(tv), 0, 4, "`f`")
+  assert missing == None
+  assert unknown.diags[0].msg == "trait witness does not cover its subject support"
+  let zero: capture.Capture = []
+  let supported = Cx { ..cx, current_capture_params = CaptureParams { ..cx.current_capture_params,
+    support_facts = [(900, zero)] } }
+  let (cx1, w1) = resolve_witness(supported, EQ_ID, opt_ty(tv), 0, 4, "`f`")
   assert w1 == None
   assert str.contains(cx1.diags[0].msg, "requires `Eq[T]`")
   # With `[T: Eq]` in scope, the whole's witness carries the part's -- which
   # is the only way to reach a relation the caller decides.
   let dicts = map.insert(cx.frame.dict_syms, capture.dictionary_key(900, capture.closed_trait(EQ_ID)), 77)
-  let bound = Cx { ..cx, frame = Frame { ..cx.frame, dict_syms = dicts } }
+  let bound = Cx { ..supported, frame = Frame { ..cx.frame, dict_syms = dicts } }
   let (cx2, w2) = resolve_witness(bound, EQ_ID, opt_ty(tv), 0, 4, "`f`")
   assert len(cx2.diags) == 0
   assert w2 == Some(WApply(capture.closed_trait(EQ_ID), opt_ty(tv), [WForward(77, capture.closed_trait(EQ_ID), tv)]))
@@ -5853,7 +5891,7 @@ test "a subject containing a rigid variable takes its arguments' witnesses" {
   # route (`cmp`) and the operator route have to return it, or one of the two
   # entry points loses the caller's Ord[T] dictionary.
   let ord_dicts = map.insert(cx.frame.dict_syms, capture.dictionary_key(900, capture.closed_trait(ORD_ID)), 78)
-  let ord_bound = Cx { ..cx, frame = Frame { ..cx.frame, dict_syms = ord_dicts } }
+  let ord_bound = Cx { ..supported, frame = Frame { ..cx.frame, dict_syms = ord_dicts } }
   let pair = TyTuple([TyInt, tv])
   let applied = Some(WApply(capture.closed_trait(ORD_ID), pair,
     [WConcrete(capture.closed_trait(ORD_ID), TyInt), WForward(78, capture.closed_trait(ORD_ID), tv)]))
@@ -7122,8 +7160,8 @@ fn check_index(cx: Cx, target: Expr, index: Expr, lo: Int, hi: Int) -> (Cx, Ty, 
       (cx3, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
     }
     Some(wr) -> {
-      let want_idx = reduce_assoc(cx2, TyAssoc(tt, capture.closed_trait(INDEX_ID), "Idx", []))
-      let result = reduce_assoc(cx2, TyAssoc(tt, capture.closed_trait(INDEX_ID), "Item", []))
+      let want_idx = reduce_assoc(cx2, TyAssoc(tt, tast.witness_application(wr), "Idx", trait_contract.member_upper(trait_of(cx2.traits, INDEX_ID), tast.witness_application(wr), "Idx")))
+      let result = reduce_assoc(cx2, TyAssoc(tt, tast.witness_application(wr), "Item", trait_contract.member_upper(trait_of(cx2.traits, INDEX_ID), tast.witness_application(wr), "Item")))
       let (cx3, it, ix) = check_expr(cx2, index, Some(want_idx))
       if it != want_idx && not is_errorish(it) {
         let expected_text = ty_show(cx3.adts, want_idx)
@@ -9532,9 +9570,10 @@ fn check_for(
             "for..in")
           cx1 = cxw
           match w {
-            Some(_) -> {
+            Some(wr) -> {
               wit = w
-              let item = reduce_assoc(cx1, TyAssoc(ft, capture.closed_trait(ITER_ID), "Item", []))
+              let app = tast.witness_application(wr)
+              let item = reduce_assoc(cx1, TyAssoc(ft, app, "Item", trait_contract.member_upper(trait_of(cx1.traits, ITER_ID), app, "Item")))
               loop_t = item
             }
             None -> ()
@@ -9634,7 +9673,8 @@ fn check_for_pattern(cx: Cx, pat: Pattern, loop_t: Ty) -> (Cx, TPat) = {
 ## impls (an opaque type does not borrow its target's, `opaque_inherits`).
 fn has_trait_at(cx: Cx, tid: Int, t: Ty) -> Bool =
   match t {
-    TyVar(_, vid) -> map.get(cx.frame.dict_syms, capture.dictionary_key(vid, capture.closed_trait(tid))) != None
+    TyVar(_, vid) -> list.any(map.get(cx.current_tparam_bounds, vid).unwrap_or([]), app =>
+        app.id == tid && map.get(cx.frame.dict_syms, capture.dictionary_key(vid, app)) != None)
     _ -> head_of(t) != None && has_impl_at(cx.impl_table, tid, t)
   }
 
@@ -9695,7 +9735,9 @@ fn mint_staged_cell(cx: Cx, id: Int, sym: Sym, kind: StagedKind, lo: Int, hi: In
   }
   let (cx1, w) = resolve_witness(cx, STAGED_VAR_ID, t, lo, hi, "a staged loop")
   if w == None { return (cx1, refused) }
-  let cell_ty = reduce_assoc(cx1, TyAssoc(t, capture.closed_trait(STAGED_VAR_ID), "Cell", []))
+  let app = witness_application(w.expect("resolved cell witness"))
+  let upper = trait_contract.member_upper(trait_of(cx1.traits, STAGED_VAR_ID), app, "Cell")
+  let cell_ty = reduce_assoc(cx1, TyAssoc(t, app, "Cell", upper))
   let (cx2, cid) = fresh(cx1)
   let cx3 = write_symbol(cx2, cid, Sym {
     name = sym.name,
@@ -9834,6 +9876,33 @@ fn staged_jump_error(cx: Cx, kw: String, lo: Int, hi: Int) -> Cx = {
 pub(pkg) fn in_staged_body(cx: Cx) -> Bool =
   len(cx.frame.lambda_stack) > 0 && cx.frame.lambda_stack[len(cx.frame.lambda_stack) - 1].staged_kind != OrdinaryClosure
 
+## The same complete application is retained at every use of a witness.
+fn witness_application(witness: WitRef) -> TraitApplication = match witness {
+  WForward(_, app, _) | WConcrete(app, _) | WApply(app, _, _) -> app
+}
+
+## Fixed given/subject equations take precedence over inferred lower bounds.
+## This collector is independent of staged syntax and never invents an axis.
+fn application_for_call(cx: Cx, tr: TraitI, subject: Ty, parameters: List[Ty],
+  arguments: List[Ty]) -> Option[capture.TraitApplication] = {
+  match subject { TyVar(_, id) -> {
+    for app in map.get(cx.current_tparam_bounds, id).unwrap_or([]) {
+      if app.id == tr.id { return Some(app) }
+    }
+    return None
+  }, _ -> () }
+  match impl_at(cx.impl_table, tr.id, subject) {
+    Some(imp) -> {
+      let vid = match tr.tvar { TyVar(_, id) -> id, _ -> -1 }
+      let tm = map.from([(vid, subject)])
+      let em: Map[Int, Eff] = map.empty()
+      let templates = map(parameters, parameter => reduce_instantiated(cx, subst(parameter, tm, em), tm))
+      trait_contract.call_application(tr, imp, subject, templates, arguments, cx.adts, cx.current_capture_params)
+    }
+    None -> None
+  }
+}
+
 ## One call of a staged trait's method at `subject`, built the way an
 ## operator's is (`arith_call`): the witness is already resolved, the effect
 ## the impl binds is charged at `lo..hi`, and its evidence travels with the
@@ -9841,7 +9910,12 @@ pub(pkg) fn in_staged_body(cx: Cx) -> Bool =
 ## call (the loop's `for`), and `NO_NAME` for a call the checker adds.
 fn staged_call(cx: Cx, tid: Int, mname: String, subject: Ty, args: List[TExpr], w: WitRef,
   ret: Ty, lo: Int, hi: Int, nlo: Int) -> (Cx, TExpr) = {
-  let tr = trait_of(cx.traits, tid)
+  # A stored cell witness is reused by each arm. Its runtime dictionaries
+  # and static support belong to the closure that consumes it at this call.
+  let captured = capture_wits(cx, [w])
+  let cx = capture_static_witness(captured, value_capture.witness_support(w),
+    trait_of(cx.traits, tid).name, lo, hi)
+  let tr = trait_contract.applied(trait_of(cx.traits, tid), witness_application(w))
   var found: Option[Sig] = None
   for pr in tr.methods {
     let (n, ms) = pr
@@ -10036,23 +10110,61 @@ fn check_staged_for(cx: Cx, pat: Pattern, from: Expr, ft: Ty, fx: TExpr, body: E
         "cannot tell a host loop from a staged one", flo, fhi,
       "a type is either walked on the host or recorded; drop one of the two impls"), err_stmt)
   }
-  let (cxw, w) = resolve_witness(cx1, STAGED_ITER_ID, ft, flo, fhi, "for..in")
-  cx1 = cxw
-  let wr = match w {
-    Some(x) -> x
-    None -> return (cx1, err_stmt)
+  let tr = trait_of(cx1.traits, STAGED_ITER_ID)
+  var app = match application_for_call(cx1, tr, ft, [], []) {
+    Some(value) -> value
+    None -> return (cerr(cx1, "cannot infer the complete application of a staged iterator", flo, fhi), err_stmt)
   }
-  let item = reduce_assoc(cx1, TyAssoc(ft, capture.closed_trait(STAGED_ITER_ID), "Item", []))
-  # the subject is evaluated once, before any cell is opened
+  # The subject is evaluated once. Body obligations are provisional until
+  # the same application's Item and callback environment reach a fixed point.
   let (cxr, rsid) = hidden_local(cx1, "\$staged", ft, flo, fhi)
-  cx1 = cxr
+  let entry = cxr
   var stmts: List[TStmt] = [TSLet(Some(rsid), "\$staged", fx, owner_off(cx, flo), owner_off(cx, fhi))]
-  let (cxb, lam, lam_eff, minted) = check_staged_body(cx1, pat, item, body, lo, hi)
-  cx1 = cxb
+  var universe = ty_scope_refs(ft)
+  for scope in entry.frame.scopes { for id in map.values(scope) {
+    universe = capture.union(universe, ty_scope_refs(sym_of(entry, id).ty))
+  } }
+  for region in entry.current_capture_params.scopes { universe = capture.union(universe, [capture.Region(region)]) }
+  for cap in entry.current_capture_params.captures { universe = capture.union(universe, [capture.CaptureVar(cap.name, cap.id)]) }
+  for bound in entry.current_capture_params.bounds { let (_, value) = bound
+    universe = capture.union(universe, value) }
+  for fact in entry.current_capture_params.support_facts { let (_, value) = fact
+    universe = capture.union(universe, value) }
+  var lam: TExpr = XError(olo, ohi)
+  var lam_eff = EPure
+  var minted: Map[Int, StagedCell] = map.empty()
+  var stable = false
+  var rounds = 0
+  let (_, method) = tr.methods[0]
+  while not stable {
+    let item = reduce_assoc(entry, TyAssoc(ft, app, "Item", trait_contract.member_upper(tr, app, "Item")))
+    let (cxb, callback, row, cells) = check_staged_body(entry, pat, item, body, lo, hi)
+    let next = match application_for_call(cxb, tr, ft, method.sig.param_tys, [ft, tex_ty(callback)]) {
+      Some(value) -> value
+      None -> return (cerr(cxb, "cannot solve the staged iterator callback application", flo, fhi), err_stmt)
+    }
+    stable = capture.trait_equal(app, next)
+    rounds = rounds + 1
+    if not stable {
+      if not capture.subset(capture.trait_support(app), capture.trait_support(next)) ||
+        not capture.subset(capture.trait_support(next), universe) || rounds > len(universe) + 1 {
+        return (cerr(cxb, "staged application obligations have no finite monotone solution", flo, fhi), err_stmt)
+      }
+      app = next
+    } else {
+      cx1 = cxb
+      lam = callback
+      lam_eff = row
+      minted = cells
+    }
+  }
+  let (cxw, witness) = resolve_application(cx1, app, ft, flo, fhi, "for..in")
+  cx1 = cxw
+  let wr = match witness { Some(value) -> value, None -> return (cx1, err_stmt) }
   # the body may perform only what the impl declares: it is recorded, and
   # whatever runs it runs it under the impl's row
-  let tr = trait_of(cx1.traits, STAGED_ITER_ID)
-  let (_, ms) = tr.methods[0]
+  let applied = trait_contract.applied(tr, app)
+  let (_, ms) = applied.methods[0]
   let row = match ms.sig.param_tys[1] {
     TyFn(_, _, e, _) -> {
       let rvid = match tr.tvar {
@@ -10157,7 +10269,7 @@ fn staged_result_arm(cx: Cx, lam: TExpr, t: Ty, slot: Int, wit: WitRef, lo: Int,
   }
   let scoped = Cx { ..cx, frame = Frame { ..cx.frame, used_effects = [], eff_witness = empty_w,
     lambda_stack = cx.frame.lambda_stack ++ [ctx] } }
-  let (resolved, _) = resolve_witness(scoped, STAGED_RESULT_ID, t, lo, hi, "a staged if result")
+  let (resolved, _) = resolve_application(scoped, witness_application(wit), t, lo, hi, "a staged if result")
   let sx = XLocal(slot, "\$result", owner_off(cx, lo), owner_off(cx, hi), sym_of(cx, slot).ty)
   let (charged, store) = staged_call(resolved, STAGED_RESULT_ID, "result_set", t, [sx, body], wit,
     TyUnit, lo, hi, NO_NAME)
@@ -10177,12 +10289,7 @@ fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], ex
   hi: Int, value_form: Bool) -> (Cx, Ty, TExpr) !io = {
   let olo = owner_off(cx, lo)
   let ohi = owner_off(cx, hi)
-  let (cxw, witness) = resolve_witness(cx, STAGED_COND_ID, ct, lo, hi, "a staged if")
-  let wr = match witness {
-    Some(w) -> w
-    None -> return (cxw, TyError, XError(olo, ohi))
-  }
-  let (cxr, sid) = hidden_local(cxw, "\$condition", ct, lo, hi)
+  let (cxr, sid) = hidden_local(cx, "\$condition", ct, lo, hi)
   var stmts: List[TStmt] = [TSLet(Some(sid), "\$condition", cond, olo, ohi)]
   let other = match els { Some(e) -> e, None -> EUnit(lo, hi) }
   let reverse = expected == None && staged_arm_waits(cxr, thn) && not staged_arm_waits(cxr, other)
@@ -10215,7 +10322,9 @@ fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], ex
       cx1 = cxv
       match rw {
         Some(w) -> {
-          let slot_ty = reduce_assoc(cx1, TyAssoc(result, capture.closed_trait(STAGED_RESULT_ID), "Slot", []))
+          let app = witness_application(w)
+          let upper = trait_contract.member_upper(trait_of(cx1.traits, STAGED_RESULT_ID), app, "Slot")
+          let slot_ty = reduce_assoc(cx1, TyAssoc(result, app, "Slot", upper))
           let (cxs, slot) = hidden_local(cx1, "\$result", slot_ty, lo, hi)
           let located = value_capture.install(cxs, slot, result)
           let installed = value_capture.carried(located, slot, slot, result)
@@ -10236,7 +10345,17 @@ fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], ex
       }
     }
   }
-  let row = reduce_eff(cx1, EffAssoc("C", -48, capture.closed_trait(STAGED_COND_ID), "StagedCond"), map.from([(-48, ct)]))
+  let tr = trait_of(cx1.traits, STAGED_COND_ID)
+  let (_, method) = tr.methods[0]
+  let app = match application_for_call(cx1, tr, ct, method.sig.param_tys, [ct, tex_ty(tx), tex_ty(fx)]) {
+    Some(value) -> value
+    None -> return (cerr(cx1, "cannot infer a complete application for staged condition callbacks", lo, hi),
+      TyError, XError(olo, ohi))
+  }
+  let (selected, witness) = resolve_application(cx1, app, ct, lo, hi, "a staged if")
+  cx1 = selected
+  let wr = match witness { Some(value) -> value, None -> return (cx1, TyError, XError(olo, ohi)) }
+  let row = reduce_eff(cx1, trait_contract.row_in(tr, app, method.sig.eff), map.from([(-48, ct)]))
   let used = eff_union([te, fe])
   if not eff_carries(row, used) {
     let declared = if row == EPure { "nothing" } else { "!" ++ eff_show(row) }
@@ -10285,9 +10404,9 @@ fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], ex
 ## order different from the one they are declared in.
 fn staged_src(body: String) -> String =
   "type V = { n: Int }\ntype C = { n: Int }\ntype R = { n: Int }\n" ++
-  "impl StagedIter[R] {\n  type Item = V\n" ++
-  "  fn staged_for(r: R, body: fn(V) -> Unit) -> Unit = body(V { n = 0 })\n}\n" ++
-  "impl StagedVar[V] {\n  type Cell = C\n" ++
+  "impl StagedIter[R, ^{}] {\n  type Item = V\n" ++
+  "  fn staged_for(r: R, body: fn(V) -> Unit ^{}) -> Unit = body(V { n = 0 })\n}\n" ++
+  "impl StagedVar[V, ^{}] {\n  type Cell = C\n" ++
   "  fn var_open(v: V) -> C = C { n = v.n }\n  fn var_get(c: C) -> V = V { n = c.n }\n" ++
   "  fn var_set(c: C, v: V) -> Unit = ()\n}\n" ++
   "fn g(a: V, b: V) -> V = a\n" ++ body
@@ -10411,8 +10530,8 @@ test "a host var in a staged body is refused at its first mention, once" {
 
 ## Test conditions deliberately share no representation with the cell or iterator.
 fn staged_if_src(body: String) -> String = staged_src(
-  "type Cond = { n: Int }\nimpl StagedCond[Cond] {\n" ++
-    "  fn staged_if(c: Cond, on_true: fn() -> Unit, on_false: fn() -> Unit) -> Unit = {\n" ++
+  "type Cond = { n: Int }\nimpl StagedCond[Cond, ^{}] {\n" ++
+    "  fn staged_if(c: Cond, on_true: fn() -> Unit ^{}, on_false: fn() -> Unit ^{}) -> Unit = {\n" ++
     "    on_true()\n    on_false()\n  }\n}\n" ++ body)
 
 test "staged if arms share canonical cells and open and write back in declaration order" {
@@ -10462,7 +10581,7 @@ test "staged if arms share canonical cells and open and write back in declaratio
 
 ## The result protocol has an empty representation, distinct from an initialized V.
 fn staged_value_src(body: String) -> String = staged_if_src(
-  "type Slot = { value: Option[V] }\nimpl StagedResult[V] {\n  type Slot = Slot\n" ++
+  "type Slot = { value: Option[V] }\nimpl StagedResult[V, ^{}] {\n  type Slot = Slot\n" ++
     "  fn result_open() -> Slot = Slot { value = None }\n" ++
     "  fn result_set(s: Slot, v: V) -> Unit = ()\n  fn result_get(s: Slot) -> V = s.value!\n}\n" ++ body)
 
@@ -10510,7 +10629,7 @@ test "a staged value stores both arm results and reads its hidden slot after the
 }
 
 test "a generic condition forwards its dictionary for a concrete pure result protocol" {
-  let src = staged_value_src("fn f[C: StagedCond](c: C, a: V, b: V) -> V !C.StagedCond = if c { a } else { b }\n")
+  let src = staged_value_src("fn f[C: StagedCond[^{}]](c: C, a: V, b: V) -> V !C.StagedCond = if c { a } else { b }\n")
   let (md, pd) = parser.parse_module(src)
   assert len(pd) == 0
   let env: Map[String, ModExports] = map.empty()
@@ -11224,7 +11343,7 @@ fn check_call(
         "that takes the result"),
       TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
   }
-  if len(s.scope_params.captures) > 0 && list.any(s.constraints, bs => list.any(bs, b => len(b.args) > 0)) {
+  if len(s.scope_params.captures) > 0 {
     cx1 = learn_trait_type_bindings(cx1, s, m)
     s = scope_infer.contract_normalized(s, cx1.frame.scope_bindings, cx1.frame.capture_bindings)
   }
@@ -14945,7 +15064,7 @@ test "the prelude Iter names its cursor `c`, which is what a caller writes" {
   # a caller has to spell. Every std impl calls the cursor `c`; the trait used
   # to call the *receiver* `c`, and this call was refused as given twice (#210).
   let src = "type Two = { a: Int, b: Int }\n" ++
-    "impl Iter[Two] {\n" ++
+    "impl Iter[Two, ^{}] {\n" ++
     "  type Cur = Int\n" ++
     "  type Item = Int\n" ++
     "  fn iter_start(t: Two) -> Int = 0\n" ++
@@ -14957,7 +15076,7 @@ test "the prelude Iter names its cursor `c`, which is what a caller writes" {
     "  let k = t.iter_start()\n" ++
     "  if t.iter_done(c = k) { 0 } else { t.iter_get(c = t.iter_next(c = k)) }\n" ++
     "}\n" ++
-    "fn any_left[C: Iter](xs: C) -> Bool = not xs.iter_done(c = xs.iter_start())\n"
+    "fn any_left[C: Iter[^{}]](xs: C) -> Bool = not xs.iter_done(c = xs.iter_start())\n"
   assert msgs_of(src) == []
 }
 
@@ -17239,7 +17358,7 @@ test "an impl method that calls itself on every path is refused (the shadowed `l
   # inside an impl body the method's own name resolves to the method, so a
   # prelude function of the same name is shadowed and the call recurses
   let src = "type Box = { n: Int }\n" ++
-    "impl Len[Box] {\n  fn len(b: Box) -> Int = len(b)\n}\n"
+    "impl Len[Box, ^{}] {\n  fn len(b: Box) -> Int = len(b)\n}\n"
   assert msgs_of(src) == [selfrec_msg("method", "len")]
   let (m, _) = parser.parse_module(src)
   let (cx, _) = check_module(seed_prelude(test_cx()), m, map.empty())
@@ -17247,7 +17366,7 @@ test "an impl method that calls itself on every path is refused (the shadowed `l
   # a generic subject, the shape the std prototype had
   # (as std/list would write it: the orphan rule keeps the impl of a prelude
   # trait at a List there)
-  let std_list = "impl[T] Len[List[T]] {\n  fn len(xs: List[T]) -> Int = len(xs)\n}\n"
+  let std_list = "impl[T] Len[List[T], ^{}] {\n  fn len(xs: List[T]) -> Int = len(xs)\n}\n"
   let (ml, _) = parser.parse_module(std_list)
   let (cxl, _) = check_module(seed_prelude(cx_new(Some("std/list"), None)), ml, map.empty())
   assert map(cxl.diags, d => d.msg) == [selfrec_msg("method", "len")]
@@ -17258,7 +17377,7 @@ test "an impl method that calls itself on every path is refused (the shadowed `l
   assert map(cxa.diags, d => d.msg) == [selfrec_msg("method", "len")]
   # the same, called as a method
   assert msgs_of("type Box = { n: Int }\n" ++
-      "impl Len[Box] {\n  fn len(b: Box) -> Int = b.len()\n}\n") == [selfrec_msg("method", "len")]
+      "impl Len[Box, ^{}] {\n  fn len(b: Box) -> Int = b.len()\n}\n") == [selfrec_msg("method", "len")]
 }
 
 test "a body with a way out, or a call that is not itself, is accepted" {
@@ -17280,7 +17399,7 @@ test "a body with a way out, or a call that is not itself, is accepted" {
   assert msgs_of("pub fn even(n: Int) -> Bool = odd(n)\npub fn odd(n: Int) -> Bool = even(n)\n") == []
   # the same trait method on another type is another symbol
   assert msgs_of("type Box = { items: List[Int] }\n" ++
-      "impl Len[Box] {\n  fn len(b: Box) -> Int = len(b.items)\n}\n") == []
+      "impl Len[Box, ^{}] {\n  fn len(b: Box) -> Int = len(b.items)\n}\n") == []
   # a handler may abort the effect operation before the call
   assert msgs_of("effect Stop {\n  fn stop() -> Int\n}\npub fn spin(n: Int) -> Int !Stop = {\n  let _ = stop()\n  spin(n)\n}\n") == []
   # a local function of the same name is not the top-level one
@@ -17297,16 +17416,18 @@ test "`[]` names the subject it could not index, whatever shape it is" {
   # One row per shape in docs/operator-traits-design.md D6.
 
   # a rigid key: three sub-goals of the conditional impl, all at the `[]`
-  let ms = msgs_of("pub fn look[K](m: Map[K, Int], k: K) -> Int = m[k]\n")
+  let ms = msgs_of("trait Stable[T: ^{}] { fn stable(value: T) -> Int }\n" ++
+      "pub fn look[K: Stable](m: Map[K, Int], k: K) -> Int = m[k]\n")
   assert ms == ["indexing a Map[K, Int] requires `Eq[K]`, but `K` has no such bound",
     "indexing a Map[K, Int] requires `Hash[K]`, but `K` has no such bound",
     "indexing a Map[K, Int] requires `Show[K]`, but `K` has no such bound"]
-  assert hints_of("pub fn look[K](m: Map[K, Int], k: K) -> Int = m[k]\n")[0] ==
+  assert hints_of("trait Stable[T: ^{}] { fn stable(value: T) -> Int }\n" ++
+      "pub fn look[K: Stable](m: Map[K, Int], k: K) -> Int = m[k]\n")[0] ==
     "add the bound: [K: Eq]"
 
   # a user type with an impl: it reaches the message at all, which is new
   let grid = "type Grid = { w: Int }\n" ++
-    "impl Index[Grid] {\n  type Idx = Int\n  type Item = Int\n" ++
+    "impl Index[Grid, ^{}] {\n  type Idx = Int\n  type Item = Int\n" ++
     "  fn index(g: Grid, i: Int) -> Int = g.w + i\n}\n"
   assert len(msgs_of("${grid}pub fn f(g: Grid) -> Int = g[1]\n")) == 0
   assert msgs_of("${grid}pub fn f(g: Grid) -> Int = g[\"x\"]\n") ==
@@ -17318,7 +17439,7 @@ test "`[]` names the subject it could not index, whatever shape it is" {
   # read as one about `M[String]`
   let opq = "opaque type M[K] = Map[K, Int]\n" ++
     "pub fn f[K](m: M[K], k: K) -> Int = m[k]\n"
-  assert msgs_of(opq) == ["indexing a M[K] requires `Index[M[K]]`, but `M[K]` has no such impl"]
+  assert msgs_of(opq) == ["indexing a M[K] requires an impl of `Index` for `M[K]`"]
 
   # a ground opaque subject keeps the message that points at get, for the same
   # reason a ground Bool does (next test): the gap is in the type, not the key
@@ -17329,9 +17450,9 @@ test "`[]` names the subject it could not index, whatever shape it is" {
 
   # a bare rigid parameter: the bound it is missing is `Index` itself
   assert msgs_of("pub fn f[C](c: C, i: Int) -> Int = c[i]\n") ==
-    ["indexing a C requires `Index[C]`, but `C` has no such bound"]
+    ["indexing a C requires a complete `Index` bound for `C`"]
   assert hints_of("pub fn f[C](c: C, i: Int) -> Int = c[i]\n")[0] ==
-    "add the bound: [C: Index]"
+    "declare the Capture axis explicitly, for example [C: Index[c] + ^{c}, ^c]"
 }
 
 test "a ground subject with no `Index` impl keeps the message that points at get" {
@@ -19817,5 +19938,182 @@ test "bitwise Int operators keep native TAST and Amount reduces before a count i
   assert match arith_body(tm, "inverted") {
     XUnary(UBnot, XLocal(..), ..) -> true
     _ -> false
+  }
+}
+
+test "shared prelude templates keep call identities and module declarations independent" {
+  let tables = prelude_tables()
+  let declaration = "fn carrier[@s, ^c](b: I64Buf@s, f: fn() -> Int ^{c}) -> Int = 0\n"
+  let local = "type Local = { value: Int }\n"
+  let env: Map[String, ModExports] = map.empty()
+  let (left, ld) = parser.parse_module(local ++ declaration)
+  let (right, rd) = parser.parse_module(declaration ++ local)
+  assert ld == [] && rd == []
+  let (one, _) = check_module(seed_prelude(cx_new(Some("first"), None, tables)), left, env)
+  let (other, _) = check_module(seed_prelude(cx_new(Some("second"), None, tables)), right, env)
+  assert one.diags == [] && other.diags == []
+  let lid = map.get(one.adts_by_name, "Local").expect("first declaration")
+  let rid = map.get(other.adts_by_name, "Local").expect("second declaration")
+  assert lid != rid
+  assert not map.has(tables.adts, lid) && not map.has(tables.adts, rid)
+  assert not map.has(other.adts, lid) && not map.has(one.adts, rid)
+  let other_signature = map.get(other.fns, "carrier").expect("other generic declaration")
+  let (_, other_call) = fresh_scope_signature(other, other_signature)
+  let original = map.get(one.fns, "carrier").expect("generic declaration")
+  let (first, a) = fresh_scope_signature(one, original)
+  assert a.scope_params.scopes[0].id != other_call.scope_params.scopes[0].id
+  let s = CaptureScope { name = "domain", id = 22000000 }
+  let t = CaptureScope { name = "domain", id = 22000001 }
+  let (bound, ok) = learn_scope_argument(first, a, a.param_tys[0], TyI64Buf(s))
+  assert ok
+  let callback = TyFn([], TyInt, EPure, CaptureFunction { scopes = [], bound = Some([capture.Region(s)]) })
+  let (captured, captured_ok) = learn_scope_argument(bound, a, a.param_tys[1], callback)
+  assert captured_ok
+  let (second, b) = fresh_scope_signature(captured, original)
+  assert a.scope_params.scopes[0].id != b.scope_params.scopes[0].id
+  assert a.scope_params.captures[0].id != b.scope_params.captures[0].id
+  let (next, next_ok) = learn_scope_argument(second, b, b.param_tys[0], TyI64Buf(t))
+  assert next_ok
+  let later = TyFn([], TyInt, EPure, CaptureFunction { scopes = [], bound = Some([capture.Region(t)]) })
+  let (finished, later_ok) = learn_scope_argument(next, b, b.param_tys[1], later)
+  assert later_ok
+  assert map.get(finished.frame.scope_bindings, a.scope_params.scopes[0].id) == Some(s)
+  assert map.get(finished.frame.scope_bindings, b.scope_params.scopes[0].id) == Some(t)
+  assert map.get(finished.frame.capture_bindings, a.scope_params.captures[0].id) == Some([capture.Region(s)])
+  assert map.get(finished.frame.capture_bindings, b.scope_params.captures[0].id) == Some([capture.Region(t)])
+  assert map.get(tables.bins, "get") == map.get(one.prelude.bins, "get")
+}
+
+# These contexts contain no staged implementation or unrelated witness edge.
+# The carrier is an erased scalar, so only carried's content duty can retain
+# the phantom Scope. Both locations are made by the production installer.
+fn carried_cell_context() -> (Cx, Ty, CaptureScope, CaptureScope) !io = {
+  let source = "type Marker[@s] = { n: Int }\n" ++
+    "trait Support[T: ^{c}, ^c] { fn keep(value: T) -> Unit }\n" ++
+    "fn context[@s, @t](a: Marker[s], b: Marker[t]) -> Unit = ()\n" ++
+    "fn ordinary[T: ^{}](value: T) -> Unit = ()\n" ++
+    "fn warranted[T: Support[c] + ^{}, ^c](value: T) -> Unit = ()\n"
+  let (module, errors) = parser.parse_module(source)
+  if len(errors) > 0 { panic(errors[0].msg) }
+  let exports: Map[String, ModExports] = map.empty()
+  let (checked, _) = check_module(seed_prelude(test_cx()), module, exports)
+  if len(checked.diags) > 0 { panic(checked.diags[0].msg) }
+  let signature = map.get(checked.fns, "context").expect("scoped parameters")
+  let s = signature.scope_params.scopes[0]
+  let t = signature.scope_params.scopes[1]
+  let context = Cx { ..checked, current_tparams = map.empty(), current_eff_vars = map.empty(),
+    current_capture_params = CaptureParams { ..signature.scope_params, scopes = [s] },
+    frame = Frame { ..checked.frame, current_sig = None, environment = environment.empty(),
+      lambda_stack = [], scope_bindings = map.empty(), capture_bindings = map.empty() } }
+  (context, signature.param_tys[0], s, t)
+}
+
+fn carried_cell_fixture(initial: Cx, contents: Ty, result_slot: Bool) -> (Cx, Int, Int) = {
+  if result_slot {
+    let (declared, cell) = hidden_local(initial, "\$slot", TyInt, 0, 1)
+    let located = value_capture.install(declared, cell, contents)
+    (value_capture.carried(located, cell, cell, contents), cell, cell)
+  } else {
+    let (declared, source) = hidden_local(initial, "origin", contents, 0, 1)
+    let mutable = write_symbol(declared, source, Sym { ..sym_of(declared, source), mutable = true })
+    let seeded = value_capture.ensure(mutable, [source])
+    let located = value_capture.install(seeded, source, contents)
+    let (carrier, cell) = hidden_local(located, "\$cell", TyInt, 0, 1)
+    (value_capture.carried(carrier, cell, source, contents), cell, source)
+  }
+}
+
+fn carried_cell_callable(cx: Cx, cell: Int) -> (Cx, Ty) = {
+  let checked = check_environment(cx, [cell], false, 0, 1)
+  let contract = default_capture_contract(checked, capture.empty_function(), [cell])
+  (checked, TyFn([], TyUnit, EPure, contract))
+}
+
+test "staged_var_phantom" {
+  let (initial, marker, s, t) = carried_cell_context()
+  assert data_capture.value_bound(initial.adts, initial.current_capture_params, marker) == Some([])
+  assert data_capture.support_bound(initial.adts, initial.current_capture_params, marker) == Some([capture.Region(s)])
+  let (carried, cell, source) = carried_cell_fixture(initial, marker, false)
+  let (checked, callable) = carried_cell_callable(carried, cell)
+  let closed = TyFn([], TyUnit, EPure, CaptureFunction { scopes = [], bound = Some([]) })
+  assert not assignable(checked, callable, closed)
+  assert assignable(checked, callable, TyFn([], TyUnit, EPure,
+    CaptureFunction { scopes = [], bound = Some([capture.Region(s)]) }))
+  assert checked.diags == []
+  let solved = environment.dependencies(checked.frame.environment, [cell])
+  assert solved.known && capture.equal(solved.value, [capture.Region(s)])
+  assert map.get(checked.frame.environment.aliases, cell) == Some(source)
+  assert environment.location(checked.frame.environment, cell) == environment.location(checked.frame.environment, source)
+  let other = CaptureScope { ..t, name = s.name }
+  let widened = Cx { ..checked, current_capture_params = CaptureParams { ..checked.current_capture_params, scopes = [s, other] } }
+  let refused = value_capture.write(widened, cell, TyI64Buf(other), 0, 1)
+  assert len(refused.diags) == 1
+  assert str.contains(refused.diags[0].msg, "value escapes the installation lifetime")
+}
+
+test "staged_result_phantom" {
+  let (initial, marker, s, _) = carried_cell_context()
+  let (carried, cell, source) = carried_cell_fixture(initial, marker, true)
+  let (checked, callable) = carried_cell_callable(carried, cell)
+  assert not assignable(checked, callable, TyFn([], TyUnit, EPure,
+    CaptureFunction { scopes = [], bound = Some([]) }))
+  assert assignable(checked, callable, TyFn([], TyUnit, EPure,
+    CaptureFunction { scopes = [], bound = Some([capture.Region(s)]) }))
+  assert checked.diags == []
+  let solved = environment.dependencies(checked.frame.environment, [cell])
+  assert solved.known && capture.equal(solved.value, [capture.Region(s)])
+  assert cell == source && map.get(checked.frame.environment.aliases, cell) == Some(cell)
+}
+
+test "staged_value_bound_only" {
+  let (initial, _, _, _) = carried_cell_context()
+  let signature = map.get(initial.fns, "ordinary").expect("value-only parameter")
+  let entered = enter_fn(initial, signature, 0, 1)
+  let contents = signature.tparams[0]
+  assert data_capture.value_bound(entered.adts, entered.current_capture_params, contents) == Some([])
+  assert data_capture.support_bound(entered.adts, entered.current_capture_params, contents) == None
+  for result_slot in [false, true] {
+    let (carried, cell, _) = carried_cell_fixture(entered, contents, result_slot)
+    let (checked, _) = carried_cell_callable(carried, cell)
+    assert len(checked.diags) == 1
+    assert str.contains(checked.diags[0].msg, "cannot prove the captured value environment")
+    assert not environment.dependencies(checked.frame.environment, [cell]).known
+  }
+}
+
+test "carried content support follows the independent witness premise" {
+  let (initial, _, _, _) = carried_cell_context()
+  let signature = map.get(initial.fns, "warranted").expect("complete witness premise")
+  let entered = enter_fn(initial, signature, 0, 1)
+  let contents = signature.tparams[0]
+  let axis = signature.scope_params.captures[0]
+  let support = [capture.CaptureVar(axis.name, axis.id)]
+  assert data_capture.value_bound(entered.adts, entered.current_capture_params, contents) == Some([])
+  assert data_capture.support_bound(entered.adts, entered.current_capture_params, contents) == Some(support)
+  for result_slot in [false, true] {
+    let (carried, cell, _) = carried_cell_fixture(entered, contents, result_slot)
+    let (checked, callable) = carried_cell_callable(carried, cell)
+    assert checked.diags == []
+    assert environment.dependencies(checked.frame.environment, [cell]).known
+    assert not assignable(checked, callable, TyFn([], TyUnit, EPure,
+      CaptureFunction { scopes = [], bound = Some([]) }))
+    assert assignable(checked, callable, TyFn([], TyUnit, EPure,
+      CaptureFunction { scopes = [], bound = Some(support) }))
+  }
+}
+
+test "carried contents preserve ordinary scalars and real resource support" {
+  let (initial, _, s, _) = carried_cell_context()
+  for contents in [TyInt, TyI64Buf(s)] {
+    let expected = data_capture.support_bound(initial.adts, initial.current_capture_params, contents)
+      .expect("known support")
+    assert data_capture.value_bound(initial.adts, initial.current_capture_params, contents) == Some(expected)
+    for result_slot in [false, true] {
+      let (carried, cell, _) = carried_cell_fixture(initial, contents, result_slot)
+      let (checked, _) = carried_cell_callable(carried, cell)
+      let solved = environment.dependencies(checked.frame.environment, [cell])
+      assert checked.diags == [] && solved.known
+      assert capture.equal(solved.value, expected)
+    }
   }
 }

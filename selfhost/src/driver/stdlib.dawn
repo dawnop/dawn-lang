@@ -31,7 +31,7 @@ use check/types.{
 }
 use check/passes.{head_owner}
 use check/tast.{TFun, TModule}
-use check/cx.{ModExports, cx_new, Cx}
+use check/cx.{ModExports, cx_new, Cx, PreludeTables, prelude_tables}
 use check/checker.{check_module, exports_of}
 use check/identity.{Minted, Named, TestDecl}
 use ir/interp.{
@@ -52,6 +52,8 @@ use std/memfs
 
 ## Everything user-module analysis needs from std.
 pub(pkg) type StdCtx = {
+  # Only immutable declarations cross into user-module context construction.
+  prelude: PreludeTables,
   # modPath → exports, seeded into every program's import environment
   exports: Map[String, ModExports],
   # the implicitly-visible surface: the PRELUDE names only
@@ -574,6 +576,7 @@ fn load_chosen_std_with(
     }
     None -> ()
   }
+  let prelude = prelude_tables()
   var exports: Map[String, ModExports] = map.empty()
   var std_fns: Map[String, Sig] = map.empty()
   # a pruned load cannot build this from the modules it left out, so it reads
@@ -616,7 +619,7 @@ fn load_chosen_std_with(
       })
     }
     impls_before = map.insert(impls_before, mod_path, impls)
-    var cx = cx_new(Some(mod_path), None)
+    var cx = cx_new(Some(mod_path), None, prelude)
     # said outright rather than left to `cx_new`'s name-shaped proposal: this
     # is the loader for the bundled library, so every module it builds a Cx
     # for is std by construction, whatever any of them is called
@@ -691,7 +694,7 @@ fn load_chosen_std_with(
   var std_names: Set[String] = set.empty()
   for k in map.keys(fn_decls) { std_names = set.insert(std_names, k) }
   Ok(StdCtx {
-    exports = exports,
+    prelude = prelude, exports = exports,
     std_fns = std_fns,
     moved = moved,
     fn_decls = fn_decls,

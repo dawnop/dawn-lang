@@ -27,7 +27,7 @@ use front/lexer
 use front/token.{
   Token, TokKind, Diag,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
-  USE, ELSE, FN, FOR, IF, MATCH, WHILE, NOT, TRUE, FALSE, IMPL, EFFECT, TYPE, ALIAS, PUB,
+  USE, ELSE, FN, FOR, IF, MATCH, WHILE, NOT, TRUE, FALSE, IMPL, TRAIT, EFFECT, TYPE, ALIAS, PUB,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
@@ -93,6 +93,7 @@ fn capture_literals(raw: List[Token]) -> List[CaptureLiteral] = {
     if k == EQ || k == FATARROW { functions = []
       arrows = set.empty() }
     if k == TYPE || k == ALIAS { alias_target = true }
+    if k == IMPL || k == TRAIT { in_type = true }
     if k == COLON || k == ARROW || k == AT { in_type = true }
     if k == EQ { in_type = alias_target
       alias_target = false }
@@ -2058,6 +2059,11 @@ test "origin arm clauses preserve tokens and formatting is idempotent" {
     assert fmt_of(once) == once
     assert str.contains(once, "origin ")
   }
+}
+
+test "complete protocol applications format capture literals in impl headers" {
+  assert format("impl Len[Bytes, ^ { }] { fn len(b:Bytes)->Int=0 }\n") ==
+    Ok("impl Len[Bytes, ^{}] { fn len(b: Bytes) -> Int = 0 }\n")
 }
 
 test "Mem scope formatting preserves binders and canonicalizes capture sets" {

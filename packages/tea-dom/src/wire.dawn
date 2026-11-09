@@ -51,6 +51,7 @@ use json/render.{render}
 use json/parser.{parse}
 use tea_core/cmd.{FetchReq}
 use tea_core/diff.{
+  diff,
   Patch,
   Replace,
   SetSelf,
@@ -60,7 +61,7 @@ use tea_core/diff.{
   RemoveKid,
   MoveKid,
 }
-use node.{Node, Text, Elem, On, NoData, Value, Key, with_key}
+use node.{wire_tree, Node, Text, Elem, On, NoData, Value, Key, with_key}
 
 ## What the host asked for this turn. `Bad` carries the reason rather than
 ## panicking: a malformed line is the host's mistake and the guest answers it
@@ -237,12 +238,17 @@ pub fn reply_ok_asking[M](
 ) -> String = {
   var out: List[String] = ["{\"ok\":true,\"model\":", quoted(model), ",\"patches\":["]
   var first = true
-  for p in ps {
-    if not first {
-      out = out ++ [","]
+  var patch_index = 0
+  while true {
+    match get(ps, patch_index) {
+      None -> break
+      Some(p) -> {
+        if not first { out = out ++ [","] }
+        out = put_patch(out, p)
+        first = false
+        patch_index = patch_index + 1
+      }
     }
-    out = put_patch(out, p)
-    first = false
   }
   if list.is_empty(asked) {
     join(out ++ ["]}"], "")
@@ -274,6 +280,12 @@ fn put_patch[M](out: List[String], p: Patch[Node[M]]) -> List[String] = {
 }
 
 # `enc_node` when `whole`, `enc_self` when not, as text.
+# The wire compares copied node data; it never freezes a witness for an
+# abstract message type or carries that type's callbacks into the reply.
+pub(pkg) fn reply_diff[M](model: String, old: Node[M], new: Node[M],
+  asked: List[FetchReq]) -> String =
+  reply_ok_asking(model, diff(wire_tree(old), wire_tree(new)), asked)
+
 fn put_node[M](out: List[String], n: Node[M], whole: Bool) -> List[String] =
   match n {
     Text(s) -> out ++ ["{\"t\":\"text\",\"s\":", quoted(s), "}"]
@@ -287,17 +299,21 @@ fn put_node[M](out: List[String], n: Node[M], whole: Bool) -> List[String] =
       }
       acc = acc ++ ["],\"on\":["]
       first = true
-      for e in on {
-        if not first {
-          acc = acc ++ [","]
+      var listener_index = 0
+      while true {
+        match get(on, listener_index) {
+          None -> break
+          Some(e) -> {
+            if not first { acc = acc ++ [","] }
+            acc = acc ++ (match e.payload {
+              NoData -> [quoted(e.event)]
+              Value -> ["[", quoted(e.event), ",\"value\"]"]
+              Key -> ["[", quoted(e.event), ",\"key\"]"]
+            })
+            first = false
+            listener_index = listener_index + 1
+          }
         }
-        acc = acc
-          ++ (match e.payload {
-            NoData -> [quoted(e.event)]
-            Value -> ["[", quoted(e.event), ",\"value\"]"]
-            Key -> ["[", quoted(e.event), ",\"key\"]"]
-          })
-        first = false
       }
       if whole {
         put_nodes(acc ++ ["],\"kids\":"], ks) ++ ["}"]
@@ -310,12 +326,17 @@ fn put_node[M](out: List[String], n: Node[M], whole: Bool) -> List[String] =
 fn put_nodes[M](out: List[String], ns: List[Node[M]]) -> List[String] = {
   var acc = out ++ ["["]
   var first = true
-  for n in ns {
-    if not first {
-      acc = acc ++ [","]
+  var node_index = 0
+  while true {
+    match get(ns, node_index) {
+      None -> break
+      Some(n) -> {
+        if not first { acc = acc ++ [","] }
+        acc = put_node(acc, n, true)
+        first = false
+        node_index = node_index + 1
+      }
     }
-    acc = put_node(acc, n, true)
-    first = false
   }
   acc ++ ["]"]
 }
@@ -732,4 +753,19 @@ test "a malformed supply is an answer, not a panic" {
     Bad(reason) -> { assert str.contains(reason, "boolean `ok`") }
     _ -> { assert false }
   }
+}
+
+test "metadata reconciliation preserves the exact patch reply bytes" {
+  let plain: Node[String] = Elem(tag = "div", props = [], on = [], kids = [], key = None)
+  let event = On { event = "input", payload = Value, to_msg = text => text }
+  let key_event = On { event = "keydown", payload = Key, to_msg = text => text }
+  let nodes: List[Node[String]] = [Text(s = "a"), Text(s = "b"), plain,
+    Elem(tag = "span", props = [], on = [], kids = [], key = None),
+    Elem(tag = "div", props = [("title", "x")], on = [], kids = [], key = None),
+    Elem(tag = "div", props = [], on = [event], kids = [], key = None),
+    Elem(tag = "div", props = [], on = [key_event], kids = [Text(s = "child")], key = None),
+    Elem(tag = "div", props = [], on = [], kids = [plain], key = Some("root"))]
+  for old in nodes { for new in nodes {
+    assert reply_diff("model", old, new, []) == reply_ok("model", diff(old, new))
+  } }
 }

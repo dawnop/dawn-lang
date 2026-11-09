@@ -812,7 +812,8 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   impl 写完整应用 `Measure[I64Buf@s, ^{s}]`，普通参数 bound 省去主体，写
   `T: Measure[c] + ^{c}`。实参必须显式给全且按不变性比较；同主体的同 trait 不同实参 bound
   拒绝，coherence 仍按 trait 与主体 head 唯一。方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
-  普通 T 的空捕获默认与必要 std 迁移随 K3b-2 启用；K3b-1 只提供新契约的表面与静态检查。
+  Omitted Type value bounds in computation contracts are empty. Data
+  representation parameters and generated introductions retain their own duty.
 - **注入是逐 trait 的属性**：一个 trait 的方法名是否占据函数命名空间由该 trait 决定。
   今天 `trait` 声明恒注入，`Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` 六个预置 trait 也注入；
   **方法名由语言代用户消费掉的二十一个不注入**，它们的方法名只在 impl 体、文档与错误消息里
@@ -838,28 +839,36 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   因为渲染把表示印出来，是一个呈现决定，相等与哈希不是（opaque 类型同理，§2.7）。
   用户 trait 不能 derive：derive 要编译器知道该 trait 的结构规则，Dawn 没有让库陈述它的
   编译期元编程（Haskell 2010 的 deriving 同样只收 Prelude 的封闭集合）。
-- **`Iter`** 声明两个关联类型与四个方法（关联类型见本节下方）：
-  `trait Iter[C] { type Cur  type Item  fn iter_start(it: C) -> C.Cur
+- **`Iter`** declares two associated types and four methods (associated types are covered further
+  down this section):
+  `trait Iter[C: ^{dep}, ^dep] { type Cur: ^{dep}  type Item: ^{dep}  fn iter_start(it: C) -> C.Cur
   fn iter_done(it: C, c: C.Cur) -> Bool  fn iter_next(it: C, c: C.Cur) -> C.Cur
-  fn iter_get(it: C, c: C.Cur) -> C.Item }`——游标式四方法而非返回配对的 `next`，
-  一步不强制任何分配（游标形状由 impl 定）。std 为 `List`/`String`/`Bytes`/
-  `Map`/`Set` 各提供一个 impl（元素分别是 `T`/单字符 `String`/`Int` 字节/
-  `(K, V)`/`T`）；用户类型实现 `Iter` 即可被 `for` 迭代。四个方法名随 prelude
-  注入函数命名空间，与其余 prelude 名同待遇——**可被本模块的声明遮蔽**（§10.3）。
-  形参名取自这份声明（具名实参，§4.3）：接收者 `it`、游标 `c`，所以写 `xs.iter_done(c = k)`。
-- **`Len`** 声明一个方法、无关联类型：`trait Len[C] { fn len(x: C) -> Int }`。
-  `len(c)` 与 `c.len()` 按接收者类型找 impl；`List` 的 impl 随 std 提供，用户类型
-  写 `impl Len[T]` 即得 `len`。`len` 这个名字随 prelude 注入（上条），但 impl 体里的
-  `fn len` 不是模块顶层声明，**不遮蔽**任何东西，这正是它存在的理由：一个模块可以给自己的
-  类型写 `len`，同一模块里对 `List` 的 `len(xs)` 照旧。
-  `Len` 在 `List` 上就是语言的 `len` 原语，不是一次对 impl 方法的调用；impl 体只服务
-  `[C: Len]` 的字典槽，并且只调内部名（调自己是无条件自递归，被检查器拒绝）。
-- **`Index`** 声明两个关联类型与一个方法：
-  `trait Index[C] { type Idx  type Item  fn index(c: C, i: C.Idx) -> C.Item }`。
-  语言为 `List`（`Idx = Int`）与 `Map`（`Idx = 键类型`）提供 impl；用户类型实现
-  `Index` 即可用 `[]`（示例见 §4.8）。方法名 `index` **不**进入函数命名空间
-  （见上条注入规则），只在 impl 体、文档与错误消息里出现。一个类型只有一个索引
-  类型——`Index` 是单参数 trait，写不出同一容器的第二种下标（如切片）。
+  fn iter_get(it: C, c: C.Cur) -> C.Item }`; four cursor methods rather than a `next` that
+  returns a pair, so that one step forces no allocation (the shape of the cursor is up to the
+  impl). std provides one impl each for `List`/`String`/`Bytes`/`Map`/`Set` (the elements are
+  `T` / a single-character `String` / an `Int` byte / `(K, V)` / `T` respectively); a user type
+  that implements `Iter` can be iterated by `for`. The four method names are injected into the
+  function namespace along with the prelude, and get the same treatment as the rest of the
+  prelude names; **they can be shadowed by a declaration in this module** (§10.3).
+  The parameter names come from this declaration (named arguments, §4.3): the receiver is `it`
+  and the cursor is `c`, so a caller writes `xs.iter_done(c = k)`.
+- **`Len`** declares one method and no associated types: `trait Len[C: ^{dep}, ^dep] { fn len(x: C) -> Int }`.
+  `len(c)` and `c.len()` find the impl by the receiver's type; the impl for `List` ships with std,
+  and a user type gets `len` by writing `impl Len[T, ^{}]`. The name `len` is injected with the prelude
+  (the entry above), but an `fn len` inside an impl body is not a top-level declaration of the
+  module and **shadows nothing**, which is the point of it: a module may write `len` for its own
+  type while `len(xs)` on a `List` in the same module keeps working. At a `List`, `Len` is the
+  language's `len` primitive, not a call on the impl's method; the impl body serves only the
+  dictionary slot of a `[C: Len[^{}]]` bound, and calls an internal name (calling itself is
+  unconditional self-recursion, which the checker rejects).
+- **`Index`** declares two associated types and one method:
+  `trait Index[C: ^{dep}, ^dep] { type Idx: ^{dep}  type Item: ^{dep}  fn index(c: C, i: C.Idx) -> C.Item }`.
+  The language provides impls for `List` (`Idx = Int`) and `Map` (`Idx = key type`); a user type
+  that implements `Index` can use `[]` (example in §4.8). The method name `index` does **not**
+  enter the function namespace (see the injection rule above), and appears only in impl bodies,
+  in documentation and in error messages. A type has exactly one index type: `Index` has
+  one Type subject and one invariant Capture argument. A second kind of subscript on the
+  same container, such as slicing, cannot be selected through a different index type.
 - **`Display`** 声明一个方法、无关联类型：
   `trait Display[T] { fn display(x: T) -> String }`。它是**顶层渲染**那一层：
   `to_string(x)` 与 `"${x}"` 有 impl 就用它，没有就照 §4.3 的既有规则渲染。方法名
@@ -889,18 +898,27 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   `FromInt[Float]`（不精确即 panic，与 §1.5 的编译期判据相同）与 `FromFloat[Float]`，
   不提供 `FromFloat[Int]`。泛型代码里 `[T: FromInt]` 下的 `0` 就是 `from_int(0)`。
   两个名字同样从此在 trait 与效果位置被占用。
+Each staged protocol below has one explicit Capture argument. A closed impl writes
+`^{}`. The subject value bound and associated output upper bound use this argument;
+complete subject and output support must also fit the selected witness. Cond and
+Iter callbacks use the same bound. Quantified applications solve all actual callback
+obligations jointly, while fixed applications remain invariant. Unknown support is
+never an empty environment. Item, row and method instantiation retain the same
+application across module boundaries. Cell content support and installation lifetime
+checks remain independent of ordinary closure value captures.
+
 - **`StagedIter`** 与 **`StagedVar`**（背后是 staged `for`，§4.7）：
-  `trait StagedIter[R] { type Item  effect StagedIter = !()  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter) -> Unit !R.StagedIter }`，
-  `trait StagedVar[T] { type Cell  effect StagedVar = !()  fn var_open(v: T) -> T.Cell !T.StagedVar  fn var_get(c: T.Cell) -> T !T.StagedVar  fn var_set(c: T.Cell, v: T) -> Unit !T.StagedVar }`。
+  `trait StagedIter[R: ^{c}, ^c] { type Item: ^{c}  effect StagedIter = !()  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter ^{c}) -> Unit !R.StagedIter }`，
+  `trait StagedVar[T: ^{c}, ^c] { type Cell: ^{c}  effect StagedVar = !()  fn var_open(v: T) -> T.Cell !T.StagedVar  fn var_get(c: T.Cell) -> T !T.StagedVar  fn var_set(c: T.Cell, v: T) -> Unit !T.StagedVar }`。
   两者的方法名由语言消费，**不**进入函数命名空间；不可 derive；各带一个与 trait 同名的关联效果，
   默认纯（与算术、字面量 trait 同），所以同时实现两者的类型在泛型代码里写 `!T.StagedIter`、
   `!T.StagedVar` 不会混淆；语言不为任何类型提供 impl。两个名字同样从此在 trait 与效果位置被占用。
 - **`StagedCond`**（背后是 staged `if`，§4.6）：
-  `trait StagedCond[C] { effect StagedCond = !()  fn staged_if(c: C, on_true: fn() -> Unit !C.StagedCond, on_false: fn() -> Unit !C.StagedCond) -> Unit !C.StagedCond }`。
+  `trait StagedCond[C: ^{c}, ^c] { effect StagedCond = !()  fn staged_if(c: C, on_true: fn() -> Unit !C.StagedCond ^{c}, on_false: fn() -> Unit !C.StagedCond ^{c}) -> Unit !C.StagedCond }`。
   方法名不注入，不可 derive，同名关联效果默认纯；泛型以 `!C.StagedCond` 投影。
   语言不提供任何 impl，尤其不给 Bool 提供；opaque 不继承底层 impl。名字占用 trait 与 effect 声明位置。
 - **`StagedResult`**（staged `if` 的结果，§4.6）：
-  `trait StagedResult[T] { type Slot  effect StagedResult = !()  fn result_open() -> T.Slot !T.StagedResult  fn result_set(s: T.Slot, v: T) -> Unit !T.StagedResult  fn result_get(s: T.Slot) -> T !T.StagedResult }`。
+  `trait StagedResult[T: ^{c}, ^c] { type Slot: ^{c}  effect StagedResult = !()  fn result_open() -> T.Slot !T.StagedResult  fn result_set(s: T.Slot, v: T) -> Unit !T.StagedResult  fn result_get(s: T.Slot) -> T !T.StagedResult }`。
   只按结果 T 选槽，与条件类型独立；open 无初值，两臂都赋值，合流后才能 get。方法不注入、不可 derive，
   同名关联效果默认纯；不提供宿主标量 impl，不继承 opaque 底层 impl，名字占用 trait 与 effect 声明位置。
 - **`BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr`/`Ushr`/`BitNot`**（§4.3）：
@@ -946,17 +964,17 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
     四个方法都把 `c: C` 放在第 0 位，正是这个原因。
 
 ```dawn compile
-trait Head[C] {
-  type Item
+trait Head[C: ^{c}, ^c] {
+  type Item: ^{c}
   fn first(c: C) -> Option[C.Item]
 }
 
-impl[T] Head[List[T]] {
+impl[T: ^{c}, ^c] Head[List[T], c] {
   type Item = T
   fn first(c: List[T]) -> Option[T] = get(c, 0)
 }
 
-fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
+fn head_or[C: Head[c] + ^{c}, ^c](c: C, d: C.Item) -> C.Item =   # The projection reduces during instantiation
   match first(c) { Some(x) -> x, None -> d }        # head_or([1], 9) 是 Int
 ```
 - **关联效果**（设计与裁决见
@@ -1496,8 +1514,8 @@ while queue.non_empty() { ... }
   循环前恰好求值一次；迭代脱糖为对
   `iter_start/iter_done/iter_next/iter_get` 的普通 trait 调用，元素类型是该 impl
   的 `Item`。std 的五个容器（`List`/`String`/`Bytes`/`Map`/`Set`）开箱可迭代；
-  泛型函数里 `[C: Iter]` 的参数同样可 `for`（字典转发）。迭代序即 impl 的游标序
-  （`String` 按码点、`Map`/`Set` 同 `entries`/`to_list`）。
+  A generic `[C: Iter[^{}]]` forwards its dictionary for `for`; iteration follows
+  the impl cursor order. String walks code points; Map and Set follow entries and to_list.
 - **staged `for`**：`e` 的类型实现了 `StagedIter` 时，`for pattern in e { body }` 不是宿主
   循环，而是交给该 impl 的 `staged_for`：`body` 成为一个闭包，由 impl 决定怎么跑（tileir
   用它记录设备循环）。`e` 仍在外层恰好求值一次，先于一切格子。体中提到的每个外层 `var`
@@ -1509,7 +1527,7 @@ while queue.non_empty() { ... }
   `Iter` 与 `StagedIter` 的类型不能被 `for` 迭代。
 
   ```dawn
-  var acc = zeros(o)                    # Tile[Float]，tileir 提供 StagedVar[Tile[D]]
+  var acc = zeros(o)                    # Tile[Float]; tileir provides StagedVar[Tile[D], ^{}]
   for k in d_range(0, K / T) {          # tileir 提供 StagedIter[DRange]
     acc = mmaf(load_at(a, [k]), load_at(b, [k]), acc)
   }
@@ -1546,7 +1564,7 @@ let c = rows[1][0]   # 可链式、可与 ?/./() 组合
 ```dawn
 type Grid = { w: Int, cells: List[Int] }
 
-impl Index[Grid] {
+impl Index[Grid, ^{}] {
   type Idx = (Int, Int)
   type Item = Int
   fn index(g: Grid, p: (Int, Int)) -> Int = {
@@ -1558,7 +1576,7 @@ impl Index[Grid] {
 let g = Grid { w = 3, cells = [1, 2, 3, 4, 5, 6] }
 let v = g[(2, 1)]                                 # 6
 
-fn first[C: Index](c: C, i: C.Idx) -> C.Item = c[i]   # 泛型消费者
+fn first[C: Index[^{}]](c: C, i: C.Idx) -> C.Item = c[i]   # Generic consumer
 ```
 
 **越界三判据**。语言只承诺三条越界策略，每个带下标/区间参数的操作（本节的 `[]` 与
@@ -1965,7 +1983,11 @@ using V(T), the reader environment and its calling row. Dictionaries separately
 contribute their complete witness contract W; ordinary hiding does not eliminate
 W or weaken S(Subject) contained in W. Cell writes check full delivery support,
 invariant content and the location's installation lifetime, including aliases
-and handler or staged channels. Computation defaults remain staged in this slice.
+and handler or staged channels. Omitted Type value bounds in computation
+contracts are now empty. Data representations and generated introductions
+retain their declared quantification. Len, Iter and Index declare explicit
+Capture arguments; their complete witness support obligation remains independent
+of an ordinary value bound.
 
 trait 见证的静态契约含 trait identity、主体、Capture 实参与子见证。Capture 实参并集 W
 必须覆盖主体可达捕获与完整类型自由域的 support；impl 的主体/Item 上界、子见证和 Scope 键
@@ -1973,9 +1995,11 @@ trait 见证的静态契约含 trait identity、主体、Capture 实参与子见
 以刚性主体/捕获参数检查，不借使用点回推契约。接口摘要、模块再载入、投影和类型替换
 保存完整应用；第一版不保留丢失 Capture 信息的接口读取分支。
 
-**本节待实现**，不表示当前编译器已封住 #847。现行 `!Mem` 与结果类型检查存在闭包环境
-逃逸和 peek/poke 纯度缺口；以下是取代它们的目标语义。表面拼写与完整约束见
-[mem-capture-scope-design.md](mem-capture-scope-design.md)。
+**This section describes the settled contract.** Computation defaults, data
+summaries and actual dependency propagation are implemented in K3b-2. The
+remaining exits are a separate slice; domain discharge and control boundaries
+remain in K4. This does not claim that #847 is complete. Surface spelling and
+full constraints are in [mem-capture-scope-design.md](mem-capture-scope-design.md).
 
 - 每次 `with_mem` 运行引入不可与别次合一的新域 s；缓冲、可达聚合、泛型实例与函数环境
   保留域依赖。函数值的捕获上界与调用效果分别检查，赋值、合流、字段、opaque、导出、
@@ -1992,9 +2016,11 @@ trait 见证的静态契约含 trait identity、主体、Capture 实参与子见
 
 
 K2 已提供类型与语法基础；K3a 已接入新域生成、分配归域和完整 Mem[s] 契约。
-K3b-1 提供 trait Capture 表面与静态契约，普通 T 空默认仍不启用、std 不迁移。
-实际环境与出口留 K3b-2，按域消解与控制边界留 K4。13 例基线现为 10 例拒绝，
-len_capture、ctl_cross、ctl_store 仍接受；本刀维持该基线，不表示 #847 已修复。
+K3b-1 provides trait Capture syntax and static contracts. K3b-2 adds actual
+environments, data summaries, computation defaults and required library contracts.
+The remaining exits are a separate slice. Domain discharge and control boundaries
+remain in K4; ctl_cross and ctl_store keep their established baseline. This
+staging does not claim that #847 is complete.
 Scope 与 Capture 分别具有独立身份和参数轴，不是普通类型或运行时值；函数环境上界
 与调用效果分别保存。内部 Scope binder 按 alpha 等价比较，替换须同时避免身份与显示名捕获。
 
@@ -2016,9 +2042,11 @@ scope_lambda   := "[" scope_binder ("," scope_binder)* "]" "(" params ")" "=>" e
 名义类型的域实参写作 `Holder[s]`；捕获实参可为集合参数名或 `^{s, c}`。
 格式化对无注释的捕获集合去重并排序，保留集合内注释。
 
-本阶段显式类型应用执行种类检查和静态替换；从调用实参求域/捕获约束、推断自由捕获、
-检查出口、为运行器产生新域和按域寻址证据由后续刀接入。
-现有程序省略捕获注解时的接受集合保持不变，普通 T 的空捕获默认值尚不用于提前翻红旧反例。
+Explicit applications check kinds and substitute static contracts. Calls infer
+declared axes from arguments and result expectations. Omitted computation Type
+value bounds are empty; data representation and generated introduction contracts
+retain their separate duty. Remaining exits and K4 obligations follow their
+respective implementation slices.
 
 ### 6.3 效果多态
 

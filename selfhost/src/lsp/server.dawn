@@ -6397,11 +6397,11 @@ test "a var a staged loop carries answers as the var at every spelling inside th
       "type V = { n: Int }",
       "type C = { n: Int }",
       "type R = { n: Int }",
-      "impl StagedIter[R] {",
+      "impl StagedIter[R, ^{}] {",
       "  type Item = V",
-      "  fn staged_for(r: R, body: fn(V) -> Unit) -> Unit = body(V { n = 0 })",
+      "  fn staged_for(r: R, body: fn(V) -> Unit ^{}) -> Unit = body(V { n = 0 })",
       "}",
-      "impl StagedVar[V] {",
+      "impl StagedVar[V, ^{}] {",
       "  type Cell = C",
       "  fn var_open(v: V) -> C = C { n = v.n }",
       "  fn var_get(c: C) -> V = V { n = c.n }",
@@ -6889,12 +6889,12 @@ test "dbg is a builtin the editor offers and explains, and its argument hovers a
     let text = "pub fn main() -> Unit !io = println(to_string(dbg(40 + 2)))\n"
     let d = def_probe_doc_named(st0, "dbgprobe.dawn", text)
     let st = LspState { ..st0, docs = map.insert(st0.docs, d.uri, d) }
-    assert def_probe_at(st, d, text, "dbg(", 0).hover == "fn dbg[T: Show](x: T) -> T"
+    assert def_probe_at(st, d, text, "dbg(", 0).hover == "fn dbg[T: Show + ^{}](x: T) -> T"
     # the head the declaration's exit appends is taken back off before the
     # written arguments are paired with the typed ones (`split_site`)
     assert def_probe_at(st, d, text, "40", 0).hover == "Int\n40  (0x28)"
     let item = d7_item(st, d, "dbg(", 2, "dbg")
-    assert ostr(item, "detail") == "fn dbg[T: Show](x: T) -> T"
+    assert ostr(item, "detail") == "fn dbg[T: Show + ^{}](x: T) -> T"
   })))
 }
 
@@ -8053,14 +8053,14 @@ test "staged if pairs both rewritten arms for navigation references rename and t
       "type Cell = { n: Int }",
       "type Cond = { n: Int }",
       "type ResultSlot = { value: Option[V] }",
-      "impl StagedResult[V] { type Slot = ResultSlot",
+      "impl StagedResult[V, ^{}] { type Slot = ResultSlot",
       "  fn result_open() -> ResultSlot = ResultSlot { value = None }",
       "  fn result_set(s: ResultSlot, v: V) -> Unit = ()",
       "  fn result_get(s: ResultSlot) -> V = s.value! }",
-      "impl StagedCond[Cond] {",
-      "  fn staged_if(c: Cond, on_true: fn() -> Unit, on_false: fn() -> Unit) -> Unit = on_true()",
+      "impl StagedCond[Cond, ^{}] {",
+      "  fn staged_if(c: Cond, on_true: fn() -> Unit ^{}, on_false: fn() -> Unit ^{}) -> Unit = on_true()",
       "}",
-      "impl StagedVar[V] { type Cell = Cell",
+      "impl StagedVar[V, ^{}] { type Cell = Cell",
       "  fn var_open(v: V) -> Cell = Cell { n = v.n }",
       "  fn var_get(c: Cell) -> V = V { n = c.n }",
       "  fn var_set(c: Cell, v: V) -> Unit = () }",

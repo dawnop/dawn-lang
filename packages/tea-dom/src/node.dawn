@@ -212,11 +212,7 @@ fn fold_hash(acc: Int, part: Int) -> Int = 31 * acc + part
 ## does: the kind is data in the tree, so declaring it there rather than
 ## encoding it in the event name costs the vocabulary nothing.
 impl[M] Tree[Node[M]] {
-  fn kids(w: Node[M]) -> List[Node[M]] =
-    match w {
-      Text(_) -> []
-      Elem(_, _, _, ks, _) -> ks
-    }
+  fn kids(w: Node[M]) -> List[Node[M]] = children(w)
 
   # Total by construction: a `Text` handed children ignores them, which is the
   # totality `apply` needs against an address that no longer exists.
@@ -277,6 +273,25 @@ impl[M] Tree[Node[M]] {
 ## Written here rather than repeated in calling modules because the named
 ## eliminator is the readable spelling and the basis of `reactor.settle`.
 pub fn deliver[M](listener: On[M], payload: String) -> M = (listener.to_msg)(payload)
+
+## Immediate children through a concrete value contract.
+pub fn children[M](w: Node[M]) -> List[Node[M]] =
+  match w {
+    Text(_) -> []
+    Elem(_, _, _, ks, _) -> ks
+  }
+
+## Copy only the data that a DOM reply can carry. Routing keeps the original
+## message callbacks; reconciliation at the wire boundary needs none of them.
+pub(pkg) fn wire_tree[M](value: Node[M]) -> Node[Unit] = match value {
+  Text(text) -> Text(s = text)
+  Elem(tag, props, on, ks, key) -> {
+    let events: List[On[Unit]] = list.map(on, listener => On {
+      event = listener.event, payload = listener.payload, to_msg = _payload => () })
+    Elem(tag = tag, props = props, on = events,
+      kids = list.map(ks, child => wire_tree(child)), key = key)
+  }
+}
 
 test deliver {
   let draft = On { event = "input", payload = Value, to_msg = text => "draft: ${text}" }
@@ -753,4 +768,22 @@ test "a repeated key in the DOM vocabulary falls back to index pairing" {
   )
   assert diff(both, one) == [Patch { path = [], op = TruncateKids(keep = 1) }]
   assert apply(both, diff(both, one)) == one
+}
+
+test "wire trees preserve every equality field without executing a message callback" {
+  for left in corpus() { for right in corpus() {
+    assert (wire_tree(left) == wire_tree(right)) == (left == right)
+  } }
+  let guarded: Node[Int] = Elem(tag = "input", props = [("value", "x")],
+    on = [On { event = "input", payload = Value,
+      to_msg = _payload => panic("message callback must remain in the original tree") }],
+    kids = [], key = Some("input"))
+  match wire_tree(guarded) {
+    Elem(_, _, on, _, key) -> {
+      assert key == Some("input")
+      assert on[0].event == "input" && on[0].payload == Value
+      assert on[0].to_msg("ignored") == ()
+    }
+    _ -> { assert false }
+  }
 }

@@ -12,11 +12,14 @@ HERE = Path(__file__).resolve().parent
 CASES = json.loads((HERE / "cases.json").read_text())
 
 
-def observe(run, compiler, case, output, expected=None, diagnostic=None, std=None):
+def observe(run, compiler, case, output, expected=None, diagnostic=None, std=None,
+            embedded=False):
     source = HERE / "cases" / (case + ".dawn")
     wanted = CASES[case]["exit"] if expected is None else expected
-    result, _ = run([*compiler, "check", "--std", (std or HERE.parents[1] / "std"), source],
-                    output, expected=wanted)
+    args = [*compiler, "check"]
+    if not embedded:
+        args.extend(["--std", std or HERE.parents[1] / "std"])
+    result, _ = run([*args, source], output, expected=wanted)
     if wanted:
         fragment = CASES[case].get("diagnostic", "") if diagnostic is None else diagnostic
         if not fragment or fragment not in result.stdout or str(source) + ":" not in result.stdout:

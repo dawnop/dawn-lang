@@ -1,0 +1,21 @@
+# Deliberately incomplete applications keep their own diagnostic paths.
+type Payload[@s] = { read: fn() -> Int ^{s} }
+type Range[@s] = { n: Int }
+type Cond[@s] = { n: Int }
+impl[@s] StagedIter[Range[s], ^{s}] {
+  type Item = Int
+  fn staged_for(range: Range[s], body: fn(Int) -> Unit ^{s}) -> Unit = body(range.n)
+}
+impl[@s] StagedCond[Cond[s], ^{s}] {
+  fn staged_if(cond: Cond[s], yes: fn() -> Unit ^{s}, no: fn() -> Unit ^{s}) -> Unit = yes()
+}
+fn index_without_bound[C](value: C) -> Int = value[0]
+fn list_without_support[T](values: List[T]) -> Unit = {
+  for value in values { let _ = value }
+}
+fn iter_scope_conflict[@s,@t](range: Range[s], other: Payload[t]) -> Unit = {
+  for item in range { let _ = other.read() }
+}
+fn cond_scope_conflict[@s,@t](cond: Cond[s], other: Payload[t]) -> Unit = {
+  if cond { let _ = other.read() }
+}

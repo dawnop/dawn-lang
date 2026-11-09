@@ -2,8 +2,11 @@
 """Require each broken static contract to fail its owning executed test.
 
 Each mutant compiler must build and start successfully. A parse, bootstrap
-or test-compilation failure is not a semantic kill. Source strings keep the
-new syntax outside the compiler's seed-readable bootstrap inputs.
+or test-compilation failure is not a semantic kill. Compile whitebox tests
+with the unmutated driver so the mutation executes inside its owning test,
+rather than altering the driver that admits the test program and its std.
+Source strings keep new syntax outside the compiler's seed-readable
+bootstrap inputs.
 
 Disjoint control shards bound each gate's wall time. The source matrix stays
 whole in its own invocation so both frontends use one native compiler build.
@@ -27,10 +30,17 @@ TEST = "selfhost/src/check/trait_capture_test.dawn"
 PROBE = Path(__file__).with_name("subwitness.dawn")
 CALLS = Path(__file__).with_name("calls.dawn")
 OWNERS = {
+    'drop-staged-method-application': 'staged applications solve callback Scope equations before finalizing Item',
+    'erase-staged-callback-environment': 'staged associated outputs and callback rows retain their declared application',
+    'skip-staged-scope-equation': 'staged applications solve callback Scope equations before finalizing Item',
+    'forget-local-value-edge': 'local value edges retain unknown origins and real resources without a type projection',
+    'reuse-template-module-owner': 'shared prelude templates keep call identities and module declarations independent',
+    'reuse-template-scope-identities': 'shared prelude templates keep call identities and module declarations independent',
+    'reuse-template-capture-identities': 'shared prelude templates keep call identities and module declarations independent',
     'value-bound-is-full-support': 'ordinary value bounds cannot prove complete support without a witness premise',
     'forget-support-premise': 'ordinary value bounds cannot prove complete support without a witness premise',
     'skip-type-application-obligations': 'explicit data and alias bounds apply before expansion on every kind path',
-    'skip-call-type-bounds': 'explicit computation bounds reject values while ordinary defaults remain staged',
+    'skip-call-type-bounds': 'computation defaults reject values while explicit capture bounds remain open',
     'skip-constructor-type-bounds': 'constructor introduction inherits bounds and all parent axes when used as a value',
     'erase-parent-constructor-axes': 'constructor introduction inherits bounds and all parent axes when used as a value',
     'block-opaque-function-conversion': 'opaque owner conversion checks the full function representation contract',
@@ -51,7 +61,7 @@ OWNERS = {
     "ignore-subwitness-support": "impl dependency checks retain subwitness and member type support",
 }
 MODULES = {'value-bound-is-full-support': 'check/data_capture', 'forget-support-premise': 'check/data_capture', 'skip-type-application-obligations': 'check/data_capture_test', 'skip-call-type-bounds': 'check/data_capture_test', 'skip-constructor-type-bounds': 'check/data_capture_test', 'erase-parent-constructor-axes': 'check/data_capture_test', 'block-opaque-function-conversion': 'check/data_capture_test'}
-CASE_OWNERS = {'env-use-S': [('closure_phantom', 1, 'escapes its scoped callback'), ('closed_bind_phantom', 1, 'cannot prove the captured value environment')], 'function-args-in-env': [('wrapped_function', 1, 'capture bound')], 'effect-in-env': [('uncalled_effect_function', 1, 'capture bound')], 'exit-use-V': [('direct_phantom', 0, '')], 'arrow-free-empty': [('direct_function', 0, '')], 'phantom-is-capability': [('phantom_recreate', 1, 'capture')], 'scope-id-collapse': [('function_relabel_buffer', 0, '')], 'dictionary-drop-W': [('dictionary_forwarded', 0, '')], 'eta-drop-W': [('dictionary_eta', 0, '')], 'direct-drop-W': [('dictionary_direct_phantom', 0, '')], 'operation-drop-env': [('handler_store_buffer', 0, '')], 'cell-content-V-only': [('staged_var_phantom', 0, ''), ('staged_result_phantom', 0, '')], 'empty-list-value': [('aggregate_list', 0, '')], 'skip-synthetic-env': [('staged_defer_buffer', 0, '')]}
+CASE_OWNERS = {'env-use-S': [('closure_phantom', 1, 'escapes its scoped callback'), ('closed_bind_phantom', 1, 'cannot prove the captured value environment')], 'function-args-in-env': [('wrapped_function', 1, 'capture bound')], 'effect-in-env': [('uncalled_effect_function', 1, 'capture bound')], 'exit-use-V': [('direct_phantom', 0, '')], 'arrow-free-empty': [('direct_function', 0, '')], 'phantom-is-capability': [('phantom_recreate', 1, 'capture')], 'scope-id-collapse': [('function_relabel_buffer', 0, '')], 'dictionary-drop-W': [('dictionary_forwarded', 0, '')], 'eta-drop-W': [('dictionary_eta', 0, '')], 'direct-drop-W': [('dictionary_direct_phantom', 0, '')], 'operation-drop-env': [('handler_store_buffer', 0, '')], 'empty-list-value': [('aggregate_list', 0, '')], 'skip-synthetic-env': [('staged_defer_buffer', 0, '')]}
 OWNERS['erase-value-parameter'] = 'data summaries distinguish phantom support from reachable values'
 MODULES['erase-value-parameter'] = 'check/data_capture'
 OWNERS['erase-support-parameter'] = 'data summaries distinguish phantom support from reachable values'
@@ -69,7 +79,10 @@ MODULES['erase-function-parameter-support'] = 'check/data_capture'
 OWNERS['erase-scope-substitution'] = 'mutual summaries retain growing arguments through their least fixed point'
 MODULES['erase-scope-substitution'] = 'check/data_capture'
 OWNERS['drop-latent-effect'] = 'function_regain_mem'
-CASE_OWNERS['drop-latent-effect'] = [('function_regain_mem', 0, '')]
+CASE_OWNERS['drop-latent-effect'] = [('function_regain_mem', 0, ''),
+    ('function_regain_mem_without_witness', 0, ''),
+    ('phantom_regain_mem', 0, ''),
+    ('phantom_regain_mem_without_witness', 0, '')]
 MODULES['drop-latent-effect'] = 'check/data_capture'
 OWNERS['abstract-effect-is-support'] = 'an abstract calling row is not a complete support proof'
 MODULES['abstract-effect-is-support'] = 'check/data_capture'
@@ -103,7 +116,9 @@ MODULES['ignore-installation-support'] = 'check/value_capture'
 OWNERS['erase-constructor-context'] = 'constructor contexts retain complete Capture equations before field inference'
 MODULES['erase-constructor-context'] = 'check/data_capture_test'
 
-CASE_OWNERS['forget-value-bound-flow'] = [('k3_generic', 0, '')]
+# The retained CLI source owns its complete witness and Scope refusal.
+# Value flow executes the production checker without loading std bodies.
+BASELINE_CASES = {'forget-value-bound-flow': ['k3_generic']}
 OWNERS['forget-value-bound-flow'] = 'k3_generic'
 CASE_OWNERS['erase-passed-environment'] = [('k3_stored_effect', 0, '')]
 OWNERS['erase-passed-environment'] = 'k3_stored_effect'
@@ -119,16 +134,62 @@ OWNERS['close-list-filter-environment'] = 'list_filter_buffer'
 
 CASE_OWNERS['erase-scalar-subject-contract'] = [('staged_closed_witness', 1, 'cannot prove the captured value environment')]
 OWNERS['erase-scalar-subject-contract'] = 'staged_closed_witness'
-CASE_OWNERS['cell-content-V-only'].append(('staged_value_bound_only', 0, ''))
+MODULES['cell-content-V-only'] = 'check/checker'
 EXTRA_ASSERTIONS = {'forget-support-premise': [
     ('staged_closed_witness', 1, 'cannot prove the captured value environment')],
     'ignore-item-upper': [('n9_item', 0, '')],
-    'erase-forwarded-application': [('p0_iter', 1, '`measure` requires `Measure[T]`')]}
+    'erase-forwarded-application': [('p0_iter', 1, '`measure` requires `Measure[T]`')],
+    'direct-drop-W': [('function_regain_mem', 1, 'argument type mismatch: expected fn[@s_0]() -> (fn() -> Int) !Mem[s_0] ^{}, got fn[@s]() -> fn() -> Int !Mem[s]')]}
+# These retained sources now refuse at protocol admission. Their refusal
+# must not substitute for the whitebox content-support ownership assertions.
+EXTRA_ASSERTIONS['cell-content-V-only'] = [
+    ('staged_var_phantom', 1, 'trait `StagedVar` requires 1 Capture argument(s), got 0'),
+    ('staged_result_phantom', 1, 'trait `StagedResult` requires 1 Capture argument(s), got 0'),
+    ('staged_value_bound_only', 1, 'trait `StagedVar` requires 1 Capture argument(s), got 0'),
+]
+EXTRA_ASSERTIONS['direct-drop-W'].append(
+    ('phantom_regain_mem_without_witness', 1, 'argument type mismatch'))
+CASE_OWNERS['empty-list-value'].append(('aggregate_list_without_witness', 0, ''))
+EXTRA_ASSERTIONS['direct-drop-W'].extend([
+    ('aggregate_list', 1, 'declares return type fn() -> Int'),
+    ('aggregate_list_without_witness', 1, 'declares return type fn() -> Int'),
+])
 CASE_OWNERS['operation-drop-env'].append(('n6_park', 0, ''))
 CASE_OWNERS['scope-id-collapse'].append(('n11_generic_relabel', 0, ''))
 
 OWNERS['erase-unknown-support-origin'] = 'unknown support explanations follow finite value dependencies'
 MODULES['erase-unknown-support-origin'] = 'check/environment'
+
+OWNERS.update({
+    'skip-quantified-scope-renaming': 'Mem scope substitution renames a binder before capturing a replacement',
+    'skip-function-defaults': 'ordinary function defaults reject domain values without changing data introduction',
+    'skip-impl-defaults': 'impl Type defaults constrain application arguments independently of witness support',
+    'skip-trait-defaults': 'trait subject defaults stay empty when the witness Capture axis is open',
+})
+for name in ['skip-function-defaults', 'skip-impl-defaults', 'skip-trait-defaults']:
+    MODULES[name] = 'check/data_capture_test'
+EXTRA_CASES['skip-function-defaults'] = ['default_function_closed']
+EXTRA_CASES['skip-impl-defaults'] = ['default_impl_closed']
+EXTRA_CASES['skip-trait-defaults'] = ['default_trait_closed']
+
+MODULES['skip-quantified-scope-renaming'] = 'check/mem_scope_test'
+MODULES['forget-local-value-edge'] = 'check/value_capture'
+MODULES['reuse-template-module-owner'] = 'check/checker'
+MODULES['reuse-template-scope-identities'] = 'check/checker'
+MODULES['reuse-template-capture-identities'] = 'check/checker'
+
+for name in ['drop-staged-method-application', 'erase-staged-callback-environment', 'skip-staged-scope-equation']:
+    MODULES[name] = 'check/staged_capture_test'
+
+for name, owner in {
+    'drop-staged-runtime-witness-use': 'staged calls retain runtime dictionaries of conditional cell witnesses',
+    'erase-exported-application': 'staged interfaces retain complete applications across module boundaries',
+    'erase-staged-associated-upper': 'staged associated outputs and callback rows retain their declared application',
+    'select-staged-first-arm': 'staged condition applications combine both arm environments',
+    'widen-fixed-staged-application': 'fixed staged applications cannot widen to callback support',
+}.items():
+    OWNERS[name] = owner
+    MODULES[name] = 'check/staged_capture_test'
 
 LOWER_OWNERS = {"erase-dictionary-argument-support", "erase-scoped-bridge-evidence"}
 
@@ -159,6 +220,9 @@ def controls(out, names, jobs):
                 ignore=shutil.ignore_patterns("build", ".dawn", "__pycache__"))
         (tree / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
         apply(name, tree)
+        # Compiler faults use the ordinary embedded std path, which prunes
+        # unrelated modules. A std source fault needs its edited directory.
+        embedded = not any(path.startswith("std/") for path, _, _ in MUTATIONS[name])
         jar = work / "compiler.jar"
         _, build_time = run([ROOT / "bin/dawn", "build", tree / "selfhost", "-o", jar], work / "build.log")
         run([*jvm, jar, "--version"], work / "version.log")
@@ -171,23 +235,34 @@ def controls(out, names, jobs):
             for case, expected, diagnostic in CASE_OWNERS[name]:
                 begin = time.monotonic()
                 observe(run, [*jvm, jar], case, work / (case + ".log"),
-                        expected=expected, diagnostic=diagnostic, std=tree / "std")
+                        expected=expected, diagnostic=diagnostic, std=tree / "std",
+                        embedded=embedded)
                 test_time += time.monotonic() - begin
         else:
             module = MODULES.get(name, "ir/lower" if name in LOWER_OWNERS else "check/trait_capture_test")
-            result, test_time = run([*jvm, jar, "test", "--std", tree / "std", tree / "selfhost/src" / (module + ".dawn")], work / "test.log", expected=None)
+            # The test program imports the mutated implementation. Keep its
+            # compilation independent of that implementation's fault; all CLI
+            # controls above and below still use the built mutant compiler.
+            result, test_time = run([ROOT / "bin/dawn", "test", "--std", tree / "std", tree / "selfhost/src" / (module + ".dawn")], work / "test.log", expected=None)
             marker = "FAIL  " + module + " :: " + OWNERS[name]
             if result.returncode != 1 or marker not in result.stdout:
                 raise RuntimeError(f"{name}: owning executed test did not fail:\n{result.stdout[-6000:]}")
+            if name == "cell-content-V-only":
+                for companion in ["staged_result_phantom", "staged_value_bound_only"]:
+                    if "FAIL  check/checker :: " + companion not in result.stdout:
+                        raise RuntimeError("the content mutation must fail both cell paths and the unknown-support oracle")
+                if "PASS  check/checker :: carried contents preserve ordinary scalars and real resource support" not in result.stdout:
+                    raise RuntimeError("the content mutation must retain the ordinary and resource controls")
             if name == "widen-invariant-arguments":
                 parameterized = "FAIL  check/trait_capture_test :: parameterized witness checking keeps Capture arguments invariant"
                 if parameterized not in result.stdout:
                     raise RuntimeError("the invariant mutation must fail both constant and parameterized witness tests")
         for case in EXTRA_CASES.get(name, []):
-            observe(run, [*jvm, jar], case, work / (case + ".log"), expected=0, std=tree / "std")
+            observe(run, [*jvm, jar], case, work / (case + ".log"), expected=0,
+                    std=tree / "std", embedded=embedded)
         for case, expected, diagnostic in EXTRA_ASSERTIONS.get(name, []):
             observe(run, [*jvm, jar], case, work / (case + ".log"), expected=expected,
-                    diagnostic=diagnostic, std=tree / "std")
+                    diagnostic=diagnostic, std=tree / "std", embedded=embedded)
         shutil.rmtree(tree)
         return dict(name=name, compiler_built=True, owning_test_failed=True,
             build_seconds=build_time, test_seconds=test_time)
@@ -209,6 +284,7 @@ def controls(out, names, jobs):
         raise RuntimeError("the subwitness probe must isolate exactly one contract refusal")
     cases = set()
     for name in names:
+        cases.update(BASELINE_CASES.get(name, []))
         cases.update(case for case, _, _ in CASE_OWNERS.get(name, []))
         cases.update(EXTRA_CASES.get(name, []))
         cases.update(case for case, _, _ in EXTRA_ASSERTIONS.get(name, []))
@@ -216,6 +292,17 @@ def controls(out, names, jobs):
     original.mkdir()
     for case in sorted(cases):
         observe(run, [*jvm, ROOT / "build/dawn-selfhost.jar"], case, original / (case + ".log"))
+    embedded_cases = set()
+    for name in names:
+        cases.update(BASELINE_CASES.get(name, []))
+        if not any(path.startswith("std/") for path, _, _ in MUTATIONS[name]):
+            embedded_cases.update(BASELINE_CASES.get(name, []))
+            embedded_cases.update(case for case, _, _ in CASE_OWNERS.get(name, []))
+            embedded_cases.update(EXTRA_CASES.get(name, []))
+            embedded_cases.update(case for case, _, _ in EXTRA_ASSERTIONS.get(name, []))
+    for case in sorted(embedded_cases):
+        observe(run, [*jvm, ROOT / "build/dawn-selfhost.jar"], case,
+                original / (case + "-embedded.log"), embedded=True)
     print("PASS trait Capture contracts: unmutated tests green", flush=True)
 
 

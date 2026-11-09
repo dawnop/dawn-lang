@@ -47,6 +47,16 @@ test "concrete calls infer declared value Capture bounds before selecting witnes
       "fn generic[@s](value: I64Buf@s) -> Int = through(value)\n") == []
 }
 
+# Keep generic value-flow ownership independent of complete witness admission.
+# The original CLI source separately checks its length witness and Scope exit.
+test "k3_generic" {
+  let refused = errors("fn bind[T: ^{c}, ^c](value: T, read: fn(T, Int) -> Int ^{c}) -> (fn(Int) -> Int ^{c}) =\n" ++
+      "  n => read(value, n)\n" ++
+      "fn bad[@s](value: I64Buf@s, read: fn(I64Buf@s, Int) -> Int ^{}) -> (fn(Int) -> Int) = bind(value, read)\n")
+  assert len(refused) == 1
+  assert refused[0] == "function `bad` declares return type fn(Int) -> Int but its body is fn(Int) -> Int ^{s}"
+}
+
 test "concrete Item reduction substitutes the witness Scope before comparing results" {
   assert errors(HEAD ++
       "impl[@s] Head[I64Buf@s, ^{s}] {\n" ++

@@ -41,10 +41,10 @@ use std/io
 use std/reactor as session
 use std/str
 use tea_core/cmd.{Cmd, NoCmd, SendMsg, BatchCmd, Fetch, fold_msg, fold_cmds}
-use tea_core/diff.{Patch, Replace, diff}
+use tea_core/diff.{Patch, Replace}
 use node.{Node, Text, Elem, On, NoData, Value, Key, deliver}
 use route
-use wire.{Init, Event, Supply, Bad, decode_request, reply_ok, reply_ok_asking, reply_err}
+use wire.{Init, Event, Supply, Bad, decode_request, reply_ok, reply_err, reply_diff}
 
 ## Answer one request line.
 ##
@@ -155,7 +155,7 @@ pub fn turn_with_flags[Mo, M](
             Err(why) -> reply_err("bad-request", why)
             Ok(msg) -> {
               let m1 = fold_msg(m0, msg, update)
-              reply_ok(encode(m1), diff(old, view(m1)))
+              reply_diff(encode(m1), old, view(m1), [])
             }
           }
       }
@@ -361,7 +361,7 @@ fn folded[S, Mo, M](
   let (m1, asked) = fold_cmds(m0, msg, (acc, x) => update(kept, acc, x))
   let text = encode(m1)
   let new = view(kept, m1)
-  (None, Some(Shown { model = text, tree = new }), reply_ok_asking(text, diff(old, new), asked))
+  (None, Some(Shown { model = text, tree = new }), reply_diff(text, old, new, asked))
 }
 
 fn no_supply(tag: String) -> String =

@@ -5,23 +5,23 @@ pub type Val = { name: String }
 pub type Slot = { tag: String }
 pub type Span = { n: Int }
 
-impl StagedIter[Span] {
+impl StagedIter[Span, ^{}] {
   type Item = Val
   effect StagedIter = !Rec
-  fn staged_for(r: Span, body: fn(Val) -> Unit !Rec) -> Unit !Rec = body(Val { name= "i" })
+  fn staged_for(r: Span, body: fn(Val) -> Unit !Rec ^{}) -> Unit !Rec = body(Val { name = "i" })
 }
 
-impl StagedVar[Val] {
+impl StagedVar[Val, ^{}] {
   type Cell = Slot
   effect StagedVar = !Rec
-  fn var_open(v: Val) -> Slot !Rec = Slot { tag= v.name }
-  fn var_get(c: Slot) -> Val !Rec = Val { name= c.tag }
+  fn var_open(v: Val) -> Slot !Rec = Slot { tag = v.name }
+  fn var_get(c: Slot) -> Val !Rec = Val { name = c.tag }
   fn var_set(c: Slot, v: Val) -> Unit !Rec = emit(c.tag ++ v.name)
 }
 
 pub type Both = { n: Int }
 
-impl Iter[Both] {
+impl Iter[Both, ^{}] {
   type Cur = Int
   type Item = Int
   fn iter_start(it: Both) -> Int = 0
@@ -30,10 +30,10 @@ impl Iter[Both] {
   fn iter_get(it: Both, c: Int) -> Int = c
 }
 
-impl StagedIter[Both] {
+impl StagedIter[Both, ^{}] {
   type Item = Int
   effect StagedIter = !Rec
-  fn staged_for(r: Both, body: fn(Int) -> Unit !Rec) -> Unit !Rec = body(0)
+  fn staged_for(r: Both, body: fn(Int) -> Unit !Rec ^{}) -> Unit !Rec = body(0)
 }
 
 pub fn host_written(r: Span) -> Int !Rec = {
@@ -58,7 +58,7 @@ pub fn jumps(r: Span) -> Option[Int] !Rec = {
 }
 
 pub fn captured(r: Span) -> Unit !Rec = {
-  var acc = Val { name= "acc" }
+  var acc = Val { name = "acc" }
   for x in r {
     let f = () => acc
     let g = (v: Val) => { acc = v }
@@ -82,7 +82,7 @@ pub fn inner_var_ok(r: Span) -> Unit !Rec = {
 
 # generic over both traits: the body charges T.StagedVar, which the iterator's
 # row T.StagedIter does not declare, so this is refused (docs/staged-for-design.md §7)
-pub fn generic_carry[T: StagedIter + StagedVar](t: T, f: fn(T) -> T) -> T !(T.StagedIter | T.StagedVar) = {
+pub fn generic_carry[T: StagedIter[^{}] + StagedVar[^{}]](t: T, f: fn(T) -> T) -> T !(T.StagedIter | T.StagedVar) = {
   var acc = t
   for i in t { acc = f(acc) }
   acc

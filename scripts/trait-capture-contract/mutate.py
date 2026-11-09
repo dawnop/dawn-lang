@@ -8,13 +8,64 @@ PASSES = "selfhost/src/check/passes.dawn"
 CONTRACT = "selfhost/src/check/trait_contract.dawn"
 LOWER = "selfhost/src/ir/lower.dawn"
 DATA = "selfhost/src/check/data_capture.dawn"
+_DEFAULT_IMPORT = (PASSES, "declare_capture_params, bind_computation_params,",
+    "declare_capture_params, bind_computation_params, bind_capture_params,")
 MUTATIONS = {
+    "drop-staged-runtime-witness-use": ((CHECKER,
+        "let captured = capture_wits(cx, [w])",
+        "let captured = cx"),),
+    "erase-exported-application": ((CHECKER,
+        "for im in ims { out = out ++ [exported_impl(im)] }",
+        "for im in ims { let exported = exported_impl(im)\n    out = out ++ [ImplI { ..exported, trait_args = [] }] }"),),
+    "erase-staged-associated-upper": (("selfhost/src/check/types.dawn",
+        "if opened { upper = map(tr.assoc, name => (name, [variable])) }",
+        "if opened { upper = map(tr.assoc, name => (name, zero)) }"),),
+    "select-staged-first-arm": ((CHECKER,
+        "method.sig.param_tys, [ct, tex_ty(tx), tex_ty(fx)])",
+        "method.sig.param_tys, [ct, tex_ty(tx)])"),),
+    "widen-fixed-staged-application": ((CONTRACT,
+        "match subject_application(imp, subject) { Some(app) -> return Some(app), None -> () }",
+        "match subject_application(imp, subject) { Some(_) -> (), None -> () }"),),
+    "drop-staged-method-application": ((CHECKER,
+        "let tr = trait_contract.applied(trait_of(cx.traits, tid), witness_application(w))",
+        "let tr = trait_of(cx.traits, tid)"),),
+    "erase-staged-callback-environment": (("selfhost/src/check/types.dawn",
+        "TyFn(ps, ret, row, CaptureFunction { ..contract, bound = Some([variable]) })",
+        "TyFn(ps, ret, row, capture.empty_function())"),),
+    "skip-staged-scope-equation": (("selfhost/src/check/scope_infer.dawn",
+        "bindings: Map[Int, Scope]) -> (Map[Int, Scope], Bool) = bind(d, a, flex, bindings)",
+        "bindings: Map[Int, Scope]) -> (Map[Int, Scope], Bool) = (bindings, true)"),),
+    "forget-local-value-edge": (("selfhost/src/check/value_capture.dawn",
+        "return Node { value = [], known = true, edges = [id], name = name,",
+        "return Node { value = [], known = true, edges = [], name = name,"),),
+    "reuse-template-module-owner": (("selfhost/src/check/cx.dawn",
+        'pub(pkg) fn module_pool(cx: Cx) -> Int = free_pool(cx.owner_class.unwrap_or(""))',
+        'pub(pkg) fn module_pool(cx: Cx) -> Int = free_pool("")'),),
+    "reuse-template-scope-identities": ((CHECKER,
+        "sm = map.insert(sm, region.id, CaptureScope { ..region, id = id })",
+        "sm = map.insert(sm, region.id, CaptureScope { ..region, id = if len(s.scope_params.captures) > 0 { region.id } else { id } })"),),
+    "reuse-template-capture-identities": ((CHECKER,
+        "cm = map.insert(cm, cap.id, [capture.CaptureVar(cap.name, id)])\n    caps = caps ++ [CaptureParam { ..cap, id = id }]",
+        "let chosen = if len(s.scope_params.scopes) > 0 { cap.id } else { id }\n    cm = map.insert(cm, cap.id, [capture.CaptureVar(cap.name, chosen)])\n    caps = caps ++ [CaptureParam { ..cap, id = chosen }]"),),
+    "skip-quantified-scope-renaming": (("selfhost/src/check/types.dawn",
+        "      if len(sc.scopes) == 0 {\n        let next = CaptureFunction { ..sc,",
+        "      if true {\n        let next = CaptureFunction { ..sc,"),),
     "value-bound-is-full-support": ((DATA,
         "      if not reachable {\n        for entry in params.support_facts",
         "      if false && not reachable {\n        for entry in params.support_facts"),),
+    # Dropping premises now rejects std at admission before the owning query.
+    # Isolate those front doors only in this composite; keep both old oracles.
     "forget-support-premise": ((DATA,
         "for entry in params.support_facts { let (vid, upper) = entry\n          if vid == id { return atoms(upper) } }",
-        "for entry in params.support_facts { let (vid, upper) = entry\n          if vid == id { return Projection { ..out, known = false } } }"),),
+        "for entry in params.support_facts { let (vid, upper) = entry\n          if vid == id { return Projection { ..out, known = false } } }"), (PASSES,
+        "if not data_capture.support_permits(cx.adts, proved, subject, allowed) {",
+        "if false && not data_capture.support_permits(cx.adts, proved, subject, allowed) {"), (PASSES,
+        "if not data_capture.support_permits(cx.adts, params, value, allowed) {",
+        "if false && not data_capture.support_permits(cx.adts, params, value, allowed) {"), (CONTRACT,
+        "let support = match data_capture.support_bound(adts, premises, subject) {",
+        "let support = match data_capture.value_bound(adts, premises, subject) {"), (CHECKER,
+        "if explicit_contract && not given {",
+        "if false && explicit_contract && not given {")),
     "skip-type-application-obligations": (("selfhost/src/check/cx.dawn",
         "for obligation in cx.capture_obligations {",
         "for obligation in list.take(cx.capture_obligations, 0) {"),),
@@ -115,7 +166,40 @@ MUTATIONS = {
     'close-list-filter-environment': (('std/list.dawn', 'fn filter_go[T: ^{c}, ^c, !e](xs: List[T], f: fn(T) -> Bool !e ^{c}, c: Cur, acc: List[T]) -> List[T] !e =', 'fn filter_go[T: ^{c}, ^c, !e](xs: List[T], f: fn(T) -> Bool !e, c: Cur, acc: List[T]) -> List[T] !e ='), ('std/list.dawn', 'pub fn filter[T: ^{c}, ^c, !e](xs: List[T], f: fn(T) -> Bool !e ^{c}) -> List[T] !e = {', 'pub fn filter[T: ^{c}, ^c, !e](xs: List[T], f: fn(T) -> Bool !e) -> List[T] !e = {')),
     'erase-scalar-subject-contract': (('std/gpu.dawn', 'pub trait ScalarDtype[A: ^{}] {', 'pub trait ScalarDtype[A] {'),),
     'erase-unknown-support-origin': (('selfhost/src/check/environment.dawn', 'None -> not node.known', 'None -> false'),),
+
+    "skip-function-defaults": (_DEFAULT_IMPORT, (PASSES,
+        "current_tparams = tp_scope, current_eff_vars = ev_scope, current_capture_params = capture.empty_params() }\n    let (scoped_cx, scope_params) = bind_computation_params(cx1, d.scope)",
+        "current_tparams = tp_scope, current_eff_vars = ev_scope, current_capture_params = capture.empty_params() }\n    let (scoped_cx, scope_params) = bind_capture_params(cx1, d.scope)")),
+    "skip-impl-defaults": (_DEFAULT_IMPORT, (PASSES,
+        "current_tparams = tp_scope, current_eff_vars = empty_ev, current_capture_params = capture.empty_params() }\n    let (scoped_cx, scope_params) = bind_computation_params(cx1, d.scope)",
+        "current_tparams = tp_scope, current_eff_vars = empty_ev, current_capture_params = capture.empty_params() }\n    let (scoped_cx, scope_params) = bind_capture_params(cx1, d.scope)")),
+    "skip-trait-defaults": (_DEFAULT_IMPORT, (PASSES,
+        "let (scoped, scope_params) = bind_computation_params(Cx { ..cx1,",
+        "let (scoped, scope_params) = bind_capture_params(Cx { ..cx1,")),
 }
+
+
+
+# Deleting a written empty bound alone is equivalent after default activation.
+# Withdraw its implicit replacement too, preserving the original staged oracle.
+MUTATIONS["erase-scalar-subject-contract"] += MUTATIONS["skip-trait-defaults"]
+# The new witness front door rejects the same missing premise first. Bypass
+# that guard in this composite mutant to reach the original environment oracle.
+MUTATIONS["erase-scalar-subject-contract"] += ((CHECKER,
+    "if explicit_contract && not given {",
+    "if false && explicit_contract && not given {"),)
+
+
+# Length now retains complete witness support before the latent row check.
+# Keep the original effect owner and remove that independent witness guard
+# in this composite. A witness-free source also isolates the original fault.
+MUTATIONS["drop-latent-effect"] += MUTATIONS["direct-drop-W"]
+# The list value owner predates the complete length witness. Keep its original
+# edit and isolate that additional witness duty in the composite; a source
+# with no length witness at the closure use also tests the original edit alone.
+MUTATIONS["empty-list-value"] += MUTATIONS["direct-drop-W"]
+
+
 
 
 def apply(name, root):

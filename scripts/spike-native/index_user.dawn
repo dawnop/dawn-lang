@@ -6,7 +6,7 @@
 # The reason to buy the trait was not "the compiler loses two arms" -- they
 # moved to lowering rather than disappearing -- it was this file compiling.
 #
-# Nothing here is special-cased. `impl Index[Grid]` registers, checks its
+# Nothing here is special-cased. `impl Index[Grid, ^{}]` registers, checks its
 # associated bindings and is found by the same `resolve_witness` a `[T: Eq]`
 # bound uses; `g[p]` devirtualises to a direct call on the impl method, the
 # ordinary route for an impl that has a body. What the prelude does for List
@@ -21,7 +21,7 @@ use std/map
 
 pub type Grid = { w: Int, cells: List[Int] }
 
-impl Index[Grid] {
+impl Index[Grid, ^{}] {
   type Idx = (Int, Int)
   type Item = Int
   fn index(g: Grid, p: (Int, Int)) -> Int = {
@@ -34,7 +34,7 @@ impl Index[Grid] {
 ## itself a container -- so `env["a"][1]` chains a user impl into a prelude one.
 pub type Env = { entries: Map[String, List[Int]] }
 
-impl Index[Env] {
+impl Index[Env, ^{}] {
   type Idx = String
   type Item = List[Int]
   fn index(e: Env, k: String) -> List[Int] = e.entries[k]
@@ -43,14 +43,14 @@ impl Index[Env] {
 fn s(x: String) -> String !io = x
 
 pub fn main() -> Unit !io = {
-  let g = Grid { w= 3, cells= [1, 2, 3, 4, 5, 6] }
+  let g = Grid { w = 3, cells = [1, 2, 3, 4, 5, 6] }
   println("-- a user type, indexed by a tuple --")
   println(to_string(g[(0, 0)]))
   println(to_string(g[(2, 1)]))
   println(to_string(g[(1, 0)] + g[(1, 1)]))
 
   println("-- an index that is a String, and an item that is a List --")
-  let e = Env { entries= map.from([("xs", [7, 8, 9]), ("ys", [1])]) }
+  let e = Env { entries = map.from([("xs", [7, 8, 9]), ("ys", [1])]) }
   println(to_string(e["xs"][2]))
   println(to_string(e[s("ys")][0]))
 

@@ -1,0 +1,30 @@
+# Scoped cells execute their protocol within their owning runner.
+use std/mem
+use std/mem.{Mem}
+type Cond[@s] = { n: Int }
+impl[@s] StagedCond[Cond[s], ^{s}] {
+  effect StagedCond = !Mem[s]
+  fn staged_if(cond: Cond[s], yes: fn() -> Unit !Mem[s] ^{s}, no: fn() -> Unit !Mem[s] ^{s}) -> Unit !Mem[s] =
+    if cond.n > 0 { yes() } else { no() }
+}
+type Marker[@s] = { n: Int }
+impl[@s] StagedVar[Marker[s], ^{s}] {
+  type Cell = I64Buf@s
+  effect StagedVar = !Mem[s]
+  fn var_open(value: Marker[s]) -> I64Buf@s !Mem[s] = {
+    let cell = mem.new(1)
+    mem.set(cell, 0, value.n)
+    cell
+  }
+  fn var_get(cell: I64Buf@s) -> Marker[s] !Mem[s] = Marker { n = mem.at(cell, 0) }
+  fn var_set(cell: I64Buf@s, value: Marker[s]) -> Unit !Mem[s] = mem.set(cell, 0, value.n)
+}
+pub fn main() -> Unit !io = {
+  let answer = mem.with_mem([@s] () => {
+    let condition: Cond[s] = Cond { n = 1 }
+    var marker: Marker[s] = Marker { n = 3 }
+    if condition { marker = Marker { n = marker.n + 1 } }
+    marker.n
+  })
+  println(to_string(answer))
+}

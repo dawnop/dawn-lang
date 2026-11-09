@@ -143,6 +143,68 @@ pub fn witness_arguments(imp: ImplI, app: TraitApplication, subject: Ty,
   (sm, cm, ok)
 }
 
+## Infer only declared application axes. Fixed subject equations remain
+## invariant; a quantified axis combines known support and all callback
+## constraints with the ordinary call capture collector.
+pub fn call_application(tr: TraitI, imp: ImplI, subject: Ty,
+  parameters: List[Ty], arguments: List[Ty], adts: Adts,
+  premises: capture.Params) -> Option[TraitApplication] = {
+  match subject_application(imp, subject) { Some(app) -> return Some(app), None -> () }
+  if len(tr.scope_params.captures) != 1 { return None }
+  let support = match data_capture.support_bound(adts, premises, subject) {
+    Some(value) -> value
+    None -> return None
+  }
+  let (initial, fits) = scope_infer.infer(imp.subject, subject, imp.scope_params.scopes, map.empty())
+  if not fits { return None }
+  var scopes = initial
+  # Only the implementation's unbound declaration variables are flexible.
+  # A caller's same-identity Scope remains rigid, including recursive calls.
+  let flex = list.filter(imp.scope_params.scopes, own =>
+      not list.any(premises.scopes, caller => capture.same_scope(own, caller)))
+  for i in 0..len(parameters) { if i < len(arguments) {
+    let (next, valid) = scope_infer.infer(parameters[i], arguments[i], flex, scopes)
+    if not valid { return None }
+    scopes = next
+  } }
+  let axis = tr.scope_params.captures[0]
+  var bindings = map.from([(axis.id, support)])
+  for i in 0..len(parameters) { if i < len(arguments) {
+    bindings = scope_infer.infer_captures(parameters[i], subst_scopes(arguments[i], scopes, map.empty()),
+      tr.scope_params.captures, bindings)
+  } }
+  var needed = map.get(bindings, axis.id).unwrap_or(support)
+  # A singleton Scope application is an identity equation. Its own pending
+  # occurrence contributes a self obligation, while a known rigid identity
+  # from a callback can solve it. Sets never select one of several regions.
+  for formal in imp.trait_args { if len(formal) == 1 { match formal[0] {
+    capture.Region(own) -> if list.any(flex, region => capture.same_scope(region, own)) &&
+      scope_infer.resolve(own, scopes).id == own.id {
+      let rest = list.filter(needed, member => match member {
+        capture.Region(region) -> not capture.same_scope(region, own)
+        _ -> true
+      })
+      if len(rest) == 1 { match rest[0] {
+        capture.Region(rigid) -> if not list.any(flex, region => capture.same_scope(region, rigid)) {
+          let (next, valid) = scope_infer.equation(own, rigid, flex, scopes)
+          if not valid { return None }
+          scopes = next
+        }
+        _ -> ()
+      } }
+    }
+    _ -> ()
+  } } }
+  let settled_scopes = scope_infer.normalized(scopes)
+  needed = capture.subst(needed, settled_scopes, map.empty())
+  if len(arguments) > 0 && list.any(needed, member => match member {
+    capture.Region(region) -> list.any(flex, own => capture.same_scope(own, region)) &&
+      scope_infer.resolve(region, settled_scopes).id == region.id
+    _ -> false
+  }) { return None }
+  Some(TraitApplication { id = tr.id, args = [needed] })
+}
+
 fn argument_captures(formals: List[capture.Capture], actuals: List[capture.Capture],
   flex: List[capture.CaptureParam], initial: Map[Int, capture.Capture]) -> Map[Int, capture.Capture] = {
   var cm = initial

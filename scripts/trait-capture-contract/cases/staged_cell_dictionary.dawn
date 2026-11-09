@@ -1,0 +1,30 @@
+# Both arms and an enclosing closure use the same conditional cell dictionary.
+trait Closed[T] { fn code(value: T) -> Int }
+impl Closed[Int] { fn code(value: Int) -> Int = value }
+type Marker[T] = { value: T }
+type Slot[T] = { value: Marker[T] }
+impl[T: Closed] StagedVar[Marker[T], ^{}] {
+  type Cell = Slot[T]
+  fn var_open(value: Marker[T]) -> Slot[T] = Slot { value = value }
+  fn var_get(cell: Slot[T]) -> Marker[T] = cell.value
+  fn var_set(cell: Slot[T], value: Marker[T]) -> Unit = {
+    if code(value.value) < 0 { panic("invalid cell value") }
+  }
+}
+type Cond = { n: Int }
+impl StagedCond[Cond, ^{}] {
+  fn staged_if(cond: Cond, yes: fn() -> Unit ^{}, no: fn() -> Unit ^{}) -> Unit =
+    if cond.n > 0 { yes() } else { no() }
+}
+fn carried[T: Closed](value: Marker[T], condition: Cond) -> Int = {
+  let invoke = () => {
+    var state = value
+    if condition { state = state } else { state = state }
+    code(state.value)
+  }
+  invoke()
+}
+pub fn main() -> Unit !io = {
+  println(to_string(carried(Marker { value = 3 }, Cond { n = 1 })))
+  println(to_string(carried(Marker { value = 5 }, Cond { n = 0 })))
+}

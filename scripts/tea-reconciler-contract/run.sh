@@ -23,8 +23,8 @@
 # translation between the two op sets. mutants.sh breaks one production line at
 # a time and requires each break to be seen.
 #
-# What each half is worth, measured rather than assumed. Of the 30 mutants, the
-# packages' own suites kill all 30 and the oracle project's command reds for 26
+# What each half is worth, measured rather than assumed. Of the 32 mutants, the
+# packages' own suites kill all 32 and the oracle project's command reds for 26
 # (it never reaches the walk, which routing rather than reconciling uses, nor
 # the DOM vocabulary, which it does not depend on). So the differential buys no
 # mutant coverage, and that is not the claim being made for it: the package
@@ -36,7 +36,7 @@
 #
 # Read that 26 narrowly. `dawn test` on the oracle project runs `tea_core/diff`
 # own blocks too, so the number counts commands that went red and not pairs
-# that disagreed. Eleven of the 30 are about keyed pairing, which the
+# that disagreed. Eleven of the 32 are about keyed pairing, which the
 # differential cannot reach at all: mutants.sh says why.
 set -euo pipefail
 

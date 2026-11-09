@@ -15,6 +15,7 @@
 # `ops` is where the chain starts. Nothing else orders them; Tile IR gives
 # program order no meaning between memory operations.
 use std/list
+use std/mem
 use std/map
 use std/str
 use std/loc
@@ -1642,7 +1643,7 @@ fn first_overlap(wi: List[Write], wj: List[Write]) -> Option[String] = {
 ## before it had a default still read the same (knife K2 folded
 ## `trace_kernel_hinted` into it; docs/std-defaults-design.md 3 says why the
 ## defaults go after the body).
-pub fn trace_kernel(name: String, params: List[KParam], body: fn() -> Unit !Dev,
+pub fn trace_kernel[^c](name: String, params: List[KParam], body: fn() -> Unit !Dev ^{c},
   hints: ByArch[EntryHints] = [], at: Loc = caller()) -> TileProg = {
   let (prog, _calls) = trace_calls(name, params, body, hints = hints, at = at)
   prog
@@ -1894,7 +1895,7 @@ fn entry_args(name: Ctx, sigs: List[Sig]) -> List[EntryArg] = {
   }
 }
 
-fn record_sigs(name: Ctx, sigs: List[Sig], body: fn() -> Unit !Dev, hints: ByArch[EntryHints]) -> TileProg = {
+fn record_sigs[^c](name: Ctx, sigs: List[Sig], body: fn() -> Unit !Dev ^{c}, hints: ByArch[EntryHints]) -> TileProg = {
   let (prog, _calls) = record_calls(name, list.map(sigs, kparam_of), list.map(sigs, s => s.access),
     list.map(sigs, s => s.g), body, hints)
   prog
@@ -1907,7 +1908,7 @@ fn record_sigs(name: Ctx, sigs: List[Sig], body: fn() -> Unit !Dev, hints: ByArc
 ## disagree with another's or with the grid, is refused before the body
 ## runs; a write into an `In` parameter is refused while it records. The
 ## program is the one `trace_kernel` records for the same body.
-pub fn trace1[A](name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev,
+pub fn trace1[A, ^c](name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev ^{c},
   hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry1[A]) = {
   let ctx0 = entry_ctx(name, at)
   let args = entry_args(ctx0, [sig_of(a)])
@@ -1916,8 +1917,8 @@ pub fn trace1[A](name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev,
 }
 
 ## [`trace1`] for two parameters.
-pub fn trace2[A, B](name: String, a: Arg[A], b: Arg[B],
-  body: fn(Param[A], Param[B]) -> Unit !Dev, hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry2[A, B]) = {
+pub fn trace2[A, B, ^c](name: String, a: Arg[A], b: Arg[B],
+  body: fn(Param[A], Param[B]) -> Unit !Dev ^{c}, hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry2[A, B]) = {
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b)]
   let args = entry_args(ctx0, sigs)
@@ -1926,8 +1927,8 @@ pub fn trace2[A, B](name: String, a: Arg[A], b: Arg[B],
 }
 
 ## [`trace1`] for three parameters.
-pub fn trace3[A, B, C](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
-  body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev, hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry3[A, B, C]) = {
+pub fn trace3[A, B, C, ^c](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
+  body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev ^{c}, hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry3[A, B, C]) = {
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c)]
   let args = entry_args(ctx0, sigs)
@@ -1937,8 +1938,8 @@ pub fn trace3[A, B, C](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
 }
 
 ## [`trace1`] for four parameters.
-pub fn trace4[A, B, C, E](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
-  d: Arg[E], body: fn(Param[A], Param[B], Param[C], Param[E]) -> Unit !Dev,
+pub fn trace4[A, B, C, E, ^c](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
+  d: Arg[E], body: fn(Param[A], Param[B], Param[C], Param[E]) -> Unit !Dev ^{c},
   hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry4[A, B, C, E]) = {
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d)]
@@ -1949,9 +1950,9 @@ pub fn trace4[A, B, C, E](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
 }
 
 ## [`trace1`] for five parameters.
-pub fn trace5[A, B, C, E, F](name: String, a: Arg[A], b: Arg[B],
+pub fn trace5[A, B, C, E, F, ^c](name: String, a: Arg[A], b: Arg[B],
   c: Arg[C], d: Arg[E], e: Arg[F],
-  body: fn(Param[A], Param[B], Param[C], Param[E], Param[F]) -> Unit !Dev,
+  body: fn(Param[A], Param[B], Param[C], Param[E], Param[F]) -> Unit !Dev ^{c},
   hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry5[A, B, C, E, F]) = {
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d), sig_of(e)]
@@ -1963,9 +1964,9 @@ pub fn trace5[A, B, C, E, F](name: String, a: Arg[A], b: Arg[B],
 }
 
 ## [`trace1`] for six parameters.
-pub fn trace6[A, B, C, E, F, G](name: String, a: Arg[A], b: Arg[B],
+pub fn trace6[A, B, C, E, F, G, ^c](name: String, a: Arg[A], b: Arg[B],
   c: Arg[C], d: Arg[E], e: Arg[F], f: Arg[G],
-  body: fn(Param[A], Param[B], Param[C], Param[E], Param[F], Param[G]) -> Unit !Dev,
+  body: fn(Param[A], Param[B], Param[C], Param[E], Param[F], Param[G]) -> Unit !Dev ^{c},
   hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry6[A, B, C, E, F, G]) = {
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d), sig_of(e), sig_of(f)]
@@ -2661,7 +2662,7 @@ fn kernel_side(marks: List[Mark]) -> Bool =
 ## the program is the one they answer: the body then reads its parameters
 ## with `param(d, k)` in the markers' formats. What the site's call map of a
 ## kernel recorded with cells runs.
-pub fn trace_calls(name: String, params: List[KParam], body: fn() -> Unit !Dev, hints: ByArch[EntryHints] = [],
+pub fn trace_calls[^c](name: String, params: List[KParam], body: fn() -> Unit !Dev ^{c}, hints: ByArch[EntryHints] = [],
   markers: List[Marker] = [], at: Loc = caller()) -> (TileProg, List[Call]) = {
   let c = entry_ctx(name, at)
   if len(markers) == 0 {
@@ -2683,8 +2684,8 @@ pub fn trace_calls(name: String, params: List[KParam], body: fn() -> Unit !Dev, 
 # batch's PR-1): both empty for the two public recorders above, which know
 # no roles and refuse nothing on their account and have no cells to read,
 # and one per parameter for `trace1` to `trace6`.
-fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: List[Cells],
-  body: fn() -> Unit !Dev, entry_hints: ByArch[EntryHints]) -> (TileProg, List[Call]) = {
+fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms: List[Cells],
+  body: fn() -> Unit !Dev ^{c}, entry_hints: ByArch[EntryHints]) -> (TileProg, List[Call]) = {
   # the entry's hints are checked before the body runs, like the shapes of its parameters
   let hints = wire_entry(entry_hints)
   check_by_value(entry, params)
@@ -5186,7 +5187,7 @@ fn widened_op(r: Rounding) -> String = {
   })
 }
 
-fn refused_as(name: String, body: fn() -> Unit !Dev) -> String = match catch_panic(() => trace_kernel(name, [ByPtr("f32")], body)) {
+fn refused_as[^c](name: String, body: fn() -> Unit !Dev ^{c}) -> String = match catch_panic(() => trace_kernel(name, [ByPtr("f32")], body)) {
   Ok(_) -> "accepted"
   Err(e) -> e.message
 }
@@ -5716,7 +5717,7 @@ fn never_opened() -> Unit !Dev = {
   ()
 }
 
-fn refusal(body: fn() -> Unit !Dev) -> String = match catch_panic(() => trace_kernel("raw", [ByPtr("f64")], body)) {
+fn refusal[^c](body: fn() -> Unit !Dev ^{c}) -> String = match catch_panic(() => trace_kernel("raw", [ByPtr("f64")], body)) {
   Ok(_) -> "accepted"
   Err(e) -> e.message
 }
@@ -6047,7 +6048,7 @@ fn view_read_half() -> Unit !Dev = {
   ()
 }
 
-fn refusal_in(params: List[KParam], body: fn() -> Unit !Dev) -> String = match catch_panic(() => trace_kernel("raw", params, body)) {
+fn refusal_in[^c](params: List[KParam], body: fn() -> Unit !Dev ^{c}) -> String = match catch_panic(() => trace_kernel("raw", params, body)) {
   Ok(_) -> "accepted"
   Err(e) -> e.message
 }
@@ -8209,4 +8210,21 @@ test "K3-G: distinct prefix views keep length stride squeeze tokens hints and so
     assert list.any(calls, c => c.name == api && c.at != None)
   }
   assert list.any(calls, c => c.name == "tile_shape" && c.ops_from == c.ops_to)
+}
+
+# The recorder consumes callbacks inside their declared domains. The resulting
+# program contains instructions, while callback resources stay with the caller.
+test "recorded staged callbacks retain scoped environments through helper chains" {
+  mem.with_mem([@s] () => {
+    let buffer = mem.new(2)
+    let program = trace_kernel("scoped", [], () => {
+      var total = i_const(1)
+      let condition = bool_const(len(buffer) > 0)
+      if condition { total = addi(total, i_const(len(buffer))) }
+      for i in d_range(0, len(buffer)) { total = addi(total, i_const(len(buffer))) }
+      let chosen = if condition { total } else { i_const(len(buffer)) }
+      d_if(condition, () => { let _ = addi(chosen, i_const(len(buffer))) }, () => ())
+    })
+    if len(program.ops) == 0 { panic("scoped recorder lost its operations") }
+  })
 }
