@@ -96,7 +96,7 @@ def job_env(prefix, *, tmpdir=None, runner_temp=None, inherit_host=False):
     in wasm-target's driver step and the classpath contract, `${CC:-cc}` in
     the scripts, and the native driver's own default), so PATH is the one
     place to inject it. CC is not set, since CI does not set it, and neither
-    is DAWN_WASM_CC, which wasm-target's own step writes. LANG is ubuntu-latest's
+    is DAWN_WASM_CC, which wasm-target's own step writes. LANG is ubuntu-24.04's
     value: without any locale the JVM's file-name encoding falls back to ASCII.
     DAWN_SEED is deliberately absent: CI does not set it, and set it would
     make seedjar.sh skip its checksum and print a warning CI never prints; the
