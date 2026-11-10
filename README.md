@@ -70,27 +70,49 @@ pub fn main() -> Unit !io =
 
 ## Install
 
-Every release publishes two artifacts, each with its SHA-256. Check the digest.
+Releases provide a native compiler and an explicit JVM toolchain. Download every
+file from one tag and verify its SHA-256 before use.
 
-**Without a JVM** (linux-x86_64): one static executable, with `std` and the C
-runtime inside it.
+**Native** (Linux x86_64 only): one static executable with `std` and the C runtime
+embedded. Installation needs Python 3 and curl. This installs the downloaded file
+itself as `~/.local/bin/dawn`; its version line retains `dawnc <version> (native)`.
+Other native platforms are unsupported and fail before downloading.
 
 ```bash
-base=https://github.com/dawnop/dawn-lang/releases/latest/download
+case "$(uname -s)/$(uname -m)" in
+  Linux/x86_64) ;;
+  *) printf '%s\n' 'Unsupported platform: native requires Linux x86_64.' >&2; exit 1 ;;
+esac
+release=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/dawnop/dawn-lang/releases/latest)
+tag=${release##*/}  # Or set a fixed tag, such as v0.104.0.
+base=https://github.com/dawnop/dawn-lang/releases/download/$tag
 curl -fsSLO $base/dawnc-linux-x86_64
 curl -fsSLO $base/dawnc-linux-x86_64.sha256
-sha256sum -c dawnc-linux-x86_64.sha256
-chmod +x dawnc-linux-x86_64 && sudo mv dawnc-linux-x86_64 /usr/local/bin/dawnc
+curl -fsSLO $base/dawn-toolchain.json
+curl -fsSLO $base/install-native.py
+python3 install-native.py --tag "$tag" --from-dir . --prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
 
 printf 'pub fn main() -> Unit !io = println("hello, dawn")\n' > hello.dawn
-dawnc run hello.dawn
+dawn run hello.dawn
 ```
 
-**With a JVM** (JDK 21 or newer, any platform): the toolchain jar carries `std`,
-so the jar on its own is the whole toolchain.
+`dawn-toolchain.json` binds the tag, full source commit, Linux x86_64 target,
+native checksum and source manifest to the builder JAR's checksum and version.
+The installer verifies this metadata, the checksum, ELF architecture and native
+identity before atomically replacing `bin/dawn`. A failed install preserves the
+old entry. An old `dawn` symlink is replaced without overwriting its target.
+For an online install, run `python3 install-native.py --tag "$tag"`; omit `--tag`
+to resolve latest once. Use `--prefix /your/prefix` to choose another destination.
+There is no `dawnc` alias or backend selection at runtime.
+
+**JVM** (JDK 21 or newer): select it explicitly with `java -jar`. The JAR embeds
+`std`. It remains available on platforms without a native release.
 
 ```bash
-base=https://github.com/dawnop/dawn-lang/releases/latest/download
+release=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/dawnop/dawn-lang/releases/latest)
+tag=${release##*/}  # Or set a fixed tag, such as v0.104.0.
+base=https://github.com/dawnop/dawn-lang/releases/download/$tag
 curl -fsSLO $base/dawn-selfhost.jar
 curl -fsSLO $base/dawn-selfhost.jar.sha256
 sha256sum -c dawn-selfhost.jar.sha256      # macOS: shasum -a 256 -c
@@ -99,20 +121,19 @@ printf 'pub fn main() -> Unit !io = println("hello, dawn")\n' > hello.dawn
 java -jar dawn-selfhost.jar run hello.dawn
 ```
 
-These two are different compilers, not two downloads of one. `dawnc` is the C
-backend and it refuses `use java`; the jar is the JVM toolchain. Which you want,
-and what each cannot do, is under [The toolchain](#the-toolchain) below.
+Installed `dawn` runs the C backend and refuses `use java`. Java projects use the
+JVM toolchain explicitly. Native `run`, `build` and `test` need a C compiler;
+WebAssembly output needs clang and WASI, and package downloads need curl. See
+[The toolchain](#the-toolchain) for their capabilities.
 
-A release also carries two files that describe it rather than install it:
-`dawn-pub-api.json`, every public signature in `std` and in `packages/` with its
-effect row, and `dawn-pub-api-diff.md`, the classified difference from the previous
-release. Read the second before upgrading: effects are in the types, so a unit that
-started doing IO cannot do it quietly, and the report (signatures, not behavior)
-names the expansion.
+A release also carries `dawn-pub-api.json`, every public signature in `std` and
+`packages/` with its effect row, and `dawn-pub-api-diff.md`, the classified
+difference from the previous release. Read the second before upgrading: effects
+are in the types, so the report names any expansion in those signatures.
 
 **From a checkout**, which is what the rest of this file assumes: `./bin/dawn`
-downloads the seed on first use, verifies it against
-`scripts/seed-checksums.txt`, and builds HEAD with it.
+remains the JVM bootstrap driver. It downloads the seed on first use, verifies it
+against `scripts/seed-checksums.txt`, and builds HEAD with it.
 
 ### A project
 

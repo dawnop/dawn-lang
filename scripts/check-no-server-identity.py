@@ -69,7 +69,7 @@ COORDINATE_ALLOWED = [
      f'pub fn repo_url() -> String = "https://github.com/{GITHUB_REPO}"',
      "the Dawn generator's one copy of the repository, held equal below"),
     ("site/src/gen/home.dawn",
-     f'fn release_base() -> String = "https://github.com/{GITHUB_REPO}/releases/latest/download"',
+     f'fn release_base() -> String = "https://github.com/{GITHUB_REPO}/releases/download/"',
      "doc-check.py reads the install commands by spelling (SITE_INSTALL_SOURCES) and"
      " compares them with RELEASE_ASSET_BASE, itself built from repo.env"),
     ("playground/deploy/DEPLOY.md",
