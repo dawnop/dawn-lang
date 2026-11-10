@@ -173,6 +173,7 @@ red has never been observed is a checker nobody can rely on.
 """
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -460,6 +461,11 @@ def load_reports(reports, digests):
     """
     observed = {}
     for report in reports:
+        from gate_observation_data import rebuild
+        try:
+            report = rebuild(report)
+        except (ValueError, KeyError, TypeError) as error:
+            raise SystemExit(f"data quality error: {error}") from error
         workflow = report.get("workflow") or DEFAULT_SOURCE
         if workflow in observed:
             raise SystemExit(
@@ -467,6 +473,19 @@ def load_reports(reports, digests):
                 " workflow so it is clear which window the claims are held to")
         keyed = digests.get(workflow, {})
         observed[workflow] = ShapedObservations(report, keyed)
+        observed[workflow].report = report
+        observed[workflow].quality_errors = report["data_quality_errors"]
+        observed[workflow].reruns = ShapedObservations(
+            {"per_run": [r for r in report["attempts"] if r["attempt"] > 1]}, keyed)
+        observed[workflow].groups = []
+        for group in report["groups"]:
+            if group["image"] == "unknown" or group["image_version"] == "unknown":
+                continue
+            record = {"id": tuple(group["runs"]),
+                      "jobs": {group["name"]: group["D"]["max"]},
+                      "steps": ({group["name"]: group["steps"]}
+                                if group["steps"] else {})}
+            observed[workflow].groups.append((group, ShapedObservations({"per_run": [record]}, keyed)))
     return observed
 
 
@@ -482,6 +501,9 @@ def audit_observed(texts, observed):
     """
     problems = []
     notes = []
+    for source, seen in observed.items():
+        for error in getattr(seen, "quality_errors", []):
+            problems.append(f"{source}: data quality error: {error}")
     for name, text in texts.items():
         records = collect_budgets(text, name)
         if not records:
@@ -497,8 +519,17 @@ def audit_observed(texts, observed):
             continue
         found, said = check_observed(
             records, observed[source].for_file(name), name)
-        problems.extend(found)
         notes.extend(said)
+        if hasattr(observed[source], "groups"):
+            for group, seen in observed[source].groups:
+                found, _ = check_observed(records, seen.for_file(name), name)
+                identity = (f"{group['phase']} {group['event']} "
+                            f"{group['image']}@{group['image_version']} "
+                            f"steps={group['steps']} input={group['input']} "
+                            f"runs={group['runs']}")
+                problems.extend(f"{identity}: {problem}" for problem in found)
+        else:
+            problems.extend(found)
     return problems, notes
 
 
@@ -514,7 +545,9 @@ def current_digests():
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent / "gates-external"))
     import steps_lock
-    return {"ci.yml": steps_lock.current_job_digests(),
+    return {"ci.yml": {"plan": steps_lock.current_plain_job_digests(
+                          ".github/workflows/gates.yml")["plan"],
+                      **steps_lock.current_job_digests()},
             "tile.yml": steps_lock.current_plain_job_digests(TILE_PATH)}
 
 
@@ -686,6 +719,13 @@ def workflow_texts(root):
 
 
 def selftest(root):
+    for path in (root / "scripts/gate_observation_data.py",
+                 root / "scripts/gate_observation_test.py"):
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[path.stem] = module
+        spec.loader.exec_module(module)
+    module.selftest()
     """Every rule must be seen refusing something before its silence means pass."""
     good = """
 jobs:
@@ -841,6 +881,17 @@ jobs:
             {"id": i, "jobs": jobs, "steps": steps}
             for i, (jobs, steps) in enumerate(runs)]}
 
+    def fixture_reports(reports, digests):
+        # These fixtures exercise the shape lookup below the raw API reader.
+        # The reader's independent fixtures cover timestamp and page validity.
+        result = {}
+        for report in reports:
+            workflow = report.get("workflow") or DEFAULT_SOURCE
+            if workflow in result:
+                raise SystemExit("two reports of one workflow")
+            result[workflow] = ShapedObservations(report, digests.get(workflow, {}))
+        return result
+
     current_run = ({"slow": 550, "quick": 8},
                    {"slow": "slow-3-shards", "quick": "quick-steps"})
     old_same_name = ({"slow": 914}, {"slow": "slow-2-shards"})
@@ -937,7 +988,7 @@ jobs:
     ]
     for label, reports, want_red, says in source_cases:
         found, _notes = audit_observed(
-            source_files, load_reports(reports, {"ci.yml": today}))
+            source_files, fixture_reports(reports, {"ci.yml": today}))
         if bool(found) != want_red or (
                 says is not None and not any(says in f for f in found)):
             failures.append(
@@ -974,7 +1025,7 @@ jobs:
     for label, report, want_red in tile_cases:
         found, _notes = audit_observed(
             {"tile.yml": tile_claim},
-            load_reports([ci_report, report],
+            fixture_reports([ci_report, report],
                          {"ci.yml": today, "tile.yml": tile_now}))
         if bool(found) != want_red:
             failures.append(
@@ -983,7 +1034,7 @@ jobs:
         else:
             print(f"  {'refused' if want_red else 'accepted'}: {label}")
     try:
-        load_reports([ci_report, tile_report(800), tile_report(900)],
+        fixture_reports([ci_report, tile_report(800), tile_report(900)],
                      {"ci.yml": today})
         failures.append("two tile.yml reports were both accepted")
     except SystemExit:
@@ -1092,6 +1143,10 @@ def main():
         reports = [json.loads(path.read_text(encoding="utf-8"))
                    for path in args.observed]
         observations = load_reports(reports, current_digests())
+        from gate_observation_data import summary_lines
+        for source, seen in observations.items():
+            for line in summary_lines(seen.report):
+                print(f"{source}: {line}")
         for report in reports:
             workflow = report.get("workflow") or DEFAULT_SOURCE
             keyed = ("by steps digest"

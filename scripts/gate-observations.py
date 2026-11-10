@@ -1,104 +1,47 @@
 #!/usr/bin/env python3
-"""Collect how long each CI job actually took, so a budget can be audited.
+"""Collect verifiable Actions observations for the manual budget audit.
 
-`scripts/check-gate-budgets.py` holds every `timeout-minutes` to three times
-the observation its `# budget:` line claims, and holds every claim under the
-run pole. What it never did was ask whether the claim is still true. Both
-halves of its arithmetic read the same file the claim lives in, so a job can
-double in cost and stay green forever: the timeout is still 3x a number, the
-number is just no longer the worst observation.
+Read original runs and every attempt separately, retaining the raw run and job
+responses and checking page totals against distinct IDs. A fixed --since /
+--until window includes running and failed runs and is never cut by --runs.
+Use --branch '' to include PRs and other branches. Every attempt uses its own
+run_started_at and jobs endpoint; inherited successes are not new execution.
 
-That is not hypothetical. On 2026-09-03 twenty-one of gates.yml's budget lines
-were below the job's own worst run since 09-02, native-diff's by 562s, and no
-gate said so. The observations were sitting in the Actions API the whole time.
+The version 2 report records successful, failed, executed and unexecuted
+cancellations, skipped, right censored and invalid clock records separately.
+D is job execution, W is budgeted job-seconds, Q is scheduling wait, S is
+attempt wall time, and span starts at original run creation. P50/P95/max and
+identity groups distinguish first attempts from reruns, event, actual runner
+image/version, steps and source input. A source SHA is not a cache or hardware
+identity and does not prove the checkout of a PR merge was identical.
 
-This fetches them. For the last K completed runs of a workflow on a branch it
-reads every job's start and finish, keeps the maximum per job name for a
-person to read, and writes a JSON file that `check-gate-budgets.py
---observed` compares the declared values against, run by run and by steps
-rather than by name (see WHICH JOB A RUN WAS below).
+StepsAt reads gates.yml and the toolchain action at each run's source SHA.
+PlainStepsAt reads other workflows. Both retain the existing steps_lock
+semantics, including rename continuity and reshard separation. Unknown images
+and invalid times are data quality errors. Raw values are never repaired.
+Legacy reports lack the timestamps needed to verify these properties and must
+be collected again; --restep only refreshes version 2 reports.
 
-    scripts/gate-observations.py --out /tmp/observed.json
-    scripts/gate-observations.py --workflow tile.yml --allow-empty \
-        --out /tmp/tile-observed.json
-    scripts/check-gate-budgets.py --observed /tmp/observed.json \
-        --observed /tmp/tile-observed.json
-    scripts/gate-observations.py --restep /tmp/observed.json --out /tmp/o2.json
+    scripts/gate-observations.py --since 2026-11-03T18:00:00Z \
+        --until 2026-11-10T18:00:00Z --out /tmp/ci.json
+    scripts/gate-observations.py --selftest
+    scripts/check-gate-budgets.py --observed /tmp/ci.json --observed /tmp/tile.json
 
-Neither runs in CI: this one needs the API (and a token), and a gate that
-depends on the network is a gate that goes red for the network. It is the
-manual audit to run before restating a budget line, and the report it writes
-is what the restatement cites.
-
-Two deliberate narrowings, both about what counts as an observation:
-
-* only `conclusion == "success"` jobs. A job that failed, was cancelled or was
-  killed by its own timeout stopped early; its duration is a fact about the
-  failure, not about the work. (A timeout kill is the one loss that matters,
-  and it is loud on its own -- the run is red.)
-* duration is `completed_at - started_at`, so queueing is outside it, exactly
-  as the pole's own note says the per-job claims are.
-
-A reusable workflow's jobs are reported under `"<caller job> / <job>"`
-(gates.yml's `native-diff` arrives as `test / native-diff`, because ci.yml
-calls it from a job named `test`). The prefix is stripped so the names match
-the keys in the workflow file; a bare name is kept as it is.
-
-The report also keeps every run it read, under "per_run": its event, its
-conclusion, each successful job's seconds and the run's span (creation to the
-last job's finish, queueing included, unlike the per-job figure). The maximum
-per job is what the budget audit needs; the per-run records are what
-scripts/gate-totals.py adds up for the nightly report of job-seconds per push,
-and keeping them here means that report reads the same API answers, through
-the same reader, as the audit does. `--allow-empty` writes a report with no
-runs instead of failing: a path-triggered workflow (tile.yml) can go a week
-without a push that touches its paths, and that is an answer, not an error.
-The report names the workflow it read ("workflow"), and that is how
-check-gate-budgets.py knows which file's claims it may be held to: since
-2026-10-03 the nightly audit passes it one report per workflow.
-
-WHICH JOB A RUN WAS (issue #244). A job's name is not its identity. Until
-2026-09-26 the audit held each budget line to the worst run of the job with
-that name in the window, so a job split in place (syntax-mutants-1 going
-from half the mutants to a third) inherited a week of the old shape's runs,
-and round two of the budget ratchet had to rename every split job to get
-out from under them. So every per-run record now also carries "steps":
-{job: digest} for each job gates.yml defined at that run's own commit,
-where the digest is scripts/gates-external/steps_lock.py's job_digests, the
-multiset of the job's `run:` texts that steps.lock.json holds per family.
-check-gate-budgets.py --observed compares a gates.yml budget line only with
-runs whose digest equals the job's digest today, whatever the job was called
-then: a reshard starts a fresh window by itself, and a rename that keeps the
-steps keeps the history.
-
-The file at a run's commit is read with git (`git rev-parse <sha>:<path>`,
-then `git cat-file` once per distinct blob; 52 runs of 2026-09-19 ..
-09-26 touched 26 distinct gates.yml blobs, parsed in 1.7s), so the checkout
-this runs in needs the history (`fetch-depth: 0`). A commit git does not
-have is read through the contents API instead, once per commit. A gates.yml
-that gatesplan refuses leaves the run's "steps" null and says why under
-"steps_error"; the audit counts those runs and compares nothing against them,
-since a job whose shape is unknown cannot be said to be today's. Jobs that
-gatesplan does not model (gates.yml's `plan`, and every job of another
-workflow, such as ci.yml's `secrets`) carry no digest and are still matched
-by name. The digests need PyYAML, as steps_lock.py does.
-
-A workflow gatesplan does not model gets the same treatment by its own reader
-(2026-10-10, issue #274). tile.yml's runs carry "steps" too: each job's
-digest is steps_lock.plain_job_digests of tile.yml at the run's commit, the
-multiset of its `run:` texts, which for a tile-golden shard includes
-`run.sh --shard I/N`. So a shard dealt seven ways and the same-named shard
-dealt eight ways are different shapes, and check-gate-budgets.py holds a
-claim only to runs of its own.
+The compatible per_run view contains attempt 1 only, and a partial run cannot
+claim full success. The observed audit recomputes from raw records rather than
+trusting derived maxima. This collector needs a token and remains a manual or
+scheduled audit; its offline selftest needs neither a token nor a network.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
 import subprocess
 import sys
 import time
+import zipfile
 from datetime import datetime, timezone
 
 import repo_env  # scripts/repo_env.py, the reader of scripts/repo.env
@@ -117,7 +60,7 @@ _TRANSIENT = (
 )
 
 
-def _gh(args):
+def _gh(args, *, binary=False):
     """Run `gh` with the proxy vars cleared, retrying a transient failure;
     -> the stdout, or a SystemExit naming the last failure."""
     env = dict(os.environ)
@@ -127,17 +70,19 @@ def _gh(args):
         env.pop(key, None)
     for attempt in range(1, GH_ATTEMPTS + 1):
         proc = subprocess.run(
-            args, capture_output=True, text=True, env=env, check=False
+            args, capture_output=True, text=not binary, env=env, check=False
         )
         if proc.returncode == 0:
             return proc.stdout
-        transient = any(t in proc.stderr for t in _TRANSIENT)
+        error = (proc.stderr.decode("utf-8", "replace")
+                 if isinstance(proc.stderr, bytes) else proc.stderr)
+        transient = any(t in error for t in _TRANSIENT)
         if not transient or attempt == GH_ATTEMPTS:
             break
         time.sleep(GH_RETRY_WAIT * 2 ** (attempt - 1))
     raise SystemExit(
         f"{' '.join(args)} failed ({proc.returncode}) after {attempt}"
-        f" attempt(s):\n{proc.stderr.strip()}"
+        f" attempt(s):\n{error.strip()}"
     )
 
 
@@ -149,6 +94,11 @@ def gh_json(args):
 def gh_text(args):
     """Run `gh` and return its stdout."""
     return _gh(args)
+
+
+def gh_bytes(args):
+    """Read an attempt's log archive without decoding compressed bytes."""
+    return _gh(args, binary=True)
 
 
 # Spelled from this file rather than as a join on the repository root, for
@@ -216,7 +166,8 @@ class StepsAt:
             self.reads["parsed"] += 1
             try:
                 self.by_blobs[key] = (
-                    self.steps_lock.job_digests(gates, action), None)
+                    {**{"plan": self.steps_lock.plain_job_digests(gates)["plan"]},
+                     **self.steps_lock.job_digests(gates, action)}, None)
             except self.gatesplan.PlanError as error:
                 self.reads["refused"] += 1
                 self.by_blobs[key] = (None, str(error))
@@ -323,206 +274,128 @@ def parse_since(text):
     return when
 
 
-def list_runs(repo, branch, workflow, limit, since, fetch=None):
-    """The workflow's runs on a branch, newest first, read page by page.
-
-    WHY NOT `gh run list` (issue #231, 2026-10-01). The totals step asked it
-    for `--limit 800` over fourteen days, and on the nightly runs of 09-30
-    and 10-01 the listing it got back held 2 and 13 runs where the API held
-    75 and 111: the table read "0 successful pushes this week" while six
-    green pushes sat in that week. The audit step, same token and same
-    workflow, asked for 300 and got all 79. The short reading could not be
-    reproduced locally (gh 2.97 and 2.101, both limits, all 111), so the
-    reader no longer trusts a long walk over the unfiltered history. With
-    --since the window is passed to the API as `created>=`, which keeps the
-    walk to one or two pages, and every page's `total_count` is compared
-    with the distinct runs read: a listing that comes back short or with a
-    run twice is refused, loudly, instead of becoming a sample. The runs
-    are sorted here rather than assumed sorted, so the oldest and newest
-    stamps the report prints are true of what was read.
-    """
-    fetch = fetch or gh_json
-    query = f"branch={branch}&per_page=100"
-    if since:
-        query += "&created=%3E%3D" + since.strftime("%Y-%m-%dT%H:%M:%SZ")
-    problem = None
-    for _attempt in range(LIST_ATTEMPTS):
-        listed, problem = _list_once(fetch, repo, branch, workflow, limit,
-                                     since, query)
-        if problem is None:
-            return listed
-    raise SystemExit(problem)
+def read_pages(repo, endpoint, field, fetch=None):
+    """Retain every response and verify total_count against distinct IDs."""
+    from gate_observation_data import read_pages as fetch_pages
+    return fetch_pages(repo, endpoint, field, fetch or gh_json)
 
 
-# A run created while the pages are walked shifts the next page by one and
-# reads as a duplicate; that is a race, not a short listing, so the walk is
-# repeated before it is refused.
-LIST_ATTEMPTS = 3
-
-
-def _list_once(fetch, repo, branch, workflow, limit, since, query):
-    """-> (runs newest first, None) or (None, why the listing is refused)."""
-    seen = {}
-    read = 0
-    total = None
-    page = 1
-    while True:
-        payload = fetch([
-            "gh", "api",
-            f"repos/{repo}/actions/workflows/{workflow}/runs?{query}&page={page}",
-        ])
-        batch = payload.get("workflow_runs", [])
-        total = payload.get("total_count", total)
-        for run in batch:
-            read += 1
-            seen[run["id"]] = {
-                "databaseId": run["id"],
-                "status": run.get("status"),
-                "conclusion": run.get("conclusion"),
-                "createdAt": run["created_at"],
-                "headSha": run.get("head_sha"),
-                "event": run.get("event"),
-            }
-        if len(batch) < 100 or (not since and read >= limit):
-            break
-        page += 1
-    if since and (read != len(seen) or total != len(seen)):
-        return None, (
-            f"the {workflow} runs on {branch} since {since.isoformat()} did not"
-            f" list cleanly in {LIST_ATTEMPTS} attempts: the API reports"
-            f" {total}, {read} came back over {page} page(s), {len(seen)} of"
-            " them distinct. A short sample would be reported as if it were"
-            " the window, so nothing is written.")
-    listed = sorted(seen.values(), key=lambda run: parse_time(run["createdAt"]),
-                    reverse=True)
-    return (listed if since else listed[:limit]), None
-
-
-def collect(repo, branch, workflow, runs, since, allow_empty=False):
-    listed = list_runs(repo, branch, workflow, max(runs * 2, runs), since)
-    picked = []
-    for run in listed:
-        if run["status"] != "completed":
-            continue
-        if since and parse_time(run["createdAt"]) < since:
-            continue
-        picked.append(run)
-        if len(picked) >= runs:
-            break
+def collect(repo, branch, workflow, runs, since, allow_empty=False, until=None):
+    """Read original runs, then every attempt's own detail and paged jobs."""
+    from gate_observation_data import rebuild, classify, headers_from_archive
+    until = until or datetime.now(timezone.utc)
+    query = "created=" + (since.strftime("%Y-%m-%dT%H:%M:%SZ") if since else "*")
+    query += ".." + until.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if branch:
+        query += f"&branch={branch}"
+    pages = read_pages(repo, f"actions/workflows/{workflow}/runs?{query}", "workflow_runs")
+    listed = [run for page in pages for run in page["workflow_runs"]]
+    listed.sort(key=lambda r: parse_time(r["created_at"]), reverse=True)
+    # A fixed window is complete, even when it contains more than --runs.
+    picked = listed if since else listed[:runs]
     if not picked and not allow_empty:
-        raise SystemExit(
-            f"no completed {workflow} runs on {branch} matched"
-            f"{' since ' + since.isoformat() if since else ''}"
-        )
-
-    seconds = {}
-    where = {}
-    per_run = []
-    for run in picked:
-        payload = gh_json([
-            "gh", "api",
-            f"repos/{repo}/actions/runs/{run['databaseId']}/jobs?per_page=100",
-        ])
-        jobs = {}
-        last = None
-        for job in payload.get("jobs", []):
-            if job.get("completed_at"):
-                done = parse_time(job["completed_at"])
-                last = done if last is None or done > last else last
-            if job.get("conclusion") != "success":
-                continue
-            if not job.get("started_at") or not job.get("completed_at"):
-                continue
-            took = int(
-                (parse_time(job["completed_at"]) - parse_time(job["started_at"]))
-                .total_seconds()
-            )
-            name = strip_caller(job["name"])
-            jobs[name] = took
-            if took > seconds.get(name, -1):
-                seconds[name] = took
-                where[name] = run["databaseId"]
-        per_run.append({
-            "id": run["databaseId"],
-            "created": run["createdAt"],
-            "event": run.get("event"),
-            "conclusion": run.get("conclusion"),
-            "head_sha": run.get("headSha"),
-            "span": (int((last - parse_time(run["createdAt"])).total_seconds())
-                     if last else None),
-            "jobs": dict(sorted(jobs.items())),
-        })
-    return picked, seconds, where, per_run
+        raise SystemExit(f"no {workflow} runs matched the observation window")
+    steps_at = steps_reader(repo, workflow)
+    raw = []
+    image_reads = {"attempt_archives": 0, "job_fallbacks": 0}
+    for original in picked:
+        rid = original["id"]
+        for attempt in range(1, original.get("run_attempt", 1) + 1):
+            endpoint = f"actions/runs/{rid}/attempts/{attempt}"
+            run = gh_json(["gh", "api", f"repos/{repo}/{endpoint}"])
+            jobs_pages = read_pages(repo, endpoint + "/jobs?", "jobs")
+            steps, steps_error = steps_at.at(run["head_sha"])
+            expected = sorted(set(steps or {}) | ({"plan"} if workflow == "ci.yml" else set()))
+            logs = {}
+            jobs = [job for page in jobs_pages for job in page["jobs"]]
+            fresh = {job["id"] for job in jobs if classify(
+                job, run, until.timestamp(), set())[0] in
+                ("success", "failure", "cancelled_executed")}
+            headers, archive_sha, archive_error = {}, None, None
+            if fresh:
+                image_reads["attempt_archives"] += 1
+                try:
+                    payload = gh_bytes([
+                        "gh", "api", "--allow-escape-sequences",
+                        f"repos/{repo}/{endpoint}/logs"])
+                    headers = headers_from_archive(payload)
+                    archive_sha = hashlib.sha256(payload).hexdigest()
+                except (SystemExit, zipfile.BadZipFile, ValueError) as error:
+                    archive_error = str(error)
+            for page in jobs_pages:
+                for job in page["jobs"]:
+                    if job["name"] in headers:
+                        logs[str(job["id"])] = headers[job["name"]]
+                        continue
+                    if job["id"] not in fresh:
+                        continue
+                    image_reads["job_fallbacks"] += 1
+                    try:
+                        # The image identity is at the start of this raw log.
+                        logs[str(job["id"])] = gh_text([
+                            "gh", "api", "--allow-escape-sequences",
+                            f"repos/{repo}/actions/jobs/{job['id']}/logs"])[:16384]
+                    except SystemExit:
+                        logs[str(job["id"])] = ""
+            raw.append({"run": run, "jobs_pages": jobs_pages, "steps": steps,
+                        "steps_error": steps_error, "expected_jobs": expected,
+                        "input": run["head_sha"], "image_logs": logs,
+                        "image_archive_sha256": archive_sha,
+                        "image_archive_error": archive_error})
+    report = {"schema": 2, "generated": datetime.now(timezone.utc).isoformat(),
+              "repo": repo, "branch": branch, "workflow": workflow,
+              "since": since.isoformat() if since else None, "until": until.isoformat(),
+              "raw_run_pages": pages, "selected_run_ids": [r["id"] for r in picked],
+              "raw_attempts": raw, "runs": [r["id"] for r in picked],
+              "oldest_run_created": picked[-1]["created_at"] if picked else None,
+              "newest_run_created": picked[0]["created_at"] if picked else None,
+              "steps_reads": steps_at.reads, "image_reads": image_reads}
+    return rebuild(report)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--repo", default=repo_env.github_repo())
-    ap.add_argument("--branch", default="main")
+    ap.add_argument("--branch", default="main", help="empty string reads all branches")
     ap.add_argument("--workflow", default="ci.yml")
     ap.add_argument("--runs", type=int, default=25,
-                    help="how many completed runs to read (newest first)")
-    ap.add_argument("--since", default=None,
-                    help="ignore runs created before this ISO timestamp")
-    ap.add_argument("--out", type=pathlib.Path, required=True)
-    ap.add_argument("--allow-empty", action="store_true",
-                    help="write an empty report when no run matched, rather"
-                    " than fail (for a path-triggered workflow)")
-    ap.add_argument("--restep", type=pathlib.Path, default=None,
-                    help="read no runs: take this earlier report, attach the"
-                    " steps digests again from git and write it to --out")
+                    help="sample limit without --since; a fixed window is never truncated")
+    ap.add_argument("--since", help="start of the complete creation window (ISO timestamp)")
+    ap.add_argument("--until", help="fixed observation cutoff (ISO timestamp)")
+    ap.add_argument("--out", type=pathlib.Path)
+    ap.add_argument("--allow-empty", action="store_true")
+    ap.add_argument("--restep", type=pathlib.Path)
+    ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
-
-    if args.restep is not None:
+    if args.selftest:
+        import gate_observation_test
+        return gate_observation_test.selftest()
+    if args.out is None:
+        ap.error("--out is required")
+    from gate_observation_data import rebuild, summary_lines
+    if args.restep:
         report = json.loads(args.restep.read_text(encoding="utf-8"))
-        steps_at = steps_reader(report.get("repo", args.repo),
-                                report.get("workflow") or "ci.yml")
-        started = time.monotonic()
-        attach_steps(report["per_run"], steps_at)
-        report["steps_reads"] = {
-            **steps_at.reads, "seconds": round(time.monotonic() - started, 2)}
-        args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        print(f"wrote {args.out}: steps of {len(report['per_run'])} run(s),"
-              f" {report['steps_reads']}")
-        return 0
-
-    since = parse_since(args.since) if args.since else None
-    picked, seconds, where, per_run = collect(
-        args.repo, args.branch, args.workflow, args.runs, since,
-        args.allow_empty,
-    )
-    steps_at = steps_reader(args.repo, args.workflow)
-    started = time.monotonic()
-    attach_steps(per_run, steps_at)
-    steps_seconds = time.monotonic() - started
-    report = {
-        "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "repo": args.repo,
-        "branch": args.branch,
-        "workflow": args.workflow,
-        "since": since.isoformat() if since else None,
-        "runs": [run["databaseId"] for run in picked],
-        "oldest_run_created": picked[-1]["createdAt"] if picked else None,
-        "newest_run_created": picked[0]["createdAt"] if picked else None,
-        "worst_run": where,
-        "jobs": dict(sorted(seconds.items())),
-        "steps_reads": {**steps_at.reads, "seconds": round(steps_seconds, 2)},
-        "per_run": per_run,
-    }
+        if report.get("schema") != 2:
+            raise SystemExit("legacy reports lack raw timestamps; regenerate instead of --restep")
+        reader = steps_reader(report["repo"], report["workflow"])
+        for entry in report["raw_attempts"]:
+            entry["steps"], entry["steps_error"] = reader.at(entry["run"]["head_sha"])
+            entry["expected_jobs"] = sorted(set(entry["steps"] or {}) |
+                                            ({"plan"} if report["workflow"] == "ci.yml" else set()))
+        report = rebuild(report)
+    else:
+        report = collect(args.repo, args.branch, args.workflow, args.runs,
+                         parse_since(args.since) if args.since else None,
+                         args.allow_empty, parse_since(args.until) if args.until else None)
     args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(
-        f"wrote {args.out}: {len(seconds)} job(s) over {len(picked)} run(s)"
-        f" ({report['oldest_run_created']} .. {report['newest_run_created']})"
-    )
-    for name, took in sorted(seconds.items(), key=lambda kv: -kv[1]):
-        print(f"  {took:5d}s  {name}  (run {where[name]})")
-    reads = steps_at.reads
-    print(
-        f"steps: {reads['commits']} commit(s), {reads['parsed']} distinct"
-        f" gates.yml parsed, {reads['api']} read through the API,"
-        f" {reads['refused']} refused by gatesplan, {steps_seconds:.2f}s"
-    )
-    return 0
+    print(f"wrote {args.out}: {len(report['runs'])} original runs, "
+          f"{len(report['attempts'])} attempts; pagination counts verified")
+    print(f"image reads: {report.get('image_reads', 'not recorded')}")
+    for line in summary_lines(report):
+        print(line)
+    for issue in report["data_quality_errors"]:
+        print(f"data quality error: {issue}", file=sys.stderr)
+    return int(bool(report["data_quality_errors"]))
 
 
 if __name__ == "__main__":
