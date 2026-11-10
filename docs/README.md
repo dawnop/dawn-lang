@@ -74,6 +74,7 @@ comptime 字节常量设计：[comptime-bytes-design.md](comptime-bytes-design.m
 | [lsp-std-source-design.md](lsp-std-source-design.md) | current | std 的文件、缓冲区与内嵌快照源身份；VS Code 只读文档与内容能力协商；真实 LSP 阅读链、token、hover、definition、引用与改名边界。 |
 | [symbol-id-design.md](symbol-id-design.md) | current | 裁决 10：顶层函数的 symbol ID 就是既有 `DeclKey` 路径（不引入序号或内容哈希），依赖图、调度、header 产物与 LSP 改为按它引用；刀序 S1 保序调度（ARC-08）、S2 真边与 SCC（ARC-01）、S3 具名 header 产物（ARC-07）、S4 TFun 带键。 |
 | [emitchange-range-design.md](emitchange-range-design.md) | current | 差分门的声明作用域从「种子窗口」收窄到「本次变更」：窗口检查原样保留，另加「基编译器 vs HEAD 编译器」的范围检查，只认变更自己的提交里的 `Emit-Change`；基按事件取（PR 为 `HEAD^1`、push 为 `before`、本地为 merge-base），工具链摘要相同则跳过并印摘要；基接成 HEAD 等接线错误常驻自测拦截。 |
+| [ci-budget-observer-design.md](ci-budget-observer-design.md) | current | Attempt identity, retained API records, clock validation and observed budget statistics. |
 | [gate-map-dependencies-design.md](gate-map-dependencies-design.md) | current | 从示例 manifest 的本地依赖闭包推导包到示例门禁的归属，并以增删依赖和传递依赖负控固定。 |
 | [prevdiff-offline-corpus-design.md](prevdiff-offline-corpus-design.md) | current | `selfhost-prev-diff.sh --corpus site` 不联网整跑：`ECO_REV` 旁钉 `backend-dawn/src` 树摘要 `ECO_TREE_SHA`，`--pack-corpus` 在联网处打包，`DAWN_ECO_CORPUS` 指向备好的 tar 时按摘要校验、不符即拒、不联网；不设则行为不变。git 元数据由运行方以真仓库提供。 |
 | [gates-external-design.md](gates-external-design.md) | current | 在 GitHub 之外按该提交的 `gates.yml` 跑全部门禁：命令清单运行时派生、`uses:` 替换表、字段白名单的证据包与按多重集重算的 `complete`；维护者签名、`refs/notes/gates` 与 `verify-external.yml` 写 `gates/maintainer` status；prefix 隔离执行、锁定摘要的离线输入包与 `check-isolation` 隔离证明。 |
