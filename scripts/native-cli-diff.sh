@@ -90,6 +90,9 @@ fi
 # a relative one would resolve against the wrong place if that ever changes
 case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac
 
+DAWN_VERSION=$(sed -n 's/^pub const VERSION: String = "\(.*\)"$/\1/p' "$ROOT/selfhost/src/version.dawn")
+python3 scripts/native-cli-contract/run.py --dawnc "$DAWNC" --expect "$DAWN_VERSION"
+
 # Reuse the release binary for the aarch64 Float rounding contract
 # (9.53s locally with an existing driver; no second bootstrap).
 DAWNC_BIN="$DAWNC" python3 scripts/fp-contract-contract/run.py
@@ -275,7 +278,6 @@ mkdir -p "$SKEW_STD"
 cp "$ROOT"/std/*.dawn "$ROOT/std/modules.txt" "$SKEW_STD/"
 for d in "$ROOT"/std/*/; do if [ -d "$d" ]; then cp -r "$d" "$SKEW_STD/"; fi; done
 printf '0.0.1-native-cli-diff\n' > "$SKEW_STD/VERSION"
-DAWN_VERSION=$(sed -n 's/^pub const VERSION: String = "\(.*\)"$/\1/p' "$ROOT/selfhost/src/version.dawn")
 SKEW_EXPECT="error: std version mismatch: the std in $SKEW_STD is 0.0.1-native-cli-diff,"
 SKEW_EXPECT="$SKEW_EXPECT this toolchain is $DAWN_VERSION"$'\n'
 SKEW_EXPECT="$SKEW_EXPECT  a toolchain only ever checked the std it was released with."$'\n'
@@ -334,12 +336,12 @@ pub fn main() -> Unit !io = {
 EOF
 
 RUN_EMPTY=$'argc=0\n'
-RUN_OPTION_LIKE=$'argc=4\n0|0|\n1|2|--\n2|9|--closure\n3|2|-o\n'
+RUN_OPTION_LIKE=$'argc=8\n0|0|\n1|2|--\n2|9|--closure\n3|2|-o\n4|6|--help\n5|4|--cp\n6|8|--native\n7|11|with spaces\n'
 
 run_expect 0 "$RUN_EMPTY" "" "run (empty argv, omitted separator)" run "$RUN_ARGV"
 run_expect 0 "$RUN_EMPTY" "" "run (empty argv, explicit separator)" run "$RUN_ARGV" --
 run_expect 0 "$RUN_OPTION_LIKE" "" "run (opaque option-like and empty argv)" \
-  run "$RUN_ARGV" -- "" -- --closure -o
+  run "$RUN_ARGV" -- "" -- --closure -o --help --cp --native "with spaces"
 run_expect 0 "$RUN_EMPTY" "" "run (compiler option before target)" \
   run --std "$ROOT/std" "$RUN_ARGV"
 
@@ -793,13 +795,19 @@ pair_report "test (test-hoisted dictionary symbols)" test packages/tea-core
 # -- the case tables, the cursor walk and the surrogate-pair arithmetic are
 # each written once per backend.
 pair_report "test (the bundled std)" test --stdlib
-# --cp names host jars. The native driver validates the entries the way the
-# JVM one does and then drops them: they can only matter to a `use java`
-# program, which this backend refuses at `check`. Both spellings of an entry
-# that exists; the two refusals are inline tests now (see this file's header),
-# and these two are what says the accepted spelling still compiles.
-pair "test (--cp, entry exists)" test --cp "$ROOT/runtime/c" packages/sha2
-pair "test (--cp=, entry exists)" test "--cp=$ROOT/runtime/c" packages/sha2
+# JVM classpath success remains its own contract. The native absolute probe
+# above refuses both spellings even for an existing path, before reading it.
+for cp in --cp "--cp=$ROOT/runtime/c"; do
+  cp_args=("$cp")
+  if [ "$cp" = --cp ]; then cp_args+=("$ROOT/runtime/c"); fi
+  if ./bin/dawn test "${cp_args[@]}" packages/sha2 > "$OUT/j-cp.txt" 2>&1; then
+    echo "OK   JVM test ($cp, entry exists)"
+  else
+    echo "FAIL: JVM test ($cp, entry exists)"
+    cat "$OUT/j-cp.txt"
+    fail=1
+  fi
+done
 
 # the failing path: report shape, six-space message indentation, the count
 # line and exit 1. `selfhost-run-diff.sh` has the same fixture against N-1.
