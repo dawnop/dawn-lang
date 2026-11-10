@@ -51,7 +51,8 @@ case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac
 # tests load the standard library through a relative `--std`, the way
 # driver/stdlib's own tests do.
 echo "== selfhost tests, native backend =="
-"$DAWNC" test selfhost/src/nmain.dawn
+native_entry=$(python3 scripts/native-source-tree.py "$OUT/source")
+"$DAWNC" test "$native_entry"
 
 # check/identity.dawn used to get a second `dawnc test` of its own, from when
 # it was not yet on the native driver's production graph. It is now, and all

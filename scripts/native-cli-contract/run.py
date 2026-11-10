@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+import sys
 import subprocess
 import tempfile
 
@@ -12,7 +13,6 @@ HERE = Path(__file__).resolve().parent
 
 COMMANDS = ("check", "build", "emitc", "run", "test", "fmt", "doc", "add",
             "cache", "lsp", "parse", "version")
-
 
 
 def command_help(help_text, command):
@@ -152,4 +152,8 @@ if __name__ == "__main__":
     parser.add_argument("--dawnc", type=Path, required=True)
     parser.add_argument("--expect", required=True)
     args = parser.parse_args()
+    subprocess.run([sys.executable, "scripts/native-source-tree.py", "--selftest"],
+                   cwd=HERE.parents[1], check=True)
     check(args.dawnc.resolve(), args.expect)
+    import semantic
+    semantic.check(args.dawnc.resolve())

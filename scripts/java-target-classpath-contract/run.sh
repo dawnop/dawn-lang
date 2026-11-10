@@ -414,14 +414,15 @@ echo "PASS  missing src/ is rejected before manifest planning and Maven fetch"
 
 capture native-refusal env COURSIER_CACHE="$work/native-cache" \
   DAWN_MAVEN_MIRROR="file://$repo" "$work/dawnc" check "$work/app-a"
-if [ "$CAPTURE_STATUS" -ne 1 ] || [ -s "$work/native-refusal.out" ] ||
-    ! grep -Fq '`use java` is not available in this compiler' "$work/native-refusal.err" ||
+if [ "$CAPTURE_STATUS" -ne 2 ] || [ -s "$work/native-refusal.out" ] ||
+    ! grep -Fq 'Java dependency `fixture:api-a:1`' "$work/native-refusal.err" ||
+    ! grep -Fq 'java -jar /path/to/dawn-selfhost.jar' "$work/native-refusal.err" ||
     [ -e "$work/native-cache" ]; then
   cat "$work/native-refusal.out" >&2
   cat "$work/native-refusal.err" >&2
   fail "native check crossed the Java/Maven boundary"
 fi
-echo "PASS  native keeps its use-java refusal without creating a Coursier cache"
+echo "PASS  native refuses planned Java coordinates without creating a Coursier cache"
 
 prepare_mutant() {
   local name=$1
@@ -502,21 +503,13 @@ elif name == "fetch-with-planner-diags":
         "  let jars = if false {",
     )
 elif name == "plan-before-preflight":
-    old = '''pub fn project_plan_for_load(
-  target: source.SourceTarget
-) -> Result[ProjectPlan, LoadResult] !Fs !Proc !Env =
-  match target {
-    source.ProjectDirectory(dir) ->
+    old = '''    source.ProjectDirectory(dir) ->
       if io.is_dir(dir ++ "/src") {
         Ok(project_plan(target))
       } else {
         Err(missing_source_root(dir))
-      }
-    source.SourceFile(_) -> Ok(project_plan(target))
-  }'''
-    new = '''pub fn project_plan_for_load(
-  target: source.SourceTarget
-) -> Result[ProjectPlan, LoadResult] !Fs !Proc !Env = Ok(project_plan(target))'''
+      }'''
+    new = '''    source.ProjectDirectory(_) -> Ok(project_plan(target))'''
     analyze = replace_once(analyze, old, new)
 elif name == "drop-asm-bridge":
     jreflect = replace_once(

@@ -637,7 +637,8 @@ class PreflightTests(unittest.TestCase):
         source = p.shell_source((p.ROOT / label).read_text(), label)
         target = "selfhost/src/driver/analyze.dawn"
         original = (p.ROOT / target).read_text()
-        changed = original.replace("pub fn project_plan_for_load(", "pub fn changed_plan_for_load(")
+        changed = original.replace('if io.is_dir(dir ++ "/src") {',
+                                   'if io.is_dir(dir ++ "/changed") {')
         with self.assertRaisesRegex(p.PreflightError, "plan-before-preflight") as raised:
             p.exercise(p.ROOT, source, label, "plan-before-preflight",
                        p.SHELL_ADAPTERS["java-target-classpath-contract"], {target: changed})

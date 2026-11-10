@@ -33,7 +33,7 @@ use std/io
 use std/io.{Fs, Proc, Env, Exit, Console}
 use std/str
 use std/bytes
-use front/token.{Diag}
+use front/token.{Diag, mk_diag}
 use front/diag
 use driver/stdlib.{
   StdCtx, StdLoadError, load_chosen_std, load_chosen_std_lean, load_chosen_std_pruned, cli_std_choice, std_choice_text, std_load_error_text,
@@ -42,7 +42,7 @@ use driver/stdlib.{
 use ir/interp.{CtOpts, ct_default, ct_fuel, ct_lsp, ct_world_empty, ct_fuel_value, take_ct_fuel, DEFAULT_FUEL}
 use check/jsig.{JsigLease, jsig_refused, jsig_refused_lease}
 use driver/analyze.{
-  Program, LocDiag, LoadResult, load_target, load_target_unstd, syntax_failure_diags, analyze_program, analyze_product,
+  Program, LocDiag, LoadResult, project_plan_for_load, load_planned, std_dir_target, syntax_failure_diags, analyze_program, analyze_product,
   rendered_diags, dawn_files_under, std_imports, union_imports,
   own_module_paths
 }
@@ -72,13 +72,55 @@ use compiler_plan/consolemem.{ConsoleWrite, Stderr}
 use compiler_plan/exitmem
 use compiler_plan/envmem.{AskedGet}
 use compiler_plan/source
+use compiler_plan/manifestv.{mcoord_show}
 use compiler_plan/buildinfo
 
 fn native_lsp_standalone_lease() -> JsigLease !io = jsig_refused_lease()
 
 fn native_lsp_target_lease(
-  _plan: source.SourcePlan
-) -> Result[JsigLease, LocDiag] !io = Ok(jsig_refused_lease())
+  plan: source.SourcePlan
+) -> Result[JsigLease, LocDiag] !io =
+  match native_java_problem(plan) {
+    Some(problem) -> Err(problem)
+    None -> Ok(jsig_refused_lease())
+  }
+
+## Invalid plans retain their loader diagnostics. A valid plan's first Java
+## coordinate identifies both the unsupported intent and its declaring file.
+fn native_java_problem(plan: source.SourcePlan) -> Option[LocDiag] = {
+  let none: Option[LocDiag] = None
+  if len(plan.diags) > 0 || len(plan.java_coords) == 0 { return none }
+  let coord = mcoord_show(plan.java_coords[0])
+  let path = map.get(plan.java_coord_origin, coord).unwrap_or(plan.project ++ "/dawn.toml")
+  Some(LocDiag { path = path, d = mk_diag(
+    "Java dependency `" ++ coord ++ "` declared in `" ++ path ++
+      "` is not supported by the native compiler",
+    0, 0,
+    "use java -jar /path/to/dawn-selfhost.jar with the same command and arguments"
+  ) })
+}
+
+## Reject and load the same captured plan. File targets keep a closure-only
+## plan; directory targets keep the loader's missing-src precedence and walk.
+fn native_load_target_unstd(target: String) -> LoadResult !Fs !Proc !Env !Exit !Console !io = {
+  let kind = if io.is_dir(target) { source.ProjectDirectory(target) } else { source.SourceFile(target) }
+  match project_plan_for_load(kind) {
+    Err(rejected) -> rejected
+    Ok(plan) -> {
+      match native_java_problem(plan.source) {
+        Some(problem) -> { cli_error(problem.d.msg ++ "; " ++ problem.d.hint) }
+        None -> ()
+      }
+      load_planned(plan)
+    }
+  }
+}
+
+fn native_load_target(std: StdCtx, target: String) -> LoadResult !Fs !Proc !Env !Exit !Console !io =
+  match std_dir_target(std, target) {
+    Some(refusal) -> refusal
+    None -> native_load_target_unstd(target)
+  }
 
 fn usage() -> String =
   join([
@@ -609,7 +651,7 @@ fn analyzed_for(
     return (std, loaded, prog)
   }
   require_target(target)
-  let loaded = load_target_unstd(target)
+  let loaded = native_load_target_unstd(target)
   let std = load_or_die_pruned(std_flag, loaded)
   (std, loaded, analyzed_loaded(std, loaded, opts, dependency_tests))
 }
@@ -628,7 +670,7 @@ fn analyzed_load(
   dependency_tests: Bool = false
 ) -> (LoadResult, Program) !Fs !Proc !Env !Exit !Console !io = {
   require_target(target)
-  let loaded = load_target(std, target)
+  let loaded = native_load_target(std, target)
   (loaded, analyzed_loaded(std, loaded, opts, dependency_tests))
 }
 
@@ -1084,7 +1126,7 @@ fn cmd_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     var order: List[(LoadResult, Option[List[LocDiag]])] = []
     var wanted: Option[Set[String]] = Some(set.empty())
     for target in targets {
-      let loaded = load_target_unstd(target)
+      let loaded = native_load_target_unstd(target)
       let syn = syntax_failure_diags(loaded)
       order = order ++ [(loaded, syn)]
       if syn == None {
@@ -1112,7 +1154,7 @@ fn cmd_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   } else {
     let std = load_or_die(std_flag)
     for target in targets {
-      let loaded = load_target(std, target)
+      let loaded = native_load_target(std, target)
       let prog = analyze_product(loaded, std, opts, jsig_refused())
       all = all ++ rendered_diags(prog)
     }
@@ -1345,7 +1387,7 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   if not io.exists(target) {
     return cli_error("no such file or directory: ${target}")
   }
-  let loaded = load_target(std, target)
+  let loaded = native_load_target(std, target)
   let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
   if len(prog.diags) > 0 { fail_doc(rendered_diags(prog)) }
   print_doc(doc.project_json(prog, std, own_module_paths(loaded)))
@@ -2478,4 +2520,58 @@ test "`dawnc run` stops taking options at the target" {
     let _ = parse_run_tail(["prog.dawn", "--closure"])
     ()
   }) == (Some(2), usage, "")
+}
+
+use std/memfs
+use std/list
+
+# The native lease must reject coordinates even when no source imports Java.
+test "native LSP refuses root and transitive Java coordinates at their manifest" {
+  for transitive in [false, true] {
+    let origin = if transitive { "/w/dep/dawn.toml" } else { "/w/app/dawn.toml" }
+    var fs = memfs.put(memfs.empty("/w"), "/w/app/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
+    fs = memfs.put(fs, "/w/app/dawn.toml", if transitive {
+      "schema = 1\nname = \"app\"\n[deps]\ndep = \"../dep\"\n"
+    } else { "schema = 1\nname = \"app\"\n[java-deps]\napi = \"fixture:api:1\"\n" })
+    if transitive {
+      fs = memfs.put(fs, origin, "schema = 1\nname = \"dep\"\n[java-deps]\napi = \"fixture:api:1\"\n")
+      fs = memfs.put(fs, "/w/dep/src/api.dawn", "pub fn value() -> Int = 1\n")
+    }
+    let (((_, log), processes), _) = memfs.with_fs(fs, () =>
+        procmem.with_proc_table([], () => envmem.with_env_table("/w", [], () => {
+          let plan = source.source_plan(source.SourceFile("/w/app/src/main.dawn"))
+          assert len(plan.diags) == 0
+          match native_lsp_target_lease(plan) {
+            Ok(lease) -> {
+              lease.close()
+              assert false
+            }
+            Err(problem) -> {
+              assert problem.path == origin
+              assert problem.d.lo == 0 && problem.d.hi == 0
+              assert str.contains(problem.d.msg, "fixture:api:1")
+              assert str.contains(problem.d.msg, "native compiler")
+              assert str.contains(problem.d.hint, "java -jar /path/to/dawn-selfhost.jar")
+            }
+          }
+        })))
+    assert processes == []
+    assert not list.contains(envmem.asked_names(log), "JAVA_HOME")
+  }
+}
+
+test "native LSP keeps planner errors and permits a pure source plan" {
+  for manifest in ["schema = 1\nname = \"app\"\n",
+    "schema = 1\nname = \"Bad-Name\"\n[java-deps]\napi = \"fixture:api:1\"\n"] {
+    var fs = memfs.put(memfs.empty("/w"), "/w/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
+    fs = memfs.put(fs, "/w/dawn.toml", manifest)
+    let (_, _) = memfs.with_fs(fs, () =>
+        procmem.with_proc_table([], () => envmem.with_env_table("/w", [], () => {
+          let plan = source.source_plan(source.SourceFile("/w/src/main.dawn"))
+          match native_lsp_target_lease(plan) {
+            Ok(lease) -> lease.close()
+            Err(_) -> { assert false }
+          }
+        })))
+  }
 }
