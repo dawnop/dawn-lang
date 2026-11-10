@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 0a0a172ad41283e1 -->
+<!-- doc-check: translation-of README.md @ ad0f6804e61d5d61 -->
 
 <p align="center">
   <a href="https://dawn-lang.dawnop.com">
@@ -68,43 +68,62 @@ pub fn main() -> Unit !io =
 
 ## 安装
 
-每个 release 挂两个产物，各带自己的 SHA-256。**请核对摘要**。
+release 提供 native 编译器和显式 JVM 工具链。所有文件从同一个 tag 下载，使用前核对 SHA-256。
 
-**不装 JVM**（linux-x86_64）：一个静态可执行文件，`std` 与 C 运行时都在里面。
+**Native**（仅 Linux x86_64）：一个静态可执行文件，内嵌 `std` 与 C 运行时。
+安装需要 Python 3 和 curl。下载的文件本体安装为 `~/.local/bin/dawn`，版本行仍保留
+`dawnc <version> (native)`。其他 native 平台明确不支持，并在下载前失败。
 
 ```bash
-base=https://github.com/dawnop/dawn-lang/releases/latest/download
+case "$(uname -s)/$(uname -m)" in
+  Linux/x86_64) ;;
+  *) printf '%s\n' 'Unsupported platform: native requires Linux x86_64.' >&2; exit 1 ;;
+esac
+release=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/dawnop/dawn-lang/releases/latest)
+tag=${release##*/}  # Or set a fixed tag, such as v0.104.0.
+base=https://github.com/dawnop/dawn-lang/releases/download/$tag
 curl -fsSLO $base/dawnc-linux-x86_64
 curl -fsSLO $base/dawnc-linux-x86_64.sha256
-sha256sum -c dawnc-linux-x86_64.sha256
-chmod +x dawnc-linux-x86_64 && sudo mv dawnc-linux-x86_64 /usr/local/bin/dawnc
+curl -fsSLO $base/dawn-toolchain.json
+curl -fsSLO $base/install-native.py
+python3 install-native.py --tag "$tag" --from-dir . --prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
 
 printf 'pub fn main() -> Unit !io = println("hello, dawn")\n' > hello.dawn
-dawnc run hello.dawn
+dawn run hello.dawn
 ```
 
-**装 JVM**（JDK 21 及以上，任意平台）：工具链 jar 自带 `std`，所以这个 jar 本身就是整套工具链。
+`dawn-toolchain.json` 把 tag、完整源码提交、Linux x86_64 目标、native checksum 和源码清单
+绑定到构建它的 JAR 的 checksum 与版本。安装器校验元数据、checksum、ELF 架构和 native 身份，
+再原子替换 `bin/dawn`；失败时保留原入口。旧 `dawn` 若为符号链接，只替换链接本身，不覆盖目标。
+在线安装可运行 `python3 install-native.py --tag "$tag"`，省略 `--tag` 时只解析一次 latest。
+用 `--prefix /your/prefix` 选择其他位置。不创建 `dawnc` 别名，运行时不选择后端。
+
+**JVM**（JDK 21 及以上）：用 `java -jar` 显式选择。JAR 内嵌 `std`，没有 native release
+的平台仍可使用这条路径。
 
 ```bash
-base=https://github.com/dawnop/dawn-lang/releases/latest/download
+release=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/dawnop/dawn-lang/releases/latest)
+tag=${release##*/}  # Or set a fixed tag, such as v0.104.0.
+base=https://github.com/dawnop/dawn-lang/releases/download/$tag
 curl -fsSLO $base/dawn-selfhost.jar
 curl -fsSLO $base/dawn-selfhost.jar.sha256
-sha256sum -c dawn-selfhost.jar.sha256      # macOS 上是 shasum -a 256 -c
+sha256sum -c dawn-selfhost.jar.sha256      # macOS: shasum -a 256 -c
 
 printf 'pub fn main() -> Unit !io = println("hello, dawn")\n' > hello.dawn
 java -jar dawn-selfhost.jar run hello.dawn
 ```
 
-这两件是**两个不同的编译器**，不是同一个东西的两种下载方式。`dawnc` 是 C 后端，它拒绝
-`use java`；jar 是 JVM 工具链。该选哪个、各自做不到什么，见下面的[工具链](#工具链)一节。
+安装后的 `dawn` 运行 C 后端，拒绝 `use java`。Java 工程显式选择 JVM 工具链。
+native 的 `run`、`build` 与 `test` 需要 C 编译器，WebAssembly 输出需要 clang 与 WASI，
+包下载需要 curl。能力边界见[工具链](#工具链)。
 
-release 还挂两件**描述**它、而不是安装它的文件：`dawn-pub-api.json` 是 `std` 与 `packages/`
-里每一条公开签名连同它的效果行，`dawn-pub-api-diff.md` 是与上一个 release 的分类差异。
-升级前该读的是后者：效果就在类型里，某个单元开始做 IO 藏不住，这份比签名不比行为的报告
-会把这次扩张点名。
+release 还提供 `dawn-pub-api.json`，列出 `std` 与 `packages/` 的全部公开签名及效果行；
+`dawn-pub-api-diff.md` 给出与前一 release 的分类差异。升级前读后者：效果写在类型中，
+这份报告会点明这些签名中的效果扩张。
 
-**从仓库检出**（本文其余部分默认的就是这条路）：`./bin/dawn` 首次运行会下载种子、按
-`scripts/seed-checksums.txt` 验它，再用它编译 HEAD。
+**从仓库检出**（本文其余部分默认的路径）：`./bin/dawn` 仍是 JVM bootstrap 驱动。
+首次运行下载种子，按 `scripts/seed-checksums.txt` 校验，再用它编译 HEAD。
 
 ### 一个项目
 

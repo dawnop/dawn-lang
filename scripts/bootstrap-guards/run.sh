@@ -459,9 +459,11 @@ tool17_validate() {
     dawn-selfhost.jar \
     dawn-selfhost.jar.sha256 \
     dawnc-linux-x86_64 \
-    dawnc-linux-x86_64.sha256)"
+    dawnc-linux-x86_64.sha256 \
+    dawn-toolchain.json \
+    install-native.py)"
   if [ "$(tool17_asset_block "$release_file" INSTALL_ASSETS)" != "$expected_assets" ]; then
-    echo "release.yml must publish exactly the four canonical install asset names" >&2
+    echo "release.yml must publish exactly the six canonical install asset names" >&2
     errors=1
   fi
   expected_reports="$(printf '%s\n' \
@@ -599,6 +601,12 @@ sed 's/^[[:space:]]*dawnc-linux-x86_64\.sha256$/            dawnc-linux-amd64.sh
   "$tool17_dir/release.base.yml" > "$tool17_dir/release.wrong-asset.yml"
 tool17_expect_reject "a wrong published asset name" \
   "$tool17_dir/release.wrong-asset.yml" "$tool17_dir/wrapper.base.sh"
+
+for asset in dawn-toolchain.json install-native.py; do
+  sed "/^[[:space:]]*$asset\$/d" "$tool17_dir/release.base.yml" > "$tool17_dir/release.missing-$asset.yml"
+  tool17_expect_reject "omitting install asset $asset" \
+    "$tool17_dir/release.missing-$asset.yml" "$tool17_dir/wrapper.base.sh"
+done
 
 sed 's/^[[:space:]]*dawn-pub-api-diff\.md$/            dawn-api-diff.md/' \
   "$tool17_dir/release.base.yml" > "$tool17_dir/release.wrong-report.yml"

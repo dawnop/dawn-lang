@@ -6,7 +6,7 @@
 # 2026-07-30 (scripts/native-fixpoint.sh) and the driver grew the rest of the
 # CLI over K-B2..K-B5, so there is a second thing worth handing to a consumer:
 # a single self-contained executable with std and the runtime embedded, which
-# is what `dawnc run hello.dawn` in an empty directory demonstrates below.
+# is what `dawn run hello.dawn` in an empty directory demonstrates below.
 #
 # Why this is a script and not eight lines inlined in release.yml: a release
 # step runs on tags only, which makes it the least-executed code in the repo
@@ -84,6 +84,12 @@ if [ -z "$VERSION" ]; then
 fi
 if [ -n "$EXPECT" ] && [ "$EXPECT" != "$VERSION" ]; then
   echo "error: --expect $EXPECT but selfhost/src/version.dawn says $VERSION" >&2
+  exit 1
+fi
+
+SOURCE_COMMIT=$(git rev-parse --verify HEAD)
+if [[ ! "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "error: a full source commit is required for native release metadata" >&2
   exit 1
 fi
 
@@ -309,6 +315,63 @@ fi
 
 [ "$fail" = 0 ] || { echo "FAIL: the native release artifact did not check out"; exit 1; }
 
+# The published JAR and this exact native candidate describe one source tag.
+# Read the complete native digest through both existing manifest readers.
+BUILDER_JAR=${JAR:-$ROOT/build/dawn-selfhost.jar}
+BUILDER_VERSION=$("${DAWN_JVM[@]}" --version)
+"${DAWN_JVM[@]}" version -m "$BUILDER_JAR" > "$WORK/builder.manifest"
+"${DAWN_JVM[@]}" version -m "$ARTIFACT" > "$WORK/native.jvm.manifest"
+"$ARTIFACT" version -m "$ARTIFACT" > "$WORK/native.own.manifest"
+python3 - "$WORK" "$BUILDER_JAR" "$ARTIFACT" "$VERSION" "$BUILDER_VERSION" "$SOURCE_COMMIT" <<'PYMETA'
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+work, jar, native = map(Path, sys.argv[1:4])
+version, builder_version, commit = sys.argv[4:]
+def digest(name):
+    values = re.findall(r"^\tbuild\t(b1:[0-9a-f]{64})$", (work / name).read_text(), re.M)
+    if len(values) != 1:
+        raise SystemExit("FAIL: expected one complete source manifest digest")
+    return values[0]
+
+source = digest("native.jvm.manifest")
+if source != digest("native.own.manifest"):
+    raise SystemExit("FAIL: native manifest readers disagree")
+builder_source = digest("builder.manifest")
+if builder_version != f"dawn {version} (selfhost) {builder_source[:15]}":
+    raise SystemExit("FAIL: builder JAR version does not match source VERSION/manifest")
+info = {
+    "schema": 1, "tag": "v" + version, "version": version, "commit": commit,
+    "host_target": "linux-x86_64", "install_path": "bin/dawn",
+    "native": {"name": "dawnc-linux-x86_64", "sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
+               "source_manifest": source},
+    "builder": {"name": "dawn-selfhost.jar", "sha256": hashlib.sha256(jar.read_bytes()).hexdigest(),
+                "version": version, "source_manifest": builder_source},
+}
+(work / "dawn-toolchain.json").write_text(json.dumps(info, indent=2) + "\n")
+PYMETA
+
+# Exercise installation using the already linked candidate, never another
+# compiler build. The installed file is the candidate whose smoke and A == B
+# checks ran above. All assets are staged before any old output is touched.
+mkdir "$WORK/package"
+cp "$ARTIFACT" "$WORK/package/dawnc-linux-x86_64"
+cp "$WORK/dawn-toolchain.json" "$WORK/package/dawn-toolchain.json"
+sha256sum "$ARTIFACT" | sed 's@  .*@  dawnc-linux-x86_64@' > "$WORK/package/dawnc-linux-x86_64.sha256"
+python3 - "$WORK/install-native.py" <<'PYINSTALL'
+from pathlib import Path
+import sys
+sys.path.insert(0, "scripts")
+import repo_env
+source = Path("scripts/install-native.py").read_text()
+Path(sys.argv[1]).write_text(source.replace("@REPOSITORY@", "https://github.com/" + repo_env.github_repo()))
+PYINSTALL
+cp "$WORK/install-native.py" "$WORK/package/install-native.py"
+python3 scripts/native-install-contract.py "$WORK/package"
+
 ARTIFACT_SHA=$(sha256sum "$ARTIFACT" | cut -d' ' -f1)
 CHECKSUM_CANDIDATE="$WORK/$OUT_BASE.sha256"
 printf '%s  %s\n' "$ARTIFACT_SHA" "$OUT_BASE" > "$CHECKSUM_CANDIDATE"
@@ -318,5 +381,7 @@ printf '%s  %s\n' "$ARTIFACT_SHA" "$OUT_BASE" > "$CHECKSUM_CANDIDATE"
 # any earlier failure leaves the old output and checksum untouched.
 mv -f "$ARTIFACT" "$OUT"
 mv -f "$CHECKSUM_CANDIDATE" "$OUT.sha256"
+mv -f "$WORK/dawn-toolchain.json" "$OUT_DIR/dawn-toolchain.json"
+mv -f "$WORK/install-native.py" "$OUT_DIR/install-native.py"
 cat "$OUT.sha256"
 echo "OK: $(basename "$OUT") is a $VERSION compiler, built and checked here"

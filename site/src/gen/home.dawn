@@ -447,7 +447,7 @@ ${fact(t("host-fact-pure-title"), t("host-fact-pure-body"))}
 ## Where the install commands download from. README's install block uses the
 ## same base and the same `$base/<name>` spelling, and the test below holds
 ## every name fetched here to the list release.yml publishes.
-fn release_base() -> String = "https://github.com/dawnop/dawn-lang/releases/latest/download"
+fn release_base() -> String = "https://github.com/dawnop/dawn-lang/releases/download/"
 
 ## The `printf` that writes hello.dawn, made from site/pages/hello.dawn itself,
 ## whose output doc-check.py holds to hello.out. The program is put between
@@ -465,19 +465,28 @@ pub fn hello_printf(src: String) -> String = {
 
 ## The two command blocks, as shell text before highlighting.
 pub fn install_commands(hello: String) -> (String, String) = {
-  let base = "base=" ++ release_base()
+  let base = "base=" ++ release_base() ++ `$tag`
+  let latest = "release=$(curl -fsSL -o /dev/null -w '%{url_effective}' " ++
+    str.replace(release_base(), "/download/", "/latest") ++ ")"
+  let tag = `tag=${release##*/}`
   let native = [
+    `case "$(uname -s)/$(uname -m)" in Linux/x86_64) ;; *) echo 'Unsupported platform: native requires Linux x86_64.' >&2; exit 1 ;; esac`,
+    latest,
+    tag,
     base,
     `curl -fsSLO $base/dawnc-linux-x86_64`,
     `curl -fsSLO $base/dawnc-linux-x86_64.sha256`,
-    "sha256sum -c dawnc-linux-x86_64.sha256",
-    "chmod +x dawnc-linux-x86_64",
-    "sudo mv dawnc-linux-x86_64 /usr/local/bin/dawnc",
+    `curl -fsSLO $base/dawn-toolchain.json`,
+    `curl -fsSLO $base/install-native.py`,
+    `python3 install-native.py --tag "$tag" --from-dir . --prefix "$HOME/.local"`,
+    `export PATH="$HOME/.local/bin:$PATH"`,
     "",
     hello_printf(hello),
-    "dawnc run hello.dawn",
+    "dawn run hello.dawn",
   ]
   let jvm = [
+    latest,
+    tag,
     base,
     `curl -fsSLO $base/dawn-selfhost.jar`,
     `curl -fsSLO $base/dawn-selfhost.jar.sha256`,
@@ -659,12 +668,12 @@ test "a strip under a listing is one line its run printed" {
   })
 }
 
-## The commands fetch each of the four assets once, from the release base.
+## The commands fetch each of the six assets once, from the release base.
 ## Whether those are the names a release publishes is doc-check.py's to say
 ## (SITE_INSTALL_SOURCES): a test here that read .github/ would fail under the
 ## previous release's toolchain, which runs `dawn test site` from a root
 ## holding only the source directories.
-test "the install commands fetch four assets from the release base" {
+test "the install commands fetch six assets from the release base" {
   let (native, jvm) = install_commands("pub fn main() -> Unit !io = println(\"x\")")
   var fetched: List[String] = []
   for l in str.split(native ++ "\n" ++ jvm, "\n") {
@@ -675,7 +684,7 @@ test "the install commands fetch four assets from the release base" {
       None -> ()
     }
   }
-  assert fetched == ["dawnc-linux-x86_64", "dawnc-linux-x86_64.sha256", "dawn-selfhost.jar",
+  assert fetched == ["dawnc-linux-x86_64", "dawnc-linux-x86_64.sha256", "dawn-toolchain.json", "install-native.py", "dawn-selfhost.jar",
     "dawn-selfhost.jar.sha256"]
   assert str.contains(native, "base=" ++ release_base())
   assert str.contains(jvm, "base=" ++ release_base())

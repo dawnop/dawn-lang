@@ -2692,7 +2692,7 @@ TOOLCHAIN_ARTIFACT_SECTIONS = (
 # them, and both checks here would stay green.
 # The repository comes from scripts/repo.env, so moving it there makes this
 # check ask every install document to follow.
-RELEASE_ASSET_BASE = f"https://github.com/{repo_env.github_repo()}/releases/latest/download"
+RELEASE_ASSET_BASE = f"https://github.com/{repo_env.github_repo()}/releases/download/"
 RELEASE_ASSET_FETCH = re.compile(r"\$base/([A-Za-z0-9._\-]+)")
 RELEASE_ASSET_DECL = re.compile(r"INSTALL_ASSETS=\(\s*(.*?)\)", re.S)
 RELEASE_REPORT_DECL = re.compile(r"REPORT_ASSETS=\(\s*(.*?)\)", re.S)
