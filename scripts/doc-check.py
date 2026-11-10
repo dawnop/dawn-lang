@@ -2564,9 +2564,9 @@ EMITC_ENTRY_SPELLINGS = (
     ("the native driver's dispatch to cmd_emitc", EMITC_NATIVE_DRIVER,
      'mode == "emitc" {\n        cmd_emitc(rest)'),
     ("generation A through the JVM entry", EMITC_FIXPOINT,
-     'dawn-selfhost.jar" __emitc \\\n  "$root/selfhost/src/nmain.dawn"'),
+     'dawn-selfhost.jar" __emitc \\\n  "$native_entry"'),
     ("generation B through the native entry", EMITC_FIXPOINT,
-     '"$work/dawnc-A" emitc "$root/selfhost/src/nmain.dawn"'),
+     '"$work/dawnc-A" emitc "$native_entry"'),
 )
 
 

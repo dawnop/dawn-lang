@@ -341,7 +341,14 @@ pub fn project_plan_for_load(
       } else {
         Err(missing_source_root(dir))
       }
-    source.SourceFile(_) -> Ok(project_plan(target))
+    source.SourceFile(_) -> {
+      # A file load follows imports; completion's tree index is unnecessary.
+      let by_use: Map[String, String] = map.empty()
+      Ok(ProjectPlan {
+        source = source.source_plan(target),
+        modules = ModuleIndex { project_files = [], by_use = by_use, walk_diags = [] }
+      })
+    }
   }
 
 fn load_directory_planned(dir: String, plan: ProjectPlan) -> LoadResult !Fs !Env !io = {
@@ -3256,4 +3263,26 @@ test "std read through a link is std through either spelling" {
       assert len(prog.diags) == 0
     })))
   let (_, _) = pair
+}
+
+test "file load planning keeps the closure without indexing sibling modules" {
+  var fs = memfs.put(memfs.empty("/w"), "/w/src/main.dawn", "use util\npub fn main() -> Int = util.value()\n")
+  fs = memfs.put(fs, "/w/src/util.dawn", "pub fn value() -> Int = 1\n")
+  fs = memfs.put(fs, "/w/src/unrelated.dawn", "this is not Dawn\n")
+  fs = memfs.put(fs, "/w/dawn.toml", "schema = 1\nname = \"app\"\n")
+  let (((_, _), processes), _) = memfs.with_fs(fs, () =>
+      procmem.with_proc_table([], () => envmem.with_env_table("/w", [], () => {
+        let plan = match project_plan_for_load(source.SourceFile("/w/src/main.dawn")) {
+          Ok(p) -> p
+          Err(_) -> panic("file rejected before planning")
+        }
+        assert plan.modules.project_files == []
+        assert len(map.keys(plan.modules.by_use)) == 0
+        # A manifest changed after capture cannot replace this load's plan.
+        assert io.write_file("/w/dawn.toml", "[broken\n") == Ok(())
+        let loaded = load_planned(plan)
+        assert len(loaded.diags) == 0
+        assert len(loaded.modules) == 2
+      })))
+  assert processes == []
 }

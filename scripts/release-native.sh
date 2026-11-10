@@ -115,7 +115,8 @@ fi
 # --split writes the same C again as the files the compile below takes: the
 # shared head and one file per translation unit (docs/c-tu-split-design.md).
 # nmain.c stays the whole text, which is what check 4 compares.
-"${DAWN_JVM[@]}" __emitc selfhost/src/nmain.dawn -o "$WORK/nmain.c" \
+NATIVE_ENTRY=$(python3 scripts/native-source-tree.py "$WORK/source")
+"${DAWN_JVM[@]}" __emitc "$NATIVE_ENTRY" -o "$WORK/nmain.c" \
   --build-info "$WORK/build_info.c" --split "$WORK/units"
 
 # -static because the failure it removes is invisible here: a dynamically
@@ -298,7 +299,7 @@ fi
 
 # ---- check 4: it agrees with the toolchain that built it ----
 set +e
-"$ARTIFACT" emitc "$ROOT/selfhost/src/nmain.dawn" -o "$WORK/self.c" > "$WORK/self.log" 2>&1
+"$ARTIFACT" emitc "$NATIVE_ENTRY" -o "$WORK/self.c" > "$WORK/self.log" 2>&1
 rc=$?
 set -e
 if [ "$rc" != 0 ]; then

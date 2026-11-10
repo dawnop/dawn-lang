@@ -35,7 +35,8 @@ cp "$root/scripts/tile-golden/kernels.dawn" "$proj/src/main.dawn"
 printf 'schema = 1\nname = "c_map"\n\n[deps]\ntileir = "%s"\ntileref = "%s"\n' \
   "$root/packages/tileir" "$root/packages/tileref" > "$proj/dawn.toml"
 
-inputs=("$root/selfhost/src/nmain.dawn" "$proj" "$root/scripts/c-map/corpus.dawn")
+native_entry=$(python3 "$root/scripts/native-source-tree.py" "$work/source")
+inputs=("$native_entry" "$proj" "$root/scripts/c-map/corpus.dawn")
 while IFS= read -r f; do inputs+=("$f"); done < <(cd "$root" && find examples -name '*.dawn' -path '*/*' | sort | sed "s|^|$root/|")
 while IFS= read -r d; do inputs+=("$d"); done < <(cd "$root" && find examples/projects -mindepth 1 -maxdepth 1 -type d | sort | sed "s|^|$root/|")
 
@@ -68,8 +69,8 @@ done
 echo "OK: $same input(s) emit the same C and units with and without --map ($skipped skipped: no C)"
 
 if [ -n "$dawnc" ]; then
-  "$dawn" __emitc "$root/selfhost/src/nmain.dawn" -o "$work/jvm.c" --map "$work/jvm.dawnmap"
-  "$dawnc" emitc "$root/selfhost/src/nmain.dawn" -o "$work/native.c" --map "$work/native.dawnmap"
+  "$dawn" __emitc "$native_entry" -o "$work/jvm.c" --map "$work/jvm.dawnmap"
+  "$dawnc" emitc "$native_entry" -o "$work/native.c" --map "$work/native.dawnmap"
   cmp "$work/jvm.c" "$work/native.c"
   if ! cmp -s "$work/jvm.dawnmap" "$work/native.dawnmap"; then
     echo "FAIL: the native compiler writes a different map of nmain.dawn than the JVM-hosted one" >&2

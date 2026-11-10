@@ -131,15 +131,17 @@ assert_inputs_unchanged() {
   fi
 }
 
+native_entry=$(python3 scripts/native-source-tree.py "$work/source")
+assert_inputs_unchanged "after portable source capture"
 java -XX:-UsePerfData -Xss512m -jar "$root/build/dawn-selfhost.jar" __emitc \
-  "$root/selfhost/src/nmain.dawn" -o "$work/A.c" --build-info "$work/A.info.c" \
+  "$native_entry" -o "$work/A.c" --build-info "$work/A.info.c" \
   --split "$work/A.units"
 assert_inputs_unchanged "after generation A"
 "$root/scripts/cc-units.sh" -o "$work/dawnc-A" "$work/A.units" "$work/A.info.c"
 
 # generation B: A compiles the driver itself; the C must match A's exactly
 assert_inputs_unchanged "before generation B"
-"$work/dawnc-A" emitc "$root/selfhost/src/nmain.dawn" -o "$work/B.c" \
+"$work/dawnc-A" emitc "$native_entry" -o "$work/B.c" \
   --build-info "$work/B.info.c" --split "$work/B.units"
 assert_inputs_unchanged "after generation B"
 if ! cmp -s "$work/A.c" "$work/B.c"; then
@@ -160,7 +162,7 @@ fi
 "$root/scripts/cc-units.sh" -o "$work/dawnc-B" "$work/B.units" "$work/B.info.c"
 
 # generation C: B compiles the driver; B == C is the fixed point
-"$work/dawnc-B" emitc "$root/selfhost/src/nmain.dawn" -o "$work/C.c" \
+"$work/dawnc-B" emitc "$native_entry" -o "$work/C.c" \
   --build-info "$work/C.info.c"
 assert_inputs_unchanged "after generation C"
 if ! cmp -s "$work/B.c" "$work/C.c"; then

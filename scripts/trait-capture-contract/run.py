@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -327,7 +328,11 @@ def calls(out, backend=None):
             result, _ = run([native, action, "--std", ROOT / "std", CALLS], out / f"calls-native-{action}.log")
             if action == "run" and result.stdout != "trait capture calls\n":
                 raise RuntimeError("the native call fixture did not execute every assertion")
-        run([native, "test", "--std", ROOT / "std", ROOT / TEST], out / "native-trait-tests.log")
+        entry = Path(subprocess.check_output([
+            sys.executable, ROOT / "scripts/native-source-tree.py", out / "native-source"
+        ], text=True).strip())
+        native_test = entry.parent / Path(TEST).relative_to("selfhost/src")
+        run([native, "test", "--std", ROOT / "std", native_test], out / "native-trait-tests.log")
         compilers.append(("native", [native]))
     matrix(run, compilers, out)
     print("PASS trait Capture calls: " + " and ".join(name for name, _ in compilers) + " check and run", flush=True)
