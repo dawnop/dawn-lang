@@ -144,3 +144,128 @@ assert.deepEqual(
 );
 
 console.log("server contract: ok");
+
+
+// Load the real extension with a client double: settings changes must stop the
+// old client before starting the next one with the new executable and argv.
+async function launchContract() {
+  const vm = require("node:vm");
+  const { spawnSync } = require("node:child_process");
+  const clients = [];
+  const events = [];
+  const lines = [];
+  const settings = { lspPath: "dawn", lspArgs: [] };
+  let changed;
+  let execute = false;
+  let fail = false;
+  class Client {
+    constructor(id, name, launch) {
+      this.launch = launch;
+      this.index = clients.length;
+      this.initializeResult = { serverInfo: { name: "dawn", version: "1.0.0" } };
+      clients.push(this);
+    }
+    registerFeature() {}
+    async start() {
+      events.push(`start ${this.index}`);
+      if (fail) throw new Error("capability refused");
+      if (execute) {
+        this.child = spawnSync(this.launch.command, this.launch.args, {
+          ...this.launch.options, encoding: "utf8",
+        });
+        assert.equal(this.child.status, 0, this.child.stderr);
+      }
+    }
+    async stop() { events.push(`stop ${this.index}`); }
+  }
+  const vscode = {
+    workspace: {
+      workspaceFolders: [{ uri: { fsPath: "/workspace" } }],
+      getConfiguration() {
+        return {
+          get: (key, dflt) => settings[key] === undefined ? dflt : settings[key],
+          inspect: () => ({ workspaceValue: true }),
+        };
+      },
+      createFileSystemWatcher: () => ({ dispose() {} }),
+      onDidChangeConfiguration(fn) { changed = fn; return { dispose() {} }; },
+    },
+    window: { createOutputChannel: () => ({ appendLine: (line) => lines.push(line) }) },
+  };
+  const module = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../extension.js"), "utf8"), {
+    module, process,
+    require: (name) => {
+      if (name === "vscode") return vscode;
+      if (name === "vscode-languageclient/node") return { LanguageClient: Client };
+      if (name === "./server") return s;
+      if (name === "./source") return { register() {}, capability() {}, scheme: "dawn-stdlib" };
+      return require(name);
+    },
+  }, { filename: "extension.js" });
+  const settled = () => new Promise((resolve) => setImmediate(resolve));
+  const change = async (...keys) => {
+    changed({ affectsConfiguration: (key) => keys.includes(key) });
+    await settled();
+  };
+  const argv = (client) => Array.from(client.launch.args);
+  module.exports.activate({ subscriptions: [] });
+  await settled();
+  assert.equal(path.basename(clients[0].launch.command), process.platform === "win32" ? "dawn.exe" : "dawn");
+  assert.deepEqual(argv(clients[0]), ["lsp"]);
+  assert.equal(clients[0].launch.options.shell, false);
+
+  settings.lspPath = process.execPath;
+  await change("dawn.lspPath");
+  assert.equal(clients[1].launch.command, fs.realpathSync(process.execPath));
+  assert.deepEqual(events, ["start 0", "stop 0", "start 1"]);
+
+  // A real child receives empty, spaced, Unicode and shell-looking arguments
+  // byte for byte. A shell would expand these or create the marker file.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dawn-launch-"));
+  try {
+    const marker = path.join(dir, "expanded");
+    const opaque = ["", "/a path/\u96ea.jar", "\"quoted\"", "$HOME", "${workspaceFolder}",
+      `$(touch '${marker}')`, "`touch ignored`", "a;b", "*"];
+    settings.lspArgs = ["-e", "process.stdout.write(JSON.stringify(process.argv.slice(1)))", "--", ...opaque];
+    execute = true;
+    await change("dawn.lspArgs");
+    execute = false;
+    assert.equal(clients.length, 3);
+    assert.deepEqual(JSON.parse(clients[2].child.stdout), [...opaque, "lsp"]);
+    assert.deepEqual(argv(clients[2]), [...settings.lspArgs, "lsp"]);
+    assert.equal(clients[2].launch.options.shell, false);
+    assert.equal(fs.existsSync(marker), false);
+    assert.deepEqual(events.slice(-2), ["stop 1", "start 2"]);
+    assert.ok(lines.some((line) => line.includes(`argv = ${JSON.stringify([...settings.lspArgs, "lsp"])}`)));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  await change("unrelated");
+  assert.equal(clients.length, 3);
+
+  settings.lspPath = "java";
+  settings.lspArgs = ["-Xss512m", "-jar", "/absolute/versioned/dawn-selfhost.jar"];
+  await change("dawn.lspPath", "dawn.lspArgs");
+  assert.equal(clients.length, 4, "one restart when both settings change");
+  assert.deepEqual(argv(clients[3]), [...settings.lspArgs, "lsp"]);
+  assert.equal(path.basename(clients[3].launch.command), process.platform === "win32" ? "java.exe" : "java");
+
+  fail = true;
+  settings.lspPath = "dawn";
+  settings.lspArgs = [];
+  await change("dawn.lspPath", "dawn.lspArgs");
+  assert.equal(clients.length, 5, "a failed native start does not select another toolchain");
+  assert.deepEqual(argv(clients[4]), ["lsp"]);
+  assert.ok(lines.some((line) => line.includes("capability refused")));
+  assert.ok(lines.some((line) => line.includes('dawn.lspArgs = ["-Xss512m","-jar"')));
+  await module.exports.deactivate();
+  assert.equal(events.at(-1), "stop 4");
+  console.log("launch and restart contract: ok");
+}
+
+assert.equal(props["dawn.lspPath"].default, "dawn");
+assert.equal(props["dawn.lspArgs"].type, "array");
+assert.deepEqual(props["dawn.lspArgs"].items, { type: "string" });
+assert.deepEqual(props["dawn.lspArgs"].default, []);
+launchContract().catch((err) => { console.error(err); process.exitCode = 1; });
