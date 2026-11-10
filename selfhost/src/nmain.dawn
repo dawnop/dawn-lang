@@ -17,10 +17,11 @@
 # is deliberate: `scripts/native-cli-diff.sh` holds the two byte for byte, and
 # a differential over one shared function proves nothing. The *work* is shared
 # (fmt.format, doc.*_json, add.run_add are the same modules); only the driver
-# plumbing is doubled.
+# plumbing for the portable intersection is doubled. Native help and JVM
+# capability refusals have absolute expectations beside that differential.
 #
-# `server` is one call either way -- there is no argument handling to double --
-# and the only thing this driver decides is the `Jsig` the server analyses
+# `server` is one call either way. After checking the native CLI arguments,
+# this driver decides the `Jsig` the server analyses
 # with. The JVM main passes jreflect's, so an editor there resolves `use java`
 # imports; this one passes the refusal, which is the same answer this backend
 # gives that program under `check`. `scripts/selfhost-lsp-diff.sh` takes
@@ -81,51 +82,43 @@ fn native_lsp_target_lease(
 
 fn usage() -> String =
   join([
-    "dawnc " ++ VERSION ++ ", the Dawn compiler's C backend: Dawn to C to cc.",
-    "No JVM is involved at any point, in this binary or in what it produces.",
-    "(`dawn build --native` is a different thing with a similar name: it is the",
-    "JVM backend's jar packaged ahead of time by GraalVM native-image.)",
+    "dawn " ++ VERSION ++ ", the Dawn compiler's native CLI.",
     "",
     "usage:",
-    "  dawnc check [--std <dir>] <target>...       type-check, report diagnostics",
-    "  dawnc build [--std <dir>] <target> [-o out] compile to a native binary via cc",
-    "  dawnc build --target wasm <target> [-o out] compile to wasm32-wasip1 via clang",
-    "  dawnc build --target wasm --reactor <target> [-o out]",
-    "                                              ... as a reactor: no _start, one",
-    "                                              exported `dawn_turn` the host calls",
-    "  dawnc emitc [--std <dir>] <target> [-o out] emit the C translation unit",
-    "                                              (--build-info <file.c>: also the",
-    "                                              unit embedding the build manifest)",
-    "  dawnc run   [--std <dir>] <target> [-- <args>...]",
-    "                                              compile and run",
-    "  dawnc test  [--std <dir>] <target>          compile the test blocks and run them",
-    "  dawnc test  [--std <dir>] --stdlib          run the bundled std's own test blocks",
-    "  dawnc fmt [--check] <file.dawn | dir>...    format files in place",
-    "  dawnc doc <target> | --stdlib | --builtins  emit the API reference as JSON",
-    "  dawnc add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
-    "                                              add a dependency to dawn.toml",
-    "  dawnc cache verify                          check every cached package's hash",
-    "  dawnc lsp   [--std <dir>]                   speak LSP over stdin/stdout",
-    "  dawnc version                               print the version and the digest of",
-    "                                              the sources this binary was built from",
-    "  dawnc version -m <project-dir | binary>...  print a build manifest: a project's,",
-    "                                              or the one a native binary or wasm",
-    "                                              module carries",
+    "  dawn check [--std <dir>] <target>...       type-check, report diagnostics",
+    "  dawn build [--std <dir>] <target> [-o out] compile to a native binary via cc",
+    "  dawn build --target wasm <target> [-o out] compile to wasm32-wasip1 via clang",
+    "  dawn build --target wasm --reactor <target> [-o out]",
+    "                                              export dawn_turn without _start",
+    "  dawn emitc [--std <dir>] <target> [-o out] emit the C translation unit",
+    "                                              --build-info <file.c>, --split <dir>,",
+    "                                              --map <file> write additional outputs",
+    "  dawn run [--std <dir>] <target> [-- <args>...]",
+    "                                              compile and run; preserve program argv",
+    "  dawn test [--std <dir>] <target>          compile test blocks via cc and run them",
+    "  dawn test [--std <dir>] --stdlib          run the bundled std's own test blocks",
+    "  dawn fmt [--check] <file.dawn | dir>...    format files in place or check formatting",
+    "  dawn doc [--std <dir>] <target> | --stdlib | --builtins",
+    "                                              emit the API reference as JSON",
+    "  dawn add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
+    "                                              edit dependencies in dawn.toml;",
+    "                                              Maven coordinates need JVM tools later",
+    "  dawn cache verify                       check every cached package's hash",
+    "  dawn lsp [--std <dir>]                   speak LSP over stdin/stdout",
+    "  dawn parse <file.dawn>...                print the syntax tree",
+    "  dawn version                            print native version and source digest",
+    "  dawn version -m <project-dir | binary>... print project, native or wasm build manifests",
     "",
-    "A <target> is a single .dawn file or a project directory (src/main.dawn entry).",
-    "--comptime-fuel <n> (check/build/emitc/run/test) is the steps each constant may",
-    "take to fold, 0 or more (default 100000000).",
-    "-O0, -O1 or -O2 (build/run/test) is the level cc optimizes the emitted C at",
-    "(default -O2). -O0 compiles a large program several times faster and the",
-    "result runs slower; what a program prints does not depend on the level.",
-    "--std <dir> names the std to compile against. Without it, DAWN_STD names one if",
-    "set and not empty, and otherwise the std compiled into this toolchain is used;",
-    "the working directory is never searched. A directory with a modules.txt must",
-    "hold every module it lists, or the compile stops and names the missing ones; a",
-    "directory without modules.txt is ignored and the std compiled in is used.",
-    "`use java` programs are rejected: Java interop needs the JVM toolchain, so",
-    "compile those with `dawn` (adding --native if you want one file out of it).",
-    "Packaging a jar and `lock` need a JVM too and are not subcommands here."
+    "A <target> is a .dawn file or a project directory (src/main.dawn entry).",
+    "--help or -h in a command's option region prints its help without loading std.",
+    "--version, -V or version prints the native artifact identity and source digest.",
+    "--comptime-fuel <n> (check/build/emitc/run/test) sets constant evaluation fuel",
+    "(default 100000000). -O0, -O1 or -O2 (build/run/test) sets cc optimization",
+    "(default -O2). Native is the default build target; wasm needs clang and WASI.",
+    "--std <dir> overrides nonempty DAWN_STD, then the embedded std is used.",
+    "The working directory is never searched for std. Package downloads need curl.",
+    "Java interop, JAR output, lock, --cp, --closure, --native and --vendor need the",
+    "explicit JVM toolchain: java -jar /path/to/dawn-selfhost.jar <command> ..."
   ], "\n") ++ "\n"
 
 fn fail_usage() -> Unit !Exit !Console !io = {
@@ -134,33 +127,20 @@ fn fail_usage() -> Unit !Exit !Console !io = {
   ()
 }
 
-## `--help` in a subcommand's tail. Off the argv surface
-## `scripts/native-cli-diff.sh` holds the two drivers to, deliberately and for
-## the reason `--target` is: the JVM driver has no per-subcommand help, so this
-## is a flag one backend has and the other does not, and the differential
-## compares the commands both of them answer.
-fn wants_help(rest: List[String]) -> Bool = {
-  var found = false
-  for a in rest {
-    if a == "--help" { found = true }
-  }
-  found
-}
-
 ## The usage block's lines for one subcommand, continuation lines included.
 ##
 ## Filtered out of `usage()` rather than written a second time. The parsers
 ## below already spell each command's contract once in the `usage: dawn ...`
 ## string they fail with, and a third copy is a third thing to forget. An entry
-## is a line beginning `  dawnc <cmd> `; the lines under it that belong to it
+## is a line beginning `  dawn <cmd> `; the lines under it that belong to it
 ## are the ones indented past the description column and not starting another
 ## entry.
 fn subcommand_help(cmd: String) -> String = {
-  let head = "  dawnc " ++ cmd ++ " "
+  let head = "  dawn " ++ cmd ++ " "
   var out: List[String] = []
   var keeping = false
   for line in str.split(usage(), "\n") {
-    if str.starts_with(line, "  dawnc ") {
+    if str.starts_with(line, "  dawn ") {
       keeping = str.starts_with(line, head)
       if keeping { out = out ++ [line] }
     } else if keeping && str.starts_with(line, "    ") {
@@ -180,6 +160,97 @@ fn cli_error(msg: String) -> Unit !Exit !Console !io = {
   console_eprintln("error: ${msg}")
   let _ = io.exit(2)
   ()
+}
+
+fn one_of(word: String, choices: List[String]) -> Bool = {
+  for choice in choices { if word == choice { return true } }
+  false
+}
+
+fn is_public_command(cmd: String) -> Bool =
+  one_of(cmd, ["check", "build", "emitc", "run", "test", "fmt", "doc",
+    "add", "cache", "lsp", "parse", "version"])
+
+fn is_jvm_command(cmd: String) -> Bool =
+  one_of(cmd, ["lock", "lex", "__lex", "__parse", "emit", "emitrt", "__emit",
+    "__emitc", "__check", "__lower", "__marks", "__source-inputs"])
+
+fn refuse_jvm(feature: String, cmd: String) -> Unit !Exit !Console !io =
+  cli_error(feature ++ " is not supported by the native compiler; use " ++
+      "java -jar /path/to/dawn-selfhost.jar " ++ cmd ++ " ...")
+
+## Only this command's value options consume the next argv element. A value
+## may itself look like help or a JVM flag; it is never scanned a second time.
+fn option_value(cmd: String, word: String) -> Option[String] = {
+  let compiling = one_of(cmd, ["check", "build", "emitc", "run", "test"])
+  if word == "--std" && (compiling || cmd == "doc" || cmd == "lsp") {
+    Some("a directory")
+  } else if word == "--comptime-fuel" && compiling {
+    Some("a number")
+  } else if (word == "-o" && (cmd == "build" || cmd == "emitc")) ||
+    (cmd == "emitc" && one_of(word, ["--build-info", "--split", "--map"])) ||
+    (cmd == "add" && one_of(word, ["--subdir", "--dir"])) ||
+    (cmd == "version" && word == "-m") {
+    Some("a path")
+  } else if cmd == "build" && word == "--target" {
+    Some("a target")
+  } else if cmd == "add" && word == "--as" {
+    Some("an alias")
+  } else {
+    None
+  }
+}
+
+## Return true after printing help. This boundary needs no host capabilities:
+## no std, project, environment, process, or LSP input is consulted here.
+fn prepare_command(cmd: String, rest: List[String]) -> Bool !Exit !Console !io = {
+  var i = 0
+  while i < len(rest) {
+    let word = rest[i]
+    if word == "--help" || word == "-h" {
+      console_print(subcommand_help(cmd))
+      return true
+    }
+    if word == "--cp" && i + 1 >= len(rest) { cli_error("--cp needs a path") }
+    if word == "--cp" || str.starts_with(word, "--cp=") {
+      refuse_jvm("--cp", cmd)
+    }
+    if one_of(word, ["--closure", "--native", "--vendor"]) { refuse_jvm(word, cmd) }
+    match option_value(cmd, word) {
+      Some(kind) -> {
+        if i + 1 >= len(rest) { cli_error(word ++ " needs " ++ kind) }
+        if cmd == "build" && word == "--target" && rest[i + 1] == "jvm" {
+          refuse_jvm("--target jvm", cmd)
+        }
+        i = i + 2
+      }
+      None -> {
+        let compiling = one_of(cmd, ["check", "build", "emitc", "run", "test"])
+        if compiling && str.starts_with(word, "--comptime-fuel=") {
+          i = i + 1
+        } else if one_of(cmd, ["build", "run", "test"]) && opt_word(word) != None {
+          let _ = opt_level_or_die(word)
+          i = i + 1
+        } else if (cmd == "build" && word == "--reactor") ||
+          (cmd == "fmt" && word == "--check") ||
+          (cmd == "test" && word == "--stdlib") ||
+          (cmd == "doc" && (word == "--stdlib" || word == "--builtins")) {
+          i = i + 1
+        } else if str.starts_with(word, "-") {
+          cli_error("unknown option for dawn " ++ cmd ++ ": " ++ word)
+          i = i + 1
+        } else if cmd == "lsp" {
+          cli_error("usage: dawn lsp [--std <dir>]")
+          i = i + 1
+        } else if cmd == "run" {
+          return false
+        } else {
+          i = i + 1
+        }
+      }
+    }
+  }
+  false
 }
 
 ## A std that will not load, said out loud. Only the copy compiled into this
@@ -989,7 +1060,6 @@ fn compile_native_packages(
 }
 
 fn cmd_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  if wants_help(rest0) { return console_print(subcommand_help("check")) }
   let (opts, rest) = ct_opts_of(rest0)
   let (std_flag, targets) = check_args(rest)
   if len(targets) == 0 {
@@ -1093,15 +1163,10 @@ fn cmd_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 }
 
 fn cmd_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  # Ahead of the parser, not inside it: `--help` is a request for the contract,
-  # so it must not be able to fail on the argv it is asking about. The parser
-  # would take it for the target and report a missing file (which is what it
-  # did until 2026-08-26).
-  if wants_help(rest0) { return console_print(subcommand_help("build")) }
   let (opts, rest1) = ct_opts_of(rest0)
   let (level, rest) = opt_level_of(rest1)
   let (std_flag, out0, target, wasm, reactor) = parse_build_tail(
-    "usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]",
+    "usage: dawn build [--std <dir>] <file.dawn | project-dir> [-o out]",
     rest
   )
   # `.wasm` by default: the artifact is not executable here, and every host
@@ -1296,20 +1361,7 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 ## generated C runner becomes its `main` (ctestrun.dawn). The report, the
 ## labels and the exit code are the JVM runner's.
 ##
-## `--cp` is validated exactly as `main.extract_cp` validates it, and then the
-## jars are dropped. They can only ever matter to a `use java` program, which
-## this backend refuses at `check` -- so ignoring their contents is observable
-## nowhere, while rejecting the flag outright would make `dawn test`'s argv
-## toolchain-specific for no gain.
-##
-## The one thing that cannot be mirrored is where the separator comes from:
-## `main.path_sep()` is `File.pathSeparator`, a java call, and a backend with
-## no classpath has nothing to ask. `:` is the same POSIX assumption
-## `default_out` above already makes by splitting paths on `/`.
-##
-## `--comptime-fuel` is taken as every compiling command here takes it
-## (`ct_opts_of`). `--closure` is not: no subcommand of this driver takes it,
-## and that gap is the driver's, not this subcommand's.
+## JVM options are refused at the dispatch boundary before this command loads std.
 fn cmd_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (opts, rest1) = ct_opts_of(rest0)
   let (level, rest) = opt_level_of(rest1)
@@ -1318,37 +1370,23 @@ fn cmd_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var std_tests = false
   var i = 0
   while i < len(rest) {
-    var spec = ""
     if rest[i] == "--std" && i + 1 < len(rest) {
       std_flag = Some(rest[i + 1])
       i = i + 2
     } else if rest[i] == "--stdlib" {
       std_tests = true
       i = i + 1
-    } else if rest[i] == "--cp" && i + 1 < len(rest) {
-      spec = rest[i + 1]
-      i = i + 2
-    } else if rest[i] == "--cp" {
-      cli_error("--cp needs a path")
-      i = i + 1
-    } else if str.starts_with(rest[i], "--cp=") {
-      spec = str.strip_prefix(rest[i], "--cp=").unwrap_or(rest[i])
-      i = i + 1
     } else {
       refuse_second_target("dawn test", target, rest[i])
       target = rest[i]
       i = i + 1
     }
-    if spec != "" {
-      for pth in str.split(spec, ":") {
-        if pth != "" && not io.exists(pth) { cli_error("--cp entry not found: ${pth}") }
-      }
-    }
+
   }
   require_one_input(
     "dawn test",
     "a target or --stdlib",
-    "usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib",
+    "usage: dawn test [--std <dir>] <file.dawn | project-dir> | dawn test --stdlib",
     (if target != "" { 1 } else { 0 }) + (if std_tests { 1 } else { 0 })
   )
   let no_spans: Map[String, identity.DeclSpans] = map.empty()
@@ -1433,7 +1471,7 @@ fn cmd_version(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
             binfo.listing(t, data)
           } else {
             Err("cannot read ${t} as a native binary or wasm module: not an ELF " ++
-                "executable or a wasm module (a jar's build manifest is read by `dawn version -m`)")
+                "executable or a wasm module (read a jar's build manifest with `java -jar /path/to/dawn-selfhost.jar version -m <file>`)")
           }
       }
       match listed {
@@ -1507,10 +1545,14 @@ fn cmd_parse(files: List[String]) -> Unit !Fs !Console !io = {
   }
 }
 
-fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  match args() {
+fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = dispatch_argv(args())
+
+fn dispatch_argv(argv: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
+  match argv {
     [] -> fail_usage()
-    [mode, ..rest] ->
+    [mode, ..rest] -> {
+      if is_jvm_command(mode) { return refuse_jvm(mode, mode) }
+      if is_public_command(mode) && prepare_command(mode, rest) { return () }
       if mode == "check" {
         cmd_check(rest)
       } else if mode == "build" {
@@ -1544,11 +1586,17 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
         cmd_parse(rest)
       } else if mode == "version" {
         cmd_version(rest)
-      } else if mode == "--version" {
+      } else if mode == "--version" || mode == "-V" {
+        if len(rest) > 0 { return cli_error("usage: dawn " ++ mode) }
         console_println(version_line(own_build_info()))
+      } else if mode == "--help" || mode == "-h" || mode == "help" {
+        if len(rest) > 0 { return cli_error("usage: dawn " ++ mode) }
+        console_print(usage())
       } else {
+        console_eprintln("error: unknown command: " ++ mode)
         fail_usage()
       }
+    }
   }
 }
 
@@ -1559,7 +1607,7 @@ test "a subcommand's help is that subcommand's lines out of the usage block" {
   let b = subcommand_help("build")
   assert str.contains(b, "compile to a native binary via cc")
   assert str.contains(b, "compile to wasm32-wasip1 via clang")
-  assert str.contains(b, "exported `dawn_turn` the host calls")
+  assert str.contains(b, "export dawn_turn without _start")
   assert not str.contains(b, "type-check, report diagnostics")
   assert not str.contains(b, "speak LSP over stdin/stdout")
 
@@ -1572,17 +1620,96 @@ test "a subcommand's help is that subcommand's lines out of the usage block" {
 }
 
 test "`cache verify` is a subcommand here and no longer filed under the JVM" {
-  assert subcommand_help("cache") == "  dawnc cache verify                          check every cached package's hash\n"
+  assert subcommand_help("cache") == "  dawn cache verify                       check every cached package's hash\n"
   assert not str.contains(usage(), "`cache` need")
   # `__pkghash` stays hidden, as on the JVM driver
   assert not str.contains(usage(), "__pkghash")
 }
 
-test "--help is recognised anywhere in a subcommand's tail" {
-  assert wants_help(["--help"])
-  assert wants_help(["-o", "out", "--help"])
-  assert not wants_help([])
-  assert not wants_help(["--target", "wasm", "prog.dawn"])
+test "public help and command errors finish before asking the host" {
+  for spelling in ["--help", "-h", "help"] {
+    assert cli_read(() => dispatch_argv([spelling])) == (None, "", usage())
+    assert cli_read(() => dispatch_argv([spelling, "extra"]))
+      == (Some(2), "error: usage: dawn " ++ spelling ++ "\n", "")
+  }
+  assert cli_read(() => dispatch_argv([])) == (Some(2), usage(), "")
+  assert cli_read(() => dispatch_argv(["bogus"]))
+    == (Some(2), "error: unknown command: bogus\n" ++ usage(), "")
+  for cmd in ["check", "build", "emitc", "run", "test", "fmt", "doc", "add",
+    "cache", "lsp", "parse", "version"] {
+    for flag in ["--help", "-h"] {
+      assert cli_read(() => dispatch_argv([cmd, flag]))
+        == (None, "", subcommand_help(cmd))
+    }
+    assert cli_read(() => dispatch_argv([cmd, "--unknown"]))
+      == (Some(2), "error: unknown option for dawn " ++ cmd ++ ": --unknown\n", "")
+    assert cli_read(() => dispatch_argv([cmd, "--cp"]))
+      == (Some(2), "error: --cp needs a path\n", "")
+    for flag in ["--cp=", "--cp=missing.jar", "--closure", "--native", "--vendor"] {
+      let shown = if str.starts_with(flag, "--cp=") { "--cp" } else { flag }
+      assert cli_read(() => dispatch_argv([cmd, flag]))
+        == (Some(2), "error: " ++ shown ++ " is not supported by the native compiler; " ++
+            "use java -jar /path/to/dawn-selfhost.jar " ++ cmd ++ " ...\n", "")
+    }
+  }
+  assert cli_read(() => dispatch_argv(["lsp", "extra"]))
+    == (Some(2), "error: usage: dawn lsp [--std <dir>]\n", "")
+  for spelling in ["--version", "-V"] {
+    assert cli_read(() => dispatch_argv([spelling, "extra"]))
+      == (Some(2), "error: usage: dawn " ++ spelling ++ "\n", "")
+  }
+}
+
+test "native capabilities are refused by name without checking classpath entries" {
+  for cmd in ["lock", "lex", "__lex", "__parse", "emit", "emitrt", "__emit",
+    "__emitc", "__check", "__lower", "__marks", "__source-inputs"] {
+    assert cli_read(() => dispatch_argv([cmd]))
+      == (Some(2), "error: " ++ cmd ++ " is not supported by the native compiler; " ++
+          "use java -jar /path/to/dawn-selfhost.jar " ++ cmd ++ " ...\n", "")
+  }
+  for path in ["/nonexistent.jar", "", "--help"] {
+    assert cli_read(() => dispatch_argv(["test", "--cp", path, "packages/sha2"]))
+      == (Some(2), "error: --cp is not supported by the native compiler; " ++
+          "use java -jar /path/to/dawn-selfhost.jar test ...\n", "")
+  }
+  assert cli_read(() => dispatch_argv(["build", "--target", "jvm"]))
+    == (Some(2), "error: --target jvm is not supported by the native compiler; " ++
+        "use java -jar /path/to/dawn-selfhost.jar build ...\n", "")
+}
+
+test "option values and run program arguments are opaque to the help boundary" {
+  for entry in [("check", "--std"), ("build", "-o"), ("build", "--target"),
+    ("emitc", "--map"), ("emitc", "--split"), ("emitc", "--build-info"),
+    ("run", "--comptime-fuel"), ("add", "--as"), ("add", "--dir"),
+    ("add", "--subdir"), ("version", "-m")] {
+    let (cmd, option) = entry
+    for value in ["--help", "-h", "--cp", "--closure", ""] {
+      assert cli_read(() => {
+        assert not prepare_command(cmd, [option, value])
+      }) == (None, "", "")
+      assert cli_read(() => dispatch_argv([cmd, option, value, "--help"]))
+        == (None, "", subcommand_help(cmd))
+    }
+  }
+  assert cli_read(() => {
+    assert not prepare_command("run", ["prog.dawn", "--", "--help", "--cp", "--closure"])
+  }) == (None, "", "")
+  assert cli_read(() => {
+    assert not prepare_command("run", ["prog.dawn", "--help"])
+  }) == (None, "", "")
+}
+
+test "missing option values are diagnosed before loading anything" {
+  for entry in [("check", "--std", "a directory"), ("test", "--comptime-fuel", "a number"),
+    ("build", "-o", "a path"), ("emitc", "--build-info", "a path"),
+    ("emitc", "--split", "a path"), ("emitc", "--map", "a path"),
+    ("build", "--target", "a target"), ("add", "--subdir", "a path"),
+    ("add", "--dir", "a path"), ("add", "--as", "an alias"),
+    ("version", "-m", "a path")] {
+    let (cmd, flag, kind) = entry
+    assert cli_read(() => dispatch_argv([cmd, flag]))
+      == (Some(2), "error: " ++ flag ++ " needs " ++ kind ++ "\n", "")
+  }
 }
 
 # ---- the toolchain this backend drives ----
@@ -2276,7 +2403,7 @@ test "`dawnc test` refuses an argv that does not name exactly one suite" {
   # scripts/native-cli-diff.sh: test (zero targets), test (usage),
   # test (multiple targets), test (target conflicts with --stdlib)
   assert cli_read(() => cmd_test([]))
-    == (Some(2), "error: usage: dawn test [--cp jars] <file.dawn | project-dir> " ++
+    == (Some(2), "error: usage: dawn test [--std <dir>] <file.dawn | project-dir> " ++
         "| dawn test --stdlib\n", "")
   assert cli_read(() => cmd_test(["a.dawn", "b.dawn"]))
     == (Some(2), "error: dawn test takes one target, got `a.dawn` and `b.dawn`; " ++
@@ -2302,14 +2429,6 @@ test "`dawnc test` refuses a target it cannot compile from" {
   assert cli_read_hosted(() => cmd_test([plain]))
     == (Some(2), "error: source files must end in .dawn: " ++ plain ++ "\n", "")
   io.with_fs_real(() => scrub(dir))
-}
-
-test "`dawnc test` validates --cp before it compiles anything" {
-  # scripts/native-cli-diff.sh: test (--cp needs a path), test (--cp entry not found)
-  assert cli_read(() => cmd_test(["packages/sha2", "--cp"]))
-    == (Some(2), "error: --cp needs a path\n", "")
-  assert cli_read(() => cmd_test(["--cp", "/nonexistent.jar", "packages/sha2"]))
-    == (Some(2), "error: --cp entry not found: /nonexistent.jar\n", "")
 }
 
 test "`dawnc doc` refuses an argv that does not name exactly one input" {
@@ -2338,8 +2457,8 @@ test "`dawnc doc` refuses a target that names nothing" {
 test "`dawnc build` refuses an argv that does not name exactly one target" {
   # scripts/native-cli-diff.sh: build (zero targets), build (multiple targets)
   assert cli_read(() => cmd_build([]))
-    == (Some(2), "error: usage: dawn build [--cp jars] <file.dawn | project-dir> " ++
-        "[-o out] [--native]\n", "")
+    == (Some(2), "error: usage: dawn build [--std <dir>] <file.dawn | project-dir> " ++
+        "[-o out]\n", "")
   assert cli_read(() => cmd_build(["a.dawn", "b.dawn"]))
     == (Some(2), "error: dawn build takes one target, got `a.dawn` and `b.dawn`; " ++
         "a bare word after the target is not a flag this subcommand knows\n", "")
