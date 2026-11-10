@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ ad0f6804e61d5d61 -->
+<!-- doc-check: translation-of README.md @ 011837d32b0d94b3 -->
 
 <p align="center">
   <a href="https://dawn-lang.dawnop.com">
@@ -262,6 +262,17 @@ JVM 上真设备的 launch 一律被拒。
 
 ## 工具链
 
+显式选择入口：
+
+| 入口 | 编译器宿主与默认构建产物 |
+|---|---|
+| 安装后的 `dawn` | Native C 后端；`dawn build app -o app` 写出本机可执行文件。仅 Linux x86_64。 |
+| 检出中的 `./bin/dawn` | JVM bootstrap 驱动；`./bin/dawn build app -o app.jar` 写出可执行 JAR。需要 JDK 21 及以上。 |
+| `java -jar /absolute/versioned/dawn-selfhost.jar` | 显式运行该 release 的 JVM 工具链，默认产物同上。需要 JDK 21 及以上。 |
+
+安装后的命令不会在失败后切换到 Java。把检出的 `bin` 放到 PATH 最前面，就会选中该检出的
+JVM 驱动。编辑器要选择特定编译器时，请使用绝对路径。
+
 `<target>` 可以是单个 `.dawn` 文件，也可以是项目目录（`src/main.dawn` 为入口）。
 
 ```bash
@@ -283,12 +294,16 @@ JVM 上真设备的 launch 一律被拒。
 内置 LSP 服务器两个后端各有一份、输出逐字节对齐：实时诊断、悬停、跳转定义、文档大纲；
 前端做了完整的错误恢复，文件残缺时一次报出全部错误。VS Code 扩展已上
 [marketplace](https://marketplace.visualstudio.com/items?itemName=dawnop.dawn-lang)
-（`dawnop.dawn-lang`）；Neovim / Helix 配置见 [editors/](editors/)。
+（`dawnop.dawn-lang`）。默认启动 `dawn lsp`，使用 PATH 上安装的 native 命令。
+使用仓库检出时，把 `dawn.lspPath` 设为其中 `bin/dawn` 的绝对路径。显式使用 JVM 服务时，
+把 `dawn.lspPath` 设为 `java`，把 `dawn.lspArgs` 设为
+`["-jar", "/absolute/versioned/dawn-selfhost.jar"]`。扩展在末尾追加 `lsp`，不经 shell 逐参数传递；
+任一配置变化都会重启服务。Neovim / Helix 配置见 [editors/](editors/)。
 
-有两样东西都叫 native，它们不是同一条路。`dawn build --native` 是把 JVM 后端刚写出来的 jar
-交给 GraalVM `native-image` 打包，所以 `use java` 照样能用；`dawnc` 是每个 release 都挂着的
-linux-x86_64 静态可执行文件，出自 C 后端，`std` 与运行时都嵌在里面，不需要 JVM，并且拒绝
-`use java`。自举种子仍然是 jar（`scripts/seed-release.txt`），JVM 后端仍是一等目标。
+JVM 构建可用 `./bin/dawn build app --native -o app` 或
+`java -jar /absolute/versioned/dawn-selfhost.jar build app --native -o app`，把 JAR 交给
+GraalVM `native-image` 打包，`use java` 仍可用。安装后的 `dawn` 经 C 构建，内嵌 `std` 与运行时，
+拒绝 `use java`；native 已是默认产物，因此它也拒绝 `--native`。自举种子仍然是 jar（`scripts/seed-release.txt`），JVM 后端仍是一等目标。
 其余细节见 [docs/native-driver-plan.md](docs/native-driver-plan.md)。
 
 ## 文档

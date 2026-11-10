@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ c92f213f5c124c2c -->
+<!-- doc-check: translation-of docs/tutorial.md @ 9c384750400b0b64 -->
 
 # Dawn 教程
 
@@ -23,33 +23,19 @@
 
 ## 1. 安装与第一个程序
 
-[Releases 页](https://github.com/dawnop/dawn-lang/releases/latest)上的每个 release
-都发布两套工具链，各自旁边附 SHA-256。它们是两个不同的编译器，不是同一个东西的两种下载，
-按有没有 JVM 选一个。
+按[安装说明](https://github.com/dawnop/dawn-lang/blob/main/README.zh-CN.md#安装)下载同一 release tag 的文件，校验 checksum 与
+native 元数据。显式选择入口：
 
-**不用 JVM**（linux-x86_64）：`dawnc` 是一个静态可执行文件，标准库与 C 运行时都在里面。
-它经 C 后端编译，所以拒绝 `use java`（第 11 章是它唯一跟不了的一章）。
+| 入口 | 运行身份 |
+|---|---|
+| 安装后的 `dawn` | Linux x86_64 上的 native C 后端，内嵌 `std` 与运行时，拒绝 `use java`。 |
+| 检出中的 `./bin/dawn` | 从源码构建编译器的 JVM bootstrap 驱动。需要 JDK 21 及以上。 |
+| `java -jar /absolute/versioned/dawn-selfhost.jar` | 已校验 release 的 JVM 工具链，内嵌 `std`。需要 JDK 21 及以上，没有 native release 的平台也可使用。 |
 
-```bash
-base=https://github.com/dawnop/dawn-lang/releases/latest/download
-curl -fsSLO $base/dawnc-linux-x86_64
-curl -fsSLO $base/dawnc-linux-x86_64.sha256
-sha256sum -c dawnc-linux-x86_64.sha256
-chmod +x dawnc-linux-x86_64 && sudo mv dawnc-linux-x86_64 /usr/local/bin/dawnc
-```
-
-**用 JVM**（JDK 21 或更新，任意平台）：`dawn-selfhost.jar` 自带标准库，单这一个 jar
-就是完整的工具链。
-
-```bash
-base=https://github.com/dawnop/dawn-lang/releases/latest/download
-curl -fsSLO $base/dawn-selfhost.jar
-curl -fsSLO $base/dawn-selfhost.jar.sha256
-sha256sum -c dawn-selfhost.jar.sha256      # macOS：shasum -a 256 -c
-```
-
-下面的命令写作 `dawn`。用静态二进制时它是 `dawnc`；用 jar 时它是
-`java -jar dawn-selfhost.jar`。
+下文命令中的 `dawn` 指安装后的 native 入口。native 的 `run`、`build`、`test` 需要 C 编译器，
+包下载需要 curl，WebAssembly 需要 clang 与 WASI。使用检出时，把 `dawn` 替换为 `./bin/dawn`；
+使用显式 JVM release 时，替换为 `java -jar /absolute/versioned/dawn-selfhost.jar`。
+安装后的命令不会在失败后选择 Java；把检出的 `bin` 放到 PATH 最前面，就会选中该检出的 JVM 驱动。
 
 ```bash
 dawn run  hello.dawn        # 编译并运行
@@ -61,7 +47,13 @@ dawn fmt  hello.dawn        # 就地格式化
 下载种子（`scripts/seed-release.txt` 钉住的那个 release 的 `dawn-selfhost.jar`，按
 `scripts/seed-checksums.txt` 校验），再用种子编译 `selfhost/` 里的编译器。在检出里，
 `./bin/dawn build hello.dawn --native -o hello` 用 GraalVM native-image 打包 JVM 构建，
-这和 `dawnc` 是两条不同的路。
+安装后的 `dawn build hello.dawn -o hello` 经 C 构建，不接受 `--native`。
+
+VS Code 默认启动 `dawn lsp`。要使用检出的 JVM 驱动，把 `dawn.lspPath` 设为其中 `bin/dawn`
+的绝对路径。使用显式 JVM release 时，把 `dawn.lspPath` 设为 `java`，把 `dawn.lspArgs` 设为
+`["-jar", "/absolute/versioned/dawn-selfhost.jar"]`；JDK 参数放在 `-jar` 之前。扩展在末尾追加
+`lsp`，不经 shell 逐元素传递原始参数，任一配置变化都会重启服务。Neovim 与 Helix 的 argv 数组
+见[编辑器集成](https://github.com/dawnop/dawn-lang/tree/main/editors)。
 
 第一个程序。函数默认是纯的；碰 IO（这里是打印）必须在签名标 `!io`：
 
@@ -551,7 +543,7 @@ pub fn main() -> Unit !io =
 ## 11. 调用 Java
 
 *仅限 JVM 工具链。* 本章需要 `dawn-selfhost.jar` 或检出里的 `./bin/dawn`。
-静态的 `dawnc` 经 C 编译、拒绝 `use java`，用它的话请直接跳到第 12 章。
+安装后的 `dawn` 经 C 编译、拒绝 `use java`，用它的话请直接跳到第 12 章。
 
 `use java "..."` 直接调 Java 类。所有 Java 调用自动视为 `!io`；引用类型返回值
 自动包成 `Option[T]`——null 进不了 Dawn。构造用 `.new`，静态方法用类名。
@@ -641,7 +633,8 @@ pub fn main() -> Unit !io = {
 ```
 
 用 `dawn run myapp`（传目录）编译并运行整个项目；`dawn test myapp` 跑所有模块的
-test 块，`dawn build myapp` 打成一个 jar。单文件的 `dawn run foo.dawn` 依然可用。
+test 块，`dawn build myapp` 写出本机可执行文件。JVM 入口则写出可执行 JAR（第 19 章）。
+单文件的 `dawn run foo.dawn` 依然可用。
 循环 `use` 是编译错误；一个名字与被引入模块的别名相同也会报错——它们共享一个命名空间。
 
 另见：[spec.md](spec.md) §10.1、§10.2、§10.3
@@ -1416,7 +1409,7 @@ subdir = "packages/json"      # 包在归档里的位置
 
 第三张表 `[java-deps]` 列的是给第 11 章 `use java` 用的 Maven 坐标
 （`sqlite = "org.xerial:sqlite-jdbc:3.36.0.3"`，只收精确版本）。JVM 工具链负责解析和
-下载；`dawnc` 拒绝 `use java`，也就用不上它们。设计与理由见
+下载；安装后的 `dawn` 拒绝 `use java`，也就用不上它们。设计与理由见
 [package-design.md](package-design.md) 和
 [package-visibility-design.md](package-visibility-design.md)。
 
@@ -1426,29 +1419,30 @@ subdir = "packages/json"      # 包在归档里的位置
 
 ## 19. 后端与目标
 
-同一份源码有两种编法，第 1 章已经见过这两个驱动。`dawn` 是 JVM 后端：`dawn run` 编成
-字节码再起一个 JVM，`dawn build app -o app.jar` 写出可执行 jar，能跟着第 11 章走进
-`use java` 的也只有它。`dawnc` 是 C 后端：它发出 C 交给 `cc`，所以 `dawnc build app -o app`
-是一个哪里都没有 JVM 的 native 可执行文件，`dawnc run` 则是编出来马上运行。`check`、
-`test`、`fmt`、`doc`、`add`、`lsp` 两边都有。
+同一份源码有两种编法。安装后的 `dawn` 是 native C 后端：`dawn run` 发出 C，交给 `cc`
+编译后运行，`dawn build app -o app` 写出本机可执行文件。检出中的 `./bin/dawn` 和显式的
+`java -jar /absolute/versioned/dawn-selfhost.jar` 是 JVM 驱动：`run` 编成字节码再启动 JVM，
+`build app -o app.jar` 写出可执行 JAR。只有 JVM 驱动支持第 11 章的 `use java`。
+`check`、`test`、`fmt`、`doc`、`add`、`lsp` 两个后端都有。
 
-其中有两条都叫 native，它们是两条不同的路：
+显式选择编译器宿主与产物：
 
 | 命令 | 得到什么 | `use java` |
 |---|---|---|
-| `dawn build app -o app.jar` | 装在 jar 里的 JVM 字节码 | 可以 |
-| `dawn build app --native -o app` | 上面那个 jar，由 GraalVM `native-image` 预先编译 | 可以 |
-| `dawnc build app -o app` | 由 `cc` 编译的 C，全程没有 JVM | 不行 |
+| `./bin/dawn build app -o app.jar` | 检出驱动生成的 JVM 字节码 JAR | 可以 |
+| `java -jar /absolute/versioned/dawn-selfhost.jar build app -o app.jar` | release 工具链生成的 JVM 字节码 JAR | 可以 |
+| `java -jar /absolute/versioned/dawn-selfhost.jar build app --native -o app` | 上面的 JAR，由 GraalVM `native-image` 预先编译 | 可以 |
+| `dawn build app -o app` | 安装后的 native `dawn` 交给 `cc` 编译的 C | 不行 |
 
 不调用 Java 的程序在两边打印出相同的字节。这是验过的，不是指望：仓库让语料走两个后端，
 逐字节比对输出，而且 C 后端编得动编译器自己。
 
-`dawnc build`、`run` 和 `test` 让 `cc` 以 `-O2` 优化 C。如果你宁可少等编译、多等程序，就传 `-O0`（或 `-O1`）：
-大程序编得快好几倍、跑得慢一些，打印的内容不变。只有这三个级别；`dawnc` 不把别的参数转交给 `cc`。
+`dawn build`、`run` 和 `test` 让 `cc` 以 `-O2` 优化 C。如果你宁可少等编译、多等程序，就传 `-O0`（或 `-O1`）：
+大程序编得快好几倍、跑得慢一些，打印的内容不变。只有这三个级别；安装后的 `dawn` 不把别的参数转交给 `cc`。
 
 ### WebAssembly 与 reactor
 
-`dawnc` 还有一个目标。`dawnc build --target wasm app -o app.wasm` 用 clang 把同一份 C
+安装后的 `dawn` 还有一个目标。`dawn build --target wasm app -o app.wasm` 用 clang 把同一份 C
 编到 `wasm32-wasip1`（要一个带 WASI sysroot 的 clang；`DAWN_WASM_CC` 可以指定别的，
 比如 wasi-sdk 的）。产物是一个普通的 WASI 命令模块：运行时调一次它的 `_start`，程序
 一直跑到结束。
@@ -1459,7 +1453,7 @@ subdir = "packages/json"      # 包在归档里的位置
 跑一遍 `main`（[spec.md](spec.md) §12.5）。把状态从这一轮带到下一轮的是 `std/reactor` 的 `serve`：它读
 一行，连同到目前为止的状态一起交给你的 step 函数，再留下 step 返回的状态。站点的
 [演示](https://dawn-lang.dawnop.com/zh/tea.html)页就是三个这样的 reactor（一个计数器、
-一个待办列表和站内搜索），各自用 `dawnc build --target wasm --reactor` 编出，由
+一个待办列表和站内搜索），各自用 `dawn build --target wasm --reactor` 编出，由
 `packages/tea-dom` 从 JavaScript 驱动。wasm 这边只读写消息，从不碰 DOM 节点；同一个程序
 在 shell 里也能应答：`echo '{"op":"init"}' | dawn run examples/projects/tea_dom_counter`。
 设计见 [dom-bridge-design.md](dom-bridge-design.md)。
@@ -1587,7 +1581,8 @@ store_view_tko
 
 第 19 章记录了一个 kernel，就停在了那里。本章写六个，每个讲一件事：向量加法、长度不是 tile
 整数倍的向量、softmax、矩阵乘、按行的 softmax，以及转置。最后一节之前的内容在任何机器上都能
-跑，用 JVM 后端即可，因为记录 kernel 是纯的，假设备也是纯的。只有最后一节需要 GPU、它的驱动
+跑，用 JVM 后端即可，因为记录 kernel 是纯的，假设备也是纯的。这些示例请使用第 1 章的显式
+JVM 入口。只有最后一节需要 GPU、它的驱动
 和 `tileiras`。
 
 GPU 程序分两层，每层一个效果。kernel 体唯一的效果是 `!Dev`，来自 `packages/tileir`：函数体
@@ -2061,9 +2056,9 @@ pub fn main() -> Unit !io = {
 把这个程序做成项目 `vadd_card`：
 
 ```text
-dawn run vadd_card -- encode                         # 写出 vadd.tilebc
+java -jar /absolute/versioned/dawn-selfhost.jar run vadd_card -- encode  # 写出 vadd.tilebc
 tileiras --gpu-name sm_86 -o vadd.cubin vadd.tilebc
-dawnc run vadd_card                                  # 在卡上启动 vadd
+dawn run vadd_card                                  # 在卡上启动 vadd
 ```
 
 `encode` 写出的就是 `render` 打印的那份记录，格式是 `tileiras` 汇编用的字节码。`--gpu-name` 是

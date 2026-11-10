@@ -24,34 +24,22 @@ packages and to the targets a program compiles for, and last to kernels for a GP
 
 ## 1. Installing, and the first program
 
-Every release on the [releases page](https://github.com/dawnop/dawn-lang/releases/latest)
-publishes two toolchains, each with its SHA-256 beside it. They are different compilers,
-not two downloads of one, so pick by whether you have a JVM.
+Follow the [installation instructions](https://github.com/dawnop/dawn-lang#install) to download one
+release tag and verify its checksums and native metadata. Choose the entry point
+explicitly:
 
-**Without a JVM** (linux-x86_64): `dawnc` is one static executable with the standard
-library and the C runtime inside it. It compiles through the C backend, so it refuses
-`use java` (chapter 11 is the one chapter it cannot follow).
+| Entry point | What runs |
+|---|---|
+| Installed `dawn` | The native C backend on Linux x86_64, with `std` and the runtime embedded. It refuses `use java`. |
+| Checkout `./bin/dawn` | The JVM bootstrap driver, which builds the compiler from source. Requires JDK 21 or newer. |
+| `java -jar /absolute/versioned/dawn-selfhost.jar` | A verified release's JVM toolchain, with `std` embedded. Requires JDK 21 or newer, including on platforms without a native release. |
 
-```bash
-base=https://github.com/dawnop/dawn-lang/releases/latest/download
-curl -fsSLO $base/dawnc-linux-x86_64
-curl -fsSLO $base/dawnc-linux-x86_64.sha256
-sha256sum -c dawnc-linux-x86_64.sha256
-chmod +x dawnc-linux-x86_64 && sudo mv dawnc-linux-x86_64 /usr/local/bin/dawnc
-```
-
-**With a JVM** (JDK 21 or newer, any platform): `dawn-selfhost.jar` carries the standard
-library, so the jar on its own is the whole toolchain.
-
-```bash
-base=https://github.com/dawnop/dawn-lang/releases/latest/download
-curl -fsSLO $base/dawn-selfhost.jar
-curl -fsSLO $base/dawn-selfhost.jar.sha256
-sha256sum -c dawn-selfhost.jar.sha256      # macOS: shasum -a 256 -c
-```
-
-The commands below say `dawn`. With the static binary that is `dawnc`; with the jar it is
-`java -jar dawn-selfhost.jar`.
+The commands below use installed `dawn`. Native `run`, `build` and `test` need a C
+compiler; package downloads need curl, and WebAssembly needs clang and WASI. To use
+a checkout, replace `dawn` with `./bin/dawn`; for an explicit JVM release, replace
+it with `java -jar /absolute/versioned/dawn-selfhost.jar`. The installed command
+does not choose Java after a failure. Putting a checkout's `bin` first on PATH
+selects that checkout's JVM driver.
 
 ```bash
 dawn run  hello.dawn        # compile and run
@@ -63,7 +51,16 @@ dawn fmt  hello.dawn        # format the file in place
 Its first run downloads the seed (the `dawn-selfhost.jar` of the release pinned by
 `scripts/seed-release.txt`, checked against `scripts/seed-checksums.txt`) and compiles
 the compiler in `selfhost/` with it. There `./bin/dawn build hello.dawn --native -o hello`
-packages the JVM build with GraalVM native-image, which is a different road from `dawnc`.
+packages the JVM build with GraalVM native-image. Installed `dawn build hello.dawn -o hello`
+instead builds through C and does not accept `--native`.
+
+For VS Code, the default settings start `dawn lsp`. Set `dawn.lspPath` to a
+checkout's absolute `bin/dawn` path to use that JVM driver. For an explicit JVM
+release, set `dawn.lspPath` to `java` and `dawn.lspArgs` to
+`["-jar", "/absolute/versioned/dawn-selfhost.jar"]`; JDK options go before `-jar`.
+The extension appends `lsp`, passes literal argv elements without a shell, and
+restarts when either setting changes. See [editor integration](https://github.com/dawnop/dawn-lang/tree/main/editors)
+for Neovim and Helix argv arrays.
 
 The first program. Functions are pure by default; touching IO — printing, here —
 requires `!io` on the signature:
@@ -585,7 +582,7 @@ See also: [spec.en.md](spec.en.md) §7
 ## 11. Calling Java
 
 *JVM toolchain only.* This chapter needs `dawn-selfhost.jar` or a checkout's `./bin/dawn`.
-The static `dawnc` compiles through C and refuses `use java`, so with it, skip to
+Installed `dawn` compiles through C and refuses `use java`, so with it, skip to
 chapter 12.
 
 `use java "..."` calls a Java class directly. Every Java call counts as `!io`, and a
@@ -681,8 +678,8 @@ pub fn main() -> Unit !io = {
 ```
 
 `dawn run myapp`, given a directory, compiles and runs the whole project; `dawn test
-myapp` runs the test blocks of every module, and `dawn build myapp` packs it into one
-jar. Single-file `dawn run foo.dawn` still works. A `use` cycle is a compile error, and
+myapp` runs the test blocks of every module, and `dawn build myapp` writes a native
+executable. A JVM entry instead writes an executable JAR (chapter 19). Single-file `dawn run foo.dawn` still works. A `use` cycle is a compile error, and
 so is a name that collides with an imported module's alias — the two share one
 namespace.
 
@@ -1518,7 +1515,7 @@ so a major version that renames the package (`json2`) can still be spelled
 
 The third table, `[java-deps]`, lists Maven coordinates for chapter 11's `use java`
 (`sqlite = "org.xerial:sqlite-jdbc:3.36.0.3"`, an exact version and nothing else). The
-JVM toolchain resolves and fetches them; `dawnc` refuses `use java` and so has no use for
+JVM toolchain resolves and fetches them; installed `dawn` refuses `use java` and so has no use for
 them. The design and its reasons are in [package-design.md](package-design.md) and
 [package-visibility-design.md](package-visibility-design.md), in Chinese.
 
@@ -1528,34 +1525,35 @@ See also: [spec.en.md](spec.en.md) §10.1, §10.4
 
 ## 19. Backends and targets
 
-One source compiles two ways, and chapter 1 has already met both drivers. `dawn` is the
-JVM backend: `dawn run` compiles to bytecode and starts a JVM, `dawn build app -o app.jar`
-writes an executable jar, and it is the only one that can follow chapter 11 into
-`use java`. `dawnc` is the C backend: it emits C and hands it to `cc`, so
-`dawnc build app -o app` is a native executable with no JVM anywhere, and `dawnc run`
-builds one and runs it at once. `check`, `test`, `fmt`, `doc`, `add` and `lsp` exist on
-both.
+One source compiles two ways. Installed `dawn` is the native C backend: `dawn run`
+emits C, hands it to `cc`, and runs the executable; `dawn build app -o app` writes a
+native executable. The checkout's `./bin/dawn` and explicit
+`java -jar /absolute/versioned/dawn-selfhost.jar` are JVM drivers: `run` compiles
+bytecode and starts a JVM, and `build app -o app.jar` writes an executable JAR.
+Only the JVM drivers support chapter 11's `use java`. `check`, `test`, `fmt`, `doc`,
+`add` and `lsp` exist on both backends.
 
-Two of these are called native, and they are different roads:
+Choose both the compiler host and the output explicitly:
 
 | Command | What you get | `use java` |
 |---|---|---|
-| `dawn build app -o app.jar` | JVM bytecode in a jar | yes |
-| `dawn build app --native -o app` | that jar, compiled ahead of time by GraalVM `native-image` | yes |
-| `dawnc build app -o app` | C compiled by `cc`, with no JVM at all | no |
+| `./bin/dawn build app -o app.jar` | JVM bytecode in a JAR, using the checkout driver | yes |
+| `java -jar /absolute/versioned/dawn-selfhost.jar build app -o app.jar` | JVM bytecode in a JAR, using a release | yes |
+| `java -jar /absolute/versioned/dawn-selfhost.jar build app --native -o app` | That JAR, compiled ahead of time by GraalVM `native-image` | yes |
+| `dawn build app -o app` | C compiled by `cc`, using installed native `dawn` | no |
 
 A program that does not call Java prints the same bytes under both. That is checked
 rather than hoped for: the repository runs its corpora through both backends and compares
 the output byte for byte, and the C backend compiles the compiler itself.
 
-`dawnc build`, `run` and `test` have `cc` optimize the C at `-O2`. Pass `-O0` (or `-O1`)
+`dawn build`, `run` and `test` have `cc` optimize the C at `-O2`. Pass `-O0` (or `-O1`)
 when you would rather wait less for the compile than for the program: a large program
 builds several times faster and runs slower, and what it prints stays the same. Those
-three levels are the only ones; `dawnc` does not pass other flags through to `cc`.
+three levels are the only ones; installed `dawn` does not pass other flags through to `cc`.
 
 ### WebAssembly, and reactors
 
-`dawnc` has one more target. `dawnc build --target wasm app -o app.wasm` compiles the
+Installed `dawn` has one more target. `dawn build --target wasm app -o app.wasm` compiles the
 same C for `wasm32-wasip1` with clang (one with a WASI sysroot; `DAWN_WASM_CC` names
 another, such as wasi-sdk's). The result is an ordinary WASI command module: a runtime
 calls its `_start` once and the program runs to the end.
@@ -1568,7 +1566,7 @@ message, and each call runs `main` once ([spec.en.md](spec.en.md) §12.5). `std/
 line, hands it to your step function together with the state so far, and keeps the state
 the step returns. The site's [Demo](https://dawn-lang.dawnop.com/tea.html) page is three
 of these (a counter, a to-do list and the site search), each built with
-`dawnc build --target wasm --reactor` and driven from JavaScript by `packages/tea-dom`.
+`dawn build --target wasm --reactor` and driven from JavaScript by `packages/tea-dom`.
 The wasm side only ever reads and writes messages, never a DOM node, and the same
 program answers a shell: `echo '{"op":"init"}' | dawn run examples/projects/tea_dom_counter`.
 The design is in [dom-bridge-design.md](dom-bridge-design.md), in Chinese.
@@ -1705,7 +1703,8 @@ Chapter 19 recorded one kernel and stopped there. This chapter writes six, each 
 one idea: a vector add, a vector whose length is not a multiple of the tile, a softmax, a
 matrix product, a softmax over rows, and a transpose. Everything before the last section
 runs on any machine, on the JVM backend, because recording a kernel is pure and so is the
-fake device. Only the last section needs a GPU, its driver and `tileiras`.
+fake device. Use the explicit JVM entry from chapter 1 for those examples. Only the
+last section needs a GPU, its driver and `tileiras`.
 
 A GPU program has two layers with one effect each. The kernel body's only effect is `!Dev`,
 from `packages/tileir`: the body runs once, on the host, under a handler that records each
@@ -2220,9 +2219,9 @@ pub fn main() -> Unit !io = {
 With that program as the project `vadd_card`:
 
 ```text
-dawn run vadd_card -- encode                         # writes vadd.tilebc
+java -jar /absolute/versioned/dawn-selfhost.jar run vadd_card -- encode  # writes vadd.tilebc
 tileiras --gpu-name sm_86 -o vadd.cubin vadd.tilebc
-dawnc run vadd_card                                  # launches vadd on the card
+dawn run vadd_card                                  # launches vadd on the card
 ```
 
 `encode` writes the same record `render` prints, as the bytecode `tileiras` assembles.

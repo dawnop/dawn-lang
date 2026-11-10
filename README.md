@@ -311,6 +311,18 @@ guaranteeing only that release runs exactly once on every exit path.
 
 ## The toolchain
 
+Choose the entry point explicitly:
+
+| Entry point | Compiler host and default build output |
+|---|---|
+| Installed `dawn` | Native C backend; `dawn build app -o app` writes a native executable. Linux x86_64 only. |
+| Checkout `./bin/dawn` | JVM bootstrap driver; `./bin/dawn build app -o app.jar` writes an executable JAR. Requires JDK 21 or newer. |
+| `java -jar /absolute/versioned/dawn-selfhost.jar` | Explicit JVM toolchain from that release, with the same JVM build output. Requires JDK 21 or newer. |
+
+The installed command does not switch to Java after a failure. Putting a checkout's
+`bin` first on PATH selects that checkout's JVM driver. Use an absolute path when
+selecting a particular compiler in an editor.
+
 `<target>` may be a single `.dawn` file or a project directory (with `src/main.dawn`
 as the entry point).
 
@@ -336,13 +348,18 @@ The built-in LSP server exists once per backend with byte-aligned output: live
 diagnostics, hover, go-to-definition, document outline. The front end does full error
 recovery, so a broken file reports all of its errors at once. The VS Code extension is
 on the [marketplace](https://marketplace.visualstudio.com/items?itemName=dawnop.dawn-lang)
-(`dawnop.dawn-lang`); Neovim / Helix configuration is in [editors/](editors/).
+(`dawnop.dawn-lang`). Its default is `dawn lsp`, using the installed native command
+on PATH. For a checkout, set `dawn.lspPath` to its absolute `bin/dawn` path. For an
+explicit JVM server, set `dawn.lspPath` to `java` and `dawn.lspArgs` to
+`["-jar", "/absolute/versioned/dawn-selfhost.jar"]`. The extension appends `lsp`,
+passes each argument without a shell, and restarts when either setting changes.
+Neovim / Helix configuration is in [editors/](editors/).
 
-Two things are called native, and they are different roads. `dawn build --native`
-packages the jar the JVM backend just wrote with GraalVM `native-image`, so
-`use java` still works; `dawnc`, the static linux-x86_64 executable every release
-ships, is the C backend with `std` and the runtime embedded, needs no JVM and
-refuses `use java`. The bootstrap seed is still a jar
+For a JVM build, `./bin/dawn build app --native -o app` or
+`java -jar /absolute/versioned/dawn-selfhost.jar build app --native -o app` packages
+the JAR with GraalVM `native-image`, and `use java` still works. Installed `dawn`
+builds through C, embeds `std` and the runtime, and refuses `use java`; it rejects
+`--native` because native output is already its default. The bootstrap seed is still a jar
 (`scripts/seed-release.txt`), and the JVM backend is still a first-class target.
 The rest is in [docs/native-driver-plan.md](docs/native-driver-plan.md).
 

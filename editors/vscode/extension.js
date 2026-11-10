@@ -13,8 +13,8 @@
 // after `initialize` it prints the server's serverInfo, and warns once per
 // window when that is missing or too old. A stale `dawn` on PATH looks like a
 // broken compiler otherwise (server.js has the case that prompted this). A
-// change to `dawn.lspPath` restarts the client, so the setting no longer
-// waits for a window reload.
+// change to `dawn.lspPath` or `dawn.lspArgs` restarts the client, so settings
+// no longer wait for a window reload.
 //
 // The inlay hint settings (`dawn.inlayHints.*`) travel as
 // `initializationOptions`, which the server reads once at `initialize`; it
@@ -35,6 +35,9 @@ function describeCommand() {
   const config = vscode.workspace.getConfiguration('dawn');
   const raw = config.get('lspPath', 'dawn');
   const source = server.settingSource(config.inspect('lspPath'));
+  const rawArgs = config.get('lspArgs', []);
+  const argsSource = server.settingSource(config.inspect('lspArgs'));
+  const args = [...rawArgs, 'lsp'];
   const folders = vscode.workspace.workspaceFolders || [];
   const workspaceFolder = folders.length > 0 ? folders[0].uri.fsPath : '';
   const command = server.expandCommand(raw, { home: os.homedir(), workspaceFolder });
@@ -43,7 +46,7 @@ function describeCommand() {
   if (found) {
     try { real = fs.realpathSync(found); } catch (_) { real = found; }
   }
-  return { raw, source, command, found, real };
+  return { raw, source, rawArgs, argsSource, args, command, found, real };
 }
 
 function log(line) {
@@ -75,20 +78,22 @@ function reportServer(c, resolved) {
 async function startClient(manifests) {
   const resolved = describeCommand();
   log(`dawn.lspPath = ${JSON.stringify(resolved.raw)} (from ${resolved.source})`);
+  log(`dawn.lspArgs = ${JSON.stringify(resolved.rawArgs)} (from ${resolved.argsSource})`);
+  log(`argv = ${JSON.stringify(resolved.args)}`);
   if (resolved.found) {
     const link = resolved.real !== resolved.found ? ` -> ${resolved.real}` : '';
-    log(`starting ${resolved.found}${link} lsp`);
+    log(`starting ${JSON.stringify(resolved.found)}${link}`);
   } else {
     const where = resolved.command.includes('/') || resolved.command.includes('\\')
       ? 'no executable file at that path'
       : 'not found on PATH';
-    log(`starting ${resolved.command} lsp (${where}; the start will likely fail)`);
+    log(`starting ${JSON.stringify(resolved.command)} (${where}; the start will likely fail)`);
   }
 
   const c = new LanguageClient(
     'dawn',
     'Dawn Language Server',
-    { command: resolved.found || resolved.command, args: ['lsp'] },
+    { command: resolved.found || resolved.command, args: resolved.args, options: { shell: false } },
     {
       documentSelector: [{ scheme: 'file', language: 'dawn' }, { scheme: source.scheme, language: 'dawn' }],
       synchronize: { fileEvents: manifests },
@@ -129,6 +134,8 @@ function activate(context) {
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
     if (e.affectsConfiguration('dawn.lspPath')) {
       restartClient(manifests, 'dawn.lspPath');
+    } else if (e.affectsConfiguration('dawn.lspArgs')) {
+      restartClient(manifests, 'dawn.lspArgs');
     } else if (e.affectsConfiguration('dawn.inlayHints')) {
       restartClient(manifests, 'dawn.inlayHints');
     }

@@ -20,28 +20,46 @@ reports all of its errors instead of stopping at the first one.
 
 This extension is a client. It does not carry a compiler, so install the Dawn
 toolchain and make sure `dawn` is on the PATH VS Code sees. The two shortest
-routes, both with the checksum the release publishes beside the artifact, are in
+routes, with release checksums and native installation verification, are in
 the [project README](https://github.com/dawnop/dawn-lang#install).
 
 If `dawn` is not on VS Code's PATH, set **Dawn: Lsp Path** (`dawn.lspPath`) in
 settings to the absolute path of the executable. The extension runs
-`<dawn.lspPath> lsp` and speaks LSP over stdio.
+`<dawn.lspPath>` with `dawn.lspArgs` followed by `lsp`, and speaks LSP over stdio.
+The default settings run the installed native command as `dawn lsp`.
+
+To use a checkout's JVM bootstrap driver, set `dawn.lspPath` to its absolute
+`bin/dawn` path and leave `dawn.lspArgs` empty. To use a release JAR explicitly:
+
+```json
+{
+  "dawn.lspPath": "java",
+  "dawn.lspArgs": ["-jar", "/absolute/versioned/dawn-selfhost.jar"]
+}
+```
+
+Use a JDK 21 or newer `java`, or set its absolute path. Put any JDK options before
+`-jar`. Each array element is passed literally, preserving empty strings, spaces
+and Unicode, without a shell, variable expansion or extra quoting. Use an absolute
+JAR path. Changing either setting restarts the server. Native capability errors
+require an explicit toolchain choice; they do not select a JVM server.
 
 To see which server is running, open the **Dawn Language Server** output
 channel. Each start prints the setting's value and the settings layer it came
-from, the file that runs (symlinks resolved), and the version the server
-reports. If that is not the `dawn` you meant, the setting is either in a place
+from, the file that runs (symlinks resolved), the exact argv array, and the
+version the server reports. If that is not the `dawn` you meant, the setting is either in a place
 this window does not read (another profile, or another folder's workspace
 settings) or names a file that does not exist.
 
-The `dawnc` binary from the same release also answers `lsp` and can be used
-here, with the caveat that it is the C backend and refuses `use java`.
+Installed `dawn` is the native C backend and refuses `use java`. The checkout
+driver and explicit JAR run on the JVM and support Java interop.
 
 ## Settings
 
 | Setting | Default | What it is |
 |---|---|---|
-| `dawn.lspPath` | `dawn` | The Dawn CLI to run the language server from. `~`, `${userHome}` and `${workspaceFolder}` are expanded; a relative path is taken from the first workspace folder; a change restarts the server. |
+| `dawn.lspPath` | `dawn` | The executable to run; the default selects the installed native CLI. `~`, `${userHome}` and `${workspaceFolder}` are expanded; a relative path is taken from the first workspace folder; a change restarts the server. |
+| `dawn.lspArgs` | `[]` | Literal argv elements before the final `lsp`, with no shell or expansion. For Java, use `["-jar", "/absolute/versioned/dawn-selfhost.jar"]` and set `dawn.lspPath` to `java`. A change restarts the server. |
 | `dawn.inlayHints.propagatedErrors` | `false` | Show the error type a `?` on a `Result` propagates, after the `?`. |
 | `dawn.inlayHints.declarationEffects` | `true` | Show the `!io` the checker infers for a private function that writes neither a return type nor effects. |
 | `dawn.inlayHints.patternTypes` | `true` | Show the types of the names a `for` pattern or a `match` arm binds. |
@@ -60,7 +78,7 @@ The extension source is in
 against a corpus using VS Code's own TextMate engine, the semantic token
 contract, which checks the manifest's declarations against the server's legend,
 and the server contract, which covers how the executable is found and the
-version check;
+version check, literal launch arguments and configuration restarts;
 `npm run package` produces the `.vsix`.
 
 ## License
