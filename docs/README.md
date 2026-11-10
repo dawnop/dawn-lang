@@ -110,6 +110,7 @@ comptime 字节常量设计：[comptime-bytes-design.md](comptime-bytes-design.m
 | [audit/README.md](audit/README.md) | historical | 上面那份旧审查遗留待办的历史作业计划：十三份材料的索引、依赖、修复顺序与“不做”理由均保留；当前顺序看审查 v2。 |
 | [audit/native-plan-overlap.md](audit/native-plan-overlap.md) | current | 2026-07-25 审查方案与 native 计划的重合登记；文件头链接当前实现与后续边界，下文冻结顺序按历史阅读。 |
 | [native-cli-design.md](native-cli-design.md) | current | 原生命令行入口的帮助、参数边界、制品身份与 JVM 能力的显式拒绝合同。 |
+| [native-install-migration.md](native-install-migration.md) | current | 下一次发布的安装资产生效范围、dawn 命令迁移、进程与终端、显式 JVM 调用和编辑器参数配置。 |
 | [native-backend-plan.md](native-backend-plan.md) | current | native 自举主线的历史方案与落地日志；状态摘要绑定 main 源码及提交，覆盖共享 Core IR、自举与后续 C extern F0–F3，并区分安装默认入口和 Java 包文档的待办边界。旧阶段估时不作今日余量。 |
 | [native-driver-plan.md](native-driver-plan.md) | current | B 线驱动补全与后端契约的落地记录。K-B1–K-B5、K-B7 的实现及 K-B6 后续独立 C extern 交付见文件头源码与提交；保留当年刀表和 D7 推迟理由，安装默认入口仍是后续工作。 |
 | [c-tu-split-design.md](c-tu-split-design.md) | current | 裁决 ffi-llvm 4.c：emitc 仍发一份文本，由共享头与 K 个以分界行隔开的段组成（拼回去仍是合法单 TU），K 只取决于程序大小（nmain 实测 15），切点按发射顺序累计字节等分，脚本与驱动切成 K 个 `.c` 并行 cc，不开 LTO。外部 runner实测 4 核编整个 dawnc 69.4 → 14.7 s、产物运行时间不变、产物与并行度无关；ThinLTO 快 16% 但字节随目标文件路径变，交给 4.a。刀序：发分界行、脚本并行、驱动并行（等 Proc spawn/wait）；**刀 1、刀 2 已落地**（2026-10-05，`scripts/cc-units.sh`，本机 4 核编 nmain 82.4 → 16.6 s，§十）。 |
