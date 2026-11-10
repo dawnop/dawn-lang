@@ -524,14 +524,13 @@ def selftest():
     """
     jobs = parse_jobs(read(GATES))
     everything = sorted(j for j, _ in jobs if j != PLAN_JOB)
-    cache = {}
+    # The real map supplies fixtures under the enclosing test job's budget.
+    # slow() below exercises load_map's timer independently of fixture cost.
+    view = build_view("HEAD")
 
     def real_map():
-        if "view" not in cache:
-            cache["view"] = load_map("HEAD")
-        return cache["view"]
+        return view
 
-    view = real_map()
     unseen = sorted(p for p in view.unseen if not forced_reason(p))
     if not unseen:
         print("SELFTEST FAIL: unseen.txt has no path outside the forced "
