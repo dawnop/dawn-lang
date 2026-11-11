@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 
+from process_events import CompilerReady, READY_FD, pidfd, wait_exited
 
 def descendants(pid):
     found = []
@@ -65,28 +66,6 @@ def terminate(proc):
         cleanup(proc, children)
 
 
-def until(predicate):
-    for _ in range(400):
-        result = predicate()
-        if result:
-            return result
-        time.sleep(.025)
-    raise AssertionError("compiler readiness deadline exceeded")
-
-
-def compiler_blocked(proc, started):
-    if proc.poll() is not None:
-        out, err = proc.communicate(timeout=5)
-        raise AssertionError(f"driver exited before starting its compiler: {proc.returncode}, {out!r}, {err!r}")
-    try:
-        pid = int(started.read_text())
-        state = Path(f"/proc/{pid}/stat").read_text().split(")", 1)[1].split()[0]
-        command = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except (FileNotFoundError, ValueError):
-        return False
-    return state == "S" and b"-include\0" in command
-
-
 def check(binary):
     cc = shutil.which(os.environ.get("CC", "cc"))
     assert cc, "the native signal contract needs a C compiler"
@@ -97,14 +76,15 @@ def check(binary):
         root = Path(temporary)
         fifo = root / "compiler.h"
         os.mkfifo(fifo)
-        started = root / "compiler.pid"
         wrapper = root / "cc-wrapper"
         wrapper.write_text(
             f"#!{sys.executable}\n"
-            "import pathlib, signal, subprocess, sys\n"
+            "import os, signal, subprocess, sys\n"
             "signal.signal(signal.SIGINT, signal.SIG_DFL)\n"
             f"child = subprocess.Popen([{cc!r}, '-include', {str(fifo)!r}, *sys.argv[1:]])\n"
-            f"pathlib.Path({str(started)!r}).write_text(str(child.pid))\n"
+            f"ready = int(os.environ[{READY_FD!r}])\n"
+            "os.write(ready, (str(child.pid) + '\\n').encode())\n"
+            "os.close(ready)\n"
             "sys.exit(child.wait())\n"
         )
         wrapper.chmod(0o755)
@@ -124,9 +104,9 @@ def check(binary):
         cases = [(command, tests if command == "test" else source, False)
                  for command in ("run", "build", "test")]
         cases.append(("run", nested, True))
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        for sig, by_group in [(sig, group) for sig in (signal.SIGINT, signal.SIGTERM)
+                              for group in (False, True)]:
             for command, target, executing in cases:
-                started.unlink(missing_ok=True)
                 argv = [str(binary), command, str(target)]
                 env = {**os.environ, "CC": str(wrapper), "TMPDIR": str(root)}
                 phase = "compiler"
@@ -136,46 +116,53 @@ def check(binary):
                     argv += ["--", str(wrapper), str(c_source), "-o", str(root / "child")]
                     phase = "program"
                     expected = 128 + sig
-                proc = subprocess.Popen(argv, cwd=root, env=env,
-                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE, start_new_session=True)
-                children = []
                 label = f"{command} {phase} descendants receive {signal.Signals(sig).name}"
-                try:
-                    until(lambda: compiler_blocked(proc, started))
-                    children = descendants(proc.pid)
-                    groups = {pid: os.getpgid(pid) for pid in children}
-                    os.kill(proc.pid, sig)
-                    proc.wait(timeout=10)
-                    out, err = proc.communicate(timeout=5)
-                    assert proc.returncode == expected and out == b"", (proc.returncode, out, err)
-                    if not executing:
-                        assert b"failed (exit code" in err, err
-                    alive = []
-                    for pid in children:
-                        try:
-                            state = Path(f"/proc/{pid}/stat").read_text().split(")", 1)[1].split()[0]
-                        except FileNotFoundError:
-                            continue
-                        if state != "Z":
-                            alive.append(pid)
-                    assert not alive, f"live descendants after driver exit: {alive}"
-                    assert proc.pid not in groups.values(), groups
-                    if executing:
-                        assert len(set(groups.values())) >= 2, groups
-                    else:
-                        assert len(set(groups.values())) == 1, groups
-                    print("PASS " + label, flush=True)
-                except (AssertionError, subprocess.TimeoutExpired) as error:
-                    failures.append(label + ": " + str(error))
-                    print("FAIL " + failures[-1], flush=True)
-                finally:
-                    cleanup(proc, children)
+                if by_group:
+                    label += " via process group"
+                with CompilerReady(fifo) as ready:
+                    proc = subprocess.Popen(argv, cwd=root, env={**env, READY_FD: str(ready.pid_write)},
+                                            pass_fds=(ready.pid_write,), stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            start_new_session=True)
+                    ready.parent_started()
+                    children, handles = [], {}
+                    try:
+                        compiler = ready.wait()
+                        children = descendants(proc.pid)
+                        assert compiler in children, (compiler, children)
+                        groups = {pid: os.getpgid(pid) for pid in children}
+                        for child in children:
+                            handles[pidfd(child)] = child
+                        if by_group:
+                            os.killpg(proc.pid, sig)
+                        else:
+                            os.kill(proc.pid, sig)
+                        proc.wait(timeout=10)
+                        out, err = proc.communicate(timeout=5)
+                        assert proc.returncode == expected and out == b"", (proc.returncode, out, err)
+                        if not executing:
+                            assert b"failed (exit code" in err, err
+                        # EOF can precede exit_notify in the kernel. A live
+                        # pidfd becomes readable only after process exit.
+                        wait_exited(handles)
+                        assert proc.pid not in groups.values(), groups
+                        if executing:
+                            assert len(set(groups.values())) >= 2, groups
+                        else:
+                            assert len(set(groups.values())) == 1, groups
+                        print("PASS " + label, flush=True)
+                    except (AssertionError, subprocess.TimeoutExpired) as error:
+                        failures.append(label + ": " + str(error))
+                        print("FAIL " + failures[-1], flush=True)
+                    finally:
+                        cleanup(proc, children)
+                        for fd in handles:
+                            os.close(fd)
         if not failures:
             import terminal
             terminal.check(binary, root)
     assert not failures, f"{len(failures)} descendant signal cases failed"
-    print("OK native signal contract: 8 descendant and 4 terminal cases", flush=True)
+    print("OK native signal contract: 16 descendant and 4 terminal cases", flush=True)
 
 
 if __name__ == "__main__":
