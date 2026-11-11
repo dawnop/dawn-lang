@@ -32,6 +32,7 @@
 # `Tile[Float]` slot, or a host `Int` where an index tile is wanted, are both
 # refused by the checker.
 use std/list
+use bounds.{suffix_overflows}
 use std/str
 use std/dtype.{Dtype, dtype_name, to_bits, F64, I64, I1}
 use std/int/i32.{I32}
@@ -1203,16 +1204,25 @@ pub fn block_id(axis: Int, at: Loc = caller()) -> Idx !Dev = called("block_id", 
 pub fn tile_at(idx: Idx, n: Int, at: Loc = caller()) -> Idx !Dev = called("tile_at", at, () => idx_mul(idx, idx_const(n)))
 
 ## The row-major strides of `shape`: the suffix products, `[1]` for a
-## one-dimensional tile. What `load` and `store` use when the tile is a
+## one-dimensional tile. Required suffix products are checked before
+## multiplication against positive int64; the unused total is not computed.
+## When a pointer operation uses these strides as device indices it checks
+## signed i32 separately, allowing zero and negative explicit strides.
+## What `load` and `store` use when the tile is a
 ## contiguous run of memory (`strides: None`); `strides: Some(..)` is the
 ## one to use when it is a block of a larger array.
-pub fn row_major(shape: List[Int]) -> List[Int] = {
+pub fn row_major(shape: List[Int], at: Loc = caller()) -> List[Int] = {
   var out: List[Int] = []
   var acc = 1
   for k in range(0, len(shape)) {
     let d = shape[len(shape) - 1 - k]
     out = [acc] ++ out
-    acc = acc * d
+    if k < len(shape) - 1 {
+      if d < 1 || acc < 1 || suffix_overflows(acc, d) {
+        panic("tileir: row_major: extent dimension ${len(shape) - 1 - k}: static suffix product ${acc} * ${d} is outside positive signed int64 [1, 9223372036854775807]", at = at)
+      } else { () }
+      acc = acc * d
+    } else { () }
   }
   out
 }
@@ -1309,7 +1319,7 @@ pub fn axis_mask(base: Idx, shape: List[Int], axis: Int, limit: Int, at: Loc = c
 pub fn load[D](p: Param[D], base: Idx, shape: List[Int], strides: Option[List[Int]] = None,
   mask: Option[Tile[Bool]] = None, pad: Option[Tile[D]] = None, hints: ByArch[PtrHints] = [], at: Loc = caller()) -> Tile[D] !Dev = called("load", at, () => {
     let i: Int = base
-    let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides_or_row_major(shape, strides),
+    let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides_or_row_major(shape, strides, at),
       handle_of(mask), handle_of(pad), wire_ptr(hints))
     h
   })
@@ -1333,14 +1343,14 @@ pub fn store[D](p: Param[D], base: Idx, v: Tile[D], strides: Option[List[Int]] =
     let i: Int = base
     let hv: Int = v
     let shape = shape_of(hv)
-    t_store(position(p), param_dtype(p), i, shape, strides_or_row_major(shape, strides), hv, handle_of(mask), wire_ptr(hints))
+    t_store(position(p), param_dtype(p), i, shape, strides_or_row_major(shape, strides, at), hv, handle_of(mask), wire_ptr(hints))
   })
 
 # The strides a `load` or a `store` walks: the ones given, or a contiguous
 # tile's.
-fn strides_or_row_major(shape: List[Int], strides: Option[List[Int]]) -> List[Int] = match strides {
+fn strides_or_row_major(shape: List[Int], strides: Option[List[Int]], at: Loc) -> List[Int] = match strides {
   Some(s) -> s
-  None -> row_major(shape)
+  None -> row_major(shape, at = at)
 }
 
 # The handle an optional tile names, for the `t_` operations that take one.
@@ -2126,7 +2136,7 @@ pub fn lanes_strided(base: Idx, shape: List[Int], strides: List[Int], at: Loc = 
 ## indices `[base, base + 1, .., base + prod(shape) - 1]` in row-major
 ## order.
 pub fn lanes(base: Idx, shape: List[Int], at: Loc = caller()) -> Tile[I32] !Dev = called("lanes", at, () => {
-  lanes_strided(base, shape, row_major(shape))
+  lanes_strided(base, shape, row_major(shape, at = at))
 })
 
 ## `a == b` over two tiles of one float format, as a mask of their shape.
@@ -2566,8 +2576,11 @@ pub fn select[D](cond: Tile[Bool], a: Tile[D], b: Tile[D], at: Loc = caller()) -
 })
 
 ## The scalar index tile holding the host constant `value`: a loop bound, a
-## step, a stride. The constant is fixed when the kernel is recorded, which
-## is what a host `Int` in a kernel body means (tile-backend-design 5.2).
+## step, a stride. Recording checks the signed i32 range
+## [-2147483648, 2147483647], including literals and Int range bounds.
+## Out-of-range values are refused at the nearest recorded caller location.
+## To supply high bits explicitly, use `i32.to_int(i32.wrap(value))` first.
+## `consti` / `i_const` retain their width-truncating contract.
 pub fn idx_const(value: Int, at: Loc = caller()) -> Idx !Dev = called("idx_const", at, () => idx_const_rec(value))
 
 # The recording of `idx_const`, shared with the operator that spells it.
@@ -2774,14 +2787,17 @@ impl RangeBound[Idx] {
 ## inside it. `break`, `continue` and `return` are not allowed in the body
 ## (staged-for-design); a data-dependent exit is `d_loop`.
 ##
-## With `Int` bounds the range records `idx_const` for lower, upper and step,
-## in that order; with `Idx` bounds it records only what the step needs.
+## With `Int` bounds the range records checked `idx_const` for lower, upper
+## and step, in that order; each must be in signed i32 range. With `Idx`
+## bounds it records only what the step needs.
 ##
 ## `unsigned_cmp` sets the loop's `unsignedCmp` unit attribute (knife T4):
 ## the induction variable is compared against the upper bound as an
 ## UNSIGNED 32-bit integer, so a range whose bounds straddle 2^31 runs
 ## forward instead of not running at all. Its own kernel is
-## scripts/tile-golden's attr_ucmp.
+## scripts/tile-golden's attr_ucmp. This changes comparison only: express
+## the high bound explicitly, e.g. `i32.to_int(i32.wrap(0x80000010))`.
+## An unsigned comparison never permits an out-of-range host Int bound.
 ##
 ## `at` is the site of the `d_range(..)` the kernel wrote, kept in the range:
 ## `for` runs the loop through a trait method, which takes no `caller()`, so

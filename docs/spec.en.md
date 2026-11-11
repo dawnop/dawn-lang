@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ a91ebf54d7e2d05a -->
+<!-- doc-check: translation-of docs/spec.md @ fbb98e5411fc150b -->
 
 # Dawn Language Specification
 
@@ -5345,6 +5345,18 @@ or ABI argument.
   scalar is rank 0), `Idx` and `Param[D]`, whose phantom parameter `D` is a format's value type (§2.7). Handles
   are issued by the handler; using one kind of handle as another, or a host `Int` as a
   handle, is a type error.
+- Host constant construction of `Idx` (`idx_const`, literals, `d_range` Int bounds
+  and direct `Dev.t_idx_const`) accepts only signed i32
+  `[-2147483648, 2147483647]`; out-of-range values panic at the recorded caller
+  location. Express high bit patterns explicitly, for example
+  `i32.to_int(i32.wrap(0x80000010))`. `unsigned_cmp` changes comparison only.
+  `consti` / `i_const` still truncate to the target width; ordinary i32 addition
+  and multiplication still wrap. Geometry queries and generated geometry
+  constants check numeric representability. Pointer strides may be zero or
+  negative but must fit signed i32. Static view shape and stride metadata stay
+  int64; required static suffix products check the int64 upper bound before
+  multiplication and do not compute an unused total. Dynamic products check
+  their known constants only.
 - **Recording**: `tileir/prog`'s `trace_kernel(name, params, body)` runs `body` exactly once,
   **at host run time**, under the recording handler, and answers a `TileProg` (an ADT in SSA
   form). `params` is the format name of each entry parameter, by position. A body that issues

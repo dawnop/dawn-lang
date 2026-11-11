@@ -241,6 +241,17 @@ let (prog, entry) = trace3("matmul",
   `broadcast(t, shape)` widens explicitly, for places that are not
   element-wise (a loop's starting value); places that need a rank-0 tile (a
   condition, a loop bound, a cell index) refuse a wider one.
+- Host `Int` construction of `Idx` is checked against signed i32
+  `[-2147483648, 2147483647]`. This includes `idx_const`, literals,
+  `d_range` Int bounds and direct effects. Express high bit patterns with
+  `i32.to_int(i32.wrap(value))` before constructing the index.
+  `unsigned_cmp` changes comparison only. `consti` / `i_const` still
+  truncate to their format's width, and ordinary i32 arithmetic still wraps.
+- Geometry queries and generated numeric factors must fit positive i32;
+  pointer strides must fit signed i32, including zero and negative values.
+  Static view shape and stride metadata remain int64. Required static
+  suffix products are checked before multiplication; an unused total is
+  not computed. Dynamic products check their known constants only.
 - `Idx` arithmetic is `idx_add`, `idx_sub`, `idx_mul`, `idx_div` and
   `idx_rem` (signed, toward zero): a grid axis that holds a head and a
   group folded together is read back as `idx_div(b, g)` and `idx_rem(b, g)`.

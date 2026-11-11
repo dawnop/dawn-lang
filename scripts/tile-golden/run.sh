@@ -711,6 +711,19 @@ mutants=(
   entry6-n-constant entry6-view-capacity entry6-loop-floor entry6-unmarked entry6-sixth-as-pointer entry6-erase-projection
   read-layout-type-rejections read-group-axis read-group-zero read-group-div2 read-group-shift read-n-constant read-loop-floor read-view-capacity read-live-stride read-no-mask
   scaled-mma-combinations
+  idx-bounds-checks
+  idx-check-dropped
+  geometry-check-dropped
+  pointer-check-dropped
+  ceil-div-overflows
+  suffix-check-dropped
+  suffix-positive-wrap-accepted
+  prefix-check-dropped
+  row-major-check-dropped
+  idx-lower-check-dropped
+  pointer-lower-check-dropped
+  metadata-limited-to-i32
+  metadata-four-bytes
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -3509,6 +3522,109 @@ if run_item scaled-mma-combinations; then
   scaled_args=(--producer-json "$producer_json" --out "$work/scaled-matrix")
   if [ -n "$tileiras" ]; then scaled_args+=(--tileiras "$tileiras"); fi
   python3 "$here/scaled-combinations.py" "${scaled_args[@]}" || fail "scaled MMA combination matrix"
+fi
+
+
+# Representation boundary fixtures run on both consumers of the same recording.
+if run_item idx-bounds-checks; then
+  python3 - <<'ORACLE'
+for n, t, expected in [(16, 8, 2), (17, 8, 3), (1, 8, 1),
+                       (9223372036854775807, 8589934592, 1073741824)]:
+    assert (n + t - 1) // t == expected
+for n, t in [(9223372036854775807, 1), (9223372036854775807, 2),
+             (9223372036854775800, 8), (4294967296, 1)]:
+    assert (n + t - 1) // t > 2147483647
+ORACLE
+  run_jvm "$work/clean" "$work/idx-bounds.jvm" --idx-bounds-checks ||
+    { cat "$work/idx-bounds.jvm" "$work/idx-bounds.jvm.err" >&2; fail "index bounds checks failed on JVM"; }
+  run_native "$work/clean.bin" "$work/idx-bounds.native" --idx-bounds-checks ||
+    { cat "$work/idx-bounds.native" "$work/idx-bounds.native.err" >&2; fail "index bounds checks failed natively"; }
+  cmp -s "$work/idx-bounds.jvm" "$work/idx-bounds.native" || fail "index bounds checks disagree"
+  cat "$work/idx-bounds.jvm"
+fi
+
+# Removing a guard must fail its owning assertions after a successful build.
+# Compare the complete red set so a crash or an unrelated rejection cannot count.
+idx_bounds_mutant() { # name, module, expected comma-separated red groups
+  local m="$1" module="$2" reds="$3" backend rc out
+  mutant_project "$m" "$module"
+  for backend in jvm native; do
+    out="$work/m-$m.bounds.$backend"
+    rc=0
+    if [ "$backend" = jvm ]; then
+      run_jvm "$work/m-$m" "$out" --idx-bounds-checks || rc=$?
+    else
+      run_native "$work/m-$m.bin" "$out" --idx-bounds-checks || rc=$?
+    fi
+    [ "$rc" = 1 ] || fail "$m did not reach the expected assertion on $backend"
+    grep -Fq 'index bounds assertions failed' "$out.err" || fail "$m failed outside the assertions"
+    python3 - "$out" "$reds" "$m" <<'REDS' || fail "$m failed the wrong checks on $backend"
+from pathlib import Path
+import sys
+lines = Path(sys.argv[1]).read_text().splitlines()
+expected = set(sys.argv[2].split(','))
+red = {line.split(':', 1)[0].removeprefix('FAIL index bounds ') for line in lines if line.startswith('FAIL index bounds ')}
+all_groups = {'idx', 'ceil', 'geometry', 'suffix', 'prefix', 'mixed', 'metadata', 'pointer', 'locations', 'lower', 'ordinary'}
+green = {line.removeprefix('PASS index bounds ') for line in lines if line.startswith('PASS index bounds ')}
+assert red == expected, (red, expected, lines)
+assert green == all_groups - expected, (green, lines)
+markers = {
+    'idx-check-dropped': {'idx': ['missing index constant -2147483649'], 'locations': ['default caller location missing: accepted']},
+    'geometry-check-dropped': {'geometry': ['missing geometry value: accepted'], 'mixed': ['missing geometry value: accepted']},
+    'pointer-check-dropped': {'pointer': ['missing pointer stride: accepted']},
+    'ceil-div-overflows': {'ceil': ['kernel `geometry_bounds`', 'geometry value -1073741823', 'extent=9223372036854775807, tile=8589934592']},
+    'suffix-check-dropped': {'suffix': ['missing static suffix product'], 'prefix': ['missing static suffix product']},
+    'suffix-positive-wrap-accepted': {'suffix': ['4294967297 * 4294967297: accepted'], 'prefix': ['4294967297 * 4294967297: accepted']},
+    'prefix-check-dropped': {'prefix': ['missing static suffix product']},
+    'row-major-check-dropped': {'pointer': ['row-major overflow guard missing']},
+    'idx-lower-check-dropped': {'lower': ['manual index lowering guard missing: accepted']},
+    'pointer-lower-check-dropped': {'lower': ['manual pointer lowering guard missing: accepted']},
+    'metadata-limited-to-i32': {'metadata': ['metadata narrowed to i32']},
+    'metadata-four-bytes': {'metadata': ['int64 metadata fields changed']},
+}[sys.argv[3]]
+assert set(markers) == expected
+for group, fragments in markers.items():
+    failures = [line for line in lines if line.startswith('FAIL index bounds ' + group + ':')]
+    assert len(failures) == 1 and all(fragment in failures[0] for fragment in fragments), failures
+REDS
+  done
+  echo "PASS  mutant: $m (owning boundary assertions red on both backends; other groups green)"
+}
+if run_item idx-check-dropped; then
+  idx_bounds_mutant idx-check-dropped prog.dawn idx,locations
+fi
+if run_item geometry-check-dropped; then
+  idx_bounds_mutant geometry-check-dropped prog.dawn geometry,mixed
+fi
+if run_item pointer-check-dropped; then
+  idx_bounds_mutant pointer-check-dropped prog.dawn pointer
+fi
+if run_item ceil-div-overflows; then
+  idx_bounds_mutant ceil-div-overflows prog.dawn ceil
+fi
+if run_item suffix-check-dropped; then
+  idx_bounds_mutant suffix-check-dropped prog.dawn suffix,prefix
+fi
+if run_item suffix-positive-wrap-accepted; then
+  idx_bounds_mutant suffix-positive-wrap-accepted prog.dawn suffix,prefix
+fi
+if run_item prefix-check-dropped; then
+  idx_bounds_mutant prefix-check-dropped prog.dawn prefix
+fi
+if run_item row-major-check-dropped; then
+  idx_bounds_mutant row-major-check-dropped dev.dawn pointer
+fi
+if run_item idx-lower-check-dropped; then
+  idx_bounds_mutant idx-lower-check-dropped lower.dawn lower
+fi
+if run_item pointer-lower-check-dropped; then
+  idx_bounds_mutant pointer-lower-check-dropped lower.dawn lower
+fi
+if run_item metadata-limited-to-i32; then
+  idx_bounds_mutant metadata-limited-to-i32 lower.dawn metadata
+fi
+if run_item metadata-four-bytes; then
+  idx_bounds_mutant metadata-four-bytes bytecode.dawn metadata
 fi
 
 _item_tick ""

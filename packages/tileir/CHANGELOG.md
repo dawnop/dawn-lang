@@ -1,5 +1,16 @@
 # tileir changelog
 
+## 0.29.0
+
+- Check host Int construction of Idx against signed i32, including literals,
+  Int range bounds and direct effects. Express high bit patterns explicitly
+  before construction. Existing unsigned loop output stays unchanged.
+- Compute static block counts without overflowing host addition and check
+  numeric geometry at its device index boundary. Check required static
+  suffix products before multiplication while retaining int64 view metadata.
+- Check pointer strides as signed i32, including zero and negative strides.
+  Ordinary integer tile truncation and wrapping arithmetic keep their contract.
+
 ## 0.28.0
 
 - Replace integer cell axes with the shared std/gpu CellAxis ADT. Grouped

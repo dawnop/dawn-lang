@@ -596,6 +596,27 @@ parser 的 round-trip，这一点没变。
 
 ### 5.2 kernel 内的控制流（刀 5 已落地）
 
+#### Idx 常量与静态几何的表示边界
+
+`Idx` 的宿主常量构造采用检查性转换：`idx_const`、`FromInt[Idx]` 字面量、
+`d_range` 的 `Int` 边界以及直接 `Dev.t_idx_const` 都只接受
+`[-2147483648, 2147483647]`。越界在录制时沿最近的公开调用位置拒绝；手工构造的
+`TileProg` 在降低时也必须通过同一值域检查。高位模式须由源码明确转换，例如
+`i32.to_int(i32.wrap(0x80000010))`。`unsigned_cmp` 只改变比较方式，不放宽构造域。
+`consti` / `i_const` 的宽度截断合同与设备 i32 加乘回绕保持原义。
+
+几何数值与位模式构造分开检查。静态块数使用正数安全算式
+`(extent - 1) / tile + 1`；`blocks_of` / `extent_of` 的静态结果以及自动生成的
+tile、动态 suffix 静态因子须能表示为正 signed-i32。pointer offset 梯子的静态
+stride 采用 signed-i32 域，允许零和负数。诊断应包含参数、维度、值域和相应输入，
+并沿用录制的调用位置、操作编号和区域路径。
+
+view 的静态 shape / stride metadata 仍为 int64。cell view、`read_prefix` capacity
+与 pointer 默认行主序只计算实际使用的 suffix；每次乘法先用
+`suffix > INT64_MAX / extent` 检查，不能在回绕后只查正负，也不能因未使用的 total
+越界拒绝合法 metadata。动态 `NumBlocks × tile` 和动态 suffix 仅检查已知常量部分，
+不据此声称未知运行时乘积安全。本次不引入全 I64 索引 ABI。
+
 记录时 Dawn 的 `if / for / while` 是宿主求值：条件只依赖宿主已知量（形状、参数位、常量）时，
 展开是对的、免费的，也就是 cuTile 里 `ct.Constant` 折叠的效果。条件依赖 tile 值时 Dawn 的
 `if` 拿不到它（`Tile[D]` 是句柄），必须走结构化操作。
@@ -2569,7 +2590,10 @@ NaN，否则答非 NaN 的那个），带上是 `maximum`（有一边是 NaN 就
 
 **四、`unsignedCmp` 的答案是一个整数，不是一个舍入。** 起点 `0x7FFFFFF0`、终点
 `0x80000010`、步长 1：有符号读法里终点是负数、在起点之下，循环一次都不跑；无符号读法里它
-在起点之上 32，循环跑 32 次。`attr_ucmp` 把两个循环各自的迭代次数存出来，本机实测
+在起点之上 32，循环跑 32 次。宿主上界明确写为
+`i32.to_int(i32.wrap(0x80000010))`，先表达位模式再进入检查性 `Idx` 构造；
+直接传 `0x80000010` 会在调用点拒绝。该迁移保持原文本与字节码逐字节相同。
+`attr_ucmp` 把两个循环各自的迭代次数存出来，本机实测
 `signed=0.0 unsigned=32.0`，与手算的一样。这是刀 T4 六个层 3 变异体里唯一一个红得**不像**
 数值问题的：`for-unsigned-bit-dropped` 把 32 变成 0。
 
