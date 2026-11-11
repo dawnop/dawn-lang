@@ -56,6 +56,7 @@
 # with "toolchain moved" rather than being reported as a backend divergence.
 # That is the residual hole, named rather than papered over.
 #
+#   ./site/prepare.sh && ./site/build.sh
 #   ./scripts/site-dist-diff.sh          # native leg (dawnc) then the JVM baseline
 #   DAWNC_BIN=<file> ...                 # use that dawnc (site/dawnc.sh)
 #   KEEP=1 ./scripts/site-dist-diff.sh   # keep the work directory
@@ -96,20 +97,17 @@ SNAP="$OUT/snap"
 mkdir -p "$SNAP"
 # site/dist is the product, not an input; node_modules is npm's, and the
 # generator only ever reads site/play-ui/dist.
-tar -cf - --exclude='site/dist' --exclude='site/play-ui/node_modules' \
+tar -cf - --exclude='site/dist' --exclude='site/play-ui/node_modules' --exclude='site/build/native' \
+  --exclude='site/build/java-metadata' \
   docs examples site packages compiler-plan scripts/example-main-contract/registry.json \
   scripts/tileir-features scripts/tile-golden scripts/tile-gpu-diff \
   | tar -xf - -C "$SNAP"
-# site/build/stdlib.json and site/build/packages/ are generated, not tracked
-# (site/build.sh makes them).
-# Regenerating them into the snapshot keeps the run self-contained and keeps this
-# script from writing anything into the working tree.
-# These are the documents the shipped site is built from, so they are written the
-# way site/build.sh writes them (dawnc doc, native A2); the JVM driver's are
-# written beside them after the two legs and held to them byte for byte.
-mkdir -p "$SNAP/site/build"
-"$(site_dawnc)" doc --stdlib > "$SNAP/site/build/stdlib.json"
-site/package-docs.sh "$SNAP/site/build/packages"
+# The production build already generated and validated this fresh bundle.
+# Validate its source and tool receipts before using its snapshotted bytes;
+# this gate never substitutes a JVM document into the production bundle.
+python3 site/inputs.py check-bundle --out site/build/doc-inputs
+DAWNC_BIN="$(python3 site/inputs.py check)"
+export DAWNC_BIN
 
 echo "snapshot: $(find "$SNAP" -type f | wc -l) input file(s)"
 
@@ -119,10 +117,7 @@ echo "snapshot: $(find "$SNAP" -type f | wc -l) input file(s)"
 # why). The generator refuses to build without them.
 . scripts/site-figures-env.sh
 
-# DAWN_SITE_PLAY_ORIGIN (site/build.sh) is not set here and needs nothing: the
-# two legs are children of this shell, so a caller who sets it compares both
-# backends on the absolute Playground endpoint, and one who does not compares
-# them on the relative one. Either way they see the same value.
+. site/build-env.sh
 
 # ---- leg 1: the native backend, the dist that ships ----
 # Run from the snapshot, with the same generator binary site/build.sh runs, so
@@ -140,29 +135,28 @@ case "$gen_bin" in /*) ;; *) gen_bin="$ROOT/$gen_bin" ;; esac
 }
 mv "$SNAP/site/dist" "$OUT/dist-native"
 
-# ---- leg 2: the JVM backend, the baseline ----
+# ---- independent JVM documents, then the JVM renderer ----
+# The reference consumes the snapshotted source and writes its own documents.
+# No production driver dispatch or cached JSON participates in this leg.
+echo "== documentation: native doc vs JVM doc =="
+mkdir -p "$OUT/docs-jvm/packages"
+(cd "$SNAP" && "$ROOT/bin/dawn" doc --stdlib) > "$OUT/docs-jvm/stdlib.json"
+for manifest in "$SNAP"/packages/*/dawn.toml; do
+  name="$(basename "$(dirname "$manifest")")"
+  (cd "$SNAP" && "$ROOT/bin/dawn" doc "packages/$name") > "$OUT/docs-jvm/packages/$name.json"
+done
+docs_rc=0
+{ diff "$OUT/docs-jvm/stdlib.json" "$SNAP/site/build/doc-inputs/stdlib.json" &&
+  diff -r "$OUT/docs-jvm/packages" "$SNAP/site/build/doc-inputs/packages"; } > "$OUT/docs.diff" 2>&1 || docs_rc=1
+
+# The full JVM page oracle uses its own JSON as well as its own renderer.
+cp "$OUT/docs-jvm/stdlib.json" "$SNAP/site/build/doc-inputs/stdlib.json"
+cp "$OUT/docs-jvm/packages/"*.json "$SNAP/site/build/doc-inputs/packages/"
 echo "== JVM =="
 (cd "$SNAP" && "$ROOT/bin/dawn" run site) > "$OUT/jvm.log" 2>&1 || {
   echo "FAIL: the JVM generator did not finish"; tail -20 "$OUT/jvm.log"; exit 1
 }
 mv "$SNAP/site/dist" "$OUT/dist-jvm"
-
-# ---- the documentation inputs: dawnc doc against `dawn doc` ----
-# After the legs, so a native doc difference is reported next to the dist
-# difference it causes rather than instead of it. The snapshot holds what the
-# shipped site reads (native, except packages with a `use java`, which
-# site/package-docs.sh sends to the JVM either way); the baseline here is every
-# document from the JVM driver. Only these two paths are compared: the
-# snapshot's site/build also carries whatever the working tree had cached there.
-echo "== documentation: dawnc doc vs dawn doc =="
-mkdir -p "$OUT/docs-jvm/packages"
-./bin/dawn doc --stdlib > "$OUT/docs-jvm/stdlib.json"
-DAWN_DOC_BACKEND=jvm site/package-docs.sh "$OUT/docs-jvm/packages" 2> "$OUT/docs-jvm.log" || {
-  echo "FAIL: the JVM documentation baseline did not finish"; tail -20 "$OUT/docs-jvm.log"; exit 1
-}
-docs_rc=0
-{ diff "$OUT/docs-jvm/stdlib.json" "$SNAP/site/build/stdlib.json" &&
-  diff -r "$OUT/docs-jvm/packages" "$SNAP/site/build/packages"; } > "$OUT/docs.diff" 2>&1 || docs_rc=1
 
 # ---- the toolchain has to have held still ----
 FP_AFTER=$(toolchain_fingerprint)

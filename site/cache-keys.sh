@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Preparation only: never sourced or run by site/build.sh.
 # Prints the one cache key CI's actions/cache uses for the site's native
 # binaries, as a `native=<value>` line (append to $GITHUB_OUTPUT). The cache
 # holds the directory site/build/native: dawnc built from HEAD plus every
@@ -17,4 +18,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . site/dawnc.sh
-printf 'native=%s\n' "$({ site_dawnc_stamp; site_prog_keys; } | sha256sum | cut -d' ' -f1)"
+printf 'native=%s\n' "$({ site_dawnc_stamp; site_prog_keys; sha256sum site/source-inputs/dawn.toml site/source-inputs/src/main.dawn; } | sha256sum | cut -d' ' -f1)"
