@@ -157,3 +157,5 @@ if __name__ == "__main__":
     check(args.dawnc.resolve(), args.expect)
     import semantic
     semantic.check(args.dawnc.resolve())
+    import signals
+    signals.check(args.dawnc.resolve())
