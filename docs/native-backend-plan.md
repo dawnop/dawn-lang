@@ -1,6 +1,6 @@
 # native 后端计划
 
-> 状态：**current —— 自举主线的落地日志，现状于 2026-11-08 核对**。2026-07-25 的
+> 状态：**current —— 自举主线的落地日志，现状于 2026-11-12 核对**。2026-07-25 的
 > Phase −1…6 与重排后的 S0–S4 记录保留在 §7、§11.4、§14.x。
 > **Phase 6（native 自举）于 2026-07-30 达成**（§14.23，main 提交 `83def2d`）；
 > 当前源码与出口门见 [nmain.dawn](../selfhost/src/nmain.dawn)、
@@ -21,6 +21,8 @@
 > 提供锁定的原始 class 元数据，完整检查与 `InputStream` 公开签名保持。工具与数据由
 > [prepare.sh](../site/prepare.sh) 独立制备，build 校验收据后重新生成全部 JSON；JVM
 > 只作独立对照门的参考。消费边界见 [建站输入设计](site-native-inputs-design.md)。
+> D31-1 的 reader、签名宿主、显式 doc 和建站收据均已合入；提交与剩余扩围边界见
+> [后续进度](history/m7-progress.md) 与 [Java 元数据设计](java-class-metadata-design.md)。
 > std 的后续状态见 [std-audit.md](std-audit.md)，不再把旧 S5 清单整份视为待办。
 >
 > 上游决策见 [llvm-backend-research.md](llvm-backend-research.md) §10、
@@ -1716,6 +1718,10 @@ CI 对这个目录只有一份 `actions/cache`;目录里有 dawnc 和 `site/nati
 不在 `redeploy.sh` 里单独加 dawnc 检查(`build.sh` 失败即停,已覆盖)。
 
 ## 16. 站点的文档输入改由 dawnc doc 生成(native A2,2026-10-20)
+
+本节记录 2026-10-20 的实现。原 `has_java` 分流和 `DAWN_DOC_BACKEND` 选择已由
+617cccb4（#940）移出生产路径；现行十四包均由 native doc 生成，JVM 仅留独立
+对照。完整身份、制备及消费边界见 [建站输入设计](site-native-inputs-design.md)。
 
 依据同 §15,调研 §5 的 A2 段(`doc --stdlib` 换 native 已证明逐字节一致;`packages/web` 卡住)。
 

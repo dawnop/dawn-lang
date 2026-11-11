@@ -313,3 +313,27 @@ List 桥在可变部分内自动可用；AST 记 `varargsPack`（开始打包的
 - `Result[T,E]` 的 `!`（序 5 只解 Option；Result 有 `?` 传播，痛点不在那儿）。
 - `@NonNull` 第三方 jar 识别（反射对象现成、接线成本低，但与痛点不相交，收益低）。
 - 瑕疵 4：上下文关键字 / `module.Type{}` / 限定调用一致性（纯人体工学，可择机）。
+
+
+## 建站 Java 包文档的后续落地（2026-11-12）
+
+本节记录自举之后的建站依赖收口，供中断后接续；不改变上文 M7 历史任务的范围。
+D31-1 保留正常 doc 的完整程序检查、依赖测试和 writer，经既有 Jsig 数据接缝消费
+固定 JDK 21 原始 class，不把 Java nominal 类型改成未知类型。
+
+| 阶段 | 已合入提交与 PR | 落地状态 |
+|---|---|---|
+| D1-1 | c68e1684（#932） | 受边界检查的 class reader、绑定目录、显式 Result 错误与闭包预检 |
+| D1-2 | bf5d175a（#935） | 继承、bridge/SAM、数组、候选诊断、上下文隔离与有界缓存 |
+| D1-3 | 29342fe4（#936） | 仅 doc 显式 `--java-signatures`；十五份 JSON 同候选 JVM 原字节资格 |
+| D1-4 | 617cccb4（#940） | 独立工具/data 制备和身份收据；十四包 native 文档与 fresh staging；共享 playground/C-only helper 保持 |
+| D1-5 | 产品基线 617cccb4 | 收官说明、设计状态和本表回填；同最终候选按完整 A1–A7、受控变异、true-parent 与预算身份核验 |
+
+当前使用与错误边界见 [Java 元数据设计](../java-class-metadata-design.md)，建站准备、
+消费和独立 JVM oracle 见 [建站输入设计](../site-native-inputs-design.md)。原生工具与
+原始 class 可按身份复用，文档每次从当前源重新生成；缺项、额外或陈旧输入均拒绝。
+JVM 仍可用于工具自举和独立 oracle，不是生产文档的额外 producer。
+
+剩余边界为通用 Maven、JMOD 运行时读取、多版本 JAR、Java 执行、Java 泛型精化、
+其它 native 命令取得 Java 能力；各项需另立来源、执行及错误合同。本线不发布、
+不部署、不重录 GPU 台账，固定点和既有发布资格保留原入口。
