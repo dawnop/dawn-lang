@@ -408,7 +408,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 29273s (the most this file's `3x` claims may add up to)
+# push-total: 31063s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2326,8 +2326,12 @@ jobs:
     # one deviation 56s; worst plus the deviation, rounded up to 5s, is 545s,
     # and the timeout is 3x that. A planning value until three main runs of
     # these steps exist.
-    # budget: 3x 545s planning value (488s replayed worst plus one deviation)
-    timeout-minutes: 28
+    # 2026-11-11: move effect provenance to contracts-8 and Bytes pack to
+    # contracts-7 as complete steps. Seven-day Ubuntu 24.04 first-attempt
+    # replay (11-03..10, n=15): P95/max 786s, sigma 104s; worst plus the
+    # larger of 10 percent or sigma, rounded up to 5s, is 895s.
+    # budget: 3x 895s planning value after whole-step rebalancing
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2401,14 +2405,6 @@ jobs:
       - name: Array contract
         run: ./scripts/array-contract/run.sh
 
-      # The first bulk Array/Bytes primitives. Byte order, wrapping, sign
-      # extension and the two panic sentences are contract clauses that the
-      # JVM runtime (a ByteBuffer loop) and the native one (C) implement
-      # without sharing a line, and no other gate states the answers: this one
-      # holds both to one hand-written expected.txt. About 5s wall locally.
-      - name: Bytes pack contract
-        run: ./scripts/bytes-pack-contract/run.sh
-
       # The flat 64-bit buffer a backend owes std/mem. Its panic wording is a
       # value once `catch_panic` hands it back, so both backends and the
       # sanitized native build are held to one expected.txt, and the native
@@ -2457,9 +2453,6 @@ jobs:
       # reached that name. This walks the table instead.
       - name: intrinsic parity (both backends, the same primitives)
         run: ./scripts/intrinsic-parity.py
-
-      - name: ordinary effect provenance on both backends
-        run: ./scripts/effect-provenance-contract/run.sh
 
       # The same table, read by a person instead of a backend.
       # `selfhost/builtins.dawn` is all 98 builtins as declarations, one line
@@ -2537,8 +2530,11 @@ jobs:
     # (run 39049482407), one deviation 111s; worst plus the deviation, rounded
     # up to 5s, is 855s, and the timeout is 3x that. A planning value until
     # three main runs of these steps exist.
-    # budget: 3x 855s planning value (741s replayed worst plus one deviation)
-    timeout-minutes: 43
+    # 2026-11-11: move the complete tea reconciler step to contracts-7.
+    # Seven-day Ubuntu 24.04 first-attempt replay (11-03..10, n=16):
+    # P95/max 759s, sigma 118s; worst plus that margin rounds up to 880s.
+    # budget: 3x 880s planning value after whole-step rebalancing
+    timeout-minutes: 44
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2559,15 +2555,6 @@ jobs:
       # `contracts`, budgeted at 28 minutes from a 558s worst observation.
       - name: Map reuse contract
         run: ./scripts/map-reuse-contract/run.sh
-
-      # packages/tea-core's reconciler is the one piece of the tree with no
-      # production caller and no way to get one here (the terminal's increment
-      # is a screen row, not a node). A package suite alone would then be a
-      # suite marking its own homework, so this adds the reconciler it replaced
-      # as an oracle over 484 tree pairs and 30 mutants that must each turn the
-      # suites red. 42s measured, on a job budgeted at 265s.
-      - name: tea reconciler contract
-        run: ./scripts/tea-reconciler-contract/run.sh
 
       # The steps below were the contracts-2 job until 2026-09-11: the half
       # that builds a private compiler or a sanitized runtime. The two halves
@@ -2687,8 +2674,11 @@ jobs:
     # Warm remaining-case probe: 54.1s; cold engine compiles: 58.2s total.
     # Reserve 420s for the complete cold contract on a slower CI runner;
     # the actual new step and affected job are recorded in the F3 handoff.
-    # budget: 3x 825s planning value (405s prior contracts plus 420s for cold SQLite)
-    timeout-minutes: 42
+    # 2026-11-11: move the complete Inflate step to contracts-6.
+    # Seven-day Ubuntu 24.04 first-attempt replay (11-03..10, n=17):
+    # P95/max 793s, sigma 109s; worst plus that margin rounds up to 905s.
+    # budget: 3x 905s planning value after whole-step rebalancing
+    timeout-minutes: 46
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2729,11 +2719,6 @@ jobs:
         run: |
           ./scripts/opaque-twin/run.sh --self-check
           ./scripts/opaque-twin/run.sh
-
-      # Java compresses, Dawn decompresses. That direction is the point: a
-      # round trip through one implementation proves only self-consistency.
-      - name: Inflate contract
-        run: ./scripts/inflate-contract/run.sh
 
       # The io batch (stdout bytes with a flush, append, range read, file size,
       # disk space, sleep): eight primitives the JVM runtime and the C runtime
@@ -2807,8 +2792,12 @@ jobs:
     runs-on: ubuntu-24.04
     # Measured 2026-11-01: 305.10s for this complete invocation.
     # Reserve twice that wall time and 50s setup, rounded up to 5s.
-    # budget: 3x 665s planning value for capture contracts
-    timeout-minutes: 34
+    # 2026-11-11: receive the complete Inflate step from contracts-3.
+    # Seven-day Ubuntu 24.04 first-attempt replay (11-03..10, n=17):
+    # P95/max 693s, sigma 82s. Cross-source maxima give 694s; adding the
+    # larger deviation and rounding up to 5s gives the planning value 780s.
+    # budget: 3x 780s planning value after whole-step rebalancing
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
       - name: the pinned C compiler
@@ -2819,14 +2808,24 @@ jobs:
       - name: Capture contracts on the JVM
         run: python3 scripts/trait-capture-contract/run.py --calls-backend jvm
 
+      # Java compresses, Dawn decompresses. That direction is the point: a
+      # round trip through one implementation proves only self-consistency.
+      - name: Inflate contract
+        run: ./scripts/inflate-contract/run.sh
+
   contracts-7:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-7') }}
     runs-on: ubuntu-24.04
     # Measured 2026-11-01: 269.62s for this complete invocation.
     # Reserve twice that wall time and 50s setup, rounded up to 5s.
-    # budget: 3x 590s planning value for capture contracts
-    timeout-minutes: 30
+    # 2026-11-11: receive complete Bytes pack and tea reconciler steps.
+    # Seven-day Ubuntu 24.04 first-attempt replay (11-03..10, n=15):
+    # P95/max 797s, sigma 78s. Cross-source sensitivity gives max 816s and
+    # sigma 85s; worst plus that margin rounds up to 905s. Synthetic
+    # combinations are sensitivity analysis, not independent observations.
+    # budget: 3x 905s planning value after whole-step rebalancing
+    timeout-minutes: 46
     steps:
       - uses: actions/checkout@v4
       - name: the pinned C compiler
@@ -2836,6 +2835,47 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Capture contracts on native
         run: python3 scripts/trait-capture-contract/run.py --calls-backend native
+
+      # The first bulk Array/Bytes primitives. Byte order, wrapping, sign
+      # extension and the two panic sentences are contract clauses that the
+      # JVM runtime (a ByteBuffer loop) and the native one (C) implement
+      # without sharing a line, and no other gate states the answers: this one
+      # holds both to one hand-written expected.txt. About 5s wall locally.
+      - name: Bytes pack contract
+        run: ./scripts/bytes-pack-contract/run.sh
+
+      # packages/tea-core's reconciler is the one piece of the tree with no
+      # production caller and no way to get one here (the terminal's increment
+      # is a screen row, not a node). A package suite alone would then be a
+      # suite marking its own homework, so this adds the reconciler it replaced
+      # as an oracle over 484 tree pairs and 30 mutants that must each turn the
+      # suites red. 42s measured, on a job budgeted at 265s.
+      - name: tea reconciler contract
+        run: ./scripts/tea-reconciler-contract/run.sh
+
+  # Keep the complete effect provenance contract together. This split adds
+  # one checkout, compiler pin and toolchain setup, with no shared artifacts.
+  contracts-8:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-8') }}
+    runs-on: ubuntu-24.04
+    # 2026-11-11: seven-day Ubuntu 24.04 first-attempt replay, 11-03..10:
+    # P95/max 765s with contracts-1 preparation, sigma 103s. Combining the
+    # effect maximum 708s with the family preparation maximum 94s gives
+    # 802s; add the larger of 10 percent or sigma and round up to 5s.
+    # The new shape needs independent Actions observations before calibration.
+    # budget: 3x 905s planning value for the complete effect provenance step
+    timeout-minutes: 46
+    steps:
+      - uses: actions/checkout@v4
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: ordinary effect provenance on both backends
+        run: ./scripts/effect-provenance-contract/run.sh
 
   # Slice C's classpath contract owns a fixture-only Maven repository and
   # private caches, so it cannot share dependency state with the broad test
