@@ -11,22 +11,21 @@ was checked in. The owning tests use in-memory Fs/Env and can also run in the
 native suite. Protocol-only comparisons would accept a server that silently
 always checks.
 
-`--shards N --shard I` runs the subjects (the positive first, then the
-mutants in their mutate.py order) whose index is I modulo N. The no-flag
-invocation is unchanged: the positive and every mutant. The subjects are
-dealt with the positive among them, not added to every shard as in
-module-memo.py, because here each subject is one `dawn check` plus one
-`dawn test` of selfhost and they cost the same: 65s to 97s each on a runner
-(the per-subject `OK:` timestamps of runs 39053565925 and 38576085599), so
-before the source-snapshot controls, the eight subjects split 4 + 4 and a
-positive in both shards would have been a ninth. A positive-less shard keeps
-what module-memo.py's shard note lists:
+`--shards N --shard I` selects subjects by index modulo N. With `--plan`,
+it selects complete named subjects from the checked-in cost plan instead.
+The no-flag invocation remains the positive and every mutant in registry
+order. Each subject is one whole `dawn check` plus `dawn test`, including
+its state sequences. The positive runs once across the selectors. A receipt
+is written only after every selected subject passes its existing oracle;
+lsp_memo_coverage.py accepts global coverage only after their full union.
+A positive-less shard keeps what module-memo.py's shard note lists:
 every anchor is applied before anything is built, every mutant must compile,
 and a mutant counts only when its owning assertion is the failure. That the
 assertions are not stuck on FAIL is a property of the tree, shown once per
-run by shard 0 over the same commit.
+run by the positive's selector over the same commit.
 """
 import argparse
+import os
 from pathlib import Path
 import re
 import runpy
@@ -37,6 +36,7 @@ import tempfile
 import time
 
 from cold import HERE, ROOT, apply, owned, run
+from lsp_memo_coverage import PLAN, read_plan, record
 
 CACHE = ("lsp/server", "workspace commits its module memo with its Program and drops it on conflict")
 RESOLVER = ("lsp/server", "a handler state cell answers at every spelling of it")
@@ -68,6 +68,10 @@ def check_cli():
     ]
     for count in [1, 2]:
         cases.append((['--shards', str(count), '--check-shards'], 0, 'unique subjects; disjoint shard sizes'))
+    cases.append((['--shards', '3', '--plan', str(PLAN), '--check-shards'],
+                  0, 'unique subjects; disjoint shard sizes'))
+    cases.append((['--shards', '2', '--plan', str(PLAN), '--check-shards'],
+                  2, 'plan shard count disagrees'))
     for args, expected, message in cases:
         result = subprocess.run([sys.executable, __file__, *args], text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -80,6 +84,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--shards', type=int, default=1)
     parser.add_argument('--shard', type=int, default=0)
+    parser.add_argument('--plan', type=Path,
+                        help='select complete named subjects from a stable cost plan')
     parser.add_argument('--check-shards', action='store_true',
                         help='validate mutation anchors and complete disjoint shard coverage without compiling')
     parser.add_argument('--self-test', action='store_true', help='check the shard flags without compiling')
@@ -89,6 +95,8 @@ def main():
         return
     if args.shards < 1 or not 0 <= args.shard < args.shards:
         parser.error('require --shards >= 1 and 0 <= --shard < --shards')
+    if os.environ.get('LSP_MEMO_COVERAGE_DIR') and not args.plan:
+        parser.error('coverage receipts require --plan')
     start = time.monotonic()
     paths = (SERVER, CHECKER, ANALYZE)
     originals = {path: (ROOT / path).read_text() for path in paths}
@@ -111,7 +119,11 @@ def main():
     names = [name for name, _, _, _ in subjects]
     if len(set(names)) != len(names):
         raise RuntimeError('Duplicate LSP module memo subject identity')
-    partitions = [names[index::args.shards] for index in range(args.shards)]
+    try:
+        partitions = (read_plan(args.plan, names, args.shards) if args.plan else
+                      [names[index::args.shards] for index in range(args.shards)])
+    except (ValueError, TypeError) as error:
+        parser.error(str(error))
     mutants_in = [[name for name in partition if name != "positive"] for partition in partitions]
     if args.check_shards and not all(mutants_in):
         parser.error('every shard must contain a mutant')
@@ -124,7 +136,8 @@ def main():
         print(f'OK: {len(names)} unique subjects; disjoint shard sizes ' +
               ', '.join(str(len(partition)) for partition in partitions))
         return
-    subjects = subjects[args.shard::args.shards]
+    by_name = {subject[0]: subject for subject in subjects}
+    subjects = [by_name[name] for name in partitions[args.shard]]
     with tempfile.TemporaryDirectory(prefix="dawn-lsp-module-memo-") as temp:
         root = Path(temp)
         for directory in ("selfhost", "compiler-plan"):
@@ -146,13 +159,16 @@ def main():
                 raise RuntimeError(f"{name} missed the owning assertion\n{output}")
             (root / path).write_text(originals[path])
             print(f"OK: lsp module memo, parses and resolver {name}", flush=True)
+    if directory := os.environ.get('LSP_MEMO_COVERAGE_DIR'):
+        record(Path(directory), args.shard, args.shards,
+               [name for name, _, _, _ in subjects], args.plan)
     if args.shards == 1:
         print(f"OK: {len(variants)} compiling LSP session, parse and resolver mutants; elapsed={time.monotonic()-start:.2f}s")
         return
     mutants = sum(1 for name, _, _, _ in subjects if name != "positive")
     print(f"OK: {mutants} of {len(variants)} compiling LSP session, parse and resolver mutants, "
           f"shard {args.shard}/{args.shards}, "
-          f"{'with' if args.shard == 0 else 'without'} the positive; elapsed={time.monotonic()-start:.2f}s")
+          f"{'with' if 'positive' in partitions[args.shard] else 'without'} the positive; elapsed={time.monotonic()-start:.2f}s")
 
 
 if __name__ == "__main__":

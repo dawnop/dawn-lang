@@ -408,7 +408,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 31063s (the most this file's `3x` claims may add up to)
+# push-total: 34433s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2048,43 +2048,33 @@ jobs:
   # runners showed against the same sweep for incremental-3-1 (849s hint,
   # 521s claim) and incremental-7-1 (835s, 522s). Restate each line at its
   # own worst once three main runs of it exist (done on 2026-09-30).
+  # 2026-11-11: rebalance the memo family from seven days of first-attempt
+  # Ubuntu 24.04 observations, 11-03T18:00Z through 11-10T18:00Z.
+  # The four old jobs reached 1274/1583/1137/1279s. Whole-step packing cannot
+  # place the 987s LSP step under 800s. Keep every stateful subject intact;
+  # select the eleven LSP check/test pairs by stable names in a cost plan.
+  # Six and seven jobs have no feasible packing under the paired and
+  # cross-source model; eight are the minimum in that model. New preparation
+  # uses all 59 observed preparations, including the 155/171s download tails.
+  # Every predicted P95 is <=800s and worst plus max(10%, one deviation)
+  # is <=950s. Each job reserves 3s, and each LSP selector another 5s for
+  # startup and its receipt. These are planning values, pending new runs.
+  # Four additional preparations at the 50s pooled median plus 13s for
+  # selector/receipt/union work add 213 job-seconds, 4.75% of paired family W
+  # at the median. The range is 4.25-5.05%; runner and test drift are separate.
+  # Three selectors are minimal too: two jobs cannot hold the observed
+  # over 1700s LSP subject total even without preparation. All eleven
+  # subjects must report once over the same inputs and plan before
+  # mutant-shards-complete accepts global LSP memo coverage. Assertions, cold
+  # and recovery branches, the six module-memo slices and subtimeouts stay.
   incremental-memo-1:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-memo-1') }}
     runs-on: ubuntu-24.04
-    # sweep hints: prefix-self-test 1.7s + prefix-shards-3-shard-0 583.3s +
-    # identity 565.7s = 1150.7s; x 0.56 + 50s = 695s.
-    # Raised on 2026-09-27 to the job's external run plus a tenth
-    # (789s on the run of 235f1054), above the sweep estimate.
-    # 2026-09-30, the first read of the 35-job shape: 541s worst (run
-    # 36670880544) over the 8 main runs of 09-27T18:08Z .. 09-30T09:12Z
-    # whose steps digest is this job's (gate-observations --since
-    # 2026-09-27T18:00Z). Restated to that plus a tenth, rounded up to
-    # 5s, 600s (870s before), and the timeout to 3x that.
-    # 2026-10-01, topped up after the nightly audit (issue #274, run
-    # 36853591265): its seven-day window, 09-24T11:09Z .. 10-01T10:51Z,
-    # holds a 666s run whose steps digest is this job's (run
-    # 36837314336). Restated to that plus a tenth, rounded up to 5s,
-    # 735s (600s before), and the timeout to 3x that.
-    # 2026-10-08, the nightly audit (issue #274, run 37613233179) found a 777s run of this
-    # job's current steps in the 150 main runs of 10-03T11:15Z .. 10-07T10:20Z
-    # (run 37584300090). Restated to that plus a tenth, rounded up to 5s, 855s,
-    # and the timeout to 3x that.
-    # 2026-10-08, rebalanced (the steps moved between the three jobs; see the
-    # note above incremental-memo-1). Claim from the last 15 successful push
-    # runs of ci.yml: the sum of each step's worst time, module-memo shard 0 (397s) and shard 1 (294s),
-    # plus 50s for toolchain and checkout, plus a tenth, rounded up to 5s.
-    # 2026-10-15, issue #274: 824s worst (run 38560439143) over 84 runs of this
-    # job's steps in the seven days to 10-15, one deviation 104s. Restated to
-    # worst plus the deviation, rounded up to 5s, 930s (820s before), and the
-    # timeout to 3x that.
-    # 2026-10-19, PR #793: 1017s with three shards of 25 mutants, 666s with
-    # shards 0 and 1 of five (run of e4132156: 337s for six subjects, 285s
-    # for five). Shards 0, 1 and 5 of six are six, four and four subjects:
-    # 39s setup + 337s + 2 x 4 x 57s = 832s at that run's rates, under the
-    # claim, which is kept.
-    # budget: 3x 930s worst observed plus one deviation (run 38560439143)
-    timeout-minutes: 47
+    # Paired P95 767.0s; cross-source P95 759.0s,
+    # worst 784.0s plus margin, rounded up to 5s.
+    # budget: 3x 865s planning value from seven-day step and case costs
+    timeout-minutes: 44
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2094,114 +2084,37 @@ jobs:
         run: python3 scripts/incremental-semantics-contract/module-memo.py --self-test
       - name: module memo equivalence and execution counts, shard 0
         run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 0
-      - name: module memo mutants shard 1
-        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 1
-      - name: module memo mutants shard 5
-        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 5
+      - name: Stateful body executor contracts
+        run: python3 scripts/incremental-semantics-contract/body-executor.py
+      - name: Full-product frozen body scheduler oracle
+        run: python3 scripts/incremental-semantics-contract/body-scheduler.py
 
   incremental-memo-2:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-memo-2') }}
     runs-on: ubuntu-24.04
-    # sweep hints: prefix-shards-3-shard-1 447.6s + lsp-prefix 721.2s =
-    # 1168.8s; x 0.56 + 50s = 705s.
-    # 2026-09-30, the first read of the 35-job shape: 647s worst (run
-    # 36694619992) over the 8 main runs of 09-27T18:08Z .. 09-30T09:12Z
-    # whose steps digest is this job's. A tenth over it rounds up to
-    # 715s, above the 705s claim; the claim already covers the
-    # run, so it is kept as the observed figure and not raised.
-    # 2026-10-01, topped up after the nightly audit (issue #274, run
-    # 36853591265): its seven-day window, 09-24T11:09Z .. 10-01T10:51Z,
-    # holds a 720s run whose steps digest is this job's (run
-    # 36851761310). Restated to that plus a tenth, rounded up to 5s,
-    # 795s (705s before), and the timeout to 3x that.
-    # 2026-10-05, topped up after the nightly audit (issue #274, run
-    # 37305388132): its window, the 150 main runs of 10-01T22:00Z ..
-    # 10-05T11:35Z, holds a 821s run whose steps digest is this job's (run
-    # 37288304802). Restated to that plus a tenth, rounded up to 5s, 905s
-    # (795s before), and the timeout to 3x that.
-    # 2026-10-08, rebalanced (the steps moved between the three jobs; see the
-    # note above incremental-memo-1). Claim from the last 15 successful push
-    # runs of ci.yml: the sum of each step's worst time, lsp-module-memo (638s), body-executor (113s), body-scheduler (45s) and the harness self-tests (1s),
-    # plus 50s for toolchain and checkout, plus a tenth, rounded up to 5s.
-    # 2026-10-19, split (issue #274): 997s worst (run 38576085599) over the 60
-    # successful main pushes of 10-12T05:22Z .. 10-17T17:23Z, median 830s, and
-    # the lsp-module-memo step alone was 632s median / 772s worst of it, so no
-    # deal of whole steps could bring this job under 700s and a restatement
-    # (997s plus a deviation) was over the pole. That step's eight subjects
-    # (the positive and seven mutants) cost the same, 65s to 97s each on a
-    # runner, so the script now deals them by index (--shards 2) and its
-    # second half is incremental-memo-4. The claim replays the same 60 runs
-    # with this job's lsp-module-memo step halved: 510s median, 611s worst
-    # (run 38576085599), one deviation 71s; worst plus the deviation, rounded
-    # up to 5s, is 685s (935s before), and the timeout is 3x that. A planning
-    # value until three main runs of these steps exist.
-    # 2026-10-19, PR #793: module-memo.py shard 4 of six (four mutants)
-    # joins this job, which took 567s and 530s on that PR's two runs. Planned
-    # from the worst of each step there: setup 41s + lsp-module-memo shard 0
-    # 357s + body-executor 119s + body-scheduler 47s + four subjects at 56s
-    # = 788s; a tenth over it, rounded up to 5s, is 870s (685s before), and
-    # the timeout is 3x that. A planning value until three main runs exist.
-    # budget: 3x 870s planning value (788s from the worst steps of two PR #793 runs plus a tenth)
-    timeout-minutes: 44
+    # Paired P95 743.0s; cross-source P95 732.0s,
+    # worst 767.0s plus margin, rounded up to 5s.
+    # budget: 3x 845s planning value from seven-day step and case costs
+    timeout-minutes: 43
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: LSP module memo, parse reuse and position resolver contracts, shard 0
-        run: python3 scripts/incremental-semantics-contract/lsp-module-memo.py --shards 2 --shard 0
-      - name: Stateful body executor contracts
-        run: python3 scripts/incremental-semantics-contract/body-executor.py
-      - name: Full-product frozen body scheduler oracle
-        run: python3 scripts/incremental-semantics-contract/body-scheduler.py
-      - name: module memo mutants shard 4
-        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 4
-      - name: LSP harness self-tests
-        run: |
-          python3 scripts/incremental-semantics-contract/lsp-module-memo.py --self-test
-          python3 scripts/incremental-semantics-contract/lsp-module-memo.py --shards 2 --check-shards
-          python3 scripts/incremental-semantics-contract/lsp-bench.py --self-test
-          python3 scripts/incremental-semantics-contract/lsp-configured.py --self-test
-          python3 scripts/incremental-semantics-contract/lsp-edit-matrix.py --self-test
-          python3 scripts/incremental-semantics-contract/lsp-project-matrix.py --self-test
+      - name: module memo mutants shard 1
+        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 1
+      - name: module memo mutants shard 2
+        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 2
 
   incremental-memo-3:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-memo-3') }}
     runs-on: ubuntu-24.04
-    # sweep hints: prefix-shards-3-shard-2 323.9s + body-executor 368.5s +
-    # cold 202.2s + body-scheduler 119.5s + probe 102.8s + lsp-self-tests 0.5s
-    # = 1117.4s; x 0.56 + 50s = 676s. The Java query probe step (probe.py)
-    # left on 2026-09-28 with the session rule it served
-    # (docs/lsp-module-memo-design.md); the claim is kept, not lowered, until
-    # a run of the new step set is observed.
-    # Raised on 2026-09-27 to the job's external run plus a tenth
-    # (713s on the run of 235f1054), above the sweep estimate.
-    # 2026-09-30, the first read of the 35-job shape: 468s worst (run
-    # 36694619992) over the 9 main runs of 09-27T18:08Z .. 09-30T09:12Z
-    # whose steps digest is this job's (gate-observations --since
-    # 2026-09-27T18:00Z). Restated to that plus a tenth, rounded up to
-    # 5s, 515s (785s before), and the timeout to 3x that.
-    # 2026-10-03, topped up after the nightly audit (issue #274, run
-    # 37115022635): a re-read of the seven days 09-26T12:49Z ..
-    # 10-03T11:22Z holds a 754s run whose steps digest is this job's (run
-    # 36906542838). Restated to that plus a tenth, rounded up to 5s,
-    # 830s (515s before), and the timeout to 3x that.
-    # That run was a slow runner, not this job: every step of it took
-    # about 1.7 times its median (toolchain 59s against 34s, shard 2
-    # 341s against 203s), and the other jobs of the run were normal.
-    # The audit holds a claim to the worst run all the same.
-    # 2026-10-08, rebalanced (the steps moved between the three jobs; see the
-    # note above incremental-memo-1). Claim from the last 15 successful push
-    # runs of ci.yml: the sum of each step's worst time, identity (334s), module-memo shard 2 (284s) and cold (74s),
-    # plus 50s for toolchain and checkout, plus a tenth, rounded up to 5s.
-    # 2026-10-19, PR #793: 895s with shard 2 of three (429s, eight
-    # mutants), 745s with shard 2 of five (273s, five). Shard 2 of six holds
-    # four: about 38s + 353s + 4 x 56s + 75s = 690s, under the claim, which
-    # is kept.
-    # budget: 3x 820s sum of per-step worst observed plus a tenth
-    timeout-minutes: 41
+    # Paired P95 566.0s; cross-source P95 566.0s,
+    # worst 566.0s plus margin, rounded up to 5s.
+    # budget: 3x 640s planning value from seven-day step and case costs
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2209,45 +2122,126 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: declaration identity, minting and carry contracts
         run: python3 scripts/incremental-semantics-contract/identity.py
-      - name: module memo mutants shard 2
-        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 2
-      - name: frozen cold transition reference
-        run: python3 scripts/incremental-semantics-contract/cold.py
 
-  # 2026-10-19: the second half of incremental-memo-2's lsp-module-memo step
-  # (the note above that job's budget line has the split). Defined after
-  # incremental-memo-3 although it is the shorter job, so the family stays in
-  # one place; the order is a soft dispatch nudge (the header), and a ~430s
-  # job queued behind the long ones still ends inside them.
   incremental-memo-4:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-memo-4') }}
     runs-on: ubuntu-24.04
-    # Replayed over the same 60 runs as incremental-memo-2's line: the
-    # setup, checkout and toolchain steps of each of those memo-2 runs plus
-    # half its lsp-module-memo step, 360s median, 430s worst (run
-    # 38576085599), one deviation 48s. Worst plus the deviation (more than a
-    # tenth), rounded up to 5s, is 480s, and the timeout is 3x that. A
-    # planning value until three main runs of this job exist.
-    # 2026-10-19, PR #793: module-memo.py shard 3 of six (four mutants)
-    # moved here. With shards 3 and 4 of five this job took 966s on the run
-    # of e4132156, its lsp-module-memo half 358s there against 227s the run
-    # before. Planned from the worst of each step over those two runs:
-    # setup 42s + lsp-module-memo shard 1 358s + four subjects at 56s (a
-    # five-mutant shard took 279s and 280s) = 624s; a tenth over it,
-    # rounded up to 5s, is 690s (480s before), and the timeout is 3x that.
-    # A planning value until three main runs of these steps exist.
-    # budget: 3x 690s planning value (624s from the worst steps of two PR #793 runs plus a tenth)
+    # Paired P95 614.6s; cross-source P95 596.3s,
+    # worst 632.7s plus margin, rounded up to 5s.
+    # budget: 3x 700s planning value from seven-day step and case costs
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: LSP module memo, parse reuse and position resolver contracts, shard 1
-        run: python3 scripts/incremental-semantics-contract/lsp-module-memo.py --shards 2 --shard 1
+      - name: LSP module memo, parse reuse and position resolver contracts, selector 0
+        env:
+          LSP_MEMO_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: python3 scripts/incremental-semantics-contract/lsp-module-memo.py --shards 3 --shard 0 --plan scripts/incremental-semantics-contract/lsp-module-memo-plan.json
+      - name: record the complete LSP memo selector
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-lsp-memo-0
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  incremental-memo-5:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-memo-5') }}
+    runs-on: ubuntu-24.04
+    # Paired P95 631.0s; cross-source P95 626.0s,
+    # worst 756.0s plus margin, rounded up to 5s.
+    # budget: 3x 835s planning value from seven-day step and case costs
+    timeout-minutes: 42
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: module memo mutants shard 4
+        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 4
+      - name: frozen cold transition reference
+        run: python3 scripts/incremental-semantics-contract/cold.py
+
+  incremental-memo-6:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-memo-6') }}
+    runs-on: ubuntu-24.04
+    # Paired P95 733.0s; cross-source P95 734.0s,
+    # worst 859.0s plus margin, rounded up to 5s.
+    # budget: 3x 945s planning value from seven-day step and case costs
+    timeout-minutes: 48
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: module memo mutants shard 3
         run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 3
+      - name: module memo mutants shard 5
+        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 5
+
+  incremental-memo-7:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-memo-7') }}
+    runs-on: ubuntu-24.04
+    # Paired P95 707.5s; cross-source P95 715.6s,
+    # worst 846.0s plus margin, rounded up to 5s.
+    # budget: 3x 935s planning value from seven-day step and case costs
+    timeout-minutes: 47
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: LSP module memo, parse reuse and position resolver contracts, selector 1
+        env:
+          LSP_MEMO_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: python3 scripts/incremental-semantics-contract/lsp-module-memo.py --shards 3 --shard 1 --plan scripts/incremental-semantics-contract/lsp-module-memo-plan.json
+      - name: record the complete LSP memo selector
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-lsp-memo-1
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  incremental-memo-8:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-memo-8') }}
+    runs-on: ubuntu-24.04
+    # Paired P95 712.3s; cross-source P95 694.8s,
+    # worst 830.5s plus margin, rounded up to 5s.
+    # budget: 3x 915s planning value from seven-day step and case costs
+    timeout-minutes: 46
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: LSP module memo, parse reuse and position resolver contracts, selector 2
+        env:
+          LSP_MEMO_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: python3 scripts/incremental-semantics-contract/lsp-module-memo.py --shards 3 --shard 2 --plan scripts/incremental-semantics-contract/lsp-module-memo-plan.json
+      - name: record the complete LSP memo selector
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-lsp-memo-2
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+      - name: LSP harness self-tests
+        run: |
+          python3 scripts/incremental-semantics-contract/lsp-module-memo.py --self-test
+          python3 scripts/incremental-semantics-contract/lsp-module-memo.py --shards 3 --plan scripts/incremental-semantics-contract/lsp-module-memo-plan.json --check-shards
+          python3 scripts/incremental-semantics-contract/lsp-bench.py --self-test
+          python3 scripts/incremental-semantics-contract/lsp-configured.py --self-test
+          python3 scripts/incremental-semantics-contract/lsp-edit-matrix.py --self-test
+          python3 scripts/incremental-semantics-contract/lsp-project-matrix.py --self-test
+          python3 scripts/incremental-semantics-contract/lsp_memo_coverage.py --self-test
 
   # contracts until 2026-09-23, split in two again because it had passed the
   # pole: 966s (run 35632425163) over the 15 completed main runs of
@@ -4677,6 +4671,9 @@ jobs:
   mutant-shards-complete:
     needs:
       - plan
+      - incremental-memo-4
+      - incremental-memo-7
+      - incremental-memo-8
       - native-diff-1
       - native-diff-2
       - syntax-mutants-3-1
@@ -4687,7 +4684,7 @@ jobs:
       - builtin-type-3-3
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'mutant-shards-complete')) }}
     runs-on: ubuntu-24.04
-    # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
+    # budget: floor (seconds-scale job: checkout, artifact download and coverage checks)
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -4708,6 +4705,7 @@ jobs:
           NATIVE_DIFF: ${{ needs.native-diff-1.result }} ${{ needs.native-diff-2.result }}
           SYNTAX: ${{ needs.syntax-mutants-3-1.result }} ${{ needs.syntax-mutants-3-2.result }} ${{ needs.syntax-mutants-3-3.result }}
           BUILTIN_TYPE: ${{ needs.builtin-type-3-1.result }} ${{ needs.builtin-type-3-2.result }} ${{ needs.builtin-type-3-3.result }}
+          LSP_MEMO: ${{ needs.incremental-memo-4.result }} ${{ needs.incremental-memo-7.result }} ${{ needs.incremental-memo-8.result }}
         run: |
           flags="--exclude-harness tile-golden"
           ran=false
@@ -4726,8 +4724,14 @@ jobs:
           echo "coverage flags: $flags (any family ran: $ran)"
           echo "flags=$flags" >> "$GITHUB_OUTPUT"
           echo "ran=$ran" >> "$GITHUB_OUTPUT"
+          memo_ran=false
+          if [ "$LSP_MEMO" != "skipped skipped skipped" ]; then memo_ran=true; fi
+          any_ran=$ran
+          if [ "$memo_ran" = true ]; then any_ran=true; fi
+          echo "memo_ran=$memo_ran" >> "$GITHUB_OUTPUT"
+          echo "any_ran=$any_ran" >> "$GITHUB_OUTPUT"
       - name: collect every shard's coverage record
-        if: ${{ steps.families.outputs.ran == 'true' }}
+        if: ${{ steps.families.outputs.any_ran == 'true' }}
         uses: actions/download-artifact@v4
         with:
           pattern: mutant-coverage-*
@@ -4740,6 +4744,9 @@ jobs:
           # $FLAGS is word-split on purpose: it is a list of flag pairs.
           python3 scripts/mutant-coverage/check.py \
             --coverage-dir coverage $FLAGS
+      - name: the LSP memo union covers every complete subject once
+        if: ${{ steps.families.outputs.memo_ran == 'true' }}
+        run: python3 scripts/incremental-semantics-contract/lsp_memo_coverage.py --coverage-dir coverage
 
 
   # Keep the complete correctness oracle separate from the route contract.
