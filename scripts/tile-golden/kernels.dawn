@@ -7,13 +7,15 @@
 # (bytes to the file) or `kernels --bytecode-version` (the header's version,
 # which run.sh holds against toolchain.txt).
 use std/list
+use std/bytes.{to_hex}
 use std/str
 use std/loc
-use std/io.{with_fs_real, write_bytes}
+use std/io.{with_fs_real, write_bytes, write_file}
 use std/gpu.{Axis, Free, Grouped, I4, ScalarDtype}
 use std/dtype.{F64, I64, Dtype, dtype_name}
 use std/int/i8.{I8}
 use std/int/i16.{I16}
+use std/int/i32
 use std/int/i32.{I32}
 use std/narrow.{F32, BF16, F16, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU, F4E2M1FN, F8E5M3FNU, Rounding, f32}
 use std/float.{INFINITY}
@@ -35,9 +37,9 @@ use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, FloatDtype
   idx_of, Fixed, Dyn, strided_view, gather_scatter_view, load_gather, atomic_red_view, At, Rows, NoPadding, PadZero,
   PadNegZero, PadNan, PadPosInf, PadNegInf, Padding, broadcast, reshape, idx_as_tile, le_i, atomic_cas, atomic_add, load_cell, load_at,
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
-  blocks_of, read_prefix, read_at, read_blocks, tile_shape, t_call_enter, t_call_exit, t_body_enter, t_body_exit }
+  blocks_of, read_prefix, read_at, read_blocks, tile_shape, t_call_enter, t_call_exit, t_body_enter, t_body_exit, t_idx_const, lanes_strided, retile }
 use tileir/prog.{TileOp, TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, trace6, cells, In, Out, Shared,
-  Whole, Scalar, trace_calls, erase, Convert, MmaFScaled }
+  Whole, Scalar, trace_calls, erase, Convert, MmaFScaled, MakeToken, IdxConst, IdxMul, CellViewOf, Load }
 use tileir/render.{render, text_debug}
 use tileir/bytecode.{encode, bytecode_version}
 use tileir/asm.{tileiras_args}
@@ -4137,12 +4139,12 @@ fn attr_addf(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 # The loop bound comparison, signed and unsigned, over a range that
 # straddles 2^31: from 0x7FFFFFF0 to 0x80000010 by one. Read as signed the
 # upper bound is negative and the loop does not run; read as unsigned it
-# is sixteen above the lower bound and the loop runs sixteen times. The
+# is 32 above the lower bound and the loop runs 32 times. The
 # kernel counts its own iterations into the two halves of the output, so
 # the attribute's effect is an integer a reader can check by hand and not
 # a rounding.
 const ATTR_UCMP_LO: Int = 0x7FFFFFF0
-const ATTR_UCMP_HI: Int = 0x80000010
+const ATTR_UCMP_HI: Int = i32.to_int(i32.wrap(0x80000010))
 
 fn attr_ucmp(out: Param[I32]) -> Unit !Dev = {
   let zero = i_const(0)
@@ -7235,7 +7237,246 @@ fn fa_config_check() -> Unit = {
   let _edge = fa_record("sm_100", 64, 512, 1, true, plan = Some(FaPlan { tiles = FaTiles { bq = 128, bk = 64 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))
 }
 
+# Numeric index construction and geometry have different representation limits.
+# Each group is also run alone against a package with one guard removed.
+fn bounds_expect(ok: Bool, what: String) -> Unit =
+  if ok { () } else { panic("index bounds: ${what}") }
+
+fn bounds_constant(value: Int, form: Int = 0, at: Loc = caller()) -> TileProg =
+  trace_kernel("index_bounds", [], () => {
+    if form == 0 { let _x = idx_const(value, at = at) }
+    else if form == 1 {
+      match value {
+        -2147483649 -> { let _x = idx_const(1) + -2147483649 }
+        2147483648 -> { let _x = idx_const(1) + 2147483648 }
+        4294967296 -> { let _x = idx_const(1) + 4294967296 }
+        4294967297 -> { let _x = idx_const(1) + 4294967297 }
+        9223372036854775807 -> { let _x = idx_const(1) + 9223372036854775807 }
+        -9223372036854775808 -> { let _x = idx_const(1) + -9223372036854775808 }
+        _ -> panic("unknown index literal")
+      }
+    }
+    else if form == 2 { for _i in d_range(0, value, at = at) { () } }
+    else { let _x = t_idx_const(value) }
+  }, at = at)
+
+fn bounds_geometry(n: Int, t: Int, blocks: Bool, at: Loc = caller()) -> TileProg = {
+  let (p, _e) = trace1("geometry_bounds", In(F64, cells([n], [t], along = [Free])), a => {
+    let _x = if blocks { blocks_of(a, 0, at = at) } else { extent_of(a, 0, at = at) }
+  }, at = at)
+  p
+}
+
+fn bounds_cells(extent: List[Int], source: String, dynamic_tile: Int = 1, at: Loc = caller()) -> TileProg = {
+  let tile = list.map(extent, e => if e == DYN_DIM { dynamic_tile } else { 1 })
+  let along = list.map(range(0, len(extent)), j => if source == "store_sub" { Axis(j) } else if extent[j] == DYN_DIM { Axis(0) } else { Free })
+  let g = cells(extent, tile, along = along)
+  if source == "store_sub" {
+    let (p, _e) = trace1("suffix_bounds", Out(F64, g), a => {
+      store_sub(a, list.map(extent, _e => 0), full(list.map(extent, _e => 1), 0.0), at = at)
+    }, at = at)
+    p
+  } else {
+    let (p, _e) = trace1("suffix_bounds", In(F64, g), a => {
+      if source == "prefix" { let _v = read_prefix(a, 1, idx_const(1), at = at) }
+      else if source == "retile" { let _v = retile(a, extent, tile, at = at) }
+      else { let _v = load_at(a, list.map(list.filter(along, x => x == Free), _x => idx_const(0)), at = at) }
+    }, at = at)
+    p
+  }
+}
+
+fn bounds_pointer(stride: Int, source: String, at: Loc = caller()) -> TileProg =
+  trace_kernel("pointer_bounds", [ByPtr("f64")], () => {
+    let a = param(F64, 0)
+    let b = idx_const(1)
+    if source == "load" { let _v = load(a, b, [2], strides = Some([stride]), at = at) }
+    else if source == "store" { store(a, b, full([2], 0.0), strides = Some([stride]), at = at) }
+    else { let _v = lanes_strided(b, [2], [stride], at = at) }
+  }, at = at)
+
+fn bounds_refused[T](body: fn() -> T, fragment: String, at: Loc) -> Unit = {
+  let why = mm_refusal(body)
+  bounds_expect(str.contains(why, fragment), "missing ${fragment}: ${why}")
+  bounds_expect(str.contains(why, " at ${at}"), "caller location missing: ${why}")
+  bounds_expect(str.contains(why, "op #"), "operation number missing: ${why}")
+}
+
+fn bounds_check(group: String) -> Unit = {
+  let at = loc.here()
+  if group == "idx" {
+    for value in [-2147483648, 2147483647, -1, 0, 1] {
+      let p = bounds_constant(value)
+      bounds_expect(list.any(p.ops, o => match o { IdxConst(_d, v) -> v == value
+        _ -> false }), "index endpoint changed")
+      bounds_expect(str.contains(render(p), "${value}"), "index text changed")
+      let _bc = encode(p)
+    }
+    for value in [-2147483649, 2147483648, 4294967296, 4294967297, 9223372036854775807, -9223372036854775808] {
+      for form in [0, 1, 2, 3] {
+        bounds_refused(() => bounds_constant(value, form, at = at), "index constant ${value} is outside signed i32", at)
+      }
+    }
+  } else if group == "ceil" {
+    # Exact answers are also checked by the harness's arbitrary precision oracle.
+    for (n, t, expected) in [(16, 8, 2), (17, 8, 3), (1, 8, 1), (9223372036854775807, 8589934592, 1073741824)] {
+      let p = bounds_geometry(n, t, true)
+      bounds_expect(list.any(p.ops, o => match o { IdxConst(_d, v) -> v == expected
+        _ -> false }), "ceil division ${n}/${t} must be ${expected}")
+      let _bc = encode(p)
+    }
+  } else if group == "geometry" {
+    for (n, t) in [(9223372036854775807, 1), (9223372036854775807, 2), (9223372036854775800, 8), (4294967296, 1)] {
+      bounds_refused(() => bounds_geometry(n, t, true, at = at), "geometry value", at)
+    }
+    for n in [2147483648, 4294967296, 4294967297] {
+      bounds_refused(() => bounds_geometry(n, 1, false, at = at), "geometry value", at)
+    }
+    let _edge = bounds_geometry(2147483647, 1, false)
+  } else if group == "suffix" || group == "prefix" {
+    let sources = if group == "prefix" { ["prefix"] } else { ["cell", "retile", "store_sub"] }
+    for source in sources {
+      for ext in [[1, 4294967296, 4294967296], [1, 9223372036854775807, 2], [1, 4294967296, 2147483648], [1, 4294967297, 4294967297]] {
+        bounds_refused(() => bounds_cells(ext, source, at = at), "static suffix product ${ext[2]} * ${ext[1]}", at)
+      }
+    }
+  } else if group == "mixed" {
+    for factor in [2147483648, 4294967296, 4294967297] {
+      bounds_refused(() => bounds_cells([1, DYN_DIM, factor], "cell", at = at), "geometry value", at)
+    }
+    for factor in [7, 2147483647] {
+      let p = bounds_cells([1, DYN_DIM, factor], "cell")
+      bounds_expect(list.any(p.ops, o => match o { IdxMul(_d, _a, _b) -> true
+        _ -> false }), "dynamic product missing")
+      let _bc = encode(p)
+    }
+    for tile in [2147483648, 4294967296] {
+      bounds_refused(() => bounds_cells([DYN_DIM], "cell", tile, at = at), "geometry value", at)
+    }
+    let (blocks, _entry) = trace1("dynamic_blocks", In(F64, cells([DYN_DIM], [4294967296])), a => {
+      let _x = blocks_of(a, 0)
+    })
+    let _blocks = encode(blocks)
+    for per in [2147483648, 4294967296] {
+      bounds_refused(() => trace1("piece_ratio", Out(F64, cells([per], [per])), a => {
+        store_sub(a, [0], full([1], 0.0), at = at)
+      }, at = at), "geometry value", at)
+    }
+    bounds_refused(() => trace1("dynamic_extent", In(F64, cells([DYN_DIM], [4294967296])), a => {
+      let _x = extent_of(a, 0, at = at)
+    }, at = at), "geometry value", at)
+  } else if group == "metadata" {
+    for source in ["cell", "retile", "prefix"] {
+      let p = bounds_cells([1, 4294967296], source)
+      bounds_expect(list.any(p.ops, o => match o { CellViewOf(_d, _p, _dt, _a, _sh, strides, _ds, _dst) -> strides == [4294967296, 1]
+        _ -> false }), "int64 capacity strides changed")
+      bounds_expect(str.contains(render(p), "4294967296"), "int64 metadata text changed")
+      let second = if source == "prefix" { "0000000000000080" } else { "0000000001000000" }
+      let fields = "02" ++ "0100000000000000" ++ second
+        ++ "02" ++ "0000000001000000" ++ "0100000000000000"
+      bounds_expect(str.contains(to_hex(encode(p)), fields), "int64 metadata fields changed")
+    }
+    let p = bounds_cells([4294967296, 4294967296], "cell")
+    let _bc = encode(p)
+    let explicit = trace_kernel("metadata_bounds", [ByPtr("f64")], () => {
+      let _v = tensor_view(param(F64, 0), idx_const(0), [4294967296, 2], [4294967296, 1])
+    })
+    let _bc2 = encode(explicit)
+    bounds_expect(str.contains(to_hex(_bc2), "02" ++ "0000000001000000" ++ "0200000000000000"
+        ++ "02" ++ "0000000001000000" ++ "0100000000000000"), "explicit int64 fields changed")
+    bounds_expect(row_major([4294967296, 4294967296]) == [4294967296, 1], "unused row-major total was checked")
+  } else if group == "pointer" {
+    for source in ["load", "store", "lanes"] {
+      for stride in [-2147483648, -1, 0, 1, 2147483647] { let _bc = encode(bounds_pointer(stride, source)) }
+      for stride in [-2147483649, 2147483648, 4294967296, 4294967297] {
+        bounds_refused(() => bounds_pointer(stride, source, at = at), "pointer stride", at)
+      }
+    }
+    bounds_refused(() => trace_kernel("default_pointer", [ByPtr("f64")], () => {
+      let _x = load(param(F64, 0), idx_const(0), [2, 4294967296], at = at)
+    }, at = at), "pointer stride", at)
+    bounds_expect(str.contains(mm_refusal(() => row_major([1, 4294967297, 4294967297], at = at)), "static suffix product"), "row-major overflow guard missing")
+  } else if group == "locations" {
+    let line = loc.line(loc.here())
+    let why = mm_refusal(() => bounds_constant(4294967296))
+    bounds_expect(str.contains(why, " at ${loc.path(at)}:${line + 1}:"), "default caller location missing: ${why}")
+    bounds_refused(() => trace_kernel("nested_index", [], () => {
+      for _i in d_range(0, 2, at = at) { let _x: Idx = 4294967296 }
+    }, at = at), "inside the body of a `d_range`", at)
+  } else if group == "lower" {
+    let p = bounds_constant(0)
+    for value in [-2147483649, 2147483648, 4294967296, 4294967297] {
+      let q = TileProg { ..p, ops = [MakeToken(0), IdxConst(1, value)] }
+      let why = mm_refusal(() => render(q))
+      bounds_expect(str.contains(why, "index constant ${value} is outside signed i32") && str.contains(why, "kernel `index_bounds`") && str.contains(why, "op #1"), "manual index lowering guard missing: ${why}")
+    }
+    let p2 = bounds_pointer(1, "load")
+    let q = TileProg { ..p2, ops = list.map(p2.ops, op => match op {
+      Load(d, t, p, dt, b, s, _st, m, pad, ti, h) -> Load(d, t, p, dt, b, s, [4294967296], m, pad, ti, h)
+      _ -> op
+    }) }
+    let why = mm_refusal(() => encode(q))
+    bounds_expect(str.contains(why, "pointer stride") && str.contains(why, "kernel `pointer_bounds`"), "manual pointer lowering guard missing: ${why}")
+  } else if group == "ordinary" {
+    let p = trace_kernel("integer_wrap", [], () => {
+      let a = i_const(4294967296)
+      let b = consti(I32, 4294967297)
+      let c = add_i(i_const(2147483647), i_const(1))
+      let d = mul_i(i_const(65536), i_const(65536))
+      d_print("%d %d %d %d", [a, b, c, d])
+      for _i in d_range(3, -1, step = By(-1)) { () }
+    })
+    let _bc = encode(p)
+    let _text = render(p)
+  } else { panic("unknown index bounds group ${group}") }
+}
+
+fn idx_bounds_checks(group: String) -> Unit !io = {
+  let groups = if group == "all" { ["idx", "ceil", "geometry", "suffix", "prefix", "mixed", "metadata", "pointer", "locations", "lower", "ordinary"] } else { [group] }
+  var failed = false
+  for g in groups {
+    match catch_panic(() => bounds_check(g)) {
+      Ok(_) -> println("PASS index bounds ${g}")
+      Err(e) -> {
+        println("FAIL index bounds ${g}: ${e.message}")
+        failed = true
+      }
+    }
+  }
+  if failed { panic("index bounds assertions failed") } else { () }
+}
+
+fn idx_bounds_records(root: String) -> Unit !io = {
+  var records: List[(String, TileProg)] = []
+  for v in [-2147483648, 2147483647, -1, 0, 1] {
+    records = records ++ [("index_${v}", bounds_constant(v))]
+  }
+  for source in ["cell", "retile", "prefix"] {
+    records = records ++ [("metadata_${source}", bounds_cells([1, 4294967296], source))]
+  }
+  records = records ++ [("metadata_unused_total", bounds_cells([4294967296, 4294967296], "cell")),
+    ("mixed_small", bounds_cells([1, DYN_DIM, 7], "cell")),
+    ("pointer_negative", bounds_pointer(-1, "load")),
+    ("ceil_limit", bounds_geometry(9223372036854775807, 8589934592, true))]
+  records = records ++ [("metadata_explicit", trace_kernel("explicit_bounds", [ByPtr("f64")], () => {
+    let _v = tensor_view(param(F64, 0), idx_const(0), [4294967296, 2], [4294967296, 1])
+  }))]
+  for (label, p) in records {
+    match with_fs_real(() => write_file("${root}/${label}.mlir", render(p))) {
+      Ok(_) -> ()
+      Err(e) -> panic(show(e))
+    }
+    match with_fs_real(() => write_bytes("${root}/${label}.tilebc", encode(p))) {
+      Ok(_) -> ()
+      Err(e) -> panic(show(e))
+    }
+  }
+}
+
 pub fn main() -> Unit !io = match args() {
+  ["--idx-bounds-emit", root] -> idx_bounds_records(root)
+  ["--idx-bounds-checks"] -> idx_bounds_checks("all")
+  ["--idx-bounds-checks", group] -> idx_bounds_checks(group)
   ["--scaled-probe", name, path] -> {
     let bytes = encode(scaled_probe_named(name))
     match with_fs_real(() => write_bytes(path, bytes)) {

@@ -52,6 +52,10 @@ tileir: kernel `shapes_differ`: op #4 `+`: rhs is tile<64xf64>, declared tile<12
 tileir: kernel `write_in`: op #7 `store_cell`: parameter 0 is an In, and nothing writes an In at src/main.dawn:84:3
 tileir: kernel `not_pow2`: every tile dimension is a power of two, got 100 in [100] at src/main.dawn:69:12
 tileir: kernel `pointer_store`: op #3 `store`: parameter 1 is an Out, which is written through its cells alone (store_cell, store_sub); a parameter written any other way is a Shared at src/main.dawn:89:3
+tileir: kernel `index_bounds`: op #1 `idx_const`: index constant 4294967296 is outside signed i32 [-2147483648, 2147483647]; write an explicit i32 bit pattern before constructing Idx at src/main.dawn:7:75
+tileir: kernel `geometry_bounds`: op #1 `extent_of`: parameter 0 dimension 0: geometry value 4294967296 is outside positive signed i32 [1, 2147483647] (extent=4294967296, tile=1) at src/main.dawn:10:16
+tileir: kernel `suffix_bounds`: op #4 `load_at`: parameter 0 extent dimension 1: static suffix product 4294967297 * 4294967297 exceeds signed int64 [1, 9223372036854775807] at src/main.dawn:15:16
+tileir: kernel `pointer_bounds`: op #2 `load`: parameter 0: pointer stride 4294967296 at dimension 0 is outside signed i32 [-2147483648, 2147483647] at src/main.dawn:20:16
 ```
 
 The trailing position is a line of your own kernel: the call you wrote that the
@@ -71,6 +75,10 @@ the message and not by a code.
 
 | Fragment of the message | Layer | Cause | Fix |
 |---|---|---|---|
+| `index constant` | record | an Int entering Idx is outside [-2147483648, 2147483647], including a literal, range bound or direct effect | use a representable value, or explicitly convert the intended bit pattern with i32.wrap and i32.to_int |
+| `geometry value` | record | a geometry query or a generated numeric factor cannot fit positive signed i32 | reduce the geometry; int64 view metadata can remain large until an index is needed |
+| `static suffix product` | record | a required static row-major stride would overflow int64 | reduce the capacity extents; unused total products are not computed |
+| `pointer stride` | record | a pointer offset ladder would narrow a static stride | use a stride in signed i32 range; zero and negative strides are allowed |
 | `, declared ` | record | an element-wise operation, a product or a store met an operand whose format or shape is not the one the operation (or the first operand) fixed | line the shapes up with `broadcast`, `reshape` or a `keepdims` reduction, or fix the load that made the odd one |
 | `nothing writes an In` | record | a store into a parameter whose marker is `In` | make the marker `Out` (written one cell per block) or `Shared` (the escape hatch for atomics and scatters) |
 | `which is written through its cells alone` | record | `store`, `scatter`, an atomic or `store_view` into an `Out` | write the cell with `store_cell` or `store_sub`, or mark the parameter `Shared` |

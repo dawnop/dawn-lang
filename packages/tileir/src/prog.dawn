@@ -15,6 +15,7 @@
 # `ops` is where the chain starts. Nothing else orders them; Tile IR gives
 # program order no meaning between memory operations.
 use std/list
+use bounds.{fits_i32, suffix_overflows}
 use std/mem
 use std/map
 use std/str
@@ -1142,6 +1143,45 @@ fn op_number(frames: List[Frame], ops: List[TileOp]) -> Int = {
 # of them.
 fn refuse_at(name: Ctx, frames: List[Frame], ops: List[TileOp], op: String, what: String) -> Never =
   refuse(name, "op #${op_number(frames, ops)} `${operator_name(op)}`: ${what}${region_note(frames, name.regions)}")
+
+# Only constants that become device indices use this positive numeric domain.
+# Static tensor-view metadata is int64 and does not pass through this check.
+fn check_geometry_i32(name: Ctx, frames: List[Frame], ops: List[TileOp], asking: String,
+  param: Int, dim: Int, value: Int, detail: String) -> Unit =
+  if value < 1 || not fits_i32(value) {
+    refuse_at(name, frames, ops, asking, "parameter ${param} dimension ${dim}: geometry value ${value} is outside positive signed i32 [1, 2147483647] (${detail})")
+  } else { () }
+
+fn check_pointer_strides(name: Ctx, frames: List[Frame], ops: List[TileOp], asking: String,
+  strides: List[Int], subject: String) -> Unit = {
+  for dim in range(0, len(strides)) {
+    if not fits_i32(strides[dim]) {
+      refuse_at(name, frames, ops, asking, "${subject}: pointer stride ${strides[dim]} at dimension ${dim} is outside signed i32 [-2147483648, 2147483647]")
+    } else { () }
+  }
+}
+
+fn suffix_multiply(name: Ctx, frames: List[Frame], ops: List[TileOp], asking: String,
+  param: Int, dim: Int, suffix: Int, extent: Int) -> Int = {
+  if suffix_overflows(suffix, extent) {
+    refuse_at(name, frames, ops, asking, "parameter ${param} extent dimension ${dim}: static suffix product ${suffix} * ${extent} exceeds signed int64 [1, 9223372036854775807]")
+  } else { () }
+  suffix * extent
+}
+
+fn capacity_strides(name: Ctx, frames: List[Frame], ops: List[TileOp], asking: String,
+  param: Int, extent: List[Int]) -> List[Int] = {
+  var strides: List[Int] = []
+  var suffix = 1
+  for k in range(0, len(extent)) {
+    let dim = len(extent) - 1 - k
+    strides = [suffix] ++ strides
+    if dim > 0 {
+      suffix = suffix_multiply(name, frames, ops, asking, param, dim, suffix, extent[dim])
+    } else { () }
+  }
+  strides
+}
 
 # The spelling the kernel's author used for an operation whose dialect name
 # has a plainer one. Only the four operators the `Add`, `Sub`, `Mul` and
@@ -2406,7 +2446,8 @@ type Built = {
 # along one axis share one: vadd's three views are one `num_blocks` and one
 # product, not three.
 fn cell_view_ops(name: Ctx, next0: Int, param: Int, dtype: String, align: Int, extent: List[Int],
-  tile: List[Int], pad: Padding, along: List[CellAxis], cut: List[Int], tv0: Int, exts0: Map[String, Int]) -> Built = {
+  tile: List[Int], pad: Padding, along: List[CellAxis], cut: List[Int], tv0: Int, exts0: Map[String, Int],
+  frames: List[Frame], here: List[TileOp], asking: String) -> Built = {
   var next = next0
   var ops: List[TileOp] = []
   var tv = tv0
@@ -2417,6 +2458,7 @@ fn cell_view_ops(name: Ctx, next0: Int, param: Int, dtype: String, align: Int, e
     var dyn_shape: List[Int] = []
     for j in range(0, r) {
       if extent[j] == DYN_DIM {
+        check_geometry_i32(name, frames, here, asking, param, j, tile[j], "dynamic extent tile")
         let key = "${along[j]}:${tile[j]}"
         let m = match map.get(exts, key) {
           Some(h) -> h
@@ -2450,6 +2492,7 @@ fn cell_view_ops(name: Ctx, next0: Int, param: Int, dtype: String, align: Int, e
         strides = [DYN_DIM] ++ strides
         dyn_strides = [dyn] ++ dyn_strides
       } else {
+        check_geometry_i32(name, frames, here, asking, param, j, stat, "dynamic stride static factor")
         let c = next
         let m = next + 1
         next = mint(name, next, 2)
@@ -2466,9 +2509,9 @@ fn cell_view_ops(name: Ctx, next0: Int, param: Int, dtype: String, align: Int, e
           ops = ops ++ [IdxMul(m, dyn, ext_h[j])]
           dyn = m
         }
-      } else {
-        stat = stat * extent[j]
-      }
+      } else if j > 0 {
+        stat = suffix_multiply(name, frames, here, asking, param, j, stat, extent[j])
+      } else { () }
     }
     tv = next
     next = mint(name, next, 1)
@@ -2775,6 +2818,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
         check_param(name, params, param, dtype, "load")
         check_shape(name, shape)
         check_strides(name, shape, strides)
+        check_pointer_strides(name, frames, ops, writer(marks, calls, "load"), strides, "parameter ${param}")
         match (mask0, pad0) {
           (None, Some(_)) -> refuse_at(name, frames, ops, writer(marks, calls, "load"), "a pad with no mask is never read: every lane of the load is")
           _ -> ()
@@ -2809,6 +2853,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
         }
         check_shape(name, shape)
         check_strides(name, shape, strides)
+        check_pointer_strides(name, frames, ops, writer(marks, calls, "store"), strides, "parameter ${param}")
         check_write(name, frames, ops, roles, Some(param), writer(marks, calls, "store"), false)
         let (g0, base) = settle(name, frames, grown(next, ops, held, spreads, pending), base0)
         let (g1, v) = widen(name, frames, g0, v0, dtype, shape)
@@ -2952,6 +2997,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
       t_lanes(base0, shape, strides) => {
         check_shape(name, shape)
         check_strides(name, shape, strides)
+        check_pointer_strides(name, frames, ops, writer(marks, calls, "lanes_strided"), strides, "lane offsets")
         let (g, base) = settle(name, frames, grown(next, ops, held, spreads, pending), base0)
         next = g.next
         ops = g.ops
@@ -3220,6 +3266,9 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
         d
       }
       t_idx_const(value) => {
+        if not fits_i32(value) {
+          refuse_at(name, frames, ops, writer(marks, calls, "idx_const"), "index constant ${value} is outside signed i32 [-2147483648, 2147483647]; write an explicit i32 bit pattern before constructing Idx")
+        } else { () }
         held = hold(held, next, "i32", [])
         let d = next
         next = mint(name, next, 1)
@@ -3671,7 +3720,8 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
           ()
         }
         if extent[dim] != DYN_DIM {
-          let n = if blocks { (extent[dim] + tile[dim] - 1) / tile[dim] } else { extent[dim] }
+          let n = if blocks { (extent[dim] - 1) / tile[dim] + 1 } else { extent[dim] }
+          check_geometry_i32(name, frames, ops, asking, param, dim, n, "extent=${extent[dim]}, tile=${tile[dim]}")
           held = hold(held, next, "i32", [])
           let d = next
           next = mint(name, next, 1)
@@ -3688,6 +3738,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
           if blocks {
             nb
           } else {
+            check_geometry_i32(name, frames, ops, asking, param, dim, tile[dim], "dynamic extent tile")
             let c = next
             let m = next + 1
             next = mint(name, next, 2)
@@ -4386,7 +4437,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
         if known < 0 {
           let align = CELL_ALIGN
           let built = cell_view_ops(name, next, param, dtype, align, extent, tile, pad, along, tile, 0 - 1,
-            visible_map(frames, ops, dyn_exts))
+            visible_map(frames, ops, dyn_exts), frames, ops, asking)
           dyn_exts = built.exts
           next = built.next
           ops = ops ++ built.ops
@@ -4431,7 +4482,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
         let limit = hs[0]
         check_rank0(name, frames, ops, held, asking, "prefix length", limit, "i32")
         let shape = list.map(range(0, len(extent)), j => if j == dim { DYN_DIM } else { extent[j] })
-        let strides = list.map(range(0, len(extent)), j => list.fold(list.drop(extent, j + 1), 1, (a, b) => a * b))
+        let strides = capacity_strides(name, frames, ops, asking, param, extent)
         let tv = next
         let pv = next + 1
         next = mint(name, next, 2)
@@ -4522,7 +4573,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
             None -> 0 - 1
           }
           let built = cell_view_ops(name, next, param, dtype, CELL_ALIGN, extent, tile, pad, along, sub, tv0,
-            visible_map(frames, ops, dyn_exts))
+            visible_map(frames, ops, dyn_exts), frames, ops, asking)
           dyn_exts = built.exts
           next = built.next
           ops = ops ++ built.ops
@@ -4551,6 +4602,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
           if per == 1 {
             ix = ix ++ [blocks[k]]
           } else {
+            check_geometry_i32(name, frames, ops, asking, param, k, per, "store_sub tile/sub ratio")
             let c = next
             let m = next + 1
             next = mint(name, next, 2)
@@ -4559,6 +4611,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
             if at[k] == 0 {
               ix = ix ++ [m]
             } else {
+              check_geometry_i32(name, frames, ops, asking, param, k, at[k], "store_sub piece offset")
               let a = next
               let s2 = next + 1
               next = mint(name, next, 2)
@@ -4593,7 +4646,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
         let claimed = len(roles) > param && roles[param] != Sharing
         let none: Map[String, Int] = map.empty()
         let built = cell_view_ops(name, next, param, dtype, if claimed { CELL_ALIGN } else { 0 }, extent, tile, pad,
-          list.map(tile, _t => Free), tile, 0 - 1, none)
+          list.map(tile, _t => Free), tile, 0 - 1, none, frames, ops, asking)
         next = built.next
         ops = ops ++ built.ops
         held = hold_view(hold_view(held, built.tv, TensorViewRow, dtype, extent),

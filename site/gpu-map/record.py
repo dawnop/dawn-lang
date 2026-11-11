@@ -78,7 +78,8 @@ CUT_AT = "# Trace `name` twice and answer the record, or panic if the two runs d
 # (old, new, how many times old must occur)
 EDITS = [
     ("use tileir/bytecode.{encode, bytecode_version}\n", "\n", 1),
-    ("use std/io.{with_fs_real, write_bytes}\n", "\n", 1),
+    ("use std/io.{with_fs_real, write_bytes, write_file}\n", "\n", 1),
+    ("use std/bytes.{to_hex}\n", "\n", 1),
     # the `--asm-args` mode of main (scripts/tile-gpu-diff) needs it; the cut
     # below removes that main
     ("use tileir/asm.{tileiras_args}\n", "\n", 1),
@@ -178,6 +179,7 @@ def dawnc() -> str:
 
 RENDER_IMPORT = re.compile(r"^use tileir/render\.\{([^}]*)\}\n", re.M)
 PROG_IMPORT = re.compile(r"^use tileir/prog\.\{([^}]*)\}\n", re.M)
+DEV_IMPORT = re.compile(r"^use tileir/dev\.\{([^}]*)\}\n", re.M)
 
 
 def harness_source(src: str, *, with_bytecode: bool = False) -> str:
@@ -193,10 +195,17 @@ def harness_source(src: str, *, with_bytecode: bool = False) -> str:
     found = PROG_IMPORT.findall(src)
     if len(found) != 1:
         fail(f"kernels.dawn has {len(found)} 'use tileir/prog.{{...}}' lines, expected 1")
-    # The TileOp checks below CUT_AT are removed from this harness too.
-    members = [name.strip() for name in found[0].split(",") if name.strip() != "TileOp"]
+    # These imports serve checks below CUT_AT, which this harness removes.
+    cut_only = {"TileOp", "MakeToken", "IdxConst", "IdxMul", "CellViewOf", "Load"}
+    members = [name.strip() for name in found[0].split(",") if name.strip() not in cut_only]
     members += [name for name in ["trace_calls", "op_count", "erase"] if name not in members]
     src = PROG_IMPORT.sub(lambda m: "use tileir/prog.{" + ", ".join(members) + "}" + "\n" * m.group(0).count("\n"), src, count=1)
+    found = DEV_IMPORT.findall(src)
+    if len(found) != 1:
+        fail(f"kernels.dawn has {len(found)} 'use tileir/dev.{{...}}' lines, expected 1")
+    cut_only = {"t_idx_const", "lanes_strided", "retile"}
+    members = [name.strip() for name in found[0].split(",") if name.strip() not in cut_only]
+    src = DEV_IMPORT.sub(lambda m: "use tileir/dev.{" + ", ".join(members) + "}" + "\n" * m.group(0).count("\n"), src, count=1)
     for old, new, times in EDITS:
         if src.count(old) != times:
             fail(f"kernels.dawn has {src.count(old)} of {old.strip()!r}, expected {times}")

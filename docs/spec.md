@@ -4186,6 +4186,13 @@ Out 只接受 Axis 单射。整数沿轴列表不再是接口。
 - 它不在设备上执行，也不在宿主上计算任何数值。`Dev` 的每个操作产生或消费**句柄**：
   `Tile[D]`（任意秩，0 秩即标量）、`Idx`、`Param[D]` 等不透明类型，幻影参数 `D` 是格式的值类型（§2.7）。
   句柄由 handler 签发；把一种句柄当另一种用，或把宿主的 `Int` 当句柄用，是类型错误。
+- `Idx` 的宿主常量构造（`idx_const`、字面量、`d_range` 的 `Int` 边界和直接
+  `Dev.t_idx_const`）只接受 signed-i32 `[-2147483648, 2147483647]`，越界在录制的
+  调用位置 panic。高位模式须显式写出，例如 `i32.to_int(i32.wrap(0x80000010))`；
+  `unsigned_cmp` 只改变比较方式。`consti` / `i_const` 仍按目标宽度截断，普通 i32
+  加乘仍回绕。几何查询与自动几何常量采用数值可表示检查；pointer stride 可为零或负，
+  但须在 signed-i32 内。静态 view shape / stride metadata 保留 int64，必要的静态
+  suffix 乘法在计算前检查 int64 上界，不计算未使用的 total。动态乘积只检查已知常量。
 - **记录**：`tileir/prog` 的 `trace_kernel(name, params, body)` 在**宿主运行期**、在记录
   handler 下把 `body` 跑恰好一次，答一个 `TileProg`（SSA 形式的 ADT）。`params` 是入口各参数
   的格式名，按位置。同一个体按同一顺序发同样的操作，得到的记录相等。

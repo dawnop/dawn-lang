@@ -37,6 +37,18 @@ LOWER = "packages/tileir/src/lower.dawn"
 KERNELS = "scripts/tile-golden/kernels.dawn"
 
 MUTATIONS = {
+    'idx-check-dropped': (('packages/tileir/src/prog.dawn', '        if not fits_i32(value) {', '        if false {'),),
+    'geometry-check-dropped': (('packages/tileir/src/prog.dawn', '  if value < 1 || not fits_i32(value) {', '  if false {'),),
+    'pointer-check-dropped': (('packages/tileir/src/prog.dawn', '    if not fits_i32(strides[dim]) {', '    if false {'),),
+    'ceil-div-overflows': (('packages/tileir/src/prog.dawn', '(extent[dim] - 1) / tile[dim] + 1', '(extent[dim] + tile[dim] - 1) / tile[dim]'),),
+    'suffix-check-dropped': (('packages/tileir/src/prog.dawn', '  if suffix_overflows(suffix, extent) {', '  if false && suffix_overflows(suffix, extent) {'),),
+    'suffix-positive-wrap-accepted': (('packages/tileir/src/prog.dawn', '  if suffix_overflows(suffix, extent) {', '  if suffix * extent <= 0 || (false && suffix_overflows(suffix, extent)) {'),),
+    'prefix-check-dropped': (('packages/tileir/src/prog.dawn', 'let strides = capacity_strides(name, frames, ops, asking, param, extent)', 'let strides = list.map(range(0, len(extent)), j => list.fold(list.drop(extent, j + 1), 1, (a, b) => a * b))'),),
+    'row-major-check-dropped': (('packages/tileir/src/dev.dawn', 'd < 1 || acc < 1 || suffix_overflows(acc, d)', 'd < 1 || acc < 1 || (false && suffix_overflows(acc, d))'),),
+    'idx-lower-check-dropped': (('packages/tileir/src/lower.dawn', '    if not fits_i32(value) {', '    if false {'),),
+    'pointer-lower-check-dropped': (('packages/tileir/src/lower.dawn', '    if not fits_i32(strides[dim]) {', '    if false {'),),
+    'metadata-limited-to-i32': (('packages/tileir/src/lower.dawn', '  CellViewOf(dst, param, dtype, align, shape, strides, dyn_shape, dyn_strides) -> {', '  CellViewOf(dst, param, dtype, align, shape, strides, dyn_shape, dyn_strides) -> {\n    if list.any(strides, s => s > 2147483647) { panic("metadata narrowed to i32") } else { () }'),),
+    'metadata-four-bytes': (('packages/tileir/src/bytecode.dawn', 'else { put_le(b, d, 8) }', 'else { put_le(b, d, 4) }'),),
     'e8m0-lower-no-magnitude': ((LOWER, 'ConstInt(d, i32, 0x7fffffff)', 'ConstInt(d, i32, 0xffffffff)'),),
     'e8m0-lower-rne32': ((LOWER, 'if from == "f64" { "ftof_zero" } else { "ftof" }', 'if from == "f64" { "ftof" } else { "ftof" }'),),
     'e8m0-lower-low': ((LOWER, 'ConstInt(d, i32, 0x00400000)', 'ConstInt(d, i32, 0x00800000)'),),
@@ -157,8 +169,8 @@ MUTATIONS = {
     ),),
     "load-dtype-f64": ((
         DEV,
-        't_load(position(p), param_dtype(p), i, shape, strides_or_row_major(shape, strides),',
-        't_load(position(p), "f64", i, shape, strides_or_row_major(shape, strides),',
+        't_load(position(p), param_dtype(p), i, shape, strides_or_row_major(shape, strides, at),',
+        't_load(position(p), "f64", i, shape, strides_or_row_major(shape, strides, at),',
     ),),
     "make-token-as-iota": ((
         BYTECODE,

@@ -47,6 +47,7 @@
 # that body and nowhere after it. A handle that refers to one of them after
 # the loop is refused by name; a ladder memoised inside is not reused after.
 use std/list
+use bounds.{fits_i32}
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred, DivBy, Hints, Padding, NoPadding, padding_present, padding_name}
@@ -578,6 +579,7 @@ fn permuted_shape(shape: List[Int], perm: List[Int]) -> List[Int] =
 # the number the next one takes, both counted as `TileProg.ops` reads depth
 # first (prog's `op_number`), which is the order this lowering visits them.
 type L = {
+  kernel: String,
   next: Int,
   names: Map[Int, Ref],
   tys: Map[Int, Ty],
@@ -778,6 +780,11 @@ fn spread_dim(l0: L, src: Ref, from: Ty, shape: List[Int], dim: Int, e: Elem) ->
 # a stride of one is no `muli` and a rank-0 tile is the base itself.
 # Memoised per (base handle, shape, strides).
 fn offsets(l0: L, base: Int, shape: List[Int], strides: List[Int]) -> (L, Ref) = {
+  for dim in range(0, len(shape)) {
+    if not fits_i32(strides[dim]) {
+      panic("tileir: kernel `${l0.kernel}`: op #${l0.at}: pointer stride ${strides[dim]} at dimension ${dim} is outside signed i32 [-2147483648, 2147483647]")
+    } else { () }
+  }
   let key = "off:${base}:${show(shape)}:${show(strides)}"
   match map.get(l0.memo, key) {
     Some(r) -> (l0, r)
@@ -1061,6 +1068,9 @@ fn lower_one(l0: L, op: TileOp) -> L = match op {
     emit(l1, SelectTile(d, i1_tile(shape), ty, c, a, b))
   }
   IdxConst(dst, value) -> {
+    if not fits_i32(value) {
+      panic("tileir: kernel `${l0.kernel}`: op #${l0.at}: index constant ${value} is outside signed i32 [-2147483648, 2147483647]")
+    } else { () }
     let (l1, d) = define(l0, dst, i32_scalar())
     emit(l1, ConstInt(d, i32_scalar(), value))
   }
@@ -1662,7 +1672,7 @@ pub fn lower(prog: TileProg) -> Kernel = {
 ## loop `lower` runs, not a second one, so the table and the instructions
 ## cannot disagree.
 pub fn lower_spans(prog: TileProg) -> (Kernel, List[Owner]) = {
-  var l = L { next = 0, names = map.empty(), tys = map.empty(), closed = map.empty(), memo = map.empty(), body = [],
+  var l = L { kernel = prog.name, next = 0, names = map.empty(), tys = map.empty(), closed = map.empty(), memo = map.empty(), body = [],
     owners = [], at = 0, next_op = 0 }
   for op in prog.ops {
     l = lower_op(l, op)

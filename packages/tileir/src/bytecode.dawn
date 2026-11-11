@@ -3713,3 +3713,21 @@ test "S2: tile_shape leaves the complete program, lower table and bytes unchange
       store_cell(o, reshape(reshape(load_cell(x), [4, 4]), [1, 4, 4])))
   assert a == manual && lower(a) == lower(manual) && encode(a) == encode(manual)
 }
+
+test "checked index endpoints retain four-byte i32 payloads" {
+  for (value, expected) in [(-2147483648, "00000080"), (2147483647, "ffffff7f"),
+    (-1, "ffffffff"), (0, "00000000"), (1, "01000000")] {
+    assert hex(int_payload("i32", 1, value)) == expected
+  }
+  # Integer tiles still truncate independently of checked Idx construction.
+  assert hex(int_payload("i32", 1, 4294967296)) == "00000000"
+  assert hex(int_payload("i32", 1, 4294967297)) == "01000000"
+}
+
+test "static view metadata retains eight-byte shape and stride fields" {
+  let w0 = W { strs = table(), types = table(), consts = table(), body = bytes.buf(), index = map.empty(), nvals = 0 }
+  let (w, i) = ty(w0, TensorView(Num("f64"), [1, 4294967296], [4294967296, 1]))
+  assert hex(w.types.items[i]) == "0e0000"
+    ++ "02" ++ "0100000000000000" ++ "0000000001000000"
+    ++ "02" ++ "0000000001000000" ++ "0100000000000000"
+}
