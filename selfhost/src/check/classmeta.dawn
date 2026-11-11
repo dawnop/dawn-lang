@@ -1,0 +1,667 @@
+# External class bytes must become checked data before a signature oracle can
+# trust them. This reader owns bounds and constant-pool validation independently
+# of the emitter's small classread probe, whose callers already own their bytes.
+# UTF constants retain UTF-16 units so a legal unpaired surrogate in an unused
+# Java string constant never becomes a lossy metadata name.
+
+use std/bytes
+use std/str
+use std/char
+use std/set
+use std/map
+use std/list.{contains}
+
+pub const MAX_CLASS_BYTES: Int = 16777216
+
+pub type MetadataError = {
+  kind: String, path: String, owner: Option[String], reference: Option[String], message: String
+} derive Show
+
+pub fn metadata_error(kind: String, path: String, message: String) -> MetadataError =
+  MetadataError { kind = kind, path = path, owner = None, reference = None, message = message }
+
+pub type JvmType = { name: String, component: Option[String], reference: Option[String], slots: Int }
+pub type MethodDescriptor = { params: List[JvmType], returns: JvmType }
+pub type MemberSignature = FieldSignature(value: JvmType) | MethodSignature(value: MethodDescriptor)
+pub type MemberMeta = {
+  signature: MemberSignature, access: Int, name: String, descriptor: String, throws: List[String], synthetic: Bool
+}
+pub type InnerMeta = { name: String, outer: Option[String], simple: Option[String], access: Int }
+pub type ClassMeta = {
+  name: String, access: Int, parent: Option[String], interfaces: List[String],
+  fields: List[MemberMeta], methods: List[MemberMeta], inner: List[InnerMeta],
+  enclosing: Option[String], major: Int, minor: Int
+}
+
+type Cursor = { data: Bytes, at: Int, end: Int, path: String }
+type Constant = { tag: Int, a: Int, b: Int, decoded: Option[String], class_name: Option[String] }
+type Attributes = {
+  throws: List[String], synthetic: Bool, inner: List[InnerMeta], enclosing: Option[String],
+  bootstraps: Int, code: Bool
+}
+
+fn bad(c: Cursor, message: String) -> MetadataError =
+  metadata_error("class-format", c.path, message ++ " at byte " ++ to_string(c.at))
+
+fn take(c: Cursor, n: Int) -> Result[(Cursor, Bytes), MetadataError] = {
+  if n < 0 || n > c.end - c.at { return Err(bad(c, "truncated structure")) }
+  Ok((Cursor { ..c, at = c.at + n }, bytes.slice(c.data, c.at, c.at + n)))
+}
+
+fn uint(c: Cursor, n: Int) -> Result[(Cursor, Int), MetadataError] = {
+  let (next, data) = take(c, n)?
+  var value = 0
+  for i in 0..n { value = value * 256 + bytes.at(data, i) }
+  Ok((next, value))
+}
+
+fn utf_units(c: Cursor, data: Bytes) -> Result[List[Int], MetadataError] = {
+  var units: List[Int] = []
+  var i = 0
+  while i < len(data) {
+    let a = bytes.at(data, i)
+    if a > 0 && a < 128 {
+      units = units ++ [a]
+      i = i + 1
+    } else {
+      let width = if a >= 0xC0 && a <= 0xDF { 2 } else if a >= 0xE0 && a <= 0xEF { 3 } else { 0 }
+      if width == 0 || width > len(data) - i { return Err(bad(c, "invalid modified UTF-8")) }
+      var value = a & (if width == 2 { 31 } else { 15 })
+      for j in 1..width {
+        let b = bytes.at(data, i + j)
+        if b < 128 || b > 191 { return Err(bad(c, "invalid modified UTF-8 continuation")) }
+        value = value * 64 + (b & 63)
+      }
+      if (width == 2 && value < 128 && not (a == 0xC0 && value == 0)) ||
+        (width == 3 && value < 2048) { return Err(bad(c, "overlong modified UTF-8")) }
+      units = units ++ [value]
+      i = i + width
+    }
+  }
+  Ok(units)
+}
+
+fn utf_text(c: Cursor, units: List[Int]) -> Result[String, MetadataError] = {
+  var out: List[Char] = []
+  var i = 0
+  while i < len(units) {
+    var value = units[i]
+    if value >= 0xD800 && value <= 0xDBFF {
+      if i + 1 >= len(units) || units[i + 1] < 0xDC00 || units[i + 1] > 0xDFFF {
+        return Err(bad(c, "unpaired surrogate in metadata name"))
+      }
+      value = 0x10000 + (value - 0xD800) * 1024 + units[i + 1] - 0xDC00
+      i = i + 1
+    }
+    match char.of(value) {
+      Some(ch) -> { out = out ++ [ch] }
+      None -> return Err(bad(c, "invalid scalar in metadata name"))
+    }
+    i = i + 1
+  }
+  Ok(from_code_points(out))
+}
+
+fn constant(c: Cursor, pool: List[Constant], index: Int, tags: List[Int]) -> Result[Constant, MetadataError] = {
+  if index <= 0 || index >= len(pool) { return Err(bad(c, "constant pool index out of range")) }
+  let entry = pool[index]
+  if not contains(tags, entry.tag) { return Err(bad(c, "constant pool tag mismatch")) }
+  Ok(entry)
+}
+
+fn text(c: Cursor, pool: List[Constant], index: Int) -> Result[String, MetadataError] = {
+  let entry = constant(c, pool, index, [1])?
+  match entry.decoded {
+    Some(value) -> Ok(value)
+    None -> Err(bad(c, "unpaired surrogate in metadata name"))
+  }
+}
+
+## A JVM internal class name, with path separators checked before conversion.
+pub fn binary_name(name: String) -> Result[String, MetadataError] = {
+  if name == "" { return Err(metadata_error("class-format", "", "empty class name")) }
+  for part in str.split(name, "/") {
+    if part == "" || str.contains(part, ".") || str.contains(part, ";") ||
+      str.contains(part, "[") || str.contains(part, "\\") || str.contains(part, "\u{0}") {
+      return Err(metadata_error("class-format", "", "invalid internal class name: " ++ name))
+    }
+  }
+  Ok(str.replace(name, "/", "."))
+}
+
+fn type_at(s: String, at: Int, allow_void: Bool) -> Result[(Int, JvmType), MetadataError] = {
+  let cps = code_points(s)
+  if at >= len(cps) { return Err(metadata_error("class-format", "", "truncated descriptor")) }
+  var i = at
+  while i < len(cps) && cps[i] == '[' { i = i + 1 }
+  let dims = i - at
+  if dims > 255 || i >= len(cps) { return Err(metadata_error("class-format", "", "invalid array descriptor")) }
+  var name = ""
+  var reference: Option[String] = None
+  var slots = 1
+  match cps[i] {
+    'B' -> { name = "byte" }
+    'C' -> { name = "char" }
+    'D' -> { name = "double"
+      slots = 2 }
+    'F' -> { name = "float" }
+    'I' -> { name = "int" }
+    'J' -> { name = "long"
+      slots = 2 }
+    'S' -> { name = "short" }
+    'Z' -> { name = "boolean" }
+    'V' -> {
+      if not allow_void || dims != 0 { return Err(metadata_error("class-format", "", "void descriptor in value position")) }
+      name = "void"
+      slots = 0
+    }
+    'L' -> {
+      let start = i + 1
+      i = start
+      while i < len(cps) && cps[i] != ';' { i = i + 1 }
+      if i >= len(cps) { return Err(metadata_error("class-format", "", "unterminated reference descriptor")) }
+      name = binary_name(str.slice(s, start, i))?
+      reference = Some(name)
+    }
+    _ -> return Err(metadata_error("class-format", "", "invalid descriptor tag"))
+  }
+  let end = i + 1
+  var component: Option[String] = None
+  if dims > 0 {
+    component = Some(if dims == 1 { name } else { str.replace(str.slice(s, at + 1, end), "/", ".") })
+    name = str.replace(str.slice(s, at, end), "/", ".")
+    slots = 1
+  }
+  Ok((end, JvmType { name = name, component = component, reference = reference, slots = slots }))
+}
+
+pub fn field_descriptor(s: String) -> Result[JvmType, MetadataError] = {
+  let (end, value) = type_at(s, 0, false)?
+  if end != len(s) { return Err(metadata_error("class-format", "", "trailing field descriptor")) }
+  Ok(value)
+}
+
+pub fn method_descriptor(s: String) -> Result[MethodDescriptor, MetadataError] = {
+  if not str.starts_with(s, "(") { return Err(metadata_error("class-format", "", "method descriptor needs parameters")) }
+  var at = 1
+  var params: List[JvmType] = []
+  var slots = 0
+  let cps = code_points(s)
+  while at < len(cps) && cps[at] != ')' {
+    let (end, value) = type_at(s, at, false)?
+    slots = slots + value.slots
+    if slots > 255 { return Err(metadata_error("class-format", "", "too many parameter slots")) }
+    params = params ++ [value]
+    at = end
+  }
+  if at >= len(cps) { return Err(metadata_error("class-format", "", "unterminated method descriptor")) }
+  let (end, returns) = type_at(s, at + 1, true)?
+  if end != len(cps) { return Err(metadata_error("class-format", "", "trailing method descriptor")) }
+  Ok(MethodDescriptor { params = params, returns = returns })
+}
+
+fn class_name(c: Cursor, pool: List[Constant], index: Int) -> Result[String, MetadataError] = {
+  let entry = constant(c, pool, index, [7])?
+  match entry.class_name {
+    Some(name) -> return Ok(name)
+    None -> ()
+  }
+  let name = text(c, pool, entry.a)?
+  if str.starts_with(name, "[") {
+    let value = field_descriptor(name)?
+    Ok(value.name)
+  } else { binary_name(name) }
+}
+
+fn read_pool(c0: Cursor) -> Result[(Cursor, List[Constant]), MetadataError] = {
+  let (start, count) = uint(c0, 2)?
+  if count == 0 { return Err(bad(c0, "empty constant pool")) }
+  let empty = Constant { tag = 0, a = 0, b = 0, decoded = None, class_name = None }
+  var pool = [empty]
+  var c = start
+  while len(pool) < count {
+    let (c1, tag) = uint(c, 1)?
+    c = c1
+    var entry = Constant { ..empty, tag = tag }
+    if tag == 1 {
+      let (c2, n) = uint(c, 2)?
+      let (c3, data) = take(c2, n)?
+      let units = utf_units(c2, data)?
+      let decoded: Option[String] = match utf_text(c2, units) {
+        Ok(value) -> Some(value)
+        Err(_) -> None
+      }
+      entry = Constant { ..entry, decoded = decoded }
+      c = c3
+    } else if tag == 3 || tag == 4 || tag == 5 || tag == 6 {
+      let (c2, _) = take(c, if tag == 5 || tag == 6 { 8 } else { 4 })?
+      c = c2
+    } else if contains([7, 8, 16, 19, 20], tag) {
+      let (c2, a) = uint(c, 2)?
+      entry = Constant { ..entry, a = a }
+      c = c2
+    } else if contains([9, 10, 11, 12, 15, 17, 18], tag) {
+      let (c2, a) = uint(c, if tag == 15 { 1 } else { 2 })?
+      let (c3, b) = uint(c2, 2)?
+      entry = Constant { ..entry, a = a, b = b }
+      c = c3
+    } else { return Err(bad(c, "unknown constant pool tag")) }
+    pool = pool ++ [entry]
+    if tag == 5 || tag == 6 {
+      if len(pool) >= count { return Err(bad(c, "wide constant lacks reserved slot")) }
+      pool = pool ++ [empty]
+    }
+  }
+  Ok((c, pool))
+}
+
+# Class and UTF entries are shared by index. Repeating a reference must not
+# multiply the size of a long name or descriptor in the resulting metadata.
+fn named_pool(c: Cursor, pool: List[Constant]) -> Result[List[Constant], MetadataError] = {
+  var names: Map[Int, String] = map.empty()
+  var out: List[Constant] = []
+  for index in 0..len(pool) {
+    let entry = pool[index]
+    if entry.tag == 7 {
+      let name = match map.get(names, entry.a) {
+        Some(value) -> value
+        None -> class_name(c, pool, index)?
+      }
+      names = map.insert(names, entry.a, name)
+      out = out ++ [Constant { ..entry, class_name = Some(name) }]
+    } else { out = out ++ [entry] }
+  }
+  Ok(out)
+}
+
+fn validate_descriptor(c: Cursor, pool: List[Constant], index: Int, validated: Set[Int]) -> Result[Set[Int], MetadataError] = {
+  if set.has(validated, index) { return Ok(validated) }
+  let desc = text(c, pool, index)?
+  if str.starts_with(desc, "(") { let _ = method_descriptor(desc)? }
+  else { let _ = field_descriptor(desc)? }
+  Ok(set.insert(validated, index))
+}
+
+fn validate_pool(c: Cursor, pool: List[Constant]) -> Result[Unit, MetadataError] = {
+  var validated: Set[Int] = set.empty()
+  for index in 1..len(pool) {
+    let entry = pool[index]
+    if contains([7, 8, 16, 19, 20], entry.tag) {
+      let _ = constant(c, pool, entry.a, [1])?
+      if entry.tag == 7 { let _ = class_name(c, pool, index)? }
+      if entry.tag == 16 {
+        if not str.starts_with(text(c, pool, entry.a)?, "(") { return Err(bad(c, "invalid method type descriptor")) }
+        validated = validate_descriptor(c, pool, entry.a, validated)?
+      }
+    } else if contains([9, 10, 11], entry.tag) {
+      let _ = constant(c, pool, entry.a, [7])?
+      let nt = constant(c, pool, entry.b, [12])?
+      let descriptor = text(c, pool, nt.b)?
+      if (entry.tag != 9) != str.starts_with(descriptor, "(") { return Err(bad(c, "member reference descriptor kind mismatch")) }
+      if entry.tag != 9 {
+        let name = text(c, pool, nt.a)?
+        if name == "<clinit>" || (name == "<init>" && (entry.tag != 10 || not str.ends_with(descriptor, ")V"))) {
+          return Err(bad(c, "invalid method reference name or return"))
+        }
+      }
+    } else if entry.tag == 12 {
+      let name = text(c, pool, entry.a)?
+      let desc = text(c, pool, entry.b)?
+      let method = str.starts_with(desc, "(")
+      if not member_name(name, method) { return Err(bad(c, "invalid name-and-type name")) }
+      validated = validate_descriptor(c, pool, entry.b, validated)?
+    } else if entry.tag == 15 {
+      let tags = match entry.a {
+        1 | 2 | 3 | 4 -> [9]
+        5 | 8 -> [10]
+        6 | 7 -> [10, 11]
+        9 -> [11]
+        _ -> return Err(bad(c, "invalid method handle kind"))
+      }
+      let target = constant(c, pool, entry.b, tags)?
+      let nt = constant(c, pool, target.b, [12])?
+      let name = text(c, pool, nt.a)?
+      if (entry.a == 8 && name != "<init>") || (entry.a != 8 && (name == "<init>" || name == "<clinit>")) {
+        return Err(bad(c, "invalid method handle target name"))
+      }
+    } else if entry.tag == 17 || entry.tag == 18 {
+      let nt = constant(c, pool, entry.b, [12])?
+      if (entry.tag == 18) != str.starts_with(text(c, pool, nt.b)?, "(") {
+        return Err(bad(c, "dynamic constant descriptor kind mismatch"))
+      }
+    }
+  }
+  Ok(())
+}
+
+fn class_list(c0: Cursor, pool: List[Constant]) -> Result[(Cursor, List[String]), MetadataError] = {
+  let (start, n) = uint(c0, 2)?
+  var c = start
+  var names: List[String] = []
+  for _ in 0..n {
+    let (next, index) = uint(c, 2)?
+    let name = class_name(c, pool, index)?
+    if str.starts_with(name, "[") { return Err(bad(c, "array in class hierarchy")) }
+    names = names ++ [name]
+    c = next
+  }
+  Ok((c, names))
+}
+
+fn attributes(c0: Cursor, pool: List[Constant], location: String, depth: Int, descriptor: String = "") -> Result[(Cursor, Attributes), MetadataError] = {
+  if depth > 2 { return Err(bad(c0, "invalid nested Code attribute")) }
+  let (start, count) = uint(c0, 2)?
+  var c = start
+  var out = Attributes { throws = [], synthetic = false, inner = [], enclosing = None, bootstraps = -1, code = false }
+  var seen: Set[String] = set.empty()
+  for _ in 0..count {
+    let (c1, name_index) = uint(c, 2)?
+    let name = text(c, pool, name_index)?
+    if (name == "SourceFile" && location != "class") ||
+      ((name == "Signature" || name == "Synthetic") && location == "code") {
+      return Err(bad(c, "attribute in wrong structure"))
+    }
+    let (c2, n) = uint(c1, 4)?
+    let (next, _) = take(c2, n)?
+    var a = Cursor { ..c2, end = next.at }
+    let known = contains(["Synthetic", "Signature", "SourceFile", "ConstantValue", "Exceptions", "InnerClasses", "EnclosingMethod", "NestHost", "NestMembers", "PermittedSubclasses", "BootstrapMethods", "MethodParameters", "Code"], name)
+    if known && set.has(seen, name) { return Err(bad(c, "duplicate " ++ name ++ " attribute")) }
+    seen = set.insert(seen, name)
+    if name == "Synthetic" {
+      out = Attributes { ..out, synthetic = true }
+    } else if name == "Signature" || name == "SourceFile" {
+      let (a1, index) = uint(a, 2)?
+      let _ = constant(a, pool, index, [1])?
+      a = a1
+    } else if name == "ConstantValue" {
+      if location != "field" { return Err(bad(a, "ConstantValue outside field")) }
+      let (a1, index) = uint(a, 2)?
+      let tag = match descriptor {
+        "B" | "C" | "I" | "S" | "Z" -> 3
+        "J" -> 5
+        "F" -> 4
+        "D" -> 6
+        "Ljava/lang/String;" -> 8
+        _ -> return Err(bad(a, "ConstantValue does not match field descriptor"))
+      }
+      let _ = constant(a, pool, index, [tag])?
+      a = a1
+    } else if name == "Exceptions" || name == "NestMembers" || name == "PermittedSubclasses" {
+      if (name == "Exceptions" && location != "method") || (name != "Exceptions" && location != "class") {
+        return Err(bad(a, "attribute in wrong structure"))
+      }
+      let (a1, names) = class_list(a, pool)?
+      if name == "Exceptions" { out = Attributes { ..out, throws = names } }
+      a = a1
+    } else if name == "NestHost" || name == "EnclosingMethod" {
+      if location != "class" { return Err(bad(a, "class attribute outside class")) }
+      let (a1, index) = uint(a, 2)?
+      let owner = class_name(a, pool, index)?
+      a = a1
+      if name == "EnclosingMethod" {
+        let (a2, method) = uint(a, 2)?
+        if method != 0 {
+          let nt = constant(a, pool, method, [12])?
+          let _ = method_descriptor(text(a, pool, nt.b)?)?
+        }
+        out = Attributes { ..out, enclosing = Some(owner) }
+        a = a2
+      }
+    } else if name == "InnerClasses" {
+      if location != "class" { return Err(bad(a, "InnerClasses outside class")) }
+      let (a1, ninner) = uint(a, 2)?
+      a = a1
+      var inner: List[InnerMeta] = []
+      for _j in 0..ninner {
+        let (a2, index) = uint(a, 2)?
+        let (a3, outer_index) = uint(a2, 2)?
+        let (a4, simple_index) = uint(a3, 2)?
+        let (a5, access) = uint(a4, 2)?
+        let inner_name = class_name(a, pool, index)?
+        let outer: Option[String] = if outer_index == 0 { None } else { Some(class_name(a, pool, outer_index)?) }
+        let simple: Option[String] = if simple_index == 0 { None } else { Some(text(a, pool, simple_index)?) }
+        inner = inner ++ [InnerMeta { name = inner_name, outer = outer, simple = simple, access = access }]
+        a = a5
+      }
+      out = Attributes { ..out, inner = inner }
+    } else if name == "BootstrapMethods" {
+      if location != "class" { return Err(bad(a, "BootstrapMethods outside class")) }
+      let (a1, nmethods) = uint(a, 2)?
+      a = a1
+      for _j in 0..nmethods {
+        let (a2, index) = uint(a, 2)?
+        let _ = constant(a, pool, index, [15])?
+        let (a3, nargs) = uint(a2, 2)?
+        a = a3
+        for _k in 0..nargs {
+          let (a4, arg) = uint(a, 2)?
+          let _ = constant(a, pool, arg, [3, 4, 5, 6, 7, 8, 15, 16, 17])?
+          a = a4
+        }
+      }
+      out = Attributes { ..out, bootstraps = nmethods }
+    } else if name == "MethodParameters" {
+      if location != "method" { return Err(bad(a, "MethodParameters outside method")) }
+      let (a1, nparams) = uint(a, 1)?
+      a = a1
+      for _j in 0..nparams {
+        let (a2, index) = uint(a, 2)?
+        let (a3, _) = uint(a2, 2)?
+        if index != 0 { let _ = constant(a, pool, index, [1])? }
+        a = a3
+      }
+    } else if name == "Code" {
+      if location != "method" { return Err(bad(a, "Code outside method")) }
+      let (a1, _) = take(a, 4)?
+      let (a2, size) = uint(a1, 4)?
+      if size == 0 || size >= 65536 { return Err(bad(a, "invalid Code length")) }
+      let (a3, _) = take(a2, size)?
+      let (a4, handlers) = uint(a3, 2)?
+      a = a4
+      for _j in 0..handlers {
+        let (a5, lo) = uint(a, 2)?
+        let (a6, hi) = uint(a5, 2)?
+        let (a7, handler) = uint(a6, 2)?
+        let (a8, caught) = uint(a7, 2)?
+        if lo >= hi || hi > size || handler >= size { return Err(bad(a, "invalid Code exception range")) }
+        if caught != 0 { let _ = constant(a, pool, caught, [7])? }
+        a = a8
+      }
+      let (a9, _) = attributes(a, pool, "code", depth + 1)?
+      a = a9
+      out = Attributes { ..out, code = true }
+    } else {
+      # Attribute payloads irrelevant to erased signatures stay opaque, but
+      # their headers, names and complete byte ranges have already been read.
+      a = Cursor { ..a, at = a.end }
+    }
+    if a.at != a.end { return Err(bad(a, "attribute length mismatch: " ++ name)) }
+    c = next
+  }
+  Ok((c, out))
+}
+
+fn member_name(name: String, method: Bool) -> Bool = {
+  if name == "" { return false }
+  if method && (name == "<init>" || name == "<clinit>") { return true }
+  for ch in code_points(name) {
+    if ch == '.' || ch == ';' || ch == '[' || ch == '/' || ch == '\u{0}' || (method && (ch == '<' || ch == '>')) { return false }
+  }
+  true
+}
+
+fn member_signature(desc: String, method: Bool) -> Result[MemberSignature, MetadataError] =
+  if method { Ok(MethodSignature(method_descriptor(desc)?)) }
+  else { Ok(FieldSignature(field_descriptor(desc)?)) }
+
+fn members(c0: Cursor, pool: List[Constant], method: Bool) -> Result[(Cursor, List[MemberMeta]), MetadataError] = {
+  let (start, count) = uint(c0, 2)?
+  var c = start
+  var out: List[MemberMeta] = []
+  var signatures: Map[Int, MemberSignature] = map.empty()
+  var seen: Set[(String, String)] = set.empty()
+  for _ in 0..count {
+    let (c1, access) = uint(c, 2)?
+    let (c2, name_index) = uint(c1, 2)?
+    let (c3, desc_index) = uint(c2, 2)?
+    if access & (if method { 0x1DFF } else { 0x50DF }) != access ||
+      (access & 7 != 0 && access & 7 != 1 && access & 7 != 2 && access & 7 != 4) ||
+      (not method && access & 0x50 == 0x50) ||
+      (method && access & 0x400 != 0 && access & (2 | 8 | 16 | 32 | 256 | 2048) != 0) {
+      return Err(bad(c, "invalid member access flags"))
+    }
+    let name = text(c, pool, name_index)?
+    let desc = text(c, pool, desc_index)?
+    if not member_name(name, method) { return Err(bad(c, "invalid member name")) }
+    if method && name == "<init>" && access & 0x1887 != access { return Err(bad(c, "invalid constructor access")) }
+    let parsed = match map.get(signatures, desc_index) {
+      Some(value) -> value
+      None -> member_signature(desc, method)?
+    }
+    signatures = map.insert(signatures, desc_index, parsed)
+    if method {
+      let signature = match parsed {
+        MethodSignature(value) -> value
+        FieldSignature(_) -> return Err(bad(c, "field signature on method"))
+      }
+      var slots = if access & 8 == 0 { 1 } else { 0 }
+      for p in signature.params { slots = slots + p.slots }
+      if slots > 255 || (name == "<init>" && signature.returns.name != "void") ||
+        (name == "<clinit>" && (desc != "()V" || access & 8 == 0)) {
+        return Err(bad(c, "invalid special method descriptor"))
+      }
+    }
+    let key = (name, desc)
+    if set.has(seen, key) { return Err(bad(c, "duplicate member")) }
+    seen = set.insert(seen, key)
+    let (next, attrs) = attributes(c3, pool, if method { "method" } else { "field" }, 0, desc)?
+    if method && attrs.code == (access & (0x100 | 0x400) != 0) { return Err(bad(c, "Code does not match method access")) }
+    out = out ++ [MemberMeta { signature = parsed, access = access, name = name, descriptor = desc, throws = attrs.throws,
+      synthetic = attrs.synthetic || access & 0x1000 != 0 }]
+    c = next
+  }
+  Ok((c, out))
+}
+
+fn read_checked(data: Bytes, path: String) -> Result[ClassMeta, MetadataError] = {
+  if len(data) > MAX_CLASS_BYTES { return Err(metadata_error("limit", path, "class exceeds byte limit")) }
+  let start = Cursor { data = data, at = 0, end = len(data), path = path }
+  let (c1, magic) = uint(start, 4)?
+  if magic != 0xCAFEBABE { return Err(bad(start, "invalid class magic")) }
+  let (c2, minor) = uint(c1, 2)?
+  let (c3, major) = uint(c2, 2)?
+  if major != 65 || minor != 0 { return Err(metadata_error("version", path, "only non-preview JDK 21 class version 65.0 is supported")) }
+  let (c4, raw_pool) = read_pool(c3)?
+  let pool = named_pool(c4, raw_pool)?
+  validate_pool(c4, pool)?
+  let (c5, access) = uint(c4, 2)?
+  if access & 0xF631 != access || (access & 0x200 != 0 && (access & 0x400 == 0 || access & (16 | 32 | 0x4000) != 0)) ||
+    (access & 0x2000 != 0 && access & 0x200 == 0) || (access & 0x410 == 0x410) {
+    return Err(bad(c5, "invalid class access flags"))
+  }
+  let (c6, this_index) = uint(c5, 2)?
+  let (c7, super_index) = uint(c6, 2)?
+  let name = class_name(c5, pool, this_index)?
+  if str.starts_with(name, "[") { return Err(bad(c5, "array class declaration")) }
+  let parent: Option[String] = if super_index == 0 { None } else { Some(class_name(c5, pool, super_index)?) }
+  if (parent == None) != (name == "java.lang.Object" || access & 0x8000 != 0) { return Err(bad(c5, "invalid superclass")) }
+  match parent {
+    Some(p) -> if str.starts_with(p, "[") { return Err(bad(c5, "array superclass")) }
+    None -> ()
+  }
+  let (c8, interfaces) = class_list(c7, pool)?
+  if len(set.from(interfaces)) != len(interfaces) { return Err(bad(c8, "duplicate interface")) }
+  let (c9, fields) = members(c8, pool, false)?
+  let (c10, methods) = members(c9, pool, true)?
+  let (end, attrs) = attributes(c10, pool, "class", 0)?
+  if end.at != end.end { return Err(bad(end, "trailing class bytes")) }
+  for entry in pool {
+    if (entry.tag == 17 || entry.tag == 18) && entry.a >= attrs.bootstraps { return Err(bad(end, "invalid bootstrap method index")) }
+  }
+  Ok(ClassMeta { name = name, access = access, parent = parent, interfaces = interfaces,
+    fields = fields, methods = methods, inner = attrs.inner, enclosing = attrs.enclosing, major = major, minor = minor })
+}
+
+## Decode one bounded class. Every malformed input is an explicit error value.
+pub fn read_class(data: Bytes, path: String) -> Result[ClassMeta, MetadataError] =
+  match read_checked(data, path) {
+    Ok(c) -> Ok(c)
+    Err(e) -> Err(MetadataError { ..e, path = path })
+  }
+
+# Independent hand-built metadata fixture: public static final long field,
+# abstract byte-array method and a checked exception, without executable code.
+fn must[T](value: Result[T, MetadataError]) -> T =
+  match value {
+    Ok(v) -> v
+    Err(e) -> panic(e.message)
+  }
+
+fn is_err[T](value: Result[T, MetadataError]) -> Bool =
+  match value { Ok(_) -> false
+    Err(_) -> true }
+
+fn sample_class() -> Bytes = bytes.from_hex("cafebabe00000041000d010008702f53616d706c650700010100106a6176612f6c616e672f4f626a65637407000301000576616c75650100014a01000472656164010005285b4229490100136a6176612f696f2f494f457863657074696f6e07000901000a457863657074696f6e7301000953796e746865746963042100020004000000010019000500060001000c0000000000010401000700080001000b000000040001000a0000")
+  .expect("fixture hex")
+
+fn changed_byte(data: Bytes, at: Int, value: Int) -> Bytes = {
+  var out = bytes.buf()
+  for i in 0..len(data) { out = bytes.put(out, if i == at { value } else { bytes.at(data, i) }) }
+  bytes.freeze(out)
+}
+
+test "bounded class reader retains fields descriptors throws and synthetic" {
+  let c = must(read_class(sample_class(), "sample"))
+  assert c.name == "p.Sample" && c.parent == Some("java.lang.Object")
+  assert c.major == 65 && c.minor == 0 && c.access == 0x421
+  assert len(c.fields) == 1 && len(c.methods) == 1
+  assert c.fields[0].name == "value" && c.fields[0].descriptor == "J"
+  assert c.fields[0].access == 0x19 && c.fields[0].synthetic
+  assert c.methods[0].throws == ["java.io.IOException"]
+  assert c.methods[0].descriptor == "([B)I" && c.methods[0].access == 0x401
+}
+
+test "every truncated class prefix is an explicit error" {
+  let b = sample_class()
+  for n in 0..len(b) {
+    match read_class(bytes.slice(b, 0, n), "prefix") {
+      Err(e) -> { assert e.path == "prefix" }
+      Ok(_) -> { assert false }
+    }
+  }
+}
+
+test "class reader refuses bad magic version preview CP and trailing bytes" {
+  let b = sample_class()
+  for (at, value) in [(0, 0), (7, 64), (7, 66), (4, 255), (8, 255), (10, 99), (13, 0), (11, 255)] {
+    match read_class(changed_byte(b, at, value), "mutant") {
+      Err(e) -> { assert e.path == "mutant" }
+      Ok(_) -> { assert false }
+    }
+  }
+  assert is_err(read_class(b ++ bytes.utf8("x"), "trailing"))
+}
+
+test "modified UTF-8 rejects malformed encodings and retains UTF-16 units" {
+  let c = Cursor { data = bytes.utf8(""), at = 0, end = 0, path = "utf" }
+  for hex in ["00", "c08080", "c181", "e08080", "f0908080", "e180", "c241"] {
+    assert is_err(utf_units(c, bytes.from_hex(hex).expect("hex")))
+  }
+  assert utf_units(c, bytes.from_hex("c080").expect("hex")) == Ok([0])
+  assert utf_units(c, bytes.from_hex("eda080").expect("hex")) == Ok([0xD800])
+  assert utf_text(c, [0xD83D, 0xDE00]) == Ok("😀")
+  assert is_err(utf_text(c, [0xD800]))
+}
+
+test "descriptors preserve reference names arrays components and parameter slots" {
+  let t = must(field_descriptor("[[Ljava/lang/String;"))
+  assert t.name == "[[Ljava.lang.String;" && t.component == Some("[Ljava.lang.String;")
+  assert t.reference == Some("java.lang.String")
+  let m = must(method_descriptor("(J[BZ)Ljava/util/Map\$Entry;"))
+  assert m.params[0].slots == 2 && m.params[1].component == Some("byte")
+  assert m.returns.name == "java.util.Map\$Entry"
+  for desc in ["V", "[V", "L;", "Ljava.lang.String;", "Lx", "Iextra", "()V"] { assert is_err(field_descriptor(desc)) }
+  for desc in ["", "V", "(V)V", "()", "(I", "()VV", "([V)V"] { assert is_err(method_descriptor(desc)) }
+  assert is_err(field_descriptor(str.repeat("[", 256) ++ "B"))
+  assert is_err(method_descriptor("(" ++ str.repeat("J", 128) ++ ")V"))
+}

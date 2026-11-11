@@ -1,0 +1,472 @@
+# One document owns one immutable class-data view. Validate its identity and
+# complete public signature graph before returning it, so later signature
+# queries can remain ordinary data queries with no filesystem error channel.
+# The caller supplies a reviewed manifest digest when consuming a locked pack.
+
+use std/io
+use std/io.{Fs, Env}
+use std/bytes
+use std/str
+use std/map
+use std/set
+use std/list
+use std/cursor
+use fspath/fspath
+use sha2/sha256
+use json/value.{Json, JObj, JArr, JStr, JInt, JBool}
+use json/parser
+use json/render
+use json/lexer
+use check/classmeta
+use check/classmeta.{ClassMeta, MemberMeta, FieldSignature, MethodSignature, MetadataError, metadata_error}
+
+pub const MAX_CLASSES: Int = 8192
+pub const MAX_TOTAL_BYTES: Int = 134217728
+const MAX_MANIFEST_BYTES: Int = 16777216
+
+pub opaque type MetadataContext = ContextRep
+type ContextRep = {
+  classes: Map[String, ClassMeta], manifest_sha256: String, classes_sha256: String
+}
+
+pub fn classes(context: MetadataContext) -> Map[String, ClassMeta] = {
+  let rep: ContextRep = context
+  rep.classes
+}
+
+pub fn manifest_digest(context: MetadataContext) -> String = {
+  let rep: ContextRep = context
+  rep.manifest_sha256
+}
+
+pub fn class_table_digest(context: MetadataContext) -> String = {
+  let rep: ContextRep = context
+  rep.classes_sha256
+}
+
+## Resolve a written nested name using the JVM import's trailing-dollar walk.
+pub fn resolve_name(context: MetadataContext, written: String) -> Option[String] = {
+  let table = classes(context)
+  var name = written
+  while true {
+    if map.has(table, name) { return Some(name) }
+    match str.rsplit_once(name, ".") {
+      Some((head, tail)) -> { name = head ++ "$" ++ tail }
+      None -> return None
+    }
+  }
+  None
+}
+
+fn schema(path: String, message: String) -> MetadataError = metadata_error("schema", path, message)
+
+fn object(path: String, value: Json, keys: List[String]) -> Result[Map[String, Json], MetadataError] =
+  match value {
+    JObj(entries) -> {
+      if list.sort(map.keys(entries)) != list.sort(keys) { return Err(schema(path, "unexpected or missing manifest keys")) }
+      Ok(entries)
+    }
+    _ -> Err(schema(path, "expected object"))
+  }
+
+fn field(path: String, entries: Map[String, Json], key: String) -> Result[Json, MetadataError] =
+  match map.get(entries, key) {
+    Some(value) -> Ok(value)
+    None -> Err(schema(path, "missing " ++ key))
+  }
+
+fn string_value(path: String, value: Json) -> Result[String, MetadataError] =
+  match value {
+    JStr(s) -> Ok(s)
+    _ -> Err(schema(path, "expected string"))
+  }
+
+fn string_field(path: String, entries: Map[String, Json], key: String) -> Result[String, MetadataError] =
+  string_value(path, field(path, entries, key)?)
+
+fn array_value(path: String, value: Json) -> Result[List[Json], MetadataError] =
+  match value {
+    JArr(items) -> Ok(items)
+    _ -> Err(schema(path, "expected array"))
+  }
+
+fn integer(path: String, value: Json) -> Result[Int, MetadataError] =
+  match value {
+    JInt(n) -> Ok(n)
+    _ -> Err(schema(path, "expected integer"))
+  }
+
+fn valid_hash(value: String) -> Bool = {
+  if len(value) != 64 { return false }
+  for ch in code_points(value) {
+    if not ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) { return false }
+  }
+  true
+}
+
+fn hash_field(path: String, entries: Map[String, Json], key: String) -> Result[String, MetadataError] = {
+  let value = string_field(path, entries, key)?
+  if not valid_hash(value) { return Err(schema(path, "invalid SHA-256 for " ++ key)) }
+  Ok(value)
+}
+
+fn canonical(value: Json) -> Json =
+  match value {
+    JObj(entries) -> {
+      var sorted: Map[String, Json] = map.empty()
+      for key in list.sort(map.keys(entries)) {
+        match map.get(entries, key) {
+          Some(v) -> { sorted = map.insert(sorted, key, canonical(v)) }
+          None -> ()
+        }
+      }
+      JObj(sorted)
+    }
+    JArr(items) -> JArr(map(items, canonical))
+    _ -> value
+  }
+
+# JSON objects elsewhere use last-key-wins. A binding manifest must have one
+# meaning, so scan its already-valid syntax with the existing JSON string lexer.
+fn unique_keys(path: String, src: String) -> Result[Unit, MetadataError] = {
+  var at = cursor.start(src)
+  var stack: List[Set[String]] = []
+  while not cursor.done(src, at) {
+    let ch = cursor.char(src, at)
+    if ch == 123 {
+      let empty: Set[String] = set.empty()
+      stack = stack ++ [empty]
+    }
+    else if ch == 125 { stack = list.take(stack, len(stack) - 1) }
+    else if ch == 34 {
+      let (key, next) = match lexer.scan_string(src, at) {
+        Ok(pair) -> pair
+        Err(e) -> return Err(schema(path, e.message))
+      }
+      at = next
+      if cursor.char(src, lexer.skip_ws(src, at)) == 58 && len(stack) > 0 {
+        let last = len(stack) - 1
+        let seen = stack[last]
+        if set.has(seen, key) { return Err(schema(path, "duplicate JSON key: " ++ key)) }
+        stack = list.take(stack, last) ++ [set.insert(seen, key)]
+      }
+      continue
+    }
+    at = cursor.next(src, at)
+  }
+  Ok(())
+}
+
+fn safe_part(part: String) -> Bool =
+  part != "" && part != "." && part != ".." && not str.contains(part, "/") &&
+  not str.contains(part, "\\") && not str.contains(part, "\u{0}")
+
+fn checked_path(root: String, relative: String) -> Result[String, MetadataError] !Fs = {
+  var path = root
+  for part in str.split(relative, "/") {
+    if not safe_part(part) { return Err(metadata_error("path", relative, "invalid relative metadata path")) }
+    path = path ++ "/" ++ part
+    if io.is_symlink(path) { return Err(metadata_error("path", path, "symbolic link in metadata path")) }
+  }
+  let actual = match io.real_path(path) {
+    Ok(value) -> value
+    Err(e) -> return Err(metadata_error("path", path, e.message))
+  }
+  if actual != path { return Err(metadata_error("path", path, "metadata path changed during resolution")) }
+  Ok(path)
+}
+
+fn file_bytes(path: String, limit: Int) -> Result[Bytes, MetadataError] !Fs = {
+  let size = match io.file_size(path) {
+    Ok(n) -> n
+    Err(e) -> return Err(metadata_error("path", path, e.message))
+  }
+  if size <= 0 || size > limit { return Err(metadata_error("limit", path, "metadata file exceeds size limits")) }
+  let data = match io.read_range(path, 0, size + 1) {
+    Ok(b) -> b
+    Err(e) -> return Err(metadata_error("path", path, e.message))
+  }
+  if len(data) != size || io.is_symlink(path) { return Err(metadata_error("identity", path, "metadata file changed while reading")) }
+  Ok(data)
+}
+
+fn inventory(root: String, expected: Set[String]) -> Result[Unit, MetadataError] !Fs = {
+  var queue = ["classes"]
+  var at = 0
+  var seen: Set[String] = set.empty()
+  while at < len(queue) {
+    if len(queue) > 131072 { return Err(metadata_error("limit", root, "metadata directory entry limit exceeded")) }
+    let rel = queue[at]
+    at = at + 1
+    if len(str.split(rel, "/")) > 256 { return Err(metadata_error("limit", rel, "metadata directory depth exceeded")) }
+    let path = checked_path(root, rel)?
+    if io.is_dir(path) {
+      let names = match io.list_dir(path) {
+        Ok(items) -> items
+        Err(e) -> return Err(metadata_error("path", path, e.message))
+      }
+      for name in names {
+        if not safe_part(name) { return Err(metadata_error("path", path, "invalid directory entry")) }
+        queue = queue ++ [rel ++ "/" ++ name]
+      }
+    } else {
+      if not set.has(expected, rel) { return Err(metadata_error("identity", path, "unlisted metadata file")) }
+      seen = set.insert(seen, rel)
+    }
+  }
+  if seen != expected { return Err(metadata_error("missing-class", root, "class inventory is incomplete")) }
+  Ok(())
+}
+
+fn platform_info(path: String, value: Json) -> Result[Unit, MetadataError] = {
+  let p = object(path, value, ["feature", "class_major", "class_minor", "preview", "vendor", "runtime_version", "archive_url", "archive_sha256", "release_sha256"])?
+  if field(path, p, "feature")? != JInt(21) || field(path, p, "class_major")? != JInt(65) ||
+    field(path, p, "class_minor")? != JInt(0) || field(path, p, "preview")? != JBool(false) {
+    return Err(metadata_error("version", path, "only non-preview JDK 21 metadata is supported"))
+  }
+  for key in ["vendor", "runtime_version", "archive_url"] {
+    if string_field(path, p, key)? == "" { return Err(schema(path, "empty platform identity")) }
+  }
+  let _ = hash_field(path, p, "archive_sha256")?
+  let _ = hash_field(path, p, "release_sha256")?
+  Ok(())
+}
+
+fn references(c: ClassMeta) -> List[String] = {
+  var refs = c.interfaces
+  match c.parent { Some(p) -> { refs = refs ++ [p] }
+    None -> () }
+  match c.enclosing { Some(p) -> { refs = refs ++ [p] }
+    None -> () }
+  for inner in c.inner {
+    if inner.name == c.name {
+      match inner.outer { Some(p) -> { refs = refs ++ [p] }
+        None -> () }
+    }
+  }
+  for m in c.fields ++ c.methods {
+    if m.access & 1 != 0 && m.name != "<clinit>" {
+      let types = match m.signature {
+        FieldSignature(value) -> [value]
+        MethodSignature(value) -> value.params ++ [value.returns]
+      }
+      for t in types {
+        match t.reference { Some(name) -> { refs = refs ++ [name] }
+          None -> () }
+      }
+      refs = refs ++ m.throws
+    }
+  }
+  refs
+}
+
+## Validate completeness and hierarchy without recursive traversal of input graphs.
+pub fn validate_graph(table: Map[String, ClassMeta], roots: List[String], path: String) -> Result[Unit, MetadataError] = {
+  for root in roots {
+    if not map.has(table, root) { return Err(MetadataError { ..metadata_error("missing-class", path, "missing root: " ++ root), reference = Some(root) }) }
+  }
+  var pending: Map[String, Int] = map.empty()
+  var children: Map[String, List[String]] = map.empty()
+  var ready: List[String] = []
+  for (name, c) in map.entries(table) {
+    for ref in references(c) {
+      if not map.has(table, ref) { return Err(MetadataError { ..metadata_error("missing-class", path, "missing signature class: " ++ ref), owner = Some(name), reference = Some(ref) }) }
+    }
+    var interface_names: Set[String] = set.empty()
+    for interface_name in c.interfaces {
+      let interface_class = map.get(table, interface_name)
+      match interface_class {
+        Some(found) -> if found.access & 0x200 == 0 || set.has(interface_names, interface_name) {
+          return Err(metadata_error("class-format", path, "invalid or duplicate interface: " ++ interface_name))
+        }
+        None -> ()
+      }
+      interface_names = set.insert(interface_names, interface_name)
+    }
+    match c.parent {
+      Some(parent) -> match map.get(table, parent) {
+        Some(found) -> if found.access & (0x200 | 16) != 0 {
+          return Err(metadata_error("class-format", path, "invalid superclass kind: " ++ parent))
+        }
+        None -> ()
+      }
+      None -> ()
+    }
+    var parents = c.interfaces
+    match c.parent { Some(p) -> { parents = parents ++ [p] }
+      None -> () }
+    pending = map.insert(pending, name, len(parents))
+    if len(parents) == 0 { ready = ready ++ [name] }
+    for parent in parents {
+      children = map.insert(children, parent, map.get(children, parent).unwrap_or([]) ++ [name])
+    }
+  }
+  var at = 0
+  while at < len(ready) {
+    let name = ready[at]
+    at = at + 1
+    for child in map.get(children, name).unwrap_or([]) {
+      let count = map.get(pending, child).unwrap_or(0) - 1
+      pending = map.insert(pending, child, count)
+      if count == 0 { ready = ready ++ [child] }
+    }
+  }
+  if at != len(map.keys(table)) { return Err(metadata_error("cycle", path, "cyclic class hierarchy")) }
+  Ok(())
+}
+
+## Read, bind and seal one metadata directory before it reaches a checker.
+fn load_checked(manifest_path: String, expected_sha256: Option[String]) -> Result[MetadataContext, MetadataError] !Fs !Env = {
+  if manifest_path == "" { return Err(metadata_error("path", manifest_path, "empty manifest path")) }
+  let requested = if str.starts_with(manifest_path, "/") { manifest_path } else { io.cwd() ++ "/" ++ manifest_path }
+  # Inspect the spelling before normalization: link/.. must not erase a link
+  # that changes the host's path resolution, even when its target stays inside.
+  var prefix = ""
+  for part in str.split(requested, "/") {
+    if part != "" {
+      prefix = prefix ++ "/" ++ part
+      if io.is_symlink(prefix) { return Err(metadata_error("path", prefix, "symbolic link in manifest path")) }
+    }
+  }
+  let absolute = fspath.normalize(requested)
+  let resolved = match io.real_path(requested) {
+    Ok(path) -> path
+    Err(e) -> return Err(metadata_error("path", requested, e.message))
+  }
+  if resolved != absolute { return Err(metadata_error("path", requested, "manifest path changed during resolution")) }
+  let parent = fspath.parent(absolute).unwrap_or("/")
+  let root = match io.real_path(parent) {
+    Ok(path) -> path
+    Err(e) -> return Err(metadata_error("path", absolute, e.message))
+  }
+  if root != parent { return Err(metadata_error("path", absolute, "symbolic link in manifest directory")) }
+  let data = file_bytes(absolute, MAX_MANIFEST_BYTES)?
+  let digest = sha256.hex(data)
+  match expected_sha256 {
+    Some(hash) -> if not valid_hash(hash) || hash != digest { return Err(metadata_error("identity", absolute, "manifest digest mismatch")) }
+    None -> ()
+  }
+  let src = match bytes.decode_utf8_checked(data) {
+    Ok(s) -> s
+    Err(_) -> return Err(schema(absolute, "manifest is not UTF-8"))
+  }
+  let parsed = match parser.parse(src) {
+    Ok(v) -> v
+    Err(e) -> return Err(schema(absolute, e.message))
+  }
+  unique_keys(absolute, src)?
+  let manifest = object(absolute, parsed, ["schema", "platform", "view", "required_roots", "java_coords", "modules", "classes", "classes_sha256"])?
+  if string_field(absolute, manifest, "schema")? != "dawn-java-metadata-v1" ||
+    string_field(absolute, manifest, "view")? != "platform-public-erased-v1" {
+    return Err(schema(absolute, "unsupported metadata schema or view"))
+  }
+  let platform = field(absolute, manifest, "platform")?
+  platform_info(absolute, platform)?
+  if len(array_value(absolute, field(absolute, manifest, "java_coords")?)?) != 0 { return Err(schema(absolute, "Java coordinates are not supported in platform metadata")) }
+  let modules = field(absolute, manifest, "modules")?
+  var module_names: Set[String] = set.empty()
+  for item in array_value(absolute, modules)? {
+    let entry = object(absolute, item, ["name", "sha256"])?
+    let name = string_field(absolute, entry, "name")?
+    if not safe_part(name) || set.has(module_names, name) { return Err(schema(absolute, "invalid or duplicate module")) }
+    let _ = hash_field(absolute, entry, "sha256")?
+    module_names = set.insert(module_names, name)
+  }
+  let items = array_value(absolute, field(absolute, manifest, "classes")?)?
+  if len(items) == 0 || len(items) > MAX_CLASSES { return Err(metadata_error("limit", absolute, "class count exceeds limits")) }
+  let table_hash = hash_field(absolute, manifest, "classes_sha256")?
+  if sha256.hex(bytes.utf8(render.render(canonical(JArr(items))))) != table_hash { return Err(metadata_error("identity", absolute, "class table digest mismatch")) }
+  var table: Map[String, ClassMeta] = map.empty()
+  var paths: Set[String] = set.empty()
+  var previous = ""
+  var total = 0
+  for item in items {
+    let entry = object(absolute, item, ["name", "module", "path", "size", "sha256"])?
+    let name = string_field(absolute, entry, "name")?
+    let module_name = string_field(absolute, entry, "module")?
+    let rel = string_field(absolute, entry, "path")?
+    if map.has(table, name) { return Err(metadata_error("duplicate-class", absolute, "duplicate class: " ++ name)) }
+    if name <= previous || not set.has(module_names, module_name) { return Err(schema(absolute, "unsorted classes or unknown module")) }
+    previous = name
+    let internal = str.replace(name, ".", "/")
+    if classmeta.binary_name(internal)? != name || rel != "classes/" ++ module_name ++ "/" ++ internal ++ ".class" {
+      return Err(metadata_error("path", rel, "class path does not match binary name"))
+    }
+    let size = integer(absolute, field(absolute, entry, "size")?)?
+    if size <= 0 || size > classmeta.MAX_CLASS_BYTES || size > MAX_TOTAL_BYTES - total { return Err(metadata_error("limit", rel, "class data size exceeds limits")) }
+    total = total + size
+    let hash = hash_field(absolute, entry, "sha256")?
+    let path = checked_path(root, rel)?
+    let content = file_bytes(path, size)?
+    if len(content) != size || sha256.hex(content) != hash { return Err(metadata_error("identity", path, "class digest or size mismatch")) }
+    let c = classmeta.read_class(content, path)?
+    if c.name != name { return Err(metadata_error("identity", path, "class declares a different binary name")) }
+    table = map.insert(table, name, c)
+    paths = set.insert(paths, rel)
+  }
+  inventory(root, paths)?
+  var roots: List[String] = []
+  var last_root = ""
+  for item in array_value(absolute, field(absolute, manifest, "required_roots")?)? {
+    let name = string_value(absolute, item)?
+    if name <= last_root { return Err(schema(absolute, "roots must be unique and sorted")) }
+    roots = roots ++ [name]
+    last_root = name
+  }
+  if len(roots) == 0 { return Err(schema(absolute, "metadata needs a root set")) }
+  validate_graph(table, roots ++ ["java.lang.Object", "java.lang.String", "java.lang.Cloneable", "java.io.Serializable"], absolute)?
+  Ok(ContextRep { classes = table, manifest_sha256 = digest, classes_sha256 = table_hash })
+}
+
+## Construct a context with every input failure carrying its source path.
+pub fn load_context(manifest_path: String, expected_sha256: Option[String]) -> Result[MetadataContext, MetadataError] !Fs !Env =
+  match load_checked(manifest_path, expected_sha256) {
+    Ok(context) -> Ok(context)
+    Err(e) -> Err(MetadataError { ..e, path = if e.path == "" {
+      if manifest_path == "" { "<manifest>" } else { manifest_path }
+    } else { e.path } })
+  }
+
+fn graph_class(name: String, parent: Option[String], interfaces: List[String]) -> ClassMeta =
+  ClassMeta { name = name, parent = parent, interfaces = interfaces, access = 1,
+    fields = [], methods = [], inner = [], enclosing = None, major = 65, minor = 0 }
+
+test "metadata graph rejects missing roots signatures parents and cycles" {
+  let object_class = graph_class("java.lang.Object", None, [])
+  var table: Map[String, ClassMeta] = map.insert(map.empty(), object_class.name, object_class)
+  assert validate_graph(table, [object_class.name], "graph") == Ok(())
+  match validate_graph(table, ["Missing"], "graph") {
+    Err(e) -> { assert e.kind == "missing-class" && e.reference == Some("Missing") }
+    Ok(_) -> { assert false }
+  }
+  let a = graph_class("A", Some("B"), [])
+  table = map.insert(table, "A", a)
+  match validate_graph(table, ["A"], "graph") {
+    Err(e) -> { assert e.kind == "missing-class" && e.owner == Some("A") }
+    Ok(_) -> { assert false }
+  }
+  table = map.insert(table, "B", graph_class("B", Some("A"), []))
+  match validate_graph(table, ["A"], "graph") {
+    Err(e) -> { assert e.kind == "cycle" }
+    Ok(_) -> { assert false }
+  }
+  let signature = match classmeta.method_descriptor("()LMissing;") {
+    Ok(value) -> MethodSignature(value)
+    Err(e) -> panic(e.message)
+  }
+  let method = MemberMeta { signature = signature, access = 1, name = "f", descriptor = "()LMissing;", throws = [], synthetic = false }
+  table = map.insert(map.insert(map.empty(), object_class.name, object_class), "A",
+    ClassMeta { ..a, parent = Some(object_class.name), methods = [method] })
+  match validate_graph(table, ["A"], "graph") {
+    Err(e) -> { assert e.kind == "missing-class" && e.reference == Some("Missing") }
+    Ok(_) -> { assert false }
+  }
+}
+
+test "manifest parser refuses ambiguous keys and canonicalizes object order" {
+  assert unique_keys("manifest", "{\"a\":1,\"a\":2}") != Ok(())
+  assert unique_keys("manifest", "{\"a\":{\"x\":1},\"b\":{\"x\":2}}") == Ok(())
+  assert unique_keys("manifest", "{\"a\":1,\"\\u0061\":2}") != Ok(())
+  let value = JObj(map.insert(map.insert(map.empty(), "z", JInt(1)), "a", JArr([JInt(2)])))
+  assert render.render(canonical(value)) == "{\"a\":[2],\"z\":1}"
+}

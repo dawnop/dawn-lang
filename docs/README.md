@@ -20,6 +20,8 @@ prints how many there are on every run.
 
 ---
 
+Java class 元数据输入与目录校验见 [java-class-metadata-design.md](java-class-metadata-design.md)。
+
 ## 权威规范
 
 | 文档 | 生命周期 | 说明 |

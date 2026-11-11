@@ -53,6 +53,9 @@ case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac
 echo "== selfhost tests, native backend =="
 native_entry=$(python3 scripts/native-source-tree.py "$OUT/source")
 "$DAWNC" test "$native_entry"
+# The metadata probe's small test graph runs its inline and directory cases
+# together, sharing one compilation on this already-prepared compiler host.
+python3 scripts/java-metadata/run.py --native-host "$DAWNC"
 
 # check/identity.dawn used to get a second `dawnc test` of its own, from when
 # it was not yet on the native driver's production graph. It is now, and all
