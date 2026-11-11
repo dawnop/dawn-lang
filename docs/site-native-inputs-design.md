@@ -28,3 +28,34 @@ SourcePlan 输入、包 manifest 身份、实际 argv 与全部输出；多余�
 仍可用。独立 JVM 门比较同 HEAD 文档及完整页面、索引和搜索资产，保留错锁、篡改
 后重算自摘要、输入漂移与不完整清单等负控。site 作业增加显式准备步骤，既有 build
 步骤承担实际无 Java 消费；不修改 java-target-classpath 或 playground 作业。
+
+
+## 收官核验设计
+
+收官只回填当前说明、设计状态与落地进度，产品代码和门禁接线保持。以同一最终
+候选同时核对原始数据及工具身份、十四包公开面、JVM 原字节、冷暖两次真实无 Java
+消费、签名语义、可靠失败和能力隔离。受控变异仅进入隔离源码树，必须由既有断言
+拒绝；true-parent 原始对照不使用输出豁免。预算复用既有步骤记录，核对输入和接线
+身份后区分既有债、附带增量及刻意新增验证，不增加计时门。
+
+## 落地与资格入口
+
+617cccb4（#940）交付本消费边界。先运行 `site/prepare.sh`，再运行 `site/build.sh`；
+准备工具可以使用既有 JVM 自举，原始数据由 Python 解包固定 JDK，消费不运行 Java。
+`dawn-doc-tool-v1`、独立准备收据与 `dawn-doc-bundle-v1` 分别绑定工具、数据和本次
+全部输出，不把收据加入正常 doc JSON。完整清单和 manifest pin 由
+`site/java-metadata.lock.json` 审阅固定，web-jvm 的 `InputStream` 公开签名保留。
+
+`site/inputs-selftest.py` 覆盖身份漂移与不完整 bundle，`scripts/site-dist-diff.sh`
+从独立 JVM JSON 生成第二套站点输入并比较全部字节；它保留为独立 oracle。
+无 Java 资格要求冷消费和热缓存消费都提供真实 npm、C、wasm 工具，移除旧文档及
+生成器缓存后构建正常资产，检查从 build 根进程开始的全部 exec，拒绝绝对路径绕行。
+工具或数据变化后的热缓存也须拒绝陈旧身份。语义与 CLI 资格入口见
+[元数据设计](java-class-metadata-design.md)，逐刀提交见 [后续进度](history/m7-progress.md)。
+
+## 不做的（理由）
+
+JMOD 运行时读取、通用 Maven、多版本 JAR、Java 执行和其它命令的元数据能力需要
+各自的来源、执行及错误合同，继续留在本线之外。工具自举和独立 JVM oracle 可以
+使用 Java，建站消费不能借此启动准备或增加 JVM 文档 producer。固定点、发布资格
+与 GPU 台账按既有入口保留；本线不发布、不部署、不重录设备数据。

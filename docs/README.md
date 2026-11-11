@@ -20,9 +20,9 @@ prints how many there are on every run.
 
 ---
 
-Java class 元数据输入与目录校验见 [java-class-metadata-design.md](java-class-metadata-design.md)。
+| [java-class-metadata-design.md](java-class-metadata-design.md) | current | 已落地的受界 class reader、封闭上下文、八项 Jsig 数据宿主与显式 native doc；原字节资格、错误通道、预算归属及 JMOD/Maven 扩围边界。 |
 
-建站工具、原始数据与文档消费边界见 [site-native-inputs-design.md](site-native-inputs-design.md)。
+| [site-native-inputs-design.md](site-native-inputs-design.md) | current | 已落地的 native/data 独立制备、工具与 bundle 收据、十四包 fresh staging；真实无 Java 冷暖消费、独立 JVM oracle 与收官核验。 |
 
 ## 权威规范
 

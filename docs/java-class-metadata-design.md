@@ -2,7 +2,7 @@
 
 > 状态：current
 
-读取层为后续文档分析提供经过校验的原始 class 数据上下文。输入由版本绑定 manifest 和类目录组成。reader 按 JDK 21 正式格式校验长度、常量池、modified UTF-8、descriptor、成员与属性，并通过 Result 返回具名错误。上下文验证文件摘要、路径、重复定义、公开签名闭包和继承环，再保存不可变元数据。
+读取层为 native doc 的完整程序分析提供经过校验的原始 class 数据上下文。输入由版本绑定 manifest 和类目录组成。reader 按 JDK 21 正式格式校验长度、常量池、modified UTF-8、descriptor、成员与属性，并通过 Result 返回具名错误。上下文验证文件摘要、路径、重复定义、公开签名闭包和继承环，再保存不可变元数据。
 
 格式解析放在 check 层，目录和 manifest 校验放在 driver 层。两层均使用现有 Bytes、JSON、SHA-256 和文件系统能力。测试通过现有 compiler/native 测试入口覆盖手构 class、损坏输入与目录负控，并由独立探针对照锁定 JDK 的原始字段。常量池 UTF、类名和已解析 descriptor 按索引共享，避免重复引用放大元数据分配。独立 probe 在 64 MiB JVM 堆中验证共享长 descriptor 的字段。输入上限为单类 16 MiB、8192 类、总计 128 MiB，数组维数上限 255。
 
@@ -35,6 +35,24 @@ native 元数据测试将 reader/context 内联测试、完整目录案例与签
 完整 native doc 字节资格是刻意新增的验证步骤，独立放在 native-selfhost-tests；prev-diff-native 保留原 doc 差分及绝对 CLI 边界，不承接新全包资格。承接 job 原有七天最坏成功值 562 秒、原 claim 630 秒；规划另给新资格 120 秒，合计 750 秒，在 950 秒约束下留出余量。最终使用该新形态至少三次独立成功执行核验腿成本、整 job 最坏值及波动余量，push-total 的增加随提交明确记账。
 
 将该 job 原先在 native-selfhost-tests.sh 内部执行的一次编译器制备原样提前到 workflow 的显式步骤，再以 DAWNC_BIN 交给原测试脚本；独立 doc 步骤直接使用同一 job、同一临时目录中的该二进制，不再构建或跨 job 传产物。新步骤从头执行全部十五份 JSON 和源码、数据负控，不接收 prev-diff-native 的 JSON 转录。原来仅服务同次差分复用的转录接口随之删除，保留 43 项逻辑断言与 36 次真实 native 调用。耗时只取既有 CI step 记录，不新增本机计时器。
+
+## 落地与当前入口
+
+结构读取与封闭上下文由 c68e1684（#932）交付，签名宿主由 bf5d175a（#935）交付，
+显式 doc 接线由 29342fe4（#936）交付；建站消费由 617cccb4（#940）接到同一实现。
+落地清单见 [后续进度](history/m7-progress.md)，建站输入协议见
+[建站消费输入边界](site-native-inputs-design.md)。
+
+源目标的公开入口是 `dawnc doc --java-signatures <manifest> <target>`。manifest 相对
+调用目录，内部 class 路径相对 manifest；只接受 JDK 21 正式版本的绑定原始目录。
+无显式上下文的 doc 仍拒绝 Java，check、build、run、test、lsp 的 Java 能力边界不变。
+根和传递 Java 坐标仍拒绝，不从 CLASSPATH、安装 JDK 或网络补类。数据错误返回
+rc 2，完整源码与文档检查错误返回 rc 1，均不产生部分 JSON。
+
+现有资格入口分别覆盖结构与目录（`scripts/java-metadata/run.py`）、反射语义及两个
+同名上下文（`scripts/java-metadata/semantic.py`）、真实 CLI 与十五份原字节文档
+（`scripts/native-cli-contract/doc_metadata.py`）。签名资格并入 native 测试的同次编译；
+独立文档资格复用 native-selfhost-tests 已制备的编译器，保持其单独预算与门禁归属。
 
 ## 不做的（理由）
 
