@@ -23,9 +23,6 @@
 # two backends at the same commit is a bug in one of them, and there is no
 # version of this repository in which it is approved.
 #
-# The corpus is deliberately free of `use java`: the native driver refuses it
-# (jsig_refused), so `doc site` is not a divergence but the documented answer.
-#
 # ---- twenty-four cases left this file in 2026-09-04 ----
 #
 # `Console` and `Exit` became effects that day, so a usage refusal is readable
@@ -336,12 +333,12 @@ pub fn main() -> Unit !io = {
 EOF
 
 RUN_EMPTY=$'argc=0\n'
-RUN_OPTION_LIKE=$'argc=8\n0|0|\n1|2|--\n2|9|--closure\n3|2|-o\n4|6|--help\n5|4|--cp\n6|8|--native\n7|11|with spaces\n'
+RUN_OPTION_LIKE=$'argc=9\n0|0|\n1|2|--\n2|9|--closure\n3|2|-o\n4|6|--help\n5|4|--cp\n6|8|--native\n7|11|with spaces\n8|17|--java-signatures\n'
 
 run_expect 0 "$RUN_EMPTY" "" "run (empty argv, omitted separator)" run "$RUN_ARGV"
 run_expect 0 "$RUN_EMPTY" "" "run (empty argv, explicit separator)" run "$RUN_ARGV" --
 run_expect 0 "$RUN_OPTION_LIKE" "" "run (opaque option-like and empty argv)" \
-  run "$RUN_ARGV" -- "" -- --closure -o --help --cp --native "with spaces"
+  run "$RUN_ARGV" -- "" -- --closure -o --help --cp --native "with spaces" --java-signatures
 run_expect 0 "$RUN_EMPTY" "" "run (compiler option before target)" \
   run --std "$ROOT/std" "$RUN_ARGV"
 

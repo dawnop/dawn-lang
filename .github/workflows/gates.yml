@@ -408,7 +408,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 34433s (the most this file's `3x` claims may add up to)
+# push-total: 34553s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -4201,8 +4201,12 @@ jobs:
     # steps: worst 562s (run 42857428118), sample deviation 63.9s.
     # Restate the stale claim to worst plus the larger of a tenth and
     # one deviation, rounded up to 5s: 405s to 630s; timeout 3x.
-    # budget: 3x 630s worst observed plus one deviation (run 42857428118)
-    timeout-minutes: 32
+    # The complete native doc byte oracle is an intentional new validation
+    # step. Reuse this job's one driver build for both suites. Its 85.39s
+    # observed window plus fresh stdlib/json/sha2 pairs receives a 120s
+    # planning allowance: the existing 630s claim becomes 750s, below 950s.
+    # budget: 3x 750s planning value for native tests and the complete doc oracle
+    timeout-minutes: 38
     steps:
       - uses: actions/checkout@v4
 
@@ -4216,8 +4220,19 @@ jobs:
       # Builds the native driver and runs the suite through it. A script
       # rather than four lines here, so the same thing runs on a laptop; its
       # header carries the rest of the reasoning.
+      - name: prepare the shared native test compiler
+        run: |
+          ./bin/dawn --version > /dev/null
+          ./bin/dawn __emitc selfhost/src/nmain.dawn --split "$RUNNER_TEMP/native-selfhost-c"
+          scripts/cc-units.sh -o "$RUNNER_TEMP/native-selfhost-dawnc" "$RUNNER_TEMP/native-selfhost-c"
+
       - name: selfhost tests on the native backend
-        run: ./scripts/native-selfhost-tests.sh
+        run: DAWNC_BIN="$RUNNER_TEMP/native-selfhost-dawnc" ./scripts/native-selfhost-tests.sh
+
+      # This compiler belongs to this job. No release artifact or JSON result
+      # is downloaded from another job; every byte oracle runs at this HEAD.
+      - name: native doc metadata byte qualification
+        run: python3 scripts/native-cli-contract/doc_metadata.py --dawnc "$RUNNER_TEMP/native-selfhost-dawnc" --out "$RUNNER_TEMP/native-doc-metadata"
 
   # The hardware baseline itself stays local. CI exercises only the strict
   # JSON reader, the synthetic Linux process tree and the two source mutants.

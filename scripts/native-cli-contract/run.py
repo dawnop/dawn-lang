@@ -108,10 +108,25 @@ def check(binary, version):
                command_help(expected, "build"))
         # A help-shaped value is consumed. The final help is the request.
         for command, flag in (("build", "-o"), ("emitc", "--map"), ("add", "--as"),
-                              ("check", "--std"), ("version", "-m")):
+                              ("check", "--std"), ("version", "-m"),
+                              ("doc", "--java-signatures")):
             expect([command, flag, "--help", "-h"], 0, command_help(expected, command))
         # A JVM-looking option used as a value is not a capability request.
         expect(["build", "-o", "--cp", "--help"], 0, command_help(expected, "build"))
+        expect(["doc", "--java-signatures", "missing.json", "--help"], 0,
+               command_help(expected, "doc"))
+        expect(["doc", "--java-signatures"], 2,
+               err=b"error: --java-signatures needs a path\n")
+        expect(["doc", "--java-signatures", "", "--java-signatures", "other"], 2,
+               err=b"error: --java-signatures may only be specified once\n")
+        for mode in ("--stdlib", "--builtins"):
+            expect(["doc", "--java-signatures", "missing.json", mode], 2,
+                   err=b"error: --java-signatures requires a source target\n")
+        expect(["doc", "--java-signatures=missing.json", "--help"], 2,
+               err=b"error: unknown option for dawn doc: --java-signatures=missing.json\n")
+        for command in ("check", "build", "run", "test", "lsp"):
+            expect([command, "--java-signatures", "missing.json", "--help"], 2,
+                   err=f"error: unknown option for dawn {command}: --java-signatures\n".encode())
         # Existing, absent and empty classpaths are all capability errors.
         for flags in (["--cp", str(root)], ["--cp", str(root / "missing.jar")],
                       ["--cp", ""], [f"--cp={root}"], ["--cp="], ["--cp=missing.jar"]):
