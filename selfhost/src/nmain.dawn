@@ -1,6 +1,6 @@
 # The native driver (docs/native-backend-plan.md §14.1): the shared frontend
-# behind a `main` that wires no JVM hook. Everything host-specific is a
-# default -- `use java` checking is refused (cx_new's jsig), std comes embedded (stdsrc),
+# behind a `main` that wires no JVM hook. Java execution is refused; explicit
+# doc metadata supplies signatures only. Std comes embedded (stdsrc),
 # and the C runtime comes embedded too (rtsrc, via cdriver) -- so the binary
 # this module compiles to is a complete toolchain with no files of its own.
 #
@@ -41,6 +41,9 @@ use driver/stdlib.{
 }
 use ir/interp.{CtOpts, ct_default, ct_fuel, ct_lsp, ct_world_empty, ct_fuel_value, take_ct_fuel, DEFAULT_FUEL}
 use check/jsig.{JsigLease, jsig_refused, jsig_refused_lease}
+use check/classmeta.{MetadataError}
+use driver/jmetadata
+use front/ast.{module_java_uses}
 use driver/analyze.{
   Program, LocDiag, LoadResult, project_plan_for_load, load_planned, std_dir_target, syntax_failure_diags, analyze_program, analyze_product,
   rendered_diags, dawn_files_under, std_imports, union_imports,
@@ -141,6 +144,7 @@ fn usage() -> String =
     "  dawn test [--std <dir>] --stdlib          run the bundled std's own test blocks",
     "  dawn fmt [--check] <file.dawn | dir>...    format files in place or check formatting",
     "  dawn doc [--std <dir>] <target> | --stdlib | --builtins",
+    "           [--java-signatures <manifest>]       source documentation only",
     "                                              emit the API reference as JSON",
     "  dawn add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
     "                                              edit dependencies in dawn.toml;",
@@ -159,7 +163,7 @@ fn usage() -> String =
     "(default -O2). Native is the default build target; wasm needs clang and WASI.",
     "--std <dir> overrides nonempty DAWN_STD, then the embedded std is used.",
     "The working directory is never searched for std. Package downloads need curl.",
-    "Java interop, JAR output, lock, --cp, --closure, --native and --vendor need the",
+    "Java execution, JAR output, lock, --cp, --closure, --native and --vendor need the",
     "explicit JVM toolchain: java -jar /path/to/dawn-selfhost.jar <command> ..."
   ], "\n") ++ "\n"
 
@@ -224,6 +228,7 @@ fn refuse_jvm(feature: String, cmd: String) -> Unit !Exit !Console !io =
 ## Only this command's value options consume the next argv element. A value
 ## may itself look like help or a JVM flag; it is never scanned a second time.
 fn option_value(cmd: String, word: String) -> Option[String] = {
+  if cmd == "doc" && word == "--java-signatures" { return Some("a path") }
   let compiling = one_of(cmd, ["check", "build", "emitc", "run", "test"])
   if word == "--std" && (compiling || cmd == "doc" || cmd == "lsp") {
     Some("a directory")
@@ -1338,12 +1343,11 @@ fn cmd_fmt(rest: List[String]) -> Unit !Fs !Env !Exit !Console !io = {
 
 ## `dawnc doc <target>` / `--stdlib` / `--builtins`.
 ##
-## The JVM driver hands `analyze_program` the reflecting `use java` hook; this
-## one hands it the refusing hook, as every other native subcommand does. For a
-## target without `use java` the two produce the same JSON, and a target with
-## it is not a program this backend compiles at all.
+## An explicit metadata manifest grants signatures to this analysis only.
+## Loading, private body checking and JSON emission keep the normal doc path.
 fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var std_flag: Option[String] = None
+  var signatures: Option[String] = None
   var builtins_mode = false
   var stdlib_mode = false
   var target = ""
@@ -1351,6 +1355,11 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
       std_flag = Some(rest[i + 1])
+      i = i + 2
+    } else if rest[i] == "--java-signatures" {
+      if (signatures != None) { return cli_error("--java-signatures may only be specified once") }
+      if i + 1 >= len(rest) { return cli_error("--java-signatures needs a path") }
+      signatures = Some(rest[i + 1])
       i = i + 2
     } else if rest[i] == "--builtins" {
       builtins_mode = true
@@ -1363,6 +1372,9 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       target = rest[i]
       i = i + 1
     }
+  }
+  if (signatures != None) && (stdlib_mode || builtins_mode) {
+    return cli_error("--java-signatures requires a source target")
   }
   require_one_input(
     "dawn doc",
@@ -1388,10 +1400,40 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     return cli_error("no such file or directory: ${target}")
   }
   let loaded = native_load_target(std, target)
-  let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
+  # Preserve planner and loader diagnostics before opening a metadata input.
+  if (signatures != None) && len(loaded.diags) > 0 { return fail_doc(loaded.diags) }
+  let lease = match doc_signature_lease(loaded, signatures) {
+    Ok(value) -> value
+    Err(e) -> { cli_error(metadata_error_text(e))
+      return }
+  }
+  let prog = analyze_program(loaded, std, ct_default(), lease.jsig)
+  lease.close()
   if len(prog.diags) > 0 { fail_doc(rendered_diags(prog)) }
   print_doc(doc.project_json(prog, std, own_module_paths(loaded)))
 }
+
+fn metadata_error_text(e: MetadataError) -> String = {
+  var detail = e.path
+  match e.owner { Some(owner) -> { detail = detail ++ ": owner " ++ owner }
+    None -> () }
+  match e.reference { Some(reference) -> { detail = detail ++ ": reference " ++ reference }
+    None -> () }
+  "Java metadata " ++ e.kind ++ ": " ++ detail ++ ": " ++ e.message
+}
+
+fn doc_signature_lease(loaded: LoadResult, manifest: Option[String]) -> Result[JsigLease, MetadataError] !Fs !Env =
+  match manifest {
+    None -> Ok(jsig_refused_lease())
+    Some(path) -> {
+      let context = jmetadata.load_context(path, None)?
+      var imports: List[String] = []
+      for module in loaded.modules {
+        for imported in module_java_uses(module.m) { imports = imports ++ [imported.fqcn] }
+      }
+      jmetadata.jsig_for_context(context, imports)
+    }
+  }
 
 ## `dawnc test [--std <dir>] <target> | --stdlib` -- the native mirror of
 ## `dawn test`.
@@ -2494,6 +2536,27 @@ test "`dawnc doc` refuses a target that names nothing" {
   # subcommand loads the standard library before it looks at the target.
   assert cli_read_hosted(() => cmd_doc([NO_SUCH]))
     == (Some(2), "error: no such file or directory: " ++ NO_SUCH ++ "\n", "")
+}
+
+test "native doc metadata arguments fail before loading std" {
+  assert cli_read(() => cmd_doc(["--java-signatures"]))
+    == (Some(2), "error: --java-signatures needs a path\n", "")
+  assert cli_read(() => cmd_doc(["--java-signatures", "", "--java-signatures", "other", "a.dawn"]))
+    == (Some(2), "error: --java-signatures may only be specified once\n", "")
+  for mode in ["--stdlib", "--builtins"] {
+    assert cli_read(() => cmd_doc(["--java-signatures", "missing", mode]))
+      == (Some(2), "error: --java-signatures requires a source target\n", "")
+  }
+  assert option_value("doc", "--java-signatures") == Some("a path")
+  for command in ["check", "build", "run", "test", "lsp"] {
+    assert option_value(command, "--java-signatures") == None
+  }
+}
+
+test "native doc metadata errors retain the path owner and reference" {
+  assert metadata_error_text(MetadataError { kind = "missing-class", path = "/data/manifest.json",
+    owner = Some("java.Owner"), reference = Some("java.Missing"), message = "missing signature type" })
+    == "Java metadata missing-class: /data/manifest.json: owner java.Owner: reference java.Missing: missing signature type"
 }
 
 test "`dawnc build` refuses an argv that does not name exactly one target" {
