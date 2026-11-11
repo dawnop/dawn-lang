@@ -20,12 +20,26 @@
 # is gone, and with it the cases that were about it (its startup sweep and
 # its answer cache).
 set -e
+# The Python entry validates the stable selector before any build or session.
+# Its child returns only after this shell's EXIT cleanup has completed.
+if [ "${1:-}" != --execute-selector ]; then
+  exec python3 -I -B "$(dirname "$0")/contract_shards.py" "$@"
+fi
+shift
+[ "$#" = 0 ] || exit 2
+: "${PLAY_CONTRACT_GROUPS:?validated groups are required}"
+: "${PLAY_CONTRACT_GROUP_LOG:?a private completion log is required}"
+selected() { case " $PLAY_CONTRACT_GROUPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+completed() { printf '%s\n' "$1" >>"$PLAY_CONTRACT_GROUP_LOG"; }
 cd "$(dirname "$0")/.."
 ROOT=$(cd .. && pwd)
 
 # The WebSocket/LSP bridge has an independent stdlib-only fake child, so its
 # framing, lifecycle and admission contract does not depend on a Dawn build.
-./test/lsp-contract.sh
+if selected lsp-session; then
+  ./test/lsp-contract.sh
+  completed lsp-session
+fi
 
 # The run wrapper's argument contract, which is all of it that runs without
 # sudo and systemd: an action, a 32-hex unit id, and for `run` a work dir and
@@ -209,6 +223,7 @@ echo "runner answered /health after $(($(date +%s) - wait_started))s"
 
 pass=0
 fail=0
+if selected main-http-session-including-cleanup; then
 # Every request is bounded, so a runner that never answers is a red case and
 # not a hung test: the compile budget, the run budget and a margin.
 REQ_MAX=$((PLAY_COMPILE_TIMEOUT + PLAY_TIMEOUT + 10))
@@ -928,9 +943,20 @@ if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: a sample that ge
 
 # The strict C path is checked from the real HTTP entry, with JVM probes and
 # tools poisoned. This cannot be satisfied by the native happy path alone.
-python3 -I -B test/c-only-contract.py "$NATIVE_BIN" "$DAWNC_REAL"
-python3 -I -B "$ROOT/scripts/play-c-only-contract/controls.py" "$DAWNC_REAL"
-python3 -I -B test/tile-probe-contract.py "$NATIVE_BIN" "$DAWNC_REAL"
+fi
+if selected c-http-sentinel; then
+  python3 -I -B test/c-only-contract.py "$NATIVE_BIN" "$DAWNC_REAL"
+  completed c-http-sentinel
+fi
+if selected complete-c-mutant-matrix; then
+  python3 -I -B "$ROOT/scripts/play-c-only-contract/controls.py" "$DAWNC_REAL"
+  completed complete-c-mutant-matrix
+fi
+if selected complete-tile-probe-session; then
+  python3 -I -B test/tile-probe-contract.py "$NATIVE_BIN" "$DAWNC_REAL"
+  completed complete-tile-probe-session
+fi
+if selected main-http-session-including-cleanup; then
 
 # The access log names each program by the SHA-256 of its `code` field, with
 # the toolchain that answered it, and never by its text: a program carrying a
@@ -979,3 +1005,5 @@ fi
 echo "----"
 echo "$pass passed, $fail failed"
 [ "$fail" = "0" ]
+completed main-http-session-including-cleanup
+fi

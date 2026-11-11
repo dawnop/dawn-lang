@@ -104,7 +104,6 @@
   ],
   "java-target-classpath": [
    "./bin/dawn lock --check selfhost",
-   "./playground/test/contract.sh",
    "./scripts/bootstrap-guards/run.sh",
    "./scripts/deploy-guards/run.sh",
    "./scripts/java-target-classpath-contract/run.sh",
@@ -137,7 +136,8 @@
   ],
   "mutant-shards-complete": [
    "# $FLAGS is word-split on purpose: it is a list of flag pairs.\npython3 scripts/mutant-coverage/check.py \\\n  --coverage-dir coverage $FLAGS\n",
-   "flags=\"--exclude-harness tile-golden\"\nran=false\nskipped() { case \" $1 \" in *\" skipped \"*) return 0 ;; esac; return 1; }\nif skipped \"$NATIVE_DIFF\"; then\n  flags=\"$flags --exclude-harness spike-native\"\nelse ran=true; fi\nif skipped \"$SYNTAX\"; then\n  flags=\"$flags --exclude-harness syntax-small-contract\"\n  flags=\"$flags --exclude-harness pattern-or-contract\"\n  flags=\"$flags --exclude-harness for-pattern-contract\"\nelse ran=true; fi\nif skipped \"$BUILTIN_TYPE\"; then\n  flags=\"$flags --exclude-harness builtin-type-contract\"\nelse ran=true; fi\necho \"coverage flags: $flags (any family ran: $ran)\"\necho \"flags=$flags\" >> \"$GITHUB_OUTPUT\"\necho \"ran=$ran\" >> \"$GITHUB_OUTPUT\"\nmemo_ran=false\nif [ \"$LSP_MEMO\" != \"skipped skipped skipped\" ]; then memo_ran=true; fi\nany_ran=$ran\nif [ \"$memo_ran\" = true ]; then any_ran=true; fi\necho \"memo_ran=$memo_ran\" >> \"$GITHUB_OUTPUT\"\necho \"any_ran=$any_ran\" >> \"$GITHUB_OUTPUT\"\n",
+   "flags=\"--exclude-harness tile-golden\"\nran=false\nskipped() { case \" $1 \" in *\" skipped \"*) return 0 ;; esac; return 1; }\nif skipped \"$NATIVE_DIFF\"; then\n  flags=\"$flags --exclude-harness spike-native\"\nelse ran=true; fi\nif skipped \"$SYNTAX\"; then\n  flags=\"$flags --exclude-harness syntax-small-contract\"\n  flags=\"$flags --exclude-harness pattern-or-contract\"\n  flags=\"$flags --exclude-harness for-pattern-contract\"\nelse ran=true; fi\nif skipped \"$BUILTIN_TYPE\"; then\n  flags=\"$flags --exclude-harness builtin-type-contract\"\nelse ran=true; fi\necho \"coverage flags: $flags (any family ran: $ran)\"\necho \"flags=$flags\" >> \"$GITHUB_OUTPUT\"\necho \"ran=$ran\" >> \"$GITHUB_OUTPUT\"\nmemo_ran=false\nif [ \"$LSP_MEMO\" != \"skipped skipped skipped\" ]; then memo_ran=true; fi\nany_ran=$ran\nif [ \"$memo_ran\" = true ]; then any_ran=true; fi\necho \"memo_ran=$memo_ran\" >> \"$GITHUB_OUTPUT\"\nplayground_ran=false\nif [ \"$PLAYGROUND\" != \"skipped skipped\" ]; then playground_ran=true; fi\nif [ \"$playground_ran\" = true ]; then any_ran=true; fi\necho \"playground_ran=$playground_ran\" >> \"$GITHUB_OUTPUT\"\necho \"any_ran=$any_ran\" >> \"$GITHUB_OUTPUT\"\n",
+   "python3 -I -B playground/test/contract_shards.py --check-coverage --coverage-dir coverage",
    "python3 scripts/incremental-semantics-contract/lsp_memo_coverage.py --coverage-dir coverage",
    "python3 scripts/mutant-coverage/check.py --self-test"
   ],
@@ -160,6 +160,13 @@
   "play-c-matrix": [
    "./playground/test/c-only-acceptance.sh matrix",
    "./scripts/pinned-cc.sh"
+  ],
+  "playground": [
+   "./playground/test/contract.sh --shards 2 --shard 0 --plan playground/test/contract-plan.json",
+   "./playground/test/contract.sh --shards 2 --shard 1 --plan playground/test/contract-plan.json",
+   "./scripts/pinned-cc.sh",
+   "./scripts/pinned-cc.sh",
+   "python3 -I -B playground/test/contract_shards.py --self-test\n./playground/test/contract.sh --shards 2 --plan playground/test/contract-plan.json --check-shards\n"
   ],
   "prev-diff": [
    "./scripts/selfhost-fmt-diff.sh",
