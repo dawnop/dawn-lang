@@ -408,7 +408,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 37183s (the most this file's `3x` claims may add up to)
+# push-total: 38673s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3023,126 +3023,29 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Slice D owns private source overlays, a fixture-only Maven repository and
-  # twenty compiling selfhost mutants. It shares no mutable fixture state
-  # with the broad test job, so keeping it independent makes failures
-  # attributable and keeps the same gate in branch and release workflows.
-  #
-  # Every other gate that speaks LSP moved here on 2026-08-10. They start
-  # language servers and read their traffic, which is this job's subject; the
-  # project-plan contract is here because analysis and completion are its two
-  # consumers.
+  # The LSP gates run complete independent sessions and their original mutants.
+  # Ownership retains private source overlays, a fixture-only Maven repository
+  # and 22 compiling mutants. Protocol contracts retain cold sessions and cleanup.
+  # Four job groups preserve every LSP case, session and cleanup.
+  # Replay preparation independently of work, including the 176s setup tail.
+  # Cross-family moves are recorded explicitly in the steps lock.
   lsp-workspace:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'lsp-workspace') }}
     runs-on: ubuntu-24.04
-    # Cold runners compile one observed server plus every mutant from scratch.
-    # 403s predicted (196s + 168s moved in); 370s then 421s measured on two
-    # consecutive runs of the same tree -- a 14% spread on identical work, the
-    # same non-reproducibility `native-diff` documents. Budget the worse one.
-    #
-    # That pair was observed with eighteen mutants, and neither of the two
-    # added since restated it (drop-diagnostics-version, unopened-version-zero).
-    # A mutant costs one private selfhost build plus its owning case: 5.1s
-    # locally, three runs, 4.4s build + 0.7s case, 0.2s spread. This job runs
-    # about 3.1x slower on the runner than locally (421s over nineteen builds
-    # against 7.0s per build locally), which over-states the per-mutant figure
-    # because the gates moved in here are inside the 421s and outside that
-    # division. 16s each on the runner, so 421s + 2 x 16s.
-    # 2026-09-04, post-prune window: the runner observation replaces the
-    # planning value -- 482s (run 33827988005) over the 20 completed main
-    # runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std pruning knife
-    # (e797abb0), 29s over the 453s planning value.
-    # 2026-09-06: 490s (run 34012685819) over the 12 completed main runs of
-    # 09-05T11:40Z .. 09-06T08:26Z, 8s over the 482s claim.
-    # 2026-09-11: 581s (run 34484938024) over the 25 completed main runs of
-    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
-    # 91s over the 490s claim.
-    # 2026-09-22: source-resolution's positive and 13 compiling controls
-    # took 108.72s locally. Planning allowance: 581 + 2 * 109 = 799s.
-    # 2026-09-25, observed on main and now the figure: 718s worst (run
-    # 35907509360) over the nightly audit's seven days, 09-18 .. 09-25. The
-    # 799s planning value above was 81s over it; restated to the
-    # observation plus a tenth, 790s, and the timeout to 3x that.
-    # 2026-09-30, the first read of the 35-job shape: 547s worst (run
-    # 36680145356) over the 8 main runs of 09-27T18:08Z .. 09-30T09:12Z
-    # whose steps digest is this job's (gate-observations --since
-    # 2026-09-27T18:00Z). Restated to that plus a tenth, rounded up to
-    # 5s, 605s (790s before), and the timeout to 3x that.
-    # 2026-10-04: the resolution-coverage step (T0 of
-    # docs/lsp-references-design.md) took 56s locally, its positive and four
-    # mutant builds. Planning allowance, as for source-resolution above:
-    # 605 + 2 * 56 = 717s, timeout 3x that. Restate from the observation once
-    # the step has a week of main runs.
-    # 2026-10-04: the semantic-tokens step (T1 of the same design) took 39s
-    # locally, its positive and four mutant builds: 717 + 2 * 39 = 795s,
-    # timeout 3x that. Restated with the one above.
-    # 2026-10-04: the references step (R1 of the same design) took 55s
-    # locally, its positive and four mutant builds: 795 + 2 * 55 = 905s,
-    # timeout 3x that. Restated with the two above.
-    # 2026-10-04: the workspace references step (R2 of the same design) took
-    # 48s locally, which would have made 905 + 2 * 48 = 1001s, over the 950s
-    # pole. So the four steps of that design left for a job of their own,
-    # lsp-references below, and this job's claim goes back to the worst run
-    # it had before the first of them came in.
-    # 2026-10-05, topped up after the nightly audit (issue #274, run
-    # 37305388132): its window, the 150 main runs of 10-01T22:00Z ..
-    # 10-05T11:35Z, holds a 643s run whose steps digest is this job's (run
-    # 37213795815). Restated to that plus a tenth, rounded up to 5s, 710s
-    # (605s before), and the timeout to 3x that.
-    # budget: 3x 710s worst observed plus a tenth (run 37213795815)
-    timeout-minutes: 36
+    # Std lookup, resolution coverage and references stay as complete contracts.
+    # Complete recovered executions: max 563s; claim includes
+    # the larger of a tenth and the retained sample deviation.
+    # budget: 3x 620s planning value calibrated from complete Ubuntu 24.04 executions
+    timeout-minutes: 31
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: LSP workspace ownership and mutants
-        run: ./scripts/lsp-workspace-contract/run.sh
-
-      # The language server's *scheduling*, which nothing else here can see:
-      # selfhost-lsp-diff.sh compares output bytes, and a server that spins a
-      # core or never notices its client left is byte-identical to a
-      # well-behaved one. Three assertions -- exits after hangup, publishes
-      # diagnostics, stays near-zero CPU while silent -- recorded before the
-      # debounced read loop of docs/audit/lsp-robustness-design.md §2.2 lands,
-      # so the change has a baseline to be held to. Each was made to fail on
-      # its own first (§2.2.2); the liveness one is why `cat` cannot pass.
-      - name: lsp liveness (hangup, diagnostics, idle CPU)
-        run: ./scripts/lsp-liveness.py
-
-      # Framing errors are not recoverable JSON errors: every malformed,
-      # conflicting, truncated or oversized frame gets one fixed response and
-      # closes the read loop. This drives raw streams rather than normalized
-      # transcripts, including the 8 KiB/64 MiB allocation boundaries.
-      - name: lsp framing boundaries and fatal recovery
-        run: ./scripts/lsp-framing.py
-
-      # Lifecycle messages gate document updates and pending analysis: no open
-      # buffer may become observable before initialize or after shutdown.
-      - name: lsp lifecycle sequencing and mutants
-        run: ./scripts/lsp-lifecycle-contract/run.sh
-
-      # `use`-line completion, against the tree it describes. The transcript
-      # gate cannot assert this (it compares against a release that has no such
-      # feature) and liveness reads no payloads, so without this the answers
-      # were checked by nobody. Its oracle is the filesystem -- directory
-      # listings, std/modules.txt, the [deps] table -- so a new module keeps it
-      # green and a broken walk turns it red.
-      - name: lsp use-path completion
-        run: ./scripts/lsp-use-completion.py
-
-      # The quickfix that removes an unused import, which is a compile error
-      # (docs/unused-imports-design.md §6). It opens a buffer with the three
-      # shapes the edit handles, applies what the server offers for the
-      # diagnostics it published, and holds the result to the expected text
-      # and to a clean re-check. The transcript gate cannot assert this for
-      # the reason given above. 2.1s locally (2026-09-24).
-      - name: lsp unused-import code action
-        run: ./scripts/lsp-unused-import-action.py
 
       # Which std the server loads, asserted from cwds that are not the
-      # checkout -- the only place the bug lived. An editor picks the server's
+      # checkout, the only place the bug lived. An editor picks the server's
       # cwd, so a run from the repo root (which every other LSP gate here does)
       # is exactly the configuration that stayed green while the editor showed
       # 281 phantom diagnostics. Covers the two halves the inline tests on
@@ -3150,55 +3053,8 @@ jobs:
       # and bin/dawn exporting DAWN_STD from its own location. ~19s.
       - name: lsp std resolution (cwd independence)
         run: ./scripts/lsp-std-resolution.py
-
-      # Which typed tree a hover reads: the one filed under the declaration
-      # path the cursor's syntax spells (docs/symbol-id-design.md §5), not the
-      # one whose body span happens to match. The transcript gate cannot
-      # assert it -- the previous release pairs by span and answers the same
-      # wherever spans are unique -- so the cases here are the ones a key can
-      # get wrong (namesake impl methods, a trait default and its override, a
-      # test named like a function) and a function declared twice, where the
-      # key names the first instance. One server, ~3s locally (2026-09-27).
-      - name: lsp typed-tree pairing by declaration key
-        run: ./scripts/lsp-decl-pairing.py
-
-      # Analysis and completion must consume one captured source plan. Both
-      # fail-closed edges carry compiling mutants: loader replanning and LSP
-      # completion discarding the document's module index.
-      - name: project plan capture and completion consistency
-        run: ./scripts/project-plan-contract/run.sh
-
-  # The per-name contracts of docs/lsp-references-design.md: what definition
-  # resolves, what kind semantic tokens give, what references return in one
-  # document and across a project, what rename edits and refuses. Each builds
-  # four or more mutant compilers, so together they are most of their job;
-  # they ran in lsp-workspace until the fourth (R2) would have taken that job
-  # past the pole.
-  lsp-references:
-    needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'lsp-references') }}
-    runs-on: ubuntu-24.04
-    # Planning allowance, each step at twice its local time as its line in
-    # lsp-workspace claimed (56s, 39s, 55s and 48s, 2026-10-04), plus 50s
-    # fixed overhead: 2 * 198 + 50 = 446s; the rename step (R3) adds twice
-    # its local 63s: 572s; its second version (applied renames, the default
-    # argument and files-on-disk projects, eleven mutants) adds twice the
-    # 44s it added locally: 660s; its third (a coverage project, 22
-    # mutants built two at a time) twice the 19s more: 698s, timeout 3x
-    # that. Restate from the observation once the job has a week of main
-    # runs.
-    # 2026-10-10 (#274), restated from the week of main runs: worst 713s (112 runs of
-    # the week to 2026-10-10) plus one standard deviation (98s), rounded up to 5s.
-    # budget: 3x 815s worst observed 713s plus one standard deviation
-    timeout-minutes: 41
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
       # Which written names go-to-definition resolves, one assertion per name
-      # (docs/lsp-references-design.md §五): written types, effect rows,
+      # (docs/lsp-references-design.md section 5): written types, effect rows,
       # `with handle`, handler arms, operation calls, module alias segments,
       # field and argument names. selfhost-lsp-diff.sh compares against the
       # previous release, which had these same holes, so it cannot hold them
@@ -3206,18 +3062,6 @@ jobs:
       # turn their own case red. 56s locally (2026-10-04).
       - name: lsp resolution coverage and mutants
         run: ./scripts/lsp-resolution-coverage.py --mutants
-
-      # What kind semanticTokens gives each name, token by token
-      # (docs/lsp-references-design.md §T1): the two programs above, a range
-      # inside one declaration, a line with characters past the BMP ahead of
-      # its names, and names in other scripts; each token's absolute
-      # position is held too. selfhost-lsp-diff.sh only sees that the reply changed;
-      # the previous release has none. Four mutants, each built from a
-      # private selfhost copy, must turn their own case red. 39s locally
-      # (2026-10-04).
-      - name: lsp semantic tokens and mutants
-        run: ./scripts/lsp-semantic-tokens.py --mutants
-
       # Which names references and documentHighlight return for a cursor
       # (docs/lsp-references-design.md §R1): a local, a parameter, a named
       # argument, a record pun from both sides, a trait method, an operation,
@@ -3229,6 +3073,134 @@ jobs:
       - name: lsp references and mutants
         run: ./scripts/lsp-references.py --mutants
 
+  lsp-references:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'lsp-references') }}
+    runs-on: ubuntu-24.04
+    # Framing, project-plan capture and the complete applied-rename matrix.
+    # Complete recovered executions: max 698s; claim includes
+    # the larger of a tenth and the retained sample deviation.
+    # budget: 3x 790s planning value calibrated from complete Ubuntu 24.04 executions
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Framing errors are not recoverable JSON errors: every malformed,
+      # conflicting, truncated or oversized frame gets one fixed response and
+      # closes the read loop. This drives raw streams rather than normalized
+      # transcripts, including the 8 KiB/64 MiB allocation boundaries.
+      - name: lsp framing boundaries and fatal recovery
+        run: ./scripts/lsp-framing.py
+      # Analysis and completion must consume one captured source plan. Both
+      # fail-closed edges carry compiling mutants: loader replanning and LSP
+      # completion discarding the document's module index.
+      - name: project plan capture and completion consistency
+        run: ./scripts/project-plan-contract/run.sh
+      # What prepareRename and rename answer (docs/lsp-references-design.md
+      # §R3): one project with a [deps] package, a case per safety condition
+      # the research report lists (case class, keyword, shadowing a builtin
+      # and a capture by a local, a module alias, an `as` import from both
+      # ends, every importer, record puns from both sides, named arguments,
+      # a trait method, an operation, doc links) and the refusals (std, a
+      # builtin, a dependency, a module, `main`, a module with errors). Every
+      # accepted rename is applied to a copy and must run and print what the
+      # original printed; a default argument's call, modules edited or
+      # created on disk mid-session, and a name of each kind the references
+      # walk once missed have projects of their own. The previous release
+      # has no rename, so selfhost-lsp-diff.sh can only say that the reply
+      # changed. Twenty-three mutants, each built from a private selfhost copy
+      # (two at a time), must turn their own case red. 126s locally
+      # (2026-10-04, 63s before the second version on the same machine
+      # scaled by the measured 117s -> 198s -> 234s).
+      - name: lsp rename and mutants
+        run: ./scripts/lsp-rename.py --mutants
+
+  lsp-workspace-2:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'lsp-workspace-2') }}
+    runs-on: ubuntu-24.04
+    # Ownership and every private mutant, liveness, completion and pairing.
+    # Complete recovered executions: max 683s; claim includes
+    # the larger of a tenth and the retained sample deviation.
+    # budget: 3x 780s planning value calibrated from complete Ubuntu 24.04 executions
+    timeout-minutes: 39
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: LSP workspace ownership and mutants
+        run: ./scripts/lsp-workspace-contract/run.sh
+      # The language server's *scheduling*, which nothing else here can see:
+      # selfhost-lsp-diff.sh compares output bytes, and a server that spins a
+      # core or never notices its client left is byte-identical to a
+      # well-behaved one. Three assertions, exits after hangup, publishes
+      # diagnostics, stays near-zero CPU while silent, recorded before the
+      # debounced read loop of docs/audit/lsp-robustness-design.md §2.2 lands,
+      # so the change has a baseline to be held to. Each was made to fail on
+      # its own first (§2.2.2); the liveness one is why `cat` cannot pass.
+      - name: lsp liveness (hangup, diagnostics, idle CPU)
+        run: ./scripts/lsp-liveness.py
+      # `use`-line completion, against the tree it describes. The transcript
+      # gate cannot assert this (it compares against a release that has no such
+      # feature) and liveness reads no payloads, so without this the answers
+      # were checked by nobody. Its oracle is the filesystem, directory
+      # listings, std/modules.txt, the [deps] table, so a new module keeps it
+      # green and a broken walk turns it red.
+      - name: lsp use-path completion
+        run: ./scripts/lsp-use-completion.py
+      # The quickfix that removes an unused import, which is a compile error
+      # (docs/unused-imports-design.md §6). It opens a buffer with the three
+      # shapes the edit handles, applies what the server offers for the
+      # diagnostics it published, and holds the result to the expected text
+      # and to a clean re-check. The transcript gate cannot assert this for
+      # the reason given above. 2.1s locally (2026-09-24).
+      - name: lsp unused-import code action
+        run: ./scripts/lsp-unused-import-action.py
+      # Which typed tree a hover reads: the one filed under the declaration
+      # path the cursor's syntax spells (docs/symbol-id-design.md §5), not the
+      # one whose body span happens to match. The transcript gate cannot
+      # assert it, the previous release pairs by span and answers the same
+      # wherever spans are unique, so the cases here are the ones a key can
+      # get wrong (namesake impl methods, a trait default and its override, a
+      # test named like a function) and a function declared twice, where the
+      # key names the first instance. One server, ~3s locally (2026-09-27).
+      - name: lsp typed-tree pairing by declaration key
+        run: ./scripts/lsp-decl-pairing.py
+
+  lsp-references-2:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'lsp-references-2') }}
+    runs-on: ubuntu-24.04
+    # Lifecycle, tokens and workspace references, with all owning mutants.
+    # Complete recovered executions: max 750s; claim includes
+    # the larger of a tenth and the retained sample deviation.
+    # budget: 3x 825s planning value calibrated from complete Ubuntu 24.04 executions
+    timeout-minutes: 42
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lifecycle messages gate document updates and pending analysis: no open
+      # buffer may become observable before initialize or after shutdown.
+      - name: lsp lifecycle sequencing and mutants
+        run: ./scripts/lsp-lifecycle-contract/run.sh
+      # What kind semanticTokens gives each name, token by token
+      # (docs/lsp-references-design.md §T1): the fixture programs, a range
+      # inside one declaration, a line with characters past the BMP ahead of
+      # its names, and names in other scripts; each token's absolute
+      # position is held too. selfhost-lsp-diff.sh only sees that the reply changed;
+      # the previous release has none. Eight mutants, each built from a
+      # private selfhost copy, must turn their own case red. 39s locally
+      # (2026-10-04).
+      - name: lsp semantic tokens and mutants
+        run: ./scripts/lsp-semantic-tokens.py --mutants
       # Which names references returns across a project
       # (docs/lsp-references-design.md §R2): a two-module and a three-module
       # project, the same set asked from the declaration, the import list, a
@@ -3243,25 +3215,6 @@ jobs:
       # locally (2026-10-04).
       - name: lsp workspace references and mutants
         run: ./scripts/lsp-references-workspace.py --mutants
-
-      # What prepareRename and rename answer (docs/lsp-references-design.md
-      # §R3): one project with a [deps] package, a case per safety condition
-      # the research report lists (case class, keyword, shadowing a builtin
-      # and a capture by a local, a module alias, an `as` import from both
-      # ends, every importer, record puns from both sides, named arguments,
-      # a trait method, an operation, doc links) and the refusals (std, a
-      # builtin, a dependency, a module, `main`, a module with errors). Every
-      # accepted rename is applied to a copy and must run and print what the
-      # original printed; a default argument's call, modules edited or
-      # created on disk mid-session, and a name of each kind the references
-      # walk once missed have projects of their own. The previous release
-      # has no rename, so selfhost-lsp-diff.sh can only say that the reply
-      # changed. Twenty-two mutants, each built from a private selfhost copy
-      # (two at a time), must turn their own case red. 126s locally
-      # (2026-10-04, 63s before the second version on the same machine
-      # scaled by the measured 117s -> 198s -> 234s).
-      - name: lsp rename and mutants
-        run: ./scripts/lsp-rename.py --mutants
 
   # The wasm target: the failure runtime, and the DOM bridge over it.
   #
