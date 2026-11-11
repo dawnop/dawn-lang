@@ -1,0 +1,112 @@
+# This executable crosses the real filesystem and both compiler hosts with
+# identical metadata requests. It stays outside the driver's command graph,
+# keeping input qualification independent of the later doc and Jsig wiring.
+
+use std/io
+use std/io.{with_fs_real, with_env_real}
+use std/map
+use json/value.{Json, JArr, JObj, JStr}
+use json/parser
+use check/classmeta
+use check/classmeta.{ClassMeta, MetadataError}
+use driver/jmetadata
+use driver/jmetadata.{MetadataContext}
+
+fn require(ok: Bool) -> Unit = if not ok { panic("metadata assertion failed") }
+
+fn text_field(value: Json, key: String) -> String =
+  match value {
+    JObj(fields) -> match map.get(fields, key) {
+      Some(JStr(s)) -> s
+      _ -> panic("invalid qualification request field: " ++ key)
+    }
+    _ -> panic("invalid qualification request")
+  }
+
+fn member(c: ClassMeta, name: String, descriptor: String) -> Unit = {
+  var found = false
+  for m in c.methods {
+    if m.name == name && m.descriptor == descriptor { found = true }
+  }
+  require(found)
+}
+
+fn jdk_fields(context: MetadataContext) -> Unit = {
+  let table = jmetadata.classes(context)
+  require(len(map.keys(table)) == 501)
+  let stream = map.get(table, "java.io.InputStream").expect("InputStream")
+  require(stream.parent == Some("java.lang.Object"))
+  require(stream.interfaces == ["java.io.Closeable"])
+  member(stream, "read", "([B)I")
+  member(stream, "read", "()I")
+  var throws = false
+  for m in stream.methods {
+    if m.name == "read" && m.descriptor == "()I" {
+      throws = m.throws == ["java.io.IOException"] && m.access & 0x401 == 0x401
+    }
+  }
+  require(throws)
+  let entry = map.get(table, "java.util.Map\$Entry").expect("Entry")
+  require(entry.access & 0x200 != 0)
+  var nested = false
+  for n in entry.inner {
+    if n.name == entry.name { nested = n.outer == Some("java.util.Map") && n.simple == Some("Entry") }
+  }
+  require(nested)
+  require(jmetadata.resolve_name(context, "java.util.Map.Entry") == Some(entry.name))
+  require(jmetadata.resolve_name(context, "no.such.Type") == None)
+  let integer = map.get(table, "java.lang.Integer").expect("Integer")
+  var constant = false
+  for f in integer.fields {
+    if f.name == "MAX_VALUE" { constant = f.descriptor == "I" && f.access & 0x19 == 0x19 }
+  }
+  require(constant)
+  let http = map.get(table, "java.net.http.HttpResponse").expect("HttpResponse")
+  member(http, "body", "()Ljava/lang/Object;")
+}
+
+fn check_result[T](result: Result[T, MetadataError], expected: String) -> Unit =
+  match result {
+    Ok(_) -> { require(expected == "ok") }
+    Err(e) -> {
+      if e.kind != expected { panic("expected " ++ expected ++ ", got " ++ e.kind ++ ": " ++ e.message) }
+      require(e.path != "")
+    }
+  }
+
+## Execute the checked requests through the filesystem qualification harness.
+pub fn run_cases(cases_path: String) -> Unit !io = {
+  with_fs_real(() => with_env_real(() => {
+    let src = match io.read_file(cases_path) {
+      Ok(s) -> s
+      Err(e) -> panic(e.message)
+    }
+    let cases = match parser.parse(src) {
+      Ok(JArr(items)) -> items
+      _ -> panic("invalid qualification cases")
+    }
+    for request in cases {
+      let name = text_field(request, "name")
+      let path = text_field(request, "path")
+      let expected = text_field(request, "expected")
+      if text_field(request, "mode") == "class" {
+        let data = match io.read_bytes(path) { Ok(b) -> b
+          Err(e) -> panic(e.message) }
+        check_result(classmeta.read_class(data, path), expected)
+      } else {
+        let hash = text_field(request, "hash")
+        let pin: Option[String] = if hash == "" { None } else { Some(hash) }
+        let result = jmetadata.load_context(path, pin)
+        check_result(result, expected)
+        if name == "locked-jdk" {
+          match result { Ok(context) -> jdk_fields(context)
+            Err(_) -> { panic("unexpected metadata error") } }
+        }
+      }
+      println("PASS " ++ name)
+    }
+    println(to_string(len(cases)) ++ " metadata cases passed")
+  }))
+}
+
+pub fn main() -> Unit !io = run_cases(args()[0])
