@@ -59,6 +59,37 @@ golden 的每一行就是 `dawn check` 的 `D` 行，只把路径缩成 basename
 
 `--record` 同时重写 `uncovered.txt`（见下），并**保留已写好的理由列**。
 
+### Complete case selectors
+
+CI uses the two stable selectors in `case-plan.json`. Each entry is a whole
+single-file or multi-module case. `run.sh --check-shards` validates that the
+selectors are nonempty and partition the current registry exactly once.
+
+Each isolated job first runs `shards.py --prepare-selector --shard I
+--state-dir DIR`, then `run.sh --shard I --state-dir DIR`. After every selected
+golden comparison and cleanup succeeds, `shards.py --write-receipt --shard I
+--state-dir DIR --coverage-dir COVERAGE` checks the current input bytes again.
+Selector 0 also runs the complete bitwise contract. Selector 1 cannot donate
+a receipt claiming to have run it.
+
+The shared guard runs `shards.py --check-coverage --coverage-dir COVERAGE`
+before the global coverage selftest and uncovered-site ratchet. It requires
+both selector receipts with the exact index, case order, commit, tracked input
+bytes and plan identity. A partial run proves no global diagnostic coverage.
+`shards.py --self-test` refuses missing, repeated, misnumbered and wrong-input
+receipts, incomplete case lists and missing or repeated bitwise execution.
+Receipts include the actual ten value-leg and eight compiling-mutant success
+records from the complete bitwise transcript. The lightweight union rejects a
+missing or repeated result without compiling another control copy.
+
+Each push runs the selector, input and receipt structure checks. The refusal
+selftest uses fixed receipt and transcript fixtures and invokes no compiler;
+run it during acceptance with `python3 -I -B scripts/checker-corpus/shards.py
+--self-test`. Acceptance also replays real receipts against changed producer,
+mutant registry and golden inputs. Those destructive scratch-copy controls
+remain separate from the required complete bitwise contract.
+The default unsharded command and `--record` retain the complete local flow.
+
 ## 覆盖率与 `uncovered.txt`
 
 golden 只能钉住「某个程序产生了什么」；它对**没有任何 case 触发的诊断**一无所知，

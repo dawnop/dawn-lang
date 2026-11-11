@@ -7,8 +7,13 @@
    "./scripts/builtin-type-contract/run.sh --shard 3/3"
   ],
   "checker-corpus": [
-   "./scripts/checker-corpus/run.sh",
-   "./scripts/java-narrowing-contract/run.sh"
+   "./scripts/checker-corpus/run.sh --shards 2 --check-shards",
+   "./scripts/checker-corpus/run.sh --shards 2 --shard 0 --state-dir .checker-state",
+   "./scripts/checker-corpus/run.sh --shards 2 --shard 1 --state-dir .checker-state",
+   "python3 -I -B scripts/checker-corpus/shards.py --shards 2 --shard 0 --prepare-selector --state-dir .checker-state",
+   "python3 -I -B scripts/checker-corpus/shards.py --shards 2 --shard 0 --write-receipt --state-dir .checker-state --coverage-dir coverage",
+   "python3 -I -B scripts/checker-corpus/shards.py --shards 2 --shard 1 --prepare-selector --state-dir .checker-state",
+   "python3 -I -B scripts/checker-corpus/shards.py --shards 2 --shard 1 --write-receipt --state-dir .checker-state --coverage-dir coverage"
   ],
   "classfile-never-mutants": [
    "./scripts/classfile-verify/run.sh --never-mutants-only"
@@ -102,6 +107,9 @@
    "./scripts/java-member-dispatch-contract/run.sh",
    "./scripts/loader-listdir-contract/run.sh"
   ],
+  "java-narrowing": [
+   "./scripts/java-narrowing-contract/run.sh"
+  ],
   "java-target-classpath": [
    "./bin/dawn lock --check selfhost",
    "./scripts/bootstrap-guards/run.sh",
@@ -136,8 +144,10 @@
   ],
   "mutant-shards-complete": [
    "# $FLAGS is word-split on purpose: it is a list of flag pairs.\npython3 scripts/mutant-coverage/check.py \\\n  --coverage-dir coverage $FLAGS\n",
-   "flags=\"--exclude-harness tile-golden\"\nran=false\nskipped() { case \" $1 \" in *\" skipped \"*) return 0 ;; esac; return 1; }\nif skipped \"$NATIVE_DIFF\"; then\n  flags=\"$flags --exclude-harness spike-native\"\nelse ran=true; fi\nif skipped \"$SYNTAX\"; then\n  flags=\"$flags --exclude-harness syntax-small-contract\"\n  flags=\"$flags --exclude-harness pattern-or-contract\"\n  flags=\"$flags --exclude-harness for-pattern-contract\"\nelse ran=true; fi\nif skipped \"$BUILTIN_TYPE\"; then\n  flags=\"$flags --exclude-harness builtin-type-contract\"\nelse ran=true; fi\necho \"coverage flags: $flags (any family ran: $ran)\"\necho \"flags=$flags\" >> \"$GITHUB_OUTPUT\"\necho \"ran=$ran\" >> \"$GITHUB_OUTPUT\"\nmemo_ran=false\nif [ \"$LSP_MEMO\" != \"skipped skipped skipped\" ]; then memo_ran=true; fi\nany_ran=$ran\nif [ \"$memo_ran\" = true ]; then any_ran=true; fi\necho \"memo_ran=$memo_ran\" >> \"$GITHUB_OUTPUT\"\nplayground_ran=false\nif [ \"$PLAYGROUND\" != \"skipped skipped\" ]; then playground_ran=true; fi\nif [ \"$playground_ran\" = true ]; then any_ran=true; fi\necho \"playground_ran=$playground_ran\" >> \"$GITHUB_OUTPUT\"\necho \"any_ran=$any_ran\" >> \"$GITHUB_OUTPUT\"\n",
+   "./scripts/checker-corpus/coverage.py --selftest\n./scripts/checker-corpus/coverage.py\n",
+   "flags=\"--exclude-harness tile-golden\"\nran=false\nskipped() { case \" $1 \" in *\" skipped \"*) return 0 ;; esac; return 1; }\nif skipped \"$NATIVE_DIFF\"; then\n  flags=\"$flags --exclude-harness spike-native\"\nelse ran=true; fi\nif skipped \"$SYNTAX\"; then\n  flags=\"$flags --exclude-harness syntax-small-contract\"\n  flags=\"$flags --exclude-harness pattern-or-contract\"\n  flags=\"$flags --exclude-harness for-pattern-contract\"\nelse ran=true; fi\nif skipped \"$BUILTIN_TYPE\"; then\n  flags=\"$flags --exclude-harness builtin-type-contract\"\nelse ran=true; fi\necho \"coverage flags: $flags (any family ran: $ran)\"\necho \"flags=$flags\" >> \"$GITHUB_OUTPUT\"\necho \"ran=$ran\" >> \"$GITHUB_OUTPUT\"\nmemo_ran=false\nif [ \"$LSP_MEMO\" != \"skipped skipped skipped\" ]; then memo_ran=true; fi\nany_ran=$ran\nif [ \"$memo_ran\" = true ]; then any_ran=true; fi\necho \"memo_ran=$memo_ran\" >> \"$GITHUB_OUTPUT\"\nplayground_ran=false\nif [ \"$PLAYGROUND\" != \"skipped skipped\" ]; then playground_ran=true; fi\nif [ \"$playground_ran\" = true ]; then any_ran=true; fi\necho \"playground_ran=$playground_ran\" >> \"$GITHUB_OUTPUT\"\nchecker_ran=false\nif [ \"$CHECKER_CORPUS\" != \"skipped skipped\" ]; then checker_ran=true; fi\nif [ \"$checker_ran\" = true ]; then any_ran=true; fi\necho \"checker_ran=$checker_ran\" >> \"$GITHUB_OUTPUT\"\necho \"any_ran=$any_ran\" >> \"$GITHUB_OUTPUT\"\n",
    "python3 -I -B playground/test/contract_shards.py --check-coverage --coverage-dir coverage",
+   "python3 -I -B scripts/checker-corpus/shards.py --check-coverage --coverage-dir coverage",
    "python3 scripts/incremental-semantics-contract/lsp_memo_coverage.py --coverage-dir coverage",
    "python3 scripts/mutant-coverage/check.py --self-test"
   ],

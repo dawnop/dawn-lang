@@ -19,15 +19,28 @@ cd "$(dirname "$0")/../.."
 here=scripts/checker-corpus
 
 mode=check
-[ "${1:-}" = "--record" ] && mode=record
+selector=
+case "${1:-}" in
+  --execute-selector)
+    selector=${CHECKER_CORPUS_SELECTOR:?missing checker selector}
+    case "$selector" in 0|1) ;; *) echo 'FAIL: checker selector out of range' >&2; exit 1 ;; esac
+    [ -f "${CHECKER_CORPUS_CASES:?missing checker cases}" ]
+    [ -n "${CHECKER_CORPUS_COMPLETED:?missing checker completion log}" ]
+    ;;
+  --record) mode=record ;;
+  '') ;;
+  *) exec python3 -I -B "$here/shards.py" "$@" ;;
+esac
 
 # Every Cx field says why it is not frame state (#204). The isolated_* cases
 # below hold the fields that are; this holds the rest to having an answer.
 # No build needed, so it runs first.
-./scripts/checker-corpus/frame-triage.py --selftest
-./scripts/checker-corpus/frame-triage.py
+if [ "$selector" != 1 ]; then
+  ./scripts/checker-corpus/frame-triage.py --selftest
+  ./scripts/checker-corpus/frame-triage.py
+fi
 
-./bin/dawn --version > /dev/null
+if [ "$selector" != 1 ]; then ./bin/dawn --version > /dev/null; fi
 
 TMP=${TMPDIR:-/tmp}/checker-corpus.$$
 mkdir -p "$TMP"
@@ -46,6 +59,11 @@ for d in "$here"/cases/*.d; do
   fi
   targets+=("$d/entry.dawn")
 done
+if [ -n "$selector" ]; then
+  targets=()
+  while IFS= read -r f; do targets+=("$f"); done < "$CHECKER_CORPUS_CASES"
+  [ "${#targets[@]}" -gt 0 ] || { echo 'FAIL: empty checker selector' >&2; exit 1; }
+fi
 
 fail=0
 n=0
@@ -91,6 +109,8 @@ for f in "${targets[@]}"; do
   else
     n=$((n + 1))
     n_diags=$((n_diags + $(wc -l < "$want")))
+    if [ -n "$selector" ]; then printf '%s\n' "$name" >> "$CHECKER_CORPUS_COMPLETED"; fi
+    echo "PASS checker case $name"
   fi
 done
 
@@ -98,7 +118,7 @@ done
 # reaches is invisible to every golden above, so the set of unreached sites is
 # a ratchet in both directions -- adding one fails the build, and so does
 # covering one without striking it off uncovered.txt.
-./scripts/checker-corpus/coverage.py --selftest
+if [ -z "$selector" ]; then ./scripts/checker-corpus/coverage.py --selftest; fi
 if [ "$mode" = record ]; then
   echo "recorded $n cases, $n_diags diagnostics"
   ./scripts/checker-corpus/coverage.py --record
@@ -107,8 +127,19 @@ fi
 
 [ "$fail" = 0 ] || { echo "FAIL: checker corpus" >&2; exit 1; }
 
-./scripts/checker-corpus/coverage.py
-echo "OK: checker corpus -- $n cases, $n_diags diagnostics in the recorded order"
+if [ -z "$selector" ]; then
+  ./scripts/checker-corpus/coverage.py
+  echo "OK: checker corpus -- $n cases, $n_diags diagnostics in the recorded order"
+else
+  echo "OK: checker selector $selector -- $n cases, $n_diags diagnostics in the recorded order; global coverage awaits the complete union"
+fi
 
 # Diagnostic bytes alone cannot prove the Int route or finite-width semantics.
-python3 scripts/bitwise-contract/check.py
+if [ "$selector" != 1 ]; then
+  if [ -n "$selector" ]; then
+    python3 scripts/bitwise-contract/check.py | tee "${CHECKER_CORPUS_BITWISE_LOG:?missing bitwise transcript}"
+  else
+    python3 scripts/bitwise-contract/check.py
+  fi
+  if [ -n "$selector" ]; then printf '%s\n' '@bitwise' >> "$CHECKER_CORPUS_COMPLETED"; fi
+fi
