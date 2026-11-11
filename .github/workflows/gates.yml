@@ -408,7 +408,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 34553s (the most this file's `3x` claims may add up to)
+# push-total: 36218s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2885,52 +2885,10 @@ jobs:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'java-target-classpath') }}
     runs-on: ubuntu-24.04
-    # 262s predicted (194s + 68s moved in); 270s then 281s measured on two
-    # consecutive runs of the same tree, so the budget follows the worse one.
-    # 2026-09-03: restated from the Actions API -- the worst of 57
-    # completed main runs since 09-02 is 301s (run 33672841752), which the
-    # 281s claim was 20s under. scripts/gate-observations.py pulled it;
-    # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # 2026-09-04: 306s (run 33774195662) over the four completed main runs of
-    # 2026-09-03 (15:26Z .. 17:42Z), 5s over the 301s claim.
-    # 2026-09-04, post-prune window: 314s (run 33810671364) over the 20
-    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
-    # pruning knife (e797abb0), 8s over the 306s claim.
-    # 2026-09-06: 337s (run 33969824892) over the 12 completed main runs of
-    # 09-05T11:40Z .. 09-06T08:26Z, 23s over the 314s claim.
-    # This one is in the window's longest run (span 2706s, the same runner
-    # contention tree-policy's note describes); the other eleven readings are
-    # 224 to 317s. Restated anyway, for the reason given there.
-    # 2026-09-11: 376s (run 34259782743) over the 25 completed main runs of
-    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
-    # 39s over the 337s claim.
-    # 2026-09-22: replay core shard 1's subject times sum to 157.02s,
-    # including its positive. With 5s invocation overhead and doubled rounded
-    # headroom: 376 + 2 * 163 = 702s. Derived, not separately observed.
-    # 2026-09-25, observed on main and now the figure: 627s worst (run
-    # 35934557545) over the nightly audit's seven days, 09-18 .. 09-25. The
-    # 702s planning value above was 75s over it; restated to the
-    # observation plus a tenth, 690s, and the timeout to 3x that.
-    # 2026-09-30, the first read of the 35-job shape: 361s worst (run
-    # 36680145356) over the 8 main runs of 09-27T18:08Z .. 09-30T09:12Z
-    # whose steps digest is this job's (gate-observations --since
-    # 2026-09-27T18:00Z). Restated to that plus a tenth, rounded up to
-    # 5s, 400s (690s before), and the timeout to 3x that.
-    # 2026-10-19: the playground contract moved in from docs. K5 of
-    # docs/playground-native-runner-design.md made it run the
-    # process-per-request runner instead of the long-lived JVM server: it
-    # builds the runner first, and a repeat /compile compiles again where the
-    # JVM server answered from its cache. Timed locally inside a held build
-    # slot, alternating with origin/main's JVM contract on the same machine:
-    # 121s and 110s for the old one, 181s and 148s for this one. docs was
-    # already at 945s, under the 950s pole by 5s, so it had no room for the
-    # difference; this job, which runs the Playground deploy guards, had.
-    # 400s plus the worse run doubled for the runner, 362s, is 762s, plus a
-    # tenth, rounded up to 5s, 840s (400s before), and the timeout 3x that;
-    # docs keeps its figure until it is restated from observation. To be
-    # restated from the first observed runs.
-    # budget: 3x 840s planning value (361s worst observed on run 36680145356 plus 39s of margin as before, plus 362s for the playground contract, plus a tenth)
-    timeout-minutes: 42
+    # Seven-day Ubuntu 24.04 replay after separating playground sessions:
+    # paired P95 577s; cross-source worst 621s plus one deviation.
+    # budget: 3x 690s planning value from complete classpath and bootstrap steps
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2960,14 +2918,6 @@ jobs:
       # About 4s on a laptop, inside this job's claim.
       - name: deploy guards (site and Playground redeploy scripts)
         run: ./scripts/deploy-guards/run.sh
-
-      # The playground runs a public endpoint that compiles and executes code
-      # strangers send it, and nothing here ever ran its contract test: the
-      # sandbox timeout, the 413 on oversized bodies, and the check that compile
-      # errors do not leak host paths were all trusted rather than exercised.
-      # It builds the native runner from this tree with the pinned CC above.
-      - name: playground contract
-        run: ./playground/test/contract.sh
 
       # PKG-04: the resolved [java-deps] closure must still match dawn.lock --
       # a moved transitive version or a mirror answering with different bytes
@@ -3004,6 +2954,67 @@ jobs:
       # behavior mutants pin query isolation, parent choice and both close paths.
       - name: target-scoped Java signature leases
         run: ./scripts/jsig-lease-contract/run.sh
+
+
+  # Select complete sessions. The main HTTP sequence, its cold state and its
+  # cleanup stay together; the tile probe keeps its full cold/warm lifecycle.
+  # Both jobs build their own compiler and runner. Only coverage receipts move
+  # between jobs, and only their complete union establishes global coverage.
+  playground-1:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'playground-1') }}
+    runs-on: ubuntu-24.04
+    # Paired P95 763s; cross-source worst 826s plus one deviation.
+    # budget: 3x 925s planning value from complete playground sessions
+    timeout-minutes: 47
+    steps:
+      - uses: actions/checkout@v4
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: playground selector and coverage refusal controls
+        run: |
+          python3 -I -B playground/test/contract_shards.py --self-test
+          ./playground/test/contract.sh --shards 2 --plan playground/test/contract-plan.json --check-shards
+      - name: playground contract, selector 0
+        env:
+          PLAY_CONTRACT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./playground/test/contract.sh --shards 2 --shard 0 --plan playground/test/contract-plan.json
+      - name: record the complete playground selector
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-playground-0
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  playground-2:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'playground-2') }}
+    runs-on: ubuntu-24.04
+    # Paired P95 738s; cross-source worst 793s plus one deviation.
+    # budget: 3x 890s planning value from the complete tile probe session
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: playground contract, selector 1
+        env:
+          PLAY_CONTRACT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./playground/test/contract.sh --shards 2 --shard 1 --plan playground/test/contract-plan.json
+      - name: record the complete playground selector
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-playground-1
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
 
   # Slice D owns private source overlays, a fixture-only Maven repository and
   # twenty compiling selfhost mutants. It shares no mutable fixture state
@@ -4687,6 +4698,8 @@ jobs:
   # records can be cross-read into this one.
   mutant-shards-complete:
     needs:
+      - playground-1
+      - playground-2
       - plan
       - incremental-memo-4
       - incremental-memo-7
@@ -4722,6 +4735,7 @@ jobs:
           NATIVE_DIFF: ${{ needs.native-diff-1.result }} ${{ needs.native-diff-2.result }}
           SYNTAX: ${{ needs.syntax-mutants-3-1.result }} ${{ needs.syntax-mutants-3-2.result }} ${{ needs.syntax-mutants-3-3.result }}
           BUILTIN_TYPE: ${{ needs.builtin-type-3-1.result }} ${{ needs.builtin-type-3-2.result }} ${{ needs.builtin-type-3-3.result }}
+          PLAYGROUND: ${{ needs.playground-1.result }} ${{ needs.playground-2.result }}
           LSP_MEMO: ${{ needs.incremental-memo-4.result }} ${{ needs.incremental-memo-7.result }} ${{ needs.incremental-memo-8.result }}
         run: |
           flags="--exclude-harness tile-golden"
@@ -4746,6 +4760,10 @@ jobs:
           any_ran=$ran
           if [ "$memo_ran" = true ]; then any_ran=true; fi
           echo "memo_ran=$memo_ran" >> "$GITHUB_OUTPUT"
+          playground_ran=false
+          if [ "$PLAYGROUND" != "skipped skipped" ]; then playground_ran=true; fi
+          if [ "$playground_ran" = true ]; then any_ran=true; fi
+          echo "playground_ran=$playground_ran" >> "$GITHUB_OUTPUT"
           echo "any_ran=$any_ran" >> "$GITHUB_OUTPUT"
       - name: collect every shard's coverage record
         if: ${{ steps.families.outputs.any_ran == 'true' }}
@@ -4764,6 +4782,9 @@ jobs:
       - name: the LSP memo union covers every complete subject once
         if: ${{ steps.families.outputs.memo_ran == 'true' }}
         run: python3 scripts/incremental-semantics-contract/lsp_memo_coverage.py --coverage-dir coverage
+      - name: the playground union covers every complete session once
+        if: ${{ steps.families.outputs.playground_ran == 'true' }}
+        run: python3 -I -B playground/test/contract_shards.py --check-coverage --coverage-dir coverage
 
 
   # Keep the complete correctness oracle separate from the route contract.
