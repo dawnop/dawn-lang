@@ -17,10 +17,10 @@
 > **后续边界**：native 驱动已有 fmt/doc/test/lsp（[nmain.dawn](../selfhost/src/nmain.dawn)），
 > 仓库 [bin/dawn](../bin/dawn) 仍以 JVM 自举；安装入口默认 native 尚未交付，后续方向是直接安装
 > 现有 native 驱动，JVM 使用者显式调用同版本 `java -jar`，不自动回退。
-> 建站 [package-docs.sh](../site/package-docs.sh) 对 web-jvm 仍调用 JVM doc；其公开
-> [input_source](../packages/web-jvm/src/server.dawn) 签名包含 `InputStream`。
-> Java 包文档闭合的后续方向是只给 native doc 提供版本锁定的 class 元数据，保持完整检查与
-> 公开签名；这项尚未实现，不能靠删页面或复用旧 JSON 计作完成。
+> 建站 [package-docs.sh](../site/package-docs.sh) 的十四包均用 native doc；web-jvm 显式
+> 提供锁定的原始 class 元数据，完整检查与 `InputStream` 公开签名保持。工具与数据由
+> [prepare.sh](../site/prepare.sh) 独立制备，build 校验收据后重新生成全部 JSON；JVM
+> 只作独立对照门的参考。消费边界见 [建站输入设计](site-native-inputs-design.md)。
 > std 的后续状态见 [std-audit.md](std-audit.md)，不再把旧 S5 清单整份视为待办。
 >
 > 上游决策见 [llvm-backend-research.md](llvm-backend-research.md) §10、

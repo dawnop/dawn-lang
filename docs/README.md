@@ -22,6 +22,8 @@ prints how many there are on every run.
 
 Java class 元数据输入与目录校验见 [java-class-metadata-design.md](java-class-metadata-design.md)。
 
+建站工具、原始数据与文档消费边界见 [site-native-inputs-design.md](site-native-inputs-design.md)。
+
 ## 权威规范
 
 | 文档 | 生命周期 | 说明 |

@@ -1,22 +1,17 @@
 #!/usr/bin/env bash
-# Build the site into site/dist (run from anywhere).
-#
-# The generator (site/) and the search budget probe (site/search-budget/) run
-# as native binaries (`dawnc build`, cached by site_prog in site/dawnc.sh), not on the JVM. The two documentation inputs
-# below are written by `dawnc doc` too (native A2), except for a package with a
-# `use java`, which only the JVM driver can read (site/package-docs.sh says
-# why and when that ends). Where dawnc comes from, and why, is site/dawnc.sh. The
-# differential that holds the two backends to the same dist is
-# scripts/site-dist-diff.sh, with the native dist as the one that is shipped
-# and the JVM dist as the baseline it is held against.
+# Consume an attested native tool and locked raw metadata into a fresh site.
+# Tool bootstrap and JDK extraction belong to site/prepare.sh; this process
+# and every child use the verified native binary without a JVM stamp lookup.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . site/dawnc.sh
 
-mkdir -p site/build
-"$(site_dawnc)" doc --stdlib > site/build/stdlib.json
-# The same for every package, for packages.html (site/package-docs.sh).
-site/package-docs.sh site/build/packages
+DAWNC_BIN="$(python3 site/inputs.py check)"
+export DAWNC_BIN
+# A previous bundle is never a documentation cache. Promotion happens only
+# after every target and output in this fresh staging has been verified.
+rm -rf site/build/doc-inputs
+python3 site/inputs.py bundle --out site/build/doc-inputs
 
 # The cuTile page's call map: which call of flash_attn wrote which Tile IR
 # line, and where that call is in its source. The generator reads the
@@ -32,7 +27,7 @@ python3 site/gpu-map/record.py
 # warning if npm is unavailable, so the rest of the site still builds.
 if command -v npm >/dev/null 2>&1; then
   echo "=== building play-ui ==="
-  (cd site/play-ui && npm install --silent && npm run build)
+  (cd site/play-ui && npm ci --silent && npm run build)
 else
   echo "warning: npm not found — Playground editor bundle NOT rebuilt" >&2
 fi
@@ -106,28 +101,8 @@ else
   echo "  (or point DAWN_WASM_CC at a wasi-sdk clang)" >&2
 fi
 
-# What the footer prints as the build (gen/pages.build_stamp): the source
-# tree's VERSION and its commit, "-dirty" when the tree has changes git can
-# see. Passed as environment rather than read by the generator, because
-# scripts/site-dist-diff.sh runs it over a snapshot with neither selfhost/ nor
-# .git in it. Either one blank, and the footer prints less or nothing.
-DAWN_SITE_VERSION="${DAWN_SITE_VERSION:-$(sed -n 's/^pub const VERSION: String = "\(.*\)"$/\1/p' selfhost/src/version.dawn)}"
-if [ -z "${DAWN_SITE_COMMIT:-}" ] && git rev-parse --git-dir >/dev/null 2>&1; then
-  DAWN_SITE_COMMIT="$(git rev-parse --short=8 HEAD)"
-  if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
-    DAWN_SITE_COMMIT="${DAWN_SITE_COMMIT}-dirty"
-  fi
-fi
-export DAWN_SITE_VERSION DAWN_SITE_COMMIT="${DAWN_SITE_COMMIT:-}"
-
-# Where the Playground's API lives (gen/pages.play_origin): empty, the default,
-# keeps the page's relative `/api/run`; set to a bare origin such as
-# `https://play.example.test`, the page hands the editor absolute URLs on it.
-# This is what lets the pages sit behind a CDN that carries no WebSocket while
-# `/api/lsp` stays on a host that does (docs/site-cdn-design.md). Environment
-# again, so scripts/site-dist-diff.sh's two legs both see whatever the caller
-# set.
-export DAWN_SITE_PLAY_ORIGIN="${DAWN_SITE_PLAY_ORIGIN:-}"
+# Match the independent renderer oracle's version, commit and API origin.
+. site/build-env.sh
 
 # The front page's figures (scripts/site-figures.sh), as DAWN_SITE_FIG_<KEY>.
 # Environment for the reason the two lines above are: the differential runs the
@@ -137,6 +112,7 @@ export DAWN_SITE_PLAY_ORIGIN="${DAWN_SITE_PLAY_ORIGIN:-}"
 # could tell apart from the first.
 . scripts/site-figures-env.sh
 
+python3 site/inputs.py check-bundle --out site/build/doc-inputs
 rm -rf site/dist
 # gen_assets vendors site/play-ui/dist/playground.{js,css}, site/build/tea/
 # *.wasm and packages/tea-dom/js/*.mjs into dist/assets

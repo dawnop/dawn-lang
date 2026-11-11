@@ -1,0 +1,29 @@
+# Site receipts need the compiler's actual source closure, including missing
+# locks and whole source trees. Reusing SourcePlan here avoids a second
+# dependency planner and keeps the native CLI capability boundary unchanged.
+
+use std/io
+use compiler_plan/source
+
+pub fn main() -> Unit !io = {
+  io.with_exit_real(() => io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() => {
+    let argv = args()
+    if len(argv) != 2 {
+      io.eprintln("error: usage: site_source_inputs <repo> <project>")
+      let _ = io.exit(2)
+      return ()
+    }
+    let plan = source.source_plan(source.ProjectDirectory(argv[1]))
+    for d in plan.diags {
+      io.eprintln("error: source inputs ${d.path}: ${d.d.msg}")
+    }
+    match source.bootstrap_source_input_manifest(plan, argv[0]) {
+      Ok(text) -> print(text)
+      Err(e) -> {
+        io.eprintln("error: source inputs: ${e}")
+        let _ = io.exit(1)
+        ()
+      }
+    }
+  }))))
+}

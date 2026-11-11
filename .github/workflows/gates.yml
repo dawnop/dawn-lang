@@ -408,7 +408,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 36218s (the most this file's `3x` claims may add up to)
+# push-total: 36228s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3882,7 +3882,10 @@ jobs:
     # Restate the stale claim to worst plus the larger of a tenth and
     # one deviation, rounded up to 5s: 380s to 625s; timeout 3x.
     # Keep the cold-cache success and all cache-miss coverage in the sample.
-    # budget: 3x 625s worst observed plus one deviation (run 42477487788)
+    # The receipt refusal controls deliberately add validation coverage.
+    # Planning: 625s existing claim plus 10s for the fixture controls. Tool
+    # preparation is split from the existing build, not a second bootstrap.
+    # budget: 3x 635s planning claim including site input refusal controls
     timeout-minutes: 32
     steps:
       - uses: actions/checkout@v4
@@ -3927,8 +3930,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: site/build/native
-          key: site-native-v2-${{ steps.sitekeys.outputs.native }}
-          restore-keys: site-native-v2-
+          key: site-native-v3-${{ steps.sitekeys.outputs.native }}
+          restore-keys: site-native-v3-
+
+      # Bootstrap and raw JDK extraction are separate from site consumption.
+      # Receipts bind the cached binaries to the current SourcePlan inputs.
+      - name: prepare the native site tool and raw Java metadata
+        run: ./site/prepare.sh
+
+      - name: site input identity refusal controls
+        run: python3 site/inputs-selftest.py
 
       # This one builds site/play-ui/dist, which is not tracked and which the
       # differential below reads. They stay in this order.

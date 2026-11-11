@@ -220,24 +220,22 @@ Playground 补全表在 npm 的 prebuild/predev/pretest 中通过
 `site/dawnc.sh` 选择的 `dawnc doc --builtins` 每次重新生成。
 独立 npm 与整站构建共用入口，`DAWNC_BIN` 优先；不再读取旧的
 `site/build/builtins.json`。工具或 JSON 失败会停止构建，不回落 JVM。
-未提供工具时首次构建 dawnc 仍可能用 JVM 种子链，`web-jvm` 包文档也仍需 JVM。
+工具和数据的显式制备与消费分开：`site/prepare.sh` 自举当前源码的 native 工具，
+解包固定 JDK 21 class 数据，并写入独立身份收据。此阶段需要 JAVA_HOME；之后
+`site/build.sh` 只读已验证收据，不启动 Java，不读取 JVM stamp。所有十四包都由
+native doc 生成；web-jvm 显式传入原始元数据，没有 JVM 回退。部署前也先执行准备。
+收据、完整包清单与 fresh bundle 的边界见
+[建站输入设计](../docs/site-native-inputs-design.md)。独立 npm/playground 的工具选择合同保持。
 
 ```bash
-site/build.sh          # dawnc doc --stdlib → play-ui → dawnc → tea reactors → 清空 dist → dawnc run site
-# 三个 wasm（demo 两个 + 搜索面板）要 clang 20+（带 wasm32 sysroot）。缺了就跳过并
-# warning，生成器写占位文件，页面自己报错，其余页面不受影响：
+site/prepare.sh --jdk "$JAVA_HOME"
+site/build.sh          # fresh native 文档 → play-ui → tea reactors → native 生成器 → 搜索预算
+# 三个 wasm 需要带 wasm32 sysroot 的 clang；完整可部署构建必须制备真实资产：
 DAWN_WASM_CC=/usr/bin/clang-20 site/build.sh
-# 生成器与搜索预算探针都由原生驱动 dawnc 运行（2026-10-20 起；`dawn doc` 也换成了
-# `dawnc doc`，只有含 `use java` 的包，目前是 packages/web-jvm，仍走 JVM）。dawnc 从当前提交自建，约 37s，按编译器自己的 source stamp +
-# runtime/c 缓存在 site/build/native/dawnc（见 site/dawnc.sh）；`DAWNC_BIN=<文件>` 可指定现成的。
-# 生成器与探针各用 `dawnc build` 编一次，缓存在 site/build/native/（site/native-progs.txt 列出的程序），
-# 键是 dawnc stamp + 项目及其路径依赖里全部 *.dawn/dawn.toml 的内容摘要（见 site_prog），
-# 源码不变则直接执行二进制；暖机后建站墙钟 37.8s，与 JVM 的 37.7s 持平。
-# CI 里 site/build/native 整个目录走一份 actions/cache，键由
-# site/cache-keys.sh 用同一批函数算出，规则见 docs/native-backend-plan.md §15。
-# 或手动：
-site/build/native/dawnc doc --stdlib > site/build/stdlib.json
-site/build/native/dawnc run site    # 生成 site/dist/（从仓库根运行，每次重编约 22s）；./bin/dawn run site 是 JVM 基准
+# 工具与 SourcePlan 清单程序的收据、生成器、探针缓存位于 site/build/native。
+# 文档不使用 JSON 缓存；每次生成 stdlib 与十四包，核对后晋升 site/build/doc-inputs。
+# 原始 class 与独立 manifest 位于 site/build/java-metadata，受版本控制的 site lock 认证。
+# 删除文档、dist 与生成器/probe 缓存仍可在没有 Java 的环境中 build。
 ./bin/dawn test site   # 生成器测试
 
 # 首页那四段代码（hero + 三张特性卡）真的编译、真的跑，输出对着同名 .out 比：
