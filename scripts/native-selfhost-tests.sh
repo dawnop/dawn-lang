@@ -50,12 +50,15 @@ case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac
 # build above does. It runs from the repo root because a handful of these
 # tests load the standard library through a relative `--std`, the way
 # driver/stdlib's own tests do.
-echo "== selfhost tests, native backend =="
+# Prepare the independent raw fixtures before the one existing test build.
+# Both metadata qualification paths then share that build's compiler graph.
+echo "== Java signature fixtures =="
+python3 scripts/java-metadata/semantic.py --prepare-native --out "$OUT/signatures"
 native_entry=$(python3 scripts/native-source-tree.py "$OUT/source")
-"$DAWNC" test "$native_entry"
-# The metadata probe's small test graph runs its inline and directory cases
-# together, sharing one compilation on this already-prepared compiler host.
-python3 scripts/java-metadata/run.py --native-host "$DAWNC"
+python3 scripts/java-metadata/semantic.py --entry "$native_entry" --out "$OUT/signatures"
+echo "== selfhost tests, native backend =="
+DAWN_JAVA_SIGNATURE_WORK="$OUT/signatures" "$DAWNC" test "$native_entry" | tee "$OUT/tests.log"
+python3 scripts/java-metadata/semantic.py --native-log "$OUT/tests.log" --out "$OUT/signatures"
 
 # check/identity.dawn used to get a second `dawnc test` of its own, from when
 # it was not yet on the native driver's production graph. It is now, and all

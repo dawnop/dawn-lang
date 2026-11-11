@@ -1,0 +1,15 @@
+# Keep the independent reflection factory out of the native test graph.
+# Both hosts use the same plain-data serialization and complete checker path;
+# only this JVM entry can construct a target-local Java classloader.
+
+use check/classmeta.{MetadataError}
+use check/jsig.{JsigLease}
+use java_signature_probe as javasig
+use jvm/jreflect
+
+pub fn snapshot(path: String) -> String !io =
+  javasig.run_with(path, (context, imports, jars) => {
+    let lease = jreflect.jsig_for(jars)
+    let result: Result[JsigLease, MetadataError] = Ok(lease)
+    result
+  })

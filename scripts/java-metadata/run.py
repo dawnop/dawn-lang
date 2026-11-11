@@ -33,6 +33,7 @@ NATIVE_INLINE_TESTS = {
     'driver/jmetadata': [
         'metadata graph rejects missing roots signatures parents and cycles',
         'manifest parser refuses ambiguous keys and canonicalizes object order',
+        'signature construction rejects missing imports before enabling queries',
     ],
 }
 
@@ -369,6 +370,9 @@ test "locked metadata directory contract" {
     print(stdout, end='')
     if args.native_host:
         print('metadata native inline and directory cases passed')
+    else:
+        from semantic import qualify_jvm
+        qualify_jvm(work / 'signatures', work / 'jdk')
     if not args.out:
         shutil.rmtree(work)
 

@@ -1,0 +1,666 @@
+# A sealed class directory can answer the checker's existing Java queries
+# without a VM. Keep reflection's erased public surface here, separate from
+# filesystem loading and from Dawn type checking. Each lease owns an immutable
+# index; finite construction bounds replace growing caches of user queries.
+
+use std/map
+use std/set
+use std/list
+use std/str
+use check/classmeta
+use check/classmeta.{ClassMeta, MemberMeta, InnerMeta, FieldSignature, MethodSignature, MetadataError, metadata_error}
+use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, JsigLease}
+
+pub const MAX_INDEX_ROWS: Int = 262144
+pub const MAX_INDEX_TEXT_BYTES: Int = 33554432
+
+type RawMethod = { value: JMethod, bridge: Bool, synthetic: Bool }
+type IndexRep = {
+  classes: Map[String, ClassMeta], infos: Map[String, JClass], canonical: Map[String, Option[String]],
+  ancestors: Map[String, Set[String]], methods: Map[String, List[JMethod]],
+  ctors: Map[String, List[JCtor]], fields: Map[String, List[JField]], rows: Int
+}
+pub opaque type SignatureIndex = IndexRep
+
+fn references(c: ClassMeta, path: String, remaining: Int) -> Result[List[String], MetadataError] = {
+  var refs = c.interfaces
+  if len(refs) > remaining { return Err(rows_limit(path, c.name)) }
+  match c.parent { Some(p) -> { refs = refs ++ [p] }
+    None -> () }
+  match c.enclosing { Some(p) -> { refs = refs ++ [p] }
+    None -> () }
+  for inner in c.inner {
+    if inner.name == c.name {
+      match inner.outer { Some(p) -> { refs = refs ++ [p] }
+        None -> () }
+    }
+    if len(refs) > remaining { return Err(rows_limit(path, c.name)) }
+  }
+  for m in c.fields ++ c.methods {
+    if m.access & 1 != 0 && m.name != "<clinit>" {
+      let types = match m.signature {
+        FieldSignature(value) -> [value]
+        MethodSignature(value) -> value.params ++ [value.returns]
+      }
+      for t in types {
+        match t.reference { Some(name) -> { refs = refs ++ [name] }
+          None -> () }
+        if len(refs) > remaining { return Err(rows_limit(path, c.name)) }
+      }
+      if len(m.throws) > remaining - len(refs) { return Err(rows_limit(path, c.name)) }
+      refs = refs ++ m.throws
+    }
+  }
+  if len(refs) > remaining { return Err(rows_limit(path, c.name)) }
+  Ok(refs)
+}
+
+## Validate completeness and hierarchy without recursive traversal of input graphs.
+fn graph_order(table: Map[String, ClassMeta], roots: List[String], path: String) -> Result[List[String], MetadataError] = {
+  for root in roots {
+    if not map.has(table, root) { return Err(MetadataError { ..metadata_error("missing-class", path, "missing root: " ++ root), reference = Some(root) }) }
+  }
+  var pending: Map[String, Int] = map.empty()
+  var children: Map[String, List[String]] = map.empty()
+  var ready: List[String] = []
+  var reference_rows = 0
+  for name in list.sort(map.keys(table)) {
+    let c = map.get(table, name).expect("class in graph")
+    let refs = references(c, path, MAX_INDEX_ROWS - reference_rows)?
+    reference_rows = reference_rows + len(refs)
+    for ref in refs {
+      if not map.has(table, ref) { return Err(MetadataError { ..metadata_error("missing-class", path, "missing signature class: " ++ ref), owner = Some(name), reference = Some(ref) }) }
+    }
+    var interface_names: Set[String] = set.empty()
+    for interface_name in c.interfaces {
+      let interface_class = map.get(table, interface_name)
+      match interface_class {
+        Some(found) -> if found.access & 0x200 == 0 || set.has(interface_names, interface_name) {
+          return Err(metadata_error("class-format", path, "invalid or duplicate interface: " ++ interface_name))
+        }
+        None -> ()
+      }
+      interface_names = set.insert(interface_names, interface_name)
+    }
+    match c.parent {
+      Some(parent) -> match map.get(table, parent) {
+        Some(found) -> if found.access & (0x200 | 16) != 0 {
+          return Err(metadata_error("class-format", path, "invalid superclass kind: " ++ parent))
+        }
+        None -> ()
+      }
+      None -> ()
+    }
+    var parents = c.interfaces
+    match c.parent { Some(p) -> { parents = parents ++ [p] }
+      None -> () }
+    pending = map.insert(pending, name, len(parents))
+    if len(parents) == 0 { ready = ready ++ [name] }
+    for parent in parents {
+      children = map.insert(children, parent, map.get(children, parent).unwrap_or([]) ++ [name])
+    }
+  }
+  var at = 0
+  while at < len(ready) {
+    let name = ready[at]
+    at = at + 1
+    for child in map.get(children, name).unwrap_or([]) {
+      let count = map.get(pending, child).unwrap_or(0) - 1
+      pending = map.insert(pending, child, count)
+      if count == 0 { ready = ready ++ [child] }
+    }
+  }
+  if at != len(map.keys(table)) { return Err(metadata_error("cycle", path, "cyclic class hierarchy")) }
+  Ok(ready)
+}
+
+pub fn validate_graph(table: Map[String, ClassMeta], roots: List[String], path: String) -> Result[Unit, MetadataError] = {
+  let _ = graph_order(table, roots, path)?
+  Ok(())
+}
+
+fn tail(name: String) -> String =
+  match str.rsplit_once(name, ".") { Some((_, end)) -> end
+    None -> name }
+
+fn self_inner(c: ClassMeta) -> Option[InnerMeta] = {
+  for inner in c.inner { if inner.name == c.name { return Some(inner) } }
+  None
+}
+
+fn simple_name(c: ClassMeta) -> String =
+  match self_inner(c) {
+    Some(inner) -> if inner.outer != None || c.enclosing != None { inner.simple.unwrap_or("") } else { tail(c.name) }
+    None -> tail(c.name)
+  }
+
+# A local or anonymous class has no canonical name. Walking member owners is
+# iterative because their names are external input, just like superclass edges.
+fn canonical_name(table: Map[String, ClassMeta], name: String, path: String, remaining: Int) -> Result[Option[String], MetadataError] = {
+  var current = name
+  var suffix = ""
+  var seen: Set[String] = set.empty()
+  while true {
+    if set.has(seen, current) { return Err(metadata_error("cycle", path, "cyclic enclosing classes: " ++ name)) }
+    seen = set.insert(seen, current)
+    let c = match map.get(table, current) {
+      Some(value) -> value
+      None -> return Err(MetadataError { ..metadata_error("missing-class", path, "missing enclosing class: " ++ current), owner = Some(name), reference = Some(current) })
+    }
+    if 4 * (len(current) + len(suffix)) > remaining { return Err(rows_limit(path, name)) }
+    if c.enclosing != None { return Ok(None) }
+    match self_inner(c) {
+      Some(inner) -> match inner.outer {
+        Some(owner) -> {
+          if 4 * (len(inner.simple.unwrap_or("")) + 1 + len(suffix)) > remaining { return Err(rows_limit(path, name)) }
+          suffix = "." ++ inner.simple.unwrap_or("") ++ suffix
+          current = owner
+        }
+        None -> return Ok(Some(current ++ suffix))
+      }
+      None -> return Ok(Some(current ++ suffix))
+    }
+  }
+  Ok(None)
+}
+
+fn primitive(name: String) -> Bool =
+  list.contains(["boolean", "byte", "char", "short", "int", "long", "float", "double", "void"], name)
+
+fn array_type(name: String) -> Option[classmeta.JvmType] = {
+  if not str.starts_with(name, "[") { return None }
+  match classmeta.field_descriptor(str.replace(name, ".", "/")) {
+    Ok(value) -> if value.name == name { Some(value) } else { None }
+    Err(_) -> None
+  }
+}
+
+fn type_text(name: String) -> String = {
+  var component = name
+  var suffix = ""
+  while str.starts_with(component, "[") {
+    match array_type(component) {
+      Some(value) -> {
+        component = value.component.expect("array component")
+        suffix = suffix ++ "[]"
+      }
+      None -> return name
+    }
+  }
+  component ++ suffix
+}
+
+fn modifiers(access: Int, is_default: Bool, constructor: Bool) -> String = {
+  var out = ""
+  for (flag, word) in [(1, "public"), (4, "protected"), (2, "private")] {
+    if access & flag != 0 { out = out ++ word ++ " " }
+  }
+  if is_default { out = out ++ "default " }
+  if not constructor {
+    for (flag, word) in [(1024, "abstract"), (8, "static"), (16, "final"),
+      (32, "synchronized"), (256, "native"), (2048, "strictfp")] {
+      if access & flag != 0 { out = out ++ word ++ " " }
+    }
+  }
+  out
+}
+
+fn member_desc(c: ClassMeta, m: MemberMeta, params: List[String], returns: String) -> String = {
+  let ctor = m.name == "<init>"
+  let default_method = not ctor && c.access & 512 != 0 && m.access & (1024 | 8 | 2) == 0
+  let header = if ctor { c.name } else { type_text(returns) ++ " " ++ c.name ++ "." ++ m.name }
+  let thrown = if len(m.throws) == 0 { "" } else { " throws " ++ join(map(m.throws, type_text), ",") }
+  modifiers(m.access, default_method, ctor) ++ header ++ "(" ++ join(map(params, type_text), ",") ++ ")" ++ thrown
+}
+
+# Charge a UTF-8 upper bound before joining repeated CP strings. Row counts
+# alone cannot bound a short class containing many references to one long name.
+fn member_text_bytes(c: ClassMeta, m: MemberMeta) -> Int = {
+  var count = len(c.name) + len(m.name) + 128
+  match m.signature {
+    MethodSignature(signature) -> {
+      count = count + len(type_text(signature.returns.name))
+      for p in signature.params { count = count + len(type_text(p.name)) + 1 }
+    }
+    FieldSignature(_) -> ()
+  }
+  for name in m.throws { count = count + len(name) + 1 }
+  4 * count
+}
+
+fn method_row(c: ClassMeta, m: MemberMeta) -> RawMethod = {
+  let signature = match m.signature {
+    MethodSignature(value) -> value
+    FieldSignature(_) -> panic("method metadata carries a field signature")
+  }
+  let params = map(signature.params, p => p.name)
+  RawMethod {
+    value = JMethod { name = m.name, param_cls = params, ret_cls = signature.returns.name,
+      is_static = m.access & 8 != 0, is_varargs = m.access & 128 != 0,
+      is_abstract = m.access & 1024 != 0, desc = member_desc(c, m, params, signature.returns.name), decl_cls = c.name },
+    bridge = m.access & 64 != 0, synthetic = m.synthetic
+  }
+}
+
+fn resolves(table: Map[String, ClassMeta], name: String) -> Bool =
+  if map.has(table, name) { true }
+  else {
+    match array_type(name) {
+      Some(t) -> match t.reference { Some(ref) -> map.has(table, ref)
+        None -> true }
+      None -> false
+    }
+  }
+
+fn resolve(table: Map[String, ClassMeta], written: String) -> Option[String] = {
+  var name = written
+  while true {
+    if resolves(table, name) { return Some(name) }
+    match str.rsplit_once(name, ".") {
+      Some((head, end)) -> { name = head ++ "$" ++ end }
+      None -> return None
+    }
+  }
+  None
+}
+
+pub(pkg) fn import_references(table: Map[String, ClassMeta], written: String) -> Option[List[String]] =
+  match resolve(table, written) {
+    Some(name) -> if map.has(table, name) { Some([name]) } else {
+      let t = array_type(name).expect("resolved array")
+      Some(match t.reference { Some(ref) -> [ref]
+        None -> [] })
+    }
+    None -> None
+  }
+
+# Names here are resolved. Primitive component equality is allowed inside an
+# array; public name queries still fail to resolve "int", as Class.forName does.
+fn assignable(ancestors: Map[String, Set[String]], sup: String, sub: String) -> Bool = {
+  var parent = sup
+  var child = sub
+  while true {
+    if parent == child { return true }
+    if primitive(parent) || primitive(child) { return false }
+    match array_type(child) {
+      Some(ct) -> {
+        if list.contains(["java.lang.Object", "java.lang.Cloneable", "java.io.Serializable"], parent) { return true }
+        match array_type(parent) {
+          Some(pt) -> {
+            parent = pt.component.expect("parent array component")
+            child = ct.component.expect("child array component")
+          }
+          None -> return false
+        }
+      }
+      None -> return set.has(map.get(ancestors, child).unwrap_or(set.empty()), parent)
+    }
+  }
+  false
+}
+
+fn method_key(m: JMethod) -> (String, String) =
+  (m.name, join(map(m.param_cls, p => to_string(len(p)) ++ ":" ++ p), ""))
+
+# The existing host uses name and comma-joined parameters for bridge and SAM
+# de-duplication. Keep that exact key rather than changing checker semantics.
+fn sig_key(m: JMethod) -> String = m.name ++ "(" ++ join(m.param_cls, ",") ++ ")"
+
+fn merge_method(table: Map[String, ClassMeta], ancestors: Map[String, Set[String]], group: List[RawMethod], incoming: RawMethod) -> List[RawMethod] = {
+  let m = incoming.value
+  let interface_method = map.get(table, m.decl_cls).expect("method owner").access & 512 != 0
+  var out: List[RawMethod] = []
+  for existing in group {
+    let e = existing.value
+    if e.ret_cls != m.ret_cls { out = out ++ [existing] }
+    else {
+      let existing_interface = map.get(table, e.decl_cls)
+        .expect("existing method owner").access & 512 != 0
+      if interface_method == existing_interface {
+        if assignable(ancestors, m.decl_cls, e.decl_cls) { return group }
+        if not assignable(ancestors, e.decl_cls, m.decl_cls) { out = out ++ [existing] }
+      } else {
+        if interface_method { return group }
+      }
+    }
+  }
+  out ++ [incoming]
+}
+
+fn stood_behind(ancestors: Map[String, Set[String]], bridge: JMethod, real: List[JMethod]) -> Bool = {
+  for m in real {
+    if m.name == bridge.name && m.is_static == bridge.is_static && len(m.param_cls) == len(bridge.param_cls) {
+      var covers = true
+      var at = 0
+      for bp in bridge.param_cls {
+        let rp = m.param_cls[at]
+        if bp != rp && not assignable(ancestors, bp, rp) { covers = false }
+        at = at + 1
+      }
+      if covers { return true }
+    }
+  }
+  false
+}
+
+fn filtered_methods(ancestors: Map[String, Set[String]], rows: List[RawMethod]) -> List[JMethod] = {
+  var real: List[JMethod] = []
+  var bridges: List[JMethod] = []
+  for row in rows {
+    if row.bridge { bridges = bridges ++ [row.value] }
+    else if not row.synthetic { real = real ++ [row.value] }
+  }
+  var out = real
+  var kept: Set[String] = set.empty()
+  for bridge in bridges {
+    if not set.has(kept, sig_key(bridge)) && not stood_behind(ancestors, bridge, real) {
+      kept = set.insert(kept, sig_key(bridge))
+      out = out ++ [bridge]
+    }
+  }
+  out
+}
+
+fn rows_limit(path: String, owner: String) -> MetadataError =
+  MetadataError { ..metadata_error("limit", path, "derived Java signature table exceeds limits"), owner = Some(owner) }
+
+## Freeze all class-owned cache rows before a caller can enable Java queries.
+pub(pkg) fn prepare(table: Map[String, ClassMeta], roots: List[String], path: String, max_rows: Int = MAX_INDEX_ROWS) -> Result[SignatureIndex, MetadataError] = {
+  let order = graph_order(table, roots ++ ["java.lang.Object", "java.lang.String", "java.lang.Cloneable", "java.io.Serializable"], path)?
+  var ancestors: Map[String, Set[String]] = map.empty()
+  var rows = 0
+  for name in order {
+    let c = map.get(table, name).expect("ordered class")
+    var parents = c.interfaces
+    match c.parent { Some(p) -> { parents = parents ++ [p] }
+      None -> () }
+    var supers: Set[String] = set.insert(set.empty(), name)
+    var count = 1
+    if count > max_rows - rows { return Err(rows_limit(path, name)) }
+    for parent in parents {
+      for ancestor in set.to_list(map.get(ancestors, parent).expect("ordered ancestor")) {
+        if not set.has(supers, ancestor) {
+          if count >= max_rows - rows { return Err(rows_limit(path, name)) }
+          supers = set.insert(supers, ancestor)
+          count = count + 1
+        }
+      }
+    }
+    rows = rows + count
+    ancestors = map.insert(ancestors, name, supers)
+  }
+  var infos: Map[String, JClass] = map.empty()
+  var canonical: Map[String, Option[String]] = map.empty()
+  var raw: Map[String, List[RawMethod]] = map.empty()
+  var methods: Map[String, List[JMethod]] = map.empty()
+  var ctors: Map[String, List[JCtor]] = map.empty()
+  var fields: Map[String, List[JField]] = map.empty()
+  var text_bytes = 0
+  for name in order {
+    let c = map.get(table, name).expect("ordered class metadata")
+    infos = map.insert(infos, name, JClass { fqcn = name, simple = simple_name(c), display = tail(name),
+      is_interface = c.access & 512 != 0, is_primitive = false, is_array = false })
+    let canonical_value = canonical_name(table, name, path, MAX_INDEX_TEXT_BYTES - text_bytes)?
+    match canonical_value { Some(value) -> { text_bytes = text_bytes + 4 * len(value) }
+      None -> () }
+    canonical = map.insert(canonical, name, canonical_value)
+    var incoming: List[RawMethod] = []
+    var constructors: List[JCtor] = []
+    for m in c.methods {
+      if m.access & 1 != 0 && m.name != "<clinit>" {
+        if len(incoming) + len(constructors) >= max_rows { return Err(rows_limit(path, name)) }
+        let cost = member_text_bytes(c, m)
+        if cost > MAX_INDEX_TEXT_BYTES - text_bytes { return Err(rows_limit(path, name)) }
+        text_bytes = text_bytes + cost
+        let row = method_row(c, m)
+        if m.name == "<init>" {
+          if not m.synthetic { constructors = constructors ++ [JCtor { param_cls = row.value.param_cls, is_varargs = row.value.is_varargs, desc = row.value.desc }] }
+        } else { incoming = incoming ++ [row] }
+      }
+    }
+    if c.access & 512 == 0 {
+      match c.parent { Some(p) -> {
+        let inherited = map.get(raw, p).expect("parent methods")
+        if len(inherited) > max_rows - len(incoming) { return Err(rows_limit(path, name)) }
+        incoming = incoming ++ inherited
+      }
+        None -> () }
+    }
+    for parent in c.interfaces {
+      for m in map.get(raw, parent)
+        .expect("interface methods") {
+        if not m.value.is_static {
+          if len(incoming) >= max_rows { return Err(rows_limit(path, name)) }
+          incoming = incoming ++ [m]
+        }
+      }
+    }
+    if len(incoming) > max_rows { return Err(rows_limit(path, name)) }
+    var groups: Map[(String, String), List[RawMethod]] = map.empty()
+    var keys: List[(String, String)] = []
+    for m in incoming {
+      let key = method_key(m.value)
+      if not map.has(groups, key) { keys = keys ++ [key] }
+      groups = map.insert(groups, key, merge_method(table, ancestors, map.get(groups, key).unwrap_or([]), m))
+    }
+    var merged: List[RawMethod] = []
+    for key in keys { merged = merged ++ map.get(groups, key).expect("method group") }
+    var static_fields: List[JField] = []
+    for f in c.fields {
+      if f.access & 9 == 9 {
+        if len(static_fields) >= max_rows { return Err(rows_limit(path, name)) }
+        let t = match f.signature { FieldSignature(value) -> value.name
+          MethodSignature(_) -> return Err(metadata_error("class-format", path, "field carries method metadata")) }
+        static_fields = static_fields ++ [JField { name = f.name, type_cls = t, decl_cls = name }]
+      }
+    }
+    var parents = c.interfaces
+    if c.access & 512 == 0 {
+      match c.parent { Some(p) -> { parents = parents ++ [p] }
+        None -> () }
+    }
+    for parent in parents {
+      let inherited = map.get(fields, parent).expect("inherited fields")
+      if len(inherited) > max_rows - len(static_fields) { return Err(rows_limit(path, name)) }
+      static_fields = static_fields ++ inherited
+    }
+    var unique_fields: List[JField] = []
+    var seen_fields: Set[(String, String, String)] = set.empty()
+    for f in static_fields {
+      let key = (f.decl_cls, f.name, f.type_cls)
+      if not set.has(seen_fields, key) { unique_fields = unique_fields ++ [f]
+        seen_fields = set.insert(seen_fields, key) }
+    }
+    let selected = filtered_methods(ancestors, merged)
+    let count = len(merged) + len(selected) + len(constructors) + len(unique_fields) + 1
+    if count > max_rows - rows { return Err(rows_limit(path, name)) }
+    rows = rows + count
+    raw = map.insert(raw, name, merged)
+    methods = map.insert(methods, name, selected)
+    ctors = map.insert(ctors, name, constructors)
+    fields = map.insert(fields, name, unique_fields)
+  }
+  Ok(IndexRep { classes = table, infos = infos, canonical = canonical, ancestors = ancestors,
+    methods = methods, ctors = ctors, fields = fields, rows = rows })
+}
+
+pub(pkg) fn index_rows(index: SignatureIndex) -> Int = {
+  let rep: IndexRep = index
+  rep.rows
+}
+
+fn class_of(index: IndexRep, name: String) -> JClass = {
+  match map.get(index.infos, name) { Some(info) -> return info
+    None -> () }
+  if primitive(name) { return JClass { fqcn = name, simple = name, display = name,
+    is_interface = false, is_primitive = true, is_array = false } }
+  let _ = array_type(name).expect("known array metadata")
+  var component = name
+  var suffix = ""
+  while str.starts_with(component, "[") {
+    component = array_type(component).expect("array metadata").component.expect("component")
+    suffix = suffix ++ "[]"
+  }
+  let simple = if primitive(component) { component } else { map.get(index.infos, component).expect("known component").simple }
+  let canonical = if primitive(component) { Some(component) } else { map.get(index.canonical, component).expect("canonical component") }
+  let display = match canonical { Some(n) -> tail(n ++ suffix)
+    None -> tail(name) }
+  JClass { fqcn = name, simple = simple ++ suffix, display = display,
+    is_interface = false, is_primitive = false, is_array = true }
+}
+
+fn find(index: IndexRep, name: String) -> Option[JClass] =
+  match resolve(index.classes, name) { Some(resolved) -> Some(class_of(index, resolved))
+    None -> None }
+
+fn indexed_methods(index: IndexRep, name: String) -> List[JMethod] = {
+  let resolved = resolve(index.classes, name).expect("validated method owner")
+  if str.starts_with(resolved, "[") { map.get(index.methods, "java.lang.Object").expect("Object methods") }
+  else { map.get(index.methods, resolved).expect("validated method table") }
+}
+
+fn indexed_sam(index: IndexRep, name: String) -> Option[JMethod] = {
+  if not find(index, name).expect("validated SAM owner").is_interface { return None }
+  var object_keys: Set[String] = set.empty()
+  for m in indexed_methods(index, "java.lang.Object") { object_keys = set.insert(object_keys, sig_key(m)) }
+  var found: List[JMethod] = []
+  var seen: Set[String] = set.empty()
+  for m in indexed_methods(index, name) {
+    let key = sig_key(m)
+    if m.is_abstract && not set.has(object_keys, key) && not set.has(seen, key) {
+      seen = set.insert(seen, key)
+      found = found ++ [m]
+    }
+  }
+  if len(found) == 1 { Some(found[0]) } else { None }
+}
+
+## Capturing one immutable index gives this lease its whole cache lifetime.
+pub(pkg) fn lease(index: SignatureIndex) -> JsigLease = {
+  let rep: IndexRep = index
+  JsigLease { jsig = Jsig {
+    on = true,
+    find_class = name => find(rep, name),
+    class_info = name => find(rep, name).expect("validated class metadata"),
+    methods_of = name => indexed_methods(rep, name),
+    ctors_of = name => {
+      let resolved = resolve(rep.classes, name).expect("validated constructor owner")
+      if str.starts_with(resolved, "[") { [] } else { map.get(rep.ctors, resolved).expect("validated constructor table") }
+    },
+    static_fields_of = name => {
+      let resolved = resolve(rep.classes, name).expect("validated field owner")
+      if str.starts_with(resolved, "[") { [] } else { map.get(rep.fields, resolved).expect("validated field table") }
+    },
+    is_assignable = (sup, sub) => match (resolve(rep.classes, sup), resolve(rep.classes, sub)) {
+      (Some(parent), Some(child)) -> assignable(rep.ancestors, parent, child)
+      _ -> false
+    },
+    sam_of = name => indexed_sam(rep, name),
+    component_of = name => match resolve(rep.classes, name) {
+      Some(resolved) -> match array_type(resolved) { Some(t) -> t.component
+        None -> None }
+      None -> None
+    }
+  }, close = () => () }
+}
+
+fn test_method(name: String, descriptor: String, access: Int = 1) -> MemberMeta = {
+  let signature = match classmeta.method_descriptor(descriptor) {
+    Ok(value) -> MethodSignature(value)
+    Err(e) -> panic(e.message)
+  }
+  MemberMeta { name = name, descriptor = descriptor, access = access, signature = signature,
+    throws = [], synthetic = access & 4096 != 0 }
+}
+
+fn test_class(name: String, parent: Option[String], methods: List[MemberMeta] = [], interfaces: List[String] = [], access: Int = 1) -> ClassMeta =
+  ClassMeta { name = name, parent = parent, methods = methods, interfaces = interfaces,
+    access = access, fields = [], inner = [], enclosing = None, major = 65, minor = 0 }
+
+fn test_table() -> Map[String, ClassMeta] = {
+  var table: Map[String, ClassMeta] = map.empty()
+  let object_class = test_class("java.lang.Object", None,
+    [test_method("equals", "(Ljava/lang/Object;)Z"), test_method("toString", "()Ljava/lang/String;")])
+  for c in [object_class, test_class("java.lang.String", Some(object_class.name)),
+    test_class("java.lang.Cloneable", Some(object_class.name), [], [], 1537),
+    test_class("java.io.Serializable", Some(object_class.name), [], [], 1537)] {
+    table = map.insert(table, c.name, c)
+  }
+  table
+}
+
+fn test_index(table: Map[String, ClassMeta]) -> SignatureIndex =
+  match prepare(table, [], "test metadata") { Ok(index) -> index
+    Err(e) -> panic(e.message) }
+
+test "metadata signatures retain exposing bridges and remove covered bridges" {
+  var table = test_table()
+  let hidden = test_class("p.Hidden", Some("java.lang.Object"), [test_method("length", "()I")], [], 32)
+  let facade = test_class("p.Facade", Some(hidden.name), [test_method("length", "()I", 4161)])
+  let base = test_class("p.Base", Some("java.lang.Object"), [test_method("compare", "(Ljava/lang/Object;)I")])
+  let child = test_class("p.Child", Some(base.name), [test_method("compare", "(Ljava/lang/String;)I"), test_method("compare", "(Ljava/lang/Object;)I", 4161)])
+  for c in [hidden, facade, base, child] { table = map.insert(table, c.name, c) }
+  let js = lease(test_index(table)).jsig
+  let exposed = filter(js.methods_of(facade.name), m => m.name == "length")
+  assert len(exposed) == 1 && exposed[0].decl_cls == facade.name
+  let comparisons = filter(js.methods_of(child.name), m => m.name == "compare")
+  assert len(comparisons) == 1 && comparisons[0].param_cls == ["java.lang.String"]
+}
+
+test "metadata signatures exclude Object and static interface inheritance from SAM" {
+  var table = test_table()
+  let parent = test_class("p.Parent", Some("java.lang.Object"),
+    [test_method("run", "(Ljava/lang/String;)V", 1025), test_method("make", "()I", 9)], [], 1537)
+  let child = test_class("p.Child", Some("java.lang.Object"),
+    [test_method("equals", "(Ljava/lang/Object;)Z", 1025)], [parent.name], 1537)
+  for c in [parent, child] { table = map.insert(table, c.name, c) }
+  let js = lease(test_index(table)).jsig
+  assert len(filter(js.methods_of(child.name), m => m.name == "toString" || m.name == "make")) == 0
+  assert js.sam_of(child.name).expect("SAM").name == "run"
+}
+
+test "metadata assignability distinguishes reference and primitive array components" {
+  let js = lease(test_index(test_table())).jsig
+  assert js.is_assignable("java.lang.Object", "[I")
+  assert js.is_assignable("java.lang.Cloneable", "[[I")
+  assert js.is_assignable("java.io.Serializable", "[I")
+  assert js.is_assignable("[Ljava.lang.Object;", "[[I")
+  assert js.is_assignable("[Ljava.lang.Object;", "[Ljava.lang.String;")
+  assert not js.is_assignable("[Ljava.lang.Object;", "[I")
+  assert not js.is_assignable("[I", "[J")
+  assert not js.is_assignable("int", "int")
+  assert js.component_of("[[I") == Some("[I")
+  assert js.find_class("[V") == None
+}
+
+test "metadata signature indexes isolate same names and bound retained rows" {
+  let first = map.insert(test_table(), "p.Same", test_class("p.Same", Some("java.lang.Object"), [test_method("value", "()I")]))
+  let second = map.insert(test_table(), "p.Same", test_class("p.Same", Some("java.lang.Object"), [test_method("value", "()Ljava/lang/String;")]))
+  let index = test_index(first)
+  let a = lease(index).jsig
+  let b = lease(test_index(second)).jsig
+  let before = index_rows(index)
+  for i in 0..1024 { assert a.find_class("missing.Type" ++ to_string(i)) == None }
+  assert filter(a.methods_of("p.Same"), m => m.name == "value")[0].ret_cls == "int"
+  assert filter(b.methods_of("p.Same"), m => m.name == "value")[0].ret_cls == "java.lang.String"
+  assert index_rows(index) == before
+  match prepare(first, [], "limited", 1) {
+    Err(e) -> { assert e.kind == "limit" && e.path == "limited" }
+    Ok(_) -> { assert false }
+  }
+  match prepare(first, [], "one row short", before - 1) {
+    Err(e) -> { assert e.kind == "limit" && e.path == "one row short" }
+    Ok(_) -> { assert false }
+  }
+}
+
+test "metadata signature text bounds shared long member names before rendering" {
+  var methods: List[MemberMeta] = []
+  let name = str.repeat("m", 32760)
+  for depth in 1..256 { methods = methods ++ [test_method(name, "(" ++ str.repeat("[", depth) ++ "I)V", 257)] }
+  let table = map.insert(test_table(), "p.Wide", test_class("p.Wide", Some("java.lang.Object"), methods))
+  match prepare(table, [], "wide metadata") {
+    Err(e) -> { assert e.kind == "limit" && e.path == "wide metadata" }
+    Ok(_) -> { assert false }
+  }
+}
