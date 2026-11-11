@@ -1,0 +1,153 @@
+# Both signature hosts must cross the same complete analysis and JSON writer.
+# This probe is outside the command graph: a supplied factory chooses the
+# oracle, while the requests, fields, diagnostics and body checks stay shared.
+# Keep this test entry beside the command entries: importing doc from a lower
+# compiler layer would make it part of that layer in the gate ownership graph.
+# Native tests import it into their existing compiler test compilation.
+
+use std/io
+use std/io.{Fs, Env, Proc}
+use std/map
+use json/value.{Json, JObj, JArr, JStr, JBool, JNull}
+use json/parser
+use json/render
+use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, JsigLease}
+use check/classmeta.{MetadataError}
+use driver/jmetadata
+use driver/jmetadata.{MetadataContext}
+use driver/analyze.{project_plan_for_load, load_planned, own_module_paths, analyze_program, rendered_diags}
+use driver/stdlib.{StdCtx, load_std, std_load_error_text}
+use front/ast.{module_java_uses}
+use front/diag
+use ir/interp.{ct_default}
+use compiler_plan/source
+use doc
+
+pub(pkg) alias SignatureFactory = fn(MetadataContext, List[String], List[String]) -> Result[JsigLease, MetadataError] !io
+
+fn object(fields: List[(String, Json)]) -> Json = JObj(map.from(fields))
+
+fn field(value: Json, name: String) -> Json =
+  match value { JObj(fields) -> map.get(fields, name).expect("signature request field: " ++ name)
+    _ -> panic("signature request must be an object") }
+
+fn string(value: Json) -> String = match value { JStr(s) -> s
+  _ -> panic("signature request must be a string") }
+
+fn items(value: Json) -> List[Json] = match value { JArr(xs) -> xs
+  _ -> panic("signature request must be an array") }
+
+fn strings(value: Json) -> List[String] = map(items(value), string)
+
+fn class_json(c: JClass) -> Json =
+  object([("fqcn", JStr(c.fqcn)), ("simple", JStr(c.simple)), ("display", JStr(c.display)),
+    ("is_interface", JBool(c.is_interface)), ("is_primitive", JBool(c.is_primitive)), ("is_array", JBool(c.is_array))])
+
+fn method_json(m: JMethod) -> Json =
+  object([("name", JStr(m.name)), ("param_cls", JArr(map(m.param_cls, p => JStr(p)))),
+    ("ret_cls", JStr(m.ret_cls)), ("is_static", JBool(m.is_static)), ("is_varargs", JBool(m.is_varargs)),
+    ("is_abstract", JBool(m.is_abstract)), ("desc", JStr(m.desc)), ("decl_cls", JStr(m.decl_cls))])
+
+fn ctor_json(c: JCtor) -> Json =
+  object([("param_cls", JArr(map(c.param_cls, p => JStr(p)))), ("is_varargs", JBool(c.is_varargs)), ("desc", JStr(c.desc))])
+
+fn field_json(f: JField) -> Json =
+  object([("name", JStr(f.name)), ("type_cls", JStr(f.type_cls)), ("decl_cls", JStr(f.decl_cls))])
+
+fn query(js: Jsig, request: Json) -> Json !io = {
+  let name = string(field(request, "query"))
+  let args = strings(field(request, "args"))
+  let result = match name {
+    "find_class" -> match js.find_class(args[0]) { Some(c) -> class_json(c)
+      None -> JNull }
+    "class_info" -> class_json(js.class_info(args[0]))
+    "methods_of" -> JArr(map(js.methods_of(args[0]), method_json))
+    "ctors_of" -> JArr(map(js.ctors_of(args[0]), ctor_json))
+    "static_fields_of" -> JArr(map(js.static_fields_of(args[0]), field_json))
+    "is_assignable" -> JBool(js.is_assignable(args[0], args[1]))
+    "sam_of" -> match js.sam_of(args[0]) { Some(m) -> method_json(m)
+      None -> JNull }
+    "component_of" -> match js.component_of(args[0]) { Some(c) -> JStr(c)
+      None -> JNull }
+    _ -> panic("unknown signature query: " ++ name)
+  }
+  object([("query", JStr(name)), ("args", JArr(map(args, a => JStr(a)))), ("result", result)])
+}
+
+fn analysis(context: MetadataContext, js: Jsig, std: StdCtx, request: Json) -> Json !Fs !Proc !Env !io = {
+  let target = string(field(request, "path"))
+  let source_target = if io.is_dir(target) { source.ProjectDirectory(target) } else { source.SourceFile(target) }
+  let loaded = match project_plan_for_load(source_target) {
+    Ok(plan) -> {
+      if len(plan.source.java_coords) != 0 { panic("signature fixture cannot request Maven dependencies") }
+      load_planned(plan)
+    }
+    Err(rejected) -> rejected
+  }
+  var imports: List[String] = []
+  for module in loaded.modules {
+    for imported in module_java_uses(module.m) { imports = imports ++ [imported.fqcn] }
+  }
+  match jmetadata.validate_imports(context, imports) {
+    Ok(_) -> ()
+    Err(e) -> panic("signature fixture missing import: " ++ e.message)
+  }
+  let program = analyze_program(loaded, std, ct_default(), js)
+  var status = "ok"
+  var diagnostics = ""
+  var json: Json = JNull
+  if len(program.diags) > 0 {
+    status = "source-error"
+    diagnostics = diag.render_all(map(rendered_diags(program), d => (d.path, d.d)))
+  } else {
+    match doc.project_json(program, std, own_module_paths(loaded)) {
+      Ok(value) -> { json = JStr(value) }
+      Err(errors) -> { status = "doc-error"
+        diagnostics = join(errors, "\n") ++ "\n" }
+    }
+  }
+  object([("name", field(request, "name")), ("status", JStr(status)), ("diagnostics", JStr(diagnostics)), ("doc", json)])
+}
+
+## Shared entry for JVM reflection and native class-data hosts.
+pub(pkg) fn run_with(path: String, factory: SignatureFactory) -> String !io =
+  io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() => {
+    let text = match io.read_file(path) { Ok(s) -> s
+      Err(e) -> panic(e.message) }
+    let requests = match parser.parse(text) { Ok(value) -> items(value)
+      Err(e) -> panic(e.message) }
+    let std = match load_std("std") { Ok(value) -> value
+      Err(e) -> panic(std_load_error_text(e)) }
+    var results: List[Json] = []
+    for request in requests {
+      let manifest = string(field(request, "manifest"))
+      let context = match jmetadata.load_context(manifest, Some(string(field(request, "hash")))) {
+        Ok(value) -> value
+        Err(e) -> panic("signature context: " ++ e.message)
+      }
+      let lease = match factory(context, strings(field(request, "imports")), strings(field(request, "jars"))) {
+        Ok(value) -> value
+        Err(e) -> panic("signature factory: " ++ e.message)
+      }
+      let answer = bracket(lease, held => (held.close)(), held => {
+        let queries = items(field(request, "queries"))
+        var answered: List[Json] = []
+        for q in queries { answered = answered ++ [query(held.jsig, q)] }
+        var checked: List[Json] = []
+        for c in items(field(request, "analyses")) { checked = checked ++ [analysis(context, held.jsig, std, c)] }
+        object([("name", field(request, "name")), ("queries", JArr(answered)), ("analyses", JArr(checked))])
+      })
+      results = results ++ [answer]
+    }
+    render.render(JArr(results))
+  })))
+
+pub fn native_snapshot(path: String) -> String !io =
+  run_with(path, (context, imports, jars) => jmetadata.jsig_for_context(context, imports))
+
+## Test-owned output avoids dumping oracle data into ordinary test logs.
+pub fn native_to_file(path: String, output: String) -> Unit !io = {
+  let snapshot = native_snapshot(path)
+  io.with_fs_real(() => match io.write_file(output, snapshot) { Ok(_) -> ()
+    Err(e) -> panic(e.message) })
+}

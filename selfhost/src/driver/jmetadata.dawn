@@ -18,7 +18,9 @@ use json/parser
 use json/render
 use json/lexer
 use check/classmeta
-use check/classmeta.{ClassMeta, MemberMeta, FieldSignature, MethodSignature, MetadataError, metadata_error}
+use check/jclasssig
+use check/jsig.{JsigLease}
+use check/classmeta.{ClassMeta, MemberMeta, MethodSignature, MetadataError, metadata_error}
 
 pub const MAX_CLASSES: Int = 8192
 pub const MAX_TOTAL_BYTES: Int = 134217728
@@ -26,7 +28,7 @@ const MAX_MANIFEST_BYTES: Int = 16777216
 
 pub opaque type MetadataContext = ContextRep
 type ContextRep = {
-  classes: Map[String, ClassMeta], manifest_sha256: String, classes_sha256: String
+  classes: Map[String, ClassMeta], manifest_sha256: String, classes_sha256: String, path: String
 }
 
 pub fn classes(context: MetadataContext) -> Map[String, ClassMeta] = {
@@ -232,88 +234,9 @@ fn platform_info(path: String, value: Json) -> Result[Unit, MetadataError] = {
   Ok(())
 }
 
-fn references(c: ClassMeta) -> List[String] = {
-  var refs = c.interfaces
-  match c.parent { Some(p) -> { refs = refs ++ [p] }
-    None -> () }
-  match c.enclosing { Some(p) -> { refs = refs ++ [p] }
-    None -> () }
-  for inner in c.inner {
-    if inner.name == c.name {
-      match inner.outer { Some(p) -> { refs = refs ++ [p] }
-        None -> () }
-    }
-  }
-  for m in c.fields ++ c.methods {
-    if m.access & 1 != 0 && m.name != "<clinit>" {
-      let types = match m.signature {
-        FieldSignature(value) -> [value]
-        MethodSignature(value) -> value.params ++ [value.returns]
-      }
-      for t in types {
-        match t.reference { Some(name) -> { refs = refs ++ [name] }
-          None -> () }
-      }
-      refs = refs ++ m.throws
-    }
-  }
-  refs
-}
-
-## Validate completeness and hierarchy without recursive traversal of input graphs.
-pub fn validate_graph(table: Map[String, ClassMeta], roots: List[String], path: String) -> Result[Unit, MetadataError] = {
-  for root in roots {
-    if not map.has(table, root) { return Err(MetadataError { ..metadata_error("missing-class", path, "missing root: " ++ root), reference = Some(root) }) }
-  }
-  var pending: Map[String, Int] = map.empty()
-  var children: Map[String, List[String]] = map.empty()
-  var ready: List[String] = []
-  for (name, c) in map.entries(table) {
-    for ref in references(c) {
-      if not map.has(table, ref) { return Err(MetadataError { ..metadata_error("missing-class", path, "missing signature class: " ++ ref), owner = Some(name), reference = Some(ref) }) }
-    }
-    var interface_names: Set[String] = set.empty()
-    for interface_name in c.interfaces {
-      let interface_class = map.get(table, interface_name)
-      match interface_class {
-        Some(found) -> if found.access & 0x200 == 0 || set.has(interface_names, interface_name) {
-          return Err(metadata_error("class-format", path, "invalid or duplicate interface: " ++ interface_name))
-        }
-        None -> ()
-      }
-      interface_names = set.insert(interface_names, interface_name)
-    }
-    match c.parent {
-      Some(parent) -> match map.get(table, parent) {
-        Some(found) -> if found.access & (0x200 | 16) != 0 {
-          return Err(metadata_error("class-format", path, "invalid superclass kind: " ++ parent))
-        }
-        None -> ()
-      }
-      None -> ()
-    }
-    var parents = c.interfaces
-    match c.parent { Some(p) -> { parents = parents ++ [p] }
-      None -> () }
-    pending = map.insert(pending, name, len(parents))
-    if len(parents) == 0 { ready = ready ++ [name] }
-    for parent in parents {
-      children = map.insert(children, parent, map.get(children, parent).unwrap_or([]) ++ [name])
-    }
-  }
-  var at = 0
-  while at < len(ready) {
-    let name = ready[at]
-    at = at + 1
-    for child in map.get(children, name).unwrap_or([]) {
-      let count = map.get(pending, child).unwrap_or(0) - 1
-      pending = map.insert(pending, child, count)
-      if count == 0 { ready = ready ++ [child] }
-    }
-  }
-  if at != len(map.keys(table)) { return Err(metadata_error("cycle", path, "cyclic class hierarchy")) }
-  Ok(())
-}
+## Validate a class-data closure before exposing a context.
+pub fn validate_graph(table: Map[String, ClassMeta], roots: List[String], path: String) -> Result[Unit, MetadataError] =
+  jclasssig.validate_graph(table, roots, path)
 
 ## Read, bind and seal one metadata directory before it reaches a checker.
 fn load_checked(manifest_path: String, expected_sha256: Option[String]) -> Result[MetadataContext, MetadataError] !Fs !Env = {
@@ -415,7 +338,7 @@ fn load_checked(manifest_path: String, expected_sha256: Option[String]) -> Resul
   }
   if len(roots) == 0 { return Err(schema(absolute, "metadata needs a root set")) }
   validate_graph(table, roots ++ ["java.lang.Object", "java.lang.String", "java.lang.Cloneable", "java.io.Serializable"], absolute)?
-  Ok(ContextRep { classes = table, manifest_sha256 = digest, classes_sha256 = table_hash })
+  Ok(ContextRep { classes = table, manifest_sha256 = digest, classes_sha256 = table_hash, path = absolute })
 }
 
 ## Construct a context with every input failure carrying its source path.
@@ -426,6 +349,25 @@ pub fn load_context(manifest_path: String, expected_sha256: Option[String]) -> R
       if manifest_path == "" { "<manifest>" } else { manifest_path }
     } else { e.path } })
   }
+
+## Admit written imports before handing an error-free query surface to a checker.
+pub fn validate_imports(context: MetadataContext, imports: List[String]) -> Result[Unit, MetadataError] = {
+  let rep: ContextRep = context
+  for name in imports {
+    match jclasssig.import_references(rep.classes, name) {
+      Some(_) -> ()
+      None -> return Err(MetadataError { ..metadata_error("missing-class", rep.path, "missing imported class: " ++ name), reference = Some(name) })
+    }
+  }
+  Ok(())
+}
+
+pub fn jsig_for_context(context: MetadataContext, imports: List[String]) -> Result[JsigLease, MetadataError] = {
+  let rep: ContextRep = context
+  validate_imports(context, imports)?
+  let index = jclasssig.prepare(rep.classes, [], rep.path)?
+  Ok(jclasssig.lease(index))
+}
 
 fn graph_class(name: String, parent: Option[String], interfaces: List[String]) -> ClassMeta =
   ClassMeta { name = name, parent = parent, interfaces = interfaces, access = 1,
@@ -469,4 +411,23 @@ test "manifest parser refuses ambiguous keys and canonicalizes object order" {
   assert unique_keys("manifest", "{\"a\":1,\"\\u0061\":2}") != Ok(())
   let value = JObj(map.insert(map.insert(map.empty(), "z", JInt(1)), "a", JArr([JInt(2)])))
   assert render.render(canonical(value)) == "{\"a\":[2],\"z\":1}"
+}
+
+test "signature construction rejects missing imports before enabling queries" {
+  let object_class = graph_class("java.lang.Object", None, [])
+  var table: Map[String, ClassMeta] = map.insert(map.empty(), object_class.name, object_class)
+  for name in ["java.lang.String", "java.lang.Cloneable", "java.io.Serializable"] {
+    table = map.insert(table, name, ClassMeta { ..graph_class(name, Some(object_class.name), []),
+      access = if name == "java.lang.String" { 17 } else { 1537 } })
+  }
+  let context: MetadataContext = ContextRep { classes = table, manifest_sha256 = "test", classes_sha256 = "test", path = "context/manifest.json" }
+  match jsig_for_context(context, ["java.io.InputStream"]) {
+    Err(e) -> { assert e.kind == "missing-class" && e.reference == Some("java.io.InputStream")
+      assert e.path == "context/manifest.json" }
+    Ok(_) -> { assert false }
+  }
+  match jsig_for_context(context, ["[I", "[[Ljava.lang.String;"]) {
+    Ok(held) -> { assert held.jsig.on && held.jsig.find_class("int") == None }
+    Err(e) -> panic(e.message)
+  }
 }
