@@ -24,10 +24,9 @@ import tarfile
 import tempfile
 import time
 
-# Six interleaved pairs on 2026-10-31 measured an 89.98s full sample warm
-# median (89.45s to 90.38s). Budget twice that median, rounded up to 30 seconds.
-# The 180 second bound below still applies to individual commands.
-FULL_WARM_TIMEOUT = 180
+# Correctness charges CPU work; the enclosing job owns the wall watchdog.
+# Children inherit this per-process allowance throughout the complete warm.
+FULL_WARM_CPU_SECONDS = 180
 
 BASE = 'fdebffc0aca84ef8346a550381488912cb247a89'
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,11 +35,16 @@ mode = sys.argv[3] if len(sys.argv) > 3 else 'matrix'
 assert mode in ('matrix', 'all', '0', '1', '2', '3', '4'), mode
 
 
-def run(argv, *, timeout=180, **kw):
+def run(argv, *, timeout=180, cpu_seconds=None, **kw):
     argv = list(map(str, argv))
+    if cpu_seconds is not None:
+        argv = [sys.executable, str(ROOT / 'scripts/cpu-limit.py'),
+                str(cpu_seconds), '--', *argv]
+        timeout = None
     record = w / 'commands' / str(len(list((w / 'commands').iterdir())))
     record.mkdir()
-    metadata = {'argv': argv, 'returncode': None, 'timeout': False}
+    metadata = {'argv': argv, 'returncode': None, 'timeout': False,
+                'wall_timeout_seconds': timeout, 'cpu_limit_seconds': cpu_seconds}
     started = time.monotonic()
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     try:
@@ -195,7 +199,8 @@ with workspace() as work:
 
         # A real full warm, followed by both view hits for every sidebar source.
         warmed = w / 'warmed'
-        run([runner, 'warm', ROOT / 'site/play-ui/samples', warmed], env=env, timeout=FULL_WARM_TIMEOUT)
+        run([runner, 'warm', ROOT / 'site/play-ui/samples', warmed], env=env,
+            cpu_seconds=FULL_WARM_CPU_SECONDS)
         wanted = sum(3 + ('use tileir/' in p.read_text()) for p in samples)
         assert len(list(warmed.iterdir())) == wanted
         # Warm must leave the cold serving store empty. Reuse the cold bodies
