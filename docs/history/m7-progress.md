@@ -337,3 +337,12 @@ JVM 仍可用于工具自举和独立 oracle，不是生产文档的额外 produ
 剩余边界为通用 Maven、JMOD 运行时读取、多版本 JAR、Java 执行、Java 泛型精化、
 其它 native 命令取得 Java 能力；各项需另立来源、执行及错误合同。本线不发布、
 不部署、不重录 GPU 台账，固定点和既有发布资格保留原入口。
+
+## 发布 API 快照输入（2026-11-12）
+
+本节供中断后接续。ae950a9f 将发布快照接到本版 native artifact，增加可重复的
+`--java-signatures TARGET=MANIFEST`，继续遍历 std 与全部包，web-jvm 显式消费
+D31-1 锁定的原始 class 数据。API JSON schema、diff 与发布资产名保持。
+固定夹具与发布接线负控进入轻量日常门，新增覆盖 planning 5 s；完整快照对拍和
+新 artifact 发布模拟作为一次性验收，不为每次 push 重复发布。
+设计与验证责任见 [快照输入设计](../api-snapshot-native-design.md)。

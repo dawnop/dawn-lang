@@ -1,10 +1,10 @@
 # 发布 API 快照的 native 输入
 
-> 状态：proposed
+> 状态：current
 
-动码前的调研与方案，不是设计定稿。基线为 0b4ead2f，当前
+本文先作为动码前方案写入，现记录已实现的输入合同。调研基线为 0b4ead2f，当时
 `scripts/api-snapshot.py:174` 拼接 doc 命令，`:223` 枚举 std 与全部包；
-`.github/workflows/release.yml:262` 仍把刚构建的 JAR 作为快照工具。
+`.github/workflows/release.yml:262` 把刚构建的 JAR 作为快照工具。
 只换工具会让 web-jvm 缺少显式 Java 数据上下文，不能删包求绿。
 
 ## 输入合同
@@ -39,6 +39,17 @@ JVM oracle 逐字节相同；校验 web-jvm 的七函数、二类型及 InputStr
 明确的独立 oracle 阶段。真实坏输入分别验证 metadata 缺失、版本错和摘要错，
 不得产生部分输出。沿用 metadata、site、API diff 自检及最终完整门禁。
 发现两端差异且不能归因时停工，不清洗输出或豁免差异。
+
+## 落地与进度
+
+ae950a9f 实现按目标输入、发布 native 消费和轻量门禁；步骤锁为 203 个 run step、
+30 个家族。API 自检覆盖多个目标、带空格及等号的路径、未知/重复目标、缺数据和
+完整 inventory；漏传 metadata 与误跳 web-jvm 的错误实现都使指定输入合同变红。
+发布接线负控拒绝缺制备、缺锁比较、缺 native 工具或缺 web-jvm 参数。
+
+完整验收入口是从新 JAR 构建的发布 artifact、实际快照命令、独立 JVM oracle 以及
+既有 metadata/site 门；不得把轻量自检等同于完整全包资格。进度记录见
+[后续进度](history/m7-progress.md)。
 
 ## 不做的（理由）
 
