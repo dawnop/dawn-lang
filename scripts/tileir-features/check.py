@@ -1066,7 +1066,7 @@ def type_cases(good, bytecode, files, ledger):
          good.replace("f8E8M0FNU          | 18 | 13.2", "f8E8M0FNU          | 18 | 13.1"),
          "f8E8M0FNU entered at 13.2, not 13.1"),
         ("a layer-2 claim with no device kernel",
-         good.replace("| 2 | golden:int_ops,device:int_ops", "| 2 | golden:int_ops          "),
+         good.replace("| 2 | golden:matmul_i8,device:matmul_i8", "| 2 | golden:matmul_i8          "),
          "claims layer 2 and names no device kernel"),
         ("a golden whose .mlir does not spell the type",
          good.replace("golden:dtype_tf32,device:dtype_tf32", "golden:vadd,device:dtype_tf32     "),
@@ -1094,8 +1094,8 @@ def type_cases(good, bytecode, files, ledger):
          good.replace("| architecture-sm107-no-card", "| -", 1),
          "stops at layer 1 and names no reason"),
         ("a row at the bar that still claims an exemption",
-         good.replace("golden:int_ops,device:int_ops                                        | -",
-                      "golden:int_ops,device:int_ops                                        | "
+         good.replace("golden:matmul_i8,device:matmul_i8                                    | -",
+                      "golden:matmul_i8,device:matmul_i8                                    | "
                       "architecture"),
          "reaches layer 2 and still claims the exemption"),
         ("an implemented row under a knife nobody has cut",

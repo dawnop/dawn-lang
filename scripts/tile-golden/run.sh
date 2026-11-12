@@ -724,6 +724,10 @@ mutants=(
   pointer-lower-check-dropped
   metadata-limited-to-i32
   metadata-four-bytes
+  i32-tag-as-f32
+  i32-payload-two-bytes
+  f32-tag-as-tf32
+  f32-payload-two-bytes
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -3625,6 +3629,76 @@ if run_item metadata-limited-to-i32; then
 fi
 if run_item metadata-four-bytes; then
   idx_bounds_mutant metadata-four-bytes bytecode.dawn metadata
+fi
+
+# Each new numeric writer control first proves the clean target and an
+# unrelated f64-only program on both backends. A type rejection is layer 1;
+# none of these controls claims a device numeric failure.
+numeric_writer_mutant() { # name, kernel, shape, diagnostic
+  local name="$1" k="$2" shape="$3" diagnostic="$4" backend out variant
+  for backend in jvm native; do
+    out="$work/$name.clean.$backend"
+    if [ "$backend" = jvm ]; then
+      run_jvm "$work/clean" "$out" "$k" || fail "$name: clean target did not render"
+      run_jvm "$work/clean" "$out.bytes" "$k" --bytecode "$out.tilebc" || fail "$name: clean target did not encode"
+    else
+      run_native "$work/clean.bin" "$out" "$k" || fail "$name: clean target did not render"
+      run_native "$work/clean.bin" "$out.bytes" "$k" --bytecode "$out.tilebc" || fail "$name: clean target did not encode"
+    fi
+    cmp -s "$here/$k.mlir" "$out" || fail "$name: clean target text differs on $backend"
+    cmp -s "$here/$k.tilebc" "$out.tilebc" || fail "$name: clean target bytes differ on $backend"
+  done
+  if [ -n "$tileiras" ]; then
+    assemble "$work/$name.clean.jvm.tilebc" "$work/$name.clean.cubin" "$(kernel_arch "$k")" ||
+      fail "$name: clean target did not assemble"
+  fi
+  mutant_project "$name" bytecode.dawn
+  writer_mutant_checks "$name" "$k" "$shape" "$diagnostic"
+  if [ -n "$tileiras" ] && [[ "$name" = *-payload-* ]]; then
+    grep -Fq "failed to parse function body for function '$k'" "$work/m-$name.cubin.log" ||
+      fail "$name: the reader did not attribute the invalid payload to $k"
+  fi
+  for variant in clean "m-$name"; do
+    for backend in jvm native; do
+      out="$work/$name.$variant.control.$backend"
+      if [ "$backend" = jvm ]; then
+        run_jvm "$work/$variant" "$out" --writer-control-f64 || fail "$name: f64 control did not render"
+        run_jvm "$work/$variant" "$out.bytes" --writer-control-f64 --bytecode "$out.tilebc" || fail "$name: f64 control did not encode"
+      else
+        run_native "$work/$variant.bin" "$out" --writer-control-f64 || fail "$name: f64 control did not render"
+        run_native "$work/$variant.bin" "$out.bytes" --writer-control-f64 --bytecode "$out.tilebc" || fail "$name: f64 control did not encode"
+      fi
+      grep -Fq 'addf' "$out" && grep -Fq 'constant <f64: 1.25>' "$out" ||
+        fail "$name: f64 control lost its arithmetic or constant"
+      if grep -Eq 'i32|f32' "$out"; then fail "$name: f64 control contains a target type"; fi
+      cmp -s "$work/$name.clean.control.jvm" "$out" || fail "$name: f64 control text changed"
+      cmp -s "$work/$name.clean.control.jvm.tilebc" "$out.tilebc" || fail "$name: f64 control bytes changed"
+    done
+  done
+  if [ -n "$tileiras" ]; then
+    assemble "$work/$name.m-$name.control.native.tilebc" "$work/$name.control.cubin" "$gpu_name" ||
+      fail "$name: unrelated f64 control did not assemble"
+  fi
+  echo "PASS  writer isolation: $name (clean target green; unrelated f64 text and bytes unchanged on both backends)"
+}
+
+if run_item i32-tag-as-f32; then
+  numeric_writer_mutant i32-tag-as-f32 sum same-size \
+    "'cuda_tile.get_tile_block_id' op result #0 must be 0D tile of i32 values"
+fi
+if run_item i32-payload-two-bytes; then
+  numeric_writer_mutant i32-payload-two-bytes int_ops file-shorter \
+    "error at offset 3: failed to validate buffer size and format"
+fi
+if run_item f32-tag-as-tf32; then
+  numeric_writer_mutant f32-tag-as-tf32 vadd_f32 same-size \
+    "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<64xtf32>'"
+fi
+if run_item f32-payload-two-bytes; then
+  # Constant interning and section alignment keep the total file size here;
+  # the reader, rather than the outer length, checks the lane's two bytes.
+  numeric_writer_mutant f32-payload-two-bytes flash_attn_bf16 same-size \
+    "error at offset 3: failed to validate buffer size and format"
 fi
 
 _item_tick ""
