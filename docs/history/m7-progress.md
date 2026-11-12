@@ -358,6 +358,8 @@ A 配 seed std/runtime、B/C 配 current std/runtime 的阶段合同。
 Q1/Q2/Q3/Q6/Q7 的 42 项快速夹具与 15 项真实输入变异均按明确拒因拒绝。
 输入摘要有域分离与字段长度 framing，缺失的 dawn.lock 状态也进入身份；
 捕获不读 live checkout，不产生依赖外链，verify 重建 Git 对象清单并检查生成物。
+读取固定禁用 Git replace objects；夹具先证明普通 Git 视图被替换，再确认原始
+commit 的 capture 不变，避免本地替换视图混入受锁输入。
 入口、算法和不做的理由见 [K1 设计](../native-seed-input-contract-design.md)。
 
 本刀新增 push 成本为 0 s，未改 workflow 或生产发布身份协议。K2 继续接 native
