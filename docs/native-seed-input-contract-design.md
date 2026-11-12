@@ -27,7 +27,7 @@ schema2 仅在 `scripts/native-seed-prototype/` 演练 producer、installer 与�
 其输出只写调用者的新目录。builder 明确是实际发射 B 的 A，bootstrap seed 为 S，
 native 为 B；显式 JVM 类型臂可演练，但不能当 native 资格。安装只验证自己取得
 的 B、sidecar 和 metadata，不下载/执行 A、JAR 或编译链，不声称独立证明来源。
-proof 单向被 metadata 引用，禁止循环摘要；模拟第九件报告与资产不可覆盖仅在
+proof 绑定独立角色字段并排除 metadata 的 proof 引用，禁止循环摘要；模拟第九件报告与资产不可覆盖仅在
 隔离目录验证。schema1、未知 kind、JAR/ELF 混名、错 stage/target/lineage、重复
 JSON key、坏摘要必须拒绝，安装失败保留旧文件，原型重发不能覆盖同 tag bytes。
 
@@ -59,8 +59,8 @@ Python 替身；K4 在临时目录用小 bytes 演练事务，不真实重编编
 外部输入收据可用 `--receipt <inputs.json> --commit <完整提交>` 单独核结构与身份。
 另可附 `--cold-receipt <receipt.json> --package-receipt <receipt.json>`，核两 root、
 阶段/步骤集合、输入/recipe/执行器摘要和 Q1–Q10/事务覆盖；不读取真实 trace 或重编。
-五个 candidate/fixture 条目已从 unseen 消化；根脚本的命名空间导入未被当前 map
-递归建模的九个 K1–K4 文件逐条保留真实理由，变化仍触发 planner 全门回退。
+十个 candidate/fixture/共享模块条目已从 unseen 消化；根脚本的命名空间导入未被当前 map
+递归建模的四个 K1–K4 文件逐条保留真实理由，变化仍触发 planner 全门回退。
 这说明映射的保守边界，不能将已经运行的夹具说成从未执行，也不能冒称重链日常覆盖。
 
 ```sh
