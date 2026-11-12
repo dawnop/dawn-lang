@@ -107,17 +107,14 @@ tileir: dim_map sends a tile dimension to tensor view dimension 3, which is outs
 |---|---|---|---|
 | `dim_map sends a tile dimension to tensor view dimension` | emit | a `partition_view` or `strided_view` maps a tile dimension to a dimension the tensor view does not have | give the view the dimensions of the tensor, or fix the map |
 | `expected tensor_view rank and tile rank to match` | emit | a `partition_view` whose tile has more or fewer dimensions than the tensor view under it | cut the tile with the tensor's rank |
-| `load_view promises inbounds over a view with padding` | emit | `inbounds: [true]` on a view that has a padding value, which `tileiras` refuses without saying why | drop the promise, or cut the view with `NoPadding` |
+| `load_view promises inbounds over a view with padding` | emit | 带 padding 的 view 上声明 `inbounds: [true]`；Dawn 保留原 NoPadding 约束，13.5 的 assembler 已接受该组合 | drop the promise, or cut the view with `NoPadding` |
 
 Past the emitter is `tileiras`, which reads the bytecode and answers in the
 dialect's terms. Its verifier refuses a program the recorder let through (a
 format an architecture does not have, say) and it prints the dialect's own
 sentence. Handed bytes that are not Tile IR at all, it says
-`error: input does not correspond to Tile IR bytecode` and exits 3. A cubin
-that assembles and computes the wrong thing is not an error at any layer; the
-one such case this package knows is a defect of one assembler version on some
-targets, which `asm.assembler_defect` names (see
-"Assembling with tileiras" in [README.md](README.md)).
+`error: input does not correspond to Tile IR bytecode` and exits 3. 成功汇编但数值错误须由设备对拍检出。固定的 13.5.37 已修复旧版 #558，所有程序使用默认
+O3；其他已知问题及其接触面见设计文档 §6.0。
 
 ## Device
 

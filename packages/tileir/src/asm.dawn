@@ -1,152 +1,32 @@
-## How to call `tileiras` on the bytes `bytecode.encode` writes, for one
-## assembler version and one `--gpu-name`: [`tileiras_args`] answers the
-## arguments, and [`assembler_defect`] says why they are not the plain ones.
-## [`assemble`] is the whole step in one call: a recorded program in, a cubin
-## out, with the right arguments and the failures told apart.
+## Assemble the 13.4 bytes `bytecode.encode` writes with the pinned
+## tileiras 13.5.37, using its default O3 optimization level. The compiler
+## fixes the loop exit miscompilation tracked by #558 and NVIDIA/cuda-tile#25.
+## The old version's workaround and parameter policy are no longer supported.
 ##
-## `std/gpu` never runs `tileiras`: a program hands `with_gpu_real` cubins
-## somebody else assembled. [`assemble`] is that somebody for a program that
-## has a `tileiras` binary at a path it can name, and the two functions
-## beside it are for a build script that wants to run the assembler itself
-## (scripts/tile-gpu-diff does).
-#
-# Why a table keyed on the EXACT assembler version and the exact target, and
-# not a flag of the package. tileiras 13.4.92 writes wrong PTX for a loop that
-# exits by `break` with two carried values when the target is in the
-# sm_90/sm_100 family and the optimization level is 1 or above (issue #558,
-# upstream NVIDIA/cuda-tile#25; tile-backend-design 6.28). The defect is a
-# property of one binary on some targets, so the workaround is keyed on both:
-# a fixed tileiras is another version string and gets the plain arguments
-# without anybody remembering to take the workaround out, and sm_86 under the
-# same 13.4.92 keeps its optimizer, since its PTX is correct.
-#
-# Why the program is a third key. The first form of this table lowered every
-# program on the affected targets to `--opt-level 0`, which cost a flash_attn
-# kernel 35x (bf16, sm_90) to 57x (sm_100) of its device time and a vadd 3x,
-# and none of those programs has a `loop` that `break`s. The defect needs one,
-# so [`has_break_loop`] asks the recorded program for that structure and only
-# a program that has it pays. The test is wider than the four conditions the
-# issue minimised (it counts any `break` loop, not just a two-carry one with a
-# `reduce` exit), because which of those loops the optimizer breaks is its
-# business and can change with a release; a `for` is a different operation
-# that never reaches the defective pass. 6.28 has the measurements.
-#
-# Why `--opt-level 0` and not the previous assembler. 13.3.36 assembles the
-# same kernels correctly, but it refuses bytecode 13.4, which is the only
-# version bytecode.dawn writes, and four goldens (attr_ftof, insert_tile,
-# powi_sweep, loop_return) use operations 13.3 does not have. 13.4.92 at
-# `--opt-level 0` is correct on the minimised program and on every golden of
-# the sm_90 and sm_100 ledgers. It costs device time (on sm_86, where it can
-# be measured as a pure cost, up to 4.5x for kernels that compute and 8x for
-# loop_until; 6.28), and only on the affected targets.
+## `std/gpu` consumes AOT cubins; it never invokes the assembler itself.
 use std/bytes
 use std/io.{Fs, Proc, temp_dir, write_bytes, read_bytes, read_file, write_file, copy_permissions, list_dir, delete, run, with_fs_real, with_proc_real}
 use std/list
 use std/str
 use bytecode.{encode}
 use std/dtype.{F64}
-use prog.{TileProg, TileOp, For, Loop, Break, Reduce, Scan, If, trace_kernel, trace1, cells, Out}
-use dev.{d_loop, d_range, carry, get, set, f_const, broadcast, reduce_max, abs, gt, store_cell}
-
-# One known assembler defect: the `tileiras` version it was measured on, the
-# `--gpu-name` values whose code is wrong, the extra arguments that avoid it,
-# and where it is written down.
-type Defect = {
-  tileiras: String,
-  targets: List[String],
-  args: List[String],
-  issue: String,
-}
-
-# The measured defects. sm_80 to sm_89 and sm_120/sm_121 assemble the
-# minimised program correctly under 13.4.92 at every level; the five below do
-# not (6.28 lists the PTX check behind each).
-fn defects() -> List[Defect] = [
-  Defect {
-    tileiras = "13.4.92",
-    targets = ["sm_90", "sm_100", "sm_103", "sm_107", "sm_110"],
-    args = ["--opt-level", "0"],
-    issue = "dawnop/dawn-lang#558, NVIDIA/cuda-tile#25",
-  }
-]
-
-fn defect_for(tileiras: String, gpu_name: String, prog: TileProg) -> Option[Defect] =
-  if has_break_loop(prog) {
-    list.find(defects(), d => d.tileiras == tileiras && list.contains(d.targets, gpu_name))
-  } else {
-    None
-  }
-
-## True when `prog` has a `loop` that can `break`: a `Loop` operation with a
-## `Break` anywhere inside its body, however deeply nested in `if`, `for`,
-## `reduce` or `scan` regions. This is the structural form of the shape that
-## trips #558, and it is deliberately wider than that issue's four conditions
-## (see 6.28): the optimizer's current behaviour decides which of these loops
-## miscompile, so every one of them is treated as suspect. A `for` loop never
-## counts, and neither does a program with no loop.
-pub fn has_break_loop(prog: TileProg) -> Bool = any_break_loop(prog.ops)
-
-fn any_break_loop(ops: List[TileOp]) -> Bool =
-  list.any(ops, op => match op {
-    Loop(_inits, _carried, _results, body) -> any_break(body) || any_break_loop(body)
-    For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> any_break_loop(body)
-    Reduce(_results, _dim, _shape, _identities, _operands, _args, body) -> any_break_loop(body)
-    Scan(_results, _dim, _reverse, _shape, _identities, _operands, _args, body) -> any_break_loop(body)
-    If(_results, _cond, on_true, on_false) -> any_break_loop(on_true) || any_break_loop(on_false)
-    _ -> false
-  })
-
-# Whether `ops` hold a `Break` at any depth.
-fn any_break(ops: List[TileOp]) -> Bool =
-  list.any(ops, op => match op {
-    Break(_values) -> true
-    Loop(_inits, _carried, _results, body) -> any_break(body)
-    For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> any_break(body)
-    Reduce(_results, _dim, _shape, _identities, _operands, _args, body) -> any_break(body)
-    Scan(_results, _dim, _reverse, _shape, _identities, _operands, _args, body) -> any_break(body)
-    If(_results, _cond, on_true, on_false) -> any_break(on_true) || any_break(on_false)
-    _ -> false
-  })
-
-## The arguments to put before `-o <cubin> <bytecode>` when `tileiras`
-## version `tileiras` (as `tileiras --version` prints it after `V`, e.g.
-## `"13.4.92"`) assembles `prog` for `gpu_name` (e.g. `"sm_90"`): `--gpu-name`
-## and, when the version and target are one [`assembler_defect`] knows AND
-## [`has_break_loop`] says `prog` has the shape that defect needs, the
-## arguments that avoid it. For tileiras 13.4.92 on sm_90, sm_100, sm_103,
-## sm_107 and sm_110 that is `--opt-level 0`, and only for a program with a
-## `loop` that `break`s: every other program keeps the default `-O3`.
-pub fn tileiras_args(tileiras: String, gpu_name: String, prog: TileProg) -> List[String] = {
-  let extra = match defect_for(tileiras, gpu_name, prog) {
-    Some(d) -> d.args
-    None -> []
-  }
-  ["--gpu-name", gpu_name] ++ extra
-}
-
-## Why [`tileiras_args`] adds arguments for this combination, or `None` when
-## it does not: one English sentence naming the assembler, the target, the
-## defect and the issues that track it.
-pub fn assembler_defect(tileiras: String, gpu_name: String, prog: TileProg) -> Option[String] =
-  match defect_for(tileiras, gpu_name, prog) {
-    Some(d) -> Some(
-      "tileiras ${d.tileiras} miscompiles the exit value of a loop that breaks for ${gpu_name} at --opt-level 1 and above"
-        ++ " (${d.issue}); assemble this program with --opt-level 0 or with a tileiras that fixes it")
-    None -> None
-  }
+use prog.{TileProg, trace_kernel, trace1, cells, Out}
+use dev.{d_loop, carry, get, set, f_const, broadcast, reduce_max, abs, gt, store_cell}
 
 ## Why [`assemble`] gave no cubin. `AssemblerNotFound` is a `tileiras` path
 ## nothing could start (missing, not executable), `AssemblerFailed` a run that
 ## exited non-zero (`args` is what it was given, `stderr` what it printed),
 ## `NoCubin` a run that exited zero and left no output file, and
 ## `UnknownVersion` a `--version` whose text has no unique, complete standard
-## version record to key [`tileiras_args`] on (see [`assemble`]). `Scratch` is
-## the host refusing the temporary directory or a file in it.
+## version record (see [`assemble`]). `UnsupportedVersion` is a valid
+## record for a binary other than the supported 13.5.37. `Scratch` is the
+## host refusing the temporary directory or a file in it.
 pub type AssembleError =
   | AssemblerNotFound(path: String, detail: String)
   | AssemblerFailed(args: List[String], status: Int, stderr: String)
   | NoCubin(path: String)
   | UnknownVersion(output: String)
+  | UnsupportedVersion(version: String)
   | Scratch(detail: String)
 derive Show
 
@@ -157,10 +37,11 @@ pub fn explain(e: AssembleError) -> String = match e {
     "tileiras ${join(args, " ")} exited with status ${status}: ${str.trim(stderr)}"
   NoCubin(path) -> "tileiras exited with status 0 but wrote no cubin at `${path}`"
   UnknownVersion(output) -> "`tileiras --version` did not print one valid version record: ${str.trim(output)}"
+  UnsupportedVersion(version) -> "tileiras ${version} is not supported; expected 13.5.37"
   Scratch(detail) -> "scratch files for tileiras: ${detail}"
 }
 
-# Canonical components keep numeric aliases from bypassing exact defect keys.
+# Canonical components keep numeric aliases from changing assembler identity.
 fn version_component(s: String) -> Bool =
   not str.is_empty(s) && (s == "0" || not str.starts_with(s, "0"))
   && list.all(str.chars(s), c => str.contains("0123456789", c))
@@ -215,7 +96,7 @@ fn run_in(dir: String, tag: String, tileiras: String, argv: List[String]) -> Res
   }
 }
 
-fn assemble_in(dir: String, prog: TileProg, bc: Bytes, gpu_name: String, tileiras: String) -> Result[Bytes, AssembleError] !Fs !Proc =
+fn assemble_in(dir: String, bc: Bytes, gpu_name: String, tileiras: String) -> Result[Bytes, AssembleError] !Fs !Proc =
   match run_in(dir, "version", tileiras, ["--version"]) {
     Err(e) -> Err(e)
     Ok((vstatus, vout, verr)) ->
@@ -224,13 +105,15 @@ fn assemble_in(dir: String, prog: TileProg, bc: Bytes, gpu_name: String, tileira
       } else {
         match version_of(vout) {
           None -> Err(UnknownVersion(vout))
-          Some(version) -> {
+          Some(version) -> if version != "13.5.37" {
+            Err(UnsupportedVersion(version))
+          } else {
             let input = "${dir}/in.tilebc"
             let output = "${dir}/out.cubin"
             match write_bytes(input, bc) {
               Err(e) -> Err(Scratch(e.message))
               Ok(_u) -> {
-                let args = tileiras_args(version, gpu_name, prog) ++ ["-o", output, input]
+                let args = ["--gpu-name", gpu_name, "-o", output, input]
                 match run_in(dir, "asm", tileiras, args) {
                   Err(e) -> Err(e)
                   Ok((status, _o, errs)) ->
@@ -264,16 +147,17 @@ fn clean(dir: String) -> Unit !Fs = {
 ## executable at `tileiras` (a path, or a name found on PATH) and answer the
 ## cubin. This is the step `encode` and the assembler make by hand: the
 ## program is encoded, written to a temporary `.tilebc`, `tileiras --version`
-## says which assembler this is, [`tileiras_args`] picks the arguments for that
-## version and target, and the cubin is read back. The temporary directory is
+## validates the complete version record, the target is passed with
+## `--gpu-name`, and the cubin is read back at the default O3 level. The temporary directory is
 ## removed whatever the outcome.
 ##
 ## Version output must contain exactly one `Cuda compilation tools, release
 ## M.m, VM.m.p` record. Components are ASCII decimal without leading zeros
 ## except `0`; the release must agree with the version. Surrounding whitespace,
 ## LF and CRLF are accepted. Incomplete, suffixed or duplicate records are
-## `UnknownVersion`, with the original stdout, before assembly starts. Other
-## complete versions retain the ordinary argument policy.
+## `UnknownVersion`, with the original stdout, before assembly starts. A
+## complete version other than 13.5.37 is `UnsupportedVersion`, also before
+## assembly starts; unsupported binaries never receive unprotected arguments.
 ##
 ## An assembler that cannot be started, one that exits non-zero, one that
 ## leaves no file and one whose version text cannot be read are four
@@ -285,26 +169,20 @@ fn clean(dir: String) -> Unit !Fs = {
 ## `with_proc_real` are the production handlers. Nothing is cached: an
 ## assembly takes well under a second, and a cache keyed on the bytes would
 ## also have to be keyed on the assembler's version, the target and the
-## arguments, which is a table this module already keeps once.
+## arguments, which this API deliberately leaves to its caller.
 pub fn assemble(prog: TileProg, gpu_name: String, tileiras: String) -> Result[Bytes, AssembleError] !Fs !Proc = {
   let bc = encode(prog)
   match temp_dir("", "tileir-asm-") {
     Err(e) -> Err(Scratch(e.message))
     Ok(dir) -> {
-      let r = assemble_in(dir, prog, bc, gpu_name, tileiras)
+      let r = assemble_in(dir, bc, gpu_name, tileiras)
       clean(dir)
       r
     }
   }
 }
 
-# ---- the programs the criterion is held against
-#
-# `repro_558` is the shape of the minimised reproducer (dawnop/dawn-lang#558):
-# an f64 carried through a `loop` that `break`s once `0.2 > max|x - 0.25|`.
-# `for_only` and `flash_like` are what the 35x to 57x of 6.28 was paid on: a
-# `for` loop (a flash_attn kernel's shape) and a straight line (vadd's).
-
+# The minimized loop remains a subprocess fixture for the default O3 policy.
 fn repro_558() -> TileProg = {
   let (p, _e) = trace1("repro_558", Out(F64, cells([1], [1])), o => {
     let c = broadcast(f_const(F64, 0.25), [1])
@@ -319,87 +197,6 @@ fn repro_558() -> TileProg = {
     store_cell(o, x.get())
   })
   p
-}
-
-fn for_only() -> TileProg = {
-  let (p, _e) = trace1("for_only", Out(F64, cells([1], [1])), o => {
-    var acc = broadcast(f_const(F64, 0.0), [1])
-    for _j in d_range(0, 8) {
-      acc = acc + broadcast(f_const(F64, 1.0), [1])
-    }
-    store_cell(o, acc)
-  })
-  p
-}
-
-fn straight_line() -> TileProg = {
-  let (p, _e) = trace1("straight", Out(F64, cells([1], [1])), o => store_cell(o, broadcast(f_const(F64, 1.0), [1])))
-  p
-}
-
-# A `break` loop nested inside a `for`: found, since the scan looks at every depth.
-fn nested_break_loop() -> TileProg = {
-  let (p, _e) = trace1("nested", Out(F64, cells([1], [1])), o => {
-    var acc = broadcast(f_const(F64, 0.0), [1])
-    for _j in d_range(0, 2) {
-      let x = carry(broadcast(f_const(F64, 1.0), [1]))
-      d_loop {
-        let v = x.get()
-        x.set(v * f_const(F64, 0.5))
-        gt(f_const(F64, 0.2), reduce_max(v))
-      }
-      acc = acc + x.get()
-    }
-    store_cell(o, acc)
-  })
-  p
-}
-
-test "has_break_loop looks at the structure: a loop that breaks counts, a for or a straight line does not" {
-  assert has_break_loop(repro_558())
-  assert has_break_loop(nested_break_loop())
-  assert has_break_loop(for_only()) == false
-  assert has_break_loop(straight_line()) == false
-}
-
-test "13.4.92 on the sm_90 and sm_100 family assembles a loop that breaks at --opt-level 0" {
-  for g in ["sm_90", "sm_100", "sm_103", "sm_107", "sm_110"] {
-    assert tileiras_args("13.4.92", g, repro_558()) == ["--gpu-name", g, "--opt-level", "0"]
-    assert tileiras_args("13.4.92", g, nested_break_loop()) == ["--gpu-name", g, "--opt-level", "0"]
-    assert assembler_defect("13.4.92", g, repro_558()) != None
-  }
-}
-
-test "13.4.92 on the sm_90 and sm_100 family keeps the default level for a program with no loop that breaks" {
-  for g in ["sm_90", "sm_100", "sm_103", "sm_107", "sm_110"] {
-    for prog in [for_only(), straight_line()] {
-      assert tileiras_args("13.4.92", g, prog) == ["--gpu-name", g]
-      assert assembler_defect("13.4.92", g, prog) == None
-    }
-  }
-}
-
-test "13.4.92 on the targets it compiles correctly keeps the default level" {
-  # sm_86 is this repository's ledger: the same 13.4.92 bytes give the right
-  # answer there at the default level, so its cubins keep the optimizer.
-  for g in ["sm_80", "sm_86", "sm_87", "sm_88", "sm_89", "sm_120", "sm_121"] {
-    assert tileiras_args("13.4.92", g, repro_558()) == ["--gpu-name", g]
-    assert assembler_defect("13.4.92", g, repro_558()) == None
-  }
-}
-
-test "the workaround is keyed on the assembler version, so another tileiras gets the plain arguments" {
-  # 13.3.36 is correct at every level on sm_90 and sm_100; a later fixed
-  # release is a different string and lifts the workaround with no edit here.
-  assert tileiras_args("13.3.36", "sm_90", repro_558()) == ["--gpu-name", "sm_90"]
-  assert tileiras_args("13.4.93", "sm_100", repro_558()) == ["--gpu-name", "sm_100"]
-  assert assembler_defect("13.3.36", "sm_90", repro_558()) == None
-}
-
-test "the diagnostic names the assembler, the target and both issues" {
-  assert assembler_defect("13.4.92", "sm_90", repro_558()) == Some(
-    "tileiras 13.4.92 miscompiles the exit value of a loop that breaks for sm_90 at --opt-level 1 and above"
-      ++ " (dawnop/dawn-lang#558, NVIDIA/cuda-tile#25); assemble this program with --opt-level 0 or with a tileiras that fixes it")
 }
 
 # ---- assemble, against a stand-in for tileiras
@@ -419,44 +216,44 @@ fn made(r: Result[String, ForeignError]) -> String = match r {
 }
 
 fn version_lines() -> String =
-  "echo \"tileiras: fake\"\necho \"Cuda compilation tools, release 13.4, V13.4.92\"\n"
+  "echo \"tileiras: fake\"\necho \"Cuda compilation tools, release 13.5, V13.5.37\"\n"
 
 # The pinned assembler's version banner is a positive identity fixture.
 fn pinned_version_output() -> String =
   "tileiras: NVIDIA (R) Cuda Tile IR optimizing assembler\n"
   ++ "Copyright (c) 2005-2026 NVIDIA Corporation\n"
-  ++ "Built on Tue_Sep__1_09:35:26_PDT_2026\n"
-  ++ "Cuda compilation tools, release 13.4, V13.4.92\n"
-  ++ "Build local.local.38855100_\n"
+  ++ "Built on Mon_Oct_12_19:27:40_PDT_2026\n"
+  ++ "Cuda compilation tools, release 13.5, V13.5.37\n"
+  ++ "Build local.local.39125733_\n"
 
 fn bad_version_outputs() -> List[String] = [
   "",
   "garbage\n",
-  "Cuda compilation tools, release 13.4, Vgarbage\n",
-  "Cuda compilation tools, release 13.4, V13.4\n",
-  "Cuda compilation tools, release 13.4, V13.4.\n",
-  "Cuda compilation tools, release 13.4, V13..92\n",
-  "Cuda compilation tools, release 13.4, V13.4.92-extra\n",
-  "Cuda compilation tools, release 13.4, V13.4.92 extra\n",
-  "Cuda compilation tools, release 13.4, V13.4.92.1\n",
-  "Cuda compilation tools, release 13.4, V\n",
-  "Cuda compilation tools, release 13.4, V13.4.-1\n",
-  "Cuda compilation tools, release 13.4, V13.4.９２\n",
-  "Cuda compilation tools, release 013.4, V013.4.92\n",
-  "Cuda compilation tools, release 13.04, V13.04.92\n",
-  "Cuda compilation tools, release 13.4, V13.4.092\n",
-  "Cuda compilation tools, release 13.3, V13.4.92\n",
-  "other program, V13.4.92\n",
-  "Cuda compilation tools, release 13.4, V13.4.92\nCuda compilation tools, release 13.4, V13.4.93\n",
-  "Cuda compilation tools, release 13.4, V13.4.92\nCuda compilation tools, release 13.4, V13.4.92\n",
-  "Cuda compilation tools, release 13.4, Vgarbage\nCuda compilation tools, release 13.4, V13.4.92\n",
-  "Cuda compilation tools, release 13.4, V13.4.92\nCuda compilation tools, release 13.4\n",
+  "Cuda compilation tools, release 13.5, Vgarbage\n",
+  "Cuda compilation tools, release 13.5, V13.5\n",
+  "Cuda compilation tools, release 13.5, V13.5.\n",
+  "Cuda compilation tools, release 13.5, V13..37\n",
+  "Cuda compilation tools, release 13.5, V13.5.37-extra\n",
+  "Cuda compilation tools, release 13.5, V13.5.37 extra\n",
+  "Cuda compilation tools, release 13.5, V13.5.37.1\n",
+  "Cuda compilation tools, release 13.5, V\n",
+  "Cuda compilation tools, release 13.5, V13.5.-1\n",
+  "Cuda compilation tools, release 13.5, V13.5.３７\n",
+  "Cuda compilation tools, release 013.5, V013.5.37\n",
+  "Cuda compilation tools, release 13.05, V13.05.37\n",
+  "Cuda compilation tools, release 13.5, V13.5.037\n",
+  "Cuda compilation tools, release 13.3, V13.5.37\n",
+  "other program, V13.5.37\n",
+  "Cuda compilation tools, release 13.5, V13.5.37\nCuda compilation tools, release 13.5, V13.5.38\n",
+  "Cuda compilation tools, release 13.5, V13.5.37\nCuda compilation tools, release 13.5, V13.5.37\n",
+  "Cuda compilation tools, release 13.5, Vgarbage\nCuda compilation tools, release 13.5, V13.5.37\n",
+  "Cuda compilation tools, release 13.5, V13.5.37\nCuda compilation tools, release 13.5\n",
 ]
 
 test "version identity requires one complete canonical record" {
-  assert version_of(pinned_version_output()) == Some("13.4.92")
-  assert version_of("\r\n\t Cuda compilation tools, release 13.4, V13.4.92 \t\r\nBuild x\r\n") == Some("13.4.92")
-  assert version_of("Cuda compilation tools, release 13.4, V13.4.93") == Some("13.4.93")
+  assert version_of(pinned_version_output()) == Some("13.5.37")
+  assert version_of("\r\n\t Cuda compilation tools, release 13.5, V13.5.37 \t\r\nBuild x\r\n") == Some("13.5.37")
+  assert version_of("Cuda compilation tools, release 13.5, V13.5.38") == Some("13.5.38")
   assert version_of("Cuda compilation tools, release 14.0, V14.0.0\n") == Some("14.0.0")
   for output in bad_version_outputs() {
     assert version_of(output) == None
@@ -522,15 +319,37 @@ test "assemble rejects bad version identities before the assembly sentinel and p
   }))
 }
 
-test "assemble preserves the version target and program argument policy through a real subprocess" {
+test "assemble rejects unsupported exact versions before starting the assembler" {
+  with_fs_real(() => with_proc_real(() => {
+    for (release, version) in [("13.4", "13.4.92"), ("13.5", "13.5.38"), ("14.0", "14.0.0")] {
+      let output = "Cuda compilation tools, release ${release}, V${version}\n"
+      let (answer, invoked) = with_fake(sentinel_assembler(output), path => {
+        let r = assemble(repro_558(), "sm_100", path)
+        let marker = "${path}.assembled"
+        let seen = match read_file(marker) {
+          Ok(_text) -> true
+          Err(_e) -> false
+        }
+        let _d = delete(marker)
+        (r, seen)
+      })
+      assert invoked == false
+      match answer {
+        Err(UnsupportedVersion(actual)) -> { assert actual == version }
+        _ -> { assert false }
+      }
+    }
+  }))
+}
+
+test "assemble uses default O3 for the pinned version on every qualified target" {
   with_fs_real(() => with_proc_real(() => {
     for (output, gpu_name, prog, expected) in [
-      (pinned_version_output(), "sm_100", repro_558(), "--gpu-name sm_100 --opt-level 0 -o "),
-      (pinned_version_output(), "sm_90", repro_558(), "--gpu-name sm_90 --opt-level 0 -o "),
-      (pinned_version_output(), "sm_100", straight_line(), "--gpu-name sm_100 -o "),
+      (pinned_version_output(), "sm_100", repro_558(), "--gpu-name sm_100 -o "),
+      (pinned_version_output(), "sm_90", repro_558(), "--gpu-name sm_90 -o "),
+      (pinned_version_output(), "sm_100", fake_program(), "--gpu-name sm_100 -o "),
       (pinned_version_output(), "sm_86", repro_558(), "--gpu-name sm_86 -o "),
-      ("Cuda compilation tools, release 13.4, V13.4.93\n", "sm_100", repro_558(), "--gpu-name sm_100 -o "),
-      ("\tCuda compilation tools, release 13.4, V13.4.92 \r\n", "sm_90", repro_558(), "--gpu-name sm_90 --opt-level 0 -o "),
+      ("\tCuda compilation tools, release 13.5, V13.5.37 \r\n", "sm_90", repro_558(), "--gpu-name sm_90 -o "),
     ] {
       let before = leftovers()
       let (answer, invoked) = with_fake(sentinel_assembler(output), path => {
@@ -553,16 +372,16 @@ test "assemble preserves the version target and program argument policy through 
   }))
 }
 
-test "assemble hands tileiras the program's bytes and the arguments tileiras_args picks, and answers the cubin" {
+test "assemble hands tileiras the program bytes and target and answers the cubin" {
   with_fs_real(() => with_proc_real(() => {
     let script = version_lines() ++ "if [ \"\$1\" = \"--version\" ]; then exit 0; fi\n"
       ++ "for a in \"\$@\"; do if [ \"\$prev\" = \"-o\" ]; then out=\"\$a\"; fi; prev=\"\$a\"; in=\"\$a\"; done\n"
       ++ "{ echo \"args: \$*\"; cat \"\$in\"; } > \"\$out\"\n"
     let before = leftovers()
     let plain = fake_program()
-    # 13.4.92 on sm_90 gets --opt-level 0 for a program with a loop that breaks, the plain arguments for one without; sm_86 never
+    # The pinned compiler needs no loop-specific arguments on any target.
     for (prog, gpu, want) in [
-      (repro_558(), "sm_90", "args: --gpu-name sm_90 --opt-level 0 -o "),
+      (repro_558(), "sm_90", "args: --gpu-name sm_90 -o "),
       (repro_558(), "sm_86", "args: --gpu-name sm_86 -o "),
       (plain, "sm_90", "args: --gpu-name sm_90 -o ")] {
       let bc = encode(prog)
@@ -599,8 +418,7 @@ test "assemble: a non-zero exit is AssemblerFailed with the arguments and stderr
       Err(AssemblerFailed(args, status, stderr)) -> {
         assert status == 3
         assert str.trim(stderr) == "error: nope"
-        assert list.take(args, 4) == ["--gpu-name", "sm_100", "--opt-level", "0"]
-        assert args[4] == "-o"
+        assert list.take(args, 3) == ["--gpu-name", "sm_100", "-o"]
       }
       _ -> { assert false }
     }
@@ -638,6 +456,7 @@ test "explain says which assembler step failed" {
   assert explain(AssemblerNotFound("/x/tileiras", "no such file")) == "could not run tileiras at `/x/tileiras`: no such file"
   assert explain(AssemblerFailed(["--gpu-name", "sm_90"], 1, "bad\n")) == "tileiras --gpu-name sm_90 exited with status 1: bad"
   assert explain(UnknownVersion("bad\n")) == "`tileiras --version` did not print one valid version record: bad"
-  assert version_of("a\nCuda compilation tools, release 13.4, V13.4.92\nBuild x\n") == Some("13.4.92")
+  assert version_of("a\nCuda compilation tools, release 13.5, V13.5.37\nBuild x\n") == Some("13.5.37")
+  assert explain(UnsupportedVersion("13.4.92")) == "tileiras 13.4.92 is not supported; expected 13.5.37"
   assert version_of("nothing") == None
 }

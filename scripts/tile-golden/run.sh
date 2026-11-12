@@ -361,12 +361,11 @@
 #     view-inbounds-all-true
 #                            the `inbounds` array is written all true
 #                            whatever the kernel promised -> view_transpose's
-#                            text is untouched, its bytes are the same
-#                            length and differ, and tileiras refuses them
-#                            with its unnamed `failed to compile Tile IR
-#                            program`: its source view has a padding value
-#                            and a promised load over one is not assembled
-#                            (docs 6.32)
+#                            text is untouched and its bytes differ at the
+#                            same length. 13.5 accepts them; the independent
+#                            decoder must expose exactly two invented true
+#                            promise arrays (the 13.4 refusal is historical,
+#                            docs 6.32). Dawn's padding constraint remains.
 #     view-inbounds-promise-dropped
 #                            the array is written all false whatever the
 #                            kernel promised -> view_inbounds's text is
@@ -1153,15 +1152,9 @@ for k in "${kernels[@]}"; do
         { cat "$work/disasm-norm.selftest" >&2; fail "disasm-norm.py selftest failed"; }
       echo "PASS  disasm-norm: $(grep -c '^PASS' "$work/disasm-norm.selftest") checks, every rule live and every counterexample red"
     fi
-    if [ "$k" = view_inbounds ]; then
-      # The promise reaches the code: the same copy with no promise is
-      # another program (knife T18). Its name differs, so compare the code.
-      assemble "$here/view_inbounds_off.tilebc" "$work/view_inbounds_off.cubin" "$arch" ||
-        { cat "$work/view_inbounds_off.cubin.log" >&2; fail "view_inbounds_off.tilebc: tileiras refused it at $arch"; }
-      [ "$(cubin_text "$work/$k.cubin")" != "$(cubin_text "$work/view_inbounds_off.cubin")" ] ||
-        fail "view_inbounds: the promised copy and the unpromised one assemble to the same code, so the promise reaches nothing"
-      echo "PASS  inbounds: view_inbounds and view_inbounds_off assemble to different code at $arch"
-    fi
+    # A divisible static view may need no masking even without a promise.
+    # The partial-view witness in view-inbounds-promise-dropped holds the
+    # field's code generation effect without depending on that optimization.
     if [ "$k" = vadd_producer ]; then
       # The Producer section (knife T14a): the one place it shows is
       # tileirdisasm's first line, and the device never sees it, so the
@@ -1189,8 +1182,9 @@ for k in "${kernels[@]}"; do
       # (the n-th instruction at the line and column it starts at). (2) The
       # default -O3 cubin is the one the same program makes without the
       # section: the device never sees it. (3) With --lineinfo the cubin's
-      # .debug_line reads back the lines, which are the golden's, and the same
-      # program without the section writes none.
+      # .debug_line reads back the golden's lines. Without the section,
+      # 13.5 emits only synthetic <unknown>:1 metadata and unchanged code.
+      python3 "$here/debug-check.py" selftest || fail "debug line reader selftest failed"
       need_disasm
       "$disasm" -g "$bc_golden" > "$work/$k.disasm" 2>&1 || fail "$k: tileirdisasm -g refused $k.tilebc"
       if [ "$mode" = record ]; then cp "$work/$k.disasm" "$here/$k.disasm"; fi
@@ -1219,8 +1213,15 @@ for k in "${kernels[@]}"; do
       cmp -s "$work/$k.li.cubin" "$work/$k.cubin" && fail "$k: --lineinfo made no difference to the cubin, so the locations reach nothing"
       assemble_lineinfo "$work/$k.bare.tilebc" "$work/$k.bare.li.cubin" "$arch" ||
         { cat "$work/$k.bare.li.cubin.log" >&2; fail "$k: tileiras --lineinfo refused the copy without a Debug section"; }
-      cmp -s "$work/$k.bare.li.cubin" "$work/$k.bare.cubin" ||
-        fail "$k: --lineinfo changes the cubin of the program that has no Debug section"
+      [ "$(cubin_text "$work/$k.bare.li.cubin")" = "$(cubin_text "$work/$k.bare.cubin")" ] ||
+        fail "$k: --lineinfo changes device code without a Debug section"
+      python3 "$here/debug-check.py" synthetic "$work/$k.bare.li.cubin" "$golden" > "$work/$k.synthetic" 2>&1 ||
+        { cat "$work/$k.synthetic" >&2; fail "$k: unexpected source metadata without a Debug section"; }
+      if python3 "$here/debug-check.py" synthetic "$work/$k.li.cubin" "$golden" > "$work/$k.synthetic-red" 2>&1; then
+        fail "$k: real source locations were accepted as synthetic metadata"
+      fi
+      grep -Eq '^debug-check: (expected only synthetic line 1|synthetic source must be <unknown>)' "$work/$k.synthetic-red" ||
+        fail "$k: the synthetic-source control failed for an unrelated reason"
       echo "PASS  debug: $k tileirdisasm -g matches $k.disasm and the golden's text ($(wc -l < "$work/$k.lines") distinct lines in .debug_line); the -O3 cubin is byte for byte the one without the section"
     fi
     if [ "$k" = global_syms ]; then
@@ -2839,23 +2840,62 @@ if run_item scale-baked-again; then
   echo "PASS  mutant: scale-baked-again (flash_attn.mlir and .tilebc red: the scale is a constant again and %arg4 is unread)"
 fi
 
-# 80. The `inbounds` array is written all true, whatever the kernel asked
-#     for. view_transpose reads through a view with a padding value, and a
-#     load that promises anything over one is refused by tileiras with a
-#     message that names nothing (the lowering refuses it by name, so a
-#     program cannot reach the assembler this way; the writer can).
+# 80. The writer invents true promises on a padded view. 13.5 accepts this
+#     bytecode, so its verifier is no longer a refusal witness. Require the
+#     external decoder to expose exactly those two incorrect arrays, while
+#     the source text remains the original unpromised program. Do not launch
+#     this mutant: an untrue promise cannot prove numerical correctness.
 if run_item view-inbounds-all-true; then
-  mutant_project view-inbounds-all-true bytecode.dawn
-  writer_mutant_checks view-inbounds-all-true view_transpose same-size \
-    "failed to compile Tile IR program"
+  name=view-inbounds-all-true
+  mutant_project "$name" bytecode.dawn
+  mutant_run "$name" view_transpose
+  mutant_run_bytecode "$name" view_transpose
+  for backend in jvm native; do
+    out="$work/m-$name.view_transpose.$backend"
+    [ "$(cat "$out.rc")" = 0 ] && cmp -s "$here/view_transpose.mlir" "$out" ||
+      fail "$name: original text changed on $backend"
+    [ "$(cat "$out.tilebc.rc")" = 0 ] || fail "$name: mutant did not encode on $backend"
+    cmp -s "$here/view_transpose.tilebc" "$out.tilebc" && fail "$name: mutant bytes still match"
+    [ "$(wc -c < "$here/view_transpose.tilebc")" = "$(wc -c < "$out.tilebc")" ] || fail "$name: byte length changed"
+  done
+  cmp -s "$work/m-$name.view_transpose.jvm.tilebc" "$work/m-$name.view_transpose.native.tilebc" || fail "$name: backend bytes differ"
+  if [ -n "$tileiras" ]; then
+    assemble "$work/m-$name.view_transpose.jvm.tilebc" "$work/m-$name.cubin" "$gpu_name" ||
+      fail "$name: 13.5 no longer accepts the promise probe"
+    need_disasm
+    "$disasm" "$work/m-$name.view_transpose.jvm.tilebc" > "$work/m-$name.disasm" 2> "$work/m-$name.disasm.err" ||
+      fail "$name: independent decoder refused the probe"
+    [ ! -s "$work/m-$name.disasm.err" ] || fail "$name: independent decoder wrote an error"
+    python3 -I - "$here/disasm-norm.py" "$here/view_transpose.mlir" "$work/m-$name.disasm" <<'PY_FIELDS'
+import importlib.util
+from pathlib import Path
+import re, sys
+spec = importlib.util.spec_from_file_location("disasm_norm", sys.argv[1])
+norm = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(norm)
+expected, actual = norm.compare(Path(sys.argv[2]).read_text(), Path(sys.argv[3]).read_text())
+if actual == expected:
+    raise SystemExit("inbounds writer mutant stayed green in the external decoder")
+pattern = r"\s*inbounds\s*=\s*\[true,\s*true\]"
+changes = sum(len(re.findall(pattern, line)) for line in actual)
+attributed = [re.sub(pattern, "", line) for line in actual]
+if changes != 2 or attributed != expected:
+    raise SystemExit("inbounds writer mutant changed something beyond the two promise arrays")
+print("PASS inbounds field control: external decoder exposes exactly two invented promise arrays")
+PY_FIELDS
+    echo "PASS  mutant: $name (text unchanged; 13.5 accepts; external decoded promises contradict the source)"
+  else
+    echo "PASS  mutant: $name (text unchanged; bytes red on both backends)"
+    echo "SKIP  mutant: $name not handed to tileiras (--without-tileiras)"
+  fi
 fi
 
 # 81. The array is written all false, whatever the kernel asked for. The
 #     bytes differ from view_inbounds.tilebc in the array alone and the
 #     assembler accepts them, as it accepts every promise it can honour; the
-#     one place the promise shows is the code, which here is exactly the
-#     unpromised kernel's. Needs the assembler, so without it only the
-#     bytes are checked.
+#     partial-view witness below keeps the promise observable in code.
+#     The mutant must equal the ordinary bytes and code; both backends
+#     must agree. Without the assembler only the bytes are checked.
 if run_item view-inbounds-promise-dropped; then
   mutant_project view-inbounds-promise-dropped bytecode.dawn
   mutant_run_bytecode view-inbounds-promise-dropped view_inbounds
@@ -2868,6 +2908,53 @@ if run_item view-inbounds-promise-dropped; then
     [ "$(wc -c < "$out")" = "$(wc -c < "$here/view_inbounds.tilebc")" ] ||
       fail "view-inbounds-promise-dropped: the mutant's bytes are not the golden's length on $backend"
   done
+  # Both variants have one entry name and a partial final row tile. The
+  # writer mutant must become exactly the unpromised variant; the old full
+  # matrix alone no longer distinguishes code generation under 13.5.
+  for backend in jvm native; do
+    for variant in promised ordinary mutant; do
+      out="$work/inbounds-witness.$variant.$backend"
+      promise=true
+      owner=clean
+      [ "$variant" != ordinary ] || promise=false
+      [ "$variant" != mutant ] || owner=m-view-inbounds-promise-dropped
+      if [ "$backend" = jvm ]; then
+        run_jvm "$work/$owner" "$out" --inbounds-witness "$promise" "$out.tilebc" ||
+          fail "view-inbounds-promise-dropped: $variant witness did not record on JVM"
+      else
+        run_native "$work/$owner.bin" "$out" --inbounds-witness "$promise" "$out.tilebc" ||
+          fail "view-inbounds-promise-dropped: $variant witness did not record natively"
+      fi
+    done
+    a="$work/inbounds-witness.promised.$backend"
+    b="$work/inbounds-witness.ordinary.$backend"
+    m="$work/inbounds-witness.mutant.$backend"
+    [ "$(grep -Fc 'inbounds=[true, true]' "$a")" = 2 ] || fail "inbounds witness lost its two promises"
+    sed 's/ inbounds=\[true, true\]//g' "$a" > "$a.without-promises"
+    cmp -s "$a.without-promises" "$b" || fail "inbounds witnesses differ beyond their promise fields"
+    cmp -s "$a" "$m" || fail "writer mutation changed the witness text"
+    cmp -s "$a.tilebc" "$b.tilebc" && fail "inbounds witness bytes do not distinguish the promise"
+    [ "$(wc -c < "$a.tilebc")" = "$(wc -c < "$b.tilebc")" ] || fail "inbounds witnesses have different byte lengths"
+    cmp -s "$m.tilebc" "$b.tilebc" || fail "writer mutant is not exactly the unpromised witness"
+    for variant in promised ordinary mutant; do
+      for suffix in "" .tilebc; do
+        cmp -s "$work/inbounds-witness.$variant.jvm$suffix" "$work/inbounds-witness.$variant.$backend$suffix" ||
+          fail "inbounds witness $variant differs between backends"
+      done
+    done
+  done
+  if [ -n "$tileiras" ]; then
+    for variant in promised ordinary mutant; do
+      assemble "$work/inbounds-witness.$variant.jvm.tilebc" "$work/inbounds-witness.$variant.cubin" "$gpu_name" ||
+        fail "inbounds witness $variant did not assemble"
+      has_global_func "$work/inbounds-witness.$variant.cubin" inbounds_witness || fail "inbounds witness has no entry"
+    done
+    [ "$(cubin_text "$work/inbounds-witness.promised.cubin")" != "$(cubin_text "$work/inbounds-witness.ordinary.cubin")" ] ||
+      fail "partial inbounds witness no longer distinguishes the promise in device code"
+    [ "$(cubin_text "$work/inbounds-witness.mutant.cubin")" = "$(cubin_text "$work/inbounds-witness.ordinary.cubin")" ] ||
+      fail "inbounds writer mutant did not become the unpromised device code"
+    echo "PASS  inbounds witness: partial view code distinguishes promises; writer mutant becomes ordinary code"
+  fi
   if [ -n "$tileiras" ]; then
     assemble "$work/m-view-inbounds-promise-dropped.view_inbounds.jvm.tilebc" "$work/m-view-inbounds-promise-dropped.cubin" "$gpu_name" ||
       { cat "$work/m-view-inbounds-promise-dropped.cubin.log" >&2; fail "view-inbounds-promise-dropped: tileiras refused the mutant, which promises nothing"; }

@@ -458,7 +458,8 @@ fn inbounds_of(inbounds: List[Bool], rank: Int, what: String) -> List[Bool] =
 # `failed to compile Tile IR program`, whatever the padding value, which
 # dimension is promised and whether the tile divides the tensor (docs 6.32);
 # a promised load reads nothing past the edge, so the value would fill no
-# lane. Said here, where the view's padding is in the type, instead.
+# lane. Dawn keeps this NoPadding policy with its 13.4 writer even though
+# the 13.5 assembler accepts the combination. Check where padding is typed.
 fn refuse_promise_over_padding(vt: Ty, flags: List[Bool]) -> Unit = {
   let padding = match vt {
     PartitionView(_ts, _e, _sh, _st, _dm, p) -> p
@@ -466,7 +467,7 @@ fn refuse_promise_over_padding(vt: Ty, flags: List[Bool]) -> Unit = {
     _ -> NoPadding
   }
   if list.any(flags, b => b) && padding_present(padding) {
-    panic("tileir: load_view promises inbounds over a view with padding `${padding_name(padding)}`; tileiras refuses that with no message, and a promised load reads no padding, so cut the view with NoPadding")
+    panic("tileir: load_view promises inbounds over a view with padding `${padding_name(padding)}`; a promised load reads no padding, so cut the view with NoPadding")
   } else {
     ()
   }

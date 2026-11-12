@@ -1,5 +1,13 @@
 # tileir changelog
 
+## 0.30.0
+
+- 离线汇编工具组件固定为 13.5.37，字节码继续使用 13.4。
+- 删除旧版 13.4.92 缺陷策略及 tileiras_args、assembler_defect、has_break_loop 接口，
+  不保留兼容包装；assemble 对含 break 的循环也使用默认 O3。
+- 完整版本记录识别保持严格；完整但不受支持的版本以 UnsupportedVersion 在汇编前拒绝。
+  现有数值容差不变。
+
 ## 0.29.0
 
 - Check host Int construction of Idx against signed i32, including literals,

@@ -80,21 +80,19 @@ use prog.{trace2, cells, In, Out, TileProg, ByPtr, ftof_mode, Global, GetGlobal,
 use lower.{kparam_ty, Kernel, Instr, instr_count, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, TokenOnlyTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
-## The three numbers that must move together are this one, the `tileiras` pin
-## in scripts/tile-golden/toolchain.txt, and the driver in the ledger.
+## The writer format and assembler pin are independent: the pinned
+## tileiras 13.5.37 reads these 13.4 bytes. toolchain.txt records both, while
+## each device ledger records its exact driver and target. Upgrading the
+## assembler requires new device evidence even when these bytes do not move.
 ##
-## Knife T8 moved the minor from 2 to 3 and knife U2 from 3 to 4. 13.4 is
-## what `tileiras` 13.4.92 calls its current version; it still accepts 13.1,
-## 13.2 and 13.3, and 13.2 is what this tree pinned from knife 3 to knife T15.
-## Neither move changed a device answer: the cubin `tileiras --gpu-name sm_86`
-## produces from the 13.3 bytes is byte for byte the cubin it produced from
-## the 13.2 bytes (tile-backend-design 6.11), and the cubin 13.4.92 produces
-## from the 13.4 bytes is byte for byte the one it produces from the 13.3
-## bytes (6.18), each measured over every golden rather than assumed.
+## Knife T8 moved the minor from 2 to 3 and knife U2 from 3 to 4. The old
+## 13.4.92 tool accepted 13.1 through 13.4. Its 13.4 and 13.3 cubins matched
+## byte for byte over the then-current golden corpus (design 6.18); that
+## historical result is not a promise across assembler versions.
 pub const BYTECODE_MAJOR: Int = 13
 
 ## The minor half of the bytecode version whose major is `BYTECODE_MAJOR`;
-## the note there on what must move together covers this number too.
+## the format contract there covers this number too.
 pub const BYTECODE_MINOR: Int = 4
 
 ## The version as `tileiras --list-versions` spells it.
@@ -1060,7 +1058,7 @@ fn int_payload(dtype: String, n: Int, value: Int) -> Bytes = match dtype {
     # bit-packed, ceil(n / 8) bytes, every lane the same: the bits past the
     # last lane of the final byte are ignored. The reader of a later Tile IR
     # also takes a ONE-byte splat for a tile of more than eight lanes; the
-    # pinned 13.3.36 does not (measured: `failed to validate buffer size and
+    # earlier 13.3.36 did not (measured: `failed to validate buffer size and
     # format`), and the packed form is what both accept.
     let byte = if (value & 1) == 1 { 0xFF } else { 0x00 }
     bytes.freeze(list.fold(range(0, (n + 7) / 8), bytes.buf(), (b, _k) => bytes.put(b, byte)))

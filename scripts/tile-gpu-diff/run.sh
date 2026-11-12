@@ -27,11 +27,8 @@
 #             tileiras into cubins for toolchain.txt's gpu-name. install-tileiras.sh
 #             installs the pin under $TILEIRAS_DIR (default
 #             ~/.cache/dawn-tileiras) unless $TILEIRAS names a binary.
-#             The arguments are packages/tileir's asm.tileiras_args for the
-#             pinned version, the gpu-name and each kernel's program:
-#             `--opt-level 0` only for a kernel with a loop that breaks, on
-#             sm_90 and sm_100 under 13.4.92 (#558), the default level
-#             everywhere else.
+#             Every kernel uses default O3 with tileiras 13.5.37, which
+#             fixes #558. Dawn still writes bytecode 13.4.
 #   jvm       vadd_diff.dawn on the JVM stops at the first operation with
 #             `gpu.unsupported_backend`: the JVM has no device runtime and
 #             says so by construction rather than by a LinkageError.
@@ -481,9 +478,9 @@
 #             provenance only.
 #             Refused unless the toolchain file's `driver` line already says
 #             the driver nvidia-smi reports and its `gpu-name` line already
-#             says what nvidia-smi's compute_cap makes of the card: the
-#             three numbers move together (6.3), and the ledger commit adds
-#             a line and nothing else.
+#             says what nvidia-smi's compute_cap makes of the card. These
+#             exact device values are independent of the assembler and
+#             bytecode versions (6.3); the new ledger row records the run.
 #
 # --check, the gate the `tile` job runs on every push (docs 6.4):
 #
@@ -669,7 +666,7 @@ tc = dict(ln.split(None, 1) for ln in toolchain.read_text().splitlines()
           if ln.strip() and not ln.startswith("#") and len(ln.split(None, 1)) == 2)
 if tc.get("driver", "").strip() != driver:
     problems.append(f"toolchain.txt says driver {tc.get('driver', '?').strip()} and the ledger's last line "
-                    f"says {driver}: the three numbers of docs 6.3 move together")
+                    f"says {driver}: the recorded device must match its exact toolchain identity (docs 6.3)")
 if tc.get("tileiras", "").strip() != tileiras:
     problems.append(f"toolchain.txt pins tileiras {tc.get('tileiras', '?').strip()} and the ledger's last "
                     f"line was assembled with {tileiras}")
@@ -773,46 +770,22 @@ fi
 grep -q "V${want_tileiras}\b" "$work/tileiras.version" ||
   { cat "$work/tileiras.version" >&2; fail "tileiras is not the pinned ${want_tileiras} (toolchain.txt)"; }
 
-# The arguments each cubin is assembled with, asked of packages/tileir's
-# `asm.tileiras_args` and not spelled here, so that this ledger and a user's
-# build take one answer from one table (docs 6.28). The answer depends on the
-# PROGRAM as well as the assembler version and the gpu-name: for the pinned
-# 13.4.92 on sm_90 and sm_100 only a kernel with a `loop` that `break`s
-# carries `--opt-level 0` (at the default level that assembler stores a wrong
-# loop exit value for such a loop, #558, and loop_until is the golden that
-# caught it); every other golden is assembled at the default level, as is
-# every kernel on sm_86. So the question is asked of each golden's recorded
-# program: kernels.dawn's `--asm-args` mode answers one line per kernel in a
-# single run, and `assemble_golden` looks its kernel up. The kernels that got
-# the extra argument are written into the ledger line as `o0=`, next to
-# `asm=` (the arguments every kernel got), so a reader of a remote line sees
-# which cubins were assembled at which level.
-asm_names="$(awk '/^fn trace(_after)?\(name/{f=1} f&&/^  "[a-z0-9_]+" ->/{gsub(/"/,"",$1); print $1} f&&/^}/{f=0}' "$golden/kernels.dawn" | tr '\n' ' ')"
-[ -n "$asm_names" ] || fail "kernels.dawn's trace dispatchers have no kernel arms"
+# All cubins use default O3. Keep the recorded policy explicit in the
+# ledger; o0=- means no kernel used the former version-specific workaround.
+asm_probe="--gpu-name,$gpu_name o0=-"
+echo "      assemble with: tileiras --gpu-name $gpu_name (default O3, tileiras $want_tileiras)"
+# The existing producer project also supplies the scaled MMA refusal matrix.
 asm_proj="$work/proj-asm"
 mkdir -p "$asm_proj/src"
 cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
 cat > "$asm_proj/dawn.toml" <<TOML
 schema = 1
-name = "tile_asm_args"
+name = "tile_scaled_producer"
 
 [deps]
 tileir = "$root/packages/tileir"
 tileref = "$root/packages/tileref"
 TOML
-# shellcheck disable=SC2086
-"$root/bin/dawn" run "$asm_proj" -- --asm-args "$want_tileiras" "$gpu_name" $asm_names > "$work/asm-args.out" 2> "$work/asm-args.err" ||
-  { cat "$work/asm-args.err" >&2; fail "packages/tileir's asm.tileiras_args did not answer for the golden kernels"; }
-asm_o0=""
-asm_plain="--gpu-name,$gpu_name"
-while read -r k a; do
-  case "$a" in
-    "$asm_plain") ;;
-    "$asm_plain",*) asm_o0="${asm_o0:+$asm_o0,}$k" ;;
-    *) fail "asm.tileiras_args answered '$a' for $k, which does not start with --gpu-name $gpu_name" ;;
-  esac
-done < "$work/asm-args.out"
-
 # Recheck the operation's actual assembler refusals on this ledger's target;
 # the architecture floor alone cannot witness a refusal. The producer runs
 # in one existing project and never changes the recorded goldens.
@@ -822,18 +795,7 @@ case "$gpu_name" in
     python3 "$golden/scaled-combinations.py" --producer-json "$producer_json" \
       --out "$work/scaled-matrix" --tileiras "$tileiras" --arch "$gpu_name" || fail "scaled MMA target refusals" ;;
 esac
-[ "$(wc -l < "$work/asm-args.out")" -eq "$(echo $asm_names | wc -w)" ] ||
-  fail "asm.tileiras_args answered for $(wc -l < "$work/asm-args.out") of $(echo $asm_names | wc -w) kernels"
-asm_probe="$asm_plain o0=${asm_o0:--}"
-echo "      assemble with: tileiras $asm_plain, plus --opt-level 0 for: ${asm_o0:-none} (asm.tileiras_args, tileiras $want_tileiras, $gpu_name)"
 
-# `asm_args` for one kernel: the line kernels.dawn answered for it.
-asm_args_for() { # kernel
-  local line
-  line="$(awk -v k="$1" '$1 == k { print $2 }' "$work/asm-args.out")"
-  [ -n "$line" ] || fail "asm.tileiras_args has no answer for kernel $1"
-  IFS=, read -r -a asm_args <<< "$line"
-}
 
 # The boundary kernels of knife 7a, in the order mask_diff takes them.
 masked=(vadd_tail copy relu leaky_relu clip elemops)
@@ -1196,8 +1158,7 @@ seq_order=("${sequenced[@]}" vadd)
 # `assemble` says which one), so the empty error stream is part of the
 # verdict here too.
 assemble_golden() { # kernel, tilebc, cubin
-  asm_args_for "$1"
-  "$tileiras" "${asm_args[@]}" -o "$3" "$2" > "$work/assemble.log" 2>&1 ||
+  "$tileiras" --gpu-name "$gpu_name" -o "$3" "$2" > "$work/assemble.log" 2>&1 ||
     { cat "$work/assemble.log" >&2; fail "tileiras refused $2"; }
   ! grep -q '^error:' "$work/assemble.log" ||
     { cat "$work/assemble.log" >&2; fail "tileiras exited 0 but refused $2"; }
@@ -2238,6 +2199,13 @@ fi
 # script does is hold the verdicts, the red sets and the corpus counts the
 # program prints.
 build_native "$root/std" "$work/seq.bin" "$here/seq_diff.dawn"
+"$work/seq.bin" --probe-selection-selftest > "$work/seq-selection.out" 2>&1 ||
+  { cat "$work/seq-selection.out" >&2; fail "sequence probe selection selftest failed"; }
+grep -Fxq 'probe selection defined=107 excluded=grid-of-later-launch-copied-from-the-first:cce' "$work/seq-selection.out" ||
+  fail "sequence probe selection excluded another pair"
+grep -Eq '^probe grid-domain bounded sequences=27 clipped_steps=[1-9][0-9]*$' "$work/seq-selection.out" ||
+  fail "sequence grid probes are not bounded by the original valid domains"
+echo "PASS  sequence probe selection: 107 defined pairs; one CCE pair excluded; copied grids bounded by original domains"
 rc=0
 device "$work/seq.bin" "${seq_cubins[@]}" > "$work/seq.out" 2> "$work/seq.err" || rc=$?
 cat "$work/seq.out"
@@ -2589,32 +2557,15 @@ echo "PASS  repeat: one round is the single-round sequence and zero rounds leave
 #       the final launch never happens -> everything reds, the control
 #       included. This is the one that says the launches all happen.
 #   grid-of-later-launch-copied-from-the-first
-#       every launch is given the first one's grid -> `attention` and
-#       `swiglu` red, and so do knife 17's four masked-score problems, whose
-#       second launch is `attn_softmax` at a grid of ATT_M blocks. `matpow`,
-#       `apsp` and `decoupled` launch on one grid throughout, so the mutant
-#       is not a change there at all; `lora`'s middle launch IGNORES the
-#       second grid axis, so the extra blocks recompute the same tile and
-#       store the same bytes. Knife 17 added two more of that last kind:
-#       `decay`'s second launch is `attn_context`, which reads only the
-#       first grid axis, and `cce`'s second is `cce_mean`, which reads NO
-#       block id at all -- sixty-four blocks all compute and store the one
-#       answer. A grid mutant is invisible wherever the blocks it adds are
-#       idempotent, which is not a fact about this harness but about what a
-#       grid means; three of the thirteen sequences here are that case.
-#       Knife 18's `mha` is not one of them: its second launch is
-#       `attn_softmax` over MHA_H * MHA_N rows, so copying the first launch's
-#       2x2x2 grid onto it leaves all but two of those rows unwritten.
-#       Knife 20 adds two more of the invisible kind, and both are the FIRST
-#       kind rather than the idempotent one: `kv` launches on KV_H blocks
-#       three times over (one block a head, and its middle launch is
-#       `attn_softmax` over exactly those KV_H rows), and `ols` launches on
-#       one block throughout because a Gauss-Jordan step reads the pivot row
-#       while it writes every other, so two blocks would race. Neither green
-#       is a hole: the mutant copies a grid onto launches that already have
-#       it. Its two new reds are `attnbwd` (the first launch is 2x2x1 and the
-#       softmax after it wants ATT_M rows) and `linattn` (the first two
-#       launches are one block and the third is two).
+#       copy the first grid, bounded on each axis by the original valid
+#       grid of that step. Too few blocks must still produce the measured
+#       numerical reds; an out-of-view launch is never a witness. In
+#       particular GPT-2's 64x1x1 first grid becomes 1x1x1 on its 1x6x1
+#       QKV step, leaving valid columns unwritten without exceeding rows.
+#       A projected grid equal to the original, or a changed axis the
+#       kernel does not read, can remain green. The CCE pair is excluded
+#       explicitly rather than turning its former UB into a guarantee.
+
 seq_reds="second-launch-sees-stale-buffer:lora launch-order-swapped:lora last-launch-dropped:lora"
 seq_reds="$seq_reds second-launch-sees-stale-buffer:attention launch-order-swapped:attention"
 seq_reds="$seq_reds last-launch-dropped:attention grid-of-later-launch-copied-from-the-first:attention"
@@ -2667,7 +2618,10 @@ if [ "$seq_verdict" = pass ]; then
   [ "$seq_probe" = "red=84 $seq_reds" ] ||
     { printf 'wanted: red=84 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
       fail "the sequence mutants' red set moved"; }
-  echo "PASS  mutant: the four sequence mutants red on exactly 84 of the 108 (mutant, sequence) pairs, by name"
+  [ "$(grep -c '^mutant ' "$work/seq.out" || true)" = 107 ] || fail "defined sequence probe count changed"
+  [ "$(grep -c '^probe excluded-ub grid-of-later-launch-copied-from-the-first:cce$' "$work/seq.out" || true)" = 1 ] ||
+    fail "the CCE grid UB exclusion is missing or repeated"
+  echo "PASS  mutant: the four sequence mutants red on exactly 84 of 107 defined pairs, by name; CCE grid UB excluded"
   seq_controls="$(grep -c '^control intermediate-round-tripped ' "$work/seq.out" || true)"
   seq_controls_moved="$(grep -c '^control intermediate-round-tripped .* verdict differ:result$' "$work/seq.out" || true)"
   if [ "$seq_controls" != 27 ] || [ "$seq_controls_moved" != 0 ]; then
@@ -3213,6 +3167,8 @@ TOML
 # The existing architecture family is the numerical judge for each temporary
 # lowering copy. Successful assembly, a named wrong lane and unaffected
 # architecture controls are required; a refusal is never a killed mutant.
+# The direct-conversion probe has a separate measured verdict: 13.5
+# implements the signed FP8 rounding correctly for this corpus itself.
 rounding_controls() {
   local name pkg k rc args=() expected lane
   if [ "$(arch_level "$gpu_name")" -lt 90 ]; then
@@ -3262,6 +3218,36 @@ rounding_controls() {
     for k in "${arch_ran[@]}"; do args+=("$k" "$work/$name-$k.cubin"); done
     rc=0
     device "$work/arch.bin" "${args[@]}" > "$work/$name.out" 2> "$work/$name.err" || rc=$?
+    if [ "$name" = narrow-odd-missing ]; then
+      # The same direct F64->FP8 bytes now get RTZ, a round-trip comparison
+      # and a sticky bit in 13.5 SASS. Do not require a compiler's old
+      # double-rounding error. Removing Dawn's entire helper still loses
+      # its E2M1 NaN-to-positive-zero policy, independently of that fix.
+      local fp4=0 want_rc=0 want_verdict=pass
+      if [ "$(arch_level "$gpu_name")" -ge 100 ]; then fp4=1; want_rc=1; want_verdict=fail; fi
+      [ "$arch_verdict" = pass ] && [ "$rc" = "$want_rc" ] && [ "$(verdict_of "$work/$name.out")" = "$want_verdict" ] || {
+        cat "$work/$name.out" "$work/$name.err" >&2
+        fail "$name: direct conversion measurement has an unexpected execution verdict"
+      }
+      awk -v fp4="$fp4" -v names="${arch_ran[*]}" 'BEGIN {
+        n=split(names, kernels, " "); for (i=1; i<=n; i++) expected[kernels[i]]=1
+      } /^kernel /{k=$2} /^  verdict / {
+        if (!(k in expected) || seen[k]++) bad=1
+        want = (fp4 && k == "dtype_e2m1") ? "differ:result" : "identical:exact"
+        if ($2 != want) bad=1
+      } END {for (k in expected) if (seen[k] != 1) bad=1; exit bad}' "$work/$name.out" ||
+        { cat "$work/$name.out" >&2; fail "$name: signed FP8 or an unrelated architecture control moved"; }
+      if [ "$fp4" = 1 ]; then
+        awk '/^kernel /{k=$2} k == "dtype_e2m1" && /^  oracle device seg=1 lane=40 bits=4018000000000000 expected=0000000000000000$/ {seen=1} END {exit !seen}' "$work/$name.out" ||
+          fail "$name: missing the independent E2M1 NaN-to-positive-zero difference"
+        awk '/^kernel /{k=$2} k == "dtype_e2m1" && /^  diffs 1 lanes: \[seg 1 lane 40 device 6.0 host 0.0\]$/ {seen=1} END {exit !seen}' "$work/$name.out" ||
+          fail "$name: the direct conversion moved more than the E2M1 NaN lane"
+        echo "PASS  measurement: $name (signed FP8 exact; only E2M1 NaN lane 40 differs; other architecture controls exact)"
+      else
+        echo "PASS  measurement: $name (direct signed FP8 conversion and all architecture controls exact; no numerical mutant killed)"
+      fi
+      continue
+    fi
     [ "$arch_verdict" = pass ] && [ "$rc" = 1 ] && [ "$(verdict_of "$work/$name.out")" = fail ] || {
       cat "$work/$name.out" "$work/$name.err" >&2
       fail "$name: expected a clean pass and an executed numerical failure"
@@ -6457,7 +6443,7 @@ if [ "$append" = no ]; then
   exit 0
 fi
 [ "$pinned_driver" = "$driver" ] ||
-  fail "toolchain.txt says driver $pinned_driver and nvidia-smi says $driver: set the driver line to $driver, commit, and run again (the three numbers move together; the ledger commit adds a line and nothing else)"
+  fail "toolchain.txt says driver $pinned_driver and nvidia-smi says $driver: the run must use its exact recorded device identity; a ledger update records an actual run"
 dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c \
   scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn \
   scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mm_diff.dawn \
