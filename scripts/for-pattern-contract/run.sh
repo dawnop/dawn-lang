@@ -34,7 +34,15 @@ runtime="$root/scripts/spike-native/iter_for.dawn"
 runtime_expected="$root/scripts/spike-native/iter_for.expect"
 matrix="$here/matrix.tsv"
 work=$(mktemp -d "${TMPDIR:-/tmp}/for-pattern-contract.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+cleanup() {
+  local status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "for-pattern failure artifacts: $work" >&2
+  else
+    rm -rf "$work"
+  fi
+}
+trap cleanup EXIT
 
 fail() {
   echo "for-pattern-contract: $*" >&2
@@ -186,15 +194,23 @@ build_compiler() {
     fail "$label compiler did not initialize"
 }
 
+record_status() {
+  local output=$1 status=0
+  shift
+  "$@" || status=$?
+  printf '%s\n' "$status" > "$output.rc"
+  return "$status"
+}
+
 capture_parse() {
   local jar=$1 source=$2 output=$3
-  timeout --kill-after=5s 30s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __parse "$source" \
+  record_status "$output" timeout --kill-after=5s 30s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __parse "$source" \
     > "$output" 2>&1
 }
 
 capture_diagnostics() {
   local jar=$1 source=$2 output=$3
-  timeout --kill-after=5s 30s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __check "$source" \
+  record_status "$output" timeout --kill-after=5s 30s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __check "$source" \
     > "$output.raw" 2>&1
   grep '^D' "$output.raw" > "$output" || true
 }
@@ -221,7 +237,7 @@ syntax_ok() {
   [ "$(grep -Fc 'PQual q.Only ' "$output/parse.out")" -eq 1 ] || return 1
   [ "$(grep -Fc 'POr nalts=2' "$output/parse.out")" -eq 1 ] || return 1
   cp "$syntax" "$output/syntax_fmt.dawn"
-  timeout --kill-after=5s 30s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" \
+  record_status "$output/fmt.out" timeout --kill-after=5s 30s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" \
     fmt "$output/syntax_fmt.dawn" --check > "$output/fmt.out" 2>&1 || return 1
   cat > "$output/legacy.dawn" <<'EOF'
 fn legacy(xs: List[Int]) -> Unit = { for value in xs { let _ = value } }
@@ -269,7 +285,7 @@ probe_compiler() {
   capture_diagnostics "$jar" "$bottom" "$output/bottom-check.out" || true
   mkdir -p "$output/bottom-dump"
   local bottom_lower=0
-  timeout --kill-after=5s 45s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __lower \
+  record_status "$output/bottom-lower" timeout --kill-after=5s 45s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __lower \
     --std "$root/std" --dump "$output/bottom-dump" "$bottom" \
     > "$output/bottom-lower.out" 2> "$output/bottom-lower.err" || bottom_lower=$?
   if [ -s "$output/bottom-check.out" ] ||
@@ -279,7 +295,7 @@ probe_compiler() {
     printf 'ASSERT: %s\n' "$ASSERT_BOTTOM" >> "$output/assertions.raw"
   fi
 
-  if ! timeout --kill-after=5s 45s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" run "$runtime" \
+  if ! record_status "$output/runtime" timeout --kill-after=5s 45s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" run "$runtime" \
       > "$output/runtime.out" 2> "$output/runtime.err" ||
       ! cmp -s "$runtime_expected" "$output/runtime.out" ||
       [ -s "$output/runtime.err" ]; then
@@ -288,10 +304,10 @@ probe_compiler() {
 
   mkdir -p "$output/iter-dump" "$output/range-dump"
   local iter_lower=0 range_lower=0
-  timeout --kill-after=5s 45s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __lower \
+  record_status "$output/iter-lower" timeout --kill-after=5s 45s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __lower \
     --std "$root/std" --dump "$output/iter-dump" "$iter_core" \
     > "$output/iter-lower.out" 2> "$output/iter-lower.err" || iter_lower=$?
-  timeout --kill-after=5s 45s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __lower \
+  record_status "$output/range-lower" timeout --kill-after=5s 45s java -XX:-UsePerfData -Xss512m -Xmx2g -jar "$jar" __lower \
     --std "$root/std" --dump "$output/range-dump" "$range_core" \
     > "$output/range-lower.out" 2> "$output/range-lower.err" || range_lower=$?
   if [ "$iter_lower" -ne 0 ] ||
@@ -333,6 +349,7 @@ probe_compiler() {
   local lsp_status=0
   python3 "$here/lsp.py" java "$jar" "$root" \
     > "$output/lsp.out" 2> "$output/lsp.err" || lsp_status=$?
+  printf '%s\n' "$lsp_status" > "$output/lsp.rc"
   grep '^ASSERT: ' "$output/lsp.out" >> "$output/assertions.raw" || true
   if [ "$lsp_status" -ne 0 ] && ! grep -q '^ASSERT: ' "$output/lsp.out"; then
     printf 'ASSERT: %s\n' "$ASSERT_LSP_QUERY" >> "$output/assertions.raw"
@@ -357,6 +374,10 @@ probe_compiler() {
 
 dump_probe() {
   local output=$1
+  for status in "$output"/*.rc; do
+    [ -f "$status" ] || continue
+    printf '%s: %s\n' "${status##*/}" "$(cat "$status")" >&2
+  done
   for file in assertions.out parse.out fmt.out refutable.out.raw derived.out.raw \
     scope.out.raw complexity.out.raw bottom-check.out.raw bottom-lower.err bottom-core.err \
     runtime.out runtime.err iter-lower.err \

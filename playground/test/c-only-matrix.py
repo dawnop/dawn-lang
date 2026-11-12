@@ -8,13 +8,16 @@ Matrix mode is a regression gate; timing modes are manual acceptance tools.
 """
 import hashlib
 import base64
+from contextlib import contextmanager
 import gzip
 import io
 import json
 import os
 from pathlib import Path
 import re
+import resource
 import statistics
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -34,7 +37,29 @@ assert mode in ('matrix', 'all', '0', '1', '2', '3', '4'), mode
 
 
 def run(argv, *, timeout=180, **kw):
-    p = subprocess.run(list(map(str, argv)), capture_output=True, timeout=timeout, **kw)
+    argv = list(map(str, argv))
+    record = w / 'commands' / str(len(list((w / 'commands').iterdir())))
+    record.mkdir()
+    metadata = {'argv': argv, 'returncode': None, 'timeout': False}
+    started = time.monotonic()
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    try:
+        p = subprocess.run(argv, capture_output=True, timeout=timeout, **kw)
+    except subprocess.TimeoutExpired as error:
+        metadata['timeout'] = True
+        (record / 'stdout').write_bytes(error.stdout or b'')
+        (record / 'stderr').write_bytes(error.stderr or b'')
+        raise
+    else:
+        metadata['returncode'] = p.returncode
+        (record / 'stdout').write_bytes(p.stdout)
+        (record / 'stderr').write_bytes(p.stderr)
+    finally:
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        metadata['wall_seconds'] = time.monotonic() - started
+        metadata['cpu_seconds'] = (after.ru_utime + after.ru_stime -
+                                   before.ru_utime - before.ru_stime)
+        (record / 'result.json').write_text(json.dumps(metadata) + '\n')
     assert p.returncode == 0, (argv[0:2], p.stderr.decode(errors='replace')[-3000:])
     return p.stdout
 
@@ -47,8 +72,23 @@ def identity(c):
     return (c['name'], *(tuple(c[k]) for k in ('from', 'to', 'nfrom', 'nto')))
 
 
-with tempfile.TemporaryDirectory(prefix='play-c-matrix.') as work:
+@contextmanager
+def workspace():
+    with tempfile.TemporaryDirectory(prefix='play-c-matrix.') as work:
+        try:
+            yield work
+        except BaseException:
+            saved = Path(tempfile.mkdtemp(prefix='play-c-matrix-failure.',
+                                         dir=os.environ.get('RUNNER_TEMP')))
+            shutil.copytree(work, saved, dirs_exist_ok=True)
+            print(f'C matrix failure artifacts: {saved}', file=sys.stderr, flush=True)
+            raise
+
+
+with workspace() as work:
     w = Path(work)
+    (w / 'commands').mkdir()
+    (w / 'wire').mkdir()
     baseline = w / 'baseline'
     baseline.mkdir()
     # GitHub's default checkout is shallow; external bundles already contain
@@ -112,13 +152,15 @@ with tempfile.TemporaryDirectory(prefix='play-c-matrix.') as work:
             bj, bbj, _ = request(runner, code, 'jvm')
             cold_views[source, 'c'] = (bc, bbc)
             cold_views[source, 'jvm'] = (bj, bbj)
-            assert norm(abj) == norm(bbj), (source.stem, 'JVM paired contract changed')
             # Keep all four wire bodies losslessly in the step log, independently
             # of the human-readable identity diff. No timing field is discarded.
             evidence = {'sample': source.stem, 'source': code, 'baseline_c': abc.decode(),
                         'baseline_jvm': abj.decode(), 'c': bbc.decode(), 'jvm': bbj.decode()}
+            (w / 'wire' / (source.stem + '.json')).write_text(
+                json.dumps(evidence, ensure_ascii=False) + '\n')
             packed = gzip.compress(json.dumps(evidence, ensure_ascii=False, separators=(',', ':')).encode(), mtime=0)
             print('C evidence ' + base64.b64encode(packed).decode(), flush=True)
+            assert norm(abj) == norm(bbj), (source.stem, 'JVM paired contract changed')
 
             if not ac['ok']:
                 assert source.stem == 'tile_broken' and norm(abc) == norm(bbc), (source.stem, ac, bc)
