@@ -365,3 +365,24 @@ commit 的 capture 不变，避免本地替换视图混入受锁输入。
 本刀新增 push 成本为 0 s，未改 workflow 或生产发布身份协议。K2 继续接 native
 source-inputs 和统一 C recipe；K3–K5 才提供无 Java 冷链、完整 lineage/撤销策略、
 双 root、固定点和资格晋级。不能从本刀的输入通过推导旧 seed 已能编当前闭包。
+
+## Native 来源查询与统一配方（2026-11-12，D12-2 K2）
+
+native 隐藏 `__source-inputs --base <repo> <project-dir>` 已直接接同一份
+compiler-plan v1 producer，保留项目目录边界、路径作用域、排序和完整错误行为。
+四组有效输入的 JVM/native wire bytes 逐字节一致，四组错误输入的退出码、诊断和
+空 stdout 一致；native 查询 descendant exec 中 Java 为 0，后代执行 canary 为 1。
+没有重写来源图、另造包解析器或复制 launcher。
+
+旧 live source capture 现在物化 selfhost/compiler-plan/packages 的保守超集，复用
+K1 portable 变换；Git 资格 capture 继续按固定 commit 工作。统一 cc-units recipe
+增加显式 runtime 参数，资格 compile-stage 要求显式 A/B/C、std/runtime、输入
+receipt 与 compiler，核配对后编译，成功才写独立 compile receipt。
+17 项固定负控涵盖漏件、外链、错阶段、错 std/runtime 和错 compiler version/target。
+原 JVM bootstrap-input-manifest 合同与 bootstrap guards 保留并通过。
+
+无新增 workflow、push 调用、claim 或 steps lock 变化，新增日常控制预算 0 s；
+物化复制仍是既有调用的成本，不宣称 PR 总工作量为零。工具链完整闭包、隔离 mount、
+三代 emitter 执行、双 root 和固定点仍归 K3–K5；compile receipt 不是冷链资格。
+生产 builder、release/install 身份协议与默认种子均未推进。
+接口、边界和验收入口见 [输入与配方设计](../native-seed-input-contract-design.md)。
