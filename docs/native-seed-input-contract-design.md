@@ -1,6 +1,33 @@
-# Native 种子、来源查询与配方合同（D12-2 K1–K2）
+# Native 种子、来源查询、配方与冷链合同（D12-2 K1–K3）
 
-> 状态：**current**。K1 输入合同与 K2 来源查询、统一配方已实现，完整冷链资格留待后续刀。K2 基线为 `b2555b46`。
+> 状态：**current**。K1 输入合同、K2 来源查询与配方已实现；K3 增加显式冷链执行与审计入口，完整资格仍须逐输入验收。K3 基线为 `8b830d3b`。
+
+## K3：无 Java 冷启动 runner 设计
+
+先以固定的 `v0.104.0` 候选验证当前 Git snapshot 的 A 发射兼容性，再实现完整
+执行链。准备阶段核 seed、源码、配对 std/runtime、clang 18.1.3 与工具链闭包的
+内容身份；执行阶段使用独立隔离 root，断网、无 Java 可执行文件，不挂宿主 home、
+产品检出、缓存或可绕回宿主的 proc。源码、seed 与工具链只读；环境从白名单重建。
+每代 output/object/tmp/home 均为空目录，只允许读取已登记输入与本代产物。
+
+S 用 seed std 发射 A，A 用 seed runtime 独立编译链接；A、B 分别用 current std
+发射 B、C，B/C 用 current runtime 在各自新对象目录链接。内嵌 stdsrc/rtsrc 始终
+来自 current snapshot，继续复用同一 `cc-units.sh`，不复制 flag 表。保留 whole
+C/info 比较，加 B/C 文件集合、单元 bytes 与静态 ELF 比较；不要求旧 S 发射的 A
+等于 B。两个独立空 root 的 B 也须相等，并从裸目录验证内嵌 std/runtime smoke。
+
+执行审计保存全部 descendant exec 与文件访问，核可执行文件允许清单及摘要、
+输入只读边界和网络隔离。receipt 绑定输入 receipt、seed lock、工具链、recipe、
+阶段顺序、实际 emitter 与输出身份和跟踪摘要；独立验证重新计算结果，不信任
+producer 自填的成功布尔值。至少一项 Java 名称执行或暖缓存 canary 必须使审计
+明确拒绝，任意异常不算负控成功。执行耗时只记粗量，不做本机计时。
+
+若旧 native 不能编当前语言、std 或 runtime，立即停止实现并估算桥接发布，不改
+源码来迁就旧 seed，不加兼容层。B/C 不同且不能归因也停止，保留原始失败待裁。
+不改生产 builder、release/install 协议、默认种子或原 native-fixpoint 义务，因为
+资格证明不等于生产切换授权。不新增每 push 重链，不塞入 prev-diff-native；本刀
+不改 workflow，新增日常调用预算为 0 s。后续轻结构检查接线须独立记账且合计
+不超过 30 s，完整资格与负控仍是显式验收，不能把一次绿灯冒充日常覆盖。
 
 ## K2：来源查询与统一配方设计
 
@@ -174,3 +201,55 @@ clang 18.1.3、x86_64 GNU Linux 和并发 1 或 2，通过唯一 `cc-units.sh` �
 源码 resolver。原 JVM manifest 合同、bootstrap guards 和生成物义务仍保留。
 本刀无新增 push 调用、workflow、claim 或 steps lock 变更，新增日常控制预算 0 s；
 物化目录替代外链的复制与既有测试成本由现有调用承担，不记作新增控制免费额度。
+
+## K3 已实现的接口与验收边界
+
+```sh
+python3 -B scripts/native-seed.py prepare-toolchain \
+  --cc /usr/lib/llvm-18/bin/clang --out /prepared/toolchain
+python3 -B scripts/native-seed.py cold-run \
+  --repo . --lock scripts/native-seed-candidate-v0.104.0.json \
+  --receipt /prepared/inputs/inputs.json --source /prepared/inputs/source \
+  --seed /prepared/candidate/seed/dawnc --seed-tree /prepared/candidate/seed \
+  --toolchain /prepared/toolchain --out /qualification/new-run
+python3 -B scripts/native-seed.py verify-cold --repo . --out /qualification/new-run
+```
+
+准备器仅接受 Ubuntu 24.04 的 clang 18.1.3/GCC 13 GNU sysroot 布局。它物化
+compiler、linker、动态装载依赖、resource-dir、C headers、CRT、静态 libc/libm/
+libgcc 及必要 shell 工具，输入链接解引用成普通文件；保存完整清单、摘要与来源。
+这份离线快照是重放工具链的输入，不按相同版本字符串替换成另一套系统库。
+不挂宿主 `/usr`、`/lib` 或用户目录，不把已登记 CRT 对象误称为自举暖缓存。
+
+runner 私有物化已核源码与 seed，工具链根只读挂载；每次执行独立 user、mount、
+PID、network 等 namespace，清除 capability，以白名单环境和空 stdin 启动。
+proc 仅显示本次 PID namespace；不提供宿主 proc 或返回宿主 root 的入口。
+两个 root 分别创建 A/B/C 输出目录，每个执行步骤有新 home/tmp，C 编译并发固定
+为 1。对象只从本步骤的新 tmp 产生；审计检查每个 TU 的实际编译及独立静态 link，
+按 lexical TU、runtime、info 的顺序消费对象。B/C 比较 whole、info、完整 units
+清单与 bytes、ELF，双 root 复核 B；裸目录 smoke 没有 source/seed 挂载。
+
+每代 current compiler 调同一 source-inputs producer，下一次发射后重查实际
+emitter 的计划；旧 S 无需新增入口。所有 descendant 的 exec 与文件系统调用由
+外部跟踪器记录，并翻译 PID namespace 编号，缺 trace 或无法解析的进程创建即拒。
+核实际 namespace argv、允许执行文件及摘要、成功 open 的边界和网络调用。shell
+可能探测不存在的本地 nscd socket；只接受该固定路径的 ENOENT，不构成成功网络
+依赖，单独记录次数。Java 名称执行、未知可执行文件、外部成功读取与网络访问均拒。
+
+`receipt.json` 绑定输入、工具链、唯一 C recipe、runner/审计器与隔离工具身份，
+记录两 root 的阶段产物、来源计划、逐步骤原始跟踪摘要与 smoke。独立 verifier
+重核输入、实际命令、允许清单、编译链接覆盖、跟踪、固定点与 smoke，不消费
+`complete=true`。失败保留原始目录且不写成功 receipt；已有输出目录一律拒绝。
+这份冷链 receipt 仍不提升 candidate，也不替代 K4 的完整负控、JVM 对照/replay
+或 K5 的资格与日常轻门交接，更不改生产 builder 与发布安装协议。
+
+一次性守卫验收入口是 `scripts/native-seed-k3-test.py --out <new-dir>`，固定夹具
+覆盖后代追踪、PID 翻译、漏 trace、Java、未知 executable、越界读取、网络、暖目录、
+跳过 payload 及四类伪固定点。加 `--toolchain <snapshot> --seed <ELF> --lock <lock>`
+后真实启动一个名为 java 的 native 子进程，要求明确 audit-java、计数 1 且无成功
+步骤收据。它只证明观察器能抓到后代，不把替身当成实际 JVM。
+
+本刀不改 workflow、steps lock、claim、timeout 或 push 接线；新增日常准备、
+重复构建、缓存准备与覆盖控制调用均为 0，push-total 保持 38673 s、pole 950 s。
+两 root 的 6 次完整 emit 与 6 次独立 cc/link、跟踪、重核和 canary 为显式资格成本，
+不计作每 push 的 0 s；不做本机计时，不预填 Gate-Budget，不借旧 job 的 claim。

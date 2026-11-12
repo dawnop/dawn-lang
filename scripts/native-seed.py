@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and verify native qualification inputs without changing a default seed."""
+"""Prepare inputs and run explicit offline native qualification without changing a default seed."""
 
 import argparse
 import json
@@ -114,6 +114,15 @@ def main():
         compile_cmd.add_argument('--' + name, type=Path, required=True)
     compile_cmd.add_argument('--stage', choices=('A', 'B', 'C'), required=True)
     compile_cmd.add_argument('--jobs', type=int, choices=(1, 2), required=True)
+    tool = sub.add_parser('prepare-toolchain', help='snapshot the offline qualification C toolchain')
+    tool.add_argument('--cc', type=Path, required=True)
+    tool.add_argument('--out', type=Path, required=True)
+    cold = sub.add_parser('cold-run', help='run two offline native-only qualification roots')
+    for name in ('repo', 'lock', 'receipt', 'source', 'seed-tree', 'seed', 'toolchain', 'out'):
+        cold.add_argument('--' + name, type=Path, required=True)
+    check = sub.add_parser('verify-cold', help='independently recheck cold execution and outputs')
+    check.add_argument('--repo', type=Path, required=True)
+    check.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == 'register-v0.104.0':
@@ -126,6 +135,17 @@ def main():
             from native_seed.recipe import compile_stage
             compile_stage(args)
             print('OK explicit native stage compiled; qualification pending')
+        elif args.command == 'prepare-toolchain':
+            from native_seed.toolchain import prepare
+            prepare(args.cc, args.out)
+            print('OK offline C toolchain snapshot prepared')
+        elif args.command in ('cold-run', 'verify-cold'):
+            from native_seed import cold
+            if args.command == 'cold-run':
+                cold.run(args)
+            else:
+                cold.verify(args.repo, args.out)
+            print('OK native cold chain and two-root fixed point verified; qualification pending')
         else:
             seed = args.seed or os.environ.get('DAWN_NATIVE_SEED')
             c.require(bool(seed), 'seed-missing', '--seed or DAWN_NATIVE_SEED is required')
