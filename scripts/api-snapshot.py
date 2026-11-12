@@ -232,7 +232,8 @@ def java_signature_inputs(specs: list) -> dict:
             raise SnapshotError("--java-signatures needs TARGET=MANIFEST")
         if target in inputs:
             raise SnapshotError(f"duplicate Java metadata target: {target}")
-        inputs[target] = os.path.abspath(path)
+        # Preserve link/.. components for the native metadata path checks.
+        inputs[target] = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
     return inputs
 
 
@@ -315,6 +316,10 @@ def input_self_test() -> None:
         inputs = java_signature_inputs(["packages/web-jvm=" + spelling])
         expected_manifest = os.path.join(os.getcwd(), spelling)
         assert inputs == {"packages/web-jvm": expected_manifest}
+        for path in ("class-link/../manifest.json", "/class-link/../manifest.json"):
+            expected = path if path.startswith("/") else os.getcwd() + "/" + path
+            assert java_signature_inputs(["packages/web-jvm=" + path]) == {
+                "packages/web-jvm": expected}, "metadata path spelling was normalized"
         calls = []
 
         def doc_command(cmd, *, capture_output, text, cwd):
