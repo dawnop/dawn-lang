@@ -11,12 +11,16 @@ Usage: scripts/lsp-framing.py [server command...]  (default: ./bin/dawn lsp)
 """
 
 import json
+import array
+import fcntl
 import os
+from pathlib import Path
 import select
 import signal
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 
@@ -223,15 +227,57 @@ class OpenServer:
         return False
 
     def wait_for_exit(self, timeout_s, sample=None):
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
+        # After initialize, the launcher has exec'd the server. Charge its
+        # threads' CPU, not time spent waiting for a scheduler or an RSS probe.
+        # The enclosing job's wall watchdog remains the blocked-I/O stopper.
+        if sys.platform.startswith("linux"):
+            before = process_cpu_seconds(self.proc.pid)
+            remaining = lambda: process_cpu_seconds(self.proc.pid) - before < timeout_s
+        else:
+            deadline = time.monotonic() + timeout_s
+            remaining = lambda: time.monotonic() < deadline
+        while True:
             self.drain()
             if sample is not None:
                 sample()
             if self.proc.poll() is not None:
                 self.drain()
                 return True
+            if self.waiting_for_stdin():
+                return False
+            if not remaining():
+                return False
             time.sleep(0.01)
+
+    def waiting_for_stdin(self):
+        """An empty pipe read after the fatal bytes is a protocol failure.
+
+        Unlike elapsed time, this identifies a server asking for more input.
+        Check queued bytes first so a runnable reader awaiting dispatch is
+        never confused with a server that consumed the rejected header.
+        """
+        if not sys.platform.startswith("linux") or os.uname().machine != "x86_64":
+            return False
+        pending = array.array('i', [0])
+        fcntl.ioctl(self.proc.stdin.fileno(), termios.FIONREAD, pending, True)
+        if pending[0]:
+            return False
+        try:
+            tasks = os.listdir("/proc/%d/task" % self.proc.pid)
+        except FileNotFoundError:
+            return False
+        for task in tasks:
+            base = "/proc/%d/task/%s/" % (self.proc.pid, task)
+            try:
+                with open(base + "wchan", encoding="ascii") as stream:
+                    if stream.read().strip() != "pipe_read":
+                        continue
+                with open(base + "syscall", encoding="ascii") as stream:
+                    call = stream.read().split()
+                if len(call) > 1 and call[0] == "0" and int(call[1], 16) == 0:
+                    return True
+            except (OSError, ValueError):
+                continue
         return False
 
     def error_tail(self):
@@ -246,6 +292,12 @@ class OpenServer:
         kill_group(self.proc, self.pgid)
         self.drain()
         self.stderr.close()
+
+
+def process_cpu_seconds(pid):
+    with open("/proc/%d/stat" % pid, encoding="ascii") as stat_file:
+        fields = stat_file.read().rsplit(") ", 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 
 
 def group_rss_kib(pgid):
@@ -484,6 +536,13 @@ def self_test_orphan_cleanup():
 
 def harness_self_tests():
     results = []
+    run_check(results, "kernel CPU allowance", lambda: subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "scripts/cpu-limit-test.py")],
+        check=True, stdout=subprocess.DEVNULL))
+    if sys.platform.startswith("linux"):
+        for mode in ("spin", "read", "exit"):
+            run_check(results, "fatal wait observes " + mode,
+                      lambda mode=mode: self_test_fatal_wait(mode))
     run_check(results, "cleanup kills child after launcher exits", self_test_orphan_cleanup)
     run_check(results, "response parser accepts exact 8192-byte header", lambda:
               expect_parsed_frames(padded_response(HEADER_MAX_BYTES), [{}]))
@@ -512,6 +571,28 @@ def harness_self_tests():
     for case, payload in rejected:
         run_check(results, case, lambda payload=payload: expect_frame_rejection(payload))
     return results
+
+
+def self_test_fatal_wait(mode):
+    code = (
+        "import sys\n"
+        "sys.stdin.buffer.readline()\n"
+        "sys.stdout.buffer.write(b'Content-Length: 2\\r\\n\\r\\n{}'); sys.stdout.flush()\n"
+        "sys.stdin.buffer.readline()\n"
+    )
+    code += {"spin": "while True: pass\n", "read": "sys.stdin.buffer.read(1)\n",
+             "exit": "sys.exit(0)\n"}[mode]
+    server = OpenServer([sys.executable, "-c", code])
+    try:
+        server.send(b"initialize\n")
+        if not server.wait_for_frames(1, STARTUP_LIMIT_S):
+            raise AssertionError("fatal wait fixture did not initialize")
+        server.send(b"fatal\n")
+        exited = server.wait_for_exit(0.05)
+        if exited != (mode == "exit"):
+            raise AssertionError("fatal wait accepted %s=%s" % (mode, exited))
+    finally:
+        server.close()
 
 
 def report_results(results):

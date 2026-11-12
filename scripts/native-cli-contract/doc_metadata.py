@@ -22,6 +22,10 @@ PACKAGES = ('fspath', 'inflate', 'json', 'sha2', 'sqlite', 'tea-core',
             'web', 'web-jvm', 'xmap')
 
 
+def cpu_command(command):
+    return [sys.executable, str(ROOT / 'scripts/cpu-limit.py'), '30', '--', *command]
+
+
 def check(binary, work):
     work = work.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -49,11 +53,12 @@ def check(binary, work):
 
     def native(label, args, code=0, fragment=None):
         nonlocal count
-        result = subprocess.run([str(binary), 'doc', '--std', str(ROOT / 'std'),
-                                 *map(str, args)], cwd=work, env=env,
-                                capture_output=True, timeout=30)
+        result = subprocess.run(cpu_command([
+            str(binary), 'doc', '--std', str(ROOT / 'std'), *map(str, args)]),
+            cwd=work, env=env, capture_output=True)
         (work / (label + '.native.stdout')).write_bytes(result.stdout)
         (work / (label + '.native.stderr')).write_bytes(result.stderr)
+        (work / (label + '.native.rc')).write_text(str(result.returncode) + '\n')
         assert result.returncode == code, (label, result)
         if code:
             assert not result.stdout and fragment.encode() in result.stderr, (label, result)
@@ -67,10 +72,12 @@ def check(binary, work):
 
     def compare(label, target, args, code=0, fragment=None):
         result = native(label, args, code, fragment)
-        oracle = subprocess.run([str(ROOT / 'bin/dawn'), 'doc', '--std', str(ROOT / 'std'),
-                                 str(target)], cwd=ROOT, capture_output=True, timeout=30)
+        oracle = subprocess.run(cpu_command([
+            str(ROOT / 'bin/dawn'), 'doc', '--std', str(ROOT / 'std'), str(target)]),
+            cwd=ROOT, capture_output=True)
         (work / (label + '.jvm.stdout')).write_bytes(oracle.stdout)
         (work / (label + '.jvm.stderr')).write_bytes(oracle.stderr)
+        (work / (label + '.jvm.rc')).write_text(str(oracle.returncode) + '\n')
         assert (result.returncode, result.stdout, result.stderr) == (
             oracle.returncode, oracle.stdout, oracle.stderr), (label, result, oracle)
         comparisons.append(dict(label=label, code=code, size=len(result.stdout),
