@@ -243,10 +243,9 @@ jobs:
       # effect row: a unit that started doing IO cannot do it quietly, and the
       # diff names the expansion.
       #
-      # Built with the jar published above rather than with ./bin/dawn, which
-      # would rebuild the whole toolchain from the seed to answer a question
-      # this jar already answers. Measured cost: ~8s for the snapshot over the
-      # stdlib and eight packages, under a second for the diff.
+      # Consume the native artifact above. The locked JDK class bytes are data,
+      # prepared without Java and passed explicitly to web-jvm alone. All
+      # packages remain in the snapshot; no JVM doc producer is needed here.
       #
       # "No previous snapshot" is a success path, not a failure: the first
       # release carrying these assets has nothing to compare against, and the
@@ -259,8 +258,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 scripts/api-diff.py --self-test
+          python3 scripts/java-metadata/prepare.py --out "$RUNNER_TEMP/release-api-metadata"
+          cmp scripts/java-metadata/jdk21.lock.json "$RUNNER_TEMP/release-api-metadata/manifest.json"
           python3 scripts/api-snapshot.py \
-            --dawn "java -XX:-UsePerfData -Xss512m -jar $PWD/dawn-selfhost.jar" \
+            --dawn "$PWD/dawnc-linux-x86_64" \
+            --java-signatures "packages/web-jvm=$RUNNER_TEMP/release-api-metadata/manifest.json" \
             -o dawn-pub-api.json
           PREVIOUS=$(
             gh release list --limit 30 --json tagName --jq '.[].tagName' \
