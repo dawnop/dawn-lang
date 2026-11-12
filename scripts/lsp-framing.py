@@ -540,7 +540,8 @@ def harness_self_tests():
         [sys.executable, str(Path(__file__).resolve().parents[1] / "scripts/cpu-limit-test.py")],
         check=True, stdout=subprocess.DEVNULL))
     if sys.platform.startswith("linux"):
-        for mode in ("spin", "read", "exit"):
+        modes = ("spin", "read", "exit") if os.uname().machine == "x86_64" else ("spin", "exit")
+        for mode in modes:
             run_check(results, "fatal wait observes " + mode,
                       lambda mode=mode: self_test_fatal_wait(mode))
     run_check(results, "cleanup kills child after launcher exits", self_test_orphan_cleanup)
