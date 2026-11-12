@@ -269,12 +269,17 @@ class OpenServer:
         for task in tasks:
             base = "/proc/%d/task/%s/" % (self.proc.pid, task)
             try:
-                with open(base + "wchan", encoding="ascii") as stream:
-                    if stream.read().strip() != "pipe_read":
-                        continue
                 with open(base + "syscall", encoding="ascii") as stream:
                     call = stream.read().split()
-                if len(call) > 1 and call[0] == "0" and int(call[1], 16) == 0:
+                with open(base + "stat", encoding="ascii") as stream:
+                    state = stream.read().rsplit(") ", 1)[1].split()[0]
+                with open(base + "syscall", encoding="ascii") as stream:
+                    confirmed = stream.read().split()
+                # Kernel wait-symbol names change across versions. Observe
+                # the blocked read itself, confirming it around the state
+                # snapshot, and recheck bytes after the process observations.
+                fcntl.ioctl(self.proc.stdin.fileno(), termios.FIONREAD, pending, True)
+                if stdin_read_snapshot(call, state, confirmed, pending[0]):
                     return True
             except (OSError, ValueError):
                 continue
@@ -298,6 +303,12 @@ def process_cpu_seconds(pid):
     with open("/proc/%d/stat" % pid, encoding="ascii") as stat_file:
         fields = stat_file.read().rsplit(") ", 1)[1].split()
     return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
+def stdin_read_snapshot(before, state, after, pending):
+    def read_zero(call):
+        return len(call) > 1 and call[0] == "0" and int(call[1], 16) == 0
+    return pending == 0 and state == "S" and read_zero(before) and read_zero(after)
 
 
 def group_rss_kib(pgid):
@@ -445,6 +456,7 @@ def expect_open_fatal(cmd, payload, request_id, flood_body=False):
 
 
 def run_check(results, label, action):
+    print("CHECK " + label, flush=True)
     try:
         detail = action()
         results.append((label, True, detail or "ok"))
@@ -540,6 +552,7 @@ def harness_self_tests():
         [sys.executable, str(Path(__file__).resolve().parents[1] / "scripts/cpu-limit-test.py")],
         check=True, stdout=subprocess.DEVNULL))
     if sys.platform.startswith("linux"):
+        run_check(results, "stdin syscall snapshots", self_test_stdin_snapshots)
         modes = ("spin", "read", "exit") if os.uname().machine == "x86_64" else ("spin", "exit")
         for mode in modes:
             run_check(results, "fatal wait observes " + mode,
@@ -574,14 +587,29 @@ def harness_self_tests():
     return results
 
 
-def self_test_fatal_wait(mode):
+def self_test_stdin_snapshots():
+    read = ["0", "0x0"]
+    if not stdin_read_snapshot(read, "S", read, 0):
+        raise AssertionError("blocked stdin read was not recognized")
+    for before, state, after, pending in (
+        (read, "R", read, 0), (read, "S", read, 1),
+        (["running"], "S", read, 0), (read, "S", ["202", "0x0"], 0),
+        (["0", "0x1"], "S", ["0", "0x1"], 0),
+    ):
+        if stdin_read_snapshot(before, state, after, pending):
+            raise AssertionError("nonblocking snapshot was accepted")
+
+
+def self_test_fatal_wait(mode, observation_cpu_s=FATAL_LIMIT_S):
     code = (
         "import sys\n"
         "sys.stdin.buffer.readline()\n"
         "sys.stdout.buffer.write(b'Content-Length: 2\\r\\n\\r\\n{}'); sys.stdout.flush()\n"
         "sys.stdin.buffer.readline()\n"
     )
-    code += {"spin": "while True: pass\n", "read": "sys.stdin.buffer.read(1)\n",
+    code += {"spin": "while True: pass\n", "read": (
+                 "sys.stdout.buffer.write(b'Content-Length: 2\\r\\n\\r\\n{}'); sys.stdout.flush()\n"
+                 "sys.stdin.buffer.read(1)\n"),
              "exit": "sys.exit(0)\n"}[mode]
     server = OpenServer([sys.executable, "-c", code])
     try:
@@ -589,6 +617,15 @@ def self_test_fatal_wait(mode):
         if not server.wait_for_frames(1, STARTUP_LIMIT_S):
             raise AssertionError("fatal wait fixture did not initialize")
         server.send(b"fatal\n")
+        if mode == "read":
+            if not server.wait_for_frames(2, STARTUP_LIMIT_S):
+                raise AssertionError("stdin read fixture did not consume its input")
+            started = time.process_time()
+            while not server.waiting_for_stdin():
+                if server.proc.poll() is not None:
+                    raise AssertionError("stdin read fixture exited unexpectedly")
+                if time.process_time() - started >= observation_cpu_s:
+                    raise AssertionError("stdin read fixture was not observable within its CPU allowance")
         exited = server.wait_for_exit(0.05)
         if exited != (mode == "exit"):
             raise AssertionError("fatal wait accepted %s=%s" % (mode, exited))
