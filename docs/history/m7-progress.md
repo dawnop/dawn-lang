@@ -438,3 +438,22 @@ JVM 臂在独立当前提交检出中使用原 builder，双 JDK 各跑 A/B/C，
 新增 push 调用和准备、重复编译、缓存准备、覆盖控制均为 0，新增日常 claim 0 秒；
 重链和负控仅显式验收，不挤占既有 job。K5 再接轻门并单独核预算；P 生产切换另裁。
 入口、模拟版本边界与不做理由见 [资格设计](../native-seed-input-contract-design.md)。
+
+## Native 轻门与资格交接（2026-11-12，D12-2 K5）
+
+tree-policy 新增单一轻控制步骤：严格 candidate lock/输入 receipt/target、输入身份、
+A/B/C 集合，以及 K1–K4 固定夹具和事务自测。固定清单核名称、顺序、数量及拒因，
+25 项外层负控证明漏阶段、丢夹具、错输入及重复项被拒；不在 push 编译 compiler。
+总停止器 30 秒，单列 planning 10 秒，push-total 38673→38683 秒，步骤锁同步登记，
+timeout 和 pole 保持。托管实测与完整最终输入资格是交接前条件，不能由夹具代替。
+
+显式 `native-seed-qualify.py run/verify` 串行完成双 root、真实控制、事务、双 JDK、
+历史 replay、双链、原 native-fixpoint/native-cli-diff 与独立重算；只在最终相关
+输入或种子晋级时执行。观测按身份分组、保留所有失败，至少三组成功配对和连续
+七天形态后才能收口 D/W、Q/S、P95、最坏值和残差；本刀不宣称七天已完成。
+
+schema2 producer/installer/聚合原型仅在隔离目录演练 A builder、S seed、B native、
+JVM reference、单向 proof 和资产不可覆盖；生产三文件与八件资产合同保持。
+原型不是正式发版或晋级。P 的生产 builder/schema2 同步、正式报告与资产不可变、
+真实 qualified seed/回滚撤销、真实安装发布演练、最终输入资格、托管预算和七天
+观察及生产授权仍逐项 no-go，详见 [K5 设计](../native-seed-input-contract-design.md)。
