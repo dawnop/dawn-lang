@@ -388,3 +388,29 @@ receipt 与 compiler，核配对后编译，成功才写独立 compile receipt�
 三代 emitter 执行、双 root 和固定点仍归 K3–K5；compile receipt 不是冷链资格。
 生产 builder、release/install 身份协议与默认种子均未推进。
 接口、边界和验收入口见 [输入与配方设计](../native-seed-input-contract-design.md)。
+
+## Native 无 Java 冷链 runner（2026-11-12，D12-2 K3）
+
+新增显式 prepare-toolchain、cold-run 与 verify-cold 入口。离线工具链快照绑定
+clang 18.1.3、GNU sysroot、CRT/静态库、resource-dir 与必要工具的完整文件身份。
+runner 使用私有源码/seed 副本、只读输入挂载、断网 namespace 和白名单环境，
+各步骤新建 home/tmp，各代独立输出与对象编译链接，不消费已有输出目录或暖缓存。
+
+协议为 S 用 seed std 发射 A，并配 seed runtime 链接；A/B 用 current std 发射
+B/C，B/C 配 current runtime。保留 whole C/info，增加 B/C units 文件集合与 bytes、
+静态 ELF 比较及两个独立 root 的 B 比较。每代 current compiler 调同一来源 producer，
+发射后重查实际 emitter 的计划；裸目录 smoke 不挂源码或 seed，验证内嵌 std/runtime。
+原 native-fixpoint 及其 JVM 对照义务保留。
+
+独立 verifier 重算输入、阶段输出、实际 namespace/exec 命令与允许清单、每个 TU
+编译及 lexical object link order、固定点、双 root 和 smoke，receipt 最后提交。
+外部跟踪覆盖全部后代，并显式翻译 PID namespace 编号。固定守卫夹具与真实
+Java 名称 native 子进程 canary 已验证：后者计数 1、明确 audit-java，且无成功步骤
+收据；K1/K2 输入与阶段配方回归保留。最终相关输入仍必须实际运行完整双 root 链，
+不能以这些夹具或单次 A 编译替代 Q0。
+
+新增日常调用预算 0 s，未改 workflow、steps lock、claim、timeout 或 push 接线，
+push-total 仍为 38673 s、pole 950 s；6 次 emit、6 次 cc/link、审计和重核作为显式
+资格成本，不塞进 prev-diff-native。K4/K5 继续完整负控、双链 replay 与资格交接；
+候选没有提升，生产 builder、release/install 协议与默认种子未改。
+命令、边界和不做的理由见 [冷链设计](../native-seed-input-contract-design.md)。
