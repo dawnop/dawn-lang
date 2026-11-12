@@ -24,6 +24,8 @@ prints how many there are on every run.
 
 | [site-native-inputs-design.md](site-native-inputs-design.md) | current | 已落地的 native/data 独立制备、工具与 bundle 收据、十四包 fresh staging；真实无 Java 冷暖消费、独立 JVM oracle 与收官核验。 |
 
+| [api-snapshot-native-design.md](api-snapshot-native-design.md) | proposed | 发布快照按目标传入原始 class 数据，消费本版 native artifact；全包对拍、可靠拒绝与轻量发布接线验证方案。 |
+
 ## 权威规范
 
 | 文档 | 生命周期 | 说明 |

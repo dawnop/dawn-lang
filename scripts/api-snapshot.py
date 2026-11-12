@@ -47,10 +47,13 @@ cover stopped being covered. That failure mode is invisible from the outside,
 so the script refuses instead.
 
     scripts/api-snapshot.py [-o FILE] [--dawn CMD] [--root DIR]
+                           [--java-signatures TARGET=MANIFEST ...]
 
-`--dawn` takes a whole command line, so a release can point at the jar it just
-built (`--dawn 'java -Xss512m -jar dawn-selfhost.jar'`) instead of at
-`./bin/dawn`, which would rebuild the toolchain from the seed.
+`--dawn` takes a whole command line. Releases use the native artifact they
+just built, with `--java-signatures packages/web-jvm=MANIFEST` supplying the
+locked raw class data to that target alone. Targets are exact root-relative
+package directories; manifest paths are relative to the caller's directory.
+The JVM command remains available as an explicit comparison oracle.
 """
 
 import argparse
@@ -220,21 +223,43 @@ def toolchain_version(root: str) -> str:
     raise SnapshotError(f"{path}: no VERSION declaration")
 
 
-def snapshot(root: str, dawn: list) -> dict:
+def java_signature_inputs(specs: list) -> dict:
+    """Explicit per-target inputs, resolved before changing the doc cwd."""
+    inputs = {}
+    for spec in specs:
+        target, separator, path = spec.partition("=")
+        if not separator or not target or not path:
+            raise SnapshotError("--java-signatures needs TARGET=MANIFEST")
+        if target in inputs:
+            raise SnapshotError(f"duplicate Java metadata target: {target}")
+        inputs[target] = os.path.abspath(path)
+    return inputs
+
+
+def snapshot(root: str, dawn: list, java_signatures=None) -> dict:
+    java_signatures = {} if java_signatures is None else java_signatures
+    packages = sorted(glob.glob(os.path.join(root, "packages", "*", "dawn.toml")))
+    targets = {os.path.relpath(os.path.dirname(path), root) for path in packages}
+    unknown = sorted(set(java_signatures) - targets)
+    if unknown:
+        raise SnapshotError(f"unknown Java metadata target(s): {', '.join(unknown)}")
     units = {
         "std": {
             "version": toolchain_version(root),
             "modules": normalize(run_doc(dawn, ["--stdlib"], root), "std"),
         }
     }
-    for manifest_path in sorted(glob.glob(os.path.join(root, "packages", "*", "dawn.toml"))):
+    for manifest_path in packages:
         pkg = os.path.dirname(manifest_path)
         rel = os.path.relpath(pkg, root)
         fields = manifest(manifest_path)
         name = fields["name"]
         if name in units:
             raise SnapshotError(f"{rel}: unit name {name!r} is already taken")
-        modules = normalize(run_doc(dawn, [rel], root), name)
+        args = [rel]
+        if rel in java_signatures:
+            args = ["--java-signatures", java_signatures[rel], rel]
+        modules = normalize(run_doc(dawn, args, root), name)
         if not modules:
             raise SnapshotError(f"{rel}: dawn doc published no modules")
         units[name] = {
@@ -268,6 +293,75 @@ CLEAN_DOC = {
                 "methods": [{"name": "eq", "sig": "fn eq[T: Eq](a: T, b: T) -> Bool",
                              "hasDefault": False}]}],
 }
+
+
+def input_self_test() -> None:
+    """Exercise the command boundary with fixed data, without a compiler build."""
+    import tempfile
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory(prefix="api-snapshot-") as directory:
+        root = Path(directory)
+        (root / "selfhost/src").mkdir(parents=True)
+        (root / "selfhost/src/version.dawn").write_text('pub const VERSION = "1.2.3"\n')
+        for target, name in (("plain", "plain7"), ("web-jvm", "web_jvm2")):
+            package = root / "packages" / target
+            package.mkdir(parents=True)
+            (package / "dawn.toml").write_text(f'name = "{name}"\nversion = "2.0.0"\n')
+        # A space and an equals sign must remain one opaque path argument.
+        spelling = "class data/manifest=21.json"
+        inputs = java_signature_inputs(["packages/web-jvm=" + spelling])
+        expected_manifest = os.path.join(os.getcwd(), spelling)
+        assert inputs == {"packages/web-jvm": expected_manifest}
+        calls = []
+
+        def doc_command(cmd, *, capture_output, text, cwd):
+            assert capture_output and text and cwd == str(root)
+            calls.append(cmd)
+            if cmd[-1] == "packages/web-jvm" and cmd[2:-1] != [
+                    "--java-signatures", expected_manifest]:
+                return SimpleNamespace(returncode=2, stdout="", stderr="missing Java metadata")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(CLEAN_DOC), stderr="")
+
+        with patch.object(subprocess, "run", doc_command):
+            result = snapshot(str(root), ["native-artifact"], inputs)
+            assert set(result["units"]) == {"std", "plain7", "web_jvm2"}, "incomplete package inventory"
+            assert calls == [
+                ["native-artifact", "doc", "--stdlib"],
+                ["native-artifact", "doc", "packages/plain"],
+                ["native-artifact", "doc", "--java-signatures", expected_manifest,
+                 "packages/web-jvm"],
+            ], calls
+            repeated = java_signature_inputs([
+                "packages/plain=" + spelling, "packages/web-jvm=" + spelling])
+            calls.clear()
+            assert snapshot(str(root), ["native-artifact"], repeated) == result
+            assert calls[1] == ["native-artifact", "doc", "--java-signatures",
+                                expected_manifest, "packages/plain"]
+            try:
+                snapshot(str(root), ["native-artifact"])
+            except SnapshotError as exc:
+                assert "missing Java metadata" in str(exc)
+            else:
+                raise AssertionError("missing metadata or a skipped web-jvm was accepted")
+            for spec in ("std=x", "--stdlib=x", "packages/absent=x", "web_jvm2=x"):
+                calls.clear()
+                try:
+                    snapshot(str(root), ["native-artifact"], java_signature_inputs([spec]))
+                except SnapshotError as exc:
+                    assert "unknown Java metadata target" in str(exc) and not calls
+                else:
+                    raise AssertionError("unknown metadata target was accepted: " + spec)
+        for specs in (["packages/web-jvm"], ["=x"], ["packages/web-jvm="],
+                      ["packages/web-jvm=x", "packages/web-jvm=y"]):
+            try:
+                java_signature_inputs(specs)
+            except SnapshotError:
+                pass
+            else:
+                raise AssertionError("invalid metadata arguments were accepted: " + repr(specs))
 
 
 def self_test(verbose: bool = True) -> int:
@@ -327,11 +421,16 @@ def self_test(verbose: bool = True) -> int:
         else:
             failures.append(f"mutant not caught: {label}")
 
+    try:
+        input_self_test()
+    except (AssertionError, SnapshotError) as exc:
+        failures.append(f"snapshot input contract: {exc}")
+
     if failures:
         for f in failures:
             print(f"SELFTEST FAIL: {f}", file=sys.stderr)
         return 1
-    print(f"selftest: {len(mutants)} mutant(s) refused, the clean shape accepted")
+    print(f"selftest: {len(mutants)} mutant(s) refused; shape, target inputs and complete inventory accepted")
     return 0
 
 
@@ -339,18 +438,20 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-o", "--out", help="write here instead of stdout")
     ap.add_argument("--self-test", action="store_true",
-                    help="run the unknown-key mutants and stop")
+                    help="run the shape and target-input contracts and stop")
     ap.add_argument("--dawn", default="./bin/dawn",
                     help="the toolchain command line (default: ./bin/dawn)")
     ap.add_argument("--root", default=os.path.join(os.path.dirname(__file__), ".."),
                     help="repository root (default: the one holding this script)")
+    ap.add_argument("--java-signatures", action="append", default=[], metavar="TARGET=MANIFEST",
+                    help="pass raw Java metadata to this package directory (repeatable)")
     args = ap.parse_args()
     if args.self_test:
         return self_test()
 
     root = os.path.abspath(args.root)
     try:
-        snap = snapshot(root, shlex.split(args.dawn))
+        snap = snapshot(root, shlex.split(args.dawn), java_signature_inputs(args.java_signatures))
     except SnapshotError as exc:
         print(f"api-snapshot: {exc}", file=sys.stderr)
         return 1

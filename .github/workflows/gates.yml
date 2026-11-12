@@ -408,7 +408,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 37178s (the most this file's `3x` claims may add up to)
+# push-total: 37183s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2887,7 +2887,9 @@ jobs:
     runs-on: ubuntu-24.04
     # Seven-day Ubuntu 24.04 replay after separating playground sessions:
     # paired P95 577s; cross-source worst 621s plus one deviation.
-    # budget: 3x 690s planning value from complete classpath and bootstrap steps
+    # Add 5s for fixed API input fixtures and release wiring controls. Full
+    # snapshot equivalence and release simulation remain acceptance checks.
+    # budget: 3x 695s planning value from classpath, bootstrap and API input checks
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -2911,6 +2913,11 @@ jobs:
       # everything would each pass half of this on their own.
       - name: bootstrap guards (cache generation, seed verification)
         run: ./scripts/bootstrap-guards/run.sh
+
+      - name: pub-API snapshot input contracts
+        run: |
+          python3 scripts/api-snapshot.py --self-test
+          python3 scripts/api-diff.py --self-test
 
       # The refusals in the two production deploy scripts (commit pin, Playground
       # origin, wasm reactors, native artifact, server prerequisites), driven

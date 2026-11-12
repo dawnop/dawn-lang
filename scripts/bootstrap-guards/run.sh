@@ -353,7 +353,10 @@ fi
 # until their final jars compare byte for byte.
 # ---------------------------------------------------------------------------
 tool17_count_line() {
-  awk -v want="$2" '
+  # Environment values preserve literal shell continuations; awk -v decodes
+  # backslashes and would change the source line this guard is comparing.
+  TOOL17_WANT="$2" awk '
+    BEGIN { want = ENVIRON["TOOL17_WANT"] }
     {
       line = $0
       sub(/^[[:space:]]+/, "", line)
@@ -406,6 +409,7 @@ tool17_validate() {
   local publish_check_line
   local publish_upload_line
   local ref_count
+  local metadata_line metadata_pin_line snapshot_line
 
   exact_count="$(tool17_count_line "$release_file" \
     'run: ./scripts/build-release-jar.sh -o dawn-selfhost.jar')"
@@ -492,12 +496,35 @@ tool17_validate() {
     errors=1
   fi
 
+  # The release consumes its native artifact and locked raw metadata. A
+  # command-only switch without the web-jvm input breaks the full inventory.
+  # shellcheck disable=SC2016 # literal workflow shell source
+  for line in \
+    'python3 scripts/java-metadata/prepare.py --out "$RUNNER_TEMP/release-api-metadata"' \
+    'cmp scripts/java-metadata/jdk21.lock.json "$RUNNER_TEMP/release-api-metadata/manifest.json"' \
+    '--dawn "$PWD/dawnc-linux-x86_64" \' \
+    '--java-signatures "packages/web-jvm=$RUNNER_TEMP/release-api-metadata/manifest.json" \'; do
+    if ! tool17_require_line "$release_file" "$line" \
+        "release.yml must retain the native API snapshot input: $line"; then
+      errors=1
+    fi
+  done
+
   # Presence is not enough: the release job must consume the comparison before
   # native compilation, and publication must upload before it checks GitHub's
   # resulting asset set.
   # shellcheck disable=SC2016 # literal workflow shell source
   compare_line="$(tool17_line_number "$release_file" 'cmp "$JDK21_JAR" "$JDK26_JAR"')"
   native_line="$(tool17_line_number "$release_file" './scripts/release-native.sh')"
+  metadata_line="$(tool17_line_number "$release_file" 'python3 scripts/java-metadata/prepare.py')"
+  metadata_pin_line="$(tool17_line_number "$release_file" 'cmp scripts/java-metadata/jdk21.lock.json')"
+  snapshot_line="$(tool17_line_number "$release_file" 'python3 scripts/api-snapshot.py')"
+  if [ -z "$metadata_line" ] || [ -z "$metadata_pin_line" ] || [ -z "$snapshot_line" ] || \
+      [ -z "$native_line" ] || [ "$native_line" -ge "$metadata_line" ] || \
+      [ "$metadata_line" -ge "$metadata_pin_line" ] || [ "$metadata_pin_line" -ge "$snapshot_line" ]; then
+    echo "release.yml must build the native artifact and pin metadata before the API snapshot" >&2
+    errors=1
+  fi
   # shellcheck disable=SC2016 # literal workflow shell source
   create_line="$(tool17_line_number "$release_file" 'gh release create "$GITHUB_REF_NAME"')"
   # shellcheck disable=SC2016 # literal workflow shell source
@@ -612,6 +639,15 @@ sed 's/^[[:space:]]*dawn-pub-api-diff\.md$/            dawn-api-diff.md/' \
   "$tool17_dir/release.base.yml" > "$tool17_dir/release.wrong-report.yml"
 tool17_expect_reject "a wrong pub-API report asset name" \
   "$tool17_dir/release.wrong-report.yml" "$tool17_dir/wrapper.base.sh"
+
+for input in 'scripts/java-metadata/prepare.py' 'cmp scripts/java-metadata/jdk21.lock.json' \
+    '--dawn "$PWD/dawnc-linux-x86_64"' '--java-signatures "packages/web-jvm='; do
+  # Fixed-string deletion keeps the workflow fixture mutation literal.
+  awk -v input="$input" 'index($0, input) == 0' \
+    "$tool17_dir/release.base.yml" > "$tool17_dir/release.missing-api-input.yml"
+  tool17_expect_reject "omitting API input $input" \
+    "$tool17_dir/release.missing-api-input.yml" "$tool17_dir/wrapper.base.sh"
+done
 
 # shellcheck disable=SC2016 # mutate the guarded script's literal $work
 sed 's|\./scripts/build-release-jar\.sh -o "$work/dawn-selfhost\.jar"|java -Xss512m -jar seed.jar build selfhost -o "$work/dawn-selfhost.jar"|' \
