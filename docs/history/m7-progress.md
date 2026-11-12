@@ -414,3 +414,27 @@ push-total 仍为 38673 s、pole 950 s；6 次 emit、6 次 cc/link、审计和�
 资格成本，不塞进 prev-diff-native。K4/K5 继续完整负控、双链 replay 与资格交接；
 候选没有提升，生产 builder、release/install 协议与默认种子未改。
 命令、边界和不做的理由见 [冷链设计](../native-seed-input-contract-design.md)。
+
+## Native 负控、双链与重放（2026-11-12，D12-2 K4）
+
+K4 在 `2c0ae659` 基线上增加独立的一次性验收入口，将真实 Q1–Q10 控制与固定
+verifier 夹具分开。真实输入、sysroot、输出集合和执行跟踪变异只接受对应拒因；
+外部缓存诱饵不可见、环境注入被清除作为正向控制，不能拿异常或语法错充数。
+观察器夹具还主动移除 cache/Java 拒绝规则，要求外层驱动发现漏报。
+
+隔离事务使用独立 rehearsal kind 和单一原子 lock，保留 parent、全部 bytes、
+递增序号、版本高水位、显式回滚理由及撤销身份。提交点前后异常、SIGTERM、
+SIGKILL 后重读和重跑，回滚旧 bytes 后重新验证其可执行性并发射程序；撤销身份
+从缓存或推进入口再入选均拒绝。版本是明确模拟标签，真实 S/B 仍保持实际身份，
+没有创建不可变发布或推进产品默认 seed；产品 candidate reader 继续严格拒绝演练锁。
+
+JVM 臂在独立当前提交检出中使用原 builder，双 JDK 各跑 A/B/C，并比较完整 JAR；
+原 replay-bootstrap 的 seed/std、固定点、standalone 与 HEAD 收敛职责保留。
+同一 portable source/current std 的 JVM 发射与 native B whole/info/units 对拍，
+另验 standalone、std、本地 package、错误诊断和 CLI transcript。资格包 receipt
+绑定冷链、控制、事务 lineage 与 JVM 摘要，独立 verifier 重新计算证据身份。
+
+本刀不改 workflow、steps lock、claim、timeout、生产 builder 或 release/install。
+新增 push 调用和准备、重复编译、缓存准备、覆盖控制均为 0，新增日常 claim 0 秒；
+重链和负控仅显式验收，不挤占既有 job。K5 再接轻门并单独核预算；P 生产切换另裁。
+入口、模拟版本边界与不做理由见 [资格设计](../native-seed-input-contract-design.md)。
