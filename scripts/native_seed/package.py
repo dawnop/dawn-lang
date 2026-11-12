@@ -44,16 +44,21 @@ def jvm_chain(repo, destination, java21, java26, seed_cache, commit):
                          'probe': probe, 'build': build, 'jar_sha256': c.digest(jar.read_bytes())})
         if label == '21':
             # The historical script still owns embedded seed std, standalone closure and HEAD convergence.
-            # A tag argument requires the existing downloader's checksum check, without an escape hatch.
-            seed_tag = (work / 'scripts/seed-release.txt').read_text().strip()
-            replay = q.command(destination, 'replay', [work / 'scripts/replay-bootstrap.sh', seed_tag], work, env)
+            # Verify the offline artifact with the original strict reader before using its local replay entry.
+            seed_path = cache / seed_tag / 'seed.jar'
+            seed_check = q.command(destination, 'replay-seed-check',
+                ['/bin/bash', '-c', 'set -eu; ROOT=$1; . "$ROOT/scripts/seedjar.sh"; seed_verify "$2" "$3"',
+                 'seed-check', work, seed_path, seed_tag], work, env)
+            c.require(seed_check['exit_code'] == 0, 'jvm-replay', 'offline historical seed was not verified')
+            replay_seed = {'tag': seed_tag, 'sha256': c.digest(seed_path.read_bytes()), 'check': seed_check}
+            replay = q.command(destination, 'replay', [work / 'scripts/replay-bootstrap.sh', seed_path], work, env)
             transcript = (destination / 'replay.stdout').read_bytes()
             c.require(replay['exit_code'] == 0 and all(s in transcript for s in REPLAY_SENTENCES),
                       'jvm-replay', 'historical replay or its owned assertions failed')
     c.require(commands[0]['jar_sha256'] == commands[1]['jar_sha256'],
               'jvm-jdk-diff', 'JDK 21 and 26 release JARs differ')
     result = {'schema': 1, 'kind': 'jvm-qualification-reference', 'source_commit': commit,
-              'arms': commands, 'replay': replay,
+              'arms': commands, 'replay': replay, 'replay_seed': replay_seed,
               'scripts': {p: c.digest((Path(repo) / p).read_bytes()) for p in
                           ('scripts/build-release-jar.sh', 'scripts/replay-bootstrap.sh',
                            'scripts/bootstrap-guards/replay-contract.sh', '.github/workflows/release.yml')}}
@@ -147,6 +152,16 @@ def inspect(repo, directory):
     c.require(jvm['arms'][0]['jar_sha256'] == jvm['arms'][1]['jar_sha256'],
               'package-jvm', 'JDK outputs differ')
     check_transcript(directory / 'jvm', 'replay', jvm['replay'])
+    seed_record = jvm['replay_seed']
+    seed_tag = (Path(repo) / 'scripts/seed-release.txt').read_text().strip()
+    pins = [line.split() for line in (Path(repo) / 'scripts/seed-checksums.txt').read_text().splitlines()
+            if line.strip() and not line.startswith('#')]
+    expected = [row[0] for row in pins if len(row) == 2 and row[1] == seed_tag]
+    check_transcript(directory / 'jvm', 'replay-seed-check', seed_record['check'])
+    c.require(seed_record['tag'] == seed_tag and seed_record['check']['exit_code'] == 0 and
+              expected == [seed_record['sha256']] and c.digest(c.regular_bytes(
+                  directory / 'jvm/seed-cache' / seed_tag / 'seed.jar')) == seed_record['sha256'],
+              'package-jvm', 'offline historical replay seed is not the pinned artifact')
     c.require(jvm['replay']['exit_code'] == 0 and all(s in (directory / 'jvm/replay.stdout').read_bytes()
                                                   for s in REPLAY_SENTENCES), 'package-jvm', 'replay assertions missing')
     dual = c.read_json(directory / 'dual/summary.json')
