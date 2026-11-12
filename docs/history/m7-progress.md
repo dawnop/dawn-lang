@@ -346,3 +346,20 @@ D31-1 锁定的原始 class 数据。API JSON schema、diff 与发布资产名�
 固定夹具与发布接线负控进入轻量日常门，新增覆盖 planning 5 s；完整快照对拍和
 新 artifact 发布模拟作为一次性验收，不为每次 push 重复发布。
 设计与验证责任见 [快照输入设计](../api-snapshot-native-design.md)。
+
+## Native 种子与输入合同（2026-11-12，D12-2 K1）
+
+实现提交 `025f95dd` 新增独立的 native candidate lock 和严格输入 receipt reader、
+一次性 v0.104.0 登记器、指定 Git commit 的完整 portable capture，以及
+A 配 seed std/runtime、B/C 配 current std/runtime 的阶段合同。
+真实发布 bytes、静态 ELF、完整 build ID、远端 tag 与同版 std/runtime 已核验；
+候选仍为 sequence 0、未资格化，不是产品默认 seed。JVM 种子文件保持原协议。
+
+Q1/Q2/Q3/Q6/Q7 的 42 项快速夹具与 15 项真实输入变异均按明确拒因拒绝。
+输入摘要有域分离与字段长度 framing，缺失的 dawn.lock 状态也进入身份；
+捕获不读 live checkout，不产生依赖外链，verify 重建 Git 对象清单并检查生成物。
+入口、算法和不做的理由见 [K1 设计](../native-seed-input-contract-design.md)。
+
+本刀新增 push 成本为 0 s，未改 workflow 或生产发布身份协议。K2 继续接 native
+source-inputs 和统一 C recipe；K3–K5 才提供无 Java 冷链、完整 lineage/撤销策略、
+双 root、固定点和资格晋级。不能从本刀的输入通过推导旧 seed 已能编当前闭包。
