@@ -90,6 +90,17 @@ def main():
         (repo / 'std/io.dawn').write_bytes(b'dirty checkout')
         (repo / 'untracked').write_bytes(b'not an input')
         assert c.source_description(repo, commit) == (source, files)
+        c.git(repo, 'add', 'std/io.dawn')
+        c.git(repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+              'commit', '-qm', 'Create replacement fixture')
+        replacement = c.git(repo, 'rev-parse', 'HEAD').decode().strip()
+        c.git(repo, 'replace', commit, replacement)
+        replaced = subprocess.check_output(['git', '-C', str(repo), 'show', commit + ':std/io.dawn'],
+                                          env={k: v for k, v in os.environ.items()
+                                               if k != 'GIT_NO_REPLACE_OBJECTS'})
+        assert replaced == b'dirty checkout', 'replacement control did not change the ordinary Git view'
+        assert c.source_description(repo, commit) == (source, files), 'replace refs changed committed inputs'
+        c.git(repo, 'replace', '-d', commit)
         # Logical identity is independent of checkout/capture prefixes.
         other = tmp / 'second-source'
         c.write_tree(other, files, readonly=False)

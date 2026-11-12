@@ -22,6 +22,7 @@ reader 的缺字段兼容。输出到调用者的新目录，最后原子写完�
 ## 源码与配对
 
 从 Git 对象捕获完整 tracked tree 的保守超集，保留原相对目录，不读 live checkout。
+读取固定禁用 Git replace objects，避免 commit 身份被本地替换视图改写。
 拒绝 symlink、gitlink、特殊文件与不安全路径。portable 变换只去掉 selfhost manifest
 的 java-deps 表；不解析包闭包，不复制 resolver。保留本地依赖，拒绝绝对路径、
 逃逸、远端依赖和缺 manifest。compiler-plan 与 inflate 等传递依赖由完整树保留，

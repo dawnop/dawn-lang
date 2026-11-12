@@ -292,7 +292,8 @@ def subtree(files, prefix):
 
 
 def git(repo, *args, input_data=None):
-    run = subprocess.run(['git', '-C', str(repo), *args], input=input_data, capture_output=True)
+    env = dict(os.environ, GIT_NO_REPLACE_OBJECTS='1')
+    run = subprocess.run(['git', '-C', str(repo), *args], input=input_data, capture_output=True, env=env)
     require(run.returncode == 0, 'source-git', run.stderr.decode('utf-8', errors='replace').strip())
     return run.stdout
 
