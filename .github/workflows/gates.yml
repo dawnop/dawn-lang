@@ -408,7 +408,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 38673s (the most this file's `3x` claims may add up to)
+# push-total: 38683s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -951,7 +951,11 @@ jobs:
     # steps: worst 551s (run 42503869678), sample deviation 95.3s.
     # Restate the stale claim to worst plus the larger of a tenth and
     # one deviation, rounded up to 5s: 445s to 650s; timeout 3x.
-    # budget: 3x 650s worst observed plus one deviation (run 42503869678)
+    # Native seed controls add a separate 10s planning claim, confirmed from
+    # hosted step timestamps before qualification handoff. They run fixed
+    # fixtures only, with a 30s hard stop; no compiler or cold chain is built.
+    # The existing 33-minute timeout also covers 3x the combined 660s claim.
+    # budget: 3x 660s (650s observed base plus 10s native seed controls)
     timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
@@ -998,6 +1002,9 @@ jobs:
           python3 scripts/mutation-anchor-preflight-test.py
           python3 scripts/anchor-guard.py
           python3 scripts/anchor-guard.py --selftest
+
+      - name: native seed light structure and fixture controls
+        run: python3 -B scripts/native-seed-light.py
 
       # std/int/i8 .. std/int/u64 and the fixed_ints corpus are one generator's output
       # (scripts/fixed-ints/gen.py's header says why); a hand edit to one of

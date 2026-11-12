@@ -1,6 +1,102 @@
-# Native 种子、来源查询、配方与冷链合同（D12-2 K1–K4）
+# Native 种子、来源查询、配方与冷链合同（D12-2 K1–K5）
 
-> 状态：**current**。K1–K3 输入、配方与冷链已实现；K4 增加显式负控、事务演练、双链及资格包核验，完整资格仍须逐输入验收。K4 基线为 `2c0ae659`。
+> 状态：**current**。K1–K4 已实现逐输入资格工具；K5 接轻门、资格交接和隔离发布协议原型。生产切换尚未授权。K5 基线为 `982dad97`。
+
+## K5：轻门、资格交接与原型设计
+
+每次 push 在 tree-policy 内增加一个独立步骤，只运行 Python/Git/文件夹具：严格
+candidate lock、输入 receipt schema/target/输入身份与恰好 A/B/C 阶段，以及 K1–K4
+固定守卫自测。清单固定自测名称与数量，逐项检查期望拒因；漏整套夹具、少一项、
+重复项和错输入均须红。轻 receipt 核验不执行 seed、不生成源码、不启动编译；
+固定夹具的通过也不表示当前源码已经冷启动。真实证据须在独立资格入口重算。
+新增步骤单列控制 claim，全部新增 push 控制合计不得超过 30 秒，实际成本从
+托管 Actions 的步骤日志/时间戳读取，不做本机计时。保留现 timeout、pole 和原门。
+
+资格入口消费明确完整 commit、历史 seed/配对树、封闭工具链及两个 JDK，串行
+捕获、双 root 冷链、真实负控、事务、双 JDK/replay、双链、封包和独立 verify。
+只在相关输入的最终提交、初始资格或种子晋级时执行，不由每次 push 自动重编。
+source capture 仍绑定整树；无关文档变化也不能直接给旧 receipt 改 commit。
+CI 取样按 event、original run/attempt、runner image、steps、源码/seed/recipe/
+toolchain 摘要及 cold 状态分组，保留失败/取消/截尾和事故组。至少三组完整成功
+配对才解释准备、重复构建、缓存与控制开销；D/W 和 Q/S 同报，不能以最长 job
+替代总量。新形态连续满七天后重新核覆盖与身份、P95、最坏成功值及余量；样本
+不足或仍有未解释残差时维持未通过，不先改声明使观测转绿。生产期重链频率与
+托管预算另裁，现有 native-fixpoint 和 native-cli-diff 义务继续保留。
+
+schema2 仅在 `scripts/native-seed-prototype/` 演练 producer、installer 与聚合身份，
+其输出只写调用者的新目录。builder 明确是实际发射 B 的 A，bootstrap seed 为 S，
+native 为 B；显式 JVM 类型臂可演练，但不能当 native 资格。安装只验证自己取得
+的 B、sidecar 和 metadata，不下载/执行 A、JAR 或编译链，不声称独立证明来源。
+proof 单向被 metadata 引用，禁止循环摘要；模拟第九件报告与资产不可覆盖仅在
+隔离目录验证。schema1、未知 kind、JAR/ELF 混名、错 stage/target/lineage、重复
+JSON key、坏摘要必须拒绝，安装失败保留旧文件，原型重发不能覆盖同 tag bytes。
+
+不改生产 `release-native.sh`、`install-native.py`、`release.yml` 或八件资产合同，
+因为资格授权不含 P。不开 schema1 自动兼容，不把旧 seed 的版本改写成当前版本，
+不发布 A，不把同源双链称为 DDC。不把重链塞进 prev-diff-native 的 900 秒，
+因为它已有独立职责与预算；不把一次性真实负控搬到每 push，因为其编译成本违背
+轻控制上限。不增加自动 nightly 替代必过门，也不扩平台或推进默认种子。
+
+### P 前 go/no-go 清单
+
+资格工具可交接，生产保持 no-go。以下每项仍须 P 的独立验收与授权：
+
+1. 生产唯一 native builder 接管、真实 schema2 producer/installer/contract 同步变更。
+2. 正式第九件报告、受信资产不可覆盖、真实 tag 冷下载与同 commit 聚合。
+3. 正式 qualified lock 消费、真实已发布 seed 的单调晋级、回滚与撤销流程。
+4. 真实无 Java 安装、升级失败保旧及发布回滚演练；原型不能代替生产验收。
+5. 最终相关输入和每次种子晋级的完整资格，以及原必过门的同输入证据。
+6. 托管重链至少三组成功配对、七天新形态观测、D/W 与 Q/S、残差和预算裁定。
+7. P 的明确生产授权；K1–K5 ready 不等于生产切换 go。
+
+### K5 接口、观测与记账
+
+轻门是 `python3 -B scripts/native-seed-light.py`，进程内 30 秒停止器覆盖整次调用，
+不是给每套夹具各 30 秒。自测清单为 `scripts/native-seed-light-fixtures.json`，
+K1/K2/K3/K4/事务分别固定 42/18/14/6/72 条；25 项外层负控覆盖阶段漏重、
+receipt 输入身份、整套夹具缺失及各套丢项/重项。K2 的 C compiler 是写 argv 的
+Python 替身；K4 在临时目录用小 bytes 演练事务，不真实重编编译器。
+外部输入收据可用 `--receipt <inputs.json> --commit <完整提交>` 单独核结构与身份。
+另可附 `--cold-receipt <receipt.json> --package-receipt <receipt.json>`，核两 root、
+阶段/步骤集合、输入/recipe/执行器摘要和 Q1–Q10/事务覆盖；不读取真实 trace 或重编。
+五个 candidate/fixture 条目已从 unseen 消化；根脚本的命名空间导入未被当前 map
+递归建模的九个 K1–K4 文件逐条保留真实理由，变化仍触发 planner 全门回退。
+这说明映射的保守边界，不能将已经运行的夹具说成从未执行，也不能冒称重链日常覆盖。
+
+```sh
+python3 -B scripts/native-seed-qualify.py run --commit FULL_COMMIT --reason final-inputs \
+  --seed /prepared/seed/dawnc --seed-tree /prepared/seed \
+  --toolchain /prepared/toolchain --java21 /jdk21/bin/java --java26 /jdk26/bin/java \
+  --seed-cache /prepared/jvm-seeds --out /qualification/new-run
+python3 -B scripts/native-seed-qualify.py verify --commit FULL_COMMIT --out /qualification/new-run
+python3 -B scripts/native-seed-prototype/rehearse.py rehearse \
+  --package /qualification/new-run --out /prototype/new-run
+```
+
+资格原因还包括 `initial-seed` 和 `seed-promotion`；调用者须提供已验证的离线材料，
+没有下载失败后回退。入口校验实际 checkout/自身提交身份，串行执行并保留原日志；
+独立 verify 再核步骤集合、日志摘要和完整 cold/package 内容。原 native-fixpoint
+与 native-cli-diff 使用同提交的独立 JVM 检出，后者明确消费本次资格 B。
+相关 inputs 至少包括 selfhost、compiler-plan、packages、std、runtime、内嵌
+生成器、native seed/recipe/runner/verifier、C 工具链、隔离审计、JVM seed/build/
+replay 及发布协议；其中任一变化后在最终提交跑资格，不按中间 push 次数重跑。
+
+CI 观测复用 `scripts/gate-observations.py` 的原始 attempt/job/step 数据；轻步骤
+单独读 Actions 时间戳，准备与编译次数另计。资格入口可由明确的 CI 资格任务执行，
+但本刀不自动派发托管重链，也不把原型 YAML 注册成 workflow。重链取样须记录
+完整 source/seed/toolchain/steps 身份、准备/六次 emit/六次独立 cc/link、JVM
+两臂/replay、审计/控制及队列等待；汇总 D/W 与 Q/S。连续七天形态改变则重新起窗，
+窗口只计完整成功样本，失败/取消/事故另表保留。先取至少三组成功配对，再核
+七天 P95≤800 秒、最坏成功值加余量≤950 秒及总 W，超界或残差不明继续 no-go。
+
+新增 push 控制单列 planning 10 秒，tree-policy claim 650→660 秒，push-total
+38673→38683 秒；原 33 分钟 timeout、950 秒 pole 和 prev-diff-native 的 900 秒
+不变。新增 job、准备、重复 compiler 构建与缓存准备均为 0；覆盖控制为一个显式
+步骤。10 秒须由托管实测核对后才交接，不把拆片准备额度用于新功能；如超过
+30 秒立即不通过。既有全局观测超界和七天未收口继续如实保留。
+原型的 API 报告为明确占位，安装器模块打包仍待 P；本刀只演练身份协议，不能将
+隔离目录的九件资产和安装器当成已可发布产品。
+
 
 ## K4：负控、双链与重放设计
 
@@ -206,8 +302,8 @@ compile receipt 记录 C version/triple probe 与固定 recipe；完整 sysroot 
 读取入口。当前整树 capture 的生成物比对已通过，冷启动兼容性仍待 K3 实测。
 
 快验入口为 `python3 -B scripts/native-seed-contract-test.py`。它只创建自己的 Git
-和 ELF 夹具，逐项检查负控拒因，不变异编译器源码。日常门尚未接入，未观测表
-明确登记此边界；未来不得把这份夹具绿灯当成完整资格。
+和 ELF 夹具，逐项检查负控拒因，不变异编译器源码。K1 初期仅手工验收，K5
+通过轻门接入固定夹具；这份夹具绿灯仍不能当成完整资格。
 
 ## K2 已实现的接口与验收
 
