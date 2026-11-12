@@ -14,6 +14,7 @@ def stage_inputs(repo, lock, receipt, source, seed_tree, stage, std, runtime):
     c.validate_receipt(receipt, lock)
     c.require(stage in ('A', 'B', 'C'), 'stage-pairing', 'expected A, B or C')
     c.verify_source(repo, source, receipt)
+    c.verify_seed_tree(repo, lock, seed_tree)
     selected = receipt['stages'][('A', 'B', 'C').index(stage)]
     base = Path(seed_tree if stage == 'A' else source).absolute()
     for key, path, suffix in (('std', std, 'std'), ('runtime', runtime, 'runtime/c')):

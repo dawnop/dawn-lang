@@ -153,14 +153,16 @@ python3 -B scripts/native-seed.py compile-stage \
 ```
 
 `compile-stage` 必须显式给出所有路径、阶段和并发数。阶段先核输入 receipt、
-当前源码和生成物，再核 std/runtime 路径及树摘要；C 编译前拒绝错配。仅允许
+当前源码和生成物，并复用 K1 的实际 seed tree verifier，从 seed commit 重建
+std/runtime 身份，再核路径及实际树摘要；自洽伪造的 lock/receipt/目录也不能换掉
+seed 配对。C 编译前拒绝错配。仅允许
 clang 18.1.3、x86_64 GNU Linux 和并发 1 或 2，通过唯一 `cc-units.sh` 传入
 `--static --inline-rc --runtime`，清除继承的 C flags、include、cache 与 std 环境。
 执行后重核配对、源码、compiler bytes 和静态 ELF，最后写独立 compile receipt，
 记录阶段、输入、recipe、argv、compiler probe 与输出摘要。失败不写成功 receipt。
 此收据不绑定 emitter 的执行，也不证明 C units 的产生过程、完整工具链闭包或冷链。
 
-一次性入口 `scripts/native-seed-k2-test.py --out <new-dir>` 运行 17 项固定负控
+一次性入口 `scripts/native-seed-k2-test.py --out <new-dir>` 运行 18 项固定负控
 并检查真实 shell 的编译 flag、显式 runtime 和 lexical link order；加
 `--dawnc <binary> --java <java> --jvm-jar <jar>` 后运行八组真实双端对照。
 四组有效输入的 wire bytes 逐字节一致，四组错误输入的完整诊断、退出码与空 stdout

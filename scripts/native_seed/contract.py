@@ -487,16 +487,21 @@ def validate_receipt(receipt, lock):
             require(actual[key] == expected[key], f'{key}-pairing', f'{actual["stage"]} uses wrong {key}')
 
 
-def verify_inputs(repo, root, lock, receipt, seed_path, seed_tree):
-    validate_lock(lock)
-    validate_receipt(receipt, lock)
-    verify_seed_probe(seed_path, lock)
+def verify_seed_tree(repo, lock, seed_tree):
+    """Reconstruct a validated lock's pair from its commit, then check actual bytes."""
     _, seed_files = git_files(repo, lock['seed']['commit'])
     for key, prefix in [('std', 'std'), ('runtime', 'runtime/c')]:
         require(lock[key] == identity(lock['seed']['commit'], subtree(seed_files, prefix)),
                 f'{key}-pairing', 'seed tree does not match locked commit')
         expected = {p[len(prefix) + 1:]: x for p, x in seed_files.items() if p.startswith(prefix + '/')}
         verify_tree(Path(seed_tree) / prefix, inventory(expected), f'{key}-pairing')
+
+
+def verify_inputs(repo, root, lock, receipt, seed_path, seed_tree):
+    validate_lock(lock)
+    validate_receipt(receipt, lock)
+    verify_seed_probe(seed_path, lock)
+    verify_seed_tree(repo, lock, seed_tree)
     verify_source(repo, root, receipt)
     return receipt
 

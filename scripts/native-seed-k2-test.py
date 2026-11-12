@@ -36,14 +36,12 @@ def fixture_controls(work):
     repo = work / 'repo'
     repo.mkdir()
     commit = k1['fixture'](repo)
+    c.git(repo, 'fetch', '--quiet', '--no-tags', str(ROOT), c.HISTORICAL_COMMIT)
     source, files = c.source_description(repo, commit)
     lock = c.read_lock(ROOT / 'scripts/native-seed-candidate-v0.104.0.json')
-    # Synthetic stage identities let tiny fixtures exercise both generations.
-    seed_files = {'std/seed.dawn': ('100644', b'seed std\n'),
-                  'runtime/c/dawn_rt.c': ('100644', b'seed runtime\n'),
-                  'runtime/c/dawn_rt.h': ('100644', b'seed header\n')}
-    for key, prefix in [('std', 'std'), ('runtime', 'runtime/c')]:
-        lock[key] = c.identity(lock['seed']['commit'], c.subtree(seed_files, prefix))
+    _, historical = c.git_files(repo, lock['seed']['commit'])
+    seed_files = {p: value for p, value in historical.items()
+                  if p.startswith(('std/', 'runtime/c/'))}
     receipt = {'schema': 2, 'kind': 'native-bootstrap-inputs',
                'seed_lock_sha256': c.digest(c.canonical(lock)), 'source': source,
                'stages': c.stages(lock, source)}
@@ -81,6 +79,18 @@ def fixture_controls(work):
         header.unlink()
         red('missing seed runtime header', 'runtime-pairing', lambda: select('A'))
         header.write_bytes(seed_files['runtime/c/dawn_rt.h'][1])
+        runtime_file = seed_tree / 'runtime/c/dawn_rt.c'
+        saved_runtime = runtime_file.read_bytes()
+        runtime_file.write_bytes(saved_runtime + b'\n/* Forged fixture runtime. */\n')
+        forged_lock = copy.deepcopy(lock)
+        forged_lock['runtime']['sha256'] = c.inventory_sha(c.inventory(c.scan(seed_tree / 'runtime/c')))
+        forged_receipt = copy.deepcopy(receipt)
+        forged_receipt['seed_lock_sha256'] = c.digest(c.canonical(forged_lock))
+        forged_receipt['stages'] = c.stages(forged_lock, source)
+        red('self-consistent substituted seed runtime', 'runtime-pairing',
+            lambda: recipe.stage_inputs(repo, forged_lock, forged_receipt, captured, seed_tree,
+                                        'A', seed_tree / 'std', seed_tree / 'runtime/c'))
+        runtime_file.write_bytes(saved_runtime)
 
     capture = runpy.run_path(str(ROOT / 'scripts/native-source-tree.py'))['capture']
     script = repo / 'scripts/native-source-tree.py'
