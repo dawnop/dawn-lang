@@ -1,6 +1,49 @@
-# Native 种子、来源查询、配方与冷链合同（D12-2 K1–K3）
+# Native 种子、来源查询、配方与冷链合同（D12-2 K1–K4）
 
-> 状态：**current**。K1 输入合同、K2 来源查询与配方已实现；K3 增加显式冷链执行与审计入口，完整资格仍须逐输入验收。K3 基线为 `8b830d3b`。
+> 状态：**current**。K1–K3 输入、配方与冷链已实现；K4 增加显式负控、事务演练、双链及资格包核验，完整资格仍须逐输入验收。K4 基线为 `2c0ae659`。
+
+## K4：负控、双链与重放设计
+
+真实验收与固定 verifier 夹具分开存放。真实验收消费同一最终提交的两 root 冷链，
+逐项覆盖 Q1–Q10：替换真实 seed、std、target/runtime/source；污染允许区的空目录；
+在边界外放置假对象、旧 seed 和 stamp；注入 std/cache 环境；离线篡改真实 C、info、
+TU 集合、ELF 与 C 执行记录。每项拒绝须匹配指定判词，异常、语法错和崩溃不算。
+边界外诱饵应不可见，环境应被白名单清除，这两项正向控制不能强称为失败。
+Q5 另故意移除观察器拒绝规则，要求控制驱动器仍因漏抓 canary 报红。
+
+种子生命周期仅在新建的隔离目录演练，使用与产品 lock 不同的 rehearsal kind。
+单一 lock 原子替换，内容含活动身份、递增序号、高水位、显式 parent 与历史事件，
+bytes 和 receipt 按摘要保留。推进先核全部内容再 fsync，lock 最后 rename；同目录
+写者串行化，旧 parent 拒绝。提交前后注入异常、SIGTERM、SIGKILL，并重新读取和
+幂等重跑，读者只能得到旧或新完整状态。回滚须记录 from/to/reason 与当前源码
+兼容证据；撤销按身份摘要拒绝，不能通过旧缓存或回滚重新选入。回滚不降低高水位。
+这只是事务资格证明，不把未发布的 B 冒称不可变发布，不放宽 K1 candidate reader，
+也不提供生产推进命令，原因是完整晋级和生产入口仍须 K5/P 审查。
+
+JVM oracle 独立从原 JAR 链产生，使用同一 portable source 与 current std 发射，
+比较 whole C、info、units 和功能语料。native/JVM CLI、错误诊断、standalone、std、
+本地 package 均须一致；路径或入口导致的身份差异须逐项解释，不能用 native B
+生成 JVM 对照。旧 replay-bootstrap 及其配对守卫、双 JDK 发布固定点长期保留，
+资格包记录实际重放与两 JDK 结果、原始命令和产物摘要；历史根按历史边重放，
+不承诺任意旧种子直跳当前源码。资格包绑定冷链、负控、事务 lineage 和对拍摘要，
+独立 verifier 重读证据，不信任 complete 布尔值；摘要仍不替代执行平台的可信性。
+
+不改生产 builder、release/install、默认 seed 或 JVM 三文件协议，因本刀未获生产
+切换授权；不删原 native-fixpoint/native-cli-diff，不把双链同源对拍称为 DDC。
+不改 workflow、steps lock、claim 或每 push 接线；新增日常准备、重复编译、缓存
+准备和覆盖控制均 0 次，新增 push claim 0 秒，符合合计不超过 30 秒的边界。
+重链与真实负控仅显式一次性验收，轻门接线留 K5；不借 prev-diff-native 的预算，
+不做本机计时，资格成本按实际执行次数单列。
+
+K4 显式入口为 `scripts/native-seed-k4-test.py`，命令分别为 `fixtures`、
+`real-controls`、`transactions`、`jvm-chain`、`dual`、`seal`、`verify-package`。
+`--out` 必须指定新证据目录；`seal` 和 `verify-package` 消费其中约定的 `cold/`、
+`real/`、`fixtures/`、`transactions/`、`jvm/` 与 `dual/`。核验重新读实际冷链、
+发射文件、功能 transcript、双 JDK JAR、历史 replay 断言和事务对象图。
+晋级、故障与回滚使用真实 S/B bytes，版本标签明确为模拟值，记录
+`simulated_versions=true`；当前源码 VERSION 仍为 0.104.0，且资格期不发布新 tag，
+所以不能伪造一个真实更高版本来声称完成发布晋级。正常版本单调、回滚高水位、
+撤销再入选均由这个隔离状态机验收；恢复后的真实旧 seed 还须重新发射程序。
 
 ## K3：无 Java 冷启动 runner 设计
 
