@@ -7055,6 +7055,12 @@ fn flash_output_records(arch: String, dir: String) -> Unit !io = {
   }
 }
 
+# A writer isolation probe, outside the golden dispatch. No address or grid
+# ladder introduces i32 or f32 into its constants and arithmetic.
+fn writer_control_f64() -> TileProg = trace_kernel("writer_control_f64", [], () => {
+  let _value = f_const(F64, 1.25) + f_const(F64, -2.5)
+})
+
 # Not a golden, and not one of `trace`'s arms for that reason: the probe
 # run.sh's out-along-twice-accepted mutant records, an Out cut along one
 # grid axis twice, which the clean recording refuses by name.
@@ -7474,6 +7480,13 @@ fn idx_bounds_records(root: String) -> Unit !io = {
 }
 
 pub fn main() -> Unit !io = match args() {
+  ["--writer-control-f64"] -> print(render(writer_control_f64()))
+  ["--writer-control-f64", "--bytecode", path] -> {
+    match with_fs_real(() => write_bytes(path, encode(writer_control_f64()))) {
+      Ok(_) -> ()
+      Err(_e) -> panic("cannot write numeric writer control")
+    }
+  }
   ["--idx-bounds-emit", root] -> idx_bounds_records(root)
   ["--idx-bounds-checks"] -> idx_bounds_checks("all")
   ["--idx-bounds-checks", group] -> idx_bounds_checks(group)

@@ -648,7 +648,23 @@ pub fn golden_gate(run_sh: String, name: String) -> Result[Int, String] =
           Some((b, _c)) -> b
           None -> after
         }
-      if str.contains(block, "writer_mutant_checks ") || str.contains(block, "if [ -n \"\$tileiras\" ]") {
+      let numeric_calls = filter(str.split(block, "\n"), l =>
+          str.starts_with(str.trim(l), "numeric_writer_mutant "))
+      if len(numeric_calls) > 0 {
+        let helpers = str.split(run_sh, "\nnumeric_writer_mutant() {")
+        if len(helpers) != 2 {
+          Err("numeric writer control needs exactly one helper")
+        } else {
+          match str.split_once(helpers[1], "\n}\n") {
+            None -> Err("numeric writer control helper has no closing brace")
+            Some((helper, _rest)) -> {
+              let calls = filter(str.split(helper, "\n"), l =>
+                  str.starts_with(str.trim(l), "writer_mutant_checks "))
+              if len(calls) == 1 { Ok(1) } else { Err("numeric writer control helper needs one writer check") }
+            }
+          }
+        }
+      } else if str.contains(block, "writer_mutant_checks ") || str.contains(block, "if [ -n \"\$tileiras\" ]") {
         Ok(1)
       } else {
         Ok(0)
@@ -1968,6 +1984,9 @@ test "every mutant is placed at the gate its harness proves" {
     assert len(names) == len(list.unique(names))
     let golden = golden_mutants(golden_run)
     assert len(golden) > 0
+    for name in ["i32-tag-as-f32", "i32-payload-two-bytes", "f32-tag-as-tf32", "f32-payload-two-bytes"] {
+      assert golden_gate(golden_run, name) == Ok(1)
+    }
     assert len(filter(ms, m => m.gate < 2)) == len(golden)
     for g in [0, 1, 2] {
       assert len(filter(ms, m => m.gate == g)) > 0
@@ -1997,6 +2016,20 @@ test "the gate rule reads the block, and only the block" {
   assert names_word("x grid-zero y", "grid-zero")
   assert not names_word("x grid-zero-two y", "grid-zero")
   assert not names_word("x big-grid-zero y", "grid-zero")
+}
+
+test "numeric writer controls follow the checked helper at the assembly gate" {
+  let block = "\nif run_item numeric; then\n  numeric_writer_mutant numeric sum same-size error\nfi\n"
+  let helper = "\nnumeric_writer_mutant() {\n  writer_mutant_checks x y z diagnostic\n}\n"
+  assert golden_gate(helper ++ block, "numeric") == Ok(1)
+  let dormant = str.replace(block, "  numeric_writer_mutant ", "  # numeric_writer_mutant ")
+  assert golden_gate(helper ++ dormant, "numeric") == Ok(0)
+  assert golden_gate(block, "numeric") == Err("numeric writer control needs exactly one helper")
+  assert golden_gate(helper ++ helper ++ block, "numeric") == Err("numeric writer control needs exactly one helper")
+  let missing = str.replace(helper, "writer_mutant_checks ", "mutant_run ")
+  assert golden_gate(missing ++ block, "numeric") == Err("numeric writer control helper needs one writer check")
+  let comment = str.replace(helper, "  writer_mutant_checks ", "  # writer_mutant_checks ")
+  assert golden_gate(comment ++ block, "numeric") == Err("numeric writer control helper needs one writer check")
 }
 
 ## Each card counts up to the implemented rows and lists, on pointing, every
