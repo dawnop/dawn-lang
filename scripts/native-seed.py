@@ -108,6 +108,12 @@ def main():
     verify.add_argument('--source', type=Path, required=True)
     verify.add_argument('--seed-tree', type=Path, required=True)
     verify.add_argument('--seed', type=Path, help='native ELF; otherwise DAWN_NATIVE_SEED is required')
+    compile_cmd = sub.add_parser('compile-stage', help='compile with an explicit verified stage recipe')
+    for name in ('repo', 'lock', 'receipt', 'source', 'seed-tree', 'std', 'runtime',
+                 'cc', 'units', 'build-info', 'out', 'recipe-out'):
+        compile_cmd.add_argument('--' + name, type=Path, required=True)
+    compile_cmd.add_argument('--stage', choices=('A', 'B', 'C'), required=True)
+    compile_cmd.add_argument('--jobs', type=int, choices=(1, 2), required=True)
     args = parser.parse_args()
     try:
         if args.command == 'register-v0.104.0':
@@ -116,6 +122,10 @@ def main():
         elif args.command == 'capture':
             capture(args.repo, args.commit, args.out, c.read_lock(args.lock))
             print('OK committed native inputs captured')
+        elif args.command == 'compile-stage':
+            from native_seed.recipe import compile_stage
+            compile_stage(args)
+            print('OK explicit native stage compiled; qualification pending')
         else:
             seed = args.seed or os.environ.get('DAWN_NATIVE_SEED')
             c.require(bool(seed), 'seed-missing', '--seed or DAWN_NATIVE_SEED is required')

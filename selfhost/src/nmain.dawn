@@ -219,7 +219,34 @@ fn is_public_command(cmd: String) -> Bool =
 
 fn is_jvm_command(cmd: String) -> Bool =
   one_of(cmd, ["lock", "lex", "__lex", "__parse", "emit", "emitrt", "__emit",
-    "__emitc", "__check", "__lower", "__marks", "__source-inputs"])
+    "__emitc", "__check", "__lower", "__marks"])
+
+## This query describes sources, including manifests with Java coordinates;
+## it does not load a program or grant native Java compilation capabilities.
+## Both drivers use the Planner's sole v1 producer and diagnostic renderer.
+fn run_source_inputs(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
+  if len(rest) != 3 || rest[0] != "--base" {
+    return cli_error("usage: dawn __source-inputs --base <repo> <project-dir>")
+  }
+  let base = rest[1]
+  let target = rest[2]
+  if not io.exists(target) {
+    return cli_error("no such file or directory: ${target}")
+  }
+  if not io.is_dir(target) {
+    return cli_error("__source-inputs requires a project directory: ${target}")
+  }
+  let plan = source.source_plan(source.ProjectDirectory(target))
+  if len(plan.diags) > 0 { return fail_planner(plan.diags) }
+  match source.bootstrap_source_input_manifest(plan, base) {
+    Ok(text) -> console_print(text)
+    Err(e) -> {
+      console_eprintln("error: ${e}")
+      let _ = io.exit(1)
+      ()
+    }
+  }
+}
 
 fn refuse_jvm(feature: String, cmd: String) -> Unit !Exit !Console !io =
   cli_error(feature ++ " is not supported by the native compiler; use " ++
@@ -1660,6 +1687,8 @@ fn dispatch_argv(argv: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io =
         cachecmd.run_cache(rest)
       } else if mode == "__pkghash" {
         cachecmd.run_pkghash(rest)
+      } else if mode == "__source-inputs" {
+        run_source_inputs(rest)
       } else if mode == "lsp" {
         run_lsp(lsp_std_flag(rest), LspLeaseHost {
           standalone = native_lsp_standalone_lease,
@@ -1746,7 +1775,7 @@ test "public help and command errors finish before asking the host" {
 
 test "native capabilities are refused by name without checking classpath entries" {
   for cmd in ["lock", "lex", "__lex", "__parse", "emit", "emitrt", "__emit",
-    "__emitc", "__check", "__lower", "__marks", "__source-inputs"] {
+    "__emitc", "__check", "__lower", "__marks"] {
     assert cli_read(() => dispatch_argv([cmd]))
       == (Some(2), "error: " ++ cmd ++ " is not supported by the native compiler; " ++
           "use java -jar /path/to/dawn-selfhost.jar " ++ cmd ++ " ...\n", "")
@@ -1759,6 +1788,15 @@ test "native capabilities are refused by name without checking classpath entries
   assert cli_read(() => dispatch_argv(["build", "--target", "jvm"]))
     == (Some(2), "error: --target jvm is not supported by the native compiler; " ++
         "use java -jar /path/to/dawn-selfhost.jar build ...\n", "")
+}
+
+test "source input query stays hidden and validates its own argument shape" {
+  assert not str.contains(usage(), "__source-inputs")
+  for rest in [[], ["--help"], ["--base", "."], ["--std", ".", "."],
+    ["--base", ".", ".", "extra"]] {
+    assert cli_read(() => dispatch_argv(["__source-inputs"] ++ rest))
+      == (Some(2), "error: usage: dawn __source-inputs --base <repo> <project-dir>\n", "")
+  }
 }
 
 test "option values and run program arguments are opaque to the help boundary" {

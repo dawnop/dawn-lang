@@ -1,8 +1,37 @@
-# Native 种子与输入合同（D12-2 K1）
+# Native 种子、来源查询与配方合同（D12-2 K1–K2）
 
-> 状态：**current**。K1 输入合同已实现，完整冷链资格留待后续刀。基线为 `b4865ce7`。
+> 状态：**current**。K1 输入合同与 K2 来源查询、统一配方已实现，完整冷链资格留待后续刀。K2 基线为 `b2555b46`。
 
-## 目标与边界
+## K2：来源查询与统一配方设计
+
+native 增加隐藏的 `__source-inputs --base <repo> <project-dir>`，只接受项目目录，
+与 JVM 入口直接调用同一个 `compiler-plan/source` producer。保留 v1 header、
+记录类型、排序、路径作用域、诊断及退出码；查询不加载 std，不启动 Java。
+不另造包解析器，不复制 launcher，不改 SourcePlan 的来源图和 Maven/MVS 语义。
+查询只描述来源，含 Java 坐标的 manifest 也可查询；这不授予 native 编译 Java 的能力。
+
+旧 portable capture 改为物化保守源码超集，保留 selfhost/compiler-plan/packages 的
+相对布局，复用 K1 的 portable manifest 变换与本地路径核验，拒绝 symlink、
+外部依赖、漏件及特殊文件。资格 capture 继续只读指定 Git commit；既有 native
+测试的 capture 保留读取当前源码的用途，不把它冒称为资格 snapshot。
+
+`cc-units.sh` 增加显式 runtime 目录参数，编译与链接继续使用唯一的 flag 表和
+固定对象顺序；旧调用者保留树内 runtime 默认值。资格配方另要求显式 A/B/C、
+std/runtime 路径、已核输入 receipt 和 C compiler，核对阶段身份后调用此脚本，
+A 配 seed，B/C 配 current，拒绝只换一半。首期只接受 clang 18.1.3 与 x86_64
+GNU target，记录 probe 与实际 argv；版本和 triple 预检不是完整 sysroot 身份证明。
+完整工具链封闭、只读挂载、执行闭包审计与三代运行归 K3，不能由 probe 推导合格。
+
+一次性验收保留原 JVM manifest 合同和 bootstrap guards，增加同输入 JVM/native
+wire bytes 逐字节对照，以及漏件、外链、错 stage/runtime 的明确判词负控。
+native 查询执行单独跟踪 descendant exec，Java 计数必须为零。重型验证不接入
+push，不改 workflow、steps lock 或 claim，新增日常调用预算为 0 s；既有调用
+改为物化目录的额外复制成本如实记录，不能宣称整个 PR 的运行成本为零。
+
+不改生产 builder、release/install 身份协议，不推进默认 seed，因为这些需要后续
+资格与独立生产切换授权；不实现 cold runner，因为本刀只准备其来源与配方接口。
+
+## K1 输入合同
 
 本刀为 Linux x86_64 的隔离资格链建立输入合同：严格读取 seed lock 和输入
 receipt，一次性登记 `v0.104.0` 候选，从指定 Git commit 捕获源码，并定义
@@ -26,7 +55,7 @@ reader 的缺字段兼容。输出到调用者的新目录，最后原子写完�
 拒绝 symlink、gitlink、特殊文件与不安全路径。portable 变换只去掉 selfhost manifest
 的 java-deps 表；不解析包闭包，不复制 resolver。保留本地依赖，拒绝绝对路径、
 逃逸、远端依赖和缺 manifest。compiler-plan 与 inflate 等传递依赖由完整树保留，
-权威 source-inputs producer 在 K2 接入。
+权威 source-inputs producer 已由 K2 接入 native；两端共用原有 v1 producer。
 
 清单按 UTF-8 路径 bytes 排序，使用带域分离与长度 framing 的 SHA-256。每项明确
 路径、类型、存在/缺失、长度、摘要及执行位；对项目 dawn.lock 的缺失也建记录。
@@ -47,8 +76,8 @@ current commit。内嵌 stdsrc/rtsrc 始终来自 current source，不为 A 换�
 撤销身份必须拒用。回滚另有显式 from/to/reason 审核记录，保留历史 bytes；K1
 不实现推进或回滚命令，避免在完整资格验证器出现前提供可以祝圣种子的入口。
 
-不改 JVM 的 seed-release/checksums/std-checksums，不修改现有 portable capture
-或 C recipe 的生产调用：后者的统一入口与 runtime 参数归 K2。不改 release-native、
+不改 JVM 的 seed-release/checksums/std-checksums。K1 没有改旧 portable capture
+或 C recipe；K2 将 capture 物化，并为同一 C recipe 增加 runtime 参数。不改 release-native、
 installer、release workflow 的身份协议，因生产切换另有授权边界。不执行冷链，
 因 K1 只验输入，不能以输入核验替代 K3 的无 Java 与 B/C 证明。不扩平台，不声称 DDC。
 
@@ -65,7 +94,7 @@ std/runtime，并在真实 capture 副本做一次源码变异。失败不得产
 
 ## 已实现的接口与身份
 
-入口为 `python3 -B scripts/native-seed.py`，三个命令均要求显式路径：
+K1 入口为 `python3 -B scripts/native-seed.py`，三个输入命令均要求显式路径：
 
 ```sh
 python3 -B scripts/native-seed.py register-v0.104.0 \
@@ -93,9 +122,9 @@ Git 对象和显式输入，不联网补缺。输出目录必须不存在，不�
 
 reader 只接受 K1 初始候选，不提供序号、资格状态或撤销策略的宽松分支；K4/K5
 接入资格 verifier 后才能增加 qualified 消费。当前 input receipt 没有输出、工具链
-probe 或执行成功字段，因本刀没有执行这些工作；传入 `complete` 或 proof kind
-会被严格拒绝。C triple/sysroot 与固定 recipe 的核验由 K2 接入，不能由 seed target
-推导为已验证。每次 verify 重核 bytes 并用私有副本执行两个身份查询，防止改换
+probe 或执行成功字段；传入 `complete` 或 proof kind 会被严格拒绝。K2 的独立
+compile receipt 记录 C version/triple probe 与固定 recipe；完整 sysroot 身份与
+隔离审计归 K3，不能由 seed target 或相同版本推导。每次 verify 重核 bytes 并用私有副本执行两个身份查询，防止改换
 原始 seed 路径。副本不是编译缓存。
 
 真实候选已核：远端 tag commit 为 `8068f0ba3ffaaabfcf10e103e375da678dbb15b6`，
@@ -109,3 +138,37 @@ probe 或执行成功字段，因本刀没有执行这些工作；传入 `comple
 快验入口为 `python3 -B scripts/native-seed-contract-test.py`。它只创建自己的 Git
 和 ELF 夹具，逐项检查负控拒因，不变异编译器源码。日常门尚未接入，未观测表
 明确登记此边界；未来不得把这份夹具绿灯当成完整资格。
+
+## K2 已实现的接口与验收
+
+```sh
+/prepared/dawnc __source-inputs --base /prepared/source /prepared/source/selfhost
+python3 -B scripts/native-seed.py compile-stage \
+  --repo . --lock scripts/native-seed-candidate-v0.104.0.json \
+  --receipt /prepared/inputs/inputs.json --source /prepared/inputs/source \
+  --seed-tree /prepared/candidate/seed --stage A \
+  --std /prepared/candidate/seed/std --runtime /prepared/candidate/seed/runtime/c \
+  --cc /toolchain/bin/clang --jobs 1 --units /out/A/units \
+  --build-info /out/A/info.c --out /out/A/dawnc --recipe-out /out/A/compile.json
+```
+
+`compile-stage` 必须显式给出所有路径、阶段和并发数。阶段先核输入 receipt、
+当前源码和生成物，再核 std/runtime 路径及树摘要；C 编译前拒绝错配。仅允许
+clang 18.1.3、x86_64 GNU Linux 和并发 1 或 2，通过唯一 `cc-units.sh` 传入
+`--static --inline-rc --runtime`，清除继承的 C flags、include、cache 与 std 环境。
+执行后重核配对、源码、compiler bytes 和静态 ELF，最后写独立 compile receipt，
+记录阶段、输入、recipe、argv、compiler probe 与输出摘要。失败不写成功 receipt。
+此收据不绑定 emitter 的执行，也不证明 C units 的产生过程、完整工具链闭包或冷链。
+
+一次性入口 `scripts/native-seed-k2-test.py --out <new-dir>` 运行 17 项固定负控
+并检查真实 shell 的编译 flag、显式 runtime 和 lexical link order；加
+`--dawnc <binary> --java <java> --jvm-jar <jar>` 后运行八组真实双端对照。
+四组有效输入的 wire bytes 逐字节一致，四组错误输入的完整诊断、退出码与空 stdout
+一致。native 查询的 descendant exec 跟踪中 Java 次数为 0，另有 canary 证明可
+观察到后代 Java 名称执行。该检查只证明查询路径，不冒称整个冷链已无 Java。
+
+旧 live capture 现在复制 selfhost/compiler-plan/packages 的源码与 manifest 保守
+超集，复用 K1 portable 变换，返回 `<capture>/selfhost/src/nmain.dawn`。没有新增
+源码 resolver。原 JVM manifest 合同、bootstrap guards 和生成物义务仍保留。
+本刀无新增 push 调用、workflow、claim 或 steps lock 变更，新增日常控制预算 0 s；
+物化目录替代外链的复制与既有测试成本由现有调用承担，不记作新增控制免费额度。
