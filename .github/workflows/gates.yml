@@ -408,7 +408,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 39263s (the most this file's `3x` claims may add up to)
+# push-total: 39853s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3981,11 +3981,9 @@ jobs:
       - name: site dist, JVM vs native
         run: ./scripts/site-dist-diff.sh
 
-  # The native half of the same comparison, split off because it is the longer
-  # one (172s of prev-diff's 314s on 2026-08-07) and because the two steps in
-  # it are joined to each other and to nothing else: the differential reuses
-  # the binary the release step built. Since the 2026-08-10 redistribution it
-  # is the critical path: 484s, and nothing in it can be moved elsewhere.
+  # Native consumers use a complete verified release artifact in each job.
+  # Independent whole contracts overlap without splitting a cold build,
+  # written oracle, framed session or recovery sequence.
   prev-diff-native:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'prev-diff-native') }}
@@ -4054,8 +4052,14 @@ jobs:
     # route as the control): about 5s measured locally, charged at 20s.
     # Planning value: 880 + 20 = 900s; 3 x 900s is the 45 minutes the timeout
     # already is. The push total moves by 20s.
-    # budget: 3x 900s worst observed plus one deviation, the web check and the web exchange contract (run 38634588917)
-    timeout-minutes: 45
+    # Two complete release preparations replace the former combined job.
+    # This role overlaps the complete std and web exchange contracts. The
+    # seven-day model retains the 173s terminal tail. Three complete execution
+    # pairs qualify the protocol; original/rerun, image and input groups stay
+    # separate. A 1s measured fixed control is included in this role's claim.
+    # Retained P95/max 626s, margin 62.600000s across 4 target successes.
+    # budget: 3x 690s observed bound for complete native contracts
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
@@ -4070,6 +4074,9 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           build: 'false'
 
+      - name: complete parallel results and recovery controls
+        run: python3 scripts/native-cli-contract/parallel_test.py
+
       # K-B7: the executable a release publishes, built and checked by the
       # same script release.yml runs. A step that only runs on tags is the
       # least-executed code in the repo; this is what keeps it honest, and it
@@ -4077,20 +4084,6 @@ jobs:
       # differential below reuses the binary instead of building a second one.
       - name: the native release artifact
         run: ./scripts/release-native.sh -o dawnc-linux-x86_64
-
-      # The same transcripts on the other backend (K-B2, extended by K-B3).
-      # Every step in prev-diff runs ./bin/dawn, which is the JVM toolchain and
-      # only that — the differentials read as "the CLI is checked" and checked
-      # one backend. This holds fmt/doc/add to the JVM's bytes, re-runs the
-      # formatter *and language server* differentials with the native binary as
-      # the toolchain under test, and checks that both servers answer a client
-      # that has not closed the connection.
-      #
-      # DAWNC_BIN points it at the artifact above rather than letting it build
-      # its own: the binary these eight legs exercise is then literally the one
-      # a tag would publish, not one built beside it with the same recipe.
-      - name: driver subcommands on the native backend
-        run: DAWNC_BIN=dawnc-linux-x86_64 ./scripts/native-cli-diff.sh
 
       # packages/web is pure Dawn since 7.0 and the JDK server is the separate
       # packages/web-jvm, so the native binary checks and documents the whole
@@ -4102,30 +4095,35 @@ jobs:
       - name: packages/web checks and documents natively as a whole
         run: ./scripts/native-web-core.sh dawnc-linux-x86_64
 
-      # packages/web has two servers: web_jvm/server (jdk.httpserver, which parses
-      # the wire before any Dawn runs) and web/exchange (one request per process,
-      # which the native backend builds). They are meant to answer every request
-      # the same, and two programs drift. This sends one set of raw requests to
-      # both, a JVM jar and the binary this job just built, and compares the
-      # responses byte for byte after the differences that are the JDK's own
-      # (listed in contract.py). Four negative controls break the adapter on a
-      # copy (no chunked decoding, HEAD writes its body, no dot-segment check, no
-      # guard) and require the contract to go red on the fixture for that rule.
-      # 41s locally, charged at 90s above. A 256 MiB upload through a stream-body
-      # route is also held to a peak resident set under 32 MiB, counted and
-      # chunked, against a route that holds the same body (over 200 MiB) as the
-      # control: 20s charged above.
-      - name: web_jvm/server and web/exchange answer the same bytes
-        run: ./scripts/web-exchange-contract/run.sh dawnc-linux-x86_64
+      # Both harnesses run in full on this verified artifact. The std speed
+      # and planted controls finish before the web contract overlaps its corpus.
+      - name: complete std and web exchange contracts
+        run: DAWNC_BIN=dawnc-linux-x86_64 ./scripts/std-prune-diff.sh --with-web-exchange
 
-      # `check`, `emitc`, `build`, `run` and a program's `test` load only the
-      # std modules the program reaches (docs/check-std-prune-design.md). This
-      # holds that to its claim, on the binary a release would publish: for
-      # every unit of the checker corpus, examples, Playground samples and
-      # packages, the pruned load and `--std std` (the full one) agree byte for
-      # byte on diagnostics and on emitted C.
-      - name: pruned std load against the full one
-        run: DAWNC_BIN=dawnc-linux-x86_64 ./scripts/std-prune-diff.sh
+  prev-diff-native-2:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'prev-diff-native-2') }}
+    runs-on: ubuntu-24.04
+    # A second complete release preparation includes both fresh links, A == B,
+    # manifest readers, cold installation and all installation failures.
+    # Formatter and framing remain complete contracts in independent windows.
+    # Retained P95/max 682s, margin 115.078234s across 4 target successes.
+    # budget: 3x 800s observed bound for complete native contracts
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          build: 'false'
+      - name: the native release artifact
+        run: ./scripts/release-native.sh -o dawnc-linux-x86_64
+      - name: driver subcommands on the native backend
+        run: DAWNC_BIN=dawnc-linux-x86_64 ./scripts/native-cli-diff.sh --parallel
 
   # `dawn test selfhost`, on the other backend.
   #
