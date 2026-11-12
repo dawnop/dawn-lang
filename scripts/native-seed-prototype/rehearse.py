@@ -61,6 +61,9 @@ def produce(qualification, destination):
                               'sha256': c.digest((qualification / 'jvm/jdk-21.jar').read_bytes()),
                               'commit': value['source_commit'],
                               'jdk_equivalence_sha256': value['components']['jvm']}}
+    # Bind all role identities without hashing metadata's proof reference back into the proof.
+    proof['identities_sha256'] = c.digest(c.canonical({key: item for key, item in info.items() if key != 'proof'}))
+    info['proof']['sha256'] = c.digest(c.canonical(proof))
     identity.metadata(info, 'v' + version, native_required=True)
     destination = cold.new_directory(destination)
     for name, source in ((c.ASSET, b), ('dawn-selfhost.jar', qualification / 'jvm/jdk-21.jar'),
@@ -157,6 +160,16 @@ def rehearse(qualification, destination):
         c.require(target.read_bytes() == old, 'prototype-install', 'failed install changed the old binary')
     metadata_path.write_bytes(original[:-2] + b',"schema":2}\n')
     rows.append(q.refused('duplicate-json-key', 'schema', lambda: installer.install(staging, prefix, tag)))
+    metadata_path.write_bytes(original)
+    for name, mutate in (
+            ('substituted-seed-digest', lambda x: x['bootstrap']['seed'].update(sha256='0' * 64)),
+            ('substituted-parent-digest', lambda x: x['bootstrap'].update(parent_receipt_sha256='0' * 64)),
+            ('substituted-builder-digest', lambda x: x['builder'].update(sha256='0' * 64)),
+            ('substituted-recipe-digest', lambda x: x['recipe'].update(recipe_sha256='0' * 64))):
+        changed = copy.deepcopy(info)
+        mutate(changed)
+        metadata_path.write_bytes(c.canonical(changed))
+        rows.append(q.refused(name, 'prototype-proof', lambda: identity.aggregate(staging, tag)))
     metadata_path.write_bytes(original)
     for name in (c.ASSET, c.ASSET + '.sha256'):
         path = staging / name

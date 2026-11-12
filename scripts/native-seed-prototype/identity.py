@@ -93,11 +93,13 @@ def aggregate(directory, tag):
     value = metadata(c.read_json(directory / 'dawn-toolchain.json'), tag, native_required=True)
     payload(directory, value)
     proof = c.read_json(directory / 'native-bootstrap.json')
-    c.fields(proof, 'schema kind prototype_only source_commit qualification_sha256 cold_sha256 builder_sha256 native_sha256', 'proof')
+    c.fields(proof, 'schema kind prototype_only source_commit qualification_sha256 cold_sha256 builder_sha256 native_sha256 identities_sha256', 'proof')
     c.require(proof['schema'] == 2 and proof['kind'] == 'native-bootstrap-prototype' and
               proof['prototype_only'] is True and proof['source_commit'] == value['release']['commit'] and
               proof['builder_sha256'] == value['builder']['sha256'] and
               proof['native_sha256'] == value['native']['sha256'] and
+              proof['identities_sha256'] == c.digest(c.canonical({key: item for key, item in value.items()
+                                                                if key != 'proof'})) and
               c.digest(c.regular_bytes(directory / 'native-bootstrap.json')) == value['proof']['sha256'],
               'prototype-proof', 'proof identity differs')
     for name in ('qualification_sha256', 'cold_sha256', 'builder_sha256', 'native_sha256'):
