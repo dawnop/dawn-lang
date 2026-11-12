@@ -42,7 +42,6 @@ use tileir/prog.{TileOp, TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, 
   Whole, Scalar, trace_calls, erase, Convert, MmaFScaled, MakeToken, IdxConst, IdxMul, CellViewOf, Load }
 use tileir/render.{render, text_debug}
 use tileir/bytecode.{encode, bytecode_version}
-use tileir/asm.{tileiras_args}
 
 # f64 vector add over 128-wide tiles: the first milestone's kernel
 # (tile-backend-design 1), and the shape std/gpu's vadd_ref answers for.
@@ -7479,7 +7478,26 @@ fn idx_bounds_records(root: String) -> Unit !io = {
   }
 }
 
+# A partial view keeps the inbounds field observable after the compiler
+# learns that a divisible static view needs no edge masking. The promised
+# version is valid for a 3 by 2 grid of full tiles, leaving 31 rows untouched.
+# This probe is separate from the ordinary trace and golden dispatchers.
+fn inbounds_witness(promise: Bool) -> TileProg = {
+  let (p, _e) = trace2("inbounds_witness", In(F64, Whole), Shared(F64), (x, out) =>
+      view_inbounds_copy(x, out, VI_ROWS - 1, if promise { [true, true] } else { [] }))
+  p
+}
+
 pub fn main() -> Unit !io = match args() {
+  ["--inbounds-witness", promised, path] -> {
+    if promised != "true" && promised != "false" { panic("inbounds witness expects true or false") }
+    let p = inbounds_witness(promised == "true")
+    println(render(p))
+    match with_fs_real(() => write_bytes(path, encode(p))) {
+      Ok(_) -> ()
+      Err(_e) -> panic("tile-golden: cannot write the inbounds witness to `${path}`")
+    }
+  }
   ["--writer-control-f64"] -> print(render(writer_control_f64()))
   ["--writer-control-f64", "--bytecode", path] -> {
     match with_fs_real(() => write_bytes(path, encode(writer_control_f64()))) {
@@ -7555,16 +7573,7 @@ pub fn main() -> Unit !io = match args() {
       Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")
     }
   }
-  all -> if len(all) >= 3 && all[0] == "--asm-args" {
-    # `--asm-args <tileiras version> <gpu-name> <kernel>...`: one line per
-    # kernel, `<kernel> <comma-joined tileiras arguments>`, as packages/tileir's
-    # asm.tileiras_args answers for the kernel's recorded program (it looks at
-    # the program, since only a loop that breaks gets --opt-level 0). The
-    # ledger script (scripts/tile-gpu-diff) assembles every golden with these.
-    for k in list.drop(all, 3) {
-      println("${k} ${join(tileiras_args(all[1], all[2], trace(k)), ",")}")
-    }
-  } else {
+  _ -> {
     panic("usage: kernels <vadd|vadd_producer|vadd_debug|foldif_debug|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops"
         ++ "|reduce_sum|softmax|dot|mse|monte_carlo|rms_norm|silu|sigmoid|ppo_loss|dpo_loss|mathops|foldif|argmax"
         ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"

@@ -34,10 +34,7 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 cc_bin="${CC:-cc}"
 
-# The asm arguments are packages/tileir's asm.tileiras_args. None of these
-# kernels has a loop that breaks, so on every target they are the plain ones
-# (--opt-level 0 only goes to a program with such a loop, #558), and the
-# default level is what this bench should time.
+# The pinned 13.5.37 compiler uses default O3 for every program.
 asm=(--gpu-name "$gpu_name")
 
 mkdir -p "$work/k/src" "$work/b/src"

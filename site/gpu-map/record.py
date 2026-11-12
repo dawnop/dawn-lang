@@ -80,9 +80,7 @@ EDITS = [
     ("use tileir/bytecode.{encode, bytecode_version}\n", "\n", 1),
     ("use std/io.{with_fs_real, write_bytes, write_file}\n", "\n", 1),
     ("use std/bytes.{to_hex}\n", "\n", 1),
-    # the `--asm-args` mode of main (scripts/tile-gpu-diff) needs it; the cut
-    # below removes that main
-    ("use tileir/asm.{tileiras_args}\n", "\n", 1),
+
 ]
 
 MAIN = '''

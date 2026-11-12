@@ -113,8 +113,7 @@ The existing separate steps remain available with that same binary:
 ./gpu_fake real vadd.cubin
 ```
 
-These plain assembler flags are sufficient for this straight-line `vadd`.
-For other kernels, use `tileir/asm.tileiras_args` as explained below.
+固定的 13.5.37 对所有 kernel 使用默认 O3，包括含 `break` 的循环。
 On the JVM (`./bin/dawn run examples/projects/gpu_fake -- fake`), fake needs
 neither GPU nor assembler. The real paths require the native build:
 `with_gpu_real` reports `gpu.unsupported_backend` on the JVM and
@@ -143,7 +142,7 @@ let bytes = encode(prog)    # bytecode for tileiras
 | `lower` | `lower(prog)`, the linear instruction table |
 | `render` | `render(prog)`, the `cuda_tile` text; `line_map` |
 | `bytecode` | `encode(prog)`; `bytecode_version()` is `"13.4"` |
-| `asm` | `assemble`, `tileiras_args(version, gpu_name, prog)`, `assembler_defect(version, gpu_name, prog)`, `has_break_loop(prog)`: how to call `tileiras` (see below) |
+| `asm` | `assemble`, `AssembleError`, `explain`: 调用固定的 13.5.37 汇编器（见下文） |
 
 The full public surface is what `./bin/dawn doc packages/tileir` prints.
 [OPERATIONS.md](OPERATIONS.md) says which `cuda_tile` operation each function
@@ -472,21 +471,19 @@ fn assemble_run(prog: TileProg, e: Entry3[Float, Float, Float], gpu_name: String
   }
 ```
 
-It returns `Result[Bytes, AssembleError]` and takes the `Fs` and `Proc`
-effects, so a test answers both without an assembler. The failures are told
-apart: `AssemblerNotFound` (nothing could start `tileiras`), `AssemblerFailed`
-(a non-zero exit, with the arguments and what it printed on stderr),
-`NoCubin` (a zero exit and no output), `UnknownVersion` (a `--version` without
-one complete, unambiguous standard version record) and `Scratch` (the host
-refused a temporary file). Nothing is cached; an assembly takes well under a second.
+返回值为 `Result[Bytes, AssembleError]`，使用 `Fs` 与 `Proc` 效果，测试可分别提供
+这两项效果而不启动真实汇编器。错误逐步区分：`AssemblerNotFound` 表示无法启动工具，
+`AssemblerFailed` 保留非零退出状态、参数与 stderr，`NoCubin` 表示零退出但没有输出，
+`UnknownVersion` 表示没有唯一完整的标准版本记录，`UnsupportedVersion` 表示完整记录
+指向不受支持的版本，`Scratch` 表示临时目录操作失败。此 API 不缓存汇编产物。
 
 The version record is `Cuda compilation tools, release M.m, VM.m.p`, with
 ASCII decimal components and no leading zeros except `0`. The release must
 agree with the full version. Surrounding whitespace, LF and CRLF are accepted;
 incomplete versions, suffixes and duplicate records are rejected before the
 assembly subprocess starts. `UnknownVersion` retains the original stdout.
-Other complete versions keep the existing argument policy. A new vendor
-format needs an explicit contract and fixture before it is accepted.
+完整记录若不是固定的 13.5.37，则以 `UnsupportedVersion` 在启动汇编前拒绝。
+新工具版本和新的版本输出格式都须先有明确合同与夹具，再纳入支持。
 
 Where to get `tileiras`: it is in the CUDA Toolkit 13.4 and later
 (`<toolkit>/bin/tileiras`), and on PyPI as `nvidia-cuda-tileiras`, which needs
@@ -495,34 +492,20 @@ Where to get `tileiras`: it is in the CUDA Toolkit 13.4 and later
 repository pins from those wheels and prints the binary's path. It needs no
 GPU and no driver.
 
-### Why the arguments are not always the plain ones (#558)
+### 固定 13.5.37 与默认 O3（#558）
 
-**With tileiras 13.4.92, a program that has a `loop` which `break`s needs
-`--opt-level 0` when it is assembled for sm_90, sm_100, sm_103, sm_107 or
-sm_110.** At the default level that assembler stores a wrong loop exit value
-for a loop that leaves through `break` with two carried values
-([#558](https://github.com/dawnop/dawn-lang/issues/558),
-[NVIDIA/cuda-tile#25](https://github.com/NVIDIA/cuda-tile/issues/25)). Any
-other program, other targets and other tileiras versions keep the default
-level, which is what makes a `for`-loop kernel such as flash attention fast.
-`assemble` applies this itself; a build script that runs `tileiras` on its own
-asks `asm` rather than hard-coding it, so the workaround lifts when you move
-to a fixed tileiras:
+本仓库支持的离线工具链为 **13.5.37**，写端仍为 **13.4** 字节码。原安装器逐一验证三个
+官方 wheel 的 SHA-256、包版本及工具版本；升级不重录文本或字节 golden。
 
-```dawn
-use tileir/asm.{tileiras_args, assembler_defect, has_break_loop}
+13.4.92 在部分目标上会错编含 `break` 的循环
+（[#558](https://github.com/dawnop/dawn-lang/issues/558)、
+[NVIDIA/cuda-tile#25](https://github.com/NVIDIA/cuda-tile/issues/25)）。13.5.37 已修复该问题，
+`assemble` 与设备录制都使用 `--gpu-name <target>` 和默认 O3。旧 pin 不再支持，已删除旧版
+绕行和 `tileiras_args`、`assembler_defect`、`has_break_loop` 接口；不保留兼容包装。
+`assemble` 的完整、唯一、规范版本记录识别保持严格，格式错误在启动汇编之前拒绝。
 
-let args = tileiras_args("13.4.92", "sm_90", prog)   # a loop that breaks: ["--gpu-name", "sm_90", "--opt-level", "0"]
-                                                     # any other program: ["--gpu-name", "sm_90"]
-let why = assembler_defect("13.4.92", "sm_90", prog) # Some("tileiras 13.4.92 miscompiles ...") or None
-# then: tileiras <args> -o kernel.cubin kernel.tilebc
-```
-
-`has_break_loop` looks for a `loop` with a `break` at any depth, which is
-wider than the four conditions the issue minimised, on purpose. `-O0` costs
-device time: measured on sm_86, up to 4.5x for kernels that compute and 8x
-for a small loop (§6.28); on sm_90 and sm_100 a flash-attention kernel took 35x
-to 57x of its `-O3` time (bf16), which is why only the programs at risk pay.
+其他已知问题与当前消费者边界见设计文档 §6.0；#558 的修复不保证所有 loop/load 或 TF32
+程序正确。历史性能测量仍只适用于其标注的工具版本。
 
 ## Writing your own `Dev` handler
 

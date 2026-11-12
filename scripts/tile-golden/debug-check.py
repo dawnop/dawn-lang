@@ -15,8 +15,16 @@ because the verdicts need real parsing and not a diff.
       per line. With the .mlir, every one of them must be the line of an
       instruction (or the entry) in it. The DWARF line program is decoded
       here rather than with readelf, whose layout differs between binutils
-      releases; tileiras writes version 2, and only the opcodes it uses are
+      releases; the pinned tileiras writes version 3, and only the opcodes it uses are
       handled (anything else is an error and not a silent skip).
+
+  debug-check.py selftest
+      A prologue marker must preserve the line rows; an unhandled opcode
+      must still be refused.
+
+  debug-check.py synthetic <cubin> <kernel>.mlir
+      Without input Debug metadata, 13.5 emits only <unknown>:1. Require
+      that exact synthetic source and reject any leaked original filename.
 """
 import re
 import struct
@@ -142,12 +150,34 @@ def line_rows(sec):
                 line += d
             elif op in (4, 5, 9):
                 _, q = uleb(sec, q) if op != 9 else (None, q + 2)
-            elif op in (6, 7, 8):
+            elif op in (6, 7, 8, 10):
+                # 10 is DW_LNS_set_prologue_end: no operands, and only a
+                # flag changes. This reader observes line numbers, not the
+                # statement, basic-block, address or prologue-end state.
                 pass
             else:
                 sys.exit(f"debug-check: standard opcode {op} is not handled")
         p = end
     return rows
+
+
+def selftest():
+    def program(code):
+        # DWARF 3, one-byte instructions, line base -5 and opcode base 13.
+        header = struct.pack("<BBbBB", 1, 1, -5, 14, 13) + bytes(12) + b"\0\0"
+        body = struct.pack("<HI", 3, len(header)) + header + code
+        return struct.pack("<I", len(body)) + body
+
+    ordinary = b"\x03\x05\x01\x03\x02\x01"  # rows 6, 8
+    marked = b"\x0a\x03\x05\x0a\x01\x0a\x03\x02\x01\x0a"
+    assert line_rows(program(ordinary)) == line_rows(program(marked)) == [6, 8]
+    try:
+        line_rows(program(b"\x0b"))
+    except SystemExit as error:
+        assert str(error) == "debug-check: standard opcode 11 is not handled"
+    else:
+        raise AssertionError("an unhandled opcode was silently ignored")
+    print("PASS debug line reader: prologue markers preserve rows; unhandled opcodes are refused")
 
 
 def cmd_lines(cubin, mlir=None):
@@ -163,11 +193,44 @@ def cmd_lines(cubin, mlir=None):
         print(l)
 
 
+def cmd_synthetic(cubin, mlir):
+    data = open(cubin, "rb").read()
+    sec = section(data, ".debug_line")
+    if not sec or sorted(set(line_rows(sec))) != [1]:
+        sys.exit("debug-check: expected only synthetic line 1 without Debug metadata")
+    files = []
+    p = 0
+    while p < len(sec):
+        unit_len, version, hdr_len = struct.unpack_from("<IHI", sec, p)
+        q = p + 11 + (version >= 4)  # minimum instruction length, then v4's maximum operations
+        opcode_base = sec[q + 3]
+        q += 4 + opcode_base - 1
+        while sec[q]:  # include directories
+            q = sec.index(b"\0", q) + 1
+        q += 1
+        while sec[q]:
+            end = sec.index(b"\0", q)
+            files.append(sec[q:end].decode())
+            q = end + 1
+            for _ in range(3):  # directory, modification time, size
+                _, q = uleb(sec, q)
+        if q + 1 != p + 10 + hdr_len:
+            sys.exit("debug-check: unexpected synthetic line-table header")
+        p += 4 + unit_len
+    if files != ["<unknown>"] or mlir.rsplit("/", 1)[-1].encode() in data:
+        sys.exit("debug-check: synthetic source must be <unknown>, with no original filename")
+    print("synthetic <unknown>:1 only; original source filename absent")
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if len(a) == 3 and a[0] == "locs":
         cmd_locs(a[1], a[2])
     elif a[:1] == ["lines"] and len(a) in (2, 3):
         cmd_lines(*a[1:])
+    elif a == ["selftest"]:
+        selftest()
+    elif len(a) == 3 and a[0] == "synthetic":
+        cmd_synthetic(a[1], a[2])
     else:
         sys.exit(__doc__)

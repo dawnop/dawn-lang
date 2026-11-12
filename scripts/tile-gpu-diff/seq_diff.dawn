@@ -1666,18 +1666,83 @@ fn reversed(steps: List[Step]) -> List[Step] =
 
 fn dropped_last(steps: List[Step]) -> List[Step] = list.take(steps, len(steps) - 1)
 
+# Keep this numerical probe inside the original valid launch domain. A
+# larger grid can exceed a view's tile index space and poison the context,
+# so only copying too few blocks is a defined wrong-grid witness.
+fn grid_bound(copied: Int, original: Int) -> Int = if copied < original { copied } else { original }
+
 fn first_grid(steps: List[Step]) -> List[Step] =
   if len(steps) == 0 {
     steps
   } else {
     let g = steps[0]
-    list.map(steps, s => Step { ..s, gx = g.gx, gy = g.gy, gz = g.gz })
+    list.map(steps, s => Step { ..s,
+      gx = grid_bound(g.gx, s.gx), gy = grid_bound(g.gy, s.gy), gz = grid_bound(g.gz, s.gz) })
   }
+
+fn numerical_verdict(v: String) -> Bool =
+  list.contains(["identical:exact", "identical:tolerance", "close:tolerance", "differ:result"], v)
 
 ## The names, in the order run.sh reads them.
 pub fn mutants() -> List[String] =
   ["second-launch-sees-stale-buffer", "launch-order-swapped", "last-launch-dropped",
     "grid-of-later-launch-copied-from-the-first"]
+
+# cce_mean has one valid view tile. Copying cce_row's grid of 64 blocks
+# exceeds that index space; padding does not define those extra tiles.
+# Exclude this UB case from execution and from both red and green counts.
+fn defined_mutants(sequence: String) -> List[String] =
+  list.filter(mutants(), m => not (sequence == "cce" && m == "grid-of-later-launch-copied-from-the-first"))
+
+fn probe_selection_selftest() -> Unit !io = {
+  let seqs = sequences()
+  var count = 0
+  var excluded: List[String] = []
+  var clipped = 0
+  for s in seqs {
+    let selected = defined_mutants(s.name)
+    let expected = if s.name == "cce" { list.take(mutants(), 3) } else { mutants() }
+    if selected != expected { panic("sequence probe selection changed an unrelated pair") }
+    count = count + len(selected)
+    for m in mutants() {
+      if not list.contains(selected, m) { excluded = excluded ++ [m ++ ":" ++ s.name] }
+    }
+    let bounded = first_grid(s.steps)
+    if len(bounded) != len(s.steps) || bounded[0] != s.steps[0] {
+      panic("grid probe changed the first launch or the step count")
+    }
+    for i in range(0, len(bounded)) {
+      let old = s.steps[i]
+      let b = bounded[i]
+      if b.gx < 1 || b.gx > old.gx || b.gy < 1 || b.gy > old.gy || b.gz < 1 || b.gz > old.gz {
+        panic("grid probe must stay within the original valid launch domain")
+      }
+      let first = s.steps[0]
+      if first.gx > old.gx || first.gy > old.gy || first.gz > old.gz { clipped = clipped + 1 }
+    }
+  }
+  let cce = cce_seq()
+  if len(seqs) != 27 || count != 107 || excluded != ["grid-of-later-launch-copied-from-the-first:cce"] {
+    panic("sequence probe selection must exclude exactly the cce grid UB pair")
+  }
+  if len(cce.steps) != 2 || cce.steps[0].kernel != "cce_row" || cce.steps[0].gx != 64
+    || cce.steps[1].kernel != "cce_mean" || cce.steps[1].gx != 1 || len(cce.bufs[3].data) != 1 {
+    panic("cce grid UB classification no longer matches the corpus geometry")
+  }
+  let gpt = first_grid(gpt2_seq().steps)
+  if clipped == 0 || gpt[0].gx != 64 || gpt[1].gx != 1 || gpt[1].gy != 1 || gpt[1].gz != 1 {
+    panic("grid probe lost the bounded GPT-2 QKV witness")
+  }
+  if numerical_verdict("blocked:cuda.CUDA_ERROR_ILLEGAL_ADDRESS@launch")
+    || numerical_verdict("blocked:gpu.unsupported_backend@alloc") || numerical_verdict("") {
+    panic("a blocked probe is not a numerical witness")
+  }
+  for v in ["identical:exact", "identical:tolerance", "close:tolerance", "differ:result"] {
+    if not numerical_verdict(v) { panic("a numerical verdict was refused") }
+  }
+  io.println("probe selection defined=107 excluded=grid-of-later-launch-copied-from-the-first:cce")
+  io.println("probe grid-domain bounded sequences=27 clipped_steps=${clipped}")
+}
 
 fn mutated(name: String, s: Seq) -> Seq =
   if name == "launch-order-swapped" {
@@ -1805,6 +1870,10 @@ fn usage() -> Unit !Exit !io = {
 # frame with nothing above it. `Fs` stays where it was, installed per read.
 pub fn main() -> Unit !io = io.with_exit_real(() => {
   let argv = args()
+  if argv == ["--probe-selection-selftest"] {
+    probe_selection_selftest()
+    io.exit(0)
+  }
   let names = cubin_names()
   if len(argv) != len(names) { usage() } else { () }
   var cubins: Map[String, Bytes] = map.empty()
@@ -1886,14 +1955,20 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     let trip = run_real(cubins, s, s.stale_at, "", s.via)
     io.println("control intermediate-round-tripped sequence=${s.name} verdict ${verdict(s.tier, tol, fake, trip)}")
 
-    # The mutants, all of them against the honest fake side.
-    for m in mutants() {
+    # Every defined probe is judged against the honest fake side. Never
+    # execute the known out-of-view CCE launch as a numerical witness.
+    if s.name == "cce" { io.println("probe excluded-ub grid-of-later-launch-copied-from-the-first:cce") }
+    for m in defined_mutants(s.name) {
       let broken = mutated(m, s)
       let at = if is_stale(m) { s.stale_at } else { 0 - 1 }
       let reset = if is_stale(m) { s.via } else { "" }
       let got = run_real(cubins, broken, at, reset, "")
       let mv = verdict(s.tier, tol, fake, got)
       io.println("mutant ${m} sequence=${s.name} verdict ${mv}")
+      if not numerical_verdict(mv) {
+        io.println("FAIL: sequence probe ${m}:${s.name} did not reach a numerical verdict")
+        io.exit(1)
+      }
       if mv == "differ:result" {
         let sep = if reds == "" { "" } else { " " }
         reds = reds ++ sep ++ m ++ ":" ++ s.name

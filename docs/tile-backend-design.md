@@ -920,6 +920,86 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 
 ## 6. 工具链与 CI
 
+### 6.0 CUDA 13.5 工具资格与 13.4 写端（G12-4）
+
+本次只切换离线工具：`tileiras`、`ptxas` 与 `libnvvm` 固定官方 **13.5.37**
+组件和逐 wheel SHA-256，仍由原安装器验证缓存、包版本与工具版本。写端继续输出完整合法的
+**13.4** 字节码，现有文本、字节与 debug golden 不重录。13.5 函数段需要新的 flags/Form、
+必写 hints、`arg_attrs`，debug 与 atomic 也有布局变化；只把 minor 改为 5 不是格式迁移。
+没有消费者就不引入 13.5 编码、foreign call、multimem、Ada 新取值或 atomic 扩展。
+
+13.4.92 的 #558 绕行只属于那个精确版本。13.5.37 修复后使用默认 O3，包括含 `break`
+的 `loop`；本仓库不再支持旧 pin，删除旧缺陷分支、结构探测及其公开参数策略接口，不留下
+兼容包装，tileir 因删除公开接口推进至 0.30.0。`assemble` 保留严格的唯一完整版本记录识别，
+不接受前缀、后缀、别名或重复记录；完整记录若不是 13.5.37，明确以 `UnsupportedVersion`
+拒绝，旧版不会进入未保护的 O3 路径。设备资格须包含同一最小反例的 O3 结果，不能只依据上游
+issue 状态撤保护。历史 §6.28 的 13.4 测量仍只描述旧版。
+
+资格使用原完整 golden/负控和完整设备 harness，原容差不变。逐项审计 warning、拒绝判词、
+归约和 MMA 的版本差异；合法正例出现无法归因的数值差异即停止升级。`cce` 的非法 grid
+负控越出 partition view 的 tile 索引空间，属于 UB，其跨版本红灯数量不构成语言保证。
+该 `(grid mutant, cce)` 对在设备执行前排除，既不计红也不计绿；其余 107 对与原 84 个具名
+红项保持原判词。固定选择器自检核对唯一排除项及 CCE 的 64→1 grid/单 lane 输出几何，
+完整 harness 另核实际执行 107 对与唯一 UB 排除标记，不能把 85 固化为新保证。
+完整本机复查还发现旧网格变异的另一个问题：GPT-2 首步为 64×1×1，直接复用到只允许
+1×6×1 的 QKV view 会越出 tile 索引域。13.5 的该变异触发非法地址，污染同进程后续
+序列；后面的 blocked 既不是正例通过，也不是数值负控成功。网格复制探针现在逐轴以该步
+原合法 grid 为上界，保留少启动的错误，禁止凭越界充当数值见证。原 CCE 对继续排除。
+选择器自检同时检查全部 27 个序列的变异 grid 为原 grid 的非空子集、首步不变和 GPT-2
+的 1×1×1 QKV 子域；设备判词若 blocked 则立即失败，不能污染后续再计红/绿。
+最终同一 inputs 的三本完整设备账分别录制；架构不足项仍明确 skip。当前执行路径是精确
+目标架构的 AOT cubin，不引入 runtime JIT、compat 包或驱动升级；在用功能若要求 R620，
+停止升级。官方 [minor compatibility 限制](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)
+不能替代实际装载与数值验证。
+
+13.5 会利用静态 view 尺寸的整除性：原 `view_inbounds` 的 128×64 矩阵与 32×32 tile，
+即使不写承诺也不再需要边缘掩码，所以它与 `view_inbounds_off` 的设备代码可以相同。
+这不是承诺字段失效，也不是数值差异。原三份 golden 与设备正例保持不变；承诺的代码生成
+见证改用独立的 127×64 view，仍为 32×32 tile。承诺版本只允许启动 3×2 个完整 tile，
+不承诺覆盖最后 31 行；普通版本必须能够处理边缘 tile。两版共享同一个入口名，仅承诺字段
+不同，JVM/native 文本与 bytes 各自一致。既有 `view-inbounds-promise-dropped` 变异必须把
+承诺版 bytes 和设备代码变成普通版，且承诺版与普通版代码确实不同；不能只删旧断言。
+此探针使用独立入口，不进入普通 trace/golden 清单，也不改变设备测试的输入或容差。
+
+13.5 的 `--lineinfo` 还会发出 DWARF 标准指令 `DW_LNS_set_prologue_end`（opcode 10）。
+它无操作数，只改变序言结束标志，不改变行号；依据
+[DWARF 5 §6.2.5.2](https://dwarfstd.org/doc/DWARF5.pdf)，行号读取器显式处理该指令。
+两份 `.disasm`、`.lines` 与文本/字节 golden 均不改，仍检查每个行号属于原文本中的指令。
+固定 fixture 证明序言标记不增删行，未实现的 opcode 仍拒绝；不引入忽略未知指令的回退。
+13.5 的 `--lineinfo` 在无 Debug 输入时也生成调试外壳：仅 `<unknown>:1`，设备代码不变。
+因此裸模块不再要求整份 ELF 相同，而是严格要求设备代码相同、文件表只有 `<unknown>`、
+行号集合恰为 `{1}`，且原始源码文件名不存在；真实源位置不能通过该合成位置判词。
+
+`view-inbounds-all-true` 的原变异保持不变，但 13.5 不再拒绝带 padding 的 view 上的承诺。
+Dawn 现有 lowering 拒绝仍保留，不据此开放调用能力；资格负控明确改判为“汇编接受、外部
+解码发现两处伪造承诺”。两后端原文本仍等于 golden、变异 bytes 同长且一致，闭集规范化
+后的独立反解必须仅多出两组 `[true, true]`。不再宣称 verifier 拒绝，也不运行不真实承诺
+来充当数值反例；丢弃承诺的部分视图代码生成见证另行保留。
+
+`narrow-odd-missing` 删除整段 F64 窄化 lowering 后，13.5 在当前 E4M3/E5M2 语料中
+已直接答对，不能继续要求旧 E5M2 lane 29 错值。相同变异 bytes 的外部反解仍为直接
+F64→FP8；新 SASS 出现 RTZ32、回转 F64 比较与 sticky OR，旧版只有 RNE32→FP8。
+这是该语料上的工具代码生成改善，不据此外推任意输入，也不删除 Dawn 的 round-to-odd
+lowering。原变异仍执行，明确作为测量：signed FP8 与无关架构核必须 exact，sm_100 的
+E2M1 NaN→正零策略仍必须只在 lane 40 报错；sm_90 不含 E2M1，测量必须 pass，不能冒称
+杀死变异体。其它五项窄化变异仍要求原具名数值失败，显式 F32 中间值仍由独立两次舍入
+oracle 判定；不把显式两次舍入融合为一次，也不接入新的生产转换路径。
+
+依据 [Tile IR 13.5 已知问题](https://docs.nvidia.com/cuda/tile-ir/latest/sections/release_notes.html#known-issues)
+及 [CUDA 13.5 编译器说明](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html)，
+下表逐项界定接触面；语料通过不等于任意可表达程序都安全，现有约束保留。
+
+| 问题 | Dawn 是否触及、当前边界 |
+| --- | --- |
+| loop/for 携带 load tile，下一次 load 早于最后使用 | 涉及 loop/load；当前 FA/GEMM carry 为累加器与 softmax 状态，K/V 原始 load tile 不跨迭代携带。未证明任意 load-carry 程序安全，#558 修复不代表此问题修复。 |
+| 全局 TF32 的低 13 尾数位非零，再转 F32 | API 可表达；现有上传 packer 先舍入并清零低位，dtype 语料存储分支转 F64，FA 用 BF16/F32。外部 dirty TF32 缓冲仍有风险。 |
+| view 单维至少 2^31 的 TMA signedness | 涉及 view/TMA；现有小形状、静态几何和 Idx 检查保留，不能覆盖所有动态 int64 view。未来大维消费者须限制维度或禁用对应 load/store 的 TMA。 |
+| scan/reduce 捕获外部 SSA、非标量中间值或嵌套 region | 涉及归约/scan；FA combiner 为标量 add/max，录制器只拒绝部分复杂 region，不声称全面禁止 captures。保留泛化风险。 |
+| 浮点 atomic add 冲掉 subnormal | 原语在用，当前数值语料以正常数和整数导出值为主；不将 FTZ 固化为语言合同。 |
+| [5795304] tensor-map 地址更新与 TMA OOB 模式组合 | 13.5 已修；Dawn 使用 TMA，但不直接发 tensormap.replace，尚无当前路径命中该组合的反例。 |
+| [6713855] 跨基本块 stmatrix 寄存器使用配 PTXAS -g 崩溃 | 13.5 已修；Dawn 的 debug golden 使用 tileirdisasm -g，不强制 PTXAS -g，不能把 debug 元数据等同于该触发组合。 |
+| fabric try_atom、CFT/MPS、NVENC 与外部 CUDA 库问题 | 当前无对应 API 或调用，不属于本次自有 Tile kernel 的资格范围。 |
+
 ### 6.1 `tileiras`：能进 CI，钉法照 wasi-sdk（刀 3 实测）
 
 - 钉 `nvidia-cuda-tileiras==13.3.36`（manylinux2014 x86_64 wheel 37,050,964 字节，
@@ -998,12 +1078,15 @@ opcode 而 `get_num_tile_blocks` 与 `get_tile_block_id` 逐字节同形。台�
 按 T0 的读法把这两类都记成层 3，理由与 `for` 那一行一样：层 3 要的是「有一条会红的变异体，
 且它改的是那条操作码的写法」，不是「它必须在设备上红」。
 
-### 6.3 版本钉法（刀 3 实况）
+### 6.3 版本钉法
 
-三个数同批改：`tileiras` 的版本与三个 wheel 的 sha256、字节码版本（`packages/tileir/src/bytecode.dawn`
-的 `BYTECODE_MAJOR / BYTECODE_MINOR`，写入头）、本机台账里的驱动版本。全部记在
-`scripts/tile-golden/toolchain.txt`（`bytecode 13.3`，刀 T8 之前是 13.2 / `tileiras 13.3.36` / `gpu-name sm_86` /
-三行 `wheel … sha256=…` / `driver 560.94`），而且不是散文：`install-tileiras.sh` 只认它的 `wheel` 行，
+分别固定写端、离线工具和设备：字节码版本由 `packages/tileir/src/bytecode.dawn` 的
+`BYTECODE_MAJOR / BYTECODE_MINOR` 写入头，工具由精确版本与三个 wheel 的 SHA-256 固定，
+设备由目标架构与驱动固定。当前 `scripts/tile-golden/toolchain.txt` 为 `bytecode 13.4`、
+`tileiras 13.5.37`、`gpu-name sm_86`、三行 `wheel … sha256=…`、`driver 617.42`。
+工具升级不要求写端或驱动一起升版，但必须重新验证消费者并重录各设备台账（§6.0）。
+刀 3 的初始工具为 13.3.36、字节码 13.2、驱动 560.94；这些旧值不代表当前支持范围。
+这些约束由脚本强制：`install-tileiras.sh` 只认它的 `wheel` 行，
 `run.sh` 拿 `kernels --bytecode-version` 对 `bytecode` 行、拿 `tileiras --version` 对 `tileiras` 行，
 任一不符直接红；刀 4 起 `driver` 行也是机器读的：`tile-gpu-diff/run.sh` 在它与 `nvidia-smi` 不符时
 拒绝写台账，`--check` 要求它等于台账末行的驱动（§6.4）。与计划稿的一处出入：wheel 的 sha256 不写在 `gates.yml` 里而写在这个文件里，
