@@ -66,9 +66,27 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
+native_cli_parallel=0
+case "$#:${1:-}" in
+  0:) ;;
+  1:--parallel) native_cli_parallel=1 ;;
+  *) echo "usage: $0 [--parallel]" >&2; exit 2 ;;
+esac
+if [ "$native_cli_parallel" = 1 ] && { [ "${NATIVE_CLI_ARITY_ONLY:-}" = 1 ] ||
+    [ "${NATIVE_CLI_RUN_ONLY:-}" = 1 ] || [ "${NATIVE_CLI_STD_ONLY:-}" = 1 ]; }; then
+  echo "FAIL: parallel native CLI runs require every complete contract" >&2
+  exit 2
+fi
+
 OUT=${TMPDIR:-/tmp}/native-cli-diff.$$
 mkdir -p "$OUT"
-if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$OUT"' EXIT; fi
+if [ "$native_cli_parallel" = 1 ]; then
+  # shellcheck source=scripts/native-cli-contract/parallel.sh
+  source scripts/native-cli-contract/parallel.sh
+  native_parallel_enable
+else
+  if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$OUT"' EXIT; fi
+fi
 
 # the JVM driver is both the reference for doc/add and the compiler that
 # produces the native one, so build it first and keep rebuild chatter out of
@@ -439,7 +457,11 @@ fi
 
 # ---- leg 1: fmt, against the previous release ----
 echo "== fmt vs N-1, native backend =="
-DAWN_SELF="$DAWNC" ./scripts/selfhost-fmt-diff.sh
+if [ "$native_cli_parallel" = 1 ]; then
+  native_parallel_start formatter env DAWN_SELF="$DAWNC" ./scripts/selfhost-fmt-diff.sh
+else
+  DAWN_SELF="$DAWNC" ./scripts/selfhost-fmt-diff.sh
+fi
 
 # `fmt --check` is a transcript, not a tree: it prints the unformatted files.
 # Their order comes from a directory walk, and io.list_dir does not return the
@@ -637,6 +659,8 @@ pair "add (invalid manifest)" add ../nowhere --dir "$BADTOML"
 # Same shape as leg 1: the whole scripted session, the N-1 oracle, the subject
 # swapped for the native binary. Every message of that session is produced by
 # server/lspq/lspc running on the C backend.
+# Finish the formatter before the next N-1 consumer reaches the seed cache.
+if [ "$native_cli_parallel" = 1 ]; then native_parallel_finish; fi
 echo "== lsp vs N-1, native backend =="
 DAWN_SELF="$DAWNC" ./scripts/selfhost-lsp-diff.sh
 
@@ -645,7 +669,11 @@ DAWN_SELF="$DAWNC" ./scripts/selfhost-lsp-diff.sh
 # byte-level framing contract directly against the release artifact as well;
 # the ordinary gates run the same script against the JVM driver.
 echo "== lsp framing boundaries, native backend =="
-if LSP_FRAMING_LABEL=native ./scripts/lsp-framing.py "$DAWNC" lsp; then :; else fail=1; fi
+if [ "$native_cli_parallel" = 1 ]; then
+  native_parallel_start framing env LSP_FRAMING_LABEL=native ./scripts/lsp-framing.py "$DAWNC" lsp
+else
+  if LSP_FRAMING_LABEL=native ./scripts/lsp-framing.py "$DAWNC" lsp; then :; else fail=1; fi
+fi
 
 # ---- leg 5: lsp answers a client that has not closed the connection ----
 # selfhost-lsp-diff.sh writes the whole session, closes stdin and reads the
@@ -1372,5 +1400,9 @@ sys.exit(bad)
 PYEOF
 then :; else fail=1; fi
 
+# Framing remains part of the verdict after every original main-thread case.
+if [ "$native_cli_parallel" = 1 ]; then
+  if native_parallel_finish; then :; else fail=1; fi
+fi
 [ "$fail" = 0 ] || { echo "FAIL: the native driver and the JVM driver disagree"; exit 1; }
 echo "OK: fmt/doc/add/lsp/test/cache/__pkghash agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, the test reports account for themselves, comptime stops at one depth limit on both, hover folds to the same values on both, and so do left-out default arguments"

@@ -78,6 +78,13 @@ one() {
 
 if [ "${1:-}" = --one ]; then one "$2" "$3"; exit $?; fi
 
+with_web_exchange=0
+case "$#:${1:-}" in
+  0:) ;;
+  1:--with-web-exchange) with_web_exchange=1 ;;
+  *) echo "usage: $0 [--with-web-exchange]" >&2; exit 2 ;;
+esac
+
 [ -x "$BIN" ] || { echo "FAIL: no native compiler at $BIN (set DAWNC_BIN)" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/std-prune-diff-run.XXXXXX")
@@ -127,6 +134,20 @@ if cmp -s "$TMP/planted/embedded.c" "$TMP/planted/planted.c"; then
 fi
 echo "control planted: a one-byte std edit changes the emitted C, so the comparison can see it"
 
+# Keep the speed and planted controls isolated before overlapping any work.
+if [ "$with_web_exchange" = 1 ]; then
+  OUT="$TMP"
+  # shellcheck source=scripts/native-cli-contract/parallel.sh
+  source scripts/native-cli-contract/parallel.sh
+  native_std_web_exchange() {
+    ./scripts/web-exchange-contract/run.sh "$BIN"
+  }
+  # The original std runner always removes TMP, including when KEEP is set.
+  KEEP= native_parallel_enable
+  native_parallel_start exchange native_std_web_exchange
+  echo 'BEGIN native foreground std-corpus'
+fi
+
 # ---- the corpus ---------------------------------------------------------------
 units=()
 for f in scripts/checker-corpus/cases/*.dawn; do units+=("$f"); done
@@ -173,5 +194,9 @@ fi
 if [ "$n_clean" -lt 50 ] || [ "$n_emitc" -lt 40 ]; then
   echo "FAIL: only $n_clean clean and $n_emitc emitted units; the corpus lost its programs" >&2
   exit 1
+fi
+if [ "$with_web_exchange" = 1 ]; then
+  echo 'END native foreground std-corpus'
+  native_parallel_finish
 fi
 echo "OK   pruned and full std agree on $n_check checked units ($n_clean clean) and $n_emitc emitted programs"
