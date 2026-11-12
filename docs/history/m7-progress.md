@@ -378,7 +378,9 @@ compiler-plan v1 producer，保留项目目录边界、路径作用域、排序�
 K1 portable 变换；Git 资格 capture 继续按固定 commit 工作。统一 cc-units recipe
 增加显式 runtime 参数，资格 compile-stage 要求显式 A/B/C、std/runtime、输入
 receipt 与 compiler，核配对后编译，成功才写独立 compile receipt。
-17 项固定负控涵盖漏件、外链、错阶段、错 std/runtime 和错 compiler version/target。
+阶段入口复用 K1 的 seed tree verifier，从 seed commit 重建身份，拒绝自洽伪造
+的 lock/receipt/runtime。18 项固定负控涵盖这项替换、漏件、外链、错阶段、
+错 std/runtime 和错 compiler version/target。
 原 JVM bootstrap-input-manifest 合同与 bootstrap guards 保留并通过。
 
 无新增 workflow、push 调用、claim 或 steps lock 变化，新增日常控制预算 0 s；
