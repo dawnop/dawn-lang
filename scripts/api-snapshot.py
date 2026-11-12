@@ -39,6 +39,8 @@ What goes in, and why the shape is ours rather than `dawn doc`'s:
     sends readers to that flag rather than listing the names, so it is surface
     in the same sense a signature is. Only builtins carry it (doc.dawn,
     `comptime_field`); `api-diff.py` compares signatures and does not read it.
+  * a trait's `captureContract` is kept verbatim, like its method signatures.
+    It describes the caller's type contract, not documentation prose.
 
 Unknown keys are an error, not a silent drop. If `dawn doc` grows a field --
 another kind of declaration, another attribute on a signature -- a snapshot
@@ -78,7 +80,7 @@ ENTRY_KEYS = {
     "fns": {"name", "sig", "comptime", "doc", "links", "examples"},
     "consts": {"name", "type", "doc", "links", "examples"},
     "types": {"name", "record", "typeParams", "ctors", "doc", "links", "examples"},
-    "traits": {"name", "typeParam", "assoc", "effectAssoc", "methods", "doc", "links", "examples"},
+    "traits": {"name", "typeParam", "captureContract", "assoc", "effectAssoc", "methods", "doc", "links", "examples"},
     "effects": {"name", "ops", "doc", "links", "examples"},
 }
 CTOR_KEYS = {"name", "fields", "doc", "links", "examples"}
@@ -281,7 +283,8 @@ CLEAN_DOC = {
                    "examples": ["let t = T { a = 1 }"],
                    "ctors": [{"name": "T", "doc": "prose", "examples": ["assert T { a = 1 } == T { a = 1 }"],
                               "fields": [{"name": "a", "type": "Int", "doc": None}]}]}],
-        "traits": [{"name": "Tr", "typeParam": "W", "assoc": [{"name": "It", "doc": None}],
+        "traits": [{"name": "Tr", "typeParam": "W", "captureContract": "trait Tr[W: ^{c}, ^c]",
+                    "assoc": [{"name": "It", "doc": None}],
                     "methods": [{"name": "go", "sig": "fn go[W: Tr](w: W) -> W",
                                  "hasDefault": False, "doc": "prose"}]}],
         "impls": ["Show[T]"],
@@ -386,6 +389,8 @@ def self_test(verbose: bool = True) -> int:
         ("links" not in json.dumps(modules), "a doc's links survived into the snapshot"),
         ("examples" not in json.dumps(modules), "a declaration's examples survived into the snapshot"),
         (modules[2]["traits"][0]["assoc"] == ["It"], "the object assoc form was not flattened"),
+        (modules[2]["traits"][0].get("captureContract") == "trait Tr[W: ^{c}, ^c]",
+         "a trait capture contract was not preserved"),
         (modules[1]["traits"][0]["assoc"] == ["Item"], "the string assoc form was not kept"),
         (modules[0]["fns"][1].get("comptime") == "refused", "a builtin's comptime flag was not kept"),
     ):

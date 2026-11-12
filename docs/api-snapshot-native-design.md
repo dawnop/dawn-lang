@@ -43,6 +43,12 @@ JVM oracle 逐字节相同；校验 web-jvm 的七函数、二类型及 InputStr
 
 ## 落地与进度
 
+新 artifact 的独立 JVM 快照发现既有输入漂移：abb482d6 已让 trait doc 写出
+`captureContract`，旧快照却仍按未知字段拒绝。当前 std 的 HasDtype、DeviceBits、
+Narrow、ScalarDtype 四条合同均受影响；这不是两后端差异。输入接入必须显式认出
+该字段并原样保留，增加固定夹具证明不丢合同；未知字段仍拒绝，不丢字段求绿。
+快照 schema 编号和 API diff 的格式、比较规则均保持，不借本刀重做 Capture 分类器。
+
 ae950a9f 实现按目标输入、发布 native 消费和轻量门禁；步骤锁为 203 个 run step、
 30 个家族。API 自检覆盖多个目标、带空格及等号的路径、未知/重复目标、缺数据和
 完整 inventory；漏传 metadata 与误跳 web-jvm 的错误实现都使指定输入合同变红。
