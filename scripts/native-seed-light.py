@@ -258,6 +258,8 @@ def main():
     signal.signal(signal.SIGALRM, deadline)
     signal.alarm(30)
     try:
+        c.require(args.receipt is not None or not (args.cold_receipt or args.package_receipt or args.commit),
+                  'arguments', 'external receipt checks require --receipt and --commit')
         if args.receipt:
             c.oid(args.commit, 'expected source')
             source, _ = c.source_description(ROOT, args.commit)

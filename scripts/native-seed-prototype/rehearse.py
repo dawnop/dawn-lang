@@ -12,6 +12,8 @@ import subprocess
 import sys
 import tempfile
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from native_seed import cold, contract as c, package, qualification as q
 import identity
@@ -95,15 +97,30 @@ def rehearse(qualification, destination):
     production = ('scripts/release-native.sh', 'scripts/install-native.py', '.github/workflows/release.yml')
     before = {name: c.digest((ROOT / name).read_bytes()) for name in production}
     staging = destination / 'staging'
-    # Exercise the shell producer, rather than a separate in-memory metadata constructor.
-    result = subprocess.run(['bash', str(HERE / 'release-native.sh'), '--package', str(qualification),
-                             '--out', str(staging)], capture_output=True)
-    (destination / 'producer.stdout').write_bytes(result.stdout)
-    (destination / 'producer.stderr').write_bytes(result.stderr)
-    c.require(result.returncode == 0, 'prototype-producer', 'isolated shell producer failed')
+    # Execute the isolated YAML's real commands, without registering a hosted workflow.
+    workflow = yaml.safe_load(c.regular_bytes(HERE / 'release.yml'))
+    c.require(set(workflow['jobs']) == {'protocol'} and
+              len(workflow['jobs']['protocol']['steps']) == 3,
+              'prototype-workflow', 'unexpected isolated workflow shape')
+    environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': str(destination),
+                   'PACKAGE': str(qualification), 'STAGING': str(staging),
+                   'STORE': str(destination / 'releases'), 'PREFIX': str(destination / 'prefix')}
+    executed = []
+    for index, step in enumerate(workflow['jobs']['protocol']['steps']):
+        c.fields(step, 'name run', 'prototype workflow step')
+        if index:
+            environment['TAG'] = c.read_json(staging / 'dawn-toolchain.json')['release']['tag']
+        result = subprocess.run(['bash', '-euo', 'pipefail', '-c', step['run']], cwd=ROOT,
+                                env=environment, capture_output=True)
+        (destination / f'workflow-{index}.stdout').write_bytes(result.stdout)
+        (destination / f'workflow-{index}.stderr').write_bytes(result.stderr)
+        executed.append({'name': step['name'], 'command': step['run'], 'exit_code': result.returncode,
+                         'stdout_sha256': c.digest(result.stdout), 'stderr_sha256': c.digest(result.stderr)})
+        c.require(result.returncode == 0, 'prototype-workflow', step['name'] + ': see saved logs')
     info = c.read_json(staging / 'dawn-toolchain.json')
     tag = info['release']['tag']
-    published = publish(staging, destination / 'releases', tag)
+    published = destination / 'releases' / tag
+    identity.aggregate(published, tag)
     baseline = {p.name: c.digest(p.read_bytes()) for p in published.iterdir()}
     rows = [q.refused('immutable-tag-reupload', 'prototype-immutable',
                      lambda: publish(staging, destination / 'releases', tag))]
@@ -111,7 +128,7 @@ def rehearse(qualification, destination):
     installer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(installer)
     prefix = destination / 'prefix'
-    target = installer.install(staging, prefix, tag)
+    target = prefix / 'bin/dawn'
     old = target.read_bytes()
     c.require(c.digest(old) == info['native']['sha256'], 'prototype-install', 'installed different B')
     cases = (
@@ -179,6 +196,7 @@ def rehearse(qualification, destination):
                'installation_inputs': [c.ASSET, c.ASSET + '.sha256', 'dawn-toolchain.json'],
                'installer_proves_bootstrap': False, 'production_asset_count': 8,
                'prototype_asset_count': 9, 'jvm_type_arm_validated': True,
+               'workflow_sha256': c.digest(c.regular_bytes(HERE / 'release.yml')), 'workflow_steps': executed,
                'standalone_installer_packaging_pending': True}
     c.atomic_json(destination / 'summary.json', summary)
     return summary

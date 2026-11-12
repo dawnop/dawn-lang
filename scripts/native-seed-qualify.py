@@ -106,6 +106,10 @@ def main():
                 temporary.write_bytes(c.canonical(rows))
                 os.replace(temporary, out / 'invocations.json')
             c.require(result.returncode == 0, 'qualification-step', name + ': see saved log')
+        receipt = c.read_json(out / 'receipt.json')
+        c.require(receipt['source_commit'] == args.commit and receipt['source_tree'] ==
+                  c.git(ROOT, 'rev-parse', args.commit + '^{tree}').decode().strip(),
+                  'qualification-input', 'qualification evidence does not describe the requested commit')
         c.atomic_json(out / ('verified.json' if args.command == 'verify' else 'completed.json'),
                       {'source_commit': args.commit, 'receipt_sha256': c.digest(c.regular_bytes(out / 'receipt.json')),
                        'checks': rows, 'production_authorized': False})
