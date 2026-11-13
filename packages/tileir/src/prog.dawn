@@ -3561,6 +3561,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
               ()
             }
             check_yields(name, frames, ops, held, writer(marks, calls, "reduce"), operands, yields)
+            check_combiner(name, frames, ops, writer(marks, calls, "reduce"), args, yields)
             let inner = ops
             let base = next
             next = mint(name, next, len(operands))
@@ -3624,6 +3625,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
               ()
             }
             check_yields(name, frames, ops, held, writer(marks, calls, "scan"), operands, yields)
+            check_combiner(name, frames, ops, writer(marks, calls, "scan"), args, yields)
             let inner = ops
             let base = next
             next = mint(name, next, len(operands))
@@ -4883,6 +4885,128 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   ReshapeOf(dst, _dtype, _from, _to, _src) -> [dst]
   BroadcastOf(dst, _dtype, _from, _to, _src) -> [dst]
 }
+
+# SSA dependencies and tile shapes of a region-free operation. Entry scalar
+# reads are aliases, not local definitions: their first actual use captures
+# the entry SSA value even when scalar() was called inside the body.
+fn combiner_optional(h: Option[Int]) -> List[Int] = match h { Some(v) -> [v], None -> [] }
+
+fn combiner_parts(op: TileOp) -> (List[Int], List[List[Int]], Bool) = match op {
+  MakeToken(_dst) -> ([], [], false)
+  BlockId(_dst, _axis) -> ([], [], false)
+  Load(_dst, _tok_out, _param, _dtype, base, shape, _strides, mask, pad, tok_in, _hints) -> ([base] ++ combiner_optional(mask) ++ combiner_optional(pad) ++ [tok_in], [shape], true)
+  Store(_tok_out, _param, _dtype, base, shape, _strides, value, mask, tok_in, _hints) -> ([base] ++ [value] ++ combiner_optional(mask) ++ [tok_in], [shape], true)
+  Gather(_dst, _tok_out, _param, _dtype, index, shape, mask, pad, tok_in) -> ([index] ++ combiner_optional(mask) ++ combiner_optional(pad) ++ [tok_in], [shape], true)
+  Scatter(_tok_out, _param, _dtype, index, shape, value, mask, tok_in) -> ([index] ++ [value] ++ combiner_optional(mask) ++ [tok_in], [shape], true)
+  AtomicRMW(_dst, _tok_out, _param, _dtype, _mode, index, shape, value, mask, tok_in) -> ([index] ++ [value] ++ combiner_optional(mask) ++ [tok_in], [shape], true)
+  AtomicCAS(_dst, _tok_out, _param, _dtype, index, shape, cmp, value, mask, tok_in) -> ([index] ++ [cmp] ++ [value] ++ combiner_optional(mask) ++ [tok_in], [shape], true)
+  ConstF(_dst, _dtype, shape, _value) -> ([], [shape], false)
+  ConstI(_dst, _dtype, shape, _value) -> ([], [shape], false)
+  Iota(_dst, n) -> ([], [[n]], false)
+  Lanes(_dst, base, shape, _strides) -> ([base], [shape], false)
+  UnaryF(_dst, _op, _dtype, shape, src) -> ([src], [shape], false)
+  BinaryF(_dst, _op, _dtype, shape, lhs, rhs) -> ([lhs] ++ [rhs], [shape], false)
+  Fma(_dst, _dtype, shape, lhs, rhs, acc) -> ([lhs] ++ [rhs] ++ [acc], [shape], false)
+  MmaF(_dst, _dtype, _out, m, _k, n, lhs, rhs, acc) -> ([lhs] ++ [rhs] ++ [acc], [[m, n]], false)
+  MmaFScaled(_dst, _dtype, _scale, m, _k, n, _block, lhs, rhs, acc, lhs_scale, rhs_scale) -> ([lhs] ++ [rhs] ++ [acc] ++ [lhs_scale, rhs_scale], [[m, n]], false)
+  MmaI(_dst, m, _k, n, lhs, rhs, acc) -> ([lhs] ++ [rhs] ++ [acc], [[m, n]], false)
+  CmpF(_dst, _pred, _dtype, shape, lhs, rhs) -> ([lhs] ++ [rhs], [shape], false)
+  CmpI(_dst, _pred, shape, lhs, rhs) -> ([lhs] ++ [rhs], [shape], false)
+  UnaryI(_dst, _op, _dtype, shape, src) -> ([src], [shape], false)
+  BinaryI(_dst, _op, _dtype, shape, lhs, rhs) -> ([lhs] ++ [rhs], [shape], false)
+  Convert(_dst, _op, _from, _to, shape, src) -> ([src], [shape], false)
+  Repack(_dst, _op, _from, _to, from_shape, to_shape, src) -> ([src], [from_shape, to_shape], false)
+  Select(_dst, _dtype, shape, cond, lhs, rhs) -> ([cond] ++ [lhs] ++ [rhs], [shape], false)
+  IdxConst(_dst, _value) -> ([], [], false)
+  IdxAdd(_dst, lhs, rhs) -> ([lhs] ++ [rhs], [], false)
+  IdxMul(_dst, lhs, rhs) -> ([lhs] ++ [rhs], [], false)
+  Break(values) -> (values, [], false)
+  Return -> ([], [], false)
+  Continue(values) -> (values, [], false)
+  Spread(_dst, _dtype, shape, src) -> ([src], [shape], false)
+  Yield(values) -> (values, [], false)
+  Extract(_dst, _dtype, from, to, src, indices) -> ([src] ++ indices, [from, to], false)
+  Insert(_dst, _dtype, sub, whole, src, dest, indices) -> ([src] ++ [dest] ++ indices, [sub, whole], false)
+  PowI(_dst, _dtype, _exp_dtype, shape, base, exp) -> ([base] ++ [exp], [shape], false)
+  Cat(_dst, _dtype, _dim, lhs_shape, rhs_shape, lhs, rhs) -> ([lhs] ++ [rhs], [lhs_shape, rhs_shape], false)
+  Permute(_dst, _dtype, shape, _perm, src) -> ([src], [shape], false)
+  NumBlocks(_dst, _axis) -> ([], [], false)
+  ScalarArg(_dst, _param, _dtype) -> ([], [], false)
+  JoinToks(_dst, toks) -> (toks, [], false)
+  MakePtrs(_dst, _param, _dtype, shape) -> ([], [shape], true)
+  PtrAdd(_dst, _dtype, shape, ptrs, offs) -> ([ptrs] ++ [offs], [shape], false)
+  PtrInt(_dst, _dtype, shape, ptrs) -> ([ptrs], [shape], false)
+  IntPtr(_dst, _dtype, shape, ints) -> ([ints], [shape], false)
+  PtrCast(_dst, _from, _to, shape, ptrs) -> ([ptrs], [shape], false)
+  LoadAt(_dst, _tok_out, _dtype, shape, ptrs, mask, pad, tok_in) -> ([ptrs] ++ combiner_optional(mask) ++ combiner_optional(pad) ++ [tok_in], [shape], false)
+  Assert(shape, cond, _message) -> ([cond], [shape], false)
+  Assume(_dst, _pred, _dtype, shape, src) -> ([src], [shape], false)
+  Print(_tok_out, _fmt, _dtype, shape, args, tok_in) -> (args ++ [tok_in], [shape], false)
+  TokenOnly(_tok_out, _op, tok_in) -> ([tok_in], [], false)
+  StoreAt(_tok_out, _dtype, shape, ptrs, value, mask, tok_in) -> ([ptrs] ++ [value] ++ combiner_optional(mask) ++ [tok_in], [shape], false)
+  GetGlobal(_dst, _sym, _dtype, shape) -> ([], [shape], false)
+  Alloca(_dst, _dtype, _num_elem, _align, _shared, shape) -> ([], [shape], false)
+  TensorViewOf(_dst, _param, _dtype, base, _shape, _strides, dyn_shape, dyn_strides) -> ([base] ++ dyn_shape ++ dyn_strides, [], true)
+  StridedViewOf(_dst, _dtype, view, _tile_shape, _traversal, _dim_map, _padding) -> ([view], [], false)
+  GatherViewOf(_dst, _dtype, view, _tile_shape, _sparse_dim, _padding) -> ([view], [], false)
+  AtomicRedViewOf(_tok_out, _dtype, view, indices, _mode, _scope, value, tok_in) -> ([view] ++ indices ++ [value] ++ [tok_in], [], false)
+  PartitionViewOf(_dst, _dtype, view, _tile_shape, _dim_map, _padding) -> ([view], [], false)
+  LoadView(_dst, _tok_out, _dtype, view, indices, tok_in, _inbounds, _hints) -> ([view] ++ indices ++ [tok_in], [], false)
+  StoreView(_tok_out, _dtype, view, indices, value, tok_in, _inbounds, _hints) -> ([view] ++ indices ++ [value] ++ [tok_in], [], false)
+  TensorShapeOf(_dst, view, _dim) -> ([view], [], false)
+  IndexSpaceShapeOf(_dst, view, _dim) -> ([view], [], false)
+  CellViewOf(_dst, _param, _dtype, _align, _shape, _strides, dyn_shape, dyn_strides) -> (dyn_shape ++ dyn_strides, [], true)
+  ReshapeOf(_dst, _dtype, from, to, src) -> ([src], [from, to], false)
+  BroadcastOf(_dst, _dtype, from, to, src) -> ([src], [from, to], false)
+  For(_iv, _lo, _up, _st, _u, _in, _ca, _rs, _body) -> ([], [], false)
+  Loop(_in, _ca, _rs, _body) -> ([], [], false)
+  Reduce(_rs, _dim, _sh, _ids, _in, _args, _body) -> ([], [], false)
+  Scan(_rs, _dim, _rev, _sh, _ids, _in, _args, _body) -> ([], [], false)
+  If(_rs, _cond, _yes, _no) -> ([], [], false)
+}
+
+## The first unsupported operation in a reduce/scan body for the pinned
+## 13.5.37 tools, as its body offset and reason. This checks recorded SSA,
+## including the yield, rather than host closure captures. Both recording
+## and lowering use it; hand-built TileProg values receive the same checks.
+## An upstream fix needs separate qualification before this contract changes.
+pub fn combiner_issue(args: List[Int], body: List[TileOp]) -> Option[(Int, String)] = {
+  var local = args
+  var issue: Option[(Int, String)] = None
+  for k in range(0, len(body)) {
+    let op = body[k]
+    let nested = match op {
+      For(_iv, _lo, _up, _st, _u, _in, _ca, _rs, _b) -> true
+      Loop(_in, _ca, _rs, _b) -> true
+      Reduce(_rs, _dim, _sh, _ids, _in, _args, _b) -> true
+      Scan(_rs, _dim, _rev, _sh, _ids, _in, _args, _b) -> true
+      If(_rs, _cond, _yes, _no) -> true
+      _ -> false
+    }
+    let (inputs, shapes, entry) = combiner_parts(op)
+    let visible = local
+    let reason: Option[String] = if nested {
+      Some("nested region")
+    } else if list.any(shapes, shape => len(shape) != 0) {
+      Some("non-scalar intermediate tile")
+    } else if entry || list.any(inputs, h => not list.contains(visible, h)) {
+      Some("outer SSA capture")
+    } else { None }
+    if issue == None {
+      issue = match reason { Some(text) -> Some((k, text)), None -> None }
+    }
+    local = local ++ match op { ScalarArg(_d, _p, _dt) -> [], _ -> defined(op) }
+  }
+  issue
+}
+
+fn check_combiner(name: Ctx, frames: List[Frame], ops: List[TileOp], asking: String,
+  args: List[Int], yields: List[Int]) -> Unit =
+  match combiner_issue(args, ops ++ [Yield(yields)]) {
+    Some((k, reason)) -> refuse_at(name, frames, ops, asking,
+      "unsupported reduce/scan body for tileiras 13.5.37: ${reason} at body op #${k}")
+    None -> ()
+  }
 
 ## Every handle `ops` define, at any depth, in issue order: for a `For`, its
 ## results, then its induction variable, its carried handles and what its

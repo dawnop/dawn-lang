@@ -1,5 +1,14 @@
 # tileir changelog
 
+## 0.32.0
+
+- Reject reduce/scan bodies with outer SSA captures, non-scalar intermediate
+  tiles or nested regions for the pinned tileiras 13.5.37 tools. Recording and
+  lowering share the recorded-SSA check, including hand-built TileProg values.
+- Keep constants materialized inside the body and ordinary outer conditionals.
+  This narrows tool support, not the Tile IR language. An upstream fix requires
+  independent qualification before lifting the restriction; no version fallback.
+
 ## 0.31.0
 
 - 录制结果向 typed Entry 传递真正物化的动态 extent 与 suffix 的 i32 检查义务。

@@ -1,0 +1,120 @@
+# Each rejected combiner is i32 modular addition, with identity zero.
+# Capture, rank and region cases are independent, including manual lowering.
+use std/io.{println}
+use std/int/i32.{I32}
+use std/dtype.{F64}
+use std/loc
+use std/str
+use std/list
+use tileir/dev.{IdI, Tile, param, scalar, i_const, f_const, broadcast, add_i, eq_i, select, reshape, d_reduce, d_scan, add, lt, reduce_sum, reduce_max, reduce_min, scan_sum}
+use tileir/prog.{TileProg, TileOp, trace_kernel, ByValue, MakeToken, ConstI, ScalarArg, BinaryI, CmpI, Select, ReshapeOf, If, Yield, Reduce, Scan, IdxConst, IdxAdd, combiner_issue}
+use tileir/lower.{lower}
+use tileir/render.{render}
+use tileir/bytecode.{encode}
+
+fn expect(ok: Bool, message: String) -> Unit = if not ok { panic(message) }
+
+fn refused[T](body: fn() -> T, reason: String, region: String, at: Loc) -> Unit = {
+  let why = match catch_panic(body) { Ok(_) -> "accepted", Err(e) -> e.message }
+  for part in ["kernel `combiner`", "op #", reason, region, " at ${at}"] {
+    expect(str.contains(why, part), "missing ${part}: ${why}")
+  }
+}
+
+fn recorded(kind: String, scan: Bool, mode: Int, at: Loc) -> TileProg =
+  trace_kernel("combiner", [ByValue("i32")], () => {
+    let cap = if mode == 0 { scalar(param(I32, 0)) } else { add_i(i_const(2), i_const(3)) }
+    let t = broadcast(i_const(1), [8])
+    let body = (a: Tile[I32], b: Tile[I32]) => {
+      if kind == "capture" {
+        let outside = if mode == 2 { scalar(param(I32, 0)) } else { cap }
+        select(eq_i(outside, outside), add_i(a, b), add_i(b, a))
+      } else if kind == "rank" {
+        reshape(add_i(reshape(a, [1]), reshape(b, [1])), [])
+      } else {
+        if eq_i(a, b) { add_i(a, b) } else { add_i(b, a) }
+      }
+    }
+    let _r = if scan { d_scan(t, 0.0, body, at = at) } else { d_reduce(t, 0.0, body, at = at) }
+  })
+
+fn manual(kind: String, scan: Bool, mode: Int) -> TileProg = {
+  let body = if kind == "capture" {
+    if mode == 2 { [ScalarArg(10, 0, "i32"), BinaryI(6, "addi", "i32", [], 4, 5), CmpI(7, "eq", [], 10, 10), Select(8, "i32", [], 7, 6, 6), Yield([8])] }
+    else { [BinaryI(6, "addi", "i32", [], 4, 5), CmpI(7, "eq", [], 2, 2), Select(8, "i32", [], 7, 6, 6), Yield([8])] }
+  } else if kind == "rank" {
+    [ReshapeOf(6, "i32", [], [1], 4), ReshapeOf(7, "i32", [], [1], 5), BinaryI(8, "addi", "i32", [1], 6, 7), ReshapeOf(9, "i32", [1], [], 8), Yield([9])]
+  } else {
+    [CmpI(6, "eq", [], 4, 5), If([7], 6, [BinaryI(8, "addi", "i32", [], 4, 5), Yield([8])], [BinaryI(9, "addi", "i32", [], 5, 4), Yield([9])]), Yield([7])]
+  }
+  let region = if scan { Scan([3], 0, false, [8], [IdI("i32", 0)], [1], [4, 5], body) }
+  else { Reduce([3], 0, [8], [IdI("i32", 0)], [1], [4, 5], body) }
+  TileProg { name = "combiner", params = [ByValue("i32")], globals = [], hints = [], producer = None, debug = None,
+    ops = [MakeToken(0), ConstI(1, "i32", [8], 1), if mode == 1 { ConstI(2, "i32", [], 3) } else { ScalarArg(2, 0, "i32") }, region] }
+}
+
+fn negative(kind: String) -> Unit = {
+  let reason = if kind == "capture" { "outer SSA capture" } else if kind == "rank" { "non-scalar intermediate tile" } else { "nested region" }
+  let at = loc.here()
+  for scan in [false, true] {
+    let word = if scan { "scan" } else { "reduce" }
+    for mode in if kind == "capture" { [0, 1, 2] } else { [0] } {
+      refused(() => recorded(kind, scan, mode, at), reason, "combiner of a `d_${word}`", at)
+      # No recording handler participates in this path.
+      refused(() => lower(manual(kind, scan, mode), at = at), reason, "inside ${word} region", at)
+    }
+  }
+}
+
+fn positive() -> Unit = {
+  for scan in [false, true] {
+    let p = trace_kernel("local", [], () => {
+      let host = i_const(0)
+      # Materializing the same host constant outside first must not make its
+      # rank-0 use in the combiner an outer SSA capture.
+      let _outside = broadcast(host, [8])
+      let t = broadcast(i_const(1), [8])
+      let body = (a: Tile[I32], b: Tile[I32]) => add_i(add_i(a, b), host)
+      # An ordinary outer device conditional may contain a legal combiner.
+      if eq_i(i_const(2), i_const(3)) {
+        let _r = if scan { d_scan(t, 0.0, body) } else { d_reduce(t, 0.0, body) }
+      }
+    })
+    let _text = render(p)
+    let _bytes = encode(p)
+    let q = manual("capture", scan, 0)
+    let legal: List[TileOp] = [ConstI(6, "i32", [], 0), BinaryI(7, "addi", "i32", [], 4, 5), BinaryI(8, "addi", "i32", [], 7, 6), Yield([8])]
+    let op = if scan { Scan([3], 0, false, [8], [IdI("i32", 0)], [1], [4, 5], legal) }
+    else { Reduce([3], 0, [8], [IdI("i32", 0)], [1], [4, 5], legal) }
+    let r = TileProg { ..q, ops = list.take(q.ops, 3) ++ [op] }
+    let _manual = encode(r)
+    expect(combiner_issue([4, 5], [ScalarArg(10, 0, "i32"), Yield([4])]) == None, "an unused entry alias is not an SSA dependency")
+  }
+  # Scalar index constants are literals, not handles; a locally computed
+  # index remains local even when its integer value equals an outer handle.
+  expect(combiner_issue([4, 5], [IdxConst(6, 99), IdxAdd(7, 6, 6), Yield([7])]) == None, "local index constants rejected")
+  let p = trace_kernel("named", [], () => {
+    let floor = f_const(F64, 0.25)
+    let t = broadcast(f_const(F64, 1.0), [8])
+    let _a = reduce_sum(t)
+    let _b = reduce_max(t)
+    let _c = reduce_min(t)
+    let _d = scan_sum(t)
+    # A host constant can participate without changing modular or sum algebra.
+    let _r = d_reduce(t, 0.0, (a, b) => select(lt(floor, floor), add(a, b), add(b, a)))
+  })
+  let _text = render(p)
+  let _bytes = encode(p)
+}
+
+pub fn main() -> Unit !io = {
+  var failed = false
+  for group in ["capture", "rank", "region", "positive"] {
+    match catch_panic(() => { if group == "positive" { positive() } else { negative(group) } }) {
+      Ok(_) -> println("PASS combiner ${group}")
+      Err(e) -> { failed = true
+        println("FAIL combiner ${group}: ${e.message}") }
+    }
+  }
+  if failed { panic("combiner contract assertions failed") }
+}

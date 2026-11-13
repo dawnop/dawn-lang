@@ -570,3 +570,18 @@ large tile used only by `blocks_of`, retain their existing range. Ordinary
 index arithmetic still wraps. Handwritten `entry1` to `entry6` constructors
 now require a final `List[GeometryUse]`; describe the program's automatic uses
 there, or pass `[]` when there are none. There is no older Entry representation.
+
+## Reduce and scan body support
+
+With the pinned tileiras 13.5.37, recording and lowering reject bodies that
+capture outer SSA values, create non-scalar intermediate tiles (including
+shape `[1]`), or nest region-bearing operations. Diagnostics name the kernel,
+body operation, region and call site. Hand-built `TileProg` values are checked
+when lowered as well. Constants materialized inside the body remain supported;
+ordinary conditionals outside the body remain supported.
+
+This is a tool support restriction in 0.32.0, not a Tile IR language rule.
+The caller still supplies an associative body, a correct identity, and, for
+reductions, commutativity. An upstream fix requires separate qualification of
+a new fixed toolchain before lifting these restrictions. There is no fallback.
+See [the design](../../docs/tile-backend-design.md#601-reducescan-的-13537-支持合同).

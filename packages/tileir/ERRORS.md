@@ -173,3 +173,18 @@ Axis in every dimension. read_prefix requires In Grid, static capacities and
 a Free storage dimension; its length must be a rank-0 i32. Dynamic length
 bounds remain the caller's host precondition. A ReadView passed to store_view
 is a compiler type error, independently of recorder In write protection.
+
+## Reduce and scan bodies with tileiras 13.5.37
+
+`unsupported reduce/scan body for tileiras 13.5.37` is a recording or lowering
+refusal. It names the kernel, body operation, enclosing reduce/scan region and
+call site, including when lowering a hand-built `TileProg`.
+
+| Fragment | Layer | Meaning | Supported form |
+| --- | --- | --- | --- |
+| `outer SSA capture` | record | An operand refers to an enclosing SSA value or entry parameter, including `scalar` inside the body | Pass data through the combiner operands; materialize constants inside the body |
+| `non-scalar intermediate tile` | record | A body operation uses a tile with nonzero rank, even `[1]` | Keep every intermediate tile rank zero |
+| `nested region` | record | A body contains an operation with regions, including a pure conditional | Use scalar operations such as `select` with body-local operands |
+
+These are known tool limitations, not Tile IR language prohibitions. An upstream
+fix needs separate qualification before this support contract is relaxed.
