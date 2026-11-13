@@ -560,3 +560,13 @@ it does not know which scalar is a prefix length. PadZero protects tail K/V
 loads; an attention algorithm must explicitly mask invalid scores before
 max, exp and sum. This release adds small semantic probes, not production
 fused GQA or a wider domain for the ordinary BF16 flash example.
+
+Automatic dynamic geometry has a launch contract in 0.31.0. The entry returned
+by `trace1` to `trace6` carries only the extent and suffix values the
+recording materialized as i32. `launch_entryN` rejects an unrepresentable
+positive product before calling any handler, with `gpu.geometry_i32` and both
+recording and launch locations. Static int64 shape and stride metadata, and a
+large tile used only by `blocks_of`, retain their existing range. Ordinary
+index arithmetic still wraps. Handwritten `entry1` to `entry6` constructors
+now require a final `List[GeometryUse]`; describe the program's automatic uses
+there, or pass `[]` when there are none. There is no older Entry representation.

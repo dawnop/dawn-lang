@@ -710,6 +710,7 @@ mutants=(
   entry6-n-constant entry6-view-capacity entry6-loop-floor entry6-unmarked entry6-sixth-as-pointer entry6-erase-projection
   read-layout-type-rejections read-group-axis read-group-zero read-group-div2 read-group-shift read-n-constant read-loop-floor read-view-capacity read-live-stride read-no-mask
   scaled-mma-combinations
+  dynamic-geometry-checks dynamic-extent-check-dropped dynamic-suffix-check-dropped dynamic-metadata-limited-to-i32
   idx-bounds-checks
   idx-check-dropped
   geometry-check-dropped
@@ -3615,6 +3616,55 @@ if run_item scaled-mma-combinations; then
   python3 "$here/scaled-combinations.py" "${scaled_args[@]}" || fail "scaled MMA combination matrix"
 fi
 
+
+# Runtime geometry controls compile a small producer against an isolated std.
+# The metadata-only Gpu handler never allocates backing storage or calls a driver.
+dynamic_geometry_checks() { # item, expected red group (empty for clean)
+  local m="$1" red="$2" tree="$work/geometry-$1" backend out rc
+  mkdir -p "$tree"
+  cp -R "$root/std" "$tree/std"
+  if [ -n "$red" ]; then python3 "$here/mutate.py" "$m" "$tree"; fi
+  project "$tree/probe" "$root/packages/tileir"
+  cp "$here/dynamic-geometry.dawn" "$tree/probe/src/main.dawn"
+  DAWN_STD="$tree/std" build_native "$tree/probe" "$tree/probe.bin" -O0
+  for backend in jvm native; do
+    out="$tree/$backend.out"
+    rc=0
+    if [ "$backend" = jvm ]; then
+      DAWN_STD="$tree/std" run_jvm "$tree/probe" "$out" || rc=$?
+    else
+      run_native "$tree/probe.bin" "$out" || rc=$?
+    fi
+    if [ -z "$red" ]; then
+      [ "$rc" = 0 ] || { cat "$out" "$out.err" >&2; fail "$m: clean $backend checks failed"; }
+    else
+      [ "$rc" = 1 ] && grep -Fq 'dynamic geometry assertions failed' "$out.err" ||
+        fail "$m: expected assertions after successful $backend build"
+    fi
+    python3 - "$out" "$red" <<'GEOMETRY' || fail "$m: wrong owning assertions on $backend"
+from pathlib import Path
+import sys
+lines = Path(sys.argv[1]).read_text().splitlines()
+red = {sys.argv[2]} if sys.argv[2] else set()
+failures = [line for line in lines if line.startswith('FAIL dynamic geometry ')]
+assert len(lines) == 3 and len(failures) == len(red), lines
+assert {line.split(':', 1)[0].removeprefix('FAIL dynamic geometry ') for line in failures} == red, lines
+assert {line.removeprefix('PASS dynamic geometry ') for line in lines if line.startswith('PASS dynamic geometry ')} == {'extent', 'suffix', 'metadata'} - red, lines
+if red:
+    marker = {'extent': 'missing dimension 0 dynamic extent: sentinel.launch',
+              'suffix': 'missing dimension 0 dynamic suffix: sentinel.launch',
+              'metadata': 'legal geometry rejected: gpu.short_tensor'}[sys.argv[2]]
+    assert marker in failures[0], failures
+GEOMETRY
+  done
+  cmp -s "$tree/jvm.out" "$tree/native.out" || fail "$m: backend verdicts differ"
+  cat "$tree/jvm.out"
+  echo "PASS  $m (built and checked on JVM and native)"
+}
+if run_item dynamic-geometry-checks; then dynamic_geometry_checks dynamic-geometry-checks ""; fi
+if run_item dynamic-extent-check-dropped; then dynamic_geometry_checks dynamic-extent-check-dropped extent; fi
+if run_item dynamic-suffix-check-dropped; then dynamic_geometry_checks dynamic-suffix-check-dropped suffix; fi
+if run_item dynamic-metadata-limited-to-i32; then dynamic_geometry_checks dynamic-metadata-limited-to-i32 metadata; fi
 
 # Representation boundary fixtures run on both consumers of the same recording.
 if run_item idx-bounds-checks; then

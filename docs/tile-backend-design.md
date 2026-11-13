@@ -4602,14 +4602,14 @@ extent（softmax 的 1000）。这样 D-4 降低时视图的动态 extent 有体
 ```dawn
 pub opaque type EntryArg = (Int, List[Int], List[Int], List[CellAxis])     # 角色码、extent、tile、along
 pub fn arg_in(extent, tile, along) / arg_in_whole() / arg_out(extent, tile) / arg_shared() -> EntryArg
-pub opaque type Entry3[A, B, C] = (String, List[EntryArg])           # Entry1..Entry5
-pub fn entry3[A, B, C](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg) -> Entry3[A, B, C]
+pub opaque type Entry3[A, B, C] = (String, List[EntryArg], List[GeometryUse]) # Entry1..Entry6
+pub fn entry3[A, B, C](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg, geometry: List[GeometryUse]) -> Entry3[A, B, C]
 pub fn entry_grid(args: List[EntryArg]) -> Result[List[Int], String]
 pub fn launch_entry3[A, B, C](e: Entry3[A, B, C], a: Tensor[A], b: Tensor[B], c: Tensor[C],
   grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu
 ```
 
-- 入口保存名字、角色码、容量及 CellAxis，`std/gpu` 仍不认识 `TileProg`（§5.3 守住），依赖方向仍是 tileir → std/gpu。角色是
+- 入口保存名字、角色码、容量、CellAxis 及实际物化的自动 i32 几何义务，`std/gpu` 仍不认识 `TileProg`（§5.3 守住），依赖方向仍是 tileir → std/gpu。角色是
   藏在 opaque 后面的整数码而不是一个和类型：JVM 后端给每个程序都带上 std 里每个类型的类（#356 的 `Base64`
   加了五个类，每个 emit 语料都要声明）。沿轴现在使用共享的名义 CellAxis 类型。
 - 格式与元数在类型里：`launch_entry3` 给一个 `Tensor[BF16]`，或少给一个张量，是编译错误；`trace2` 配一个三参数的体、
@@ -6913,3 +6913,43 @@ CPU 测试编译完整路径、运行 fake，并用受控 Proc 证明装配器�
 
 不做的：不重新实现 assemble，不加探测、缓存、autotune，不改 FA/GQA、
 来源图或六参 API；三账输入若相同则保留原始身份，不伪造重录。
+
+
+### G13-1：自动动态几何的运行时 i32 合同
+
+设计（2026-11-13，先完成旧树 CPU 反例再实施）。宿主的容量检查使用 Int64，
+动态 cell extent 和包含动态维的 row-major suffix 却由 rank-0 i32 乘法生成。
+旧树在 grid.x=16777216、tile=128 时允许 launch 到达只持元数据的 handler，
+而同一录制的设备 extent 是 -2147483648；这个夹具不分配实际存储。
+因此容量足够并不能证明设备几何可表示。
+
+采用单一 Entry 表示：在名字与参数旁携带录制产生的 `GeometryUse` 列表，
+每项记录原参数号、原存储维度、值的用途、正整数因子和录制调用位置。
+因子只有静态 extent 和指定 grid 轴乘 tile 两种。`trace1` 至 `trace6`
+在录制完成后把实际自动物化的值交给 Entry；`extent_of`
+以及首次建立 cell view 的路径登记义务，region 的试录必须同步回滚列表。
+所有 `entry1` 至 `entry6` 构造必须显式提供列表，删除旧签名，不加兼容包装；
+手写 Entry 的调用者负责提供与程序一致的义务，空列表表示没有自动物化值。
+这与手写参数的 role、extent 等声明一样，不是对任意手工 IR 的动态范围证明。
+包因合同收窄推进到 0.31.0，标准库随编译器一起升级。
+
+`launch_entryN` 先做既有 entry、身份、grid 和容量检查，再按义务以乘前除法
+证明值在 1..2147483647 内。失败返回 `gpu.geometry_i32`，包含 kernel、
+参数、原存储维度、extent/suffix、因子及乘积和录制调用位置；
+同时携带 launch 调用位置。检查在 Gpu effect 之前，因此所有 handler 同判。
+跨轴 Out 的宿主几何仍可重排，义务独立保留原维度与原 grid 轴，不按重排后的
+维度猜测 suffix。静态 metadata 不产生义务；只问 blocks 时沿用既有 grid 上界，
+不登记 extent 或限制 grid 乘原 tile。cell view 仅登记动态 extent 和实际使用的动态 suffix，
+不把未用的最终 total 当作 stride。一般 Idx 运算和用户显式 view 不自动登记。
+
+验收用无存储的 launch-plan 表覆盖 INT_MAX 两侧、2^31、2^32、双动态因子、
+静态与动态混合以及轴置换，并用 launch sentinel 证明拒绝发生在 handler 前。
+删除 extent 检查、删除 suffix 检查、误限静态 metadata 三类负控分别要求自己的
+具名分组失败、其余分组通过；构建失败不算命中。原 run_of、carry_extent、
+read layout、FA/GEMM 的文本、bytes 与小形状数值保持。新增 golden item 的
+实际耗时单列，现有分片与预算不变。
+
+不做的（理由）：不把全部 EntryArg 或 int64 shape/stride 限为 i32，因为它们
+未必生成设备索引；不改一般整数回绕与 unsigned 语义，因为这里约束的是自动
+几何值；不引入 I64 设备 ABI 或宣称一次支持超过 2^31 个元素；不改参考容差、
+工具版本、驱动、输入摘要范围或现有分片，因为这些不能修复两种表示的裂缝。

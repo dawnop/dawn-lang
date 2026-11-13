@@ -1,0 +1,124 @@
+# These checks ask a metadata-only handler about real recorded entries.
+# No backing storage or driver is needed, including at the i32 boundaries.
+# Each group keeps its own failure so removing one guard cannot borrow an
+# unrelated panic as evidence that the launch was rejected correctly.
+use std/gpu
+use std/gpu.{Gpu, Entry1, Axis, Free}
+use std/dtype.{F64}
+use std/str
+use std/loc
+use std/io.{println}
+use tileir/prog.{trace1, cells, In, Out}
+use tileir/dev.{DYN_DIM, extent_of, blocks_of, load_cell, load_at, idx_const}
+use tileir/render.{render}
+
+fn expect(ok: Bool, message: String) -> Unit = if not ok { panic(message) }
+
+fn attempt(e: Entry1[Float], capacity: Int, grid: List[Int], at: Loc = caller()) -> ForeignError = {
+  let r: Result[Unit, ForeignError] = {
+    with handle Gpu {
+      gpu_alloc(_dtype, _n) => Ok(1)
+      gpu_copy_from_host(_h, _data) => panic("unexpected copy")
+      gpu_copy_to_host(_h) => panic("unexpected copy")
+      gpu_launch(_name, _x, _y, _z, _args) => Err(ForeignError { kind = "sentinel.launch", message = "handler reached", cause = None })
+      gpu_module_global(_kernel, _name, _dtype) => panic("unexpected global")
+      gpu_free(_h) => Ok(())
+      gpu_sync() => Ok(())
+    }
+    let a = gpu.alloc(F64, capacity)
+    match a {
+      Err(e) -> Err(e)
+      Ok(b) -> gpu.launch_entry1(e, gpu.buffer_arg(b), grid = grid, at = at)
+    }
+  }
+  match r { Err(e) -> e, Ok(_) -> panic("sentinel missing") }
+}
+
+fn accepted(e: Entry1[Float], capacity: Int, grid: List[Int]) -> Unit = {
+  let error = attempt(e, capacity, grid)
+  expect(error.kind == "sentinel.launch", "legal geometry rejected: ${error.kind}: ${error.message}")
+}
+
+fn rejected(e: Entry1[Float], capacity: Int, grid: List[Int], fragment: String, product: Int,
+  recorded: Loc, at: Loc = caller()) -> Unit = {
+  let error = attempt(e, capacity, grid, at = at)
+  expect(error.kind == "gpu.geometry_i32", "missing ${fragment}: ${error.kind}: ${error.message}")
+  for part in ["argument 0", fragment, "= ${product}", "recorded at ${loc.path(recorded)}:${loc.line(recorded)}:${loc.col(recorded)}",
+    "launched at ${loc.path(at)}:${loc.line(at)}:${loc.col(at)}"] {
+    expect(str.contains(error.message, part), "wrong geometry diagnostic: ${error.message}; missing ${part}")
+  }
+}
+
+fn extent_checks() -> Unit = {
+  let at = loc.here()
+  let (_p2, e) = trace1("run", Out(F64, cells([DYN_DIM], [128])), a => { let _v = extent_of(a, 0, at = at) })
+  accepted(e, 2147483520, [16777215])
+  rejected(e, 2147483648, [16777216], "dimension 0 dynamic extent", 2147483648, at)
+  rejected(e, 4294967296, [33554432], "dimension 0 dynamic extent", 4294967296, at)
+  # A query alone and a materialized view each create an obligation.
+  for view in [false, true] {
+    let (_p1, e) = trace1("extent", In(F64, cells([DYN_DIM], [1])), a => {
+      if view { let _v = load_cell(a, at = at) } else { let _v = extent_of(a, 0, at = at) }
+    })
+    for n in [2147483646, 2147483647] { accepted(e, n, [n]) }
+    for n in [2147483648, 4294967296] { rejected(e, n, [n], "dimension 0 dynamic extent", n, at) }
+  }
+  # The existing grid contract bounds block counts independently of the tile.
+  let (_p3, b) = trace1("blocks", In(F64, cells([DYN_DIM], [1])), a => { let _v = blocks_of(a, 0, at = at) })
+  accepted(b, 2147483647, [2147483647])
+}
+
+fn suffix_checks() -> Unit = {
+  let at = loc.here()
+  # Two dynamic factors, following different, nonadjacent grid axes.
+  let (_p4, two) = trace1("two", In(F64, cells([1, DYN_DIM, DYN_DIM], [1, 1, 1],
+    along = [Free, Axis(2), Axis(0)])), a => { let _v = load_at(a, [idx_const(0)], at = at) })
+  accepted(two, 2147450880, [32768, 1, 65535])
+  rejected(two, 2147483648, [65536, 1, 32768], "dimension 0 dynamic suffix", 2147483648, at)
+  rejected(two, 4294967296, [131072, 1, 32768], "dimension 0 dynamic suffix", 4294967296, at)
+  accepted(two, 2147483647, [2147483647, 1, 1])
+  for order in [false, true] {
+    let ext = if order { [1, DYN_DIM, 65536] } else { [1, 65536, DYN_DIM] }
+    let axes = if order { [Free, Axis(0), Free] } else { [Free, Free, Axis(0)] }
+    let (_p5, mixed) = trace1("mixed", In(F64, cells(ext, [1, 1, 1], along = axes)), a => {
+      let _v = load_at(a, [idx_const(0), idx_const(0)], at = at)
+    })
+    accepted(mixed, 2147418112, [32767])
+    rejected(mixed, 2147483648, [32768], "dimension 0 dynamic suffix", 2147483648, at)
+    rejected(mixed, 4294967296, [65536], "dimension 0 dynamic suffix", 4294967296, at)
+  }
+  # Out host axes are normalized, while the suffix belongs to storage dim 0.
+  let (_p6, out) = trace1("permuted", Out(F64, cells([1, DYN_DIM, DYN_DIM], [1, 1, 1],
+    along = [Axis(1), Axis(2), Axis(0)])), a => { let _v = load_cell(a, at = at) })
+  rejected(out, 2147483648, [65536, 1, 32768], "dimension 0 dynamic suffix", 2147483648, at)
+}
+
+fn metadata_checks() -> Unit = {
+  let (_p7, e) = trace1("metadata", In(F64, cells([1, 4294967296], [1, 1], along = [Free, Free])), a => {
+    let _v = load_at(a, [idx_const(0), idx_const(0)])
+  })
+  accepted(e, 4294967296, [1])
+  let (p, b) = trace1("large_tile", In(F64, cells([DYN_DIM], [4294967296])), a => { let _n = blocks_of(a, 0) })
+  accepted(b, 4294967296, [1])
+  expect(not str.contains(render(p), "muli"), "blocks query materialized extent")
+  # Neither an unused marker nor an unneeded final total is an i32 value.
+  let (_p8, unused) = trace1("unused", In(F64, cells([DYN_DIM], [4294967296])), _a => ())
+  accepted(unused, 4294967296, [1])
+  let (_p9, total) = trace1("total", In(F64, cells([DYN_DIM, DYN_DIM], [1, 1])), a => { let _v = load_cell(a) })
+  accepted(total, 4294967296, [131072, 32768])
+}
+
+pub fn main() -> Unit !io = {
+  var failed = false
+  for group in ["extent", "suffix", "metadata"] {
+    let r = catch_panic(() => {
+      if group == "extent" { extent_checks() } else if group == "suffix" { suffix_checks() } else { metadata_checks() }
+    })
+    match r {
+      Ok(_) -> println("PASS dynamic geometry ${group}")
+      Err(e) -> { failed = true
+        println("FAIL dynamic geometry ${group}: ${e.message}") }
+    }
+  }
+  if failed { panic("dynamic geometry assertions failed") }
+}
