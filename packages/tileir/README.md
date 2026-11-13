@@ -584,4 +584,4 @@ This is a tool support restriction in 0.32.0, not a Tile IR language rule.
 The caller still supplies an associative body, a correct identity, and, for
 reductions, commutativity. An upstream fix requires separate qualification of
 a new fixed toolchain before lifting these restrictions. There is no fallback.
-See [the design](../../docs/tile-backend-design.md#601-reducescan-的-13537-支持合同).
+See [the design](../../docs/tile-backend-design.md), section 6.0.1.
