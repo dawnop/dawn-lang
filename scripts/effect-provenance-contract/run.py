@@ -10,9 +10,15 @@ import sys
 
 from builder_oracle import judge as judge_builder
 from tree_oracle import judge as judge_tree
+from native_runtime import RuntimeObject
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
+
+
+# Every contract case, in execution order. The gate schedules them in
+# several jobs (scheduling_test.py holds the partition complete and disjoint).
+CASES = ['continuation-modes', 'actual-goldens', 'tile-origin-shadow', 'cli-preview', 'w3-resources', 'w3-local-observer', 'w3-mutants', 'w3-foreign', 'w3-bounded', 'w3-control-matrix', 'method-size', 'snapshot', 'snapshot_bulk', 'snapshot_metadata', 'snapshot_defaults', 'snapshot_control', 'snapshot_flags', 'builder', 'modes', 'callbacks', 'bracket_exits', 'generic_capture', 'builtin_functions', 'bounded_functions', 'associated', 'origin_api', 'checkpoints', 'nested', 'shadow', 'evidence', 'unwind', 'staged', 'modules', 'packages', 'shared-probe', 'multi-tu-observe', 'observed-bench', 'escape', 'runtime-errors', 'w3', 'mutations']
 
 
 class Run:
@@ -21,6 +27,8 @@ class Run:
         self.out = args.out.resolve()
         self.out.mkdir(parents=True, exist_ok=True)
         self.results = []
+        self.runtime_object = (RuntimeObject(ROOT/'runtime/c', self.out, self.command)
+                               if args.reuse_runtime else None)
 
     def command(self, label, command):
         result = subprocess.run([str(x) for x in command], cwd=ROOT,
@@ -42,11 +50,17 @@ class Run:
         assert result.returncode == 0, (label, 'compile', result.stdout, result.stderr)
         if backend == 'native':
             exe = self.out/(label+'.bin')
-            result = self.command(label+'-cc', [self.args.cc, '-std=c11', '-O2',
+            prefix = [self.args.cc, '-std=c11', '-O2',
                 '-fwrapv', '-fexceptions', '-fno-strict-aliasing', '-ffp-contract=off',
-                '-pthread', '-I'+str(ROOT/'runtime/c'), target,
-                ROOT/'runtime/c/dawn_rt.c', '-lm', *cc_extra, '-o', exe])
+                '-pthread', '-I'+str(ROOT/'runtime/c')]
+            # Extra flags change how the runtime itself is compiled, so such a
+            # build keeps the original single-command compile of runtime and program.
+            shared = self.runtime_object is not None and not cc_extra
+            runtime = self.runtime_object.get(prefix) if shared else ROOT/'runtime/c/dawn_rt.c'
+            result = self.command(label+'-cc', [*prefix, target, runtime, '-lm', *cc_extra, '-o', exe])
             assert result.returncode == 0, (label, 'C compile', result.stderr[-6000:])
+            if shared:
+                self.runtime_object.confirm(prefix)
             command = [exe]
         else:
             command = [self.args.java, '-Xverify:all', '-jar', target]
@@ -92,14 +106,20 @@ def main():
     parser.add_argument('--java', default='java')
     parser.add_argument('--cc', default='clang')
     parser.add_argument('--out', type=Path, required=True)
-    parser.add_argument('--only', nargs='*')
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument('--only', nargs='*')
+    selection.add_argument('--except', dest='excluded', nargs='+',
+                           help='run every case except these (they run in another job)')
     parser.add_argument('--timeout', type=int, default=900,
                         help='seconds allowed per subprocess; a stall fails instead of waiting')
+    parser.add_argument('--reuse-runtime', action='store_true',
+                        help='verify and reuse one runtime object within this invocation')
     args = parser.parse_args()
     args.compiler = args.compiler.resolve()
     run = Run(args)
-    cases = ['continuation-modes', 'actual-goldens', 'tile-origin-shadow', 'cli-preview', 'w3-resources', 'w3-local-observer', 'w3-mutants', 'w3-foreign', 'w3-bounded', 'w3-control-matrix', 'method-size', 'snapshot', 'snapshot_bulk', 'snapshot_metadata', 'snapshot_defaults', 'snapshot_control', 'snapshot_flags', 'builder', 'modes', 'callbacks', 'bracket_exits', 'generic_capture', 'builtin_functions', 'bounded_functions', 'associated', 'origin_api', 'checkpoints', 'nested', 'shadow', 'evidence', 'unwind', 'staged', 'modules', 'packages', 'shared-probe', 'multi-tu-observe', 'observed-bench', 'escape', 'runtime-errors', 'w3', 'mutations']
-    selected = args.only if args.only is not None else cases
+    assert all(name in CASES for name in (args.only or []) + (args.excluded or [])), 'unknown contract case'
+    selected = (args.only if args.only is not None
+                else [name for name in CASES if name not in (args.excluded or [])])
     for name in selected:
         if name == 'continuation-modes':
             run.execute(name,HERE/'continuation_modes.dawn',lambda output: None if output.startswith('42 saved Plain mode stays Plain under an observed driver\n') else (_ for _ in ()).throw(AssertionError(output)))
@@ -239,7 +259,11 @@ def main():
     sources = [*HERE.rglob('*.dawn'), *HERE.glob('*.py')]
     manifest = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in sorted(sources)}
-    (run.out/'result.json').write_text(json.dumps({'cases': run.results, 'inputs': manifest}, indent=2)+'\n')
+    result = {'cases': run.results, 'inputs': manifest}
+    if run.runtime_object is not None:
+        result['runtime_object'] = run.runtime_object.metadata()
+        print('EFFECT_RUNTIME_OBJECT '+json.dumps(result['runtime_object'], sort_keys=True), flush=True)
+    (run.out/'result.json').write_text(json.dumps(result, indent=2)+'\n')
 
 
 if __name__ == '__main__':
