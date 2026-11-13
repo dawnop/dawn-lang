@@ -8,8 +8,8 @@ rather than altering the driver that admits the test program and its std.
 Source strings keep new syntax outside the compiler's seed-readable
 bootstrap inputs.
 
-Disjoint control shards bound each gate's wall time. The source matrix stays
-whole in its own invocation so both frontends use one native compiler build.
+Disjoint control shards bound each gate's wall time. Source selectors retain
+each complete check and run case, and native cases share one compiler build.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -213,6 +213,7 @@ def controls(out, names, jobs):
     jvm = [java, "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-XX:+UseSerialGC", "-jar"]
 
     def control(name):
+        started = time.monotonic()
         work = out / name
         work.mkdir()
         tree = work / "tree"
@@ -266,23 +267,36 @@ def controls(out, names, jobs):
                     diagnostic=diagnostic, std=tree / "std", embedded=embedded)
         shutil.rmtree(tree)
         return dict(name=name, compiler_built=True, owning_test_failed=True,
-            build_seconds=build_time, test_seconds=test_time)
+            build_seconds=build_time, test_seconds=test_time,
+            started=started, ended=time.monotonic())
 
     # Each worker owns its source tree, compiler and logs. Publish results in
     # declaration order only after its owning executed test has failed.
     rows = []
+    telemetry_seconds = 0.0
     with ThreadPoolExecutor(max_workers=jobs) as workers:
         for row in workers.map(control, names):
+            telemetry_start = time.monotonic()
             rows.append(row)
             (out / "results.json").write_text(json.dumps(rows, indent=2) + "\n")
+            print("CAPTURE_TASK " + json.dumps(row, sort_keys=True), flush=True)
             print(f"PASS mutant {row['name']}: compiler built, owning test red", flush=True)
+            telemetry_seconds += time.monotonic() - telemetry_start
+    print("CAPTURE_TELEMETRY " + json.dumps(dict(phase="private_results", seconds=telemetry_seconds)), flush=True)
     # Check the unmutated implementation after proving that the oracles fail.
+    common_start = time.monotonic()
+    completed_tests = []
     run([ROOT / "bin/dawn", "test", ROOT / TEST], out / "baseline.log")
+    completed_tests.append(TEST)
     run([ROOT / "bin/dawn", "test", ROOT / "selfhost/src/check/data_capture_test.dawn"], out / "data-baseline.log")
+    completed_tests.append("selfhost/src/check/data_capture_test.dawn")
     run([ROOT / "bin/dawn", "test", ROOT / "selfhost/src/ir/lower.dawn"], out / "lower-baseline.log")
+    completed_tests.append("selfhost/src/ir/lower.dawn")
     result, _ = run([ROOT / "bin/dawn", "check", PROBE], out / "subwitness-baseline.log", expected=1)
     if result.stdout.count("error:") != 1 or "impl subwitness support is not covered" not in result.stdout:
         raise RuntimeError("the subwitness probe must isolate exactly one contract refusal")
+    print("CAPTURE_BASELINE " + json.dumps(dict(phase="common", seconds=time.monotonic() - common_start)), flush=True)
+    cases_start = time.monotonic()
     cases = set()
     for name in names:
         cases.update(BASELINE_CASES.get(name, []))
@@ -291,8 +305,10 @@ def controls(out, names, jobs):
         cases.update(case for case, _, _ in EXTRA_ASSERTIONS.get(name, []))
     original = out / "case-baseline"
     original.mkdir()
+    completed_cases = []
     for case in sorted(cases):
         observe(run, [*jvm, ROOT / "build/dawn-selfhost.jar"], case, original / (case + ".log"))
+        completed_cases.append(case)
     embedded_cases = set()
     for name in names:
         cases.update(BASELINE_CASES.get(name, []))
@@ -301,16 +317,24 @@ def controls(out, names, jobs):
             embedded_cases.update(case for case, _, _ in CASE_OWNERS.get(name, []))
             embedded_cases.update(EXTRA_CASES.get(name, []))
             embedded_cases.update(case for case, _, _ in EXTRA_ASSERTIONS.get(name, []))
+    completed_embedded = []
     for case in sorted(embedded_cases):
         observe(run, [*jvm, ROOT / "build/dawn-selfhost.jar"], case,
                 original / (case + "-embedded.log"), embedded=True)
+        completed_embedded.append(case)
     print("PASS trait Capture contracts: unmutated tests green", flush=True)
+    print("CAPTURE_BASELINE " + json.dumps(dict(phase="cases", seconds=time.monotonic() - cases_start)), flush=True)
+    return dict(mutants=[{key: row[key] for key in
+                         ("name", "compiler_built", "owning_test_failed")} for row in rows],
+                tests=completed_tests, subwitness=True,
+                cases=completed_cases, embedded=completed_embedded)
 
 
-def calls(out, backend=None):
+def calls(out, backend=None, jobs=1, names=None):
     """Build this tree's native compiler before using its checker and runner."""
     compilers = []
     if backend != "native":
+        baseline_start = time.monotonic()
         for action in ("check", "run"):
             result, _ = run([ROOT / "bin/dawn", action, CALLS], out / f"calls-jvm-{action}.log")
             if action == "run" and result.stdout != "trait capture calls\n":
@@ -319,6 +343,7 @@ def calls(out, backend=None):
             env={**os.environ, "DAWN_LAUNCHER_PRINT_JAVA": "1"}, text=True).strip()
         jvm = [java, "-XX:-UsePerfData", "-Xss512m", "-Xmx2g", "-XX:+UseSerialGC", "-jar", ROOT / "build/dawn-selfhost.jar"]
         compilers.append(("jvm", jvm))
+        print("CAPTURE_BASELINE " + json.dumps(dict(phase="jvm_calls", seconds=time.monotonic() - baseline_start)), flush=True)
     if backend != "jvm":
         units = out / "native-units"
         native = out / "dawnc"
@@ -334,8 +359,10 @@ def calls(out, backend=None):
         native_test = entry.parent / Path(TEST).relative_to("selfhost/src")
         run([native, "test", "--std", ROOT / "std", native_test], out / "native-trait-tests.log")
         compilers.append(("native", [native]))
-    matrix(run, compilers, out)
-    print("PASS trait Capture calls: " + " and ".join(name for name, _ in compilers) + " check and run", flush=True)
+    rows = matrix(run, compilers, out, jobs=jobs, names=names)
+    label = "PASS trait Capture calls" + (" selector" if names is not None else "")
+    print(label + ": " + " and ".join(name for name, _ in compilers) + " check and run", flush=True)
+    return rows
 
 
 def main():
@@ -348,8 +375,13 @@ def main():
                            help="run the complete JVM and native source matrix")
     selection.add_argument("--calls-backend", choices=("jvm", "native"),
                            help="run the complete source matrix on one frontend")
+    parser.add_argument("--calls-shard", metavar="I/N",
+                        help="run one of two complete JVM source case selectors")
     parser.add_argument("--out", type=Path)
-    parser.add_argument("--jobs", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--coverage-dir", type=Path,
+                        help="record a complete selector after input verification and cleanup")
+    parser.add_argument("--jobs", type=int, choices=(1, 2, 4),
+                        help="bounded workers (default: two for mutants, one for source cases)")
     args = parser.parse_args()
     if set(OWNERS) != set(MUTATIONS):
         raise RuntimeError("each mutation must have exactly one owning test")
@@ -362,19 +394,49 @@ def main():
         except ValueError:
             parser.error("--controls-shard must be I/N with 1 <= I <= N <= the mutation count")
         names = names[index - 1::total]
+    call_index, call_names = None, None
+    if args.calls_shard:
+        if args.calls_backend != "jvm":
+            parser.error("--calls-shard requires --calls-backend jvm")
+        try:
+            call_index, count = map(int, args.calls_shard.split("/"))
+            if count != 2 or not 1 <= call_index <= count:
+                raise ValueError()
+        except ValueError:
+            parser.error("--calls-shard must select 1/2 or 2/2")
+        import controls_shards
+        call_names = controls_shards.calls_plan()[call_index - 1]
+    if args.coverage_dir is not None and not (
+            (args.controls_shard and total == 3) or call_index is not None):
+        parser.error("--coverage-dir requires a complete control or JVM source selector")
+    if args.coverage_dir is not None:
+        start = time.monotonic()
+        import controls_shards
+        identity = controls_shards.input_identity()
+        print("CAPTURE_CONTROL " + json.dumps(dict(phase="prepare", seconds=time.monotonic() - start)), flush=True)
     with tempfile.TemporaryDirectory(prefix="trait-capture-contract-") as temporary:
         out = (args.out or Path(temporary)).resolve()
         out.mkdir(parents=True, exist_ok=True)
         timings = {}
         if not args.calls_only and args.calls_backend is None:
             start = time.monotonic()
-            controls(out, names, args.jobs)
+            completed = controls(out, names, args.jobs or 2)
             timings["controls_seconds"] = time.monotonic() - start
         if args.only is None and args.controls_shard is None:
             start = time.monotonic()
-            calls(out, args.calls_backend)
+            rows = calls(out, args.calls_backend, args.jobs or 1, names=call_names)
+            if call_index is not None:
+                completed_calls = dict(baseline_checked=True, baseline_ran=True,
+                    cases=[{key: row[key] for key in ('case', 'checked', 'ran', 'exit')} for row in rows])
             timings["calls_seconds"] = time.monotonic() - start
         (out / "timings.json").write_text(json.dumps(timings, indent=2) + "\n")
+    if args.coverage_dir is not None:
+        start = time.monotonic()
+        if call_index is not None:
+            controls_shards.record_calls(args.coverage_dir, call_index, completed_calls, identity)
+        else:
+            controls_shards.record(args.coverage_dir, index, completed, identity)
+        print("CAPTURE_CONTROL " + json.dumps(dict(phase="receipt", seconds=time.monotonic() - start)), flush=True)
 
 
 if __name__ == "__main__":

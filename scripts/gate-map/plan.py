@@ -105,6 +105,10 @@ every event anyway. A job whose `needs:` names a selected job is selected too
 (mutant-shards-complete reassembles the shards it needs), so the selection is
 closed over the needs graph.
 
+Each kind of Capture selector forms a complete execution family. Selecting
+a companion also selects the remaining members of its family. Overlapping
+families expand until every selected family is complete.
+
 The residual risk, stated rather than hidden: gatemap's `coarse` is a claim
 that a gate reads a path, derived from what the gate's scripts name. A gate
 that reads a path through something gatemap cannot see (a compiled program
@@ -376,6 +380,42 @@ def evidence_problems(gates_text, ci_text):
 
 # ---- the plan ------------------------------------------------------------
 
+def capture_family(gates, gate_jobs, option, expected_count, backend=None):
+    """Derive the complete receipt family from its actual selector commands."""
+    selectors = {}
+    total = None
+    for gate in gates:
+        if gate.workflow != GATES_NAME:
+            continue
+        for command in gate.commands:
+            if not re.search(r"(?:^|\s)(?:\./)?scripts/trait-capture-contract/run\.py(?:\s|$)", command):
+                continue
+            if option not in command or '--coverage-dir' not in command:
+                continue
+            match = re.search(re.escape(option) + r"\s+(\d+)/(\d+)(?:\s|$)", command)
+            if match is None or (backend is not None and not re.search(
+                    r'--calls-backend\s+' + re.escape(backend) + r'(?:\s|$)', command)):
+                raise ValueError('invalid Capture selector')
+            index, count = map(int, match.groups())
+            job = gate.id.split(' / ', 1)[0]
+            if (count != expected_count or not 1 <= index <= count or index in selectors or
+                    job not in gate_jobs or (total is not None and count != total)):
+                raise ValueError('inconsistent Capture control family')
+            total = count
+            selectors[index] = job
+    if total is not None and (set(selectors) != set(range(1, total + 1)) or
+                              len(set(selectors.values())) != total):
+        raise ValueError('incomplete Capture control family')
+    return set(selectors.values())
+
+
+def capture_control_family(gates, gate_jobs):
+    return capture_family(gates, gate_jobs, '--controls-shard', 3)
+
+
+def capture_jvm_family(gates, gate_jobs):
+    return capture_family(gates, gate_jobs, '--calls-shard', 2, backend='jvm')
+
 def git(args, timeout=GIT_TIMEOUT):
     return subprocess.run(
         ["git", "-C", str(ROOT)] + args,
@@ -404,6 +444,8 @@ class MapView:
         self.gm = gm
         self.base_std_modules = base_std_modules
         self.gate_jobs = gate_jobs
+        self.capture_controls = capture_control_family(gm.gates, gate_jobs)
+        self.capture_jvm = capture_jvm_family(gm.gates, gate_jobs)
         # gatemap's `unread` kind, spelled the same way as its check
         self.unread = {
             p for p in gm.unseen()
@@ -425,6 +467,12 @@ class MapView:
             job = o.gate_id.split(" / ", 1)[0]
             if job in self.gate_jobs:
                 jobs.add(job)
+        previous = None
+        while previous != jobs:
+            previous = set(jobs)
+            for family in (self.capture_controls, self.capture_jvm):
+                if jobs & family:
+                    jobs |= family
         return jobs
 
 
