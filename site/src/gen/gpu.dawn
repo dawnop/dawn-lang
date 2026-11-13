@@ -639,14 +639,25 @@ pub fn golden_mutants(run_sh: String) -> List[String] = {
 }
 
 ## The gate of one tile-golden mutant, from its block, or why it has none.
+## A complete block may put its command and closing `fi` on the header line.
 pub fn golden_gate(run_sh: String, name: String) -> Result[Int, String] =
-  match str.split_once(run_sh, "\nif run_item ${name}; then\n") {
+  match str.split_once(run_sh, "\nif run_item ${name}; then") {
     None -> Err("scripts/tile-golden/run.sh lists `${name}` and runs no block for it")
     Some((_a, after)) -> {
       let block =
-        match str.split_once(after, "\nfi\n") {
-          Some((b, _c)) -> b
-          None -> after
+        if str.starts_with(after, "\n") {
+          match str.split_once(after, "\nfi\n") {
+            Some((b, _c)) -> b
+            None -> after
+          }
+        } else if str.starts_with(after, " ") {
+          let line = str.trim(str.split(after, "\n")[0])
+          match str.strip_suffix(line, "; fi") {
+            Some(b) -> b
+            None -> return Err("scripts/tile-golden/run.sh has no complete inline block for `${name}`")
+          }
+        } else {
+          return Err("scripts/tile-golden/run.sh lists `${name}` and runs no block for it")
         }
       let numeric_calls = filter(str.split(block, "\n"), l =>
           str.starts_with(str.trim(l), "numeric_writer_mutant "))
@@ -1987,6 +1998,9 @@ test "every mutant is placed at the gate its harness proves" {
     for name in ["i32-tag-as-f32", "i32-payload-two-bytes", "f32-tag-as-tf32", "f32-payload-two-bytes"] {
       assert golden_gate(golden_run, name) == Ok(1)
     }
+    for name in ["dynamic-geometry-checks", "dynamic-extent-check-dropped", "dynamic-suffix-check-dropped", "dynamic-metadata-limited-to-i32"] {
+      assert golden_gate(golden_run, name) == Ok(0)
+    }
     assert len(filter(ms, m => m.gate < 2)) == len(golden)
     for g in [0, 1, 2] {
       assert len(filter(ms, m => m.gate == g)) > 0
@@ -2018,10 +2032,30 @@ test "the gate rule reads the block, and only the block" {
   assert not names_word("x big-grid-zero y", "grid-zero")
 }
 
+test "compact gate blocks end on their own line and keep their exact selector" {
+  let host = "\nif run_item host; then dynamic_geometry_checks host extent; fi\n"
+  let writer = "\nif run_item writer; then writer_mutant_checks writer vadd same-size x; fi\n"
+  assert golden_gate(host ++ writer, "host") == Ok(0)
+  assert golden_gate(host ++ writer, "writer") == Ok(1)
+  for broken in [str.replace(host, "; fi", ""), str.replace(host, "; fi", "; fi trailing")] {
+    match golden_gate(broken ++ writer, "host") {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert str.contains(e, "no complete inline block") }
+    }
+  }
+  match golden_gate(str.replace(host, "run_item host;", "run_item host-extra;"), "host") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "runs no block") }
+  }
+}
+
 test "numeric writer controls follow the checked helper at the assembly gate" {
   let block = "\nif run_item numeric; then\n  numeric_writer_mutant numeric sum same-size error\nfi\n"
   let helper = "\nnumeric_writer_mutant() {\n  writer_mutant_checks x y z diagnostic\n}\n"
   assert golden_gate(helper ++ block, "numeric") == Ok(1)
+  let compact = "\nif run_item numeric; then numeric_writer_mutant numeric sum same-size error; fi\n"
+  assert golden_gate(helper ++ compact, "numeric") == Ok(1)
+  assert golden_gate(compact, "numeric") == Err("numeric writer control needs exactly one helper")
   let dormant = str.replace(block, "  numeric_writer_mutant ", "  # numeric_writer_mutant ")
   assert golden_gate(helper ++ dormant, "numeric") == Ok(0)
   assert golden_gate(block, "numeric") == Err("numeric writer control needs exactly one helper")
