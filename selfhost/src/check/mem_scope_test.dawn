@@ -1,10 +1,10 @@
 # Rigid static identities, rather than runtime buffer allocation, isolate the
 # type foundation from capture propagation and scoped effect discharge.
+use check/types.{ty_fn, Ty, TyInt, TyUnit, TyI64Buf, TyF64Buf, TyFn, EPure, ScopedEffect}
 use std/map
 use check/capture
 use check/capture.{Scope, Function, Arguments, Region, CaptureVar}
 use check/types
-use check/types.{Ty, TyInt, TyUnit, TyI64Buf, TyF64Buf, TyFn, EPure, ScopedEffect}
 use check/cx.{test_cx, cx_new, bind_capture_params, resolve_type}
 use check/passes.{seed_prelude}
 use check/checker.{check_module, exports_of, assignable, unify_into, unify_eff}
@@ -13,7 +13,7 @@ use front/ast
 use front/ast.{ScopeSyntax, CaptureBound}
 
 fn region(name: String, id: Int) -> Scope = Scope { name = name, id = id }
-fn quantified(s: Scope) -> Ty = TyFn([TyI64Buf(s)], TyF64Buf(s),
+fn quantified(s: Scope) -> Ty = ty_fn([TyI64Buf(s)], TyF64Buf(s),
   types.scoped_eff(EPure, [ScopedEffect { id = 77, name = "Mem", scope = s }]),
   Function { scopes = [s], bound = None })
 
@@ -28,7 +28,7 @@ test "Mem scope type equality distinguishes rigid regions and alpha renames quan
   assert assignable(test_cx(), quantified(s), quantified(t))
   let (_, _, ok) = unify_into(test_cx(), quantified(s), quantified(t), map.empty(), map.empty())
   assert ok
-  assert not types.ty_equal(quantified(s), TyFn([TyI64Buf(s)], TyF64Buf(t),
+  assert not types.ty_equal(quantified(s), ty_fn([TyI64Buf(s)], TyF64Buf(t),
     types.scoped_eff(EPure, [ScopedEffect { id = 77, name = "Mem", scope = s }]),
     Function { scopes = [s], bound = None }))
 }
@@ -36,12 +36,12 @@ test "Mem scope type equality distinguishes rigid regions and alpha renames quan
 test "Mem scope substitution renames a binder before capturing a replacement" {
   let bound = region("s", 1)
   let free = region("t", 2)
-  let source = TyFn([], TyI64Buf(free),
+  let source = ty_fn([], TyI64Buf(free),
     types.scoped_eff(EPure, [ScopedEffect { id = 77, name = "Mem", scope = bound }]),
     Function { scopes = [bound], bound = Some([CaptureVar("c", 3)]) })
   let replaced = types.subst_scopes(source, map.from([(2, bound)]), map.from([(3, [Region(bound)])]))
   match replaced {
-    TyFn([], TyI64Buf(result), row, scope) -> {
+    TyFn([], TyI64Buf(result), row, scope, _) -> {
       assert result.id == bound.id
       assert scope.scopes[0].id != bound.id
       assert scope.scopes[0].name != result.name
@@ -50,12 +50,12 @@ test "Mem scope substitution renames a binder before capturing a replacement" {
     }
     _ -> { assert false }
   }
-  let nested = TyFn([], source, EPure, capture.empty_function())
+  let nested = ty_fn([], source, EPure, capture.empty_function())
   let nested_replaced = types.subst_scopes(nested, map.from([(2, bound)]),
     map.from([(3, [Region(bound)])]))
   assert capture.contains(types.ty_scope_refs(nested_replaced), Region(bound))
   match nested_replaced {
-    TyFn([], TyFn(_, _, _, child), _, _) -> {
+    TyFn([], TyFn(_, _, _, child, _), _, _, _) -> {
       assert child.scopes[0].id != bound.id
       assert child.scopes[0].name != bound.name
     }
@@ -66,12 +66,12 @@ test "Mem scope substitution renames a binder before capturing a replacement" {
 test "Mem scope printing groups a captured function returned by a captured arrow" {
   let s = region("s", 1)
   let c = [CaptureVar("c", 2)]
-  let inner = TyFn([], TyInt, EPure, Function { scopes = [], bound = Some(c) })
-  let outer = TyFn([TyI64Buf(s)], inner,
+  let inner = ty_fn([], TyInt, EPure, Function { scopes = [], bound = Some(c) })
+  let outer = ty_fn([TyI64Buf(s)], inner,
     types.scoped_eff(EPure, [ScopedEffect { id = 77, name = "Mem", scope = s }]),
     Function { scopes = [s], bound = Some(c) })
   assert types.ty_show(map.empty(), outer) == "fn[@s](I64Buf@s) -> (fn() -> Int ^{c}) !Mem[s] ^{c}"
-  let plain = TyFn([], TyUnit, EPure, capture.empty_function())
+  let plain = ty_fn([], TyUnit, EPure, capture.empty_function())
   assert types.ty_show(map.empty(), plain) == "fn() -> Unit"
 }
 
@@ -148,11 +148,11 @@ test "Mem scope rows retain each domain through union effect substitution and un
 test "Mem scope substitution avoids textual binder capture across every argument kind" {
   let s = region("s", 1)
   let free = region("s", 2)
-  let arrow = TyFn([], types.TyVar("T", 3), types.EffVar("e", 4),
+  let arrow = ty_fn([], types.TyVar("T", 3), types.EffVar("e", 4),
     Function { scopes = [s], bound = None })
   let inserted = types.subst(arrow, map.from([(3, TyI64Buf(free))]), map.empty())
   match inserted {
-    TyFn([], TyI64Buf(result), _, sc) -> {
+    TyFn([], TyI64Buf(result), _, sc, _) -> {
       assert result == free
       assert sc.scopes[0].name != result.name
       assert sc.scopes[0].id != result.id
@@ -162,7 +162,7 @@ test "Mem scope substitution avoids textual binder capture across every argument
   let inner = quantified(s)
   let nested = types.subst(arrow, map.from([(3, inner)]), map.empty())
   match nested {
-    TyFn([], TyFn(_, _, _, child), _, parent) -> {
+    TyFn([], TyFn(_, _, _, child, _), _, parent, _) -> {
       assert parent.scopes[0].name != child.scopes[0].name
       assert parent.scopes[0].id != child.scopes[0].id
     }
@@ -170,14 +170,14 @@ test "Mem scope substitution avoids textual binder capture across every argument
   }
   let row_replaced = types.subst(arrow, map.empty(), map.from([(4, types.EffVar("s", 5))]))
   match row_replaced {
-    TyFn(_, _, _, sc) -> { assert sc.scopes[0].name != "s" }
+    TyFn(_, _, _, sc, _) -> { assert sc.scopes[0].name != "s" }
     _ -> { assert false }
   }
-  let source = TyFn([], TyI64Buf(region("t", 6)), EPure,
+  let source = ty_fn([], TyI64Buf(region("t", 6)), EPure,
     Function { scopes = [s], bound = None })
   let renamed = types.subst_scopes(source, map.from([(6, free)]), map.empty())
   match renamed {
-    TyFn([], TyI64Buf(result), _, sc) -> {
+    TyFn([], TyI64Buf(result), _, sc, _) -> {
       assert result == free
       assert sc.scopes[0].name != result.name
     }
@@ -187,10 +187,10 @@ test "Mem scope substitution avoids textual binder capture across every argument
 
 test "Mem scope printing keeps a returned capture bound inside a pure arrow" {
   let c = [CaptureVar("c", 1)]
-  let inner = TyFn([], TyInt, EPure, Function { scopes = [], bound = Some(c) })
-  let outer = TyFn([], inner, EPure, capture.empty_function())
+  let inner = ty_fn([], TyInt, EPure, Function { scopes = [], bound = Some(c) })
+  let outer = ty_fn([], inner, EPure, capture.empty_function())
   assert types.ty_show(map.empty(), outer) == "fn() -> (fn() -> Int ^{c})"
-  let value = TyFn([], types.TyCaptured(TyInt, c), EPure, capture.empty_function())
+  let value = ty_fn([], types.TyCaptured(TyInt, c), EPure, capture.empty_function())
   assert types.ty_show(map.empty(), value) == "fn() -> (Int^{c})"
   assert diagnostics("alias Returned[^c] = fn() -> (fn() -> Int ^{c})\n" ++
       "alias Value[^c] = fn() -> (Int^{c})\n") == []
@@ -200,9 +200,9 @@ test "Mem scope substitution keeps qualified function types in TyFn" {
   let c = [CaptureVar("c", 1)]
   let source = types.TyCaptured(types.TyVar("T", 2), c)
   let result = types.subst(source,
-    map.from([(2, TyFn([], TyInt, EPure, capture.empty_function()))]), map.empty())
+    map.from([(2, ty_fn([], TyInt, EPure, capture.empty_function()))]), map.empty())
   match result {
-    TyFn([], TyInt, EPure, sc) -> { assert sc.bound == Some(c) }
+    TyFn([], TyInt, EPure, sc, _) -> { assert sc.bound == Some(c) }
     _ -> { assert false }
   }
   assert diagnostics("alias Narrow[@s] = (fn() -> Int ^{s})^{}\n")[0] ==
@@ -212,8 +212,8 @@ test "Mem scope substitution keeps qualified function types in TyFn" {
 test "Mem scope nominal argument equality uses identity rather than display spelling" {
   let s = region("s", 1)
   let renamed = region("renamed", 1)
-  let x = types.TyAdt(42, [TyInt], scope_arguments(s))
-  let y = types.TyAdt(42, [TyInt], scope_arguments(renamed))
+  let x = types.ty_adt(42, [TyInt], scope_arguments(s))
+  let y = types.ty_adt(42, [TyInt], scope_arguments(renamed))
   assert types.ty_equal(x, y)
   let (_, _, fits) = unify_into(test_cx(), x, y, map.empty(), map.empty())
   assert fits
@@ -224,8 +224,8 @@ fn scope_arguments(s: Scope) -> Arguments = Arguments { scopes = [s], captures =
 test "Mem scope alpha equivalence cannot capture a free identity into a target binder" {
   let s = region("s", 1)
   let t = region("t", 2)
-  let free = TyFn([], TyI64Buf(t), EPure, Function { scopes = [s], bound = Some([Region(t)]) })
-  let bound = TyFn([], TyI64Buf(t), EPure, Function { scopes = [t], bound = Some([Region(t)]) })
+  let free = ty_fn([], TyI64Buf(t), EPure, Function { scopes = [s], bound = Some([Region(t)]) })
+  let bound = ty_fn([], TyI64Buf(t), EPure, Function { scopes = [t], bound = Some([Region(t)]) })
   assert not types.ty_equal(free, bound)
   assert not types.ty_equal(bound, free)
   assert not assignable(test_cx(), free, bound)

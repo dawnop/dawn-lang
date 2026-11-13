@@ -29,7 +29,7 @@ use std/list
 use std/map
 use std/set
 use std/str
-use check/types.{
+use check/types.{signature_scope_inert,
   Ty, TyAdt, TyVar, TyError, Eff, Sig, AdtI, TraitI, subst, adt_of, ty_show, sig_render, bounds_of
 }
 use check/checker.{resolve_application, unify_into}
@@ -157,7 +157,7 @@ fn bounds_hold(qc: QCx, s: Sig, m: Map[Int, Ty], em: Map[Int, Eff]) -> Bool = {
 ## A record's field `name` at the type arguments of `t`.
 fn field_of(qc: QCx, t: Ty, name: String) -> Option[Ty] =
   match t {
-    TyAdt(aid, targs, _) -> {
+    TyAdt(aid, targs, _, _) -> {
       let ad = adt_of(qc.entry.cx.adts, aid)
       if not ad.is_record || len(ad.ctors) == 0 { return None }
       var im: Map[Int, Ty] = map.empty()
@@ -191,12 +191,15 @@ fn without_first(s: Sig) -> Sig = {
   for c in s.caller_params {
     if c > 0 { shifted = shifted ++ [c - 1] }
   }
-  Sig {
-    ..s,
-    param_tys = list.drop(s.param_tys, 1),
-    param_names = list.drop(s.param_names, 1),
-    param_defaults = list.drop(s.param_defaults, 1),
-    caller_params = shifted
+  {
+    let identity_base = s
+    let identity_param_tys: List[Ty] = list.drop(s.param_tys, 1)
+    Sig { ..identity_base,
+      param_tys = identity_param_tys,
+      param_names = list.drop(s.param_names, 1),
+      param_defaults = list.drop(s.param_defaults, 1),
+      caller_params = shifted,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_param_tys, identity_base.ret, identity_base.eff) }
   }
 }
 
@@ -277,7 +280,7 @@ pub(pkg) fn dot_candidates(qc: QCx, cps: List[Char], dot: Int, locals: Set[Strin
   var out: List[DotCand] = []
   let adts = qc.entry.cx.adts
   match rt {
-    TyAdt(aid, _, _) -> {
+    TyAdt(aid, _, _, _) -> {
       let ad = adt_of(adts, aid)
       if ad.is_record && len(ad.ctors) > 0 {
         for f in ad.ctors[0].fields {

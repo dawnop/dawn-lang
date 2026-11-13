@@ -7,20 +7,7 @@
 # has no re-export: a name reachable from `checker` alone would pin the whole
 # 11k-line file under all of them.
 
-use check/capture.{TraitApplication, Scope as CaptureScope, CaptureParam, Params as CaptureParams, Function as CaptureFunction, Arguments as CaptureArguments}
-use check/capture
-use check/data_capture
-use check/environment
-use check/trait_contract
-use std/str
-use std/list
-use std/map
-use std/set
-use check/identity
-use check/identity.{Minted, Part, minted, minted_path, minted_show, free_pool}
-use front/token.{Diag, mk_diag, DiagOwner}
-use front/ast.{CaptureArg, TScoped, TCaptured, TKindArg, ScopeSyntax, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
-use check/types.{BtBuffer, with_capture_bound, TyCaptured,
+use check/types.{ty_adt, ty_list, ty_opaque, ty_tuple, ty_fn, BtBuffer, with_capture_bound, TyCaptured,
   Adts, AdtI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
   no_eparam_names, fn_max_params,
   Audience, PackageId, PkgRoot, PkgStd, PkgDep, package_display,
@@ -35,6 +22,19 @@ use check/types.{BtBuffer, with_capture_bound, TyCaptured,
   builtins, internal_builtins,
   prelude_adts, prelude_traits, prelude_impls, LEN_ID, insert_impl
 }
+use check/capture.{TraitApplication, Scope as CaptureScope, CaptureParam, Params as CaptureParams, Function as CaptureFunction, Arguments as CaptureArguments}
+use check/capture
+use check/data_capture
+use check/environment
+use check/trait_contract
+use std/str
+use std/list
+use std/map
+use std/set
+use check/identity
+use check/identity.{Minted, Part, minted, minted_path, minted_show, free_pool}
+use front/token.{Diag, mk_diag, DiagOwner}
+use front/ast.{CaptureArg, TScoped, TCaptured, TKindArg, ScopeSyntax, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
 use check/jsig.{Jsig, jsig_refused}
 use check/tast.{WitRef}
 use front/suggest
@@ -893,7 +893,7 @@ pub(pkg) fn with_list_len(cx: Cx) -> Cx = {
   let imp = ImplI { trait_args = [[variable]], scope_params = CaptureParams { ..params,
     captures = [CaptureParam { name = "dep", id = -51, bound = None }], bounds = [(-50, [variable])] },
     trait_id = LEN_ID,
-    subject = TyList(tv),
+    subject = ty_list(tv),
     tparams = [tv],
     constraints = [[]],
     lo = 0,
@@ -1726,7 +1726,7 @@ fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
         out = out ++ [t]
         i = i + 1
       }
-      (record_span_at(cx1, lo, hi, elems), TyTuple(out))
+      (record_span_at(cx1, lo, hi, elems), ty_tuple(out))
     }
     TFn(params, ret, effs, lo, hi, syntax) -> {
       let saved = cx.current_capture_params
@@ -1748,7 +1748,7 @@ fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
           (resolved, Some(cap)) }
       }
       (record_span_at(Cx { ..cx5, current_capture_params = saved }, lo, hi, params ++ [ret]),
-        TyFn(ps, rt, eff, CaptureFunction { scopes = own.scopes, bound = bound }))
+        ty_fn(ps, rt, eff, CaptureFunction { scopes = own.scopes, bound = bound }))
     }
     TScoped(value, name, lo, hi) -> {
       let (resolved, region) = resolve_scope(cx, name, lo, hi)
@@ -1774,7 +1774,7 @@ fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
             cx3 = cerr(cx3, "a capture bound cannot erase a buffer's Scope", lo, hi)
           }
         }
-        TyFn(_, _, _, sc) -> {
+        TyFn(_, _, _, sc, _) -> {
           match sc.bound { Some(old) -> {
             if not capture.subset_in(old, bound, cx3.current_capture_params.captures) {
               cx3 = cerr(cx3, "a capture bound cannot erase a function's declared captures", lo, hi)
@@ -1865,8 +1865,8 @@ fn resolve_kind_application(cx: Cx, qual: Option[String], name: String,
   let substituted = subst_scopes(value, sm, cm)
   let actual = CaptureArguments { scopes = scopes, captures = captures }
   let result = match substituted {
-    TyAdt(id, ts, _) -> TyAdt(id, ts, actual)
-    TyOpaque(id, n, owner, ts, target, _, envelope) -> TyOpaque(id, n, owner, ts, target, actual, envelope)
+    TyAdt(id, ts, _, _) -> ty_adt(id, ts, actual)
+    TyOpaque(id, n, owner, ts, target, _, envelope, _) -> ty_opaque(id, n, owner, ts, target, actual, envelope)
     _ -> substituted
   }
   next = resolved
@@ -2036,7 +2036,7 @@ fn resolve_qual(
         cx1 = cx2
         args = args ++ [t]
       }
-      (record_span_at(type_capture_obligations(cx1, info.name, info.scope_params, info.tparams, args, lo, hi), lo, hi, targs), TyAdt(aid, args, capture.empty_arguments()))
+      (record_span_at(type_capture_obligations(cx1, info.name, info.scope_params, info.tparams, args, lo, hi), lo, hi, targs), ty_adt(aid, args, capture.empty_arguments()))
     }
     None -> {
       let pool = map.keys(exp.types_by_name) ++ map.keys(exp.aliases)
@@ -2374,7 +2374,7 @@ fn resolve_named(
         cx1 = cx2
         args = args ++ [t]
       }
-      (record_span_at(type_capture_obligations(cx1, info.name, info.scope_params, info.tparams, args, lo, hi), lo, hi, targs), TyAdt(aid, args, capture.empty_arguments()))
+      (record_span_at(type_capture_obligations(cx1, info.name, info.scope_params, info.tparams, args, lo, hi), lo, hi, targs), ty_adt(aid, args, capture.empty_arguments()))
     }
   }
 }
@@ -2386,7 +2386,7 @@ fn resolve_named(
 ## arguments it was applied to — which the target cannot always give back,
 ## since a target need not mention every parameter.
 pub fn wrap_opaque(al: AliasE, args: List[Ty], target: Ty) -> Ty =
-  if al.is_opaque { TyOpaque(al.id, al.name, al.owner, args, target, capture.empty_arguments(), al.capture_envelope) } else { target }
+  if al.is_opaque { ty_opaque(al.id, al.name, al.owner, args, target, capture.empty_arguments(), al.capture_envelope) } else { target }
 
 ## The std types whose representation means different things on the two
 ## backends, and so cannot be written down in Core.
@@ -2423,7 +2423,7 @@ fn backend_dependent_repr(owner: String, name: String) -> Bool =
 ## spelling out.
 pub fn const_refusal_hint(t: Ty) -> String =
   match t {
-    TyOpaque(_, nm, own, _, _, _, _) ->
+    TyOpaque(_, nm, own, _, _, _, _, _) ->
       if backend_dependent_repr(own, nm) {
         "a cursor is a position in the backend's own representation of a " ++
           "string, and the two backends do not agree on it, so there is no " ++
@@ -2467,20 +2467,20 @@ pub(pkg) fn is_const_literal_type(adts: Adts, t: Ty, visited: Set[Int]) -> Bool 
     # Serializability is a question about the representation, so an opaque
     # type is exactly as serializable as its target -- unless the target's
     # *meaning* is the backend's rather than the language's.
-    TyOpaque(_, nm, own, _, tgt, _, _) ->
+    TyOpaque(_, nm, own, _, tgt, _, _, _) ->
       if backend_dependent_repr(own, nm) {
         false
       } else {
         is_const_literal_type(adts, tgt, visited)
       }
-    TyList(e) -> is_const_literal_type(adts, e, visited)
-    TyTuple(elems) -> {
+    TyList(e, _) -> is_const_literal_type(adts, e, visited)
+    TyTuple(elems, _) -> {
       for e in elems {
         if not is_const_literal_type(adts, e, visited) { return false }
       }
       true
     }
-    TyAdt(aid, targs, _) -> {
+    TyAdt(aid, targs, _, _) -> {
       # Inspect arguments before the recursion shortcut: a non-regular
       # recursive field can introduce a function or another refused type.
       for arg in targs {

@@ -795,7 +795,7 @@ fn hint_dyn_call(qc: QCx, q: Q, sid: Int, args: List[Arg], name_hi: Int, call_hi
   match sym_get(qc, sid) {
     Some(sym) ->
       match sym.ty {
-        TyFn(_, _, eff, _) -> add_hint(q, effect_hint(call_effect_at(qc.cps, args, name_hi, call_hi), eff))
+        TyFn(_, _, eff, _, _) -> add_hint(q, effect_hint(call_effect_at(qc.cps, args, name_hi, call_hi), eff))
         _ -> q
       }
     None -> q
@@ -3106,11 +3106,11 @@ fn offer_range(qc: QCx, q: Q, from: Expr, to: Expr, tfrom: TExpr, tto: TExpr) ->
 
 fn head_name_of(qc: QCx, t: Ty) -> Option[String] =
   match t {
-    TyAdt(aid, _, _) -> Some(adt_of(qc.entry.cx.adts, aid).name)
-    TyOpaque(_, n, _, _, _, _, _) -> Some(n)
-    TyList(_) -> Some("List")
-    TyMap(_, _) -> Some("Map")
-    TySet(_) -> Some("Set")
+    TyAdt(aid, _, _, _) -> Some(adt_of(qc.entry.cx.adts, aid).name)
+    TyOpaque(_, n, _, _, _, _, _, _) -> Some(n)
+    TyList(_, _) -> Some("List")
+    TyMap(_, _, _) -> Some("Map")
+    TySet(_, _) -> Some("Set")
     TyString -> Some("String")
     TyBool -> Some("Bool")
     _ -> None
@@ -3284,8 +3284,8 @@ fn bound_site(lists: List[List[TypeParamDecl]], tname: String, tr: String) -> Si
 ## written anywhere a reader could open: its operator is the primitive one.
 fn via_impl(qc: QCx, tid: Int, subj: Ty) -> (String, Site) =
   match subj {
-    TyAdt(_, _, _) -> (impl_text(qc, tid, subj), site_of_impl_method(qc, tid, subj))
-    TyOpaque(_, _, _, _, _, _, _) -> (impl_text(qc, tid, subj), site_of_impl_method(qc, tid, subj))
+    TyAdt(_, _, _, _) -> (impl_text(qc, tid, subj), site_of_impl_method(qc, tid, subj))
+    TyOpaque(_, _, _, _, _, _, _, _) -> (impl_text(qc, tid, subj), site_of_impl_method(qc, tid, subj))
     _ -> ("(primitive)", no_site())
   }
 
@@ -3300,7 +3300,7 @@ fn hint_propagated(qc: QCx, q: Q, operand_ty: Ty, at: Int) -> Q =
         q
       } else {
         match operand_ty {
-          TyAdt(aid, [_, e], _) -> if aid == RESULT_ID { add_hint(q, propagate_hint(at, show_ty(qc, e))) } else { q }
+          TyAdt(aid, [_, e], _, _) -> if aid == RESULT_ID { add_hint(q, propagate_hint(at, show_ty(qc, e))) } else { q }
           _ -> q
         }
       }
@@ -3528,7 +3528,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         Some(XField(tt, fi, _, _, _)) -> {
           q = walk_e(qc, q, target, Some(tt))
           match tex_ty(tt) {
-            TyAdt(aid, _, _) -> {
+            TyAdt(aid, _, _, _) -> {
               let a = adt_of(qc.entry.cx.adts, aid)
               if a.is_record && len(a.ctors) > 0 {
                 match get(a.ctors[0].fields, fi) {

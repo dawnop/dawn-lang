@@ -1,12 +1,12 @@
 # Complete trait contracts must survive rigid defaults and module interfaces.
 # Source strings isolate the new surface from the seed-readable compiler.
+use check/types.{ty_fn, Ty, TyInt, TyUnit, TyVar, TyI64Buf, TyAssoc, EPure}
 use std/map
 use std/list
 use std/str
 use check/capture
 use check/capture.{Scope, TraitApplication, Region, CaptureVar, Function}
 use check/types
-use check/types.{Ty, TyInt, TyUnit, TyVar, TyI64Buf, TyFn, TyAssoc, EPure}
 use check/trait_contract
 use check/data_capture
 use check/scope_infer
@@ -215,17 +215,17 @@ test "projection and effect substitution retain complete arguments and member bo
   let changed = types.subst_capture_eff(row, map.from([(1, t)]), map.from([(3, [Region(t)])]))
   let (_, _, row_app, _) = types.eff_assocs(changed)[0]
   assert row_app.args == [[Region(t)]]
-  let fn_type = TyFn([], TyUnit, row, Function { scopes = [], bound = None })
+  let fn_type = ty_fn([], TyUnit, row, Function { scopes = [], bound = None })
   assert types.subst_scopes(fn_type, map.empty(), map.from([(3, [Region(t)])])) != fn_type
   assert capture.contains(types.ty_scope_refs(fn_type), Region(s))
-  let left = TyFn([], TyUnit, types.EffAssoc("T", 4,
+  let left = ty_fn([], TyUnit, types.EffAssoc("T", 4,
     TraitApplication { id = 77, args = [[Region(s)]] }, "Read"), Function { scopes = [s], bound = None })
-  let right = TyFn([], TyUnit, types.EffAssoc("T", 4,
+  let right = ty_fn([], TyUnit, types.EffAssoc("T", 4,
     TraitApplication { id = 77, args = [[Region(t)]] }, "Read"), Function { scopes = [t], bound = None })
   assert types.ty_equal(left, right)
   assert not capture.contains(types.ty_scope_refs(left), Region(s))
-  assert not types.ty_equal(TyFn([], TyInt, types.EIo, capture.empty_function()),
-    TyFn([], TyInt, types.eff_union([types.EIo, types.EffVar("r", 88)]), capture.empty_function()))
+  assert not types.ty_equal(ty_fn([], TyInt, types.EIo, capture.empty_function()),
+    ty_fn([], TyInt, types.eff_union([types.EIo, types.EffVar("r", 88)]), capture.empty_function()))
 }
 
 test "witness keys distinguish complete applications by identity rather than display names" {
@@ -305,7 +305,7 @@ test "associated Mem bindings retain the impl Scope in exported metadata" {
 
 test "a function's free type Scope support is independent of its value captures" {
   let s = Scope { name = "s", id = 1 }
-  let value = TyFn([TyI64Buf(s)], TyInt, EPure, capture.empty_function())
+  let value = ty_fn([TyI64Buf(s)], TyInt, EPure, capture.empty_function())
   assert data_capture.value_bound(map.empty(), capture.empty_params(), value) == Some([])
   assert trait_contract.support(map.empty(), capture.empty_params(), value) == Some([Region(s)])
 }
@@ -317,7 +317,7 @@ test "a concrete independent associated result sheds the declared projection bou
   assert cx.diags == []
   let tid = map.get(cx.traits_by_name, "Cursor").expect("trait")
   let aid = map.get(cx.adts_by_name, "Token").expect("subject")
-  let subject: Ty = types.TyAdt(aid, [], capture.empty_arguments())
+  let subject: Ty = types.ty_adt(aid, [], capture.empty_arguments())
   let region = Scope { name = "s", id = 77 }
   let projected = TyAssoc(subject, TraitApplication { id = tid, args = [[Region(region)]] }, "Cur", [Region(region)])
   assert reduce_assoc(cx, projected) == TyInt

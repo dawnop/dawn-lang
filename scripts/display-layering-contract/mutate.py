@@ -42,25 +42,11 @@ TO_STR_MATCH = """    match t {
 
 # The old peel, as an arm of `to_str`: an opaque type asks every layer below
 # it for a Display before it falls back to its own Show.
-TO_STR_MATCH_INHERITING = """    match t {
-      TyOpaque(_, _, _, _, tgt, _, _) ->
-        if has_display_below(st, tgt) { to_str(st, e, tgt, wit) } else { show_at(st, e, t) }
-      TyVar(_, _) ->
-        match wit {"""
+TO_STR_MATCH_INHERITING = '    match t {\n      TyOpaque(_, _, _, _, tgt, _, _, _) ->\n        if has_display_below(st, tgt) { to_str(st, e, tgt, wit) } else { show_at(st, e, t) }\n      TyVar(_, _) ->\n        match wit {'
 
 HAS_OWN_DISPLAY_DOC = "## Does `t` have a `Display` impl written on `t` itself?"
 
-HAS_DISPLAY_BELOW = """fn has_display_below(st: LSt, t: Ty) -> Bool =
-  if has_own_display(st, t) {
-    true
-  } else {
-    match t {
-      TyOpaque(_, _, _, _, tgt, _, _) -> has_display_below(st, tgt)
-      _ -> false
-    }
-  }
-
-"""
+HAS_DISPLAY_BELOW = 'fn has_display_below(st: LSt, t: Ty) -> Bool =\n  if has_own_display(st, t) {\n    true\n  } else {\n    match t {\n      TyOpaque(_, _, _, _, tgt, _, _, _) -> has_display_below(st, tgt)\n      _ -> false\n    }\n  }\n\n'
 
 
 def replace_once(text: str, old: str, new: str, mutation: str, what: str) -> str:

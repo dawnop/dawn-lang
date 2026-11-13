@@ -1,11 +1,11 @@
 # Interface checks must work from public contracts even when private fields
 # are unavailable. These source strings keep capture syntax out of the seed's
 # own input while exercising the actual checker and exported table products.
+use check/types.{ty_opaque, signature_scope_inert, Ty, TyOpaque, AdtI, Sig, insert_impl}
 use std/map
 use std/list
 use std/str
 use check/capture
-use check/types.{TyOpaque, AdtI, Sig, insert_impl}
 use check/cx.{Cx, ModExports, AliasE, cx_new}
 use check/passes.{seed_prelude}
 use check/checker.{check_module, exports_of}
@@ -72,10 +72,16 @@ test "opaque function contracts retain their envelope independently of aliases" 
   let surface = produced(MODEL)
   let wrap = map.get(surface.fns, "wrap").expect("wrap")
   let missing = match wrap.ret {
-    TyOpaque(id, name, owner, args, target, axes, _) -> TyOpaque(id, name, owner, args, target, axes, None)
+    TyOpaque(id, name, owner, args, target, axes, _, _) -> ty_opaque(id, name, owner, args, target, axes, None)
     _ -> panic("wrap must return an opaque type")
   }
-  let broken = ModExports { ..surface, fns = map.insert(surface.fns, "wrap", Sig { ..wrap, ret = missing }) }
+  let broken = ModExports { ..surface, fns = map.insert(surface.fns, "wrap", {
+    let identity_base = wrap
+    let identity_ret: Ty = missing
+    Sig { ..identity_base,
+      ret = identity_ret,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_ret, identity_base.eff) }
+  }) }
   assert metadata_error(consumed(ZERO, broken))
 }
 
@@ -85,11 +91,17 @@ test "opaque Scope metadata cannot disappear from an exported application" {
       "pub fn zero() -> Int = 0\n")
   let same = map.get(surface.fns, "same").expect("same")
   let missing = match same.ret {
-    TyOpaque(id, name, owner, args, target, _, envelope) ->
-      TyOpaque(id, name, owner, args, target, capture.empty_arguments(), envelope)
+    TyOpaque(id, name, owner, args, target, _, envelope, _) ->
+      ty_opaque(id, name, owner, args, target, capture.empty_arguments(), envelope)
     _ -> panic("same must return an opaque type")
   }
-  let broken = ModExports { ..surface, fns = map.insert(surface.fns, "same", Sig { ..same, ret = missing }) }
+  let broken = ModExports { ..surface, fns = map.insert(surface.fns, "same", {
+    let identity_base = same
+    let identity_ret: Ty = missing
+    Sig { ..identity_base,
+      ret = identity_ret,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_ret, identity_base.eff) }
+  }) }
   assert metadata_error(consumed(ZERO, broken))
   assert consumed(ZERO, surface).diags == []
 }

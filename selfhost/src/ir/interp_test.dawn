@@ -12,6 +12,7 @@
 # keeps them off the compiler package's public surface. `no_impls`, `test_sig`
 # and `test_tfun` are fixtures small enough to write twice rather than publish.
 
+use check/types.{ty_adt, ty_map, ty_set, signature_scope_inert, Eff, Ty, TyInt, TyError, Sig, EPure}
 use check/capture
 use std/str
 use std/map
@@ -21,7 +22,6 @@ use front/lexer
 use check/cx.{ModExports, Cx, cx_new, with_list_len}
 use check/checker.{check_module, exports_of}
 use check/tast.{TExpr, TFun, TModule, XError}
-use check/types.{Ty, TyInt, TyError, TyAdt, TyMap, TySet, Sig, EPure}
 use ir/core.{
   ConstValue, CVInt, CVBool, CVStr, CVBytes, CVList, CVAdt, CCall, CDirect, CImpl, CDefault,
   CExpr, CBlock, CUpdate, CLocal, CSLet, CIntrinsic, CFun
@@ -37,22 +37,29 @@ use ir/interp.{
 fn no_impls() -> Map[(Int, String, String), (String, TFun)] = map.empty()
 
 fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =
-  Sig { scope_params = capture.empty_params(),
-    name = name,
-    param_tys = params,
-    param_names = [],
-    param_defaults = [],
-    caller_params = [],
-    ret = ret,
-    eff = EPure,
-    is_builtin = false,
-    tparams = [],
-    constraints = [],
-    eparams = [],
-    owner = None,
-    trait_id = None,
-    op_of = None,
-    inferring = false
+  {
+    let identity_scope_params: capture.Params = capture.empty_params()
+    let identity_param_tys: List[Ty] = params
+    let identity_ret: Ty = ret
+    let identity_eff: Eff = EPure
+    let identity_constraints: List[List[capture.TraitApplication]] = []
+    Sig { scope_params = identity_scope_params,
+      name = name,
+      param_tys = identity_param_tys,
+      param_names = [],
+      param_defaults = [],
+      caller_params = [],
+      ret = identity_ret,
+      eff = identity_eff,
+      is_builtin = false,
+      tparams = [],
+      constraints = identity_constraints,
+      eparams = [],
+      owner = None,
+      trait_id = None,
+      op_of = None,
+      inferring = false,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
 
 fn test_tfun(name: String, params: List[Ty], ret: Ty, body: TExpr) -> TFun =
@@ -189,7 +196,7 @@ test "interpreter identity tables keep direct, impl, and default spellings separ
   let impl_fn = explicit_fn.expect("impl same")
   let default_fn = defs_tm.fns[0]
   assert direct_fn.sig.param_tys == [TyInt, TyInt]
-  assert impl_fn.sig.param_tys == [TyAdt(explicit_id, [], capture.empty_arguments())]
+  assert impl_fn.sig.param_tys == [ty_adt(explicit_id, [], capture.empty_arguments())]
   assert default_fn.sig.param_tys != direct_fn.sig.param_tys
   assert default_fn.sig.param_tys != impl_fn.sig.param_tys
 
@@ -248,7 +255,7 @@ test "interpreter identity tables keep direct, impl, and default spellings separ
     CCall(CImpl(o, got_tid, subject, "same"), _, _, _) -> {
       assert o == "same_impl"
       assert got_tid == tid
-      assert subject == TyAdt(explicit_id, [], capture.empty_arguments())
+      assert subject == ty_adt(explicit_id, [], capture.empty_arguments())
     }
     _ -> { assert false }
   }
@@ -447,9 +454,9 @@ test "Map and Set calls have signatures but remain ordinary comptime refusals" {
 
   var hamt: Map[String, TFun] = map.empty()
   hamt = map.insert(hamt, "empty",
-    test_tfun("empty", [], TyMap(TyInt, TyInt), XError(0, 0)))
+    test_tfun("empty", [], ty_map(TyInt, TyInt), XError(0, 0)))
   hamt = map.insert(hamt, "sfrom",
-    test_tfun("sfrom", [TyError], TySet(TyInt), XError(0, 0)))
+    test_tfun("sfrom", [TyError], ty_set(TyInt), XError(0, 0)))
   hamt = map.insert(hamt, "count",
     test_tfun("count", [TyError], TyInt, XError(0, 0)))
   var owners: Map[String, Map[String, TFun]] = map.empty()

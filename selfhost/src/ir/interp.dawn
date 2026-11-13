@@ -46,7 +46,7 @@ use check/tast.{
   TSPText, TSPInterp,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor
 }
-use check/types.{
+use check/types.{signature_scope_inert, Eff,
   Ty, TyUnit, Sym, Sig, Traits, Impls, Adts, adt_of,
   intrinsics, Intr, OPTION_ID, EPure, TyList, TyMap, TySet, TyArray, TyTuple,
   EV_PACK_ID, EV_MISS_MSG, FROM_INT_ID, FROM_FLOAT_ID, ty_show
@@ -1004,11 +1004,11 @@ fn note_miss(st: ESt) -> ESt =
 ## but not of a builtin container, so it cannot be the key on its own.
 fn subject_key(t: Ty) -> String =
   match t {
-    TyList(_) -> "List"
-    TyMap(_, _) -> "Map"
-    TySet(_) -> "Set"
-    TyArray(_) -> "Array"
-    TyTuple(es) -> "Tup${to_string(len(es))}"
+    TyList(_, _) -> "List"
+    TyMap(_, _, _) -> "Map"
+    TySet(_, _) -> "Set"
+    TyArray(_, _) -> "Array"
+    TyTuple(es, _) -> "Tup${to_string(len(es))}"
     _ -> ty_key(t)
   }
 
@@ -3752,22 +3752,29 @@ test "the comptime interpreter covers every intrinsic, removes it in lowering, o
 }
 
 fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =
-  Sig { scope_params = capture.empty_params(),
-    name = name,
-    param_tys = params,
-    param_names = [],
-    param_defaults = [],
-    caller_params = [],
-    ret = ret,
-    eff = EPure,
-    is_builtin = false,
-    tparams = [],
-    constraints = [],
-    eparams = [],
-    owner = None,
-    trait_id = None,
-    op_of = None,
-    inferring = false
+  {
+    let identity_scope_params: capture.Params = capture.empty_params()
+    let identity_param_tys: List[Ty] = params
+    let identity_ret: Ty = ret
+    let identity_eff: Eff = EPure
+    let identity_constraints: List[List[capture.TraitApplication]] = []
+    Sig { scope_params = identity_scope_params,
+      name = name,
+      param_tys = identity_param_tys,
+      param_names = [],
+      param_defaults = [],
+      caller_params = [],
+      ret = identity_ret,
+      eff = identity_eff,
+      is_builtin = false,
+      tparams = [],
+      constraints = identity_constraints,
+      eparams = [],
+      owner = None,
+      trait_id = None,
+      op_of = None,
+      inferring = false,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
 
 fn test_tfun(name: String, params: List[Ty], ret: Ty, body: TExpr) -> TFun =
