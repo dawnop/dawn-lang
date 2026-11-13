@@ -29,7 +29,11 @@ trap 'rm -rf "$work"' EXIT
 
 # shellcheck source=scripts/mutant-coverage/shard.sh
 source "$root/scripts/mutant-coverage/shard.sh"
+# shellcheck source=scripts/syntax-pool/phase.sh
+source "$root/scripts/syntax-pool/phase.sh"
 shard_parse "$@"
+syntax_phase_parse "${shard_rest[@]}"
+shard_rest=("${syntax_phase_rest[@]}")
 only=
 if [ "${#shard_rest[@]}" -gt 0 ]; then
   case "${shard_rest[0]}" in
@@ -43,6 +47,7 @@ if [ "${#shard_rest[@]}" -gt 0 ]; then
       ;;
   esac
 fi
+if [ "$syntax_phase" = case ]; then only=$syntax_case_name; fi
 
 fail() {
   echo "FAIL: $*" >&2
@@ -109,6 +114,7 @@ assertion_failed_exactly() {
   cmp -s "$expected_path" "$actual_path"
 }
 
+if [ "$syntax_phase" != case ]; then
 "$dawn" --version > /dev/null
 "$dawn" __parse "$fixture" > "$work/fixture.out"
 diagnostic_count=$(grep -c '^!' "$work/fixture.out" || true)
@@ -170,6 +176,9 @@ assert_checker_exact "$work/builtin-boundary.out" "$builtin_boundary_expected" \
     fail "builtin alias boundary fixture changed"
   }
 echo "PASS  builtin alias ownership, uniform hints, and nominal boundaries"
+
+fi
+if [ "$syntax_phase" = fixtures ]; then exit 0; fi
 
 new_syntax_mutant() {
   mdir="$work/$1"
@@ -295,7 +304,9 @@ if [ -n "$only" ]; then
   found=0
   for name in "${mutants[@]}"; do
     if [ "$name" = "$only" ]; then
+      syntax_phase_begin syntax-small-contract
       run_syntax_mutant "$name"
+      syntax_phase_end syntax-small-contract
       found=1
     fi
   done

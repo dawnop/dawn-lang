@@ -65,6 +65,7 @@ Usage:
 """
 
 import argparse
+import importlib.util
 import pathlib
 import tempfile
 from collections import defaultdict
@@ -333,6 +334,19 @@ def run(coverage_dir, root, only=(), exclude=()):
             )
     if failed:
         raise SystemExit(1)
+    # The syntax workers report only completed whole oracles. Their receipts
+    # also bind the input, producers, goldens and fixed complete deal across jobs.
+    if set(harnesses) & {"syntax-small-contract", "pattern-or-contract", "for-pattern-contract"}:
+        print("BEGIN syntax receipt control", flush=True)
+        module_path = root / "scripts/syntax-pool/plan.py"
+        spec = importlib.util.spec_from_file_location("syntax_pool_plan", module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        try:
+            module.verify_coverage(root, coverage_dir, harnesses)
+            print("END syntax receipt control", flush=True)
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            raise SystemExit(f"FAIL  syntax receipts: {error}") from error
     print(f"PASS  every mutation harness fully covered ({len(harnesses)} harness(es))")
 
 
