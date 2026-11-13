@@ -1680,26 +1680,7 @@ fn type_has_scope(t: Ty, id: Int) -> Bool = {
 ## Rename binders that occur in a replacement before descending. Merely
 ## deleting bound keys from the map would still capture its range.
 pub fn subst_scopes(t: Ty, sm: Map[Int, capture.Scope], cm: Map[Int, capture.Capture]) -> Ty =
-  if len(sm) == 0 && len(cm) == 0 { t } else { subst_scopes_avoiding(t, sm, cm, [], []) }
-
-# Reuse a subtree only when neither substitution nor binder hygiene can
-# change it. Wrappers and associated rows still take the normalization path.
-fn scope_invariant(t: Ty) -> Bool = match t {
-  TyInt | TyFloat | TyBool | TyString | TyBytes | TyUnit | TyNever | TyError | TyVar(_, _) | TyJava(_, _) -> true
-  TyList(inner) | TySet(inner) | TyArray(inner) -> scope_invariant(inner)
-  TyMap(k, v) -> scope_invariant(k) && scope_invariant(v)
-  TyTuple(values) -> list.all(values, value => scope_invariant(value))
-  TyAdt(_, args, axes) -> len(axes.scopes) == 0 && len(axes.captures) == 0 &&
-    list.all(args, value => scope_invariant(value))
-  TyOpaque(_, _, _, args, target, axes, _) -> len(axes.scopes) == 0 && len(axes.captures) == 0 &&
-    scope_invariant(target) && list.all(args, value => scope_invariant(value))
-  TyFn(ps, ret, row, contract) -> {
-    let plain = match row { EPure | EIo | EffVar(_, _) -> true, _ -> false }
-    plain && len(contract.scopes) == 0 && len(capture.bound(contract)) == 0 &&
-      scope_invariant(ret) && list.all(ps, value => scope_invariant(value))
-  }
-  _ -> false
-}
+  subst_scopes_avoiding(t, sm, cm, [], [])
 
 fn avoiding_id(ts: List[Ty], es: List[Eff], id: Int) -> Bool =
   list.any(ts, t => type_has_scope(t, id)) || list.any(es, e => list.contains(capture_scope_ids(effect_capture_refs(e)), id))
@@ -1712,7 +1693,6 @@ fn avoiding_name(ts: List[Ty], es: List[Eff], name: String) -> Bool =
 fn subst_scopes_avoiding(t: Ty, sm: Map[Int, capture.Scope], cm: Map[Int, capture.Capture],
   ts: List[Ty], es: List[Eff]) -> Ty = {
   if len(sm) == 0 && len(cm) == 0 && len(ts) == 0 && len(es) == 0 { return t }
-  if scope_invariant(t) { return t }
   match t {
     TyI64Buf(s) -> TyI64Buf(capture.scope_subst(s, sm))
     TyF64Buf(s) -> TyF64Buf(capture.scope_subst(s, sm))
@@ -6290,4 +6270,23 @@ test "scope invariant reuse preserves wrappers and binder hygiene" {
   let arrow = TyFn([], TyInt, EPure, capture.empty_function())
   assert subst_scopes(TyCaptured(arrow, [capture.CaptureVar("c", 3)]), sm, cm) ==
     TyFn([], TyInt, EPure, CaptureFunction { scopes = [], bound = Some([capture.Region(s)]) })
+}
+
+test "nominal scope substitution retains each representation axis" {
+  let s = CaptureScope { name = "s", id = 1 }
+  let renamed = CaptureScope { name = "renamed", id = 1 }
+  let actual = CaptureScope { name = "actual", id = 2 }
+  let sm = map.from([(1, actual)])
+  let cm = map.from([(3, [capture.Region(s)])])
+  let closed = TyAdt(99, [], capture.empty_arguments())
+  assert subst_scopes(closed, sm, cm) == closed
+  let axes = CaptureArguments { scopes = [s], captures = [[capture.CaptureVar("c", 3)]] }
+  let value = TyAdt(99, [], axes)
+  assert subst_scopes(value, sm, cm) == TyAdt(99, [],
+    CaptureArguments { scopes = [actual], captures = [[capture.Region(s)]] })
+  assert value == TyAdt(99, [], axes)
+  let duplicate = TyAdt(99, [], CaptureArguments { scopes = [],
+    captures = [[capture.Region(s), capture.Region(renamed)]] })
+  assert subst_scopes(duplicate, sm, cm) == TyAdt(99, [],
+    CaptureArguments { scopes = [], captures = [[capture.Region(actual)]] })
 }
