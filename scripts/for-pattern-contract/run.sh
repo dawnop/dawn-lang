@@ -17,7 +17,11 @@ dawn=${DAWN_BIN:-"$root/bin/dawn"}
 
 # shellcheck source=scripts/mutant-coverage/shard.sh
 source "$root/scripts/mutant-coverage/shard.sh"
+# shellcheck source=scripts/syntax-pool/phase.sh
+source "$root/scripts/syntax-pool/phase.sh"
 shard_parse "$@"
+syntax_phase_parse "${shard_rest[@]}"
+shard_rest=("${syntax_phase_rest[@]}")
 if [ "${#shard_rest[@]}" -gt 0 ]; then
   echo "for-pattern-contract: unknown argument(s): ${shard_rest[*]}" >&2
   exit 2
@@ -149,6 +153,7 @@ validate_matrix() {
   cmp -s "$owner_names.sorted" "$matrix_owners.sorted" || return 1
 }
 
+if [ "$syntax_phase" != case ]; then
 registry="$work/registry"
 python3 "$here/mutate.py" --list > "$registry"
 validate_matrix "$registry" "$matrix" "$owner_registry" "$work/matrix" ||
@@ -183,6 +188,8 @@ awk -F '\t' '$1 != "schema"' "$matrix" > "$work/matrix-no-schema"
 expect_invalid_matrix "a missing schema" "$work/matrix-no-schema"
 
 python3 "$here/core_check.py" --self-test
+
+fi
 
 build_compiler() {
   local source=$1 output=$2 label=$3
@@ -388,6 +395,7 @@ dump_probe() {
   done
 }
 
+if [ "$syntax_phase" != case ]; then
 observed="$work/observed.jar"
 build_compiler "$root/selfhost" "$observed" observed
 probe_compiler "$observed" "$work/observed"
@@ -399,6 +407,9 @@ if [ -s "$work/observed/assertions.out" ]; then
 fi
 cat "$work/observed/lsp.out"
 echo "PASS  observed compiler satisfies the complete for-pattern assertion set"
+
+fi
+if [ "$syntax_phase" = fixtures ]; then exit 0; fi
 
 expect_mutant_red() {
   local name=$1 relative=$2 owner=$3
@@ -424,6 +435,20 @@ expect_mutant_red() {
   fi
   echo "PASS  $name changes production source and turns only '$owner' red"
 }
+
+if [ "$syntax_phase" = case ]; then
+  found=0
+  while IFS=$'\t' read -r record name relative owner; do
+    if [ "$record" = mutant ] && [ "$name" = "$syntax_case_name" ]; then
+      syntax_phase_begin for-pattern-contract
+      expect_mutant_red "$name" "$relative" "$owner"
+      syntax_phase_end for-pattern-contract
+      found=1
+    fi
+  done < "$matrix"
+  [ "$found" -eq 1 ] || fail "no mutant named $syntax_case_name"
+  exit 0
+fi
 
 shard_begin for-pattern-contract
 mutant_position=0
