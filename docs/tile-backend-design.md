@@ -6917,6 +6917,36 @@ F64 对照通过。i32 tag 用现有 `sum` 循环，命中 `get_tile_block_id` �
 不做的（理由）：不扩展 f16/i1 等行，不改变生产 writer、工具链 pin、容差或
 CI timeout，不制造没有独立判词的必红夹具。
 
+### G13-3：F16 与 Bool mask 写入字段的独立负控
+
+设计（2026-11-13，先实测拒绝再登记层次）。沿用 G12-2 的两后端检查和
+无关 F64 probe，只取已有 F16 GEMM、f16_ops 与 interleave、bitwise_mask
+消费者，不增加业务 kernel。每项只改变 bytecode writer 的一个字段：F16
+和 i1 的 type tag，F16 常量的两字节宽度，以及 i1 常量的 packed buffer
+宽度。正常目标先核对原文本和 bytes 并成功装配；变异文本保持、两后端
+bytes 相同，必须命中固定 13.5.37 reader 或 verifier 的具体诊断。
+
+F16 tag 使用 f16_ops，payload 使用 matmul_f16 的零累加器；i1 tag 使用
+interleave 的真实 mask，payload 使用 bitwise_mask 的 0/1 常量。i1 的
+单字节 splat 是合法同义编码，不能作为必须拒绝的变异；选择三字节
+buffer，先证明它对现有 128 lane 常量非法。宽度按字段、常量段与真实
+reader 判词核实，不用总文件长度代替。无关 F64 probe 的四份 bytes 必须
+保持，生产 writer、packer、地址、算式、参考答案与容差均不改。
+
+type 表层 3 只表示两个字段族已有具名 writer 负控；实际装配拒绝另记为
+层 1，不声称设备数值红。设备正例由最终 inputs 的完整三架构对拍提供。
+四个新增矩阵项及准备成本实测后交 CI 刀 4，不修改工作流或成本分配。
+其余 type 层 2 不扩项；F16 零常量不构成 BF16 零规范化的消费者，N5 封存。
+
+实测判词：F16 tag 命中 `addf` 的浮点 operand 约束；i1 tag 命中 `cmpi`
+的 i1 result 约束。F16 payload 从两字节变为一字节，常量段 58→57 字节，
+reader 报 offset 2 的 buffer size/format 错误，文件总长仍为 403 字节。
+i1 两个常量各从 16 变为 3 字节，常量段 110→84 字节，reader 明确报告
+3 字节不是 128 个 i1 元素的认可编码；两种 payload 均点名所属函数。
+这些都是层 1 红灯，与 type 表层 3 的 writer 覆盖分别登记。
+另以同一 bitwise_mask 实测单字节 0x00/0xFF splat，两后端文本和 bytes
+一致、装配接受，原编码与 splat 的 raw disassembly 逐字节相同。
+
 ### N3：一步装配的首个真机例程
 
 实现与契约（2026-10-29，先定方案后实现）。`gpu_fake/first.dawn` 原有 `trace3`、

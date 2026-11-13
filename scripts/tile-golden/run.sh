@@ -729,6 +729,10 @@ mutants=(
   i32-payload-two-bytes
   f32-tag-as-tf32
   f32-payload-two-bytes
+  f16-tag-as-i16
+  f16-payload-one-byte
+  i1-tag-as-i8
+  i1-payload-three-bytes
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -3851,7 +3855,7 @@ numeric_writer_mutant() { # name, kernel, shape, diagnostic
       fi
       grep -Fq 'addf' "$out" && grep -Fq 'constant <f64: 1.25>' "$out" ||
         fail "$name: f64 control lost its arithmetic or constant"
-      if grep -Eq 'i32|f32' "$out"; then fail "$name: f64 control contains a target type"; fi
+      if grep -Eq 'i1|i32|f16|f32' "$out"; then fail "$name: f64 control contains a target type"; fi
       cmp -s "$work/$name.clean.control.jvm" "$out" || fail "$name: f64 control text changed"
       cmp -s "$work/$name.clean.control.jvm.tilebc" "$out.tilebc" || fail "$name: f64 control bytes changed"
     done
@@ -3880,6 +3884,24 @@ if run_item f32-payload-two-bytes; then
   # the reader, rather than the outer length, checks the lane's two bytes.
   numeric_writer_mutant f32-payload-two-bytes flash_attn_bf16 same-size \
     "error at offset 3: failed to validate buffer size and format"
+fi
+
+if run_item f16-tag-as-i16; then
+  numeric_writer_mutant f16-tag-as-i16 f16_ops same-size \
+    "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi16>'"
+fi
+if run_item f16-payload-one-byte; then
+  # Section alignment absorbs the missing byte; the reader checks the blob.
+  numeric_writer_mutant f16-payload-one-byte matmul_f16 same-size \
+    "error at offset 2: failed to validate buffer size and format"
+fi
+if run_item i1-tag-as-i8; then
+  numeric_writer_mutant i1-tag-as-i8 interleave same-size \
+    "'cuda_tile.cmpi' op result #0 must be tile of i1 values, but got '!cuda_tile.tile<128xi8>'"
+fi
+if run_item i1-payload-three-bytes; then
+  numeric_writer_mutant i1-payload-three-bytes bitwise_mask file-shorter \
+    "error at offset 4: i1 dense attribute payload size 3 is not a recognized encoding for 128 elements"
 fi
 
 _item_tick ""

@@ -311,6 +311,26 @@ MUTATIONS = {
         '  "f32" -> bytes.freeze(put_le(bytes.buf(), ieee_bits(narrow.round_f32(value), 24, -126, 127), 4))',
         '  "f32" -> bytes.freeze(put_le(bytes.buf(), ieee_bits(narrow.round_f32(value), 24, -126, 127), 2))',
     ),),
+    "f16-tag-as-i16": ((
+        BYTECODE,
+        '  "f16" -> 5',
+        '  "f16" -> 2',
+    ),),
+    "f16-payload-one-byte": ((
+        BYTECODE,
+        '  "f16" -> bytes.freeze(put_le(bytes.buf(), narrow.f16_bits(narrow.round_f16(value)), 2))',
+        '  "f16" -> bytes.freeze(put_le(bytes.buf(), narrow.f16_bits(narrow.round_f16(value)), 1))',
+    ),),
+    "i1-tag-as-i8": ((
+        BYTECODE,
+        '  "i1" -> 0',
+        '  "i1" -> 1',
+    ),),
+    "i1-payload-three-bytes": ((
+        BYTECODE,
+        'bytes.freeze(list.fold(range(0, (n + 7) / 8), bytes.buf(), (b, _k) => bytes.put(b, byte)))',
+        'bytes.freeze(list.fold(range(0, 3), bytes.buf(), (b, _k) => bytes.put(b, byte)))',
+    ),),
     "e4m3-tag-as-i8": ((
         BYTECODE,
         ('  "f8E4M3FN" -> 10\n'),
