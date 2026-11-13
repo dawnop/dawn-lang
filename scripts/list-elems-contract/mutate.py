@@ -21,7 +21,7 @@ LOWER = "selfhost/src/ir/lower.dawn"
 # ---- the sentences, quoted once so a drift in any of them fails loudly ----
 
 # a spread contributes the *item* type of its operand
-SPREAD_ITEM = "        TyList(item) -> (cx1, item, TLESpread(tx))\n"
+SPREAD_ITEM = '        TyList(item, _) -> (cx1, item, TLESpread(tx))\n'
 
 # ... and the operand is a list at all
 SPREAD_LIST_CHECK = """        _ ->
@@ -35,11 +35,7 @@ SPREAD_LIST_CHECK = """        _ ->
 """
 
 # the element type crosses the `..` as a list of itself
-SPREAD_EXPECTATION = """      let list_exp: Option[Ty] = match el_exp {
-        Some(t) -> Some(TyList(t))
-        None -> None
-      }
-"""
+SPREAD_EXPECTATION = '      let list_exp: Option[Ty] = match el_exp {\n        Some(t) -> Some(ty_list(t))\n        None -> None\n      }\n'
 
 # a conditional element's body is checked at the element type
 COND_EXPECTATION = """        let body_exp: Option[Ty] =
@@ -98,7 +94,7 @@ MUTATIONS = {
     "spread-item-type-not-joined": (
         CHECKER,
         SPREAD_ITEM,
-        "        TyList(item) -> (cx1, TyNever, TLESpread(tx))\n",
+        '        TyList(item, _) -> (cx1, TyNever, TLESpread(tx))\n',
     ),
     # 2: and the operand is a list at all.
     #

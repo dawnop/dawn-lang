@@ -289,7 +289,7 @@ pub fn evidence_label_name(l: EvidenceLabel) -> String = match l.scope {
 ## A domain parameter belongs to the evidence record as well as the row.
 pub fn evidence_label_type(l: EvidenceLabel) -> Ty = {
   let scopes = match l.scope { Some(s) -> [s], None -> [] }
-  TyAdt(l.id, [], CaptureArguments { scopes = scopes, captures = [] })
+  ty_adt(l.id, [], CaptureArguments { scopes = scopes, captures = [] })
 }
 
 ## Scope keys are hidden values, never user-spellable bindings.
@@ -427,7 +427,7 @@ pub fn key_trait_id(k: Int) -> Int = (k - 2) / 3
 ## empty one. That is the price this knife exists to measure.
 pub fn fn_arity(t: Ty) -> Int =
   match peel_opaque(t) {
-    TyFn(ps, _, _, sc) -> len(ps) + len(sc.scopes) + 1
+    TyFn(ps, _, _, sc, _) -> len(ps) + len(sc.scopes) + 1
     _ -> 0
   }
 
@@ -436,39 +436,39 @@ pub fn fn_arity(t: Ty) -> Int =
 pub fn ty_fn_arities(t: Ty, provided: Set[Int], initial: Set[Int]) -> Set[Int] = {
   var out = initial
   match t {
-    TyFn(ps, r, _, _) -> {
+    TyFn(ps, r, _, _, _) -> {
       let arity = fn_arity(t)
       if not set.has(provided, arity) { out = set.insert(out, arity) }
       for p in ps { out = ty_fn_arities(p, provided, out) }
       ty_fn_arities(r, provided, out)
     }
-    TyAdt(_, args, _) | TyTuple(args) -> {
+    TyAdt(_, args, _, _) | TyTuple(args, _) -> {
       for arg in args { out = ty_fn_arities(arg, provided, out) }
       out
     }
-    TyOpaque(_, _, _, args, target, _, _) -> {
+    TyOpaque(_, _, _, args, target, _, _, _) -> {
       for arg in args { out = ty_fn_arities(arg, provided, out) }
       ty_fn_arities(target, provided, out)
     }
-    TyList(value) | TySet(value) | TyArray(value) | TyAssoc(value, _, _, _) | TyCaptured(value, _) ->
+    TyList(value, _) | TySet(value, _) | TyArray(value, _) | TyAssoc(value, _, _, _) | TyCaptured(value, _) ->
       ty_fn_arities(value, provided, out)
-    TyMap(key, value) -> ty_fn_arities(value, provided, ty_fn_arities(key, provided, out))
+    TyMap(key, value, _) -> ty_fn_arities(value, provided, ty_fn_arities(key, provided, out))
     _ -> out
   }
 }
 
 test "nested function types retain missing Scope interface arities" {
   let s = CaptureScope { name = "s", id = 11 }
-  let wide = TyFn([TyInt, TyInt, TyInt, TyInt, TyInt, TyInt, TyInt, TyInt], TyInt, EPure,
+  let wide = ty_fn([TyInt, TyInt, TyInt, TyInt, TyInt, TyInt, TyInt, TyInt], TyInt, EPure,
     CaptureFunction { scopes = [s], bound = None })
-  let ordinary = TyFn([wide], TyUnit, EPure, capture.empty_function())
-  let nested = TyMap(TyString, TyTuple([ordinary, TyList(wide)]))
+  let ordinary = ty_fn([wide], TyUnit, EPure, capture.empty_function())
+  let nested = ty_map(TyString, ty_tuple([ordinary, ty_list(wide)]))
   assert ty_fn_arities(nested, set.from(fn_interface_arities()), set.from([12])) == set.from([10, 12])
 }
 
 ## Scope arguments are physical Int slots before the function value's pack.
 pub fn fn_runtime_params(t: Ty) -> List[Ty] = match peel_opaque(t) {
-  TyFn(ps, _, _, sc) -> ps ++ map(sc.scopes, _s => TyInt)
+  TyFn(ps, _, _, sc, _) -> ps ++ map(sc.scopes, _s => TyInt)
   _ -> []
 }
 
@@ -501,7 +501,7 @@ pub fn fn_max_params() -> Int = {
   for n in fn_interface_arities() {
     if n > widest { widest = n }
   }
-  widest - fn_arity(TyFn([], TyUnit, EPure, capture.empty_function()))
+  widest - fn_arity(ty_fn([], TyUnit, EPure, capture.empty_function()))
 }
 
 ## A control handler also takes a continuation, leaving one fewer written
@@ -523,13 +523,13 @@ test "every function value the checker admits has an interface to be called thro
   var widest: List[Ty] = []
   for _k in 0..fn_max_params() { widest = widest ++ [TyInt] }
   for row in [EPure, EIo, EffVar("e", 1), ELabeled(EPure, [(7, "Ask")])] {
-    assert list.contains(table, fn_arity(TyFn(widest, TyInt, row, capture.empty_function())))
+    assert list.contains(table, fn_arity(ty_fn(widest, TyInt, row, capture.empty_function())))
   }
   # and one wider would not: the limit is the table's, not a number beside it
-  assert not list.contains(table, fn_arity(TyFn(widest ++ [TyInt], TyInt, EPure, capture.empty_function())))
+  assert not list.contains(table, fn_arity(ty_fn(widest ++ [TyInt], TyInt, EPure, capture.empty_function())))
   # a control arm takes the operation's parameters, the continuation and the
   # pack, so the widest operation's arm is exactly the widest interface
-  assert list.contains(table, ctl_max_op_params() + 1 + fn_arity(TyFn([], TyUnit, EPure, capture.empty_function())))
+  assert list.contains(table, ctl_max_op_params() + 1 + fn_arity(ty_fn([], TyUnit, EPure, capture.empty_function())))
 }
 
 test "the named side counts atoms and a function value counts one" {
@@ -553,11 +553,11 @@ test "the named side counts atoms and a function value counts one" {
   assert len(atom_keys(ELabeled(EUnion([(1, "e")], [("T", 4, capture.closed_trait(3), "E")], true), [(7, "Ask")]))) == 3
   # the function-value arity is the written parameters plus the pack, and the
   # row is not consulted: these four are one shape
-  assert fn_arity(TyFn([TyInt], TyInt, EPure, capture.empty_function())) == 2
-  assert fn_arity(TyFn([TyInt], TyInt, ask, capture.empty_function())) == 2
-  assert fn_arity(TyFn([TyInt], TyInt, EIo, capture.empty_function())) == 2
-  assert fn_arity(TyFn([TyInt], TyInt, EffVar("e", 1), capture.empty_function())) == 2
-  assert fn_arity(TyFn([], TyInt, EffVar("e", 1), capture.empty_function())) == 1
+  assert fn_arity(ty_fn([TyInt], TyInt, EPure, capture.empty_function())) == 2
+  assert fn_arity(ty_fn([TyInt], TyInt, ask, capture.empty_function())) == 2
+  assert fn_arity(ty_fn([TyInt], TyInt, EIo, capture.empty_function())) == 2
+  assert fn_arity(ty_fn([TyInt], TyInt, EffVar("e", 1), capture.empty_function())) == 2
+  assert fn_arity(ty_fn([], TyInt, EffVar("e", 1), capture.empty_function())) == 1
   assert fn_arity(TyInt) == 0
 }
 
@@ -828,14 +828,14 @@ pub type Ty =
 # a type variable, introduced by [T, U] on a declaration; compares by id
   | TyVar(name: String, id: Int)
 # a user-defined (or prelude) sum type, possibly instantiated: Option[Int]
-  | TyAdt(adt: Int, args: List[Ty], scope_args: capture.Arguments)
-  | TyList(elem: Ty)
-  | TyMap(key: Ty, value: Ty)
-  | TySet(elem: Ty)
+  | TyAdt(adt: Int, args: List[Ty], scope_args: capture.Arguments, scope_inert: Bool)
+  | TyList(elem: Ty, scope_inert: Bool)
+  | TyMap(key: Ty, value: Ty, scope_inert: Bool)
+  | TySet(elem: Ty, scope_inert: Bool)
 # the one collection primitive a backend has to implement (D1): a growable
 # immutable vector std builds List/Map/Set out of. Not part of the language's
 # surface -- only std modules may name it, only std may call `array_*`.
-  | TyArray(elem: Ty)
+  | TyArray(elem: Ty, scope_inert: Bool)
 # an opaque imported Java class; the display is precomputed at creation
 # (arrays need Class reflection for their readable name)
   | TyJava(fqcn: String, display: String)
@@ -852,7 +852,7 @@ pub type Ty =
 # trace there, so a `Phantom[Int]` and a `Phantom[String]` that compared
 # targets would be one type. It also makes an opaque type answer
 # `type_args_of` and render as `N[A, B]` like every other constructor.
-  | TyOpaque(id: Int, name: String, owner: String, args: List[Ty], target: Ty, scope_args: capture.Arguments, envelope: Option[capture.Envelope])
+  | TyOpaque(id: Int, name: String, owner: String, args: List[Ty], target: Ty, scope_args: capture.Arguments, envelope: Option[capture.Envelope], scope_inert: Bool)
 # a projection `T.Item` (docs/assoc-types-design.md): an associated type read
 # off the impl chosen for `subject`. Canonical-form invariant: a ground type
 # never contains one -- reduction is eager (D3), so a projection only survives
@@ -862,11 +862,198 @@ pub type Ty =
 # stands over, which is correct for a rigid survivor and silent for an
 # invariant break. The effect twin (`EffAssoc`) documents the same split.
   | TyAssoc(subject: Ty, application: capture.TraitApplication, name: String, upper: capture.Capture)
-  | TyTuple(elems: List[Ty])
-  | TyFn(params: List[Ty], ret: Ty, eff: Eff, scope: capture.Function)
+  | TyTuple(elems: List[Ty], scope_inert: Bool)
+  | TyFn(params: List[Ty], ret: Ty, eff: Eff, scope: capture.Function, scope_inert: Bool)
 # A written upper bound on a non-function value. Functions keep the same
 # information in TyFn, so every callable still has one representation.
   | TyCaptured(value: Ty, bound: capture.Capture)
+
+## A proof for arbitrary Scope/Capture substitutions, stored at construction.
+## Only direct child attributes are read. Conservative false leaves the full
+## substitution responsible for binders, names and all retained metadata.
+pub fn scope_inert(t: Ty) -> Bool = match t {
+  TyInt | TyFloat | TyBool | TyString | TyBytes | TyUnit | TyNever | TyError | TyVar(_, _) | TyJava(_, _) -> true
+  TyAdt(_, _, _, inert) | TyList(_, inert) | TyMap(_, _, inert) | TySet(_, inert) |
+    TyArray(_, inert) | TyOpaque(_, _, _, _, _, _, _, inert) | TyTuple(_, inert) | TyFn(_, _, _, _, inert) -> inert
+  TyI64Buf(_) | TyF64Buf(_) | TyAssoc(_, _, _, _) | TyCaptured(_, _) -> false
+}
+
+fn all_scope_inert(ts: List[Ty]) -> Bool = list.all(ts, t => scope_inert(t))
+
+fn arguments_scope_inert(a: capture.Arguments) -> Bool = len(a.scopes) == 0 && len(a.captures) == 0
+
+fn effect_scope_inert(e: Eff) -> Bool = match e { EPure | EIo | EffVar(_, _) -> true, _ -> false }
+
+## Signatures retain their original fields; this derived proof never owns an
+## environment, declaration table, historical result or fresh identity.
+pub fn signature_scope_inert(params: capture.Params, constraints: List[List[capture.TraitApplication]],
+  param_tys: List[Ty], ret: Ty, eff: Eff) -> Bool =
+  len(params.scopes) == 0 && len(params.captures) == 0 &&
+  list.all(params.bounds, b => { let (_, value) = b
+    len(value) == 0 }) &&
+  list.all(params.support_facts, b => { let (_, value) = b
+    len(value) == 0 }) &&
+  list.all(constraints, bs => list.all(bs, b => list.all(b.args, a => len(a) == 0))) &&
+  effect_scope_inert(eff) && scope_inert(ret) && all_scope_inert(param_tys)
+
+pub fn ty_adt(adt: Int, args: List[Ty], scope_args: capture.Arguments) -> Ty =
+  TyAdt(adt, args, scope_args, arguments_scope_inert(scope_args) && all_scope_inert(args))
+
+pub fn ty_list(elem: Ty) -> Ty =
+  TyList(elem, scope_inert(elem))
+
+pub fn ty_map(key: Ty, value: Ty) -> Ty =
+  TyMap(key, value, scope_inert(key) && scope_inert(value))
+
+pub fn ty_set(elem: Ty) -> Ty =
+  TySet(elem, scope_inert(elem))
+
+pub fn ty_array(elem: Ty) -> Ty =
+  TyArray(elem, scope_inert(elem))
+
+pub fn ty_opaque(id: Int, name: String, owner: String, args: List[Ty], target: Ty, scope_args: capture.Arguments, envelope: Option[capture.Envelope]) -> Ty =
+  TyOpaque(id, name, owner, args, target, scope_args, envelope, arguments_scope_inert(scope_args) && scope_inert(target) && all_scope_inert(args))
+
+pub fn ty_tuple(elems: List[Ty]) -> Ty =
+  TyTuple(elems, all_scope_inert(elems))
+
+pub fn ty_fn(params: List[Ty], ret: Ty, eff: Eff, scope: capture.Function) -> Ty =
+  TyFn(params, ret, eff, scope, effect_scope_inert(eff) && len(scope.scopes) == 0 && len(capture.bound(scope)) == 0 && scope_inert(ret) && all_scope_inert(params))
+
+test "scope identity proofs compose without retaining a substitution environment" {
+  let region = CaptureScope { name = "s", id = 17 }
+  let buffer = TyI64Buf(region)
+  var deep = TyInt
+  for _i in 0..2048 { deep = ty_list(deep) }
+  assert scope_inert(deep)
+  for leaf in [TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
+    TyError, TyVar("T", 3), TyJava("x.Y", "Y")] {
+    assert scope_inert(ty_map(leaf, ty_tuple([ty_array(leaf), ty_set(leaf)])))
+  }
+  assert not scope_inert(ty_list(buffer))
+  assert not scope_inert(ty_map(TyInt, TyF64Buf(region)))
+  assert not scope_inert(TyCaptured(TyInt, []))
+  assert not scope_inert(TyAssoc(TyVar("T", 3), capture.closed_trait(8), "Item", []))
+  let actual = CaptureScope { name = "actual", id = 19 }
+  let sm = map.from([(region.id, actual)])
+  let cm: Map[Int, capture.Capture] = map.from([(3, [capture.Region(actual)])])
+  assert subst_scopes(deep, sm, cm) == deep
+  assert subst_scopes(ty_list(buffer), sm, cm) == ty_list(TyI64Buf(actual))
+}
+
+test "nominal identity proofs preserve both argument axes and opaque metadata" {
+  let region = CaptureScope { name = "s", id = 23 }
+  let scoped = CaptureArguments { scopes = [region], captures = [] }
+  let captured = CaptureArguments { scopes = [], captures = [[capture.CaptureVar("c", 29)]] }
+  let envelope = capture.opaque_head(0, 0, 0)
+  assert scope_inert(ty_adt(71, [], capture.empty_arguments()))
+  assert not scope_inert(ty_adt(71, [], scoped))
+  assert not scope_inert(ty_adt(71, [], captured))
+  let plain = ty_opaque(73, "Hidden", "owner", [], TyInt, capture.empty_arguments(), envelope)
+  assert scope_inert(plain)
+  assert not scope_inert(ty_opaque(73, "Hidden", "owner", [], TyInt, scoped, envelope))
+  assert not scope_inert(ty_opaque(73, "Hidden", "owner", [], TyI64Buf(region), capture.empty_arguments(), envelope))
+  let renamed = CaptureScope { name = "diagnostic_name", id = region.id }
+  let empty: Map[Int, capture.Capture] = map.empty()
+  assert subst_scopes(ty_adt(71, [], scoped), map.from([(region.id, renamed)]), empty) ==
+    ty_adt(71, [], CaptureArguments { scopes = [renamed], captures = [] })
+  assert subst_scopes(plain, map.from([(region.id, renamed)]), empty) == plain
+}
+
+test "arrow identity proofs keep quantified binders and capture bounds on the guarded path" {
+  let region = CaptureScope { name = "s", id = 31 }
+  let c = capture.CaptureVar("c", 37)
+  let empty = capture.empty_function()
+  assert scope_inert(ty_fn([TyInt], TyUnit, EPure, empty))
+  assert scope_inert(ty_fn([], TyUnit, EffVar("e", 41), empty))
+  assert scope_inert(ty_fn([], TyUnit, EIo, CaptureFunction { scopes = [], bound = Some([]) }))
+  assert not scope_inert(ty_fn([], TyUnit, EPure, CaptureFunction { scopes = [], bound = Some([c]) }))
+  assert not scope_inert(ty_fn([], TyUnit, EPure, CaptureFunction { scopes = [region], bound = None }))
+  assert not scope_inert(ty_fn([], TyUnit, scoped_eff(EPure, [ScopedEffect { id = 43, name = "E", scope = region }]), empty))
+  let quantified = ty_fn([TyI64Buf(region)], TyI64Buf(CaptureScope { name = "free", id = 47 }), EPure,
+    CaptureFunction { scopes = [region], bound = Some([capture.Region(region)]) })
+  let sm = map.from([(47, region)])
+  let cm: Map[Int, capture.Capture] = map.empty()
+  assert subst_scopes(quantified, sm, cm) == subst_scopes_avoiding(quantified, sm, cm, [], [])
+}
+
+test "signature updates rebuild proofs while equality and hashing ignore derived metadata" {
+  let plain = bsig("identity", [ty_list(TyInt)], ["xs"], TyUnit)
+  assert plain.scope_inert
+  assert eff1(plain, EIo).scope_inert
+  assert not eff1(plain, EffAssoc("T", 3, capture.closed_trait(5), "E")).scope_inert
+  assert not callback_captures(bsig("callback", [ty_fn([], TyUnit, EPure, capture.empty_function())], ["f"], TyUnit)).scope_inert
+  assert not mem_runner_sig(7).scope_inert
+  let weaker = Sig { ..plain, scope_inert = false }
+  assert weaker == plain
+  assert hash(weaker) == hash(plain)
+  assert TyList(TyInt, false) == ty_list(TyInt)
+  assert hash(TyList(TyInt, false)) == hash(ty_list(TyInt))
+  assert hash(TyInt) == 31
+  assert hash(ty_list(TyInt)) == 1364
+  let params = capture.empty_params()
+  let support = CaptureParams { ..params, support_facts = [(3, [capture.CaptureVar("c", 11)])] }
+  assert not signature_scope_inert(support, [], [], TyUnit, EPure)
+  assert not signature_scope_inert(params, [[TraitApplication { id = 5, args = [[capture.CaptureVar("c", 11)]] }]], [], TyUnit, EPure)
+}
+
+impl Eq[Ty] {
+  fn eq(a: Ty, b: Ty) -> Bool = match (a, b) {
+    (TyInt, TyInt) -> true
+    (TyFloat, TyFloat) -> true
+    (TyBool, TyBool) -> true
+    (TyString, TyString) -> true
+    (TyBytes, TyBytes) -> true
+    (TyI64Buf(a0), TyI64Buf(b0)) -> a0 == b0
+    (TyF64Buf(a0), TyF64Buf(b0)) -> a0 == b0
+    (TyUnit, TyUnit) -> true
+    (TyNever, TyNever) -> true
+    (TyError, TyError) -> true
+    (TyVar(a0, a1), TyVar(b0, b1)) -> a0 == b0 && a1 == b1
+    (TyAdt(a0, a1, a2, _), TyAdt(b0, b1, b2, _)) -> a0 == b0 && a1 == b1 && a2 == b2
+    (TyList(a0, _), TyList(b0, _)) -> a0 == b0
+    (TyMap(a0, a1, _), TyMap(b0, b1, _)) -> a0 == b0 && a1 == b1
+    (TySet(a0, _), TySet(b0, _)) -> a0 == b0
+    (TyArray(a0, _), TyArray(b0, _)) -> a0 == b0
+    (TyJava(a0, a1), TyJava(b0, b1)) -> a0 == b0 && a1 == b1
+    (TyOpaque(a0, a1, a2, a3, a4, a5, a6, _), TyOpaque(b0, b1, b2, b3, b4, b5, b6, _)) -> a0 == b0 && a1 == b1 && a2 == b2 && a3 == b3 && a4 == b4 && a5 == b5 && a6 == b6
+    (TyAssoc(a0, a1, a2, a3), TyAssoc(b0, b1, b2, b3)) -> a0 == b0 && a1 == b1 && a2 == b2 && a3 == b3
+    (TyTuple(a0, _), TyTuple(b0, _)) -> a0 == b0
+    (TyFn(a0, a1, a2, a3, _), TyFn(b0, b1, b2, b3, _)) -> a0 == b0 && a1 == b1 && a2 == b2 && a3 == b3
+    (TyCaptured(a0, a1), TyCaptured(b0, b1)) -> a0 == b0 && a1 == b1
+    _ -> false
+  }
+}
+
+impl Hash[Ty] {
+  fn hash(t: Ty) -> Int = {
+    let h = match t {
+      TyInt -> 31
+      TyFloat -> 32
+      TyBool -> 33
+      TyString -> 34
+      TyBytes -> 35
+      TyI64Buf(a0) -> ((31 * 36 + hash(a0)) & 0xFFFFFFFF)
+      TyF64Buf(a0) -> ((31 * 37 + hash(a0)) & 0xFFFFFFFF)
+      TyUnit -> 38
+      TyNever -> 39
+      TyError -> 40
+      TyVar(a0, a1) -> ((31 * ((31 * 41 + hash(a0)) & 0xFFFFFFFF) + hash(a1)) & 0xFFFFFFFF)
+      TyAdt(a0, a1, a2, _) -> ((31 * ((31 * ((31 * 42 + hash(a0)) & 0xFFFFFFFF) + hash(a1)) & 0xFFFFFFFF) + hash(a2)) & 0xFFFFFFFF)
+      TyList(a0, _) -> ((31 * 43 + hash(a0)) & 0xFFFFFFFF)
+      TyMap(a0, a1, _) -> ((31 * ((31 * 44 + hash(a0)) & 0xFFFFFFFF) + hash(a1)) & 0xFFFFFFFF)
+      TySet(a0, _) -> ((31 * 45 + hash(a0)) & 0xFFFFFFFF)
+      TyArray(a0, _) -> ((31 * 46 + hash(a0)) & 0xFFFFFFFF)
+      TyJava(a0, a1) -> ((31 * ((31 * 47 + hash(a0)) & 0xFFFFFFFF) + hash(a1)) & 0xFFFFFFFF)
+      TyOpaque(a0, a1, a2, a3, a4, a5, a6, _) -> ((31 * ((31 * ((31 * ((31 * ((31 * ((31 * ((31 * 48 + hash(a0)) & 0xFFFFFFFF) + hash(a1)) & 0xFFFFFFFF) + hash(a2)) & 0xFFFFFFFF) + hash(a3)) & 0xFFFFFFFF) + hash(a4)) & 0xFFFFFFFF) + hash(a5)) & 0xFFFFFFFF) + hash(a6)) & 0xFFFFFFFF)
+      TyAssoc(a0, a1, a2, a3) -> ((31 * ((31 * ((31 * ((31 * 49 + hash(a0)) & 0xFFFFFFFF) + hash(a1)) & 0xFFFFFFFF) + hash(a2)) & 0xFFFFFFFF) + hash(a3)) & 0xFFFFFFFF)
+      TyTuple(a0, _) -> ((31 * 50 + hash(a0)) & 0xFFFFFFFF)
+      TyFn(a0, a1, a2, a3, _) -> ((31 * ((31 * ((31 * ((31 * 51 + hash(a0)) & 0xFFFFFFFF) + hash(a1)) & 0xFFFFFFFF) + hash(a2)) & 0xFFFFFFFF) + hash(a3)) & 0xFFFFFFFF)
+      TyCaptured(a0, a1) -> ((31 * ((31 * 52 + hash(a0)) & 0xFFFFFFFF) + hash(a1)) & 0xFFFFFFFF)
+    }
+    ((h & 0xFFFFFFFF) ^ 0x80000000) - 0x80000000
+  }
+}
 
 ## An opaque type as the language sees the *value* behind it.
 ##
@@ -877,7 +1064,7 @@ pub type Ty =
 ## declaring module, keeps the two apart.
 pub fn peel_opaque(t: Ty) -> Ty =
   match t {
-    TyOpaque(_, _, _, _, tgt, _, _) -> peel_opaque(tgt)
+    TyOpaque(_, _, _, _, tgt, _, _, _) -> peel_opaque(tgt)
     TyCaptured(value, _) -> peel_opaque(value)
     _ -> t
   }
@@ -900,7 +1087,7 @@ pub fn peel_opaque(t: Ty) -> Ty =
 pub fn is_ref_ty(t: Ty) -> Bool =
   match t {
     TyCaptured(value, _) -> is_ref_ty(value)
-    TyOpaque(_, _, _, _, tgt, _, _) -> is_ref_ty(tgt)
+    TyOpaque(_, _, _, _, tgt, _, _, _) -> is_ref_ty(tgt)
     TyInt -> false
     TyFloat -> false
     TyBool -> false
@@ -912,18 +1099,18 @@ pub fn is_ref_ty(t: Ty) -> Bool =
     # seen from the expression side). Before this arm, a closure capturing a
     # dictionary counted it in its capture mask, and dropping the closure
     # walked `dawn_drop` into a static -- the unheaded-pointer guard.
-    TyAdt(id, _, _) -> id != DICT_ADT_ID
-    TyTuple(_) -> true
-    TyFn(_, _, _, _) -> true
+    TyAdt(id, _, _, _) -> id != DICT_ADT_ID
+    TyTuple(_, _) -> true
+    TyFn(_, _, _, _, _) -> true
     TyVar(_, _) -> true
     TyError -> true
     TyBytes -> true
     TyI64Buf(_) -> true
     TyF64Buf(_) -> true
-    TyList(_) -> true
-    TyMap(_, _) -> true
-    TySet(_) -> true
-    TyArray(_) -> true
+    TyList(_, _) -> true
+    TyMap(_, _, _) -> true
+    TySet(_, _) -> true
+    TyArray(_, _) -> true
     TyJava(_, _) -> true
     # only alive over a rigid subject (canonical-form invariant), where it is
     # an erased reference slot exactly like the TyVar it projects from
@@ -955,7 +1142,7 @@ pub fn is_errorish(t: Ty) -> Bool = t == TyError || t == TyNever
 pub const CHAR_OPAQUE_ID: Int = -2
 
 ## The type of a character literal: `Char`, an opaque `Int`.
-pub fn ty_char() -> Ty = TyOpaque(CHAR_OPAQUE_ID, "Char", "std/char", [], TyInt, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
+pub fn ty_char() -> Ty = ty_opaque(CHAR_OPAQUE_ID, "Char", "std/char", [], TyInt, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
 
 ## `Loc`, a call site as `<path>:<line>:<col>` (docs/caller-location-design.md
 ## 3.1). Minted here for the reason `Char` is: a builtin signature (`panic`'s
@@ -965,12 +1152,12 @@ pub fn ty_char() -> Ty = TyOpaque(CHAR_OPAQUE_ID, "Char", "std/char", [], TyInt,
 ## owner, is the one module that sees the text.
 pub const LOC_OPAQUE_ID: Int = -4
 
-pub fn ty_loc() -> Ty = TyOpaque(LOC_OPAQUE_ID, "Loc", "std/loc", [], TyString, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
+pub fn ty_loc() -> Ty = ty_opaque(LOC_OPAQUE_ID, "Loc", "std/loc", [], TyString, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
 
 # The origin binder is typed before its body is checked. This is the stable
 # identity of std/provenance's ordinary opaque declaration, not a new prelude
 # name. check/provenance tests it against the declaration-key derivation.
-pub fn ty_origin() -> Ty = TyOpaque(123946331297243, "Origin", "std/provenance", [], TyString, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
+pub fn ty_origin() -> Ty = ty_opaque(123946331297243, "Origin", "std/provenance", [], TyString, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
 
 ## Who may write a compiler-owned type name. This is surface policy, including
 ## the distinct return-only access used by Never.
@@ -1107,10 +1294,10 @@ pub fn builtin_type_apply(info: BuiltinTypeI, args: List[Ty]) -> Ty =
   match info.build {
     BtLeaf(ty) -> ty
     BtBuffer(_) -> TyError
-    BtList -> TyList(args[0])
-    BtMap -> TyMap(args[0], args[1])
-    BtSet -> TySet(args[0])
-    BtArray -> TyArray(args[0])
+    BtList -> ty_list(args[0])
+    BtMap -> ty_map(args[0], args[1])
+    BtSet -> ty_set(args[0])
+    BtArray -> ty_array(args[0])
   }
 
 ## The public nongeneric compiler-owned type for a name, or None.
@@ -1306,7 +1493,7 @@ pub fn adt_of(adts: Adts, id: Int) -> AdtI =
   }
 
 ## The declared "self type": Tree[T] inside its own declaration.
-pub fn adt_self_ty(a: AdtI) -> Ty = TyAdt(a.id, a.tparams, capture.arguments(a.scope_params))
+pub fn adt_self_ty(a: AdtI) -> Ty = ty_adt(a.id, a.tparams, capture.arguments(a.scope_params))
 
 ## JVM internal name (erased): abstract base (sum) or the single class (record).
 pub fn adt_jvm_name(a: AdtI) -> String =
@@ -1346,7 +1533,7 @@ fn ty_show_at(adts: Adts, t: Ty, group_fn: Bool, java_fqn: Bool) -> String =
     TyNever -> "Never"
     TyError -> "?"
     TyVar(n, _) -> n
-    TyAdt(aid, targs, sc) -> {
+    TyAdt(aid, targs, sc, _) -> {
       let name = adt_of(adts, aid).name
       let shown_args = map(targs, x => ty_show_at(adts, x, false, java_fqn)) ++ capture.argument_names(sc)
       if len(shown_args) == 0 {
@@ -1355,23 +1542,23 @@ fn ty_show_at(adts: Adts, t: Ty, group_fn: Bool, java_fqn: Bool) -> String =
         name ++ "[" ++ join(shown_args, ", ") ++ "]"
       }
     }
-    TyList(e) -> "List[" ++ ty_show_at(adts, e, false, java_fqn) ++ "]"
-    TyMap(k, v) -> "Map[" ++ ty_show_at(adts, k, false, java_fqn) ++ ", " ++
+    TyList(e, _) -> "List[" ++ ty_show_at(adts, e, false, java_fqn) ++ "]"
+    TyMap(k, v, _) -> "Map[" ++ ty_show_at(adts, k, false, java_fqn) ++ ", " ++
       ty_show_at(adts, v, false, java_fqn) ++ "]"
-    TySet(e) -> "Set[" ++ ty_show_at(adts, e, false, java_fqn) ++ "]"
-    TyArray(e) -> "Array[" ++ ty_show_at(adts, e, false, java_fqn) ++ "]"
+    TySet(e, _) -> "Set[" ++ ty_show_at(adts, e, false, java_fqn) ++ "]"
+    TyArray(e, _) -> "Array[" ++ ty_show_at(adts, e, false, java_fqn) ++ "]"
     TyJava(fqcn, display) -> if java_fqn { fqcn } else { display }
     # the name, never the target: a diagnostic outside the declaring module
     # must not leak what the module is hiding
-    TyOpaque(_, name, _, args, _, sc, _) ->
+    TyOpaque(_, name, _, args, _, sc, _, _) ->
       if len(args) == 0 && len(capture.argument_names(sc)) == 0 {
         name
       } else {
         name ++ "[" ++ join(map(args, x => ty_show_at(adts, x, false, java_fqn)) ++ capture.argument_names(sc), ", ") ++ "]"
       }
-    TyTuple(elems) ->
+    TyTuple(elems, _) ->
       "(" ++ join(map(elems, x => ty_show_at(adts, x, false, java_fqn)), ", ") ++ ")"
-    TyFn(params, ret, eff, sc) -> {
+    TyFn(params, ret, eff, sc, _) -> {
       let binders = if len(sc.scopes) == 0 { "" } else {
         "[" ++ join(map(sc.scopes, s => "@" ++ s.name), ", ") ++ "]"
       }
@@ -1389,7 +1576,7 @@ fn ty_show_at(adts: Adts, t: Ty, group_fn: Bool, java_fqn: Bool) -> String =
   }
 
 fn capture_suffix(t: Ty) -> Bool = match t {
-  TyFn(_, _, _, sc) -> sc.bound != None
+  TyFn(_, _, _, sc, _) -> sc.bound != None
   TyCaptured(_, _) -> true
   _ -> false
 }
@@ -1539,17 +1726,17 @@ pub fn ty_map_children(t: Ty, f: fn(Ty) -> Ty) -> Ty =
   match t {
     # a nullary head has nothing to map, and answering with `t` keeps the walk
     # off the allocator for the commonest node in the table
-    TyAdt(aid, targs, sc) -> if len(targs) == 0 { t } else { TyAdt(aid, map(targs, f), sc) }
-    TyList(e) -> TyList(f(e))
-    TyMap(k, v) -> TyMap(f(k), f(v))
-    TySet(e) -> TySet(f(e))
-    TyArray(e) -> TyArray(f(e))
-    TyTuple(elems) -> TyTuple(map(elems, f))
-    TyOpaque(id, n, ow, args, tgt, sc, envelope) -> TyOpaque(id, n, ow, map(args, f), f(tgt), sc, envelope)
+    TyAdt(aid, targs, sc, _) -> if len(targs) == 0 { t } else { ty_adt(aid, map(targs, f), sc) }
+    TyList(e, _) -> ty_list(f(e))
+    TyMap(k, v, _) -> ty_map(f(k), f(v))
+    TySet(e, _) -> ty_set(f(e))
+    TyArray(e, _) -> ty_array(f(e))
+    TyTuple(elems, _) -> ty_tuple(map(elems, f))
+    TyOpaque(id, n, ow, args, tgt, sc, envelope, _) -> ty_opaque(id, n, ow, map(args, f), f(tgt), sc, envelope)
     # a projection's subject is a type, so it is a child like any other; what
     # the projection itself becomes is the caller's rule, not this walk's
     TyAssoc(s, tid, n, upper) -> TyAssoc(f(s), tid, n, upper)
-    TyFn(params, ret, eff, sc) -> TyFn(map(params, f), f(ret), eff, sc)
+    TyFn(params, ret, eff, sc, _) -> ty_fn(map(params, f), f(ret), eff, sc)
     TyCaptured(value, bound) -> with_capture_bound(f(value), bound)
     TyVar(_, _) -> t
     TyInt | TyFloat | TyBool | TyString | TyBytes | TyI64Buf(_) | TyF64Buf(_) -> t
@@ -1560,15 +1747,15 @@ pub fn ty_map_children(t: Ty, f: fn(Ty) -> Ty) -> Ty =
 ## reading of the walk above, over exactly the same children.
 pub fn ty_any_child(t: Ty, f: fn(Ty) -> Bool) -> Bool =
   match t {
-    TyAdt(_, targs, _) -> list.any(targs, f)
-    TyList(e) -> f(e)
-    TyMap(k, v) -> f(k) || f(v)
-    TySet(e) -> f(e)
-    TyArray(e) -> f(e)
-    TyTuple(elems) -> list.any(elems, f)
-    TyOpaque(_, _, _, args, tgt, _, _) -> list.any(args, f) || f(tgt)
+    TyAdt(_, targs, _, _) -> list.any(targs, f)
+    TyList(e, _) -> f(e)
+    TyMap(k, v, _) -> f(k) || f(v)
+    TySet(e, _) -> f(e)
+    TyArray(e, _) -> f(e)
+    TyTuple(elems, _) -> list.any(elems, f)
+    TyOpaque(_, _, _, args, tgt, _, _, _) -> list.any(args, f) || f(tgt)
     TyAssoc(s, _, _, _) -> f(s)
-    TyFn(params, ret, _, _) -> list.any(params, f) || f(ret)
+    TyFn(params, ret, _, _, _) -> list.any(params, f) || f(ret)
     TyCaptured(value, _) -> f(value)
     TyVar(_, _) -> false
     TyInt | TyFloat | TyBool | TyString | TyBytes | TyI64Buf(_) | TyF64Buf(_) -> false
@@ -1578,7 +1765,7 @@ pub fn ty_any_child(t: Ty, f: fn(Ty) -> Bool) -> Bool =
 ## Keep function capture bounds on the single function representation even
 ## when a type variable under a qualifier becomes a function during substitution.
 pub fn with_capture_bound(value: Ty, bound: capture.Capture) -> Ty = match value {
-  TyFn(ps, ret, eff, sc) -> TyFn(ps, ret, eff, CaptureFunction { ..sc, bound = Some(bound) })
+  TyFn(ps, ret, eff, sc, _) -> ty_fn(ps, ret, eff, CaptureFunction { ..sc, bound = Some(bound) })
   TyCaptured(inner, _) -> with_capture_bound(inner, bound)
   _ -> TyCaptured(value, bound)
 }
@@ -1598,13 +1785,13 @@ pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
       }
     # the one arm ty_map_children cannot serve: a function type also carries an
     # effect, and an effect is not a child of a type
-    TyFn(params, ret, eff, sc) -> {
+    TyFn(params, ret, eff, sc, _) -> {
       let fresh = if len(sc.scopes) == 0 { t } else {
         subst_scopes_avoiding(t, map.empty(), map.empty(), map.values(m), map.values(em))
       }
       match fresh {
-        TyFn(ps, r, e, scope) -> TyFn(map(ps, x => subst(x, m, em)), subst(r, m, em), subst_eff(e, em), scope)
-        _ -> TyFn(map(params, x => subst(x, m, em)), subst(ret, m, em), subst_eff(eff, em), sc)
+        TyFn(ps, r, e, scope, _) -> ty_fn(map(ps, x => subst(x, m, em)), subst(r, m, em), subst_eff(e, em), scope)
+        _ -> ty_fn(map(params, x => subst(x, m, em)), subst(ret, m, em), subst_eff(eff, em), sc)
       }
     }
     _ -> ty_map_children(t, x => subst(x, m, em))
@@ -1650,13 +1837,13 @@ fn capture_names(c: capture.Capture) -> List[String] = map(c, m => match m {
 fn type_has_scope_name(t: Ty, name: String) -> Bool = {
   let here = match t {
     TyI64Buf(s) | TyF64Buf(s) -> s.name == name
-    TyFn(_, _, e, sc) -> list.any(sc.scopes, s => s.name == name) ||
+    TyFn(_, _, e, sc, _) -> list.any(sc.scopes, s => s.name == name) ||
       list.contains(capture_names(capture.bound(sc)), name) ||
       list.contains(capture_names(effect_capture_refs(e)), name) || list.any(eff_vars(e), v => { let (_, n) = v
         n == name })
     TyCaptured(_, c) -> list.contains(capture_names(c), name)
     TyAssoc(_, app, _, upper) -> list.contains(capture_names(capture.union(capture.trait_support(app), upper)), name)
-    TyAdt(_, _, a) | TyOpaque(_, _, _, _, _, a, _) -> list.any(a.scopes, s => s.name == name) ||
+    TyAdt(_, _, a, _) | TyOpaque(_, _, _, _, _, a, _, _) -> list.any(a.scopes, s => s.name == name) ||
       list.any(a.captures, c => list.contains(capture_names(c), name))
     _ -> false
   }
@@ -1666,11 +1853,11 @@ fn type_has_scope_name(t: Ty, name: String) -> Bool = {
 fn type_has_scope(t: Ty, id: Int) -> Bool = {
   let here = match t {
     TyI64Buf(s) | TyF64Buf(s) -> s.id == id
-    TyFn(_, _, e, sc) -> list.any(sc.scopes, s => s.id == id) ||
+    TyFn(_, _, e, sc, _) -> list.any(sc.scopes, s => s.id == id) ||
       list.contains(capture_scope_ids(capture.bound(sc)), id) || list.contains(capture_scope_ids(effect_capture_refs(e)), id)
     TyCaptured(_, c) -> list.contains(capture_scope_ids(c), id)
     TyAssoc(_, app, _, upper) -> list.contains(capture_scope_ids(capture.union(capture.trait_support(app), upper)), id)
-    TyAdt(_, _, a) | TyOpaque(_, _, _, _, _, a, _) -> list.any(a.scopes, s => s.id == id) ||
+    TyAdt(_, _, a, _) | TyOpaque(_, _, _, _, _, a, _, _) -> list.any(a.scopes, s => s.id == id) ||
       list.any(a.captures, c => list.contains(capture_scope_ids(c), id))
     _ -> false
   }
@@ -1680,7 +1867,7 @@ fn type_has_scope(t: Ty, id: Int) -> Bool = {
 ## Rename binders that occur in a replacement before descending. Merely
 ## deleting bound keys from the map would still capture its range.
 pub fn subst_scopes(t: Ty, sm: Map[Int, capture.Scope], cm: Map[Int, capture.Capture]) -> Ty =
-  subst_scopes_avoiding(t, sm, cm, [], [])
+  if scope_inert(t) { t } else { subst_scopes_avoiding(t, sm, cm, [], []) }
 
 fn avoiding_id(ts: List[Ty], es: List[Eff], id: Int) -> Bool =
   list.any(ts, t => type_has_scope(t, id)) || list.any(es, e => list.contains(capture_scope_ids(effect_capture_refs(e)), id))
@@ -1699,16 +1886,16 @@ fn subst_scopes_avoiding(t: Ty, sm: Map[Int, capture.Scope], cm: Map[Int, captur
     TyCaptured(value, bound) -> with_capture_bound(subst_scopes_avoiding(value, sm, cm, ts, es), capture.subst(bound, sm, cm))
     TyAssoc(subject, app, name, upper) -> TyAssoc(subst_scopes_avoiding(subject, sm, cm, ts, es),
       capture.trait_subst(app, sm, cm), name, capture.subst(upper, sm, cm))
-    TyAdt(id, args, a) -> TyAdt(id, map(args, x => subst_scopes_avoiding(x, sm, cm, ts, es)), capture.arguments_subst(a, sm, cm))
-    TyOpaque(id, name, owner, args, target, a, envelope) -> TyOpaque(id, name, owner,
+    TyAdt(id, args, a, _) -> ty_adt(id, map(args, x => subst_scopes_avoiding(x, sm, cm, ts, es)), capture.arguments_subst(a, sm, cm))
+    TyOpaque(id, name, owner, args, target, a, envelope, _) -> ty_opaque(id, name, owner,
       map(args, x => subst_scopes_avoiding(x, sm, cm, ts, es)), subst_scopes_avoiding(target, sm, cm, ts, es), capture.arguments_subst(a, sm, cm), envelope)
-    TyFn(ps, ret, eff, sc) -> {
+    TyFn(ps, ret, eff, sc, _) -> {
       # An ordinary arrow binds no Scope, so it cannot capture a replacement
       # at this node. Nested quantified arrows still take the guarded path.
       if len(sc.scopes) == 0 {
         let next = CaptureFunction { ..sc,
           bound = match sc.bound { Some(c) -> Some(capture.subst(c, sm, cm)), None -> None } }
-        return TyFn(map(ps, x => subst_scopes_avoiding(x, sm, cm, ts, es)),
+        return ty_fn(map(ps, x => subst_scopes_avoiding(x, sm, cm, ts, es)),
           subst_scopes_avoiding(ret, sm, cm, ts, es), subst_capture_eff(eff, sm, cm), next)
       }
       var range = map(map.values(sm), s => s.id)
@@ -1743,7 +1930,7 @@ fn subst_scopes_avoiding(t: Ty, sm: Map[Int, capture.Scope], cm: Map[Int, captur
       let renamed_bound = match sc.bound { Some(c) -> Some(capture.subst(c, rename, empty)), None -> None }
       let next = CaptureFunction { scopes = binders,
         bound = match renamed_bound { Some(c) -> Some(capture.subst(c, free, cm)), None -> None } }
-      TyFn(map(ps, x => subst_scopes_avoiding(subst_scopes(x, renames, empty), frees, cm, ts, es)),
+      ty_fn(map(ps, x => subst_scopes_avoiding(subst_scopes(x, renames, empty), frees, cm, ts, es)),
         subst_scopes_avoiding(subst_scopes(ret, rename, empty), free, cm, ts, es),
         subst_capture_eff(subst_scope_eff(eff, rename), free, cm), next)
     }
@@ -1824,22 +2011,22 @@ pub fn ty_scope_refs(t: Ty) -> capture.Capture = {
   var bound: List[capture.Scope] = []
   match t {
     TyI64Buf(s) | TyF64Buf(s) -> { refs = [capture.Region(s)] }
-    TyFn(ps, ret, e, sc) -> {
+    TyFn(ps, ret, e, sc, _) -> {
       children = ps ++ [ret]
       refs = capture.bound(sc) ++ effect_capture_refs(e)
       bound = sc.scopes
     }
     TyCaptured(value, c) -> { children = [value]
       refs = c }
-    TyAdt(_, args, sc) -> { children = args
+    TyAdt(_, args, sc, _) -> { children = args
       refs = argument_scope_refs(sc) }
-    TyOpaque(_, _, _, args, _, sc, _) -> { children = args
+    TyOpaque(_, _, _, args, _, sc, _, _) -> { children = args
       refs = argument_scope_refs(sc) }
     TyAssoc(value, app, _, upper) -> { children = [value]
       refs = capture.union(capture.trait_support(app), upper) }
-    TyList(value) | TySet(value) | TyArray(value) -> { children = [value] }
-    TyMap(key, value) -> { children = [key, value] }
-    TyTuple(values) -> { children = values }
+    TyList(value, _) | TySet(value, _) | TyArray(value, _) -> { children = [value] }
+    TyMap(key, value, _) -> { children = [key, value] }
+    TyTuple(values, _) -> { children = values }
     TyInt | TyFloat | TyBool | TyString | TyBytes | TyUnit | TyNever | TyError |
       TyVar(_, _) | TyJava(_, _) -> ()
   }
@@ -1871,19 +2058,19 @@ fn ty_equal_in(a: Ty, b: Ty, sm: Map[Int, capture.Scope]) -> Bool = {
     (TyI64Buf(s), TyI64Buf(t)) | (TyF64Buf(s), TyF64Buf(t)) -> scope_equal_in(s, t, sm)
     (TyCaptured(x, c), TyCaptured(y, d)) -> ty_equal_in(x, y, sm) &&
       capture_equal_in(c, d, sm)
-    (TyFn(ps, r, e, sc), TyFn(qs, t, f, tc)) -> {
+    (TyFn(ps, r, e, sc, _), TyFn(qs, t, f, tc, _)) -> {
       if len(sc.scopes) != len(tc.scopes) { return false }
       var renamed = sm
       for i in 0..len(sc.scopes) { renamed = map.insert(renamed, sc.scopes[i].id, tc.scopes[i]) }
       scope_types_equal(ps, qs, renamed) && ty_equal_in(r, t, renamed) &&
         scope_effect_equal(e, f, renamed) && capture_equal_in(capture.bound(sc), capture.bound(tc), renamed)
     }
-    (TyAdt(id, xs, sc), TyAdt(jd, ys, tc)) -> id == jd && scope_types_equal(xs, ys, sm) && scope_arguments_equal(sc, tc, sm)
-    (TyOpaque(id, _, _, xs, x, sc, _), TyOpaque(jd, _, _, ys, y, tc, _)) -> id == jd &&
+    (TyAdt(id, xs, sc, _), TyAdt(jd, ys, tc, _)) -> id == jd && scope_types_equal(xs, ys, sm) && scope_arguments_equal(sc, tc, sm)
+    (TyOpaque(id, _, _, xs, x, sc, _, _), TyOpaque(jd, _, _, ys, y, tc, _, _)) -> id == jd &&
       scope_types_equal(xs, ys, sm) && ty_equal_in(x, y, sm) && scope_arguments_equal(sc, tc, sm)
-    (TyTuple(xs), TyTuple(ys)) -> scope_types_equal(xs, ys, sm)
-    (TyList(x), TyList(y)) | (TySet(x), TySet(y)) | (TyArray(x), TyArray(y)) -> ty_equal_in(x, y, sm)
-    (TyMap(x, y), TyMap(u, v)) -> ty_equal_in(x, u, sm) && ty_equal_in(y, v, sm)
+    (TyTuple(xs, _), TyTuple(ys, _)) -> scope_types_equal(xs, ys, sm)
+    (TyList(x, _), TyList(y, _)) | (TySet(x, _), TySet(y, _)) | (TyArray(x, _), TyArray(y, _)) -> ty_equal_in(x, y, sm)
+    (TyMap(x, y, _), TyMap(u, v, _)) -> ty_equal_in(x, u, sm) && ty_equal_in(y, v, sm)
     (TyAssoc(x, id, name, upper), TyAssoc(y, jd, other, other_upper)) -> id.id == jd.id && capture_equal_in(upper, other_upper, sm) && scope_arguments_equal((CaptureArguments { scopes = [], captures = id.args }), (CaptureArguments { scopes = [], captures = jd.args }), sm) && name == other && ty_equal_in(x, y, sm)
     _ -> a == b
   }
@@ -1893,7 +2080,7 @@ fn ty_equal_in(a: Ty, b: Ty, sm: Map[Int, capture.Scope]) -> Bool = {
 ## before variance checks. This does not instantiate a runner or generate a
 ## fresh runtime scope; that operation belongs to scoped effect discharge.
 pub fn fn_align(source: Ty, target: Ty) -> Option[Ty] = match (source, target) {
-  (TyFn(ps, r, e, sc), TyFn(_, _, _, tc)) -> {
+  (TyFn(ps, r, e, sc, _), TyFn(_, _, _, tc, _)) -> {
     if len(sc.scopes) != len(tc.scopes) { return None }
     if len(sc.scopes) == 0 { return Some(source) }
     if list.any(ty_scope_refs(source), member => match member {
@@ -1904,7 +2091,7 @@ pub fn fn_align(source: Ty, target: Ty) -> Option[Ty] = match (source, target) {
     for i in 0..len(sc.scopes) { sm = map.insert(sm, sc.scopes[i].id, tc.scopes[i]) }
     let cm: Map[Int, capture.Capture] = map.empty()
     let bound_scopes = sm
-    Some(TyFn(map(ps, x => subst_scopes(x, bound_scopes, cm)), subst_scopes(r, sm, cm), subst_scope_eff(e, sm),
+    Some(ty_fn(map(ps, x => subst_scopes(x, bound_scopes, cm)), subst_scopes(r, sm, cm), subst_scope_eff(e, sm),
       CaptureFunction { scopes = tc.scopes, bound = match sc.bound {
         Some(c) -> Some(capture.subst(c, sm, cm)), None -> None
       } }))
@@ -2091,7 +2278,7 @@ pub fn reduce_ty_effs_via_bindings(
   bindings: List[(String, Eff)]
 ) -> Ty =
   match t {
-    TyFn(ps, r, e, sc) -> TyFn(
+    TyFn(ps, r, e, sc, _) -> ty_fn(
       map(ps, x => reduce_ty_effs_via_bindings(x, vid, tid, bindings)),
       reduce_ty_effs_via_bindings(r, vid, tid, bindings),
       reduce_eff_via_bindings(e, vid, tid, bindings), sc)
@@ -2143,6 +2330,7 @@ pub type Sym = {
 
 ## Function signature (user functions and builtins alike).
 pub type Sig = {
+  scope_inert: Bool,
   scope_params: capture.Params,
   name: String,
   param_tys: List[Ty],
@@ -2187,6 +2375,50 @@ pub type Sig = {
   op_of: Option[(Int, Int)],
   # the return type (and effect) is still being inferred; ret is a placeholder
   inferring: Bool
+}
+
+## The proof is derived metadata, not an additional semantic field.
+impl Eq[Sig] {
+  fn eq(a: Sig, b: Sig) -> Bool =
+    a.scope_params == b.scope_params &&
+    a.name == b.name &&
+    a.param_tys == b.param_tys &&
+    a.param_names == b.param_names &&
+    a.param_defaults == b.param_defaults &&
+    a.caller_params == b.caller_params &&
+    a.ret == b.ret &&
+    a.eff == b.eff &&
+    a.is_builtin == b.is_builtin &&
+    a.tparams == b.tparams &&
+    a.constraints == b.constraints &&
+    a.eparams == b.eparams &&
+    a.owner == b.owner &&
+    a.trait_id == b.trait_id &&
+    a.op_of == b.op_of &&
+    a.inferring == b.inferring
+}
+
+impl Hash[Sig] {
+  fn hash(s: Sig) -> Int = {
+    var h = 1
+    h = (31 * h + hash(s.scope_params)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.name)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.param_tys)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.param_names)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.param_defaults)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.caller_params)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.ret)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.eff)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.is_builtin)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.tparams)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.constraints)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.eparams)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.owner)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.trait_id)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.op_of)) & 0xFFFFFFFF
+    h = (31 * h + hash(s.inferring)) & 0xFFFFFFFF
+    (h ^ 0x80000000) - 0x80000000
+  }
 }
 
 ## The bounds of tparams[i], or none.
@@ -2306,20 +2538,20 @@ fn buffer_reach_in(adts: Adts, effs: Effects, t: Ty, seen: List[Int]) -> Option[
     TyCaptured(value, _) -> buffer_reach_in(adts, effs, value, seen)
     TyI64Buf(_) -> Some("an `I64Buf`")
     TyF64Buf(_) -> Some("an `F64Buf`")
-    TyList(e) -> reach_first(adts, effs, [e], "the element type of a list", seen)
-    TySet(e) -> reach_first(adts, effs, [e], "the element type of a set", seen)
-    TyArray(e) -> reach_first(adts, effs, [e], "the element type of an array", seen)
-    TyMap(k, v) -> reach_first(adts, effs, [k, v], "a map's key or value type", seen)
-    TyTuple(es) -> reach_first(adts, effs, es, "a tuple element", seen)
-    TyOpaque(_, name, _, args, tgt, _, _) ->
+    TyList(e, _) -> reach_first(adts, effs, [e], "the element type of a list", seen)
+    TySet(e, _) -> reach_first(adts, effs, [e], "the element type of a set", seen)
+    TyArray(e, _) -> reach_first(adts, effs, [e], "the element type of an array", seen)
+    TyMap(k, v, _) -> reach_first(adts, effs, [k, v], "a map's key or value type", seen)
+    TyTuple(es, _) -> reach_first(adts, effs, es, "a tuple element", seen)
+    TyOpaque(_, name, _, args, tgt, _, _, _) ->
       reach_first(adts, effs, args ++ [tgt], "the opaque type `" ++ name ++ "`", seen)
-    TyFn(ps, r, e, _) ->
+    TyFn(ps, r, e, _, _) ->
       if eff_names_mem(effs, e) {
         Some("a function type whose row carries `Mem`")
       } else {
         reach_first(adts, effs, ps ++ [r], "a function type", seen)
       }
-    TyAdt(id, args, _) ->
+    TyAdt(id, args, _, _) ->
       if list.contains(seen, id) {
         None
       } else {
@@ -2377,15 +2609,15 @@ pub fn ev_record_name(effect_name: String) -> String = "ev\$${effect_name}"
 ## the type being built.
 pub fn ty_eff_vars(t: Ty) -> List[(Int, String)] =
   match t {
-    TyAdt(_, args, _) -> ty_eff_vars_all(args)
-    TyList(e) -> ty_eff_vars(e)
-    TyMap(k, v) -> ty_eff_vars(k) ++ ty_eff_vars(v)
-    TySet(e) -> ty_eff_vars(e)
-    TyArray(e) -> ty_eff_vars(e)
-    TyOpaque(_, _, _, args, tgt, _, _) -> ty_eff_vars_all(args) ++ ty_eff_vars(tgt)
+    TyAdt(_, args, _, _) -> ty_eff_vars_all(args)
+    TyList(e, _) -> ty_eff_vars(e)
+    TyMap(k, v, _) -> ty_eff_vars(k) ++ ty_eff_vars(v)
+    TySet(e, _) -> ty_eff_vars(e)
+    TyArray(e, _) -> ty_eff_vars(e)
+    TyOpaque(_, _, _, args, tgt, _, _, _) -> ty_eff_vars_all(args) ++ ty_eff_vars(tgt)
     TyAssoc(s, _, _, _) -> ty_eff_vars(s)
-    TyTuple(es) -> ty_eff_vars_all(es)
-    TyFn(ps, r, ef, _) -> ty_eff_vars_all(ps) ++ ty_eff_vars(r) ++ eff_vars(ef)
+    TyTuple(es, _) -> ty_eff_vars_all(es)
+    TyFn(ps, r, ef, _, _) -> ty_eff_vars_all(ps) ++ ty_eff_vars(r) ++ eff_vars(ef)
     _ -> []
   }
 
@@ -2404,20 +2636,20 @@ test "ty_eff_vars finds the rows a type carries, and only those" {
   let e1 = EffVar("e", 11)
   let e2 = EffVar("f", 12)
   assert ty_eff_vars(TyInt) == []
-  assert ty_eff_vars(TyFn([TyInt], TyInt, e1, capture.empty_function())) == [(11, "e")]
+  assert ty_eff_vars(ty_fn([TyInt], TyInt, e1, capture.empty_function())) == [(11, "e")]
   # nested: a list of functions, and a function returning a function
-  assert ty_eff_vars(TyList(TyFn([], TyUnit, e1, capture.empty_function()))) == [(11, "e")]
+  assert ty_eff_vars(ty_list(ty_fn([], TyUnit, e1, capture.empty_function()))) == [(11, "e")]
   # parameters, then the return, then the row -- the row is written last and
   # walked last, the same order `eff_params_of` mints in
-  assert ty_eff_vars(TyFn([], TyFn([], TyInt, e2, capture.empty_function()), e1, capture.empty_function())) == [(12, "f"), (11, "e")]
+  assert ty_eff_vars(ty_fn([], ty_fn([], TyInt, e2, capture.empty_function()), e1, capture.empty_function())) == [(12, "f"), (11, "e")]
   # io and a written label are answers, not variables: neither is a slot here
-  assert ty_eff_vars(TyFn([], TyInt, EIo, capture.empty_function())) == []
-  assert ty_eff_vars(TyFn([], TyInt, ELabeled(EPure, [(7, "Ask")]), capture.empty_function())) == []
+  assert ty_eff_vars(ty_fn([], TyInt, EIo, capture.empty_function())) == []
+  assert ty_eff_vars(ty_fn([], TyInt, ELabeled(EPure, [(7, "Ask")]), capture.empty_function())) == []
   # a type reference hides its declaration's binder -- see the header
-  assert ty_eff_vars(TyAdt(3, [], capture.empty_arguments())) == []
-  assert ty_eff_vars(TyAdt(3, [TyFn([], TyInt, e1, capture.empty_function())], capture.empty_arguments())) == [(11, "e")]
+  assert ty_eff_vars(ty_adt(3, [], capture.empty_arguments())) == []
+  assert ty_eff_vars(ty_adt(3, [ty_fn([], TyInt, e1, capture.empty_function())], capture.empty_arguments())) == [(11, "e")]
   # the list form dedupes by id, so two fields writing one binder are one entry
-  assert ty_eff_vars_all([TyFn([], TyInt, e1, capture.empty_function()), TyFn([], TyUnit, e1, capture.empty_function())]) == [(11, "e")]
+  assert ty_eff_vars_all([ty_fn([], TyInt, e1, capture.empty_function()), ty_fn([], TyUnit, e1, capture.empty_function())]) == [(11, "e")]
 }
 
 ## A signature's **ABI row**: its declared row, with the effect variables it
@@ -2468,14 +2700,40 @@ test "a signature's ABI row lays its labels out by effect id" {
   # can be mistaken for the id sort asserted here. Same construction as
   # `scripts/checker-corpus/cases/ctl_two_labels.dawn`, which holds down the
   # one place that does sort by name.
-  let s = Sig { scope_params = capture.empty_params(), name = "f", param_tys = [], param_names = [], param_defaults = [], caller_params = [], ret = TyUnit,
-    eff = ELabeled(EPure, [(59, "Alpha"), (23, "Zulus"), (41, "Mimas")]),
-    is_builtin = false, tparams = [], constraints = [], eparams = [],
-    owner = None, trait_id = None, op_of = None, inferring = false }
+  let s = {
+    let identity_scope_params: capture.Params = capture.empty_params()
+    let identity_param_tys: List[Ty] = []
+    let identity_ret: Ty = TyUnit
+    let identity_eff: Eff = ELabeled(EPure, [(59, "Alpha"), (23, "Zulus"), (41, "Mimas")])
+    let identity_constraints: List[List[capture.TraitApplication]] = []
+    Sig { scope_params = identity_scope_params,
+      name = "f",
+      param_tys = identity_param_tys,
+      param_names = [],
+      param_defaults = [],
+      caller_params = [],
+      ret = identity_ret,
+      eff = identity_eff,
+      is_builtin = false,
+      tparams = [],
+      constraints = identity_constraints,
+      eparams = [],
+      owner = None,
+      trait_id = None,
+      op_of = None,
+      inferring = false,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
+  }
   assert eff_labels(sig_abi_eff(s)) == [(23, "Zulus"), (41, "Mimas"), (59, "Alpha")]
   # and the row is written in whatever order the source wrote it, which the
   # layout does not inherit
-  let rewritten = Sig { ..s, eff = ELabeled(EPure, [(41, "Mimas"), (59, "Alpha"), (23, "Zulus")]) }
+  let rewritten = {
+    let identity_base = s
+    let identity_eff: Eff = ELabeled(EPure, [(41, "Mimas"), (59, "Alpha"), (23, "Zulus")])
+    Sig { ..identity_base,
+      eff = identity_eff,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+  }
   assert eff_labels(sig_abi_eff(rewritten)) == eff_labels(sig_abi_eff(s))
   # folding in the variables a signature binds leaves the labels alone, and
   # the variable axis behind them takes the same id order
@@ -2634,7 +2892,7 @@ pub fn ev_pack_adt() -> AdtI =
     bound_eparams = []
   }
 
-pub fn ev_pack_ty() -> Ty = TyAdt(EV_PACK_ID, [], capture.empty_arguments())
+pub fn ev_pack_ty() -> Ty = ty_adt(EV_PACK_ID, [], capture.empty_arguments())
 
 ## What a failed `ev_get` says, in one place because three implementations say
 ## it: the JVM emitter writes it into a `Panic`, the comptime interpreter
@@ -2724,14 +2982,14 @@ pub fn head_of(t: Ty) -> Option[Head] =
     TyI64Buf(_) -> Some(HI64Buf)
     TyF64Buf(_) -> Some(HF64Buf)
     TyUnit -> Some(HUnit)
-    TyAdt(aid, _, _) -> Some(HAdt(aid))
-    TyList(_) -> Some(HList)
-    TyMap(_, _) -> Some(HMap)
-    TySet(_) -> Some(HSet)
-    TyArray(_) -> Some(HArray)
+    TyAdt(aid, _, _, _) -> Some(HAdt(aid))
+    TyList(_, _) -> Some(HList)
+    TyMap(_, _, _) -> Some(HMap)
+    TySet(_, _) -> Some(HSet)
+    TyArray(_, _) -> Some(HArray)
     TyJava(fqcn, _) -> Some(HJava(fqcn))
     # an opaque type may carry its own impl, distinct from its target's
-    TyOpaque(id, _, _, _, _, _, _) -> Some(HOpaque(id))
+    TyOpaque(id, _, _, _, _, _, _, _) -> Some(HOpaque(id))
     _ -> None
   }
 
@@ -2741,13 +2999,13 @@ pub fn head_of(t: Ty) -> Option[Head] =
 pub fn type_args_of(t: Ty) -> List[Ty] =
   match t {
     TyCaptured(value, _) -> type_args_of(value)
-    TyAdt(_, args, _) -> args
-    TyTuple(elems) -> elems
-    TyList(e) -> [e]
-    TySet(e) -> [e]
-    TyArray(e) -> [e]
-    TyMap(k, v) -> [k, v]
-    TyOpaque(_, _, _, args, _, _, _) -> args
+    TyAdt(_, args, _, _) -> args
+    TyTuple(elems, _) -> elems
+    TyList(e, _) -> [e]
+    TySet(e, _) -> [e]
+    TyArray(e, _) -> [e]
+    TyMap(k, v, _) -> [k, v]
+    TyOpaque(_, _, _, args, _, _, _, _) -> args
     _ -> []
   }
 
@@ -2761,7 +3019,7 @@ pub fn type_args_of(t: Ty) -> List[Ty] =
 pub fn is_ground(t: Ty) -> Bool =
   match t {
     TyVar(_, _) -> false
-    TyFn(ps, r, _, _) -> all_ground(ps) && is_ground(r)
+    TyFn(ps, r, _, _, _) -> all_ground(ps) && is_ground(r)
     TyInt | TyFloat | TyBool | TyString | TyBytes | TyI64Buf(_) | TyF64Buf(_) -> true
     TyUnit | TyNever | TyError | TyJava(_, _) -> true
     # A projection that survived reduction stands over a rigid subject (D3),
@@ -2792,8 +3050,8 @@ pub fn all_ground(ts: List[Ty]) -> Bool = {
 ## impl has anything to do with the arguments it is given.
 pub fn expandable(t: Ty) -> Bool =
   match t {
-    TyAdt(_, _, _) -> true
-    TyTuple(_) -> true
+    TyAdt(_, _, _, _) -> true
+    TyTuple(_, _) -> true
     _ -> false
   }
 
@@ -3007,11 +3265,30 @@ fn closers_of(cps: List[Char]) -> List[Char] = {
 }
 
 test "a default renders as its source text, cut at the shown width" {
-  let s = Sig { scope_params = capture.empty_params(), name = "pad", param_tys = [TyString, TyInt, TyString],
-    param_names = ["s", "width", "fill"], param_defaults = [None, None, Some("\" \"")],
-    caller_params = [],
-    ret = TyString, eff = EPure, is_builtin = false, tparams = [], constraints = [], eparams = [],
-    owner = None, trait_id = None, op_of = None, inferring = false }
+  let s = {
+    let identity_scope_params: capture.Params = capture.empty_params()
+    let identity_param_tys: List[Ty] = [TyString, TyInt, TyString]
+    let identity_ret: Ty = TyString
+    let identity_eff: Eff = EPure
+    let identity_constraints: List[List[capture.TraitApplication]] = []
+    Sig { scope_params = identity_scope_params,
+      name = "pad",
+      param_tys = identity_param_tys,
+      param_names = ["s", "width", "fill"],
+      param_defaults = [None, None, Some("\" \"")],
+      caller_params = [],
+      ret = identity_ret,
+      eff = identity_eff,
+      is_builtin = false,
+      tparams = [],
+      constraints = identity_constraints,
+      eparams = [],
+      owner = None,
+      trait_id = None,
+      op_of = None,
+      inferring = false,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
+  }
   let adts = prelude_adts()
   let traits = prelude_traits()
   assert sig_render(adts, traits, s) == "fn pad(s: String, width: Int, fill: String = \" \") -> String"
@@ -3351,11 +3628,11 @@ pub fn adt_derives(info: AdtI, tid: Int) -> Bool = {
   false
 }
 
-pub fn opt_ty(t: Ty) -> Ty = TyAdt(OPTION_ID, [t], capture.empty_arguments())
+pub fn opt_ty(t: Ty) -> Ty = ty_adt(OPTION_ID, [t], capture.empty_arguments())
 
-pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e], capture.empty_arguments())
+pub fn result_ty(t: Ty, e: Ty) -> Ty = ty_adt(RESULT_ID, [t, e], capture.empty_arguments())
 
-pub fn foreign_error_ty() -> Ty = TyAdt(FOREIGN_ERROR_ID, [], capture.empty_arguments())
+pub fn foreign_error_ty() -> Ty = ty_adt(FOREIGN_ERROR_ID, [], capture.empty_arguments())
 
 ## The `T` in a `cast` call's `Result[T, ForeignError]`.
 ##
@@ -3365,7 +3642,7 @@ pub fn foreign_error_ty() -> Ty = TyAdt(FOREIGN_ERROR_ID, [], capture.empty_argu
 ## type differently would be checking against a different class.
 pub fn cast_target(ty: Ty) -> Ty =
   match peel_opaque(ty) {
-    TyAdt(aid, args, _) ->
+    TyAdt(aid, args, _, _) ->
       if aid == RESULT_ID && len(args) == 2 {
         args[0]
       } else {
@@ -3464,22 +3741,29 @@ pub fn prelude_adts() -> Adts = {
 
 fn prelude_method(tid: Int, tv: Ty, name: String, ptys: List[Ty], pnames: List[String],
   ret: Ty) -> Sig =
-  Sig { scope_params = capture.empty_params(),
-    name = name,
-    param_tys = ptys,
-    param_names = pnames,
-    param_defaults = [],
-    caller_params = [],
-    ret = ret,
-    eff = EPure,
-    is_builtin = false,
-    tparams = [tv],
-    constraints = [[capture.closed_trait(tid)]],
-    eparams = [],
-    owner = None,
-    trait_id = Some(tid),
-    op_of = None,
-    inferring = false
+  {
+    let identity_scope_params: capture.Params = capture.empty_params()
+    let identity_param_tys: List[Ty] = ptys
+    let identity_ret: Ty = ret
+    let identity_eff: Eff = EPure
+    let identity_constraints: List[List[capture.TraitApplication]] = [[capture.closed_trait(tid)]]
+    Sig { scope_params = identity_scope_params,
+      name = name,
+      param_tys = identity_param_tys,
+      param_names = pnames,
+      param_defaults = [],
+      caller_params = [],
+      ret = identity_ret,
+      eff = identity_eff,
+      is_builtin = false,
+      tparams = [tv],
+      constraints = identity_constraints,
+      eparams = [],
+      owner = None,
+      trait_id = Some(tid),
+      op_of = None,
+      inferring = false,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
 
 fn prelude_trait(tid: Int, name: String, tv: Ty, m: String, sig: Sig) -> TraitI =
@@ -3501,22 +3785,29 @@ fn prelude_trait(tid: Int, name: String, tv: Ty, m: String, sig: Sig) -> TraitI 
 ## Eq (id 1) behind `==`/`!=`, and Hash (id 2), which nothing calls yet.
 fn prelude_trait_definitions() -> List[(Int, TraitI)] = {
   let tv = TyVar("T", -10)
-  let cmp_sig = Sig { scope_params = capture.empty_params(),
-    name = "cmp",
-    param_tys = [tv, tv],
-    param_names = ["a", "b"],
-    param_defaults = [],
-    caller_params = [],
-    ret = TyInt,
-    eff = EPure,
-    is_builtin = false,
-    tparams = [tv],
-    constraints = [[capture.closed_trait(ORD_ID)]],
-    eparams = [],
-    owner = None,
-    trait_id = Some(ORD_ID),
-    op_of = None,
-    inferring = false
+  let cmp_sig = {
+    let identity_scope_params: capture.Params = capture.empty_params()
+    let identity_param_tys: List[Ty] = [tv, tv]
+    let identity_ret: Ty = TyInt
+    let identity_eff: Eff = EPure
+    let identity_constraints: List[List[capture.TraitApplication]] = [[capture.closed_trait(ORD_ID)]]
+    Sig { scope_params = identity_scope_params,
+      name = "cmp",
+      param_tys = identity_param_tys,
+      param_names = ["a", "b"],
+      param_defaults = [],
+      caller_params = [],
+      ret = identity_ret,
+      eff = identity_eff,
+      is_builtin = false,
+      tparams = [tv],
+      constraints = identity_constraints,
+      eparams = [],
+      owner = None,
+      trait_id = Some(ORD_ID),
+      op_of = None,
+      inferring = false,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
   let ord = TraitI { scope_params = capture.empty_params(), assoc_bounds = [],
     id = ORD_ID,
@@ -3665,10 +3956,13 @@ fn staged_iter_trait() -> TraitI = {
   let rv = TyVar("R", -31)
   let item = TyAssoc(rv, capture.closed_trait(STAGED_ITER_ID), "Item", [])
   let e = EffAssoc("R", -31, capture.closed_trait(STAGED_ITER_ID), "StagedIter")
-  let body = TyFn([item], TyUnit, e, capture.empty_function())
-  let sig = Sig {
-    ..prelude_method(STAGED_ITER_ID, rv, "staged_for", [rv, body], ["r", "body"], TyUnit),
-    eff = e
+  let body = ty_fn([item], TyUnit, e, capture.empty_function())
+  let sig = {
+    let identity_base = prelude_method(STAGED_ITER_ID, rv, "staged_for", [rv, body], ["r", "body"], TyUnit)
+    let identity_eff: Eff = e
+    Sig { ..identity_base,
+      eff = identity_eff,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
   }
   TraitI { scope_params = capture.empty_params(), assoc_bounds = [],
     id = STAGED_ITER_ID,
@@ -3690,10 +3984,13 @@ fn staged_iter_trait() -> TraitI = {
 fn staged_cond_trait() -> TraitI = {
   let cv = TyVar("C", -48)
   let e = EffAssoc("C", -48, capture.closed_trait(STAGED_COND_ID), "StagedCond")
-  let arm = TyFn([], TyUnit, e, capture.empty_function())
-  let sig = Sig {
-    ..prelude_method(STAGED_COND_ID, cv, "staged_if", [cv, arm, arm], ["c", "on_true", "on_false"], TyUnit),
-    eff = e
+  let arm = ty_fn([], TyUnit, e, capture.empty_function())
+  let sig = {
+    let identity_base = prelude_method(STAGED_COND_ID, cv, "staged_if", [cv, arm, arm], ["c", "on_true", "on_false"], TyUnit)
+    let identity_eff: Eff = e
+    Sig { ..identity_base,
+      eff = identity_eff,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
   }
   TraitI {
     ..prelude_trait(STAGED_COND_ID, "StagedCond", cv, "staged_if", sig),
@@ -3710,7 +4007,13 @@ fn staged_result_trait() -> TraitI = {
   let slot = TyAssoc(tv, capture.closed_trait(STAGED_RESULT_ID), "Slot", [])
   let e = EffAssoc("T", -49, capture.closed_trait(STAGED_RESULT_ID), "StagedResult")
   let method = (n: String, ps: List[Ty], ns: List[String], ret: Ty) =>
-    (n, MethodSig { sig = Sig { ..prelude_method(STAGED_RESULT_ID, tv, n, ps, ns, ret), eff = e },
+    (n, MethodSig { sig = {
+      let identity_base = prelude_method(STAGED_RESULT_ID, tv, n, ps, ns, ret)
+      let identity_eff: Eff = e
+      Sig { ..identity_base,
+        eff = identity_eff,
+        scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+    },
       has_default = false })
   TraitI { scope_params = capture.empty_params(), assoc_bounds = [],
     id = STAGED_RESULT_ID, name = "StagedResult", tvar = tv, audience = AWorld,
@@ -3732,7 +4035,13 @@ fn staged_var_trait() -> TraitI = {
   let e = EffAssoc("T", -32, capture.closed_trait(STAGED_VAR_ID), "StagedVar")
   let m = (name: String, ptys: List[Ty], pns: List[String], ret: Ty) =>
     (name, MethodSig {
-      sig = Sig { ..prelude_method(STAGED_VAR_ID, tv, name, ptys, pns, ret), eff = e },
+      sig = {
+        let identity_base = prelude_method(STAGED_VAR_ID, tv, name, ptys, pns, ret)
+        let identity_eff: Eff = e
+        Sig { ..identity_base,
+          eff = identity_eff,
+          scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+      },
       has_default = false
     })
   TraitI { scope_params = capture.empty_params(), assoc_bounds = [],
@@ -3759,7 +4068,13 @@ fn staged_var_trait() -> TraitI = {
 fn lit_trait(tid: Int, name: String, m: String, pty: Ty, tvid: Int) -> TraitI = {
   let tv = TyVar("T", tvid)
   let pn = if tid == FROM_INT_ID { "n" } else { "x" }
-  let sig = Sig { ..prelude_method(tid, tv, m, [pty], [pn], tv), eff = EffAssoc("T", tvid, capture.closed_trait(tid), name) }
+  let sig = {
+    let identity_base = prelude_method(tid, tv, m, [pty], [pn], tv)
+    let identity_eff: Eff = EffAssoc("T", tvid, capture.closed_trait(tid), name)
+    Sig { ..identity_base,
+      eff = identity_eff,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+  }
   TraitI { scope_params = capture.empty_params(), assoc_bounds = [],
     id = tid,
     name = name,
@@ -3784,7 +4099,13 @@ fn arith_trait(tid: Int, name: String, m: String, tvid: Int, arity: Int) -> Trai
   let tv = TyVar("T", tvid)
   let ptys = if arity == 2 { [tv, tv] } else { [tv] }
   let pns = if arity == 2 { ["a", "b"] } else { ["a"] }
-  let sig = Sig { ..prelude_method(tid, tv, m, ptys, pns, tv), eff = EffAssoc("T", tvid, capture.closed_trait(tid), name) }
+  let sig = {
+    let identity_base = prelude_method(tid, tv, m, ptys, pns, tv)
+    let identity_eff: Eff = EffAssoc("T", tvid, capture.closed_trait(tid), name)
+    Sig { ..identity_base,
+      eff = identity_eff,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+  }
   TraitI { scope_params = capture.empty_params(), assoc_bounds = [],
     id = tid,
     name = name,
@@ -3808,7 +4129,13 @@ fn bitwise_trait(tid: Int, name: String, method: String, tvid: Int, arity: Int) 
   let rhs = if shift { TyAssoc(tv, capture.closed_trait(tid), shift_amount_name(tid), []) } else { tv }
   let ps = if arity == 1 { [tv] } else { [tv, rhs] }
   let ns = if arity == 1 { ["a"] } else if shift { ["a", "n"] } else { ["a", "b"] }
-  let sig = Sig { ..prelude_method(tid, tv, method, ps, ns, tv), eff = EffAssoc("T", tvid, capture.closed_trait(tid), name) }
+  let sig = {
+    let identity_base = prelude_method(tid, tv, method, ps, ns, tv)
+    let identity_eff: Eff = EffAssoc("T", tvid, capture.closed_trait(tid), name)
+    Sig { ..identity_base,
+      eff = identity_eff,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+  }
   TraitI {
     ..prelude_trait(tid, name, tv, method, sig),
     assoc = if shift { [shift_amount_name(tid)] } else { [] },
@@ -4061,14 +4388,14 @@ fn prelude_impl_definitions() -> List[ImplI] = {
   let mk = TyVar("K", -20)
   let mv = TyVar("V", -21)
   out ++ [
-    prelude_cond_impl(SHOW_ID, TyAdt(OPTION_ID, [ot], capture.empty_arguments()), [ot]),
-    prelude_cond_impl(SHOW_ID, TyAdt(RESULT_ID, [rt, re], capture.empty_arguments()), [rt, re]),
+    prelude_cond_impl(SHOW_ID, ty_adt(OPTION_ID, [ot], capture.empty_arguments()), [ot]),
+    prelude_cond_impl(SHOW_ID, ty_adt(RESULT_ID, [rt, re], capture.empty_arguments()), [rt, re]),
     # `ForeignError` takes no parameters, so its `derive Show` is the same
     # mint with nothing to constrain -- the fields are String/String/
     # Option[String] and each already shows.
     prelude_cond_impl(SHOW_ID, foreign_error_ty(), []),
     # `xs[i]`: an Int in, the element out, and nothing asked of the element.
-    prelude_assoc_impl(INDEX_ID, TyList(lt), [lt], [[]],
+    prelude_assoc_impl(INDEX_ID, ty_list(lt), [lt], [[]],
       [("Idx", TyInt), ("Item", lt)]),
     # `m[k]`: Eq and Hash to find the entry, and Show only to name the key in
     # the panic when there is none -- the one bound of the three that is not
@@ -4077,28 +4404,35 @@ fn prelude_impl_definitions() -> List[ImplI] = {
     # they used to be resolved by hand at the `[]`; a conditional impl's
     # sub-goals carry the same span and the same requirer, so the three
     # diagnostics still land on the subscript.
-    prelude_assoc_impl(INDEX_ID, TyMap(mk, mv), [mk, mv],
+    prelude_assoc_impl(INDEX_ID, ty_map(mk, mv), [mk, mv],
       [[capture.closed_trait(EQ_ID), capture.closed_trait(HASH_ID), capture.closed_trait(SHOW_ID)], []], [("Idx", mk), ("Item", mv)])
   ]
 }
 
 fn bsig(name: String, ptys: List[Ty], pnames: List[String], ret: Ty) -> Sig =
-  Sig { scope_params = capture.empty_params(),
-    name = name,
-    param_tys = ptys,
-    param_names = pnames,
-    param_defaults = [],
-    caller_params = [],
-    ret = ret,
-    eff = EPure,
-    is_builtin = true,
-    tparams = [],
-    constraints = [],
-    eparams = [],
-    owner = None,
-    trait_id = None,
-    op_of = None,
-    inferring = false
+  {
+    let identity_scope_params: capture.Params = capture.empty_params()
+    let identity_param_tys: List[Ty] = ptys
+    let identity_ret: Ty = ret
+    let identity_eff: Eff = EPure
+    let identity_constraints: List[List[capture.TraitApplication]] = []
+    Sig { scope_params = identity_scope_params,
+      name = name,
+      param_tys = identity_param_tys,
+      param_names = pnames,
+      param_defaults = [],
+      caller_params = [],
+      ret = identity_ret,
+      eff = identity_eff,
+      is_builtin = true,
+      tparams = [],
+      constraints = identity_constraints,
+      eparams = [],
+      owner = None,
+      trait_id = None,
+      op_of = None,
+      inferring = false,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
 
 fn tp1(s: Sig, v: Ty) -> Sig = Sig { ..s, tparams = [v] }
@@ -4122,9 +4456,22 @@ fn sited(s: Sig) -> Sig = {
 ## One type parameter carrying one bound: the shape `to_string` has now that
 ## rendering is a trait rather than a predicate the checker applies itself.
 fn tp1b(s: Sig, v: Ty, tid: Int) -> Sig =
-  Sig { ..s, tparams = [v], constraints = [[capture.closed_trait(tid)]] }
+  {
+    let identity_base = s
+    let identity_constraints: List[List[capture.TraitApplication]] = [[capture.closed_trait(tid)]]
+    Sig { ..identity_base,
+      tparams = [v],
+      constraints = identity_constraints,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_constraints, identity_base.param_tys, identity_base.ret, identity_base.eff) }
+  }
 
-fn eff1(s: Sig, e: Eff) -> Sig = Sig { ..s, eff = e }
+fn eff1(s: Sig, e: Eff) -> Sig = {
+  let identity_base = s
+  let identity_eff: Eff = e
+  Sig { ..identity_base,
+    eff = identity_eff,
+    scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+}
 
 ## The row *and* the binder, for the entries that raise the variable they
 ## introduce: `sort_by`, `map_fold` and `bracket`, each of which takes a
@@ -4145,7 +4492,14 @@ fn eff1(s: Sig, e: Eff) -> Sig = Sig { ..s, eff = e }
 ## entry of this table has no enclosing signature for a variable to come from,
 ## so a variable in its row is one it bound. That is why the fix is to say so
 ## rather than to teach the renderer to guess.
-fn effp1(s: Sig, e: Eff) -> Sig = Sig { ..s, eff = e, eparams = [e] }
+fn effp1(s: Sig, e: Eff) -> Sig = {
+  let identity_base = s
+  let identity_eff: Eff = e
+  Sig { ..identity_base,
+    eff = identity_eff,
+    eparams = [e],
+    scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+}
 
 ## A Map/Set primitive that hashes: its key parameter carries `Eq` and `Hash`,
 ## so the dictionaries reach the trie in std/hamt. Which relation decides "same
@@ -4153,16 +4507,36 @@ fn effp1(s: Sig, e: Eff) -> Sig = Sig { ..s, eff = e, eparams = [e] }
 ## happened to be. The primitives that only count or list entries are
 ## deliberately not in this shape -- reading a map should not need the bound.
 fn keyed2(s: Sig, kk: Ty, vv: Ty) -> Sig =
-  Sig { ..s, tparams = [kk, vv], constraints = [[capture.closed_trait(EQ_ID), capture.closed_trait(HASH_ID)]] }
+  {
+    let identity_base = s
+    let identity_constraints: List[List[capture.TraitApplication]] = [[capture.closed_trait(EQ_ID), capture.closed_trait(HASH_ID)]]
+    Sig { ..identity_base,
+      tparams = [kk, vv],
+      constraints = identity_constraints,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_constraints, identity_base.param_tys, identity_base.ret, identity_base.eff) }
+  }
 
 fn keyed1(s: Sig, tt: Ty) -> Sig =
-  Sig { ..s, tparams = [tt], constraints = [[capture.closed_trait(EQ_ID), capture.closed_trait(HASH_ID)]] }
+  {
+    let identity_base = s
+    let identity_constraints: List[List[capture.TraitApplication]] = [[capture.closed_trait(EQ_ID), capture.closed_trait(HASH_ID)]]
+    Sig { ..identity_base,
+      tparams = [tt],
+      constraints = identity_constraints,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_constraints, identity_base.param_tys, identity_base.ret, identity_base.eff) }
+  }
 
 ## The flat buffer families behind std/mem, apart from `builtins` so that
 ## function stays under the JIT's size limit (scripts/method-size-gate.py).
 fn buffer_sig(scopes: List[capture.Scope], name: String, params: List[Ty], names: List[String], ret: Ty) -> Sig = {
   let empty = capture.empty_params()
-  Sig { ..bsig(name, params, names, ret), scope_params = CaptureParams { ..empty, scopes = scopes } }
+  {
+    let identity_base = bsig(name, params, names, ret)
+    let identity_scope_params: capture.Params = CaptureParams { ..empty, scopes = scopes }
+    Sig { ..identity_base,
+      scope_params = identity_scope_params,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_base.eff) }
+  }
 }
 
 fn buffer_sigs() -> List[Sig] = {
@@ -4205,14 +4579,24 @@ pub fn mem_runner_sig(eid: Int) -> Sig = {
   let scope = CaptureScope { name = "s", id = -37 }
   let c = capture.CaptureVar("c", -38)
   let e = EffVar("e", -1)
-  let body = TyFn([], result, scoped_eff(e, [ScopedEffect { id = eid, name = "Mem", scope = scope }]),
+  let body = ty_fn([], result, scoped_eff(e, [ScopedEffect { id = eid, name = "Mem", scope = scope }]),
     CaptureFunction { scopes = [scope], bound = Some([c]) })
   let empty = capture.empty_params()
-  Sig { ..bsig("mem_run", [body], ["body"], result),
-    eff = e, eparams = [e], tparams = [result], constraints = [[]],
-    scope_params = CaptureParams { ..empty,
+  {
+    let identity_base = bsig("mem_run", [body], ["body"], result)
+    let identity_eff: Eff = e
+    let identity_constraints: List[List[capture.TraitApplication]] = [[]]
+    let identity_scope_params: capture.Params = CaptureParams { ..empty,
       captures = [CaptureParam { name = "c", id = -38, bound = None }],
-      bounds = [(-36, [c])], fn_effects = [-1] } }
+      bounds = [(-36, [c])], fn_effects = [-1] }
+    Sig { ..identity_base,
+      eff = identity_eff,
+      eparams = [e],
+      tparams = [result],
+      constraints = identity_constraints,
+      scope_params = identity_scope_params,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+  }
 }
 
 # Higher-order intrinsic contracts declare the same explicit axes as user
@@ -4220,7 +4604,7 @@ pub fn mem_runner_sig(eid: Int) -> Sig = {
 fn callback_captures(sig: Sig) -> Sig = {
   let variable = capture.CaptureVar("c", -90)
   let parameters = map(sig.param_tys, value => match value {
-    TyFn(ps, ret, row, contract) -> TyFn(ps, ret, row,
+    TyFn(ps, ret, row, contract, _) -> ty_fn(ps, ret, row,
       CaptureFunction { ..contract, bound = Some(capture.union(capture.bound(contract), [variable])) })
     _ -> value
   })
@@ -4229,8 +4613,16 @@ fn callback_captures(sig: Sig) -> Sig = {
     TyVar(_, id) -> { bounds = bounds ++ [(id, [variable])] }
     _ -> ()
   } }
-  Sig { ..sig, param_tys = parameters, scope_params = CaptureParams { ..sig.scope_params,
-    captures = sig.scope_params.captures ++ [CaptureParam { name = "c", id = -90, bound = None }], bounds = bounds } }
+  {
+    let identity_base = sig
+    let identity_param_tys: List[Ty] = parameters
+    let identity_scope_params: capture.Params = CaptureParams { ..sig.scope_params,
+      captures = sig.scope_params.captures ++ [CaptureParam { name = "c", id = -90, bound = None }], bounds = bounds }
+    Sig { ..identity_base,
+      param_tys = identity_param_tys,
+      scope_params = identity_scope_params,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_base.constraints, identity_param_tys, identity_base.ret, identity_base.eff) }
+  }
 }
 
 ## The builtin function table (port of Types.kt BUILTINS, same order).
@@ -4239,8 +4631,14 @@ fn provenance_builtins() -> List[Sig] = {
   let t = TyVar("T", -1)
   let e = EffVar("e", -1)
   [
-    Sig { ..tp1(bsig("provenance_observe", [TyFn([TyInt], t, e, capture.empty_function())], ["body"], t), t),
-      eff = eff_union([EIo, e]), eparams = [e] },
+    {
+      let identity_base = tp1(bsig("provenance_observe", [ty_fn([TyInt], t, e, capture.empty_function())], ["body"], t), t)
+      let identity_eff: Eff = eff_union([EIo, e])
+      Sig { ..identity_base,
+        eff = identity_eff,
+        eparams = [e],
+        scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+    },
     eff1(bsig("provenance_note", [TyInt, TyString], ["scope", "origin"], TyUnit), EIo),
     eff1(bsig("provenance_completed", [TyInt], ["scope"], TyString), EIo),
     eff1(bsig("provenance_checkpoint", [TyInt], ["scope"], TyString), EIo),
@@ -4257,23 +4655,23 @@ fn provenance_builtins() -> List[Sig] = {
 # JIT method-size limit.
 fn collection_sigs(t: Ty, a: Ty, k: Ty, v: Ty, e: Eff) -> List[Sig] = {
   [
-    Sig { ..bsig("map_empty", [], [], TyMap(k, v)), tparams = [k, v] },
-    tp1(bsig("set_empty", [], [], TySet(t)), t),
-    keyed2(bsig("map_from", [TyList(TyTuple([k, v]))], ["entries"], TyMap(k, v)), k, v),
-    keyed1(bsig("set_from", [TyList(t)], ["xs"], TySet(t)), t),
-    keyed2(bsig("map_insert", [TyMap(k, v), k, v], ["m", "key", "value"], TyMap(k, v)), k, v),
-    keyed1(bsig("set_insert", [TySet(t), t], ["s", "x"], TySet(t)), t),
-    keyed2(bsig("map_remove", [TyMap(k, v), k], ["m", "key"], TyMap(k, v)), k, v),
-    keyed1(bsig("set_remove", [TySet(t), t], ["s", "x"], TySet(t)), t),
-    keyed2(bsig("map_get", [TyMap(k, v), k], ["m", "key"], opt_ty(v)), k, v),
-    keyed2(bsig("map_has", [TyMap(k, v), k], ["m", "key"], TyBool), k, v),
-    keyed1(bsig("set_has", [TySet(t), t], ["s", "x"], TyBool), t),
-    Sig { ..bsig("map_size", [TyMap(k, v)], ["m"], TyInt), tparams = [k, v] },
-    tp1(bsig("set_size", [TySet(t)], ["s"], TyInt), t),
-    Sig { ..bsig("map_keys", [TyMap(k, v)], ["m"], TyList(k)), tparams = [k, v] },
-    Sig { ..bsig("map_values", [TyMap(k, v)], ["m"], TyList(v)), tparams = [k, v] },
+    Sig { ..bsig("map_empty", [], [], ty_map(k, v)), tparams = [k, v] },
+    tp1(bsig("set_empty", [], [], ty_set(t)), t),
+    keyed2(bsig("map_from", [ty_list(ty_tuple([k, v]))], ["entries"], ty_map(k, v)), k, v),
+    keyed1(bsig("set_from", [ty_list(t)], ["xs"], ty_set(t)), t),
+    keyed2(bsig("map_insert", [ty_map(k, v), k, v], ["m", "key", "value"], ty_map(k, v)), k, v),
+    keyed1(bsig("set_insert", [ty_set(t), t], ["s", "x"], ty_set(t)), t),
+    keyed2(bsig("map_remove", [ty_map(k, v), k], ["m", "key"], ty_map(k, v)), k, v),
+    keyed1(bsig("set_remove", [ty_set(t), t], ["s", "x"], ty_set(t)), t),
+    keyed2(bsig("map_get", [ty_map(k, v), k], ["m", "key"], opt_ty(v)), k, v),
+    keyed2(bsig("map_has", [ty_map(k, v), k], ["m", "key"], TyBool), k, v),
+    keyed1(bsig("set_has", [ty_set(t), t], ["s", "x"], TyBool), t),
+    Sig { ..bsig("map_size", [ty_map(k, v)], ["m"], TyInt), tparams = [k, v] },
+    tp1(bsig("set_size", [ty_set(t)], ["s"], TyInt), t),
+    Sig { ..bsig("map_keys", [ty_map(k, v)], ["m"], ty_list(k)), tparams = [k, v] },
+    Sig { ..bsig("map_values", [ty_map(k, v)], ["m"], ty_list(v)), tparams = [k, v] },
     Sig {
-      ..bsig("map_entries", [TyMap(k, v)], ["m"], TyList(TyTuple([k, v]))),
+      ..bsig("map_entries", [ty_map(k, v)], ["m"], ty_list(ty_tuple([k, v]))),
       tparams = [k, v]
     },
     # a fold over the trie itself, so reading every entry does not build the
@@ -4282,42 +4680,42 @@ fn collection_sigs(t: Ty, a: Ty, k: Ty, v: Ty, e: Eff) -> List[Sig] = {
     # step the way `sort_by`'s rides through its comparator.
     effp1(
       Sig {
-        ..bsig("map_fold", [TyMap(k, v), a, TyFn([a, k, v], a, e, capture.empty_function())], ["m", "init", "f"], a),
+        ..bsig("map_fold", [ty_map(k, v), a, ty_fn([a, k, v], a, e, capture.empty_function())], ["m", "init", "f"], a),
         tparams = [k, v, a]
       },
       e
     ),
-    tp1(bsig("set_to_list", [TySet(t)], ["s"], TyList(t)), t),
+    tp1(bsig("set_to_list", [ty_set(t)], ["s"], ty_list(t)), t),
     # array_* intrinsics: the one collection primitive a backend implements, and
     # the whole of what std needs to build List/Map/Set on top (D1). Values, not
     # storage: every operation returns a new array and none of them is observably
     # destructive. `array_push` is the one that must extend in place when it can
     # -- see the note on the fast path below.
-    tp1(bsig("array_new", [], [], TyArray(t)), t),
-    tp1(bsig("array_len", [TyArray(t)], ["a"], TyInt), t),
-    tp1(bsig("array_get", [TyArray(t), TyInt], ["a", "i"], t), t),
-    tp1(bsig("array_push", [TyArray(t), t], ["a", "x"], TyArray(t)), t),
-    tp1(bsig("array_with", [TyArray(t), TyInt, t], ["a", "i", "x"], TyArray(t)), t),
+    tp1(bsig("array_new", [], [], ty_array(t)), t),
+    tp1(bsig("array_len", [ty_array(t)], ["a"], TyInt), t),
+    tp1(bsig("array_get", [ty_array(t), TyInt], ["a", "i"], t), t),
+    tp1(bsig("array_push", [ty_array(t), t], ["a", "x"], ty_array(t)), t),
+    tp1(bsig("array_with", [ty_array(t), TyInt, t], ["a", "i", "x"], ty_array(t)), t),
     # The bulk pair (docs/bulk-array-bytes-design.md): one runtime loop where
     # std used to push element by element. `array_extend` appends every element
     # of `b`; `array_slice` copies `[from, to)` and panics on a range outside
     # `[0, len]` or with `from > to` rather than clamping. It is a primitive
     # under std's own range functions, which do their own clamping, so a bad
     # range here is a bug in std and not a question the caller asked.
-    tp1(bsig("array_extend", [TyArray(t), TyArray(t)], ["a", "b"], TyArray(t)), t),
-    tp1(bsig("array_slice", [TyArray(t), TyInt, TyInt], ["a", "from", "to"], TyArray(t)), t),
+    tp1(bsig("array_extend", [ty_array(t), ty_array(t)], ["a", "b"], ty_array(t)), t),
+    tp1(bsig("array_slice", [ty_array(t), TyInt, TyInt], ["a", "from", "to"], ty_array(t)), t),
     # `array_get` for a caller about to overwrite the slot: on native, a
     # unique array hands the slot's own reference out instead of pinning an
     # extra count on the child for the duration of the rebuild. Value
     # semantics are `array_get`'s -- the difference is a count, and only the
     # native runtime has counts (dawn_rt.h spells the caller's obligation).
-    tp1(bsig("array_steal", [TyArray(t), TyInt], ["a", "i"], t), t),
+    tp1(bsig("array_steal", [ty_array(t), TyInt], ["a", "i"], t), t),
     # The List/Array crossing std can name (docs/listarr-design.md). A `List`
     # is a vector in std/pvec and the checker keeps it apart from that
     # module's own `Vec` type, so std source had no way to cross; each
     # backend answers with the vector's own `to_array` / `from_array`.
-    tp1(bsig("list_to_array", [TyList(t)], ["xs"], TyArray(t)), t),
-    tp1(bsig("array_to_list", [TyArray(t)], ["a"], TyList(t)), t),
+    tp1(bsig("list_to_array", [ty_list(t)], ["xs"], ty_array(t)), t),
+    tp1(bsig("array_to_list", [ty_array(t)], ["a"], ty_list(t)), t),
     # HAMT bitmaps; a pure-Dawn loop would do, so this is only here because
     # every target has the instruction (docs/runtime-intrinsics-design.md §5).
     bsig("popcount", [TyInt], ["n"], TyInt)
@@ -4346,10 +4744,10 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("float_ceil", [TyFloat], ["x"], TyFloat),
     bsig("float_trunc", [TyFloat], ["x"], TyFloat),
     bsig("float_round_even", [TyFloat], ["x"], TyFloat),
-    callback_captures(tp1(bsig("list_len", [TyList(t)], ["xs"], TyInt), t)),
-    callback_captures(tp1(bsig("get", [TyList(t), TyInt], ["xs", "i"], opt_ty(t)), t)),
-    bsig("range", [TyInt, TyInt], ["from", "to"], TyList(TyInt)),
-    callback_captures(effp1(tp1(bsig("sort_by", [TyList(t), TyFn([t, t], TyInt, e, capture.empty_function())], ["xs", "cmp"], TyList(t)), t), e)),
+    callback_captures(tp1(bsig("list_len", [ty_list(t)], ["xs"], TyInt), t)),
+    callback_captures(tp1(bsig("get", [ty_list(t), TyInt], ["xs", "i"], opt_ty(t)), t)),
+    bsig("range", [TyInt, TyInt], ["from", "to"], ty_list(TyInt)),
+    callback_captures(effp1(tp1(bsig("sort_by", [ty_list(t), ty_fn([t, t], TyInt, e, capture.empty_function())], ["xs", "cmp"], ty_list(t)), t), e)),
     callback_captures(sited(tp1(bsig("expect", [opt_ty(t), TyString, ty_loc()], ["o", "msg", "at"], t), t))),
     callback_captures(tp1(bsig("unwrap_or", [opt_ty(t), t], ["o", "fallback"], t), t)),
     tp1b(bsig("to_string", [t], ["x"], TyString), t, SHOW_ID),
@@ -4360,9 +4758,9 @@ pub fn builtins() -> Map[String, Sig] = {
     # program has (spec section 8.3). Lowering expands it, so no backend sees
     # the name; what they see is `dbg_line` below.
     tp1b(bsig("dbg", [t], ["x"], t), t, SHOW_ID),
-    bsig("join", [TyList(TyString), TyString], ["xs", "sep"], TyString),
-    bsig("code_points", [TyString], ["s"], TyList(ty_char())),
-    bsig("from_code_points", [TyList(ty_char())], ["cs"], TyString),
+    bsig("join", [ty_list(TyString), TyString], ["xs", "sep"], TyString),
+    bsig("code_points", [TyString], ["s"], ty_list(ty_char())),
+    bsig("from_code_points", [ty_list(ty_char())], ["cs"], TyString),
     bsig("parse_float", [TyString], ["s"], opt_ty(TyFloat)),
     bsig("cursor_start", [TyString], ["s"], TyInt),
     bsig("cursor_end", [TyString], ["s"], TyInt),
@@ -4446,9 +4844,9 @@ pub fn builtins() -> Map[String, Sig] = {
     # unpacking sign-extends when `signed` and zero-extends otherwise. A byte
     # length that is not a multiple of `width` panics rather than dropping the
     # tail. The contract is scripts/bytes-pack-contract.
-    bsig("bytes_pack_int", [TyArray(TyInt), TyInt, TyBool], ["a", "width", "little"], TyBytes),
+    bsig("bytes_pack_int", [ty_array(TyInt), TyInt, TyBool], ["a", "width", "little"], TyBytes),
     bsig("bytes_unpack_int", [TyBytes, TyInt, TyBool, TyBool],
-      ["b", "width", "signed", "little"], TyArray(TyInt)),
+      ["b", "width", "signed", "little"], ty_array(TyInt)),
     # The same pair for doubles; `width` is 4 or 8 and anything else panics.
     # Width 8 is bit-exact: the bits of the double go in and come out as they
     # are, so a NaN keeps its payload and sign and `-0.0` stays `-0.0`. Width 4
@@ -4456,9 +4854,9 @@ pub fn builtins() -> Map[String, Sig] = {
     # exact; a NaN's payload is not promised across the narrowing. Byte order
     # is an argument for the reason `bytes_pack_int` gives, and a ragged
     # length panics on the way back. The contract is scripts/bytes-pack-contract.
-    bsig("bytes_pack_float", [TyArray(TyFloat), TyInt, TyBool], ["a", "width", "little"], TyBytes),
+    bsig("bytes_pack_float", [ty_array(TyFloat), TyInt, TyBool], ["a", "width", "little"], TyBytes),
     bsig("bytes_unpack_float", [TyBytes, TyInt, TyBool], ["b", "width", "little"],
-      TyArray(TyFloat))
+      ty_array(TyFloat))
   ]
   sigs = sigs ++ buffer_sigs()
   sigs = sigs ++ [
@@ -4466,7 +4864,7 @@ pub fn builtins() -> Map[String, Sig] = {
     # visible from every module, not state belonging to the entry module or a
     # privilege reserved to it. Backends must therefore give the same list to
     # a call in a library as to a call written beside `main`.
-    eff1(bsig("args", [], [], TyList(TyString)), EIo),
+    eff1(bsig("args", [], [], ty_list(TyString)), EIo),
     # The io barrier. It catches a *fault* -- the outside world said no -- and
     # lets a panic through, which is the split spec 9.8 is about and the one
     # `catch_panic` is the other half of. It was called `java_try` through
@@ -4516,7 +4914,7 @@ pub fn builtins() -> Map[String, Sig] = {
     # `!e` is declared rather than merely mentioned, because `sig_abi_eff`
     # counts binders: without the binder the row would carry no variable, the
     # call site would pass no pack, and the closure would walk a null one.
-    callback_captures(effp1(tp1(bsig("catch_fault", [TyFn([], t, e, capture.empty_function())], ["f"],
+    callback_captures(effp1(tp1(bsig("catch_fault", [ty_fn([], t, e, capture.empty_function())], ["f"],
       result_ty(t, foreign_error_ty())), t), e)),
     # The reclaim's failure is a value, not an exception thrown through a
     # signature that says `pure` (docs/audit/error-model-design.md 二.B,
@@ -4552,7 +4950,7 @@ pub fn builtins() -> Map[String, Sig] = {
     # arguments, and folding or deduplicating the call cannot change it.
     # Comptime still refuses the call outright (`interp.comptime_refused`),
     # so no build machine's message is folded into an artifact.
-    callback_captures(effp1(tp1(bsig("catch_panic", [TyFn([], t, e, capture.empty_function())], ["f"],
+    callback_captures(effp1(tp1(bsig("catch_panic", [ty_fn([], t, e, capture.empty_function())], ["f"],
       result_ty(t, foreign_error_ty())), t), e)),
     # The third member of the family, and the one that catches nothing. It runs
     # `release` on every way out of `use` -- the value, a panic, a fault -- and
@@ -4612,7 +5010,7 @@ pub fn builtins() -> Map[String, Sig] = {
     callback_captures(effp1(
       Sig {
         ..bsig("bracket",
-          [a, TyFn([a], TyUnit, e, capture.empty_function()), TyFn([a], b, e, capture.empty_function())],
+          [a, ty_fn([a], TyUnit, e, capture.empty_function()), ty_fn([a], b, e, capture.empty_function())],
           ["resource", "release", "body"], b),
         tparams = [a, b]
       },
@@ -4648,7 +5046,7 @@ pub fn builtins() -> Map[String, Sig] = {
     # because `sig_abi_eff` counts binders.
     effp1(
       Sig {
-        ..bsig("discard", [TyFn([t], u, e, capture.empty_function())], ["k"], TyUnit),
+        ..bsig("discard", [ty_fn([t], u, e, capture.empty_function())], ["k"], TyUnit),
         tparams = [t, u]
       },
       e
@@ -4674,7 +5072,7 @@ pub fn builtins() -> Map[String, Sig] = {
     eff1(bsig("io_is_dir", [TyString], ["path"], TyBool), EIo),
     eff1(bsig("io_read_file", [TyString], ["path"], TyString), EIo),
     eff1(bsig("io_write_file", [TyString, TyString], ["path", "content"], TyUnit), EIo),
-    eff1(bsig("io_list_names", [TyString], ["path"], TyList(TyString)), EIo),
+    eff1(bsig("io_list_names", [TyString], ["path"], ty_list(TyString)), EIo),
     # stderr, and the process/filesystem primitives a CLI needs on any
     # backend. The compiler reached all five through `use java`, and stderr
     # had a module of its own for it -- `System.err` is a static field, which
@@ -4829,7 +5227,7 @@ pub fn builtins() -> Map[String, Sig] = {
     # Spawn failure (no such program) throws, like read_file; the exit status
     # is the child's own and is not an error.
     eff1(
-      bsig("io_run", [TyList(TyString), TyString, TyString], ["argv", "out_path", "err_path"],
+      bsig("io_run", [ty_list(TyString), TyString, TyString], ["argv", "out_path", "err_path"],
         TyInt),
       EIo
     ),
@@ -4870,13 +5268,13 @@ pub fn builtins() -> Map[String, Sig] = {
       EIo
     ),
     eff1(
-      bsig("gpu_launch_host", [TyInt, TyString, TyInt, TyInt, TyInt, TyArray(TyInt)],
+      bsig("gpu_launch_host", [TyInt, TyString, TyInt, TyInt, TyInt, ty_array(TyInt)],
         ["module", "kernel", "gx", "gy", "gz", "args"], result_ty(TyUnit, foreign_error_ty())),
       EIo
     ),
     eff1(
       bsig("gpu_module_global_host", [TyInt, TyString], ["module", "name"],
-        result_ty(TyArray(TyInt), foreign_error_ty())),
+        result_ty(ty_array(TyInt), foreign_error_ty())),
       EIo
     ),
     eff1(bsig("gpu_free_host", [TyInt], ["devptr"], result_ty(TyUnit, foreign_error_ty())), EIo),
@@ -5565,23 +5963,23 @@ test "a trailing closure fills the last declared slot" {
 test "type rendering" {
   let adts = prelude_adts()
   let traits = prelude_traits()
-  assert ty_show(adts, TyMap(TyInt, TyList(TyString))) == "Map[Int, List[String]]"
+  assert ty_show(adts, ty_map(TyInt, ty_list(TyString))) == "Map[Int, List[String]]"
   assert ty_show(adts, opt_ty(TyInt)) == "Option[Int]"
-  assert ty_show(adts, TyAdt(RESULT_ID, [], capture.empty_arguments())) == "Result"
-  assert ty_show(adts, TyTuple([TyInt, TyBool])) == "(Int, Bool)"
-  assert ty_show(adts, TyFn([TyInt], TyUnit, EIo, capture.empty_function())) == "fn(Int) -> Unit !io"
-  let pure_inner = TyFn([], TyInt, EPure, capture.empty_function())
-  let io_inner = TyFn([], TyInt, EIo, capture.empty_function())
-  assert ty_show(adts, TyFn([], pure_inner, EIo, capture.empty_function())) == "fn() -> (fn() -> Int) !io"
-  assert ty_show(adts, TyFn([], io_inner, EPure, capture.empty_function())) == "fn() -> fn() -> Int !io"
-  assert ty_show(adts, TyFn([], io_inner, EIo, capture.empty_function())) == "fn() -> (fn() -> Int !io) !io"
-  assert ty_show(adts, TyList(pure_inner)) == "List[fn() -> Int]"
+  assert ty_show(adts, ty_adt(RESULT_ID, [], capture.empty_arguments())) == "Result"
+  assert ty_show(adts, ty_tuple([TyInt, TyBool])) == "(Int, Bool)"
+  assert ty_show(adts, ty_fn([TyInt], TyUnit, EIo, capture.empty_function())) == "fn(Int) -> Unit !io"
+  let pure_inner = ty_fn([], TyInt, EPure, capture.empty_function())
+  let io_inner = ty_fn([], TyInt, EIo, capture.empty_function())
+  assert ty_show(adts, ty_fn([], pure_inner, EIo, capture.empty_function())) == "fn() -> (fn() -> Int) !io"
+  assert ty_show(adts, ty_fn([], io_inner, EPure, capture.empty_function())) == "fn() -> fn() -> Int !io"
+  assert ty_show(adts, ty_fn([], io_inner, EIo, capture.empty_function())) == "fn() -> (fn() -> Int !io) !io"
+  assert ty_show(adts, ty_list(pure_inner)) == "List[fn() -> Int]"
   let outer = eff1(bsig("outer", [], [], pure_inner), EIo)
   assert sig_render(adts, traits, outer) == "fn outer() -> (fn() -> Int) !io"
   assert ty_show(adts, TyError) == "?"
   assert ty_show(adts, TyJava("java.sql.Connection", "Connection")) == "Connection"
-  let phantom_int = TyOpaque(40, "Phantom", "m", [TyInt], TyUnit, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
-  let phantom_string = TyOpaque(40, "Phantom", "m", [TyString], TyUnit, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
+  let phantom_int = ty_opaque(40, "Phantom", "m", [TyInt], TyUnit, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
+  let phantom_string = ty_opaque(40, "Phantom", "m", [TyString], TyUnit, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
   assert phantom_int != phantom_string
   assert ty_show(adts, phantom_int) == "Phantom[Int]"
   assert ty_show(adts, phantom_string) == "Phantom[String]"
@@ -5592,11 +5990,11 @@ test "substitution reaches every position" {
   let t = TyVar("T", 5)
   let m: Map[Int, Ty] = map.from([(5, TyInt)])
   let em: Map[Int, Eff] = map.empty()
-  assert subst(TyList(t), m, em) == TyList(TyInt)
-  assert subst(TyMap(t, TySet(t)), m, em) == TyMap(TyInt, TySet(TyInt))
+  assert subst(ty_list(t), m, em) == ty_list(TyInt)
+  assert subst(ty_map(t, ty_set(t)), m, em) == ty_map(TyInt, ty_set(TyInt))
   assert subst(opt_ty(t), m, em) == opt_ty(TyInt)
-  assert subst(TyFn([t], t, EPure, capture.empty_function()), m, em) == TyFn([TyInt], TyInt, EPure, capture.empty_function())
-  assert subst(TyTuple([t, TyBool]), m, em) == TyTuple([TyInt, TyBool])
+  assert subst(ty_fn([t], t, EPure, capture.empty_function()), m, em) == ty_fn([TyInt], TyInt, EPure, capture.empty_function())
+  assert subst(ty_tuple([t, TyBool]), m, em) == ty_tuple([TyInt, TyBool])
 }
 
 test "mentioning a type variable reaches every position substitution does" {
@@ -5604,39 +6002,39 @@ test "mentioning a type variable reaches every position substitution does" {
   let u = TyVar("U", 6)
   assert ty_mentions_var(t, 5)
   assert not ty_mentions_var(t, 6)
-  assert ty_mentions_var(TyList(t), 5)
-  assert ty_mentions_var(TyMap(TyInt, TySet(t)), 5)
-  assert ty_mentions_var(TyArray(t), 5)
+  assert ty_mentions_var(ty_list(t), 5)
+  assert ty_mentions_var(ty_map(TyInt, ty_set(t)), 5)
+  assert ty_mentions_var(ty_array(t), 5)
   assert ty_mentions_var(opt_ty(t), 5)
-  assert ty_mentions_var(TyFn([TyInt], t, EPure, capture.empty_function()), 5)
-  assert ty_mentions_var(TyFn([t], TyInt, EPure, capture.empty_function()), 5)
-  assert ty_mentions_var(TyTuple([TyBool, t]), 5)
-  assert ty_mentions_var(TyOpaque(0, "N", "m", [], TyList(t), capture.empty_arguments(), capture.opaque_head(0, 0, 0)), 5)
+  assert ty_mentions_var(ty_fn([TyInt], t, EPure, capture.empty_function()), 5)
+  assert ty_mentions_var(ty_fn([t], TyInt, EPure, capture.empty_function()), 5)
+  assert ty_mentions_var(ty_tuple([TyBool, t]), 5)
+  assert ty_mentions_var(ty_opaque(0, "N", "m", [], ty_list(t), capture.empty_arguments(), capture.opaque_head(0, 0, 0)), 5)
   assert ty_mentions_var(TyAssoc(t, capture.closed_trait(ITER_ID), "Item", []), 5)
   # the same shapes with the other variable: a walk that answered `true`
   # everywhere would pass the block above and fail here
-  assert not ty_mentions_var(TyList(u), 5)
-  assert not ty_mentions_var(TyMap(TyInt, TySet(u)), 5)
-  assert not ty_mentions_var(TyFn([u], u, EPure, capture.empty_function()), 5)
-  assert not ty_mentions_var(TyTuple([TyBool, u]), 5)
+  assert not ty_mentions_var(ty_list(u), 5)
+  assert not ty_mentions_var(ty_map(TyInt, ty_set(u)), 5)
+  assert not ty_mentions_var(ty_fn([u], u, EPure, capture.empty_function()), 5)
+  assert not ty_mentions_var(ty_tuple([TyBool, u]), 5)
   assert not ty_mentions_var(TyString, 5)
 }
 
 test "any-variable reaches every position and says no to a closed type" {
   let t = TyVar("T", 5)
   assert ty_has_any_var(t)
-  assert ty_has_any_var(TyList(t))
-  assert ty_has_any_var(TyMap(TyInt, TySet(t)))
+  assert ty_has_any_var(ty_list(t))
+  assert ty_has_any_var(ty_map(TyInt, ty_set(t)))
   assert ty_has_any_var(opt_ty(t))
-  assert ty_has_any_var(TyFn([TyInt], t, EPure, capture.empty_function()))
-  assert ty_has_any_var(TyFn([t], TyInt, EPure, capture.empty_function()))
-  assert ty_has_any_var(TyTuple([TyInt, t]))
-  assert ty_has_any_var(TyOpaque(0, "N", "m", [], TyList(t), capture.empty_arguments(), capture.opaque_head(0, 0, 0)))
+  assert ty_has_any_var(ty_fn([TyInt], t, EPure, capture.empty_function()))
+  assert ty_has_any_var(ty_fn([t], TyInt, EPure, capture.empty_function()))
+  assert ty_has_any_var(ty_tuple([TyInt, t]))
+  assert ty_has_any_var(ty_opaque(0, "N", "m", [], ty_list(t), capture.empty_arguments(), capture.opaque_head(0, 0, 0)))
   # a walk that answered `true` everywhere would pass the block above
   assert not ty_has_any_var(TyInt)
-  assert not ty_has_any_var(TyList(TyInt))
-  assert not ty_has_any_var(TyTuple([TyInt, TyBool]))
-  assert not ty_has_any_var(TyFn([TyInt], TyString, EPure, capture.empty_function()))
+  assert not ty_has_any_var(ty_list(TyInt))
+  assert not ty_has_any_var(ty_tuple([TyInt, TyBool]))
+  assert not ty_has_any_var(ty_fn([TyInt], TyString, EPure, capture.empty_function()))
   assert not ty_has_any_var(TyI64Buf(CaptureScope { name = "s", id = 1 }))
   assert not ty_has_any_var(TyF64Buf(CaptureScope { name = "s", id = 1 }))
 }
@@ -5652,47 +6050,47 @@ test "the traversal kernels reach every child of every parameterised variant" {
   let to_int: fn(Ty) -> Ty = x => if x == t { TyInt } else { x }
   let is_t: fn(Ty) -> Bool = x => x == t
 
-  assert ty_map_children(TyList(t), to_int) == TyList(TyInt)
-  assert ty_map_children(TyMap(t, TyBool), to_int) == TyMap(TyInt, TyBool)
-  assert ty_map_children(TyMap(TyBool, t), to_int) == TyMap(TyBool, TyInt)
-  assert ty_map_children(TySet(t), to_int) == TySet(TyInt)
-  assert ty_map_children(TyArray(t), to_int) == TyArray(TyInt)
-  assert ty_map_children(TyTuple([TyBool, t]), to_int) == TyTuple([TyBool, TyInt])
+  assert ty_map_children(ty_list(t), to_int) == ty_list(TyInt)
+  assert ty_map_children(ty_map(t, TyBool), to_int) == ty_map(TyInt, TyBool)
+  assert ty_map_children(ty_map(TyBool, t), to_int) == ty_map(TyBool, TyInt)
+  assert ty_map_children(ty_set(t), to_int) == ty_set(TyInt)
+  assert ty_map_children(ty_array(t), to_int) == ty_array(TyInt)
+  assert ty_map_children(ty_tuple([TyBool, t]), to_int) == ty_tuple([TyBool, TyInt])
   assert ty_map_children(opt_ty(t), to_int) == opt_ty(TyInt)
-  assert ty_map_children(TyOpaque(0, "N", "m", [t], t, capture.empty_arguments(), capture.opaque_head(1, 0, 0)), to_int) ==
-    TyOpaque(0, "N", "m", [TyInt], TyInt, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
+  assert ty_map_children(ty_opaque(0, "N", "m", [t], t, capture.empty_arguments(), capture.opaque_head(1, 0, 0)), to_int) ==
+    ty_opaque(0, "N", "m", [TyInt], TyInt, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
   assert ty_map_children(TyAssoc(t, capture.closed_trait(ITER_ID), "Item", []), to_int) ==
     TyAssoc(TyInt, capture.closed_trait(ITER_ID), "Item", [])
   # both a function type's parameters and its result, and the effect rides
   # through -- it is not a type and this walk has nothing to say about it
-  assert ty_map_children(TyFn([t], TyBool, EIo, capture.empty_function()), to_int) == TyFn([TyInt], TyBool, EIo, capture.empty_function())
-  assert ty_map_children(TyFn([TyBool], t, EIo, capture.empty_function()), to_int) == TyFn([TyBool], TyInt, EIo, capture.empty_function())
+  assert ty_map_children(ty_fn([t], TyBool, EIo, capture.empty_function()), to_int) == ty_fn([TyInt], TyBool, EIo, capture.empty_function())
+  assert ty_map_children(ty_fn([TyBool], t, EIo, capture.empty_function()), to_int) == ty_fn([TyBool], TyInt, EIo, capture.empty_function())
   # a variant with no type children is itself, and a variable is a leaf here:
   # what a type variable becomes is the caller's rule, not the walk's
   assert ty_map_children(TyString, to_int) == TyString
-  assert ty_map_children(TyAdt(OPTION_ID, [], capture.empty_arguments()), to_int) == TyAdt(OPTION_ID, [], capture.empty_arguments())
+  assert ty_map_children(ty_adt(OPTION_ID, [], capture.empty_arguments()), to_int) == ty_adt(OPTION_ID, [], capture.empty_arguments())
   assert ty_map_children(t, to_int) == t
   # immediate children only: the recursion belongs to the caller, and a kernel
   # that recursed on its own would apply the caller's leaf rule twice
-  assert ty_map_children(TyList(TyList(t)), to_int) == TyList(TyList(t))
+  assert ty_map_children(ty_list(ty_list(t)), to_int) == ty_list(ty_list(t))
 
-  assert ty_any_child(TyList(t), is_t)
-  assert ty_any_child(TyMap(t, TyBool), is_t)
-  assert ty_any_child(TyMap(TyBool, t), is_t)
-  assert ty_any_child(TySet(t), is_t)
-  assert ty_any_child(TyArray(t), is_t)
-  assert ty_any_child(TyTuple([TyBool, t]), is_t)
+  assert ty_any_child(ty_list(t), is_t)
+  assert ty_any_child(ty_map(t, TyBool), is_t)
+  assert ty_any_child(ty_map(TyBool, t), is_t)
+  assert ty_any_child(ty_set(t), is_t)
+  assert ty_any_child(ty_array(t), is_t)
+  assert ty_any_child(ty_tuple([TyBool, t]), is_t)
   assert ty_any_child(opt_ty(t), is_t)
-  assert ty_any_child(TyOpaque(0, "N", "m", [], t, capture.empty_arguments(), capture.opaque_head(0, 0, 0)), is_t)
+  assert ty_any_child(ty_opaque(0, "N", "m", [], t, capture.empty_arguments(), capture.opaque_head(0, 0, 0)), is_t)
   assert ty_any_child(TyAssoc(t, capture.closed_trait(ITER_ID), "Item", []), is_t)
-  assert ty_any_child(TyFn([t], TyBool, EIo, capture.empty_function()), is_t)
-  assert ty_any_child(TyFn([TyBool], t, EIo, capture.empty_function()), is_t)
+  assert ty_any_child(ty_fn([t], TyBool, EIo, capture.empty_function()), is_t)
+  assert ty_any_child(ty_fn([TyBool], t, EIo, capture.empty_function()), is_t)
   # a walk that answered `true` everywhere would pass the block above
-  assert not ty_any_child(TyList(TyBool), is_t)
+  assert not ty_any_child(ty_list(TyBool), is_t)
   assert not ty_any_child(TyString, is_t)
-  assert not ty_any_child(TyAdt(OPTION_ID, [], capture.empty_arguments()), is_t)
+  assert not ty_any_child(ty_adt(OPTION_ID, [], capture.empty_arguments()), is_t)
   assert not ty_any_child(t, is_t)
-  assert not ty_any_child(TyList(TyList(t)), is_t)
+  assert not ty_any_child(ty_list(ty_list(t)), is_t)
 }
 
 test "effect substitution collapses unions" {
@@ -5820,8 +6218,8 @@ test "builtin type inventory keeps its surface boundaries" {
   let ma = builtin_type_at("Map").expect("Map")
   assert builtin_type_render(li) == "List[T]"
   assert builtin_type_render(ma) == "Map[K, V]"
-  assert builtin_type_apply(li, [TyInt]) == TyList(TyInt)
-  assert builtin_type_apply(ma, [TyString, TyInt]) == TyMap(TyString, TyInt)
+  assert builtin_type_apply(li, [TyInt]) == ty_list(TyInt)
+  assert builtin_type_apply(ma, [TyString, TyInt]) == ty_map(TyString, TyInt)
 
   # Prelude ADTs are a separate nominal layer, not compiler-owned type names.
   # `ev$Pack` is in the table but not of that layer: `$` is not an identifier
@@ -6164,7 +6562,13 @@ fn computation_params(p: capture.Params, ts: List[Ty]) -> capture.Params = {
   capture.computation(p, ids)
 }
 fn computation_sig(s: Sig) -> Sig =
-  if len(s.tparams) == 0 { s } else { Sig { ..s, scope_params = computation_params(s.scope_params, s.tparams) } }
+  if len(s.tparams) == 0 { s } else { {
+    let identity_base = s
+    let identity_scope_params: capture.Params = computation_params(s.scope_params, s.tparams)
+    Sig { ..identity_base,
+      scope_params = identity_scope_params,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_base.eff) }
+  } }
 pub fn prelude_traits() -> Traits = {
   let zero: capture.Capture = []
   var out: Traits = map.empty()
@@ -6185,19 +6589,29 @@ pub fn prelude_traits() -> Traits = {
       let (name, method) = item
       let base = method.sig
       let app = TraitApplication { id = id, args = [[variable]] }
-      let sig = if opened { Sig { ..base, scope_params = own,
-        constraints = [[app]],
-        param_tys = map(base.param_tys, ty => {
+      let sig = if opened { {
+        let identity_base = base
+        let identity_scope_params: capture.Params = own
+        let identity_constraints: List[List[capture.TraitApplication]] = [[app]]
+        let identity_param_tys: List[Ty] = map(base.param_tys, ty => {
           let projected = capture_projection(ty, id, app, [variable])
           match projected {
-            TyFn(ps, ret, row, contract) -> if id == STAGED_COND_ID || id == STAGED_ITER_ID {
-              TyFn(ps, ret, row, CaptureFunction { ..contract, bound = Some([variable]) })
+            TyFn(ps, ret, row, contract, _) -> if id == STAGED_COND_ID || id == STAGED_ITER_ID {
+              ty_fn(ps, ret, row, CaptureFunction { ..contract, bound = Some([variable]) })
             } else { projected }
             _ -> projected
           }
-        }),
-        ret = capture_projection(base.ret, id, app, [variable]),
-        eff = application_row(base.eff, id, app) }
+        })
+        let identity_ret: Ty = capture_projection(base.ret, id, app, [variable])
+        let identity_eff: Eff = application_row(base.eff, id, app)
+        Sig { ..identity_base,
+          scope_params = identity_scope_params,
+          constraints = identity_constraints,
+          param_tys = identity_param_tys,
+          ret = identity_ret,
+          eff = identity_eff,
+          scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
+      }
       } else { computation_sig(base) }
       (name, MethodSig { ..method, sig = sig })
     })
@@ -6216,7 +6630,7 @@ pub fn prelude_impls() -> List[ImplI] = map(prelude_impl_definitions(), imp => {
 
 fn capture_projection(value: Ty, tid: Int, app: capture.TraitApplication, upper: capture.Capture) -> Ty =
   match value {
-    TyFn(ps, ret, row, contract) -> TyFn(map(ps, t => capture_projection(t, tid, app, upper)),
+    TyFn(ps, ret, row, contract, _) -> ty_fn(map(ps, t => capture_projection(t, tid, app, upper)),
       capture_projection(ret, tid, app, upper), application_row(row, tid, app), contract)
     TyAssoc(subject, prior, name, _) -> if prior.id == tid {
       TyAssoc(capture_projection(subject, tid, app, upper), app, name, upper)
@@ -6244,7 +6658,7 @@ test "primitive capture reuse keeps unknown types and concrete regions distinct"
   assert primitive_captures(TyF64Buf(t)) == Some([capture.Region(t)])
   assert primitive_captures(TyCaptured(TyInt, [capture.Region(s)])) == Some([])
   assert primitive_captures(TyVar("T", 1)) == None
-  assert primitive_captures(TyAdt(1, [], capture.empty_arguments())) == None
+  assert primitive_captures(ty_adt(1, [], capture.empty_arguments())) == None
   assert primitive_captures(TyError) == None
 }
 
@@ -6254,22 +6668,22 @@ test "scope invariant reuse preserves wrappers and binder hygiene" {
   let sm = map.from([(1, replacement), (9, s)])
   let cm = map.from([(3, [capture.Region(s)])])
   let axes = capture.empty_arguments()
-  let closed = TyFn([TyAdt(10, [TyList(TyVar("T", 1))], axes)],
-    TyTuple([TyInt, TySet(TyString)]), EffVar("e", 1), capture.empty_function())
+  let closed = ty_fn([ty_adt(10, [ty_list(TyVar("T", 1))], axes)],
+    ty_tuple([TyInt, ty_set(TyString)]), EffVar("e", 1), capture.empty_function())
   assert subst_scopes(closed, sm, cm) == closed
-  let opaque = TyOpaque(11, "Closed", "owner", [closed], TyMap(TyInt, closed), axes, capture.opaque_head(1, 0, 0))
+  let opaque = ty_opaque(11, "Closed", "owner", [closed], ty_map(TyInt, closed), axes, capture.opaque_head(1, 0, 0))
   assert subst_scopes(opaque, sm, cm) == opaque
   assert subst_scopes(TyCaptured(TyInt, []), sm, cm) == TyCaptured(TyInt, [])
-  assert subst_scopes(TyList(TyI64Buf(s)), sm, cm) == TyList(TyI64Buf(replacement))
-  let scoped = TyFn([closed], TyI64Buf(s), EPure,
+  assert subst_scopes(ty_list(TyI64Buf(s)), sm, cm) == ty_list(TyI64Buf(replacement))
+  let scoped = ty_fn([closed], TyI64Buf(s), EPure,
     CaptureFunction { scopes = [s], bound = Some([capture.Region(s)]) })
   let renamed = subst_scopes(scoped, sm, cm)
   assert renamed != scoped
   assert ty_equal(renamed, scoped)
   assert subst_scopes(scoped, map.empty(), map.empty()) == scoped
-  let arrow = TyFn([], TyInt, EPure, capture.empty_function())
+  let arrow = ty_fn([], TyInt, EPure, capture.empty_function())
   assert subst_scopes(TyCaptured(arrow, [capture.CaptureVar("c", 3)]), sm, cm) ==
-    TyFn([], TyInt, EPure, CaptureFunction { scopes = [], bound = Some([capture.Region(s)]) })
+    ty_fn([], TyInt, EPure, CaptureFunction { scopes = [], bound = Some([capture.Region(s)]) })
 }
 
 test "nominal scope substitution retains each representation axis" {
@@ -6278,15 +6692,15 @@ test "nominal scope substitution retains each representation axis" {
   let actual = CaptureScope { name = "actual", id = 2 }
   let sm = map.from([(1, actual)])
   let cm = map.from([(3, [capture.Region(s)])])
-  let closed = TyAdt(99, [], capture.empty_arguments())
+  let closed = ty_adt(99, [], capture.empty_arguments())
   assert subst_scopes(closed, sm, cm) == closed
   let axes = CaptureArguments { scopes = [s], captures = [[capture.CaptureVar("c", 3)]] }
-  let value = TyAdt(99, [], axes)
-  assert subst_scopes(value, sm, cm) == TyAdt(99, [],
+  let value = ty_adt(99, [], axes)
+  assert subst_scopes(value, sm, cm) == ty_adt(99, [],
     CaptureArguments { scopes = [actual], captures = [[capture.Region(s)]] })
-  assert value == TyAdt(99, [], axes)
-  let duplicate = TyAdt(99, [], CaptureArguments { scopes = [],
+  assert value == ty_adt(99, [], axes)
+  let duplicate = ty_adt(99, [], CaptureArguments { scopes = [],
     captures = [[capture.Region(s), capture.Region(renamed)]] })
-  assert subst_scopes(duplicate, sm, cm) == TyAdt(99, [],
+  assert subst_scopes(duplicate, sm, cm) == ty_adt(99, [],
     CaptureArguments { scopes = [], captures = [[capture.Region(actual)]] })
 }

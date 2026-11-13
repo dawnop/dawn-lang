@@ -1,12 +1,12 @@
 # Staged syntax must settle the same complete application that its method,
 # associated types and callback environments use. Source strings keep the
 # public Capture syntax outside the bootstrap compiler's own declarations.
+use check/types.{ty_fn, TyFn, TyUnit, EffAssoc, EPure, insert_impl, trait_of, prelude_traits, STAGED_VAR_ID,
+  STAGED_RESULT_ID, STAGED_COND_ID, STAGED_ITER_ID }
 use std/map
 use std/list
 use check/capture
 use check/capture.{TraitApplication, Function as CaptureFunction, Scope}
-use check/types.{TyFn, TyUnit, EffAssoc, EPure, insert_impl, trait_of, prelude_traits, STAGED_VAR_ID,
-  STAGED_RESULT_ID, STAGED_COND_ID, STAGED_ITER_ID }
 use check/cx.{Cx, ModExports, test_cx, cx_new}
 use check/passes.{seed_prelude}
 use check/checker.{check_module, exports_of}
@@ -88,7 +88,7 @@ test "staged associated outputs and callback rows retain their declared applicat
       assert method.sig.constraints == [[app]]
       assert match method.sig.eff { EffAssoc(_, _, row_app, _) -> capture.trait_equal(row_app, app), _ -> false }
       for parameter in method.sig.param_tys { match parameter {
-        TyFn(_, _, row, contract) -> {
+        TyFn(_, _, row, contract, _) -> {
           assert capture.equal(capture.bound(contract), app.args[0])
           assert match row { EffAssoc(_, _, row_app, _) -> capture.trait_equal(row_app, app), _ -> false }
         }
@@ -108,7 +108,7 @@ test "fixed staged applications cannot widen to callback support" {
   let (_, method) = tr.methods[0]
   var tested = false
   for implementation in cx.local_impls { if implementation.trait_id == STAGED_COND_ID {
-    let callback = TyFn([], TyUnit, EPure, CaptureFunction { scopes = [],
+    let callback = ty_fn([], TyUnit, EPure, CaptureFunction { scopes = [],
       bound = Some([capture.Region(Scope { name = "caller", id = 47001 })]) })
     let app = trait_contract.call_application(tr, implementation, implementation.subject,
       method.sig.param_tys, [implementation.subject, callback, callback], cx.adts, capture.empty_params())

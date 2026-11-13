@@ -18,13 +18,7 @@
 # parse error below class-file version 50, and that is where these classes
 # emit now (K-A4). scripts/constpool-scan.py keeps the pool clear of them.
 
-use check/capture
-use std/str
-use std/bytes
-use std/set
-use std/list
-use std/map
-use check/types.{fn_runtime_params, sig_runtime_params, evidence_labels, evidence_label_count, evidence_label_type, Intr, Rt, RtStrings, RtBytes, RtArray, RtMem, RtIo, RtGpu, peel_opaque, cast_target,
+use check/types.{ty_adt, signature_scope_inert, Eff, fn_runtime_params, sig_runtime_params, evidence_labels, evidence_label_count, evidence_label_type, Intr, Rt, RtStrings, RtBytes, RtArray, RtMem, RtIo, RtGpu, peel_opaque, cast_target,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyF64Buf, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, adt_of, adt_jvm_name, ctor_jvm_name,
@@ -35,6 +29,12 @@ use check/types.{fn_runtime_params, sig_runtime_params, evidence_labels, evidenc
   intrinsics,
   Impls, impl_at, sig_abi_eff
 }
+use check/capture
+use std/str
+use std/bytes
+use std/set
+use std/list
+use std/map
 use check/tast.{call_source, TJavaCall, TModule, BEq, BNeq, BLt, BLe, BGt, BGe}
 use ir/interp.{CtOut}
 use front/ast.{no_scope_syntax,
@@ -469,7 +469,7 @@ fn box_ty(m: MethodVisitor, t: Ty) -> Unit !io = {
 fn unerase(gx: GenCtx, g: Gen, t: Ty) -> Unit !io = {
   let m = g.mv
   match t {
-    TyOpaque(_, _, _, _, tgt, _, _) -> unerase(gx, g, tgt)
+    TyOpaque(_, _, _, _, tgt, _, _, _) -> unerase(gx, g, tgt)
     TyCaptured(value, _) -> unerase(gx, g, value)
     TyInt -> {
       m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
@@ -487,14 +487,14 @@ fn unerase(gx: GenCtx, g: Gen, t: Ty) -> Unit !io = {
     TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
     TyI64Buf(_) -> { m.visitTypeInsn(OP_CHECKCAST, "[J") }
     TyF64Buf(_) -> { m.visitTypeInsn(OP_CHECKCAST, "[D") }
-    TyAdt(aid, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(gx.adts, aid))) }
-    TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, PVEC_CLASS) }
-    TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
-    TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
-    TyArray(_) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }
-    TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
+    TyAdt(aid, _, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(gx.adts, aid))) }
+    TyList(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, PVEC_CLASS) }
+    TyMap(_, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
+    TySet(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
+    TyArray(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }
+    TyTuple(elems, _) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
     TyJava(fqcn, _) -> { m.visitTypeInsn(OP_CHECKCAST, internal_of(fqcn)) }
-    TyFn(_, _, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(fn_arity(t))) }
+    TyFn(_, _, _, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(fn_arity(t))) }
     TyUnit -> { m.visitTypeInsn(OP_CHECKCAST, UNIT_CLASS) }
     # TyVar (and a projection over one) is already erased, and the two
     # bottom types carry no value
@@ -516,7 +516,7 @@ fn unerase(gx: GenCtx, g: Gen, t: Ty) -> Unit !io = {
 ## accepts everything, which is the same answer as no check at all.
 fn unerase_class(adts: Adts, t: Ty) -> String =
   match t {
-    TyOpaque(_, _, _, _, tgt, _, _) -> unerase_class(adts, tgt)
+    TyOpaque(_, _, _, _, tgt, _, _, _) -> unerase_class(adts, tgt)
     TyCaptured(value, _) -> unerase_class(adts, value)
     TyInt -> "java/lang/Long"
     TyFloat -> "java/lang/Double"
@@ -525,14 +525,14 @@ fn unerase_class(adts: Adts, t: Ty) -> String =
     TyBytes -> "[B"
     TyI64Buf(_) -> "[J"
     TyF64Buf(_) -> "[D"
-    TyAdt(aid, _, _) -> adt_jvm_name(adt_of(adts, aid))
-    TyList(_) -> PVEC_CLASS
-    TyMap(_, _) -> HAMT_CLASS
-    TySet(_) -> HAMT_CLASS
-    TyArray(_) -> ARRAY_CLASS
-    TyTuple(elems) -> tuple_class(len(elems))
+    TyAdt(aid, _, _, _) -> adt_jvm_name(adt_of(adts, aid))
+    TyList(_, _) -> PVEC_CLASS
+    TyMap(_, _, _) -> HAMT_CLASS
+    TySet(_, _) -> HAMT_CLASS
+    TyArray(_, _) -> ARRAY_CLASS
+    TyTuple(elems, _) -> tuple_class(len(elems))
     TyJava(fqcn, _) -> internal_of(fqcn)
-    TyFn(_, _, _, _) -> fn_iface(fn_arity(t))
+    TyFn(_, _, _, _, _) -> fn_iface(fn_arity(t))
     TyUnit -> UNIT_CLASS
     TyVar(_, _) | TyAssoc(_, _, _, _) | TyNever | TyError -> obj()
   }
@@ -572,7 +572,7 @@ fn sig_desc_with_dicts(adts: Adts, s: Sig) -> String = {
   # no erasure, and the field reads inside need no cast
   for l in evidence_labels(abi) {
     let eid = l.id
-    ps = ps ++ desc_of(adts, TyAdt(eid, [], capture.empty_arguments()))
+    ps = ps ++ desc_of(adts, ty_adt(eid, [], capture.empty_arguments()))
   }
   # ... one erased slot per effect variable, behind them (rule 丁), and one per
   # written projection behind those (rule 丙): which evidence fills either is
@@ -606,7 +606,7 @@ fn trait_iface_desc(adts: Adts, s: Sig) -> String = {
   let abi = sig_abi_eff(s)
   for l in evidence_labels(abi) {
     let eid = l.id
-    ps = ps ++ desc_of(adts, TyAdt(eid, [], capture.empty_arguments()))
+    ps = ps ++ desc_of(adts, ty_adt(eid, [], capture.empty_arguments()))
   }
   ps = ps ++ erased_ev_slots(nev(abi) - evidence_label_count(abi))
   "(" ++ ps ++ ")" ++ desc_of(adts, s.ret)
@@ -770,7 +770,7 @@ fn const_method(gx: GenCtx, st: ConstEmit, desc: String, refs: Int) -> (ConstEmi
 fn const_ref_desc(gx: GenCtx, v: ConstValue) -> String = match v {
   CVList(_) -> "L" ++ PVEC_CLASS ++ ";"
   CVTuple(xs) -> "L" ++ tuple_class(len(xs)) ++ ";"
-  CVAdt(a, _, _) -> desc_of(gx.adts, TyAdt(a, [], capture.empty_arguments()))
+  CVAdt(a, _, _) -> desc_of(gx.adts, ty_adt(a, [], capture.empty_arguments()))
   _ -> panic("constant builder requires a structured value")
 }
 
@@ -999,7 +999,7 @@ fn emit_method_return(g: Gen) -> Unit !io = {
 
 fn tyfn_parts(t: Ty) -> (List[Ty], Ty) =
   match t {
-    TyFn(_, r, _, _) -> (fn_runtime_params(t), r)
+    TyFn(_, r, _, _, _) -> (fn_runtime_params(t), r)
     _ -> panic("expected a fn type")
   }
 
@@ -2381,7 +2381,7 @@ fn emit_module_with(
     }
     if keep {
       out = out ++ gen_adt(supers, adts, a,
-        eq_override(impl_table, class_name, TyAdt(aid, a.tparams, capture.empty_arguments())))
+        eq_override(impl_table, class_name, ty_adt(aid, a.tparams, capture.empty_arguments())))
     }
   }
   for tid in own_trait_ids {
@@ -2585,7 +2585,7 @@ fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, By
         let mabi = sig_abi_eff(ms.sig)
         for l in evidence_labels(mabi) {
           let eid = l.id
-          load_slot(m, TyAdt(eid, [], capture.empty_arguments()), slot)
+          load_slot(m, ty_adt(eid, [], capture.empty_arguments()), slot)
           slot = slot + 1
         }
         # the erased slots -- rule 丁's variables and rule 丙's projections -- are
@@ -3363,7 +3363,7 @@ fn obj_desc() -> String = "Ljava/lang/Object;"
 
 fn tuple_arity(t: Ty) -> Int =
   match t {
-    TyTuple(es) -> len(es)
+    TyTuple(es, _) -> len(es)
     _ -> panic("codegen: tuple projection on a non-tuple")
   }
 
@@ -3428,7 +3428,7 @@ fn gen_cbinary(gx: GenCtx, g: Gen, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (G
         TyBytes -> {
           invoke_rt(g1.mv, rt_bytes_concat())
         }
-        TyList(_) -> {
+        TyList(_, _) -> {
           call_pvec(gx, g1.mv, LIST_CONCAT,
             "(L" ++ PVEC_CLASS ++ ";L" ++ PVEC_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";")
         }
@@ -4277,35 +4277,69 @@ test "a signature's descriptor carries one evidence slot per row atom" {
   # impl method purer than the trait row that admits it. Delete that fold and
   # every other test here stays green.
   let adts = prelude_adts()
-  let base = Sig { scope_params = capture.empty_params(),
-    name = "f",
-    param_tys = [TyInt],
-    param_names = ["x"],
-    param_defaults = [None],
-    caller_params = [],
-    ret = TyBool,
-    eff = EPure,
-    is_builtin = false,
-    tparams = [],
-    constraints = [],
-    eparams = [],
-    owner = None,
-    trait_id = None,
-    op_of = None,
-    inferring = false
+  let base = {
+    let identity_scope_params: capture.Params = capture.empty_params()
+    let identity_param_tys: List[Ty] = [TyInt]
+    let identity_ret: Ty = TyBool
+    let identity_eff: Eff = EPure
+    let identity_constraints: List[List[capture.TraitApplication]] = []
+    Sig { scope_params = identity_scope_params,
+      name = "f",
+      param_tys = identity_param_tys,
+      param_names = ["x"],
+      param_defaults = [None],
+      caller_params = [],
+      ret = identity_ret,
+      eff = identity_eff,
+      is_builtin = false,
+      tparams = [],
+      constraints = identity_constraints,
+      eparams = [],
+      owner = None,
+      trait_id = None,
+      op_of = None,
+      inferring = false,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
   assert sig_desc_with_dicts(adts, base) == "(J)Z"
   # a variable adds one erased slot, whether the row mentions it or only the
   # binder list does (`types.sig_abi_eff`)
   let ev = EffVar("e", 1)
-  assert sig_desc_with_dicts(adts, Sig { ..base, eff = ev, eparams = [ev] }) ==
+  assert sig_desc_with_dicts(adts, {
+    let identity_base = base
+    let identity_eff: Eff = ev
+    Sig { ..identity_base,
+      eff = identity_eff,
+      eparams = [ev],
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+  }) ==
     "(JLjava/lang/Object;)Z"
-  assert sig_desc_with_dicts(adts, Sig { ..base, eff = EPure, eparams = [ev] }) ==
+  assert sig_desc_with_dicts(adts, {
+    let identity_base = base
+    let identity_eff: Eff = EPure
+    Sig { ..identity_base,
+      eff = identity_eff,
+      eparams = [ev],
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+  }) ==
     "(JLjava/lang/Object;)Z"
   # io is an answer, not a question
-  assert sig_desc_with_dicts(adts, Sig { ..base, eff = EIo }) == "(J)Z"
+  assert sig_desc_with_dicts(adts, {
+    let identity_base = base
+    let identity_eff: Eff = EIo
+    Sig { ..identity_base,
+      eff = identity_eff,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+  }) == "(J)Z"
   # the trait-interface spelling is the same layout without the dictionary
-  assert trait_iface_desc(adts, Sig { ..base, eff = ev, eparams = [ev] }) ==
+  assert trait_iface_desc(adts, {
+    let identity_base = base
+    let identity_eff: Eff = ev
+    Sig { ..identity_base,
+      eff = identity_eff,
+      eparams = [ev],
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+  }) ==
     "(JLjava/lang/Object;)Z"
 }
 
@@ -4321,10 +4355,29 @@ test "call result width reads the return descriptor, not its last character" {
 ## One class holding `f(x) = m.g(m.g(x))`, a nested pair of sited calls,
 ## written by `gen_cbody` with `mapping` as given: its bytes and the Gen.
 fn mapped_fixture(mapping: Bool) -> (Bytes, Gen) !io = {
-  let base = Sig { scope_params = capture.empty_params(),
-    name = "g", param_tys = [TyInt], param_names = ["x"], param_defaults = [None], caller_params = [],
-    ret = TyInt, eff = EPure, is_builtin = false, tparams = [], constraints = [], eparams = [],
-    owner = None, trait_id = None, op_of = None, inferring = false
+  let base = {
+    let identity_scope_params: capture.Params = capture.empty_params()
+    let identity_param_tys: List[Ty] = [TyInt]
+    let identity_ret: Ty = TyInt
+    let identity_eff: Eff = EPure
+    let identity_constraints: List[List[capture.TraitApplication]] = []
+    Sig { scope_params = identity_scope_params,
+      name = "g",
+      param_tys = identity_param_tys,
+      param_names = ["x"],
+      param_defaults = [None],
+      caller_params = [],
+      ret = identity_ret,
+      eff = identity_eff,
+      is_builtin = false,
+      tparams = [],
+      constraints = identity_constraints,
+      eparams = [],
+      owner = None,
+      trait_id = None,
+      op_of = None,
+      inferring = false,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
   let gx = GenCtx { observation = false, observed_mode = false, logical = map.empty(),
     next_sym = 10, class_name = "m", args_owner = "", adts = prelude_adts(), traits = map.empty(),

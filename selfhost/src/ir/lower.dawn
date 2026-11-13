@@ -13,13 +13,7 @@
 #   2. Nothing implicit. A discarded value gets a CSDiscard; a boxed value
 #      gets a CBox. If a backend has to re-derive it, it is not lowered.
 
-use check/capture
-use check/capture.{Arguments as CaptureArguments, Scope as CaptureScope, TraitApplication}
-use std/list
-use std/map
-use std/str
-use check/provenance as observation
-use check/types.{ev_record_name, ty_scope_refs, scope_key_name, ScopedEffect, TyI64Buf, TyF64Buf, EvidenceLabel, apply_scope_arguments, ev_pack_ty, fn_runtime_params, sig_runtime_params, EvidenceRole, ScopedLabelSlot, evidence_roles, evidence_labels, evidence_label_role, evidence_label_type, Intr,
+use check/types.{ty_adt, ty_tuple, ty_fn, signature_scope_inert, ev_record_name, ty_scope_refs, scope_key_name, ScopedEffect, TyI64Buf, TyF64Buf, EvidenceLabel, apply_scope_arguments, ev_pack_ty, fn_runtime_params, sig_runtime_params, EvidenceRole, ScopedLabelSlot, evidence_roles, evidence_labels, evidence_label_role, evidence_label_type, Intr,
   intrinsics,
   subst, subst_scopes,
   reduce_via_bindings,
@@ -41,6 +35,12 @@ use check/types.{ev_record_name, ty_scope_refs, scope_key_name, ScopedEffect, Ty
   is_eq_scalar, is_ord_scalar, is_hash_scalar, is_show_scalar, Impls, impl_at, has_impl_at,
   is_ground, expandable, witness_goals
 }
+use check/capture
+use check/capture.{Arguments as CaptureArguments, Scope as CaptureScope, TraitApplication}
+use std/list
+use std/map
+use std/str
+use check/provenance as observation
 use check/scope_infer
 use check/trait_contract
 use check/identity
@@ -405,7 +405,7 @@ fn ev_slot(st: LSt, key: Int, role: EvidenceRole, domain: Option[CExpr]) -> CExp
       ScopedLabelSlot(eid, _) -> {
         let instance = domain.expect("scoped evidence must carry its execution key")
         let raw = CIntrinsic("ev_get_scoped", [pack, CInt(key), instance], erased_ev_ty(), CNoSite)
-        adapt_out(raw, erased_ev_ty(), TyAdt(eid, [], capture.empty_arguments()))
+        adapt_out(raw, erased_ev_ty(), ty_adt(eid, [], capture.empty_arguments()))
       }
       _ -> ev_from_pack(pack, key)
     }
@@ -424,7 +424,7 @@ fn ev_slot(st: LSt, key: Int, role: EvidenceRole, domain: Option[CExpr]) -> CExp
 fn ev_from_pack(pack: CExpr, key: Int) -> CExpr =
   if key_is_label(key) {
     let raw = CIntrinsic("ev_get", [pack, CInt(key)], erased_ev_ty(), CNoSite)
-    adapt_out(raw, erased_ev_ty(), TyAdt(key_effect_id(key), [], capture.empty_arguments()))
+    adapt_out(raw, erased_ev_ty(), ty_adt(key_effect_id(key), [], capture.empty_arguments()))
   } else {
     pack
   }
@@ -507,7 +507,7 @@ fn fn_value_evs(st: LSt) -> (LSt, List[CParam]) = {
 ## which is the regression it exists for and the shape the corpus mutant takes.
 fn is_evidence_ty(st: LSt, t: Ty) -> Bool =
   match t {
-    TyAdt(aid, _, _) ->
+    TyAdt(aid, _, _, _) ->
       if aid == EV_PACK_ID {
         true
       } else {
@@ -738,7 +738,7 @@ fn concrete_field_ty(st: LSt, scrut: Ty, adt: Int, ci: Int, idx: Int) -> Ty = {
   }
   let targs =
     match scrut {
-      TyAdt(_, args, _) -> args
+      TyAdt(_, args, _, _) -> args
       _ -> []
     }
   var m: Map[Int, Ty] = map.empty()
@@ -888,7 +888,7 @@ fn pat_test_slots(
       var i = 0
       let ets =
         match t {
-          TyTuple(xs) -> xs
+          TyTuple(xs, _) -> xs
           _ -> []
         }
       for sub in elems {
@@ -941,7 +941,7 @@ fn lower_list_pattern(
 ) -> (LSt, CExpr, List[CStmt]) = {
   let et =
     match t {
-      TyList(e) -> e
+      TyList(e, _) -> e
       _ -> TyError
     }
   let n = len(pre) + len(post)
@@ -1008,9 +1008,9 @@ fn pat_ty(st: LSt, p: TPat) -> Ty =
         LBool(_) -> TyBool
         LStr(_) -> TyString
       }
-    TPCtor(adt, _, _) -> TyAdt(adt, [], capture.empty_arguments())
+    TPCtor(adt, _, _) -> ty_adt(adt, [], capture.empty_arguments())
     TPOr(alts) -> if len(alts) > 0 { pat_ty(st, alts[0]) } else { TyError }
-    TPTuple(elems) -> TyTuple([])
+    TPTuple(elems) -> ty_tuple([])
     TPList(_, _, _, _) -> TyError
     TPWild -> TyError
   }
@@ -1053,17 +1053,17 @@ fn sym_ty(st: LSt, sym: Int, fallback: Ty) -> Ty =
 fn field_ty(t: Ty, adt: Int, ci: Int, idx: Int) -> Ty =
   if adt == OPTION_ID && ci == SOME_CI {
     match t {
-      TyAdt(_, args, _) -> if len(args) > 0 { args[0] } else { TyError }
+      TyAdt(_, args, _, _) -> if len(args) > 0 { args[0] } else { TyError }
       _ -> TyError
     }
   } else if adt == RESULT_ID && ci == OK_CI {
     match t {
-      TyAdt(_, args, _) -> if len(args) > 0 { args[0] } else { TyError }
+      TyAdt(_, args, _, _) -> if len(args) > 0 { args[0] } else { TyError }
       _ -> TyError
     }
   } else if adt == RESULT_ID && ci == ERR_CI {
     match t {
-      TyAdt(_, args, _) -> if len(args) > 1 { args[1] } else { TyError }
+      TyAdt(_, args, _, _) -> if len(args) > 1 { args[1] } else { TyError }
       _ -> TyError
     }
   } else {
@@ -1534,16 +1534,20 @@ pub(pkg) fn subst_subject(
       reduce_via_bindings(subst(p, m, map.empty()), tr.id, subject, bindings),
       vid, tr.id, ebindings)]
   }
-  Sig {
-    ..sg,
-    param_tys = ps,
-    ret = reduce_ty_effs_via_bindings(
+  {
+    let identity_base = sg
+    let identity_param_tys: List[Ty] = ps
+    let identity_ret: Ty = reduce_ty_effs_via_bindings(
       reduce_via_bindings(subst(sg.ret, m, map.empty()), tr.id, subject, bindings),
-      vid, tr.id, ebindings),
-    # the row too: the impl method's declared labels are its evidence layout,
-    # and this signature is what every devirtualised call spells (the checker
-    # held the impl to exactly these labels)
-    eff = reduce_eff_via_bindings(sg.eff, vid, tr.id, ebindings)
+      vid, tr.id, ebindings)
+    Sig { ..identity_base,
+      param_tys = identity_param_tys,
+      ret = identity_ret,
+      # the row too: the impl method's declared labels are its evidence layout,
+      # and this signature is what every devirtualised call spells (the checker
+      # held the impl to exactly these labels)
+      eff = reduce_eff_via_bindings(sg.eff, vid, tr.id, ebindings),
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_param_tys, identity_ret, identity_base.eff) }
   }
 }
 
@@ -1607,7 +1611,7 @@ fn owner_or(o: Option[String], fallback: String) -> String =
 ## The type of a dictionary as Core sees it: erased, like every other value a
 ## backend chooses its own representation for. The pseudo-id is named in
 ## types.dawn because `is_ref_ty` needs the same answer from the type alone.
-fn dict_ty() -> Ty = TyAdt(DICT_ADT_ID, [], capture.empty_arguments())
+fn dict_ty() -> Ty = ty_adt(DICT_ADT_ID, [], capture.empty_arguments())
 
 ## Build (once) an argument-free dictionary and return a reference to it.
 ## This is every ground witness, plus a conditional impl whose subject still
@@ -1918,7 +1922,7 @@ fn make_bridge(
       owner = st1.owner,
       captures = [],
       params = ps,
-      dicts = [CParam { sym = dsym, ty = TyAdt(-1, [], capture.empty_arguments()), mode = COwned }],
+      dicts = [CParam { sym = dsym, ty = ty_adt(-1, [], capture.empty_arguments()), mode = COwned }],
       evs = evps,
       ret = sg.ret,
       body = adapt_in(call, psig.ret, sg.ret),
@@ -2211,7 +2215,7 @@ fn dict_expr(st: LSt, app: capture.TraitApplication, t: Ty) -> (LSt, CExpr) =
 ## of its own is its target (spec §2.7), which is the peel `rel_at` does for Eq.
 fn eq_subject(st: LSt, t: Ty) -> Ty =
   match t {
-    TyOpaque(_, _, _, _, tgt, _, _) ->
+    TyOpaque(_, _, _, _, tgt, _, _, _) ->
       if has_impl_at(st.impls, EQ_ID, t) { t } else { eq_subject(st, tgt) }
     _ -> t
   }
@@ -2296,7 +2300,7 @@ fn rel_at(st: LSt, rel: Rel, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
   # which would send it to the fallback and panic.
   if rel.peels_opaque {
     match t {
-      TyOpaque(_, _, _, _, tgt, _, _) -> return rel_at(st, rel, xs, tgt)
+      TyOpaque(_, _, _, _, tgt, _, _, _) -> return rel_at(st, rel, xs, tgt)
       _ -> ()
     }
   }
@@ -2423,7 +2427,7 @@ type Arm = { ci: Int, parts: List[(Int, Ty)] }
 ## union's arguments give it.
 fn components(st: LSt, t: Ty) -> List[Arm] =
   match t {
-    TyTuple(elems) -> {
+    TyTuple(elems, _) -> {
       var parts: List[(Int, Ty)] = []
       var i = 0
       for et in elems {
@@ -2432,7 +2436,7 @@ fn components(st: LSt, t: Ty) -> List[Arm] =
       }
       [Arm { ci = -1, parts = parts }]
     }
-    TyAdt(aid, _, _) -> {
+    TyAdt(aid, _, _, _) -> {
       var arms: List[Arm] = []
       var ci = 0
       for c in adt_of(st.adts, aid).ctors {
@@ -2452,7 +2456,7 @@ fn components(st: LSt, t: Ty) -> List[Arm] =
 
 fn adt_id(t: Ty) -> Int =
   match t {
-    TyAdt(aid, _, _) -> aid
+    TyAdt(aid, _, _, _) -> aid
     _ -> panic("lower: a relation asked a tuple for its constructor")
   }
 
@@ -3003,7 +3007,7 @@ fn primitive_subject(st: LSt, tid: Int, subject: Ty) -> Bool =
 ## including the dictionaries of rigid element types.
 fn orders_structurally(t: Ty) -> Bool =
   match t {
-    TyTuple(_) -> true
+    TyTuple(_, _) -> true
     _ -> false
   }
 
@@ -3020,7 +3024,7 @@ fn orders_structurally(t: Ty) -> Bool =
 ## reach `show_at` directly rather than through a witness.
 fn shows_structurally(t: Ty) -> Bool =
   match t {
-    TyTuple(_) -> true
+    TyTuple(_, _) -> true
     _ -> false
   }
 
@@ -3052,7 +3056,7 @@ fn is_relation_op(op: TBinOp) -> Bool =
 ## A witness as a value, for the hidden trailing arguments of a generic call.
 fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
   match w {
-    WForward(sym, _, _) -> (st, CLocal(sym, TyAdt(-1, [], capture.empty_arguments())))
+    WForward(sym, _, _) -> (st, CLocal(sym, ty_adt(-1, [], capture.empty_arguments())))
     # The structural default is not a different kind of dictionary, only one
     # whose slots the compiler supplies -- which is why deleting WStructural
     # changed nothing here.
@@ -3253,7 +3257,7 @@ fn params_of_fn_ty(t: Ty) -> List[Ty] =
 
 fn ret_of_fn_ty(t: Ty) -> Ty =
   match t {
-    TyFn(_, r, _, _) -> r
+    TyFn(_, r, _, _, _) -> r
     _ -> TyError
   }
 
@@ -3632,7 +3636,7 @@ fn lift_builtin_value(st: LSt, name: String, ty: Ty) -> (LSt, CExpr) = {
     let (st3, sym) = fresh_sym(st2)
     st2 = st3
     ps = ps ++ [CParam { sym = sym, ty = pt, mode = COwned }]
-    if len(args) < len(match ty { TyFn(values, _, _, _) -> values, _ -> [] }) {
+    if len(args) < len(match ty { TyFn(values, _, _, _, _) -> values, _ -> [] }) {
       args = args ++ [XLocal(sym, "", 0, 0, pt)]
     }
   }
@@ -3735,7 +3739,7 @@ test "a builtin taken as a value lowers as the call it wraps" {
   }
   for n in lowered_intrinsics() {
     let sg = map.get(it, n).expect("a lowered name is an intrinsic").sig
-    let (st1, clo) = lift_fn_value(initial, "app", n, true, TyFn(sg.param_tys, sg.ret, sg.eff, capture.empty_function()))
+    let (st1, clo) = lift_fn_value(initial, "app", n, true, ty_fn(sg.param_tys, sg.ret, sg.eff, capture.empty_function()))
     match clo {
       CClosure(_, _, _, _) -> ()
       _ -> panic("`" ++ n ++ "` taken as a value is not a closure")
@@ -3794,7 +3798,7 @@ fn mem_allocation_value(st: LSt, ty: Ty) -> (LSt, CExpr) = {
 fn lower_mem_run(st: LSt, args: List[TExpr], evidence: List[TExpr], ret: Ty, site: CSite) -> (LSt, CExpr) = {
   let source = tex_ty(args[0])
   let (region, row, result) = match source {
-    TyFn(ps, result, row, contract) -> {
+    TyFn(ps, result, row, contract, _) -> {
       if len(ps) != 0 || len(contract.scopes) != 1 { panic("invalid Mem runner callback") }
       (contract.scopes[0], row, result)
     }
@@ -4039,7 +4043,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       # discriminant is statically known
       let tt = tex_ty(target)
       match tt {
-        TyAdt(adt, _, _) -> (st1, read_field(st1, tv, tt, adt, 0, idx))
+        TyAdt(adt, _, _, _) -> (st1, read_field(st1, tv, tt, adt, 0, idx))
         _ -> panic("lower: field read on a non-ADT")
       }
     }
@@ -4334,7 +4338,7 @@ fn lower_run(st: LSt, items: List[TExpr], ty: Ty) -> (LSt, CExpr) = {
 ## the backends peel before choosing their concat (emitc.emit_binary says why).
 fn is_list_ty(ty: Ty) -> Bool =
   match peel_opaque(ty) {
-    TyList(_) -> true
+    TyList(_, _) -> true
     _ -> false
   }
 
@@ -4603,7 +4607,7 @@ test "dictionary constructors and slots keep their argument shape in either requ
         }
       }
     }
-    let subject = if bridge { TyInt } else { TyTuple([TyInt]) }
+    let subject = if bridge { TyInt } else { ty_tuple([TyInt]) }
     let goals = [(capture.closed_trait(EQ_ID), TyBool)]
     for first in [false, true] {
       let (a, first_key) = dict_def(start, capture.closed_trait(EQ_ID), subject, goals, first)
@@ -4668,7 +4672,7 @@ test "a tuple literal scrutinee is matched by component unless an arm needs the 
     origin = "",
     ct_inline = false, keep_calls = false
   }
-  let tt = TyTuple([TyInt, TyInt])
+  let tt = ty_tuple([TyInt, TyInt])
   let lit = XTupleLit([XInt(1, 0, 0), XInt(2, 0, 0)], 0, 0, tt)
   let body = XInt(0, 0, 0)
   let arm = (p: TPat) => TArm { pat = p, guard = None, body = body }
@@ -4716,7 +4720,7 @@ fn tuple_scrut_parts(scrut: TExpr, sty: Ty, arms: List[TArm]) -> List[TExpr] =
     XTupleLit(elems, _, _, _) -> {
       let n = len(elems)
       let width_ok = match sty {
-        TyTuple(xs) -> len(xs) == n
+        TyTuple(xs, _) -> len(xs) == n
         _ -> false
       }
       if n < 2 || not width_ok { return [] }
@@ -4778,7 +4782,7 @@ fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty, tl: Bool) -> (LS
     # `match (a, b)`: bind each component once, in written order, and let
     # every arm test the components in place. No tuple is built.
     let ets = match sty {
-      TyTuple(xs) -> xs
+      TyTuple(xs, _) -> xs
       _ -> []
     }
     let (stp, vs) = lower_all(st, parts)
@@ -4873,7 +4877,7 @@ fn lower_propagate(st: LSt, operand: TExpr, ty: Ty) -> (LSt, CExpr) = {
   let (st2, sym) = fresh_sym(st1)
   let subj = CLocal(sym, ot)
   match ot {
-    TyAdt(adt, _, _) ->
+    TyAdt(adt, _, _, _) ->
       if adt == OPTION_ID {
         (st2, CBlock(
           [CSLet(sym, ot, ov),
@@ -4989,7 +4993,7 @@ fn list_len_call(st: LSt, args: List[TExpr], ty: Ty, site: CSite) -> (LSt, CExpr
 pub fn is_len_primitive(tid: Int, subject: Ty) -> Bool =
   tid == LEN_ID &&
   match subject {
-    TyList(_) -> true
+    TyList(_, _) -> true
     _ -> false
   }
 
@@ -5061,7 +5065,7 @@ fn lower_unwrap(st: LSt, operand: TExpr, msg: String, ty: Ty) -> (LSt, CExpr) = 
   let (st2, sym) = fresh_sym(st1)
   let subj = CLocal(sym, ot)
   match ot {
-    TyAdt(adt, _, _) ->
+    TyAdt(adt, _, _, _) ->
       if adt == OPTION_ID {
         (st2, CBlock(
           [CSLet(sym, ot, ov),
@@ -5360,27 +5364,27 @@ fn hamt_call(
 ## type for a Map.
 fn index_idx_ty(subject: Ty) -> Ty =
   match peel_opaque(subject) {
-    TyList(_) -> TyInt
-    TyMap(k, _) -> k
+    TyList(_, _) -> TyInt
+    TyMap(k, _, _) -> k
     _ -> panic("lower: no indexing for ${ty_key_inst(subject)}")
   }
 
 ## `C.Item` at the same subjects.
 fn index_item_ty(subject: Ty) -> Ty =
   match peel_opaque(subject) {
-    TyList(el) -> el
-    TyMap(_, v) -> v
+    TyList(el, _) -> el
+    TyMap(_, v, _) -> v
     _ -> panic("lower: no indexing for ${ty_key_inst(subject)}")
   }
 
 fn index_at(st: LSt, app: capture.TraitApplication, c: CExpr, i: CExpr, subject: Ty) -> (LSt, CExpr) =
   match peel_opaque(subject) {
-    TyList(el) -> {
+    TyList(el, _) -> {
       # indexing yields an erased element, so the unbox is explicit
       let erased = TyVar("E", 0)
       (st, adapt_out(CIntrinsic("list_index", [c, i], erased, CNoSite), erased, el))
     }
-    TyMap(k, v) -> {
+    TyMap(k, v, _) -> {
       # `m[k]` is `hamt.index`, which needs the key's Eq, Hash and Show -- the
       # last only to name the key it could not find, which is why the message
       # survives without every lookup paying to build one. The three used to
@@ -6069,7 +6073,7 @@ test "the flat module and the grouped functions are one lowering" {
   # separate lowerings, and a comment asserted they agreed
   # (docs/audit/re-audit-2026-07-30.md RC-04). They are one now; this is the
   # check, because "the same value" is only true while nobody rebuilds it.
-  let tt = TyTuple([TyInt, TyInt])
+  let tt = ty_tuple([TyInt, TyInt])
   let sym = (nm: String) => Sym {
     name = nm,
     ty = tt,
@@ -6091,22 +6095,29 @@ test "the flat module and the grouped functions are one lowering" {
       0, 0, 0, 0, TyBool)
   let fn_named = (nm: String) => TFun {
     name = nm,
-    sig = Sig { scope_params = capture.empty_params(),
-      name = nm,
-      param_tys = [tt, tt],
-      param_names = ["a", "b"],
-      param_defaults = [],
-      caller_params = [],
-      ret = TyBool,
-      eff = EPure,
-      is_builtin = false,
-      tparams = [],
-      constraints = [],
-      eparams = [],
-      owner = None,
-      trait_id = None,
-      op_of = None,
-      inferring = false
+    sig = {
+      let identity_scope_params: capture.Params = capture.empty_params()
+      let identity_param_tys: List[Ty] = [tt, tt]
+      let identity_ret: Ty = TyBool
+      let identity_eff: Eff = EPure
+      let identity_constraints: List[List[capture.TraitApplication]] = []
+      Sig { scope_params = identity_scope_params,
+        name = nm,
+        param_tys = identity_param_tys,
+        param_names = ["a", "b"],
+        param_defaults = [],
+        caller_params = [],
+        ret = identity_ret,
+        eff = identity_eff,
+        is_builtin = false,
+        tparams = [],
+        constraints = identity_constraints,
+        eparams = [],
+        owner = None,
+        trait_id = None,
+        op_of = None,
+        inferring = false,
+        scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
     },
     param_syms = [1, 2],
     dict_syms = [],
@@ -6184,8 +6195,8 @@ test "emitted_core carries the test bodies and what they hoisted" {
   # `str.to_upper` sat in a test block shipped without the case table and the
   # test died on a missing method. The two structural comparisons below stand
   # in for that -- one hoisted by a function, one by a test.
-  let ti = TyTuple([TyInt, TyInt])
-  let ts = TyTuple([TyString, TyString])
+  let ti = ty_tuple([TyInt, TyInt])
+  let ts = ty_tuple([TyString, TyString])
   let sym = (nm: String, t: Ty) => Sym {
     name = nm,
     ty = t,
@@ -6206,22 +6217,29 @@ test "emitted_core carries the test bodies and what they hoisted" {
     XBinary(BEq, XLocal(x, nx, 0, 0, t), XLocal(y, ny, 0, 0, t), no_wit, 0, 0, 0, 0, TyBool)
   let src = TFun {
     name = "f",
-    sig = Sig { scope_params = capture.empty_params(),
-      name = "f",
-      param_tys = [ti, ti],
-      param_names = ["a", "b"],
-      param_defaults = [],
-      caller_params = [],
-      ret = TyBool,
-      eff = EPure,
-      is_builtin = false,
-      tparams = [],
-      constraints = [],
-      eparams = [],
-      owner = None,
-      trait_id = None,
-      op_of = None,
-      inferring = false
+    sig = {
+      let identity_scope_params: capture.Params = capture.empty_params()
+      let identity_param_tys: List[Ty] = [ti, ti]
+      let identity_ret: Ty = TyBool
+      let identity_eff: Eff = EPure
+      let identity_constraints: List[List[capture.TraitApplication]] = []
+      Sig { scope_params = identity_scope_params,
+        name = "f",
+        param_tys = identity_param_tys,
+        param_names = ["a", "b"],
+        param_defaults = [],
+        caller_params = [],
+        ret = identity_ret,
+        eff = identity_eff,
+        is_builtin = false,
+        tparams = [],
+        constraints = identity_constraints,
+        eparams = [],
+        owner = None,
+        trait_id = None,
+        op_of = None,
+        inferring = false,
+        scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
     },
     param_syms = [1, 2],
     dict_syms = [],
@@ -6239,7 +6257,17 @@ test "emitted_core carries the test bodies and what they hoisted" {
   let tst = TFun {
     ..src,
     name = "strings compare",
-    sig = Sig { ..src.sig, name = "strings compare", param_tys = [], param_names = [], ret = TyUnit },
+    sig = {
+      let identity_base = src.sig
+      let identity_param_tys: List[Ty] = []
+      let identity_ret: Ty = TyUnit
+      Sig { ..identity_base,
+        name = "strings compare",
+        param_tys = identity_param_tys,
+        param_names = [],
+        ret = identity_ret,
+        scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_param_tys, identity_ret, identity_base.eff) }
+    },
     param_syms = [],
     body = XBlock([TSAssert(eq_of(3, 4, "s", "t", ts), None, 0, 0)], None, 0, 0, TyUnit),
     is_test = true
@@ -6297,22 +6325,29 @@ pub fn lower_module(
   lower_module_full(owner, tm, traits, impls, adts, prog_fns, false).m
 
 test "a written call's site is measured from its declaration, and a call nobody wrote has none" {
-  let sig0 = (nm: String) => Sig { scope_params = capture.empty_params(),
-    name = nm,
-    param_tys = [],
-    param_names = [],
-    param_defaults = [],
-    caller_params = [],
-    ret = TyInt,
-    eff = EPure,
-    is_builtin = false,
-    tparams = [],
-    constraints = [],
-    eparams = [],
-    owner = None,
-    trait_id = None,
-    op_of = None,
-    inferring = false
+  let sig0 = (nm: String) => {
+    let identity_scope_params: capture.Params = capture.empty_params()
+    let identity_param_tys: List[Ty] = []
+    let identity_ret: Ty = TyInt
+    let identity_eff: Eff = EPure
+    let identity_constraints: List[List[capture.TraitApplication]] = []
+    Sig { scope_params = identity_scope_params,
+      name = nm,
+      param_tys = identity_param_tys,
+      param_names = [],
+      param_defaults = [],
+      caller_params = [],
+      ret = identity_ret,
+      eff = identity_eff,
+      is_builtin = false,
+      tparams = [],
+      constraints = identity_constraints,
+      eparams = [],
+      owner = None,
+      trait_id = None,
+      op_of = None,
+      inferring = false,
+      scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
   let none_tid: Option[Int] = None
   let call = (nm: String, lo: Int, hi: Int, nlo: Int) => XCallFn(Some("m"), nm, [], [], [], none_tid, lo, hi, nlo, TyInt, call_source(-1, "call"))
@@ -6374,13 +6409,25 @@ test "associated Mem bridge selects its scoped evidence from the projection pack
   let app = TraitApplication { id = 777, args = [[capture.Region(s)]] }
   let base = trait_method_sig(trait_of(prelude_traits(), LEN_ID), "len")
   let row = check_scoped_row(s)
-  let declared = Sig { ..base, eff = EffAssoc("T", 888, app, "Read") }
-  let concrete = Sig { ..base, eff = row }
+  let declared = {
+    let identity_base = base
+    let identity_eff: Eff = EffAssoc("T", 888, app, "Read")
+    Sig { ..identity_base,
+      eff = identity_eff,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+  }
+  let concrete = {
+    let identity_base = base
+    let identity_eff: Eff = row
+    Sig { ..identity_base,
+      eff = identity_eff,
+      scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
+  }
   let imp = ImplI { ..prelude_impls()[0], eff_bindings = [("Read", row)] }
   let sources = impl_ev_sources(declared, imp, concrete)
   assert len(sources) == 1
   let (index, from, to, via, domain) = sources[0]
-  let expected = TyAdt(999, [], CaptureArguments { scopes = [s], captures = [] })
+  let expected = ty_adt(999, [], CaptureArguments { scopes = [s], captures = [] })
   assert index == 0 && from == erased_ev_ty() && to == expected
   assert via == label_key(999) && domain == Some(s)
 }

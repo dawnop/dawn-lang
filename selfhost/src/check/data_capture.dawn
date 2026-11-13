@@ -2,14 +2,14 @@
 # expanded through instantiated recursive fields. The finite projection domain
 # separates reachable value captures from complete static support and lets an
 # opaque head keep its contract without exposing its representation.
+use check/types.{ty_adt, ty_list, ty_opaque, ty_fn, Ty, TyVar, TyI64Buf, TyF64Buf, TyCaptured, TyFn, TyAdt, TyOpaque,
+  TyTuple, TyList, TySet, TyArray, TyMap, TyAssoc, TyInt, TyUnit, Adts, AdtI, CtorI, FieldI, AWorld, Eff, EffVar, scoped_eff, ScopedEffect, EPure,
+  eff_scopes, eff_assocs, eff_vars, type_args_of }
 use std/map
 use std/list
 use std/set
 use check/capture
 use check/capture.{Summary, Scope, Region, Params, Arguments, Function}
-use check/types.{Ty, TyVar, TyI64Buf, TyF64Buf, TyCaptured, TyFn, TyAdt, TyOpaque,
-  TyTuple, TyList, TySet, TyArray, TyMap, TyAssoc, TyInt, TyUnit, Adts, AdtI, CtorI, FieldI, AWorld, Eff, EffVar, scoped_eff, ScopedEffect, EPure,
-  eff_scopes, eff_assocs, eff_vars, type_args_of }
 
 pub type Projection = { parameters: List[Int], atoms: capture.Capture, known: Bool }
 
@@ -99,7 +99,7 @@ fn project(adts: Adts, working: Map[Int, capture.Summary], params: capture.Param
     TyI64Buf(scope) | TyF64Buf(scope) -> { out = atoms([capture.Region(scope)]) }
     TyCaptured(inner, bound) -> { out = atoms(bound)
       children = [inner] }
-    TyFn(ps, ret, row, contract) -> {
+    TyFn(ps, ret, row, contract, _) -> {
       out = atoms(capture.bound(contract))
       if not reachable {
         for variable in eff_vars(row) { let (id, _) = variable
@@ -115,7 +115,7 @@ fn project(adts: Adts, working: Map[Int, capture.Summary], params: capture.Param
         _ -> true
       }) }
     }
-    TyAdt(id, args, axes) -> {
+    TyAdt(id, args, axes, _) -> {
       let info = match map.get(adts, id) {
         Some(found) -> found
         None -> return Projection { ..out, known = false }
@@ -131,7 +131,7 @@ fn project(adts: Adts, working: Map[Int, capture.Summary], params: capture.Param
         out = join(out, project(adts, working, params, formals, args[index], reachable, effect_formals))
       }
     }
-    TyOpaque(_, _, _, args, _, axes, envelope) -> {
+    TyOpaque(_, _, _, args, _, axes, envelope, _) -> {
       if not valid_envelope(envelope, len(args), axes) { return Projection { ..out, known = false } }
       out = atoms(argument_support(axes))
       children = args
@@ -141,9 +141,9 @@ fn project(adts: Adts, working: Map[Int, capture.Summary], params: capture.Param
       if not reachable { out = join(out, atoms(capture.trait_support(application)))
         children = [subject] }
     }
-    TyList(inner) | TySet(inner) | TyArray(inner) -> { children = [inner] }
-    TyMap(key, inner) -> { children = [key, inner] }
-    TyTuple(values) -> { children = values }
+    TyList(inner, _) | TySet(inner, _) | TyArray(inner, _) -> { children = [inner] }
+    TyMap(key, inner, _) -> { children = [key, inner] }
+    TyTuple(values, _) -> { children = values }
     _ -> ()
   }
   for child in children { out = join(out, project(adts, working, params, formals, child, reachable, effect_formals)) }
@@ -171,8 +171,8 @@ fn references(value: Ty, out: List[Int]) -> List[Int] = {
   var found = out
   var children = type_args_of(value)
   match value {
-    TyAdt(id, _, _) -> { found = positions(found, [id]) }
-    TyFn(ps, ret, _, _) -> { children = ps ++ [ret] }
+    TyAdt(id, _, _, _) -> { found = positions(found, [id]) }
+    TyFn(ps, ret, _, _, _) -> { children = ps ++ [ret] }
     TyCaptured(inner, _) -> { children = [inner] }
     _ -> ()
   }
@@ -336,7 +336,7 @@ pub fn assume_support(params: capture.Params, subject: Ty, upper: capture.Captur
     }
     _ -> {
       let children = match subject {
-        TyFn(ps, ret, _, _) -> ps ++ [ret]
+        TyFn(ps, ret, _, _, _) -> ps ++ [ret]
         TyCaptured(inner, _) | TyAssoc(inner, _, _, _) -> [inner]
         _ -> type_args_of(subject)
       }
@@ -397,15 +397,15 @@ pub fn valid_summary(info: AdtI) -> Bool = match info.capture_summary {
 pub fn valid_type(adts: Adts, value: Ty) -> Bool = {
   var children = type_args_of(value)
   match value {
-    TyOpaque(_, _, _, args, _, axes, envelope) ->
+    TyOpaque(_, _, _, args, _, axes, envelope, _) ->
       if not valid_envelope(envelope, len(args), axes) { return false }
-    TyAdt(id, args, axes) -> match map.get(adts, id) {
+    TyAdt(id, args, axes, _) -> match map.get(adts, id) {
       Some(info) -> if not valid_summary(info) || len(args) != len(info.tparams) ||
         len(axes.scopes) != len(info.scope_params.scopes) ||
         len(axes.captures) != len(info.scope_params.captures) { return false }
       None -> return false
     }
-    TyFn(ps, ret, _, _) -> { children = ps ++ [ret] }
+    TyFn(ps, ret, _, _, _) -> { children = ps ++ [ret] }
     TyCaptured(inner, _) | TyAssoc(inner, _, _, _) -> { children = [inner] }
     _ -> ()
   }
@@ -431,26 +431,26 @@ test "data summaries distinguish phantom support from reachable values" {
   let adts = settle(map.from([(1, test_info(1, [t], [TyInt], axes)),
     (2, test_info(2, [t], [t], axes))]))
   let region = Scope { name = "s", id = 90 }
-  let phantom = TyAdt(1, [TyI64Buf(region)], capture.empty_arguments())
-  let box = TyAdt(2, [TyI64Buf(region)], capture.empty_arguments())
+  let phantom = ty_adt(1, [TyI64Buf(region)], capture.empty_arguments())
+  let box = ty_adt(2, [TyI64Buf(region)], capture.empty_arguments())
   assert value_bound(adts, capture.empty_params(), phantom) == Some([])
   assert support_bound(adts, capture.empty_params(), phantom) == Some([Region(region)])
   assert value_bound(adts, capture.empty_params(), box) == Some([Region(region)])
   assert not permits(adts, axes, t, [])
-  assert permits(adts, axes, TyAdt(1, [t], capture.empty_arguments()), [])
+  assert permits(adts, axes, ty_adt(1, [t], capture.empty_arguments()), [])
   assert len(axes.captures) == 0
   assert capture.representation_types(capture.introduction(axes)) == [11]
 }
 
 test "function fields separate empty environments from parameter and row support" {
   let region = Scope { name = "s", id = 90 }
-  let function = TyFn([TyI64Buf(region)], TyUnit, EPure, capture.empty_function())
+  let function = ty_fn([TyI64Buf(region)], TyUnit, EPure, capture.empty_function())
   let adts = settle(map.from([(1, test_info(1, [], [function], capture.empty_params()))]))
-  let value = TyAdt(1, [], capture.empty_arguments())
+  let value = ty_adt(1, [], capture.empty_arguments())
   assert value_bound(adts, capture.empty_params(), value) == Some([])
   assert support_bound(adts, capture.empty_params(), value) == Some([Region(region)])
   let row = scoped_eff(EPure, [ScopedEffect { id = 12, name = "Read", scope = region }])
-  let latent = TyFn([], TyInt, row, capture.empty_function())
+  let latent = ty_fn([], TyInt, row, capture.empty_function())
   assert value_bound(adts, capture.empty_params(), latent) == Some([])
   assert support_bound(adts, capture.empty_params(), latent) == Some([Region(region)])
 }
@@ -462,9 +462,9 @@ test "mutual summaries retain growing arguments through their least fixed point"
   let r = Scope { name = "r", id = 32 }
   let left = capture.data_params(Params { ..capture.empty_params(), scopes = [s] }, [11])
   let right = capture.data_params(Params { ..capture.empty_params(), scopes = [r] }, [12])
-  let child = TyAdt(2, [TyList(t)], Arguments { scopes = [s], captures = [] })
-  let callback = TyFn([], TyInt, EPure, Function { scopes = [], bound = Some([Region(r)]) })
-  let back = TyAdt(1, [callback], Arguments { scopes = [r], captures = [] })
+  let child = ty_adt(2, [ty_list(t)], Arguments { scopes = [s], captures = [] })
+  let callback = ty_fn([], TyInt, EPure, Function { scopes = [], bound = Some([Region(r)]) })
+  let back = ty_adt(1, [callback], Arguments { scopes = [r], captures = [] })
   let a = test_info(1, [t], [child], left)
   let b = test_info(2, [u], [u, back], right)
   let adts = settle(map.from([(1, a), (2, b)]))
@@ -476,13 +476,13 @@ test "mutual summaries retain growing arguments through their least fixed point"
   assert summary.value_parameters == [0]
   assert summary.value == [Region(s)]
   let actual = Scope { name = "actual", id = 90 }
-  let value = TyAdt(1, [TyInt], Arguments { scopes = [actual], captures = [] })
+  let value = ty_adt(1, [TyInt], Arguments { scopes = [actual], captures = [] })
   assert value_bound(adts, capture.empty_params(), value) == Some([Region(actual)])
 }
 
 test "a missing nominal summary remains unknown rather than empty" {
   let raw = map.from([(1, test_info(1, [], [TyInt], capture.empty_params()))])
-  let value = TyAdt(1, [], capture.empty_arguments())
+  let value = ty_adt(1, [], capture.empty_arguments())
   assert value_bound(raw, capture.empty_params(), value) == None
   assert not permits(raw, capture.empty_params(), value, [])
   assert value_bound(settle(raw), capture.empty_params(), value) == Some([])
@@ -490,25 +490,25 @@ test "a missing nominal summary remains unknown rather than empty" {
 
 test "opaque value contracts use the public head instead of its hidden target" {
   let region = Scope { name = "s", id = 90 }
-  let hidden = TyFn([], TyInt, EPure, Function { scopes = [], bound = Some([Region(region)]) })
-  let value = TyOpaque(1, "Marker", "owner", [TyInt], hidden, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
+  let hidden = ty_fn([], TyInt, EPure, Function { scopes = [], bound = Some([Region(region)]) })
+  let value = ty_opaque(1, "Marker", "owner", [TyInt], hidden, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
   let empty: Adts = map.empty()
   assert value_bound(empty, capture.empty_params(), value) == Some([])
-  let parameter = TyOpaque(1, "Hidden", "owner", [TyI64Buf(region)], TyInt, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
+  let parameter = ty_opaque(1, "Hidden", "owner", [TyI64Buf(region)], TyInt, capture.empty_arguments(), capture.opaque_head(1, 0, 0))
   assert value_bound(empty, capture.empty_params(), parameter) == Some([Region(region)])
-  let missing = TyOpaque(1, "Hidden", "owner", [TyInt], TyInt, capture.empty_arguments(), None)
+  let missing = ty_opaque(1, "Hidden", "owner", [TyInt], TyInt, capture.empty_arguments(), None)
   assert value_bound(empty, capture.empty_params(), missing) == None
   assert not valid_envelope(capture.opaque_head(0, 1, 0), 0, capture.empty_arguments())
 }
 
 test "local solving does not reconstruct an imported opaque representation" {
   let hidden = AdtI { ..test_info(1, [], [], capture.empty_params()), owner = Some("producer") }
-  let opaque = TyOpaque(2, "Hidden", "producer", [], TyAdt(1, [], capture.empty_arguments()),
+  let opaque = ty_opaque(2, "Hidden", "producer", [], ty_adt(1, [], capture.empty_arguments()),
     capture.empty_arguments(), capture.opaque_head(0, 0, 0))
   let local = AdtI { ..test_info(3, [], [opaque], capture.empty_params()), owner = Some("consumer") }
   let result = settle_owned(map.from([(1, hidden), (3, local)]), Some("consumer"))
   assert map.get(result, 1).expect("hidden").capture_summary == None
-  assert value_bound(result, capture.empty_params(), TyAdt(3, [], capture.empty_arguments())) == Some([])
+  assert value_bound(result, capture.empty_params(), ty_adt(3, [], capture.empty_arguments())) == Some([])
 }
 
 test "ordinary value bounds cannot prove complete support without a witness premise" {
@@ -525,13 +525,13 @@ test "ordinary value bounds cannot prove complete support without a witness prem
   let s = Scope { name = "s", id = 13 }
   let phantom = test_info(1, [t], [TyInt], declaration_params(capture.empty_params(), [t]))
   let adts = settle(map.from([(1, phantom)]))
-  assert support_bound(adts, params, TyAdt(1, [TyI64Buf(s)], capture.empty_arguments())) == Some([Region(s)])
+  assert support_bound(adts, params, ty_adt(1, [TyI64Buf(s)], capture.empty_arguments())) == Some([Region(s)])
 }
 
 test "an abstract calling row is not a complete support proof" {
   let empty: Adts = map.empty()
   let row = EffVar("e", 7)
-  let value = TyFn([], TyInt, row, capture.empty_function())
+  let value = ty_fn([], TyInt, row, capture.empty_function())
   let params = Params { ..capture.empty_params(), fn_effects = [7] }
   assert value_bound(empty, params, value) == Some([])
   assert support_bound(empty, params, value) == None
@@ -540,10 +540,10 @@ test "an abstract calling row is not a complete support proof" {
 }
 
 test "unresolved data dependencies are refused without publishing a lower bound" {
-  let info = test_info(1, [], [TyAdt(2, [], capture.empty_arguments())], capture.empty_params())
+  let info = test_info(1, [], [ty_adt(2, [], capture.empty_arguments())], capture.empty_params())
   let resolved = settle(map.from([(1, info)]))
   assert map.get(resolved, 1).expect("data").capture_summary == None
-  assert value_bound(resolved, capture.empty_params(), TyAdt(1, [], capture.empty_arguments())) == None
+  assert value_bound(resolved, capture.empty_params(), ty_adt(1, [], capture.empty_arguments())) == None
 }
 
 test "opaque definitions prove both components against their public head" {
@@ -552,8 +552,8 @@ test "opaque definitions prove both components against their public head" {
   let absent = Scope { name = "other", id = 13 }
   let params = declaration_params(Params { ..capture.empty_params(), scopes = [s] }, [t])
   let adts = settle(map.from([(1, test_info(1, [t], [t], params))]))
-  assert opaque_representation_permits(adts, params, [t], [], TyAdt(1, [t], Arguments { scopes = [s], captures = [] }))
-  assert opaque_representation_permits(adts, params, [t], [], TyFn([t], TyInt, EPure, capture.empty_function()))
+  assert opaque_representation_permits(adts, params, [t], [], ty_adt(1, [t], Arguments { scopes = [s], captures = [] }))
+  assert opaque_representation_permits(adts, params, [t], [], ty_fn([t], TyInt, EPure, capture.empty_function()))
   assert not opaque_representation_permits(adts, params, [t], [], TyI64Buf(absent))
   assert not opaque_representation_permits(adts, params, [t], [], TyVar("Unknown", 99))
 }
@@ -571,7 +571,7 @@ test "projection facts distinguish modes premises and declaration revisions for 
   assert support_bound(empty, ordinary, t) == None
   let representation = declaration_params(capture.empty_params(), [t])
   assert value_bound(empty, representation, t) == None
-  let application = TyAdt(1, [TyI64Buf(s)], capture.empty_arguments())
+  let application = ty_adt(1, [TyI64Buf(s)], capture.empty_arguments())
   assert value_bound(empty, ordinary, application) == None
   let pending = map.from([(1, test_info(1, [t], [TyInt], representation))])
   assert value_bound(pending, ordinary, application) == None

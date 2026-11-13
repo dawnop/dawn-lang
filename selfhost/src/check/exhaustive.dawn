@@ -4,12 +4,12 @@
 # to SPat rows — Kotlin's `SLit(value: Any)` becomes the LitV sum here, and a
 # constructor is identified by (adt id, ctor index) against the ADT table.
 
-use std/list
-use std/map
-use check/types.{
+use check/types.{ty_list, ty_tuple,
   Ty, TyVar, TyAdt, TyTuple, TyList, TyBool, TyInt, TyString, TyError,
   Adts, CtorI, adt_of, subst, Eff, prelude_adts, OPTION_ID, opt_ty
 }
+use std/list
+use std/map
 
 pub type LitV =
   | LInt(v: Int)
@@ -79,7 +79,7 @@ fn inst_fields(adts: Adts, adt: Int, ci: Int, column: Ty) -> List[Ty] = {
   let c = a.ctors[ci]
   let field_tys = map(c.fields, f => f.ty)
   match column {
-    TyAdt(_, targs, _) ->
+    TyAdt(_, targs, _, _) ->
       if len(a.tparams) == 0 {
         field_tys
       } else {
@@ -171,7 +171,7 @@ fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
         if has_true && has_false { return SWild }
       }
       match column {
-        TyAdt(adt, _, _) -> if complete_ctor_alts(adts, flat, adt) { return SWild }
+        TyAdt(adt, _, _, _) -> if complete_ctor_alts(adts, flat, adt) { return SWild }
         _ -> ()
       }
       if len(flat) == 1 { flat[0] } else { SOr(flat) }
@@ -189,7 +189,7 @@ fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
         index = index + 1
       }
       match column {
-        TyAdt(found_adt, _, _) ->
+        TyAdt(found_adt, _, _, _) ->
           if found_adt == adt && len(adt_of(adts, adt).ctors) == 1 && all_wild(simplified) {
             SWild
           } else {
@@ -200,7 +200,7 @@ fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
     }
     STuple(subs) -> {
       let elem_tys = match column {
-        TyTuple(found) -> found
+        TyTuple(found, _) -> found
         _ -> err_tys(len(subs))
       }
       var simplified: List[SPat] = []
@@ -214,13 +214,13 @@ fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
         index = index + 1
       }
       match column {
-        TyTuple(_) -> if all_wild(simplified) { SWild } else { STuple(simplified) }
+        TyTuple(_, _) -> if all_wild(simplified) { SWild } else { STuple(simplified) }
         _ -> STuple(simplified)
       }
     }
     SList(pre, has_rest, post) -> {
       let elem_ty = match column {
-        TyList(found) -> found
+        TyList(found, _) -> found
         _ -> TyError
       }
       let simplified_pre = map(pre, sub => simplify_pat(adts, sub, elem_ty))
@@ -315,7 +315,7 @@ fn useful_go(
     SLit(value) -> useful_go(adts, spec_lit(expanded, value), rest_q, rest_t, left0)
     STuple(subs) -> {
       let elem_tys = match column {
-        TyTuple(elems) -> if len(elems) == 0 { err_tys(len(subs)) } else { elems }
+        TyTuple(elems, _) -> if len(elems) == 0 { err_tys(len(subs)) } else { elems }
         _ -> err_tys(len(subs))
       }
       useful_go(adts, spec_tuple(expanded, len(subs)), subs ++ rest_q,
@@ -323,7 +323,7 @@ fn useful_go(
     }
     SList(pre, has_rest, post) -> {
       let elem = match column {
-        TyList(found) -> found
+        TyList(found, _) -> found
         _ -> TyError
       }
       if not has_rest {
@@ -352,7 +352,7 @@ fn useful_go(
     }
     SWild -> {
       match column {
-        TyList(elem) -> {
+        TyList(elem, _) -> {
           let bound = list_len_bound(expanded, None)
           var left = left0
           var length = 0
@@ -369,10 +369,10 @@ fn useful_go(
           }
           return (left, Some(false))
         }
-        TyTuple(elems) ->
+        TyTuple(elems, _) ->
           return useful_go(adts, spec_tuple(expanded, len(elems)),
             wilds(len(elems)) ++ rest_q, elems ++ rest_t, left0)
-        TyAdt(aid, _, _) -> {
+        TyAdt(aid, _, _, _) -> {
           let adt = adt_of(adts, aid)
           if heads_complete(expanded, aid, len(adt.ctors)) {
             var left = left0
@@ -590,13 +590,13 @@ test "or-patterns stay structured through constructors, tuples, and lists" {
   assert not useful(adts, [option_row], [SWild], [opt_ty(TyBool)])
 
   let tuple_row = [STuple([bools, SWild])]
-  assert not useful(adts, [tuple_row], [SWild], [TyTuple([TyBool, TyString])])
+  assert not useful(adts, [tuple_row], [SWild], [ty_tuple([TyBool, TyString])])
 
   let list_row = [SOr([
     SList([], false, []),
     SList([SWild], true, [])
   ])]
-  assert not useful(adts, [list_row], [SWild], [TyList(TyInt)])
+  assert not useful(adts, [list_row], [SWild], [ty_list(TyInt)])
 }
 
 test "complete boolean alternatives normalize before recursive expansion" {
@@ -605,7 +605,7 @@ test "complete boolean alternatives normalize before recursive expansion" {
   var elems: List[SPat] = []
   for _i in 0..24 { elems = elems ++ [bools] }
   let rows = [[SList(elems, false, [])], [SWild]]
-  assert useful_result(adts, rows, [SWild], [TyList(TyBool)]) == Some(false)
+  assert useful_result(adts, rows, [SWild], [ty_list(TyBool)]) == Some(false)
 }
 
 test "pathological alternatives exhaust the deterministic work budget" {
@@ -621,7 +621,7 @@ test "pathological alternatives exhaust the deterministic work budget" {
     elems = elems ++ [branch]
     types_ = types_ ++ [opt_ty(TyBool)]
   }
-  assert useful_result(adts, [[STuple(elems)]], [SWild], [TyTuple(types_)]) == None
+  assert useful_result(adts, [[STuple(elems)]], [SWild], [ty_tuple(types_)]) == None
 }
 
 test "int literals are never complete" {
@@ -634,15 +634,15 @@ test "list patterns probe lengths" {
   let adts = prelude_adts()
   # [] and [x, ..rest] together are exhaustive
   let rows = [[SList([], false, [])], [SList([SWild], true, [])]]
-  assert not useful(adts, rows, [SWild], [TyList(TyInt)])
+  assert not useful(adts, rows, [SWild], [ty_list(TyInt)])
   # [] and [x] leave two-element lists uncovered
   let rows2 = [[SList([], false, [])], [SList([SWild], false, [])]]
-  assert useful(adts, rows2, [SWild], [TyList(TyInt)])
-  assert missing_list_patterns(adts, rows2, TyList(TyInt)) == ["[_, _, ..]"]
+  assert useful(adts, rows2, [SWild], [ty_list(TyInt)])
+  assert missing_list_patterns(adts, rows2, ty_list(TyInt)) == ["[_, _, ..]"]
 }
 
 test "tuples decompose into their elements" {
   let adts = prelude_adts()
   let rows = [[STuple([SLit(LBool(true)), SWild])], [STuple([SLit(LBool(false)), SWild])]]
-  assert not useful(adts, rows, [SWild], [TyTuple([TyBool, TyString])])
+  assert not useful(adts, rows, [SWild], [ty_tuple([TyBool, TyString])])
 }
