@@ -1745,10 +1745,11 @@ fn sentinels(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
     s("5")
     let v = load(x, k, [8])
     s("6")
-    let w = d_scan(v, 0.0, (a, e) => {
-      s("7")
+    let w = d_scan(v, 0.0 - 1.0 / 0.0, (a, e) => {
+      # Sentinels inside a combiner need body-local rank-0 conditions.
+      d_assert(lt(a, a), "@@7")
       let r = max(a, e)
-      s("8")
+      d_assert(lt(r, r), "@@8")
       r
     })
     s("9")
@@ -1796,8 +1797,8 @@ test "the map agrees with sentinels: every line is the call that ran between the
   })
   # the constant is made where it is first used, by the broadcast, so the
   # `f_const` call has no line of its own
-  assert slots == [["head", "broadcast", "lt"], ["idx_const"], ["load"], ["idx_const"], ["d_range"], ["load"], ["d_scan"],
-    ["max"], ["d_scan"], ["add"], ["d_range"], ["store"], ["tail"]]
+  assert slots == [["head", "broadcast", "lt"], ["idx_const"], ["load"], ["idx_const"], ["d_range"], ["load"], ["d_scan", "lt"],
+    ["max", "lt"], ["d_scan"], ["add"], ["d_range"], ["store"], ["tail"]]
 }
 
 fn tabled(x: Param[Float], out: Param[Float]) -> Unit !Dev = {

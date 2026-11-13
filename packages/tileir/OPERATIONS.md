@@ -416,6 +416,7 @@ Pure functions with no operation of their own: they build the attribute values t
 | `ftof_modes` | - | - |
 | `mma_accumulators` | - | - |
 | `op_count` | - | - |
+| `combiner_issue` | - | - |
 | `defined` | - | - |
 | `defined_inside` | - | - |
 

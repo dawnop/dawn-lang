@@ -994,11 +994,39 @@ oracle 判定；不把显式两次舍入融合为一次，也不接入新的生�
 | loop/for 携带 load tile，下一次 load 早于最后使用 | 涉及 loop/load；当前 FA/GEMM carry 为累加器与 softmax 状态，K/V 原始 load tile 不跨迭代携带。未证明任意 load-carry 程序安全，#558 修复不代表此问题修复。 |
 | 全局 TF32 的低 13 尾数位非零，再转 F32 | API 可表达；现有上传 packer 先舍入并清零低位，dtype 语料存储分支转 F64，FA 用 BF16/F32。外部 dirty TF32 缓冲仍有风险。 |
 | view 单维至少 2^31 的 TMA signedness | 涉及 view/TMA；现有小形状、静态几何和 Idx 检查保留，不能覆盖所有动态 int64 view。未来大维消费者须限制维度或禁用对应 load/store 的 TMA。 |
-| scan/reduce 捕获外部 SSA、非标量中间值或嵌套 region | 涉及归约/scan；FA combiner 为标量 add/max，录制器只拒绝部分复杂 region，不声称全面禁止 captures。保留泛化风险。 |
+| scan/reduce 捕获外部 SSA、非标量中间值或嵌套 region | 涉及归约/scan；FA combiner 为标量 add/max。0.32.0 按 §6.0.1 拒绝三类风险 body，原有内存和循环拒绝保留。 |
 | 浮点 atomic add 冲掉 subnormal | 原语在用，当前数值语料以正常数和整数导出值为主；不将 FTZ 固化为语言合同。 |
 | [5795304] tensor-map 地址更新与 TMA OOB 模式组合 | 13.5 已修；Dawn 使用 TMA，但不直接发 tensormap.replace，尚无当前路径命中该组合的反例。 |
 | [6713855] 跨基本块 stmatrix 寄存器使用配 PTXAS -g 崩溃 | 13.5 已修；Dawn 的 debug golden 使用 tileirdisasm -g，不强制 PTXAS -g，不能把 debug 元数据等同于该触发组合。 |
 | fabric try_atom、CFT/MPS、NVENC 与外部 CUDA 库问题 | 当前无对应 API 或调用，不属于本次自有 Tile kernel 的资格范围。 |
+
+### 6.0.1 reduce/scan 的 13.5.37 支持合同
+
+固定工具 13.5.37 的 [已知问题](https://docs.nvidia.com/cuda/tile-ir/13.5/sections/release_notes.html#known-issues)
+指出，reduce/scan body 捕获外层 SSA、使用非标量中间 tile 或嵌套带 region
+的操作可能错编。实施前的最小夹具已通过现有 `d_reduce`、`d_scan` 录制并降低：
+入口 i32 标量参与条件选择、标量经 `[1]` reshape 后相加再还原、纯条件两臂
+分别计算 `a+b` 和 `b+a`。三者均为 i32 模加，identity 为 0，结合且交换；
+不以错误 identity 造反例，也不在设备执行这些已知风险形状。
+
+这是 tileir 0.32.0 对工具能力的支持收窄，不是 Tile IR 语言规范的禁止。
+录制结束时检查 body 的实际 SSA 依赖与形状，拒绝上述三类，并给出 kernel、
+操作编号、reduce/scan region 与调用位置；lowering 复用同一合同，覆盖手造
+`TileProg`，并给出降低调用位置和 region。判据不检查宿主 closure 类型，
+不全局禁止 `if`：外层条件中的合法归约仍支持，body 内延迟物化的常量
+属于 body 的局部 SSA，继续支持。`[1]` 有一个 lane 但不是 rank 0，也拒绝。
+入口参数在 body 内通过 `scalar` 重新读取仍是外部 SSA，不等同于重新物化常量。
+
+原有内存及循环拒绝保留，不为已拒绝路径重复增加能力检查。普通
+`reduce_sum/max/min`、`scan_sum`、argmax、线性递推和 segmented scan 的
+标量 body 保持；关联性、reduce 的交换性与正确 identity 仍由调用方负责。
+检查不能证明这些代数性质，也不改变浮点容差或整数回绕语义。
+
+不升级 wire、工具 pin 或驱动，不提供版本 fallback，不扩展其它已知问题的
+处理范围。assembler 接受不能证明风险形状安全，现有数值语料通过也不能
+解除限制。只有上游明确修复相应问题，并对新的固定工具另做独立资格、
+合法/非法边界、文本与 bytes、解释器及设备数值验证后，才另行放开支持域；
+不得只改版本判断绕过合同。
 
 ### 6.1 `tileiras`：能进 CI，钉法照 wasi-sdk（刀 3 实测）
 

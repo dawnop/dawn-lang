@@ -710,6 +710,7 @@ mutants=(
   entry6-n-constant entry6-view-capacity entry6-loop-floor entry6-unmarked entry6-sixth-as-pointer entry6-erase-projection
   read-layout-type-rejections read-group-axis read-group-zero read-group-div2 read-group-shift read-n-constant read-loop-floor read-view-capacity read-live-stride read-no-mask
   scaled-mma-combinations
+  combiner-contract-checks combiner-capture-check-dropped combiner-rank-check-dropped combiner-region-check-dropped
   dynamic-geometry-checks dynamic-extent-check-dropped dynamic-suffix-check-dropped dynamic-metadata-limited-to-i32
   idx-bounds-checks
   idx-check-dropped
@@ -3616,6 +3617,49 @@ if run_item scaled-mma-combinations; then
   python3 "$here/scaled-combinations.py" "${scaled_args[@]}" || fail "scaled MMA combination matrix"
 fi
 
+
+# Every body contract control runs after successful builds on both backends.
+# Only the owning red group may fail when one shared check is removed.
+combiner_contract_checks() { # item, expected red group (empty for clean)
+  local m="$1" red="$2" tree="$work/combiner-$1" backend out rc
+  mkdir -p "$tree/packages"
+  fork_pkg "$tree/packages/tileir"
+  if [ -n "$red" ]; then python3 "$here/mutate.py" "$m" "$tree"; fi
+  project "$tree/probe" "$tree/packages/tileir"
+  cp "$here/combiner-contract.dawn" "$tree/probe/src/main.dawn"
+  build_native "$tree/probe" "$tree/probe.bin" -O0
+  for backend in jvm native; do
+    out="$tree/$backend.out"
+    rc=0
+    if [ "$backend" = jvm ]; then run_jvm "$tree/probe" "$out" || rc=$?
+    else run_native "$tree/probe.bin" "$out" || rc=$?; fi
+    if [ -z "$red" ]; then
+      [ "$rc" = 0 ] || { cat "$out" "$out.err" >&2; fail "$m: clean $backend checks failed"; }
+    else
+      [ "$rc" = 1 ] && grep -Fq 'combiner contract assertions failed' "$out.err" ||
+        fail "$m: expected assertions after successful $backend build"
+    fi
+    python3 - "$out" "$red" <<'COMBINER' || fail "$m: wrong owning assertions on $backend"
+from pathlib import Path
+import sys
+lines = Path(sys.argv[1]).read_text().splitlines()
+red = {sys.argv[2]} if sys.argv[2] else set()
+failed = [line for line in lines if line.startswith('FAIL combiner ')]
+assert len(lines) == 4 and len(failed) == len(red), lines
+assert {line.split(':', 1)[0].removeprefix('FAIL combiner ') for line in failed} == red, lines
+assert {line.removeprefix('PASS combiner ') for line in lines if line.startswith('PASS combiner ')} == {'capture', 'rank', 'region', 'positive'} - red, lines
+if red:
+    assert all('accepted' in line for line in failed), failed
+COMBINER
+  done
+  cmp -s "$tree/jvm.out" "$tree/native.out" || fail "$m: backend verdicts differ"
+  cat "$tree/jvm.out"
+  echo "PASS  $m (built and checked on JVM and native)"
+}
+if run_item combiner-contract-checks; then combiner_contract_checks combiner-contract-checks ""; fi
+if run_item combiner-capture-check-dropped; then combiner_contract_checks combiner-capture-check-dropped capture; fi
+if run_item combiner-rank-check-dropped; then combiner_contract_checks combiner-rank-check-dropped rank; fi
+if run_item combiner-region-check-dropped; then combiner_contract_checks combiner-region-check-dropped region; fi
 
 # Runtime geometry controls compile a small producer against an isolated std.
 # The metadata-only Gpu handler never allocates backing storage or calls a driver.

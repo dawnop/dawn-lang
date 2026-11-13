@@ -37,6 +37,9 @@ LOWER = "packages/tileir/src/lower.dawn"
 KERNELS = "scripts/tile-golden/kernels.dawn"
 
 MUTATIONS = {
+    'combiner-capture-check-dropped': ((PROG, 'entry || list.any(inputs, h => not list.contains(visible, h))', 'false && (entry || list.any(inputs, h => not list.contains(visible, h)))'),),
+    'combiner-rank-check-dropped': ((PROG, 'list.any(shapes, shape => len(shape) != 0)', 'false && list.any(shapes, shape => len(shape) != 0)'),),
+    'combiner-region-check-dropped': ((PROG, 'let reason: Option[String] = if nested {', 'let reason: Option[String] = if false && nested {'),),
     'dynamic-extent-check-dropped': (('std/gpu.dawn', '  for u in uses {',
         '  for u in list.filter(uses, u => u.kind != ExtentI32) {'),),
     'dynamic-suffix-check-dropped': (('std/gpu.dawn', '  for u in uses {',

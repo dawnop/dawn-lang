@@ -51,7 +51,7 @@ use bounds.{fits_i32}
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred, DivBy, Hints, Padding, NoPadding, padding_present, padding_name}
-use prog.{TileOp, TileProg, KParam, ByPtr, ByValue, ScalarArg, Global, Alloca, MmaFScaled, Assert, Assume, Print, TokenOnly, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView, CellViewOf, ReshapeOf, BroadcastOf, DebugInfo}
+use prog.{combiner_issue, TileOp, TileProg, KParam, ByPtr, ByValue, ScalarArg, Global, Alloca, MmaFScaled, Assert, Assume, Print, TokenOnly, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView, CellViewOf, ReshapeOf, BroadcastOf, DebugInfo}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -581,6 +581,7 @@ fn permuted_shape(shape: List[Int], perm: List[Int]) -> List[Int] =
 # first (prog's `op_number`), which is the order this lowering visits them.
 type L = {
   kernel: String,
+  site: Loc,
   next: Int,
   names: Map[Int, Ref],
   tys: Map[Int, Ty],
@@ -1564,11 +1565,20 @@ fn yielded(body: List[Instr], what: String) -> List[Ty] = match body[len(body) -
   _ -> panic("tileir: ${what} does not end in yield, break or return")
 }
 
+# The shared recorded-SSA contract also guards programs built without a
+# recorder. The call site belongs to the caller of lower/lower_spans.
+fn check_lower_combiner(l: L, what: String, args: List[Int], body: List[TileOp]) -> Unit =
+  match combiner_issue(args, body) {
+    Some((k, reason)) -> panic("tileir: kernel `${l.kernel}`: op #${l.at} `${what}`: unsupported reduce/scan body for tileiras 13.5.37: ${reason} at body op #${k} (inside ${what} region)", at = l.site)
+    None -> ()
+  }
+
 # Lower a reduction. The operands and their types are the enclosing scope's;
 # the results are the rank-0 tiles of the same element formats, numbered
 # first (the order the text reads in), then the `2 * k` region arguments,
 # then the body. On the way out the region's scope is closed, as a loop's is.
 fn lower_reduce(l0: L, results: List[Int], dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp]) -> L = {
+  check_lower_combiner(l0, "reduce", args, body)
   if len(args) != 2 * len(operands) || len(results) != len(operands) {
     panic("tileir: a reduction over ${len(operands)} operand(s) names ${len(args)} region argument(s) and ${len(results)} result(s)")
   } else {
@@ -1602,6 +1612,7 @@ fn lower_reduce(l0: L, results: List[Int], dim: Int, shape: List[Int], identitie
 # types ARE the operands' types rather than the operands' types with `dim`
 # dropped.
 fn lower_scan(l0: L, results: List[Int], dim: Int, reverse: Bool, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp]) -> L = {
+  check_lower_combiner(l0, "scan", args, body)
   if len(args) != 2 * len(operands) || len(results) != len(operands) {
     panic("tileir: a scan over ${len(operands)} operand(s) names ${len(args)} region argument(s) and ${len(results)} result(s)")
   } else {
@@ -1662,8 +1673,8 @@ fn lower_if(l0: L, results: List[Int], cond: Int, on_true: List[TileOp], on_fals
 ## preceded by the pointer ladder it needs, `Ret` last. A handle no earlier
 ## operation defined, or one a finished loop body defined, is refused rather
 ## than numbered.
-pub fn lower(prog: TileProg) -> Kernel = {
-  let (k, _spans) = lower_spans(prog)
+pub fn lower(prog: TileProg, at: Loc = caller()) -> Kernel = {
+  let (k, _spans) = lower_spans(prog, at = at)
   k
 }
 
@@ -1672,8 +1683,8 @@ pub fn lower(prog: TileProg) -> Kernel = {
 ## no operation issued, nested the way the instructions are. This is the same
 ## loop `lower` runs, not a second one, so the table and the instructions
 ## cannot disagree.
-pub fn lower_spans(prog: TileProg) -> (Kernel, List[Owner]) = {
-  var l = L { kernel = prog.name, next = 0, names = map.empty(), tys = map.empty(), closed = map.empty(), memo = map.empty(), body = [],
+pub fn lower_spans(prog: TileProg, at: Loc = caller()) -> (Kernel, List[Owner]) = {
+  var l = L { kernel = prog.name, site = at, next = 0, names = map.empty(), tys = map.empty(), closed = map.empty(), memo = map.empty(), body = [],
     owners = [], at = 0, next_op = 0 }
   for op in prog.ops {
     l = lower_op(l, op)
