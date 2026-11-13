@@ -325,7 +325,7 @@ GraalVM `native-image` 打包，`use java` 仍可用。安装后的 `dawn` 经 C
 
 ## 状态
 
-当前工具链 0.104.0，M0–M8 已实现。此后的主线（C 后端与 native 自举、Perceus、trait v2、
+当前工具链 0.105.0，M0–M8 已实现。此后的主线（C 后端与 native 自举、Perceus、trait v2、
 效果处理器、包管理，以及 [cuTile 设备后端](docs/tile-backend-design.md)）落地记录在
 `docs/` 各自的设计文档里，[docs/history.md](docs/history.md) 按时间把它们一条一条列出来。
 
