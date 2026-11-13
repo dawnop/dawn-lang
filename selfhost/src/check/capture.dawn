@@ -86,7 +86,8 @@ pub fn arguments(p: Params) -> Arguments = Arguments { scopes = p.scopes,
   captures = map(p.captures, c => [CaptureVar(c.name, c.id)]) }
 
 pub fn arguments_subst(a: Arguments, sm: Map[Int, Scope], cm: Map[Int, Capture]) -> Arguments =
-  Arguments { scopes = map(a.scopes, s => scope_subst(s, sm)), captures = map(a.captures, c => subst(c, sm, cm)) }
+  if len(a.scopes) == 0 && len(a.captures) == 0 { a } else {
+    Arguments { scopes = map(a.scopes, s => scope_subst(s, sm)), captures = map(a.captures, c => subst(c, sm, cm)) } }
 
 pub fn arguments_equal(a: Arguments, b: Arguments) -> Bool = {
   if len(a.scopes) != len(b.scopes) || len(a.captures) != len(b.captures) { return false }
@@ -158,7 +159,8 @@ pub fn normalize(c: Capture) -> Capture = {
   })
 }
 
-pub fn union(a: Capture, b: Capture) -> Capture = normalize(a ++ b)
+pub fn union(a: Capture, b: Capture) -> Capture =
+  if len(a) == 0 { normalize(b) } else if len(b) == 0 { normalize(a) } else { normalize(a ++ b) }
 pub fn subset(a: Capture, b: Capture) -> Bool = list.all(a, x => contains(b, x))
 pub fn equal(a: Capture, b: Capture) -> Bool = subset(a, b) && subset(b, a)
 
@@ -190,7 +192,9 @@ fn subset_step(a: Capture, b: Capture, params: List[CaptureParam], seen: List[In
   true
 }
 
-pub fn bound(f: Function) -> Capture = match f.bound { Some(c) -> c, None -> [] }
+# Capture lists are immutable, so an empty result can cross checker frames.
+const EMPTY_CAPTURE: Capture = []
+pub fn bound(f: Function) -> Capture = match f.bound { Some(c) -> c, None -> EMPTY_CAPTURE }
 
 pub fn show(c: Capture) -> String = {
   let names = map(normalize(c), x => match x {
@@ -206,6 +210,7 @@ pub fn scope_subst(s: Scope, sm: Map[Int, Scope]) -> Scope =
 ## Substitution is simultaneous: replacement sets are not recursively
 ## expanded, so mutually named bounds cannot make this operation diverge.
 pub fn subst(c: Capture, sm: Map[Int, Scope], cm: Map[Int, Capture]) -> Capture = {
+  if len(c) == 0 { return c }
   var out: Capture = []
   for m in c {
     match m {
@@ -244,4 +249,44 @@ test "capture inclusion follows upper bounds without treating cycles as empty" {
     CaptureParam { name = "d", id = 3, bound = Some([c]) }]
   assert not subset_in([c], [], cycle)
   assert subset_in([c], [d], cycle)
+}
+
+test "empty capture reuse preserves aliases and canonical diagnostic spelling" {
+  let s = Region(Scope { name = "first", id = 1 })
+  let renamed = Region(Scope { name = "alias", id = 1 })
+  let t = Region(Scope { name = "second", id = 2 })
+  let empty = bound(empty_function())
+  var extended = empty
+  extended = extended ++ [t]
+  assert empty == []
+  assert bound(empty_function()) == []
+  assert extended == [t]
+  assert bound(Function { scopes = [], bound = Some([s]) }) == [s]
+  let original = [t, s, renamed]
+  assert union(empty, original) == [s, t]
+  assert union(original, empty) == [s, t]
+  assert original == [t, s, renamed]
+  assert show(union(empty, original)) == "^{first, second}"
+}
+
+test "empty substitutions retain simultaneous replacements and unknown cycles" {
+  let s = Scope { name = "s", id = 1 }
+  let t = Scope { name = "t", id = 2 }
+  let c = CaptureVar("c", 3)
+  let d = CaptureVar("d", 4)
+  let sm = map.from([(1, t)])
+  let cm = map.from([(3, [d]), (4, [Region(s)])])
+  let empty = empty_arguments()
+  assert arguments_subst(empty, sm, cm) == empty
+  assert subst([], sm, cm) == []
+  assert subst([c, Region(s)], sm, cm) == [Region(t), d]
+  assert arguments_subst(Arguments { scopes = [s], captures = [[], [c]] }, sm, cm) ==
+    Arguments { scopes = [t], captures = [[], [d]] }
+  assert empty_arguments() == empty
+  assert map.get(cm, 3) == Some([d])
+  assert map.get(cm, 4) == Some([Region(s)])
+  let cycle = [CaptureParam { name = "c", id = 3, bound = Some([d]) },
+    CaptureParam { name = "d", id = 4, bound = Some([c]) }]
+  assert not subset_in(subst([c], sm, cm), [], cycle)
+  assert not subset_in([c], [], [CaptureParam { name = "c", id = 3, bound = None }])
 }
