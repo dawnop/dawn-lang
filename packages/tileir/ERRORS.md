@@ -174,17 +174,17 @@ a Free storage dimension; its length must be a rank-0 i32. Dynamic length
 bounds remain the caller's host precondition. A ReadView passed to store_view
 is a compiler type error, independently of recorder In write protection.
 
-## Reduce and scan bodies with tileiras 13.5.37
+## tileiras 13.5.37 的 reduce/scan body
 
-`unsupported reduce/scan body for tileiras 13.5.37` is a recording or lowering
-refusal. It names the kernel, body operation, enclosing reduce/scan region and
-call site, including when lowering a hand-built `TileProg`.
+`unsupported reduce/scan body for tileiras 13.5.37` 表示录制或 lowering 拒绝。
+诊断包含 kernel、body 操作、所属 reduce/scan region 与调用位置；
+手造 `TileProg` 的 lowering 也会检查。
 
-| Fragment | Layer | Meaning | Supported form |
+| 消息片段 | 层 | 含义 | 支持的写法 |
 | --- | --- | --- | --- |
-| `outer SSA capture` | record | An operand refers to an enclosing SSA value or entry parameter, including `scalar` inside the body | Pass data through the combiner operands; materialize constants inside the body |
-| `non-scalar intermediate tile` | record | A body operation uses a tile with nonzero rank, even `[1]` | Keep every intermediate tile rank zero |
-| `nested region` | record | A body contains an operation with regions, including a pure conditional | Use scalar operations such as `select` with body-local operands |
+| `outer SSA capture` | record | 操作数引用外层 SSA 或入口参数，包括在 body 内调用 `scalar` | 通过 combiner 操作数传值；在 body 内物化常量 |
+| `non-scalar intermediate tile` | record | body 操作使用非零 rank 的 tile，`[1]` 也拒绝 | 所有中间 tile 保持 rank 0 |
+| `nested region` | record | body 含带 region 的操作，包括纯条件 | 使用 `select` 等标量操作，操作数须来自 body 内部 |
 
-These are known tool limitations, not Tile IR language prohibitions. An upstream
-fix needs separate qualification before this support contract is relaxed.
+这是工具的已知限制，不是 Tile IR 语言禁止。上游修复后仍须另做独立资格，
+才能解除相应支持限制。

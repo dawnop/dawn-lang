@@ -571,17 +571,14 @@ index arithmetic still wraps. Handwritten `entry1` to `entry6` constructors
 now require a final `List[GeometryUse]`; describe the program's automatic uses
 there, or pass `[]` when there are none. There is no older Entry representation.
 
-## Reduce and scan body support
+## reduce/scan body 的支持合同
 
-With the pinned tileiras 13.5.37, recording and lowering reject bodies that
-capture outer SSA values, create non-scalar intermediate tiles (including
-shape `[1]`), or nest region-bearing operations. Diagnostics name the kernel,
-body operation, region and call site. Hand-built `TileProg` values are checked
-when lowered as well. Constants materialized inside the body remain supported;
-ordinary conditionals outside the body remain supported.
+对固定工具 tileiras 13.5.37，录制与 lowering 拒绝捕获外层 SSA、创建非标量
+中间 tile（包括形状 `[1]`）或嵌套带 region 操作的 body。诊断包含 kernel、
+body 操作、region 与调用位置；手造的 `TileProg` 也会在 lowering 时检查。
+body 内重新物化的常量与 body 外的普通条件继续支持。
 
-This is a tool support restriction in 0.32.0, not a Tile IR language rule.
-The caller still supplies an associative body, a correct identity, and, for
-reductions, commutativity. An upstream fix requires separate qualification of
-a new fixed toolchain before lifting these restrictions. There is no fallback.
-See [the design](../../docs/tile-backend-design.md), section 6.0.1.
+这是 0.32.0 对工具能力的支持收窄，不是 Tile IR 语言规则。调用方仍须保证
+body 满足结合律、identity 正确，并在 reduce 中满足交换律。上游修复后，
+仍须对新的固定工具另做独立资格才能解除相应限制；不提供版本 fallback。
+详见[设计文档](../../docs/tile-backend-design.md) §6.0.1。
