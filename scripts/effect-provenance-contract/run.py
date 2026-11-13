@@ -10,6 +10,7 @@ import sys
 
 from builder_oracle import judge as judge_builder
 from tree_oracle import judge as judge_tree
+from native_runtime import RuntimeObject
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -21,6 +22,8 @@ class Run:
         self.out = args.out.resolve()
         self.out.mkdir(parents=True, exist_ok=True)
         self.results = []
+        self.runtime_object = (RuntimeObject(ROOT/'runtime/c', self.out, self.command)
+                               if args.reuse_runtime else None)
 
     def command(self, label, command):
         result = subprocess.run([str(x) for x in command], cwd=ROOT,
@@ -42,11 +45,15 @@ class Run:
         assert result.returncode == 0, (label, 'compile', result.stdout, result.stderr)
         if backend == 'native':
             exe = self.out/(label+'.bin')
-            result = self.command(label+'-cc', [self.args.cc, '-std=c11', '-O2',
+            prefix = [self.args.cc, '-std=c11', '-O2',
                 '-fwrapv', '-fexceptions', '-fno-strict-aliasing', '-ffp-contract=off',
-                '-pthread', '-I'+str(ROOT/'runtime/c'), target,
-                ROOT/'runtime/c/dawn_rt.c', '-lm', '-o', exe])
+                '-pthread', '-I'+str(ROOT/'runtime/c')]
+            runtime = (self.runtime_object.get(prefix) if self.runtime_object is not None
+                       else ROOT/'runtime/c/dawn_rt.c')
+            result = self.command(label+'-cc', [*prefix, target, runtime, '-lm', '-o', exe])
             assert result.returncode == 0, (label, 'C compile', result.stderr)
+            if self.runtime_object is not None:
+                self.runtime_object.confirm(prefix)
             command = [exe]
         else:
             command = [self.args.java, '-Xverify:all', '-jar', target]
@@ -89,6 +96,8 @@ def main():
     parser.add_argument('--cc', default='clang')
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--only', nargs='*')
+    parser.add_argument('--reuse-runtime', action='store_true',
+                        help='verify and reuse one runtime object within this invocation')
     args = parser.parse_args()
     args.compiler = args.compiler.resolve()
     run = Run(args)
@@ -158,7 +167,11 @@ def main():
     sources = [*HERE.rglob('*.dawn'), *HERE.glob('*.py')]
     manifest = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in sorted(sources)}
-    (run.out/'result.json').write_text(json.dumps({'cases': run.results, 'inputs': manifest}, indent=2)+'\n')
+    result = {'cases': run.results, 'inputs': manifest}
+    if run.runtime_object is not None:
+        result['runtime_object'] = run.runtime_object.metadata()
+        print('EFFECT_RUNTIME_OBJECT '+json.dumps(result['runtime_object'], sort_keys=True), flush=True)
+    (run.out/'result.json').write_text(json.dumps(result, indent=2)+'\n')
 
 
 if __name__ == '__main__':

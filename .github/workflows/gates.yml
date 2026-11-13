@@ -408,7 +408,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 40653s (the most this file's `3x` claims may add up to)
+# push-total: 41434s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -955,8 +955,11 @@ jobs:
     # hosted step timestamps before qualification handoff. They run fixed
     # fixtures only, with a 30s hard stop; no compiler or cold chain is built.
     # The existing 33-minute timeout also covers 3x the combined 660s claim.
-    # budget: 3x 660s (650s observed base plus 10s native seed controls)
-    timeout-minutes: 33
+    # Capture controls reserve 5s for fixed fixtures, 10s for shared unions
+    # and artifact dispatch, and 1s for complete family planning. Replace
+    # these provisional bounds with full paired measurements before acceptance.
+    # budget: 3x 676s provisional bound including fixture, union and planner costs
+    timeout-minutes: 34
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1005,6 +1008,24 @@ jobs:
 
       - name: native seed light structure and fixture controls
         run: python3 -B scripts/native-seed-light.py
+
+      # steps_lock.py reads gates.yml through gatesplan.py, which uses PyYAML;
+      # the other steps here use hand-rolled scanners and need nothing. The
+      # runner image does not document python3-yaml (its README lists only
+      # libyaml-dev, and yamllint is a pipx venv), so this makes the
+      # dependency explicit instead of trusting the base image: use the
+      # system module when it is there, install a pinned one when it is not.
+      # Local runs: python3-yaml 6.0.1 (Ubuntu 24.04's, Python 3.12.3, the
+      # runner's) and PyYAML 6.0.3 both pass check and selftest.
+      - name: PyYAML for the steps lock
+        run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml==6.0.3
+
+      - name: Capture scheduling and oracle fixtures
+        run: |
+          python3 -B scripts/trait-capture-contract/scheduling_test.py
+          python3 -B scripts/trait-capture-contract/controls_shards.py --self-test
+          python3 -B -m unittest discover -s scripts/effect-provenance-contract -p runtime_object_test.py
+          python3 -B scripts/sqlite-contract/scheduling_test.py
 
       # std/int/i8 .. std/int/u64 and the fixed_ints corpus are one generator's output
       # (scripts/fixed-ints/gen.py's header says why); a hand edit to one of
@@ -1081,16 +1102,6 @@ jobs:
       # therefore needs the same commit to re-record the lock, which is the
       # point: the deletion has to be said. Text only, 0.1s locally for the
       # check and 0.1s for the self-test.
-      # steps_lock.py reads gates.yml through gatesplan.py, which uses PyYAML;
-      # the other steps here use hand-rolled scanners and need nothing. The
-      # runner image does not document python3-yaml (its README lists only
-      # libyaml-dev, and yamllint is a pipx venv), so this makes the
-      # dependency explicit instead of trusting the base image: use the
-      # system module when it is there, install a pinned one when it is not.
-      # Local runs: python3-yaml 6.0.1 (Ubuntu 24.04's, Python 3.12.3, the
-      # runner's) and PyYAML 6.0.3 both pass check and selftest.
-      - name: PyYAML for the steps lock
-        run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml==6.0.3
       - name: every gate job family still carries the steps its lock records
         run: |
           python3 scripts/gates-external/steps_lock.py check
@@ -2238,44 +2249,69 @@ jobs:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-1') }}
     runs-on: ubuntu-24.04
-    # classfile 203 + ASM adapter 40 + call sites 13 +
-    # opaque twin 47 + dtoa 15 + inflate 33 + unicode 4 + array 8 +
-    # collections 6 + path 3 + JSON 8 + table freight 7 + dict owner 5 +
-    # dict shapes 32 + intrinsic parity 1 + builtin mirror 6 + error model 3
-    # = 434s, plus 50s fixed overhead = 484s.
-    # 2026-09-25: the Core IR golden step (22s and 21s in runs 36033690490
-    # and 36024756336) left this job; the diff is an on-demand tool now
-    # (docs/recorded-numbers-design.md). The budget line is left on the
-    # observed worst until new runs replace it.
-    # 2026-09-24, restated: 475s worst (run 35866197071) over its 5 successful
-    # main runs of 09-23 (gate-observations --since 2026-09-23T00:00:00Z).
-    # 2026-09-25, restated: 485s worst (run 36047155863) over the
-    # successful main runs of 09-18 .. 09-25 (gate-observations --since
-    # 2026-09-11, cut to the nightly audit's seven days).
-    # 2026-09-30, the first read of the 35-job shape: 444s worst (run
-    # 36694619992) over the 9 main runs of 09-27T18:08Z .. 09-30T09:12Z
-    # whose steps digest is this job's. A tenth over it rounds up to
-    # 490s, above the 485s claim; the claim already covers the
-    # run, so it is kept as the observed figure and not raised.
-    # 2026-10-08, the budget audit found a 489s run of this job's current
-    # steps (run 37761504402) in the main runs of 10-04 .. 10-08 (median
-    # 434s). Restated to that plus a tenth, rounded up to 5s, 540s (485s
-    # before), and the timeout to 3x that.
-    # 2026-10-19: the nightly audit (run 39236124290) found a 623s run of
-    # these steps (run 39024859369), and since 10-16 nearly every run took 550s
-    # to 578s. contracts-3 had been made the same day with one 107s step and
-    # its setup already paid, so the opaque twin (51s median, 68s worst) and
-    # Inflate (62s, 69s) steps moved there instead of this line being restated
-    # to about 700s. Replaying the 60 successful main pushes of 10-12T05:22Z ..
-    # 10-17T17:23Z without them: 398s median, 488s worst (run 39024859369),
-    # one deviation 56s; worst plus the deviation, rounded up to 5s, is 545s,
-    # and the timeout is 3x that. A planning value until three main runs of
-    # these steps exist.
-    # 2026-11-11: move effect provenance to contracts-8 and Bytes pack to
-    # contracts-7 as complete steps. Seven-day Ubuntu 24.04 first-attempt
-    # replay (11-03..10, n=15): P95/max 786s, sigma 104s; worst plus the
-    # larger of 10 percent or sigma, rounded up to 5s, is 895s.
-    # budget: 3x 895s planning value after whole-step rebalancing
+    # Complete contracts use disjoint private outputs and retain every oracle.
+    # Fresh complete executions will replace this provisional planning value.
+    # budget: 3x 925s provisional content bound for complete contract selectors
+    timeout-minutes: 47
+    steps:
+      - uses: actions/checkout@v4
+      # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The other `array_with` axis. The Array contract step (contracts-1
+      # since 2026-09-23) accumulates with `++`, so
+      # every call it counts comes from std/pvec; `map.insert` reaches the
+      # same primitive through std/hamt and the two rates move independently.
+      # They did, by 29 points, while that step measured the identical
+      # 11241/11241 on both sides. The whole script is 33s locally on a warm
+      # toolchain (66s runner-doubled), of which about 31s is the private
+      # compiler build for the keep-record-spread-source mutant. It runs in
+      # `contracts`, budgeted at 28 minutes from a 558s worst observation.
+      - name: Map reuse contract
+        run: ./scripts/map-reuse-contract/run.sh
+
+      # The tagged immediates (docs/native-immediates-design.md): an erased Int
+      # or Bool is a word with its low bit set that points at nothing, and every
+      # runtime point that reads a header or a box has to ask first. A point
+      # that forgets segfaults on a program holding an immediate and on no
+      # other, so no corpus can show it; this builds the runtime once per point
+      # with that point's question removed and requires the case that owns it
+      # to go red, in plain, inline-RC, AddressSanitizer and 31-bit builds.
+      - name: Immediates contract
+        run: ./scripts/imm-contract/run.sh
+      # The flat 64-bit buffer a backend owes std/mem. Its panic wording is a
+      # value once `catch_panic` hands it back, so both backends and the
+      # sanitized native build are held to one expected.txt, and the native
+      # accessors are checked to stay `static inline` (docs/mem-buffer-design.md).
+      # Capture propagation runs in its dedicated jobs below.
+      - name: I64Buf contract
+        run: ./scripts/mem-contract/run.sh
+
+      # JSONTestSuite as a gate, not a claim: y_ accepted + round-trips,
+      # n_ rejected, i_ only counted (scripts/json-suite.sh has the story)
+      - name: JSON suite
+        run: ./scripts/json-suite.sh
+
+      # Those tables are pruned to what a program can reach, and "can reach"
+      # has to mean what the artifact actually holds -- test blocks included,
+      # since the JVM emits them. selfhost cannot notice a shortfall here: its
+      # own non-test code uses every table.
+      - name: table freight
+        run: ./scripts/table-freight/run.sh
+      - name: Capture contracts on native
+        run: python3 scripts/trait-capture-contract/run.py --calls-backend native --jobs 4
+
+  contracts-2:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-2') }}
+    runs-on: ubuntu-24.04
+    # Complete contracts use disjoint private outputs and retain every oracle.
+    # Fresh complete executions will replace this provisional planning value.
+    # budget: 3x 885s provisional content bound for complete contract selectors
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -2286,14 +2322,42 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # TEST-01: every emitted class force-linked through the JVM verifier.
-      # The differentials prove the backends agree, never that the bytes are
-      # legal; lazy linking means a class no test touches is never verified.
-      # The thirteen compiling Never mutants that ride along in a full local
-      # run are the classfile-never-mutants job's step; the two halves
-      # partition the script's no-flag run.
-      - name: classfile verification
-        run: ./scripts/classfile-verify/run.sh --without-never-mutants
+      # The steps below were the contracts-2 job until 2026-09-11: the half
+      # that builds a private compiler or a sanitized runtime. The two halves
+      # never shared anything but the toolchain, which is why the split was
+      # free to make and is now free to undo. Redone on 2026-09-23 at a
+      # different seam: the two steps above joined this half to balance it.
+
+      # Reference counting, checked in C: `rc.dawn` decides where every dup and
+      # drop goes, and this drives the runtime half of that contract directly.
+      # The oracle is AddressSanitizer -- a drop that fails to recurse is a leak,
+      # one that recurses twice is a double free -- plus a small-stack run,
+      # because drop walks a 200k-node chain and must not do it by recursing.
+      # A fourth leg, added 2026-08-28, builds the runtime with the sanitizer
+      # *and* the slab allocator (-DDAWN_SLAB_FORCE) and reads the hand
+      # poisoning off six probe processes and two mutants of its own.
+      - name: RC contract
+        run: ./scripts/rc-contract/run.sh
+
+      # The borrowed views (selfhost/src/c/views.dawn): a local with no count of
+      # its own, read out of a borrowed parameter. The saving is a dup and a drop
+      # per projected child, and the risk is a view that outlives what it reads
+      # or one that is released though it took nothing. The probe runs under
+      # AddressSanitizer and LeakSanitizer, three functions' emitted C is held
+      # to carry no counting, and one private compiler per mutation takes away
+      # one of the things that keep a view safe, each of which has to turn the
+      # contract red. Measured 2026-10-07: 31s on four cores, six private
+      # compilers built side by side.
+      - name: RC view contract
+        run: ./scripts/rc-view-contract/run.sh
+
+      # `Display` decides the top-level rendering in place of `Show`, and the
+      # question is asked at every peel layer of an opaque stack. Two compiling
+      # mutants, one per rule: dropping the question turns both assertions red,
+      # asking it once turns only the peel-layer one red. The nested rendering
+      # is a control neither may move.
+      - name: display layering contract
+        run: ./scripts/display-layering-contract/run.sh
 
       # K-A7: the compiler emits `dawn/rt/Asm`, the five null adapters that
       # used to be the last handwritten Java in the trusted base. Every other
@@ -2322,164 +2386,43 @@ jobs:
           rm -rf "${RUNNER_TEMP:?}/gate-emit" && mkdir -p "$RUNNER_TEMP/gate-emit"
           ./bin/dawn __emit selfhost -o "$RUNNER_TEMP/gate-emit" > /dev/null
           ./scripts/adapter-callsites.py "$RUNNER_TEMP/gate-emit"
-
-      # Float rendering's only independent oracle. std/fmt.dawn says outright
-      # that it does not re-test dtoa because this script pins it byte for
-      # byte -- and until 2026-08-08 the script ran nowhere, so the claim
-      # pointed at nothing. Everything else that touches Float rendering
-      # compares the two backends, and both compile the same Dawn source: a
-      # wrong shortest-round-trip rule is a *shared* wrong answer there and
-      # invisible. The JDK's Schubfach is the outside opinion.
-      #
-      # The full 200,000-sample default runs on every push; it costs ~14s
-      # wall, so there is no reason for a reduced push tier.
-      - name: dtoa contract (Float rendering vs the JDK)
-        run: ./scripts/dtoa-contract/run.sh
-
-      # Case folding and classification are the two operations with a table
-      # behind them rather than a derivation, so the backends cannot share an
-      # implementation -- only the data. This checks that both answer from the
-      # compiler's tables, and that those tables still match the JDK they were
-      # generated from.
-      - name: Unicode contract
-        run: ./scripts/unicode-contract/run.sh
-
-      # The one collection primitive a backend owes the language. Its in-place
-      # append is a contract clause, not an optimization -- losing it makes the
-      # accumulation loop quadratic again, and nothing else here would notice.
-      - name: Array contract
-        run: ./scripts/array-contract/run.sh
-
-      # The flat 64-bit buffer a backend owes std/mem. Its panic wording is a
-      # value once `catch_panic` hands it back, so both backends and the
-      # sanitized native build are held to one expected.txt, and the native
-      # accessors are checked to stay `static inline` (docs/mem-buffer-design.md).
-      # Capture propagation runs in its dedicated jobs below.
-      - name: I64Buf contract
-        run: ./scripts/mem-contract/run.sh
-
       - name: Collection contracts
         run: |
           ./scripts/hamt-contract/run.sh
           ./scripts/pvec-contract/run.sh
 
-      # std/fspath replaces a `use java` the compiler spelled in two places, so
-      # the thing it replaces is the oracle.
-      - name: Path contract
-        run: ./scripts/path-contract/run.sh
+      # packages/tea-core's reconciler is the one piece of the tree with no
+      # production caller and no way to get one here (the terminal's increment
+      # is a screen row, not a node). A package suite alone would then be a
+      # suite marking its own homework, so this adds the reconciler it replaced
+      # as an oracle over 484 tree pairs and 30 mutants that must each turn the
+      # suites red. Keep its complete oracle and all 30 private mutants.
+      - name: tea reconciler contract
+        run: ./scripts/tea-reconciler-contract/run.sh
 
-      # JSONTestSuite as a gate, not a claim: y_ accepted + round-trips,
-      # n_ rejected, i_ only counted (scripts/json-suite.sh has the story)
-      - name: JSON suite
-        run: ./scripts/json-suite.sh
+      - name: Capture JVM source cases 1 of 2
+        run: python3 scripts/trait-capture-contract/run.py --calls-backend jvm --calls-shard 1/2 --jobs 1 --coverage-dir "$RUNNER_TEMP/capture-coverage"
+      - name: record the complete JVM source selector
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-capture-jvm-1
+          path: ${{ runner.temp }}/capture-coverage/capture-calls-jvm-1.json
+          if-no-files-found: error
+          retention-days: 7
 
-      # Those tables are pruned to what a program can reach, and "can reach"
-      # has to mean what the artifact actually holds -- test blocks included,
-      # since the JVM emits them. selfhost cannot notice a shortfall here: its
-      # own non-test code uses every table.
-      - name: table freight
-        run: ./scripts/table-freight/run.sh
-
-      # The other thing std pruning made load-bearing: which module's copy of a
-      # shared dictionary a program links against. It used to be whichever the
-      # emitter met first, i.e. the order std/modules.txt lists modules in, and
-      # that made one `==` on strings pin std/gpu (issue #69). 2.6s measured on
-      # a warm toolchain -- two `__emitc` runs of a six-line program.
-      - name: dictionary owner contract
-        run: ./scripts/dict-owner-contract/run.sh
-
-      - name: dictionary constructor shape contract
-        run: python3 scripts/dict-owner-contract/shapes.py
-
-      # The other half of the intrinsic contract. `types.Intr.rt` makes a
-      # runtime-owned primitive impossible to implement on one backend only;
-      # the ones each backend writes inline had no such guard, just a `panic`
-      # in each emitter that fired in the *user's* compile if a corpus ever
-      # reached that name. This walks the table instead.
-      - name: intrinsic parity (both backends, the same primitives)
-        run: ./scripts/intrinsic-parity.py
-
-      # The same table, read by a person instead of a backend.
-      # `selfhost/builtins.dawn` is all 98 builtins as declarations, one line
-      # each, and this holds it to the table in both directions -- name,
-      # signature, visibility and comptime availability. A mirror nothing
-      # compares is a document that goes stale the day after it is written,
-      # and a stale mirror of an API is worse than none, because a reader
-      # believes it. Seven mutants ride along; they are string edits held in
-      # memory, so the whole step is seconds and needs no shard.
-      - name: builtin declaration mirror
-        run: ./scripts/builtin-decl-contract/run.sh
-
-      # `ForeignError.kind` is the backend's own name for a failure class, so
-      # the native differential can only ask whether it is a name at all --
-      # one expectation, two backends, different names. This is where the JVM's
-      # names are written down, and what stops the handler drifting back to the
-      # `toString()` rendering the string barrier still hands back.
-      - name: Error model contract
-        run: ./scripts/error-contract/run.sh
-
-  contracts-2:
+  # 2026-10-19: contracts-2 was back within a deviation of the pole (the note
+  # above its budget line), so its RC parameter-mode step moved here. Same
+  # family (`contracts`), so no gate moves family and the steps lock gains
+  # only this job's own `pinned-cc.sh`; the job exists for scheduling only,
+  # like the split at contracts-1.
+  contracts-3:
     needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-2') }}
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-3') }}
     runs-on: ubuntu-24.04
-    # map reuse 48 + tea reconciler 105 + atomic write 98 + RC 24 + ctl-live
-    # 12 + RC mode 64 + source loop label 46 + range bound order 31 +
-    # display layering 37 = 465s, plus 50s fixed overhead = 515s.
-    # 2026-10-07: the RC view contract adds a planning 40s (31s measured on
-    # four cores, 2026-10-07), so the claim goes from 550s to 590s and the
-    # timeout to 3x that.
-    # 2026-09-24, restated: 488s worst (run 35860976205) over its 4 successful
-    # main runs of 09-23 (gate-observations --since 2026-09-23T00:00:00Z).
-    # 2026-09-25, restated: 497s worst (run 36121790909) over the
-    # successful main runs of 09-18 .. 09-25 (gate-observations --since
-    # 2026-09-11, cut to the nightly audit's seven days).
-    # 2026-09-30, the first read of the 35-job shape: 441s worst (run
-    # 36339539348) over the 8 main runs of 09-27T18:08Z .. 09-30T09:12Z
-    # whose steps digest is this job's (gate-observations --since
-    # 2026-09-27T18:00Z). Restated to that plus a tenth, rounded up to
-    # 5s, 490s (497s before), and the timeout to 3x that.
-    # 2026-09-30, topped up after the nightly audit (issue #274, run
-    # 36704057991): its seven-day window also holds runs from before
-    # 09-27T18:00Z whose steps digest is this job's, the worst 497s
-    # (run 36121790909). Restated to that plus a tenth, rounded up to 5s,
-    # 550s (490s before), and the timeout to 3x that.
-    # 2026-10-08, the budget audit found a 629s run of this job's current
-    # steps (run 37765371280); 12 main runs of 10-07 .. 10-08 have them,
-    # median 575s. Restated to that plus a tenth, rounded up to 5s, 695s
-    # (590s before), and the timeout to 3x that.
-    # 2026-10-08, later: the ADT reuse contract adds a planning 50s (47s
-    # measured on 16 cores, five private compilers built side by side), so the
-    # claim goes from 695s to 745s and the timeout to 3x that.
-    # 2026-10-11: the Immediates contract joins this job. Measured locally
-    # 67s wall, 40s user + 9s system, at load average 4 to 7 (16 runtime
-    # mutants in four builds each, plus the emitter mutant), so the claim goes
-    # from 745s to 815s and the timeout to 41 minutes.
-    # 2026-10-15, issue #274: 934s worst (run 38622191193) over 42 runs of this
-    # job's steps in the seven days to 10-15, one deviation 127s; the last six
-    # runs of 10-14 and 10-15 sit at 906s to 934s. Worst plus the deviation
-    # (1061s) is over the 950s run pole, which the checker refuses, so the claim
-    # stops at the pole (815s before), 16s over the worst run, and the timeout is
-    # 3x that. The job is at the pole: its next growth needs a split, not a
-    # restatement.
-    # 2026-10-16: the atomic write contract (84s of the 934s worst) leaves for
-    # compiler-weight-contract, because #758 added a `dawn fmt` call-site leg
-    # (+42s locally, a native driver build among it) and the job had 16s under
-    # the pole. 934 - 84 = 850s projected, planning value 880s with a standard
-    # deviation's worth of margin kept out of the claim until a run of the new
-    # steps exists; timeout 3x that.
-    # 2026-10-19: the 17 successful main pushes since (10-16T18:05Z ..
-    # 10-17T17:23Z) took 805s median and 848s worst (run 39049482407), one
-    # deviation 127s, so worst plus a deviation was already past the pole
-    # again. The RC parameter-mode step (90s median, 107s worst) leaves for
-    # contracts-3. Replaying those 17 runs without it: 703s median, 741s worst
-    # (run 39049482407), one deviation 111s; worst plus the deviation, rounded
-    # up to 5s, is 855s, and the timeout is 3x that. A planning value until
-    # three main runs of these steps exist.
-    # 2026-11-11: move the complete tea reconciler step to contracts-7.
-    # Seven-day Ubuntu 24.04 first-attempt replay (11-03..10, n=16):
-    # P95/max 759s, sigma 118s; worst plus that margin rounds up to 880s.
-    # budget: 3x 880s planning value after whole-step rebalancing
-    timeout-minutes: 44
+    # Complete contracts use disjoint private outputs and retain every oracle.
+    # Fresh complete executions will replace this provisional planning value.
+    # budget: 3x 905s provisional content bound for complete contract selectors
+    timeout-minutes: 46
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2488,45 +2431,6 @@ jobs:
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # The other `array_with` axis. The Array contract step (contracts-1
-      # since 2026-09-23) accumulates with `++`, so
-      # every call it counts comes from std/pvec; `map.insert` reaches the
-      # same primitive through std/hamt and the two rates move independently.
-      # They did, by 29 points, while that step measured the identical
-      # 11241/11241 on both sides. The whole script is 33s locally on a warm
-      # toolchain (66s runner-doubled), of which about 31s is the private
-      # compiler build for the keep-record-spread-source mutant. It runs in
-      # `contracts`, budgeted at 28 minutes from a 558s worst observation.
-      - name: Map reuse contract
-        run: ./scripts/map-reuse-contract/run.sh
-
-      # The steps below were the contracts-2 job until 2026-09-11: the half
-      # that builds a private compiler or a sanitized runtime. The two halves
-      # never shared anything but the toolchain, which is why the split was
-      # free to make and is now free to undo. Redone on 2026-09-23 at a
-      # different seam: the two steps above joined this half to balance it.
-
-      # Reference counting, checked in C: `rc.dawn` decides where every dup and
-      # drop goes, and this drives the runtime half of that contract directly.
-      # The oracle is AddressSanitizer -- a drop that fails to recurse is a leak,
-      # one that recurses twice is a double free -- plus a small-stack run,
-      # because drop walks a 200k-node chain and must not do it by recursing.
-      # A fourth leg, added 2026-08-28, builds the runtime with the sanitizer
-      # *and* the slab allocator (-DDAWN_SLAB_FORCE) and reads the hand
-      # poisoning off six probe processes and two mutants of its own.
-      - name: RC contract
-        run: ./scripts/rc-contract/run.sh
-
-      # The tagged immediates (docs/native-immediates-design.md): an erased Int
-      # or Bool is a word with its low bit set that points at nothing, and every
-      # runtime point that reads a header or a box has to ask first. A point
-      # that forgets segfaults on a program holding an immediate and on no
-      # other, so no corpus can show it; this builds the runtime once per point
-      # with that point's question removed and requires the case that owns it
-      # to go red, in plain, inline-RC, AddressSanitizer and 31-bit builds.
-      - name: Immediates contract
-        run: ./scripts/imm-contract/run.sh
 
       # The other memory oracle, and the one AddressSanitizer cannot be.
       # A continuation nobody resumes is a parked carrier thread, whose stack
@@ -2538,31 +2442,6 @@ jobs:
       # red sets recorded in both directions.
       - name: ctl-live contract
         run: ./scripts/ctl-live-contract/run.sh
-
-      # The borrowed views (selfhost/src/c/views.dawn): a local with no count of
-      # its own, read out of a borrowed parameter. The saving is a dup and a drop
-      # per projected child, and the risk is a view that outlives what it reads
-      # or one that is released though it took nothing. The probe runs under
-      # AddressSanitizer and LeakSanitizer, three functions' emitted C is held
-      # to carry no counting, and one private compiler per mutation takes away
-      # one of the things that keep a view safe, each of which has to turn the
-      # contract red. Measured 2026-10-07: 31s on four cores, six private
-      # compilers built side by side.
-      - name: RC view contract
-        run: ./scripts/rc-view-contract/run.sh
-
-      # ADT reset/reuse (the runtime's dawn_adt_reset/dawn_adt_reuse and the
-      # rewrite's CReset/CReuse). Reuse changes no answer, and a stale read of
-      # a reused block is not a sanitizer report, so three oracles: stdout
-      # against the recording made before reuse existed (a shared tree must
-      # survive `incr`), AddressSanitizer and LeakSanitizer over runs that
-      # suspend or panic between a reset and its reuse, and the runtime's own
-      # counters as a difference of two sizes (a steady-state update chain
-      # allocates nothing; a tree or list walk reuses 95% of its nodes). One
-      # private compiler per mutation, and one private runtime, each of which
-      # has to turn it red. Measured 2026-10-08: 47s on 16 cores.
-      - name: ADT reuse contract
-        run: ./scripts/adt-reuse-contract/run.sh
 
       # RC's match-only unloop rewrite must not erase a source loop that still
       # owns a named break or continue target. The compiling mutant restores
@@ -2578,60 +2457,158 @@ jobs:
       # Core-only control keeps the once-before-loop half independent of stdout.
       - name: range bound order contract
         run: ./scripts/range-bound-order-contract/run.sh
+      # TEST-01: every emitted class force-linked through the JVM verifier.
+      # The differentials prove the backends agree, never that the bytes are
+      # legal; lazy linking means a class no test touches is never verified.
+      # The thirteen compiling Never mutants that ride along in a full local
+      # run are the classfile-never-mutants job's step; the two halves
+      # partition the script's no-flag run.
+      - name: classfile verification
+        run: ./scripts/classfile-verify/run.sh --without-never-mutants
+      # Java compresses, Dawn decompresses. That direction is the point: a
+      # round trip through one implementation proves only self-consistency.
+      - name: Inflate contract
+        run: ./scripts/inflate-contract/run.sh
+      # F3 uses instrumented test-only SQLite, reuses each compiled engine for
+      # both RC modes and all mutants, and runs real simple tokenizer queries.
+      - name: SQLite native values, lifetimes, transactions and simple FTS
+        run: ./scripts/sqlite-contract/run.sh --native --native-jobs 2
 
-      # `Display` decides the top-level rendering in place of `Show`, and the
-      # question is asked at every peel layer of an opaque stack. Two compiling
-      # mutants, one per rule: dropping the question turns both assertions red,
-      # asking it once turns only the peel-layer one red. The nested rendering
-      # is a control neither may move.
-      - name: display layering contract
-        run: ./scripts/display-layering-contract/run.sh
-
-  # 2026-10-19: contracts-2 was back within a deviation of the pole (the note
-  # above its budget line), so its RC parameter-mode step moved here. Same
-  # family (`contracts`), so no gate moves family and the steps lock gains
-  # only this job's own `pinned-cc.sh`; the job exists for scheduling only,
-  # like the split at contracts-1.
-  contracts-3:
+  # Three stable control selectors retain every original private compiler.
+  # Every frontend matrix remains complete; no job is added.
+  contracts-4:
     needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-3') }}
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-4') }}
     runs-on: ubuntu-24.04
-    # Replayed over the 17 contracts-2 runs named in that note: each run's
-    # setup, checkout, pinned C compiler and toolchain steps plus its RC
-    # parameter-mode step, 147s median, 158s worst (run 39049482407), one
-    # deviation 21s. Worst plus the deviation, rounded up to 5s, is 180s.
-    # The same day the opaque twin and Inflate steps came over from
-    # contracts-1 (the note above its budget line); adding each of those 17
-    # runs' contracts-1 times for the two steps: 261s median, 285s worst (run
-    # 39024859369), one deviation 30s, so 315s, and the timeout is 3x that.
-    # A planning value until three main runs exist.
-    # 2026-10-21: scripts/io-prims-contract/run.sh joins this job (the io
-    # primitives on both backends, with six negative controls): 30s measured
-    # locally, charged at 60s for a runner about twice as slow. Planning value:
-    # 315 + 60 = 375s, and the timeout is 3x that. The push total moves by 60s.
-    # 2026-10-21: scripts/ffi-header-contract/run.sh joins this job (the C
-    # extern header against the real runtime in three builds, with five
-    # negative controls; only cc, no JVM): 11s measured locally, charged at 30s.
-    # Planning value: 375 + 30 = 405s, and the timeout is 3x that. The push
-    # total moves by 30s.
-    # 2026-10-21: SQLite adds real Dawn package builds, 25 native mutants,
-    # two pinned engine versions, plain/inline RC, sanitizer and simple FTS.
-    # Warm remaining-case probe: 54.1s; cold engine compiles: 58.2s total.
-    # Reserve 420s for the complete cold contract on a slower CI runner;
-    # the actual new step and affected job are recorded in the F3 handoff.
-    # 2026-11-11: move the complete Inflate step to contracts-6.
-    # Seven-day Ubuntu 24.04 first-attempt replay (11-03..10, n=17):
-    # P95/max 793s, sigma 109s; worst plus that margin rounds up to 905s.
-    # budget: 3x 905s planning value after whole-step rebalancing
-    timeout-minutes: 46
+    # Complete contracts use disjoint private outputs and retain every oracle.
+    # Fresh complete executions will replace this provisional planning value.
+    # budget: 3x 935s provisional content bound for complete contract selectors
+    timeout-minutes: 47
     steps:
       - uses: actions/checkout@v4
-      # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
       - name: the pinned C compiler
         run: ./scripts/pinned-cc.sh
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The one collection primitive a backend owes the language. Its in-place
+      # append is a contract clause, not an optimization -- losing it makes the
+      # accumulation loop quadratic again, and nothing else here would notice.
+      - name: Array contract
+        run: ./scripts/array-contract/run.sh
+      # The same table, read by a person instead of a backend.
+      # `selfhost/builtins.dawn` is all 98 builtins as declarations, one line
+      # each, and this holds it to the table in both directions -- name,
+      # signature, visibility and comptime availability. A mirror nothing
+      # compares is a document that goes stale the day after it is written,
+      # and a stale mirror of an API is worse than none, because a reader
+      # believes it. Seven mutants ride along; they are string edits held in
+      # memory, so the whole step is seconds and needs no shard.
+      - name: builtin declaration mirror
+        run: ./scripts/builtin-decl-contract/run.sh
+      - name: Capture mutations 1 of 3
+        run: python3 scripts/trait-capture-contract/run.py --controls-shard 1/3 --jobs 2 --coverage-dir "$RUNNER_TEMP/capture-coverage"
+      - name: record the complete Capture control selector
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-capture-1
+          path: ${{ runner.temp }}/capture-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  contracts-5:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-5') }}
+    runs-on: ubuntu-24.04
+    # Complete contracts use disjoint private outputs and retain every oracle.
+    # Fresh complete executions will replace this provisional planning value.
+    # budget: 3x 910s provisional content bound for complete contract selectors
+    timeout-minutes: 46
+    steps:
+      - uses: actions/checkout@v4
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Float rendering's only independent oracle. std/fmt.dawn says outright
+      # that it does not re-test dtoa because this script pins it byte for
+      # byte -- and until 2026-08-08 the script ran nowhere, so the claim
+      # pointed at nothing. Everything else that touches Float rendering
+      # compares the two backends, and both compile the same Dawn source: a
+      # wrong shortest-round-trip rule is a *shared* wrong answer there and
+      # invisible. The JDK's Schubfach is the outside opinion.
+      #
+      # The full 200,000-sample default runs on every push; it costs ~14s
+      # wall, so there is no reason for a reduced push tier.
+      - name: dtoa contract (Float rendering vs the JDK)
+        run: ./scripts/dtoa-contract/run.sh
+
+      # std/fspath replaces a `use java` the compiler spelled in two places, so
+      # the thing it replaces is the oracle.
+      - name: Path contract
+        run: ./scripts/path-contract/run.sh
+
+      - name: dictionary constructor shape contract
+        run: python3 scripts/dict-owner-contract/shapes.py
+
+      # The public header of the C extern surface (docs/ffi-extern-design.md):
+      # a stub that includes dawn_ffi.h and nothing else, called the way
+      # emitted code will call it, linked with the real runtime in plain,
+      # inline-RC and ASan/LSan/UBSan builds. Five controls must turn it red:
+      # an ABI number that moved, an embedded NUL truncated instead of refused,
+      # a ForeignError that hides references from the drop, bytes cut at a zero
+      # byte, and dawn_fault left reachable. 11s measured locally, charged at 30s.
+      - name: ffi header contract
+        run: ./scripts/ffi-header-contract/run.sh
+      - name: Capture mutations 2 of 3
+        run: python3 scripts/trait-capture-contract/run.py --controls-shard 2/3 --jobs 2 --coverage-dir "$RUNNER_TEMP/capture-coverage"
+      - name: record the complete Capture control selector
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-capture-2
+          path: ${{ runner.temp }}/capture-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  contracts-6:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-6') }}
+    runs-on: ubuntu-24.04
+    # Complete contracts use disjoint private outputs and retain every oracle.
+    # Fresh complete executions will replace this provisional planning value.
+    # budget: 3x 880s provisional content bound for complete contract selectors
+    timeout-minutes: 44
+    steps:
+      - uses: actions/checkout@v4
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ADT reset/reuse (the runtime's dawn_adt_reset/dawn_adt_reuse and the
+      # rewrite's CReset/CReuse). Reuse changes no answer, and a stale read of
+      # a reused block is not a sanitizer report, so three oracles: stdout
+      # against the recording made before reuse existed (a shared tree must
+      # survive `incr`), AddressSanitizer and LeakSanitizer over runs that
+      # suspend or panic between a reset and its reuse, and the runtime's own
+      # counters as a difference of two sizes (a steady-state update chain
+      # allocates nothing; a tree or list walk reuses 95% of its nodes). One
+      # private compiler per mutation, and one private runtime, each of which
+      # has to turn it red. Measured 2026-10-08: 47s on 16 cores.
+      - name: ADT reuse contract
+        run: ./scripts/adt-reuse-contract/run.sh
+
+      # The other half of the intrinsic contract. `types.Intr.rt` makes a
+      # runtime-owned primitive impossible to implement on one backend only;
+      # the ones each backend writes inline had no such guard, just a `panic`
+      # in each emitter that fired in the *user's* compile if a corpus ever
+      # reached that name. This walks the table instead.
+      - name: intrinsic parity (both backends, the same primitives)
+        run: ./scripts/intrinsic-parity.py
 
       # The parameter-mode contract (core.CMode) under single-sided flips:
       # a call-site table row without the callee's CParam.mode, and the
@@ -2643,7 +2620,6 @@ jobs:
       # findings; read that file before touching them.
       - name: RC parameter-mode mutants
         run: ./scripts/rc-mode-contract/run.sh
-
       # The two steps below were contracts-1's until 2026-10-19 (the note
       # above that job's budget line); neither shares anything with the rest
       # of it but the toolchain.
@@ -2664,7 +2640,6 @@ jobs:
         run: |
           ./scripts/opaque-twin/run.sh --self-check
           ./scripts/opaque-twin/run.sh
-
       # The io batch (stdout bytes with a flush, append, range read, file size,
       # disk space, sleep): eight primitives the JVM runtime and the C runtime
       # implement apart. One probe through std/io holds both, and the native
@@ -2677,100 +2652,25 @@ jobs:
       # 30s measured locally on a loaded 16-core machine, charged at 60s.
       - name: io primitives contract
         run: ./scripts/io-prims-contract/run.sh
+      - name: Capture JVM source cases 2 of 2
+        run: python3 scripts/trait-capture-contract/run.py --calls-backend jvm --calls-shard 2/2 --jobs 1 --coverage-dir "$RUNNER_TEMP/capture-coverage"
 
-      # The public header of the C extern surface (docs/ffi-extern-design.md):
-      # a stub that includes dawn_ffi.h and nothing else, called the way
-      # emitted code will call it, linked with the real runtime in plain,
-      # inline-RC and ASan/LSan/UBSan builds. Five controls must turn it red:
-      # an ABI number that moved, an embedded NUL truncated instead of refused,
-      # a ForeignError that hides references from the drop, bytes cut at a zero
-      # byte, and dawn_fault left reachable. 11s measured locally, charged at 30s.
-      - name: ffi header contract
-        run: ./scripts/ffi-header-contract/run.sh
-
-      # F3 uses instrumented test-only SQLite, reuses each compiled engine for
-      # both RC modes and all mutants, and runs real simple tokenizer queries.
-      - name: SQLite native values, lifetimes, transactions and simple FTS
-        run: ./scripts/sqlite-contract/run.sh --native
-
-  # Capture propagation has two disjoint control shards and a complete
-  # source matrix per frontend. The standalone command still runs every check.
-  contracts-4:
-    needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-4') }}
-    runs-on: ubuntu-24.04
-    # Measured 2026-11-01: 296.46s for this complete invocation.
-    # Reserve twice that wall time and 50s setup, rounded up to 5s.
-    # budget: 3x 645s planning value for capture contracts
-    timeout-minutes: 33
-    steps:
-      - uses: actions/checkout@v4
-      - name: the pinned C compiler
-        run: ./scripts/pinned-cc.sh
-      - uses: ./.github/actions/dawn-toolchain
+      - name: record the complete JVM source selector
+        uses: actions/upload-artifact@v4
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Capture mutations 1 of 2
-        run: python3 scripts/trait-capture-contract/run.py --controls-shard 1/2
-
-  contracts-5:
-    needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-5') }}
-    runs-on: ubuntu-24.04
-    # Measured 2026-11-01: 282.58s for this complete invocation.
-    # Reserve twice that wall time and 50s setup, rounded up to 5s.
-    # budget: 3x 620s planning value for capture contracts
-    timeout-minutes: 31
-    steps:
-      - uses: actions/checkout@v4
-      - name: the pinned C compiler
-        run: ./scripts/pinned-cc.sh
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Capture mutations 2 of 2
-        run: python3 scripts/trait-capture-contract/run.py --controls-shard 2/2
-
-  contracts-6:
-    needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-6') }}
-    runs-on: ubuntu-24.04
-    # Measured 2026-11-01: 305.10s for this complete invocation.
-    # Reserve twice that wall time and 50s setup, rounded up to 5s.
-    # 2026-11-11: receive the complete Inflate step from contracts-3.
-    # Seven-day Ubuntu 24.04 first-attempt replay (11-03..10, n=17):
-    # P95/max 693s, sigma 82s. Cross-source maxima give 694s; adding the
-    # larger deviation and rounding up to 5s gives the planning value 780s.
-    # budget: 3x 780s planning value after whole-step rebalancing
-    timeout-minutes: 39
-    steps:
-      - uses: actions/checkout@v4
-      - name: the pinned C compiler
-        run: ./scripts/pinned-cc.sh
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Capture contracts on the JVM
-        run: python3 scripts/trait-capture-contract/run.py --calls-backend jvm
-
-      # Java compresses, Dawn decompresses. That direction is the point: a
-      # round trip through one implementation proves only self-consistency.
-      - name: Inflate contract
-        run: ./scripts/inflate-contract/run.sh
+          name: mutant-coverage-capture-jvm-2
+          path: ${{ runner.temp }}/capture-coverage/capture-calls-jvm-2.json
+          if-no-files-found: error
+          retention-days: 7
 
   contracts-7:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-7') }}
     runs-on: ubuntu-24.04
-    # Measured 2026-11-01: 269.62s for this complete invocation.
-    # Reserve twice that wall time and 50s setup, rounded up to 5s.
-    # 2026-11-11: receive complete Bytes pack and tea reconciler steps.
-    # Seven-day Ubuntu 24.04 first-attempt replay (11-03..10, n=15):
-    # P95/max 797s, sigma 78s. Cross-source sensitivity gives max 816s and
-    # sigma 85s; worst plus that margin rounds up to 905s. Synthetic
-    # combinations are sensitivity analysis, not independent observations.
-    # budget: 3x 905s planning value after whole-step rebalancing
-    timeout-minutes: 46
+    # Complete contracts use disjoint private outputs and retain every oracle.
+    # Fresh complete executions will replace this provisional planning value.
+    # budget: 3x 925s provisional content bound for complete contract selectors
+    timeout-minutes: 47
     steps:
       - uses: actions/checkout@v4
       - name: the pinned C compiler
@@ -2778,9 +2678,21 @@ jobs:
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Capture contracts on native
-        run: python3 scripts/trait-capture-contract/run.py --calls-backend native
+      # Case folding and classification are the two operations with a table
+      # behind them rather than a derivation, so the backends cannot share an
+      # implementation -- only the data. This checks that both answer from the
+      # compiler's tables, and that those tables still match the JDK they were
+      # generated from.
+      - name: Unicode contract
+        run: ./scripts/unicode-contract/run.sh
 
+      # `ForeignError.kind` is the backend's own name for a failure class, so
+      # the native differential can only ask whether it is a name at all --
+      # one expectation, two backends, different names. This is where the JVM's
+      # names are written down, and what stops the handler drifting back to the
+      # `toString()` rendering the string barrier still hands back.
+      - name: Error model contract
+        run: ./scripts/error-contract/run.sh
       # The first bulk Array/Bytes primitives. Byte order, wrapping, sign
       # extension and the two panic sentences are contract clauses that the
       # JVM runtime (a ByteBuffer loop) and the native one (C) implement
@@ -2789,28 +2701,27 @@ jobs:
       - name: Bytes pack contract
         run: ./scripts/bytes-pack-contract/run.sh
 
-      # packages/tea-core's reconciler is the one piece of the tree with no
-      # production caller and no way to get one here (the terminal's increment
-      # is a screen row, not a node). A package suite alone would then be a
-      # suite marking its own homework, so this adds the reconciler it replaced
-      # as an oracle over 484 tree pairs and 30 mutants that must each turn the
-      # suites red. 42s measured, on a job budgeted at 265s.
-      - name: tea reconciler contract
-        run: ./scripts/tea-reconciler-contract/run.sh
+      - name: Capture mutations 3 of 3
+        run: python3 scripts/trait-capture-contract/run.py --controls-shard 3/3 --jobs 2 --coverage-dir "$RUNNER_TEMP/capture-coverage"
+      - name: record the complete Capture control selector
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-capture-3
+          path: ${{ runner.temp }}/capture-coverage
+          if-no-files-found: error
+          retention-days: 1
 
-  # Keep the complete effect provenance contract together. This split adds
-  # one checkout, compiler pin and toolchain setup, with no shared artifacts.
+  # Keep the complete effect provenance contract together. Verify one runtime
+  # object inside its fresh temporary run; independent mutants keep their
+  # original builds and the separate runtime probe retains its own compile.
   contracts-8:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-8') }}
     runs-on: ubuntu-24.04
-    # 2026-11-11: seven-day Ubuntu 24.04 first-attempt replay, 11-03..10:
-    # P95/max 765s with contracts-1 preparation, sigma 103s. Combining the
-    # effect maximum 708s with the family preparation maximum 94s gives
-    # 802s; add the larger of 10 percent or sigma and round up to 5s.
-    # The new shape needs independent Actions observations before calibration.
-    # budget: 3x 905s planning value for the complete effect provenance step
-    timeout-minutes: 46
+    # Complete contracts use disjoint private outputs and retain every oracle.
+    # Fresh complete executions will replace this provisional planning value.
+    # budget: 3x 935s provisional content bound for complete contract selectors
+    timeout-minutes: 47
     steps:
       - uses: actions/checkout@v4
       - name: the pinned C compiler
@@ -2819,8 +2730,16 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # The other thing std pruning made load-bearing: which module's copy of a
+      # shared dictionary a program links against. It used to be whichever the
+      # emitter met first, i.e. the order std/modules.txt lists modules in, and
+      # that made one `==` on strings pin std/gpu (issue #69). 2.6s measured on
+      # a warm toolchain -- two `__emitc` runs of a six-line program.
+      - name: dictionary owner contract
+        run: ./scripts/dict-owner-contract/run.sh
+
       - name: ordinary effect provenance on both backends
-        run: ./scripts/effect-provenance-contract/run.sh
+        run: ./scripts/effect-provenance-contract/run.sh --reuse-runtime
 
   # Slice C's classpath contract owns a fixture-only Maven repository and
   # private caches, so it cannot share dependency state with the broad test
@@ -2910,7 +2829,6 @@ jobs:
       # behavior mutants pin query isolation, parent choice and both close paths.
       - name: target-scoped Java signature leases
         run: ./scripts/jsig-lease-contract/run.sh
-
 
   # Select complete sessions. The main HTTP sequence, its cold state and its
   # cleanup stay together; the tile probe keeps its full cold/warm lifecycle.
@@ -4633,6 +4551,11 @@ jobs:
   # records can be cross-read into this one.
   mutant-shards-complete:
     needs:
+      - contracts-2
+      - contracts-6
+      - contracts-4
+      - contracts-5
+      - contracts-7
       - checker-corpus
       - checker-corpus-2
       - playground-1
@@ -4672,6 +4595,8 @@ jobs:
       - name: which shard families this run dispatched
         id: families
         env:
+          CAPTURE: ${{ needs.contracts-4.result }} ${{ needs.contracts-5.result }} ${{ needs.contracts-7.result }}
+          CAPTURE_JVM: ${{ needs.contracts-2.result }} ${{ needs.contracts-6.result }}
           NATIVE_DIFF: ${{ needs.native-diff-1.result }} ${{ needs.native-diff-2.result }}
           SYNTAX: ${{ needs.syntax-mutants-3-1.result }} ${{ needs.syntax-mutants-3-2.result }} ${{ needs.syntax-mutants-3-3.result }} ${{ needs.syntax-mutants-3-4.result }}
           BUILTIN_TYPE: ${{ needs.builtin-type-3-1.result }} ${{ needs.builtin-type-3-2.result }} ${{ needs.builtin-type-3-3.result }}
@@ -4709,6 +4634,28 @@ jobs:
           if [ "$CHECKER_CORPUS" != "skipped skipped" ]; then checker_ran=true; fi
           if [ "$checker_ran" = true ]; then any_ran=true; fi
           echo "checker_ran=$checker_ran" >> "$GITHUB_OUTPUT"
+          # The planner expands any selected Capture job to its complete
+          # control family, including inputs of independent companions.
+          capture_ran=false
+          if [ "$CAPTURE" != "skipped skipped skipped" ]; then
+            if [ "$CAPTURE" != "success success success" ]; then
+              echo "A Capture selector did not succeed: $CAPTURE" >&2
+              exit 1
+            fi
+            capture_ran=true
+          fi
+          if [ "$capture_ran" = true ]; then any_ran=true; fi
+          echo "capture_ran=$capture_ran" >> "$GITHUB_OUTPUT"
+          capture_jvm_ran=false
+          if [ "$CAPTURE_JVM" != "skipped skipped" ]; then
+            if [ "$CAPTURE_JVM" != "success success" ]; then
+              echo "A JVM source selector did not succeed: $CAPTURE_JVM" >&2
+              exit 1
+            fi
+            capture_jvm_ran=true
+          fi
+          if [ "$capture_jvm_ran" = true ]; then any_ran=true; fi
+          echo "capture_jvm_ran=$capture_jvm_ran" >> "$GITHUB_OUTPUT"
           echo "any_ran=$any_ran" >> "$GITHUB_OUTPUT"
       - name: collect every shard's coverage record
         if: ${{ steps.families.outputs.any_ran == 'true' }}
@@ -4716,6 +4663,12 @@ jobs:
         with:
           pattern: mutant-coverage-*
           path: coverage
+      - name: the Capture union covers every private mutant and ordinary baseline
+        if: ${{ steps.families.outputs.capture_ran == 'true' }}
+        run: python3 -B scripts/trait-capture-contract/controls_shards.py --check-coverage --coverage-dir coverage
+      - name: the JVM source union covers every checked and executed case
+        if: ${{ steps.families.outputs.capture_jvm_ran == 'true' }}
+        run: python3 -B scripts/trait-capture-contract/controls_shards.py --check-calls --coverage-dir coverage
       - name: the union of the shards is the whole matrix
         if: ${{ steps.families.outputs.ran == 'true' }}
         env:
@@ -4739,7 +4692,6 @@ jobs:
         run: |
           ./scripts/checker-corpus/coverage.py --selftest
           ./scripts/checker-corpus/coverage.py
-
 
   # Keep the complete correctness oracle separate from the route contract.
   # Performance comparisons remain manual acceptance tools.
