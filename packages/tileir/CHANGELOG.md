@@ -2,12 +2,11 @@
 
 ## 0.32.0
 
-- Reject reduce/scan bodies with outer SSA captures, non-scalar intermediate
-  tiles or nested regions for the pinned tileiras 13.5.37 tools. Recording and
-  lowering share the recorded-SSA check, including hand-built TileProg values.
-- Keep constants materialized inside the body and ordinary outer conditionals.
-  This narrows tool support, not the Tile IR language. An upstream fix requires
-  independent qualification before lifting the restriction; no version fallback.
+- 对固定工具 tileiras 13.5.37，拒绝捕获外层 SSA、创建非标量中间 tile 或
+  含嵌套 region 的 reduce/scan body。录制与 lowering 共享实际 SSA 检查，
+  手造的 TileProg 也会检查。
+- body 内重新物化的常量与普通外层条件继续支持。这是工具能力的支持收窄，
+  不是 Tile IR 语言禁止；上游修复后仍须另做独立资格才能解除，不提供版本 fallback。
 
 ## 0.31.0
 
