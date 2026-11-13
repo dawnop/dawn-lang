@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ fbb98e5411fc150b -->
+<!-- doc-check: translation-of docs/spec.md @ 567473be2fc883a0 -->
 
 # Dawn Language Specification
 
@@ -5355,8 +5355,15 @@ or ABI argument.
   constants check numeric representability. Pointer strides may be zero or
   negative but must fit signed i32. Static view shape and stride metadata stay
   int64; required static suffix products check the int64 upper bound before
-  multiplication and do not compute an unused total. Dynamic products check
-  their known constants only.
+  multiplication and do not compute an unused total. Entries returned by `trace1` through `trace6` carry
+  `GeometryUse` obligations for automatic dynamic extents and suffixes actually
+  materialized as i32. Typed launch checks these positive products against
+  2147483647 before calling a handler. An overflow returns `gpu.geometry_i32`,
+  naming the argument, original storage dimension, factors, product, recording
+  site and launch site. Static int64 metadata and large tiles queried only for
+  blocks retain their range. Handwritten `entry1` through `entry6` constructors
+  require an explicit obligation list matching the program, or `[]` when no
+  automatic values were materialized.
 - **Recording**: `tileir/prog`'s `trace_kernel(name, params, body)` runs `body` exactly once,
   **at host run time**, under the recording handler, and answers a `TileProg` (an ADT in SSA
   form). `params` is the format name of each entry parameter, by position. A body that issues

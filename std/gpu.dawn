@@ -30,6 +30,7 @@ use std/bytes
 use std/list
 use std/str
 use std/map
+use std/loc
 use std/narrow
 use std/dtype.{Dtype, HasDtype, DeviceBits, to_bits, from_bits, dtype_of, dtype_name, dtype_from_name, F64, I64}
 use std/narrow.{BF16, F16, F32}
@@ -869,17 +870,17 @@ fn handle_of_launch(a: LaunchArg) -> Int = match a {
 }
 
 fn launch_plan(args: List[EntryArg], launches: List[(LaunchArg, Int)],
-  given: List[Int]) -> Result[List[Int], (String, String)] =
+  given: List[Int], geometry: List[GeometryUse] = []) -> Result[List[Int], (String, String)] =
   match entry_grid(args) {
     Err(p) -> Err(("gpu.bad_entry", p))
     Ok(grid) -> match kind_problem(args, launches) {
       Some(p) -> Err(("gpu.bad_entry", p))
-      None -> launch_buffers(args, launches, given, grid)
+      None -> launch_buffers(args, launches, given, grid, geometry)
     }
   }
 
 fn launch_buffers(args: List[EntryArg], launches: List[(LaunchArg, Int)], given: List[Int],
-  grid: List[Int]) -> Result[List[Int], (String, String)] = {
+  grid: List[Int], geometry: List[GeometryUse]) -> Result[List[Int], (String, String)] = {
   let handles = list.map(launches, l => {
     let (a, _n) = l
     handle_of_launch(a)
@@ -914,7 +915,10 @@ fn launch_buffers(args: List[EntryArg], launches: List[(LaunchArg, Int)], given:
                 }
               }
             }
-            Ok(g)
+            match geometry_problem(args, geometry, g) {
+              Err(e) -> Err(e)
+              Ok(_) -> Ok(g)
+            }
           }
         }
       }
@@ -923,11 +927,12 @@ fn launch_buffers(args: List[EntryArg], launches: List[(LaunchArg, Int)], given:
 }
 
 fn launch_args(kernel: String, args: List[EntryArg], launches: List[(LaunchArg, Int)],
-  given: List[Int]) -> Result[Unit, ForeignError] !Gpu =
-  match launch_plan(args, launches, given) {
+  given: List[Int], geometry: List[GeometryUse], at: Loc) -> Result[Unit, ForeignError] !Gpu =
+  match launch_plan(args, launches, given, geometry) {
     Err(e) -> {
       let (kind, message) = e
-      Err(refuse(kind, "gpu.launch_entry: kernel `${kernel}`: ${message}"))
+      let site = if kind == "gpu.geometry_i32" { "; launched at ${loc.path(at)}:${loc.line(at)}:${loc.col(at)}" } else { "" }
+      Err(refuse(kind, "gpu.launch_entry: kernel `${kernel}`: ${message}${site}"))
     }
     Ok(g) -> launch(kernel, g[0], list.map(launches, l => erase_pair(l)), gy = g[1], gz = g[2])
   }
@@ -942,63 +947,114 @@ fn erase_pair(l: (LaunchArg, Int)) -> LaunchArg = {
   a
 }
 
+## A positive factor of an automatically materialized device geometry value.
+## Static metadata alone does not create a use. GridExtent follows the
+## original storage dimension's grid axis, even when Out axes are reordered.
+pub type GeometryFactor =
+  | StaticExtent(value: Int)
+  | GridExtent(axis: Int, tile: Int)
+derive Show
+
+## Which automatic i32 value the recording actually emitted.
+pub type GeometryKind = ExtentI32 | SuffixI32
+derive Show
+
+## One launch obligation from a recording, with its original parameter,
+## storage dimension and call site. All factors must be positive; a
+## suffix contains at least one grid factor. Handwritten entries must
+## describe their program's uses just as they describe its argument roles.
+pub type GeometryUse = {
+  param: Int,
+  dimension: Int,
+  kind: GeometryKind,
+  factors: List[GeometryFactor],
+  at: Loc,
+}
+
+fn geometry_problem(args: List[EntryArg], uses: List[GeometryUse], grid: List[Int]) -> Result[Unit, (String, String)] = {
+  for u in uses {
+    if u.param < 0 || u.param >= len(args) || u.dimension < 0 || len(u.factors) == 0 ||
+      not list.any(u.factors, f => match f { GridExtent(_k, _t) -> true, _ -> false }) ||
+      list.any(u.factors, f => match f {
+        StaticExtent(v) -> v < 1
+        GridExtent(k, t) -> k < 0 || k > 2 || t < 1
+      }) {
+      return Err(("gpu.bad_entry", "invalid automatic geometry obligation for argument ${u.param} dimension ${u.dimension}"))
+    }
+    var n = 1
+    let what = match u.kind { ExtentI32 -> "dynamic extent", SuffixI32 -> "dynamic suffix" }
+    for f in u.factors {
+      let factors = match f { StaticExtent(v) -> [v], GridExtent(k, t) -> [grid[k], t] }
+      for v in factors {
+        if n > 2147483647 / v {
+          let product = if n > MAX_HOST_SIZE / v { "exceeds Int max ${MAX_HOST_SIZE}" } else { "= ${n * v}" }
+          return Err(("gpu.geometry_i32", "${arg_word(args, u.param)} dimension ${u.dimension} ${what} product ${n} times ${v} ${product} exceeds signed i32 max 2147483647; factors ${show(u.factors)}; recorded at ${loc.path(u.at)}:${loc.line(u.at)}:${loc.col(u.at)}"))
+        }
+        n = n * v
+      }
+    }
+  }
+  Ok(())
+}
+
 ## A kernel of one buffer argument of format `A`, as its recorder answers
 ## it: the kernel's name and what it does to the buffer. [`launch_entry1`]
 ## runs it. Opaque, so a program holds one only as a recorder made it.
-pub opaque type Entry1[A] = (String, List[EntryArg])
+pub opaque type Entry1[A] = (String, List[EntryArg], List[GeometryUse])
 
 ## [`Entry1`] for two arguments, of formats `A` and `B` in order.
-pub opaque type Entry2[A, B] = (String, List[EntryArg])
+pub opaque type Entry2[A, B] = (String, List[EntryArg], List[GeometryUse])
 
 ## [`Entry1`] for three arguments.
-pub opaque type Entry3[A, B, C] = (String, List[EntryArg])
+pub opaque type Entry3[A, B, C] = (String, List[EntryArg], List[GeometryUse])
 
 ## [`Entry1`] for four arguments.
-pub opaque type Entry4[A, B, C, D] = (String, List[EntryArg])
+pub opaque type Entry4[A, B, C, D] = (String, List[EntryArg], List[GeometryUse])
 
 ## [`Entry1`] for five arguments.
-pub opaque type Entry5[A, B, C, D, E] = (String, List[EntryArg])
+pub opaque type Entry5[A, B, C, D, E] = (String, List[EntryArg], List[GeometryUse])
 
 ## [`Entry1`] for six arguments.
-pub opaque type Entry6[A, B, C, D, E, F] = (String, List[EntryArg])
+pub opaque type Entry6[A, B, C, D, E, F] = (String, List[EntryArg], List[GeometryUse])
 
 ## The entry of `kernel`, whose one argument is `a`. The format is the
-## type's: a recorder fixes it from the kernel's own parameter.
-pub fn entry1[A](kernel: String, a: EntryArg) -> Entry1[A] = {
-  let e: Entry1[A] = (kernel, [a])
+## type's: a recorder fixes it from the kernel's own parameter. The required
+## geometry list describes only automatic i32 values the program materialized.
+pub fn entry1[A](kernel: String, a: EntryArg, geometry: List[GeometryUse]) -> Entry1[A] = {
+  let e: Entry1[A] = (kernel, [a], geometry)
   e
 }
 
 ## [`entry1`] for two arguments.
-pub fn entry2[A, B](kernel: String, a: EntryArg, b: EntryArg) -> Entry2[A, B] = {
-  let e: Entry2[A, B] = (kernel, [a, b])
+pub fn entry2[A, B](kernel: String, a: EntryArg, b: EntryArg, geometry: List[GeometryUse]) -> Entry2[A, B] = {
+  let e: Entry2[A, B] = (kernel, [a, b], geometry)
   e
 }
 
 ## [`entry1`] for three arguments.
-pub fn entry3[A, B, C](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg) -> Entry3[A, B, C] = {
-  let e: Entry3[A, B, C] = (kernel, [a, b, c])
+pub fn entry3[A, B, C](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg, geometry: List[GeometryUse]) -> Entry3[A, B, C] = {
+  let e: Entry3[A, B, C] = (kernel, [a, b, c], geometry)
   e
 }
 
 ## [`entry1`] for four arguments.
 pub fn entry4[A, B, C, D](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg,
-  d: EntryArg) -> Entry4[A, B, C, D] = {
-  let e: Entry4[A, B, C, D] = (kernel, [a, b, c, d])
+  d: EntryArg, geometry: List[GeometryUse]) -> Entry4[A, B, C, D] = {
+  let e: Entry4[A, B, C, D] = (kernel, [a, b, c, d], geometry)
   e
 }
 
 ## [`entry1`] for five arguments.
 pub fn entry5[A, B, C, D, E](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg,
-  d: EntryArg, x: EntryArg) -> Entry5[A, B, C, D, E] = {
-  let e: Entry5[A, B, C, D, E] = (kernel, [a, b, c, d, x])
+  d: EntryArg, x: EntryArg, geometry: List[GeometryUse]) -> Entry5[A, B, C, D, E] = {
+  let e: Entry5[A, B, C, D, E] = (kernel, [a, b, c, d, x], geometry)
   e
 }
 
 ## [`entry1`] for six arguments.
 pub fn entry6[A, B, C, D, E, F](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg,
-  d: EntryArg, x: EntryArg, y: EntryArg) -> Entry6[A, B, C, D, E, F] = {
-  let e: Entry6[A, B, C, D, E, F] = (kernel, [a, b, c, d, x, y])
+  d: EntryArg, x: EntryArg, y: EntryArg, geometry: List[GeometryUse]) -> Entry6[A, B, C, D, E, F] = {
+  let e: Entry6[A, B, C, D, E, F] = (kernel, [a, b, c, d, x, y], geometry)
   e
 }
 
@@ -1014,50 +1070,53 @@ pub fn entry6[A, B, C, D, E, F](kernel: String, a: EntryArg, b: EntryArg, c: Ent
 ## cells disagree with the Out cells, `gpu.short_tensor` when the reach's
 ## grid-times-tile or extent product exceeds Int max, or a tensor is
 ## shorter than its cells reach, and `gpu.bad_grid` as [`launch`] has it.
-pub fn launch_entry1[A](e: Entry1[A], a: Launch[A], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
-  let p: (String, List[EntryArg]) = e
-  let (kernel, args) = p
-  launch_args(kernel, args, [pair(a)], grid)
+## `gpu.geometry_i32` names a recorded automatic extent or suffix
+## whose resolved positive product exceeds signed i32, including the
+## recording and launch call sites. Static int64 metadata is unaffected.
+pub fn launch_entry1[A](e: Entry1[A], a: Launch[A], grid: List[Int] = [], at: Loc = caller()) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg], List[GeometryUse]) = e
+  let (kernel, args, geometry) = p
+  launch_args(kernel, args, [pair(a)], grid, geometry, at)
 }
 
 ## [`launch_entry1`] for two arguments.
 pub fn launch_entry2[A, B](e: Entry2[A, B], a: Launch[A], b: Launch[B],
-  grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
-  let p: (String, List[EntryArg]) = e
-  let (kernel, args) = p
-  launch_args(kernel, args, [pair(a), pair(b)], grid)
+  grid: List[Int] = [], at: Loc = caller()) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg], List[GeometryUse]) = e
+  let (kernel, args, geometry) = p
+  launch_args(kernel, args, [pair(a), pair(b)], grid, geometry, at)
 }
 
 ## [`launch_entry1`] for three arguments.
 pub fn launch_entry3[A, B, C](e: Entry3[A, B, C], a: Launch[A], b: Launch[B], c: Launch[C],
-  grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
-  let p: (String, List[EntryArg]) = e
-  let (kernel, args) = p
-  launch_args(kernel, args, [pair(a), pair(b), pair(c)], grid)
+  grid: List[Int] = [], at: Loc = caller()) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg], List[GeometryUse]) = e
+  let (kernel, args, geometry) = p
+  launch_args(kernel, args, [pair(a), pair(b), pair(c)], grid, geometry, at)
 }
 
 ## [`launch_entry1`] for four arguments.
 pub fn launch_entry4[A, B, C, D](e: Entry4[A, B, C, D], a: Launch[A], b: Launch[B],
-  c: Launch[C], d: Launch[D], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
-  let p: (String, List[EntryArg]) = e
-  let (kernel, args) = p
-  launch_args(kernel, args, [pair(a), pair(b), pair(c), pair(d)], grid)
+  c: Launch[C], d: Launch[D], grid: List[Int] = [], at: Loc = caller()) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg], List[GeometryUse]) = e
+  let (kernel, args, geometry) = p
+  launch_args(kernel, args, [pair(a), pair(b), pair(c), pair(d)], grid, geometry, at)
 }
 
 ## [`launch_entry1`] for five arguments.
 pub fn launch_entry5[A, B, C, D, E](e: Entry5[A, B, C, D, E], a: Launch[A], b: Launch[B],
-  c: Launch[C], d: Launch[D], x: Launch[E], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
-  let p: (String, List[EntryArg]) = e
-  let (kernel, args) = p
-  launch_args(kernel, args, [pair(a), pair(b), pair(c), pair(d), pair(x)], grid)
+  c: Launch[C], d: Launch[D], x: Launch[E], grid: List[Int] = [], at: Loc = caller()) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg], List[GeometryUse]) = e
+  let (kernel, args, geometry) = p
+  launch_args(kernel, args, [pair(a), pair(b), pair(c), pair(d), pair(x)], grid, geometry, at)
 }
 
 ## [`launch_entry1`] for six arguments.
 pub fn launch_entry6[A, B, C, D, E, F](e: Entry6[A, B, C, D, E, F], a: Launch[A], b: Launch[B],
-  c: Launch[C], d: Launch[D], x: Launch[E], y: Launch[F], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
-  let p: (String, List[EntryArg]) = e
-  let (kernel, args) = p
-  launch_args(kernel, args, [pair(a), pair(b), pair(c), pair(d), pair(x), pair(y)], grid)
+  c: Launch[C], d: Launch[D], x: Launch[E], y: Launch[F], grid: List[Int] = [], at: Loc = caller()) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg], List[GeometryUse]) = e
+  let (kernel, args, geometry) = p
+  launch_args(kernel, args, [pair(a), pair(b), pair(c), pair(d), pair(x), pair(y)], grid, geometry, at)
 }
 
 ## The module-level global named `name`, in the module that defines
@@ -2690,11 +2749,11 @@ test "launch plans check dynamic dimension and combined extent products" {
 fn dynamic_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
   # vadd with no extent: the grid is the launch's, the cells cover it
   let e: Entry3[Float, Float, Float] = entry3("vadd", arg_in([0 - 1], [128], [Axis(0)]), arg_in([0 - 1], [128], [Axis(0)]),
-    arg_out([0 - 1], [128]))
+    arg_out([0 - 1], [128]), [])
   # a kernel with no Out: the grid is the caller's alone
-  let s: Entry2[Float, I32] = entry2("hist", arg_in_whole(), arg_shared())
+  let s: Entry2[Float, I32] = entry2("hist", arg_in_whole(), arg_shared(), [])
   # an In with a static extent along a dynamic axis is held at the launch
-  let f: Entry2[Float, Float] = entry2("fixed", arg_in([512], [128], [Axis(0)]), arg_out([0 - 1], [128]))
+  let f: Entry2[Float, Float] = entry2("fixed", arg_in([512], [128], [Axis(0)]), arg_out([0 - 1], [128]), [])
   match (alloc(F64, 512), alloc(F64, 512), alloc(F64, 500), alloc(I32, 4)) {
     (Ok(a), Ok(b), Ok(short), Ok(h)) -> [
       launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(a), grid = [4]),
@@ -2762,7 +2821,7 @@ test "a scalar is the bit pattern of its value in the width its format has" {
 }
 
 fn scale_entry() -> Entry4[Float, Float, Float, Float] =
-  entry4("vadd_scaled", arg_in([4], [4], [Axis(0)]), arg_in([4], [4], [Axis(0)]), arg_scalar(), arg_out([4], [4]))
+  entry4("vadd_scaled", arg_in([4], [4], [Axis(0)]), arg_in([4], [4], [Axis(0)]), arg_scalar(), arg_out([4], [4]), [])
 
 fn scaled_kernels() -> Map[String, (Int, WideRefFn)] =
   map.from([("vadd_scaled", (3, last_out_with((dts, ins, ss) =>
@@ -3053,13 +3112,13 @@ fn six_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
   let input = arg_in([3, 4, 4], [1, 2, 4], [Axis(2), Axis(0), Axis(1)])
   let out = arg_out([4, 4, 3], [2, 4, 1])
   let e: Entry6[Float, Float, Float, Float, Float, Float] =
-    entry6("six_scalar", input, input, input, out, arg_scalar(), arg_scalar())
+    entry6("six_scalar", input, input, input, out, arg_scalar(), arg_scalar(), [])
   let input6: Entry6[Float, Float, Float, Float, Float, Float] =
-    entry6("six_in", input, input, arg_scalar(), out, arg_scalar(), input)
+    entry6("six_in", input, input, arg_scalar(), out, arg_scalar(), input, [])
   let out6: Entry6[Float, Float, Float, Float, Float, Float] =
-    entry6("six_out", input, input, input, arg_scalar(), arg_scalar(), out)
+    entry6("six_out", input, input, input, arg_scalar(), arg_scalar(), out, [])
   let shared6: Entry6[Float, Float, Float, Float, Float, Float] =
-    entry6("six_shared", input, input, arg_scalar(), out, arg_scalar(), arg_shared())
+    entry6("six_shared", input, input, arg_scalar(), out, arg_scalar(), arg_shared(), [])
   [
     launch_entry6(e, buffer_arg(a), buffer_arg(b), buffer_arg(c), buffer_arg(o), scalar_arg(0.0), scalar_arg(0.0)),
     launch_entry6(e, buffer_arg(a), buffer_arg(b), buffer_arg(c), buffer_arg(o), scalar_arg(2.0), buffer_arg(c)),
@@ -3123,8 +3182,8 @@ fn grouped_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
   let short = match alloc(narrow.F32, 271) { Ok(b) -> b, Err(_) -> return [] }
   let out = match alloc(narrow.F32, 96) { Ok(b) -> b, Err(_) -> return [] }
   let input = arg_in([4, 17, 4], [1, 4, 4], [Grouped(2, 3), Free, Axis(1)])
-  let read: Entry1[narrow.F32] = entry1("repeat", input)
-  let dynamic: Entry2[narrow.F32, narrow.F32] = entry2("repeat_dynamic", input, arg_out([2, 4, DYNAMIC], [1, 4, 1]))
+  let read: Entry1[narrow.F32] = entry1("repeat", input, [])
+  let dynamic: Entry2[narrow.F32, narrow.F32] = entry2("repeat_dynamic", input, arg_out([2, 4, DYNAMIC], [1, 4, 1]), [])
   [launch_entry1(read, buffer_arg(kv), grid = [2, 1, 12]),
     launch_entry1(read, buffer_arg(kv), grid = [2, 1, 10]),
     launch_entry1(read, buffer_arg(kv), grid = [2, 1, 15]),
@@ -3146,4 +3205,62 @@ test "K3-G: typed Grouped launches refuse unknown grids short capacity kinds and
   assert str.starts_with(seen[5], "test.launch: repeat_dynamic ")
   assert str.contains(seen[6], "complete groups")
   assert str.contains(seen[7], "gpu.aliased_argument")
+}
+
+test "launch plans check only recorded dynamic i32 extents at both boundaries" {
+  let a = arg_in([DYNAMIC], [1], [Axis(2)])
+  let u = GeometryUse { param = 0, dimension = 0, kind = ExtentI32,
+    factors = [GridExtent(2, 1)], at = loc.here() }
+  for n in [2147483646, 2147483647, 2147483648, 4294967296] {
+    let result = launch_plan([a], [(Buffer(1), n)], [1, 1, n], [u])
+    if n <= 2147483647 { assert result == Ok([1, 1, n]) } else {
+      match result { Err((kind, message)) -> {
+        assert kind == "gpu.geometry_i32"
+        assert str.contains(message, "= ${n}")
+      }, _ -> { assert false } }
+    }
+    assert launch_plan([a], [(Buffer(1), n)], [1, 1, n]) == Ok([1, 1, n])
+  }
+}
+
+test "launch plans check mixed and cross-axis dynamic suffixes without storage" {
+  let a = arg_in([1, DYNAMIC, DYNAMIC], [1, 1, 1], [Free, Axis(2), Axis(0)])
+  let u = GeometryUse { param = 0, dimension = 0, kind = SuffixI32,
+    factors = [GridExtent(2, 1), GridExtent(0, 1)], at = loc.here() }
+  assert launch_plan([a], [(Buffer(1), 2147483647)], [1, 1, 2147483647], [u]) == Ok([1, 1, 2147483647])
+  for n in [32768, 65536] {
+    match launch_plan([a], [(Buffer(1), n * 65536)], [n, 1, 65536], [u]) {
+      Err((kind, message)) -> { assert kind == "gpu.geometry_i32"
+        assert str.contains(message, "dynamic suffix") }
+      _ -> { assert false }
+    }
+  }
+  let mixed = arg_in([1, DYNAMIC, 65536], [1, 1, 1], [Free, Axis(1), Free])
+  let m = GeometryUse { ..u, factors = [GridExtent(1, 1), StaticExtent(65536)] }
+  assert launch_plan([mixed], [(Buffer(1), 2147418112)], [1, 32767], [m]) == Ok([1, 32767, 1])
+  match launch_plan([mixed], [(Buffer(1), 2147483648)], [1, 32768], [m]) {
+    Err((kind, _message)) -> { assert kind == "gpu.geometry_i32" }
+    _ -> { assert false }
+  }
+}
+
+test "launch plans preserve int64 metadata and blocks-only large tiles" {
+  let a = arg_in([1, 4294967296], [1, 1], [Free, Free])
+  assert launch_plan([a], [(Buffer(1), 4294967296)], [1]) == Ok([1, 1, 1])
+  let b = arg_in([DYNAMIC], [4294967296], [Axis(0)])
+  assert launch_plan([b], [(Buffer(1), 4294967296)], [1]) == Ok([1, 1, 1])
+}
+
+test "launch plans refuse malformed geometry before resolving its factors" {
+  let a = arg_in([DYNAMIC], [1], [Axis(0)])
+  let u = GeometryUse { param = 0, dimension = 0, kind = ExtentI32,
+    factors = [GridExtent(0, 1)], at = loc.here() }
+  for bad in [GeometryUse { ..u, param = 2 }, GeometryUse { ..u, dimension = -1 },
+    GeometryUse { ..u, factors = [] }, GeometryUse { ..u, factors = [StaticExtent(1)] },
+    GeometryUse { ..u, factors = [GridExtent(3, 1)] }, GeometryUse { ..u, factors = [GridExtent(0, 0)] }] {
+    match launch_plan([a], [(Buffer(1), 1)], [1], [bad]) {
+      Err((kind, _message)) -> { assert kind == "gpu.bad_entry" }
+      _ -> { assert false }
+    }
+  }
 }

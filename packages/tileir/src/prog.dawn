@@ -22,7 +22,7 @@ use std/str
 use std/loc
 use std/gpu.{CellAxis, Axis, Free, Grouped, Gpu, alloc, copy_from_host, copy_to_host, with_gpu_fake, reference_kernels, launch_entry3, buffer_arg, arg_scalar, last_out_with, EntryArg, Entry1,
   Entry2, Entry3, Entry4, Entry5, Entry6, entry1, entry2, entry3, entry4, entry5, entry6, arg_in, arg_in_whole, arg_out,
-  arg_shared, entry_grid }
+  arg_shared, entry_grid, GeometryUse, GeometryKind, StaticExtent, GridExtent, ExtentI32, SuffixI32 }
 use std/gpu
 use std/dtype.{F64, I64, Dtype, dtype_name}
 use std/int/i32 as std_i32
@@ -1935,10 +1935,10 @@ fn entry_args(name: Ctx, sigs: List[Sig]) -> List[EntryArg] = {
   }
 }
 
-fn record_sigs[^c](name: Ctx, sigs: List[Sig], body: fn() -> Unit !Dev ^{c}, hints: ByArch[EntryHints]) -> TileProg = {
-  let (prog, _calls) = record_calls(name, list.map(sigs, kparam_of), list.map(sigs, s => s.access),
+fn record_sigs[^c](name: Ctx, sigs: List[Sig], body: fn() -> Unit !Dev ^{c}, hints: ByArch[EntryHints]) -> (TileProg, List[GeometryUse]) = {
+  let (prog, _calls, geometry) = record_calls(name, list.map(sigs, kparam_of), list.map(sigs, s => s.access),
     list.map(sigs, s => s.g), body, hints)
-  prog
+  (prog, geometry)
 }
 
 ## `trace_kernel` for a kernel of one parameter, described by its marker
@@ -1952,8 +1952,8 @@ pub fn trace1[A, ^c](name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev ^{
   hints: ByArch[EntryHints] = [], at: Loc = caller()) -> (TileProg, Entry1[A]) = {
   let ctx0 = entry_ctx(name, at)
   let args = entry_args(ctx0, [sig_of(a)])
-  let prog = record_sigs(ctx0, [sig_of(a)], () => body(param(marker(a), 0)), hints)
-  (prog, entry1(name, args[0]))
+  let (prog, geometry) = record_sigs(ctx0, [sig_of(a)], () => body(param(marker(a), 0)), hints)
+  (prog, entry1(name, args[0], geometry))
 }
 
 ## [`trace1`] for two parameters.
@@ -1962,8 +1962,8 @@ pub fn trace2[A, B, ^c](name: String, a: Arg[A], b: Arg[B],
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b)]
   let args = entry_args(ctx0, sigs)
-  let prog = record_sigs(ctx0, sigs, () => body(param(marker(a), 0), param(marker(b), 1)), hints)
-  (prog, entry2(name, args[0], args[1]))
+  let (prog, geometry) = record_sigs(ctx0, sigs, () => body(param(marker(a), 0), param(marker(b), 1)), hints)
+  (prog, entry2(name, args[0], args[1], geometry))
 }
 
 ## [`trace1`] for three parameters.
@@ -1972,9 +1972,9 @@ pub fn trace3[A, B, C, ^c](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c)]
   let args = entry_args(ctx0, sigs)
-  let prog = record_sigs(ctx0, sigs,
+  let (prog, geometry) = record_sigs(ctx0, sigs,
     () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2)), hints)
-  (prog, entry3(name, args[0], args[1], args[2]))
+  (prog, entry3(name, args[0], args[1], args[2], geometry))
 }
 
 ## [`trace1`] for four parameters.
@@ -1984,9 +1984,9 @@ pub fn trace4[A, B, C, E, ^c](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d)]
   let args = entry_args(ctx0, sigs)
-  let prog = record_sigs(ctx0, sigs,
+  let (prog, geometry) = record_sigs(ctx0, sigs,
     () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2), param(marker(d), 3)), hints)
-  (prog, entry4(name, args[0], args[1], args[2], args[3]))
+  (prog, entry4(name, args[0], args[1], args[2], args[3], geometry))
 }
 
 ## [`trace1`] for five parameters.
@@ -1997,10 +1997,10 @@ pub fn trace5[A, B, C, E, F, ^c](name: String, a: Arg[A], b: Arg[B],
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d), sig_of(e)]
   let args = entry_args(ctx0, sigs)
-  let prog = record_sigs(ctx0, sigs,
+  let (prog, geometry) = record_sigs(ctx0, sigs,
     () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2), param(marker(d), 3),
       param(marker(e), 4)), hints)
-  (prog, entry5(name, args[0], args[1], args[2], args[3], args[4]))
+  (prog, entry5(name, args[0], args[1], args[2], args[3], args[4], geometry))
 }
 
 ## [`trace1`] for six parameters.
@@ -2011,10 +2011,10 @@ pub fn trace6[A, B, C, E, F, G, ^c](name: String, a: Arg[A], b: Arg[B],
   let ctx0 = entry_ctx(name, at)
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d), sig_of(e), sig_of(f)]
   let args = entry_args(ctx0, sigs)
-  let prog = record_sigs(ctx0, sigs,
+  let (prog, geometry) = record_sigs(ctx0, sigs,
     () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2), param(marker(d), 3),
       param(marker(e), 4), param(marker(f), 5)), hints)
-  (prog, entry6(name, args[0], args[1], args[2], args[3], args[4], args[5]))
+  (prog, entry6(name, args[0], args[1], args[2], args[3], args[4], args[5], geometry))
 }
 
 # Whether a read of what `aim` points at is ordered by nothing: the target is
@@ -2425,6 +2425,18 @@ fn cells_of(name: Ctx, frames: List[Frame], ops: List[TileOp], geoms: List[Cells
     }
   }
 
+# Only automatic i32 values create launch obligations. A cell view's
+# static shape and strides remain int64 metadata. The final unused total
+# is not a suffix operand, even when the SSA builder emits its product.
+fn geometry_use(name: Ctx, param: Int, dim: Int, kind: GeometryKind, extent: List[Int],
+  tile: List[Int], along: List[CellAxis]) -> GeometryUse = {
+  let dims = if kind == SuffixI32 { range(dim + 1, len(extent)) } else { [dim] }
+  GeometryUse { param = param, dimension = dim, kind = kind, at = name.at,
+    factors = list.map(dims, j => if extent[j] == DYN_DIM {
+      GridExtent(axis_number(along[j]), tile[j])
+    } else { StaticExtent(extent[j]) }) }
+}
+
 # What building one cell view adds to the recording.
 type Built = {
   next: Int,
@@ -2432,6 +2444,7 @@ type Built = {
   tv: Int,
   view: Int,
   exts: Map[String, Int],
+  geometry: List[GeometryUse],
 }
 
 # The views parameter `param`'s cells are read and written through: a
@@ -2452,12 +2465,14 @@ fn cell_view_ops(name: Ctx, next0: Int, param: Int, dtype: String, align: Int, e
   var ops: List[TileOp] = []
   var tv = tv0
   var exts = exts0
+  var geometry: List[GeometryUse] = []
   if tv < 0 {
     let r = len(extent)
     var ext_h: List[Int] = []
     var dyn_shape: List[Int] = []
     for j in range(0, r) {
       if extent[j] == DYN_DIM {
+        geometry = geometry ++ [geometry_use(name, param, j, ExtentI32, extent, tile, along)]
         check_geometry_i32(name, frames, here, asking, param, j, tile[j], "dynamic extent tile")
         let key = "${along[j]}:${tile[j]}"
         let m = match map.get(exts, key) {
@@ -2489,9 +2504,11 @@ fn cell_view_ops(name: Ctx, next0: Int, param: Int, dtype: String, align: Int, e
       if dyn < 0 {
         strides = [stat] ++ strides
       } else if stat == 1 {
+        geometry = geometry ++ [geometry_use(name, param, j, SuffixI32, extent, tile, along)]
         strides = [DYN_DIM] ++ strides
         dyn_strides = [dyn] ++ dyn_strides
       } else {
+        geometry = geometry ++ [geometry_use(name, param, j, SuffixI32, extent, tile, along)]
         check_geometry_i32(name, frames, here, asking, param, j, stat, "dynamic stride static factor")
         let c = next
         let m = next + 1
@@ -2522,7 +2539,7 @@ fn cell_view_ops(name: Ctx, next0: Int, param: Int, dtype: String, align: Int, e
   let pv = next
   next = mint(name, next, 1)
   ops = ops ++ [PartitionViewOf(pv, dtype, tv, cut, range(0, len(cut)), pad)]
-  Built { next = next, ops = ops, tv = tv, view = pv, exts = exts }
+  Built { next = next, ops = ops, tv = tv, view = pv, exts = exts, geometry = geometry }
 }
 
 # The entries of `m` whose handle may be named where the recording stands.
@@ -2616,6 +2633,7 @@ type Snap = {
   cell_marks: Map[Int, Int],
   sub_views: Map[String, Int],
   dyn_exts: Map[String, Int],
+  geometry: List[GeometryUse],
   carries: List[Int],
   carry_rows: List[(String, List[Int])],
   carry_sets: List[Int],
@@ -2709,7 +2727,8 @@ pub fn trace_calls[^c](name: String, params: List[KParam], body: fn() -> Unit !D
   markers: List[Marker] = [], at: Loc = caller()) -> (TileProg, List[Call]) = {
   let c = entry_ctx(name, at)
   if len(markers) == 0 {
-    record_calls(c, params, [], [], body, hints)
+    let (prog, calls, _geometry) = record_calls(c, params, [], [], body, hints)
+    (prog, calls)
   } else if len(params) != 0 {
     refuse(c, "`trace_calls` takes formats or markers, not both")
   } else {
@@ -2718,8 +2737,9 @@ pub fn trace_calls[^c](name: String, params: List[KParam], body: fn() -> Unit !D
       sg
     })
     let _args = entry_args(c, sigs)
-    record_calls(c, list.map(sigs, kparam_of), list.map(sigs, s => s.access), list.map(sigs, s => s.g),
+    let (prog, calls, _geometry) = record_calls(c, list.map(sigs, kparam_of), list.map(sigs, s => s.access), list.map(sigs, s => s.g),
       body, hints)
+    (prog, calls)
   }
 }
 
@@ -2728,11 +2748,11 @@ pub fn trace_calls[^c](name: String, params: List[KParam], body: fn() -> Unit !D
 # no roles and refuse nothing on their account and have no cells to read,
 # and one per parameter for `trace1` to `trace6`.
 fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms: List[Cells],
-  body: fn() -> Unit !Dev ^{c}, entry_hints: ByArch[EntryHints]) -> (TileProg, List[Call]) = {
+  body: fn() -> Unit !Dev ^{c}, entry_hints: ByArch[EntryHints]) -> (TileProg, List[Call], List[GeometryUse]) = {
   # the entry's hints are checked before the body runs, like the shapes of its parameters
   let hints = wire_entry(entry_hints)
   check_by_value(entry, params)
-  let (globals, ops, calls) = {
+  let (globals, ops, calls, geometry) = {
     with handle Dev {
       var next: Int = 1
       var tok: Int = 0
@@ -2754,6 +2774,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
       var cell_marks: Map[Int, Int] = map.empty()
       var sub_views: Map[String, Int] = map.empty()
       var dyn_exts: Map[String, Int] = map.empty()
+      var geometry: List[GeometryUse] = []
       var carries: List[Int] = []
       var carry_rows: List[(String, List[Int])] = []
       var carry_sets: List[Int] = []
@@ -3738,6 +3759,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
           if blocks {
             nb
           } else {
+            geometry = geometry ++ [geometry_use(name, param, dim, ExtentI32, extent, tile, along)]
             check_geometry_i32(name, frames, ops, asking, param, dim, tile[dim], "dynamic extent tile")
             let c = next
             let m = next + 1
@@ -3802,7 +3824,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
       t_trial_begin() => {
         trials = trials ++ [Snap { next = next, tok = tok, region_tokens = region_tokens, ops = ops, globals = globals, frames = frames, marks = marks,
           calls = calls, spans = spans, held = held, aims = aims, cell_views = cell_views, spreads = spreads, cell_blocks = cell_blocks,
-          pending = pending, cell_tvs = cell_tvs, cell_marks = cell_marks, sub_views = sub_views, dyn_exts = dyn_exts,
+          pending = pending, cell_tvs = cell_tvs, cell_marks = cell_marks, sub_views = sub_views, dyn_exts = dyn_exts, geometry = geometry,
           carries = carries, carry_rows = carry_rows, carry_sets = carry_sets, results = results }]
         ()
       }
@@ -3832,6 +3854,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
         cell_marks = sn.cell_marks
         sub_views = sn.sub_views
         dyn_exts = sn.dyn_exts
+        geometry = sn.geometry
         carries = sn.carries
         carry_rows = sn.carry_rows
         carry_sets = sn.carry_sets
@@ -4441,6 +4464,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
           dyn_exts = built.exts
           next = built.next
           ops = ops ++ built.ops
+          geometry = geometry ++ built.geometry
           held = hold_view(hold_view(hold_indices(held, built.ops), built.tv, TensorViewRow, dtype, extent),
             built.view, GridViewRow("partition view"), dtype, tile)
           aims = map.insert(map.insert(aims, built.tv, param), built.view, param)
@@ -4577,6 +4601,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
           dyn_exts = built.exts
           next = built.next
           ops = ops ++ built.ops
+          geometry = geometry ++ built.geometry
           held = hold_view(hold_view(hold_indices(held, built.ops), built.tv, TensorViewRow, dtype, extent),
             built.view, GridViewRow("partition view"), dtype, sub)
           aims = map.insert(map.insert(aims, built.tv, param), built.view, param)
@@ -4649,6 +4674,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
           list.map(tile, _t => Free), tile, 0 - 1, none, frames, ops, asking)
         next = built.next
         ops = ops ++ built.ops
+        geometry = geometry ++ built.geometry
         held = hold_view(hold_view(held, built.tv, TensorViewRow, dtype, extent),
           built.view, GridViewRow("partition view"), dtype, tile)
         aims = map.insert(map.insert(aims, built.tv, param), built.view, param)
@@ -4775,9 +4801,9 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
     if len(trials) != 0 { refuse(name, "the body ended inside a trial") } else { () }
     if len(frames) != 0 { refuse(name, "the body ended with ${len(frames)} region(s) still open") } else { () }
     if len(marks) != 0 { refuse(name, "the body ended with ${len(marks)} call or body mark(s) still open") } else { () }
-    (globals, ops, calls)
+    (globals, ops, calls, geometry)
   }
-  (TileProg { name = entry.kernel, params = params, globals = globals, ops = [MakeToken(0)] ++ ops, hints = hints, producer = None, debug = None }, calls)
+  (TileProg { name = entry.kernel, params = params, globals = globals, ops = [MakeToken(0)] ++ ops, hints = hints, producer = None, debug = None }, calls, geometry)
 }
 
 ## The handles an operation defines in the region it sits in, in definition

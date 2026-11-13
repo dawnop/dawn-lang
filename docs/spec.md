@@ -4192,7 +4192,11 @@ Out 只接受 Axis 单射。整数沿轴列表不再是接口。
   `unsigned_cmp` 只改变比较方式。`consti` / `i_const` 仍按目标宽度截断，普通 i32
   加乘仍回绕。几何查询与自动几何常量采用数值可表示检查；pointer stride 可为零或负，
   但须在 signed-i32 内。静态 view shape / stride metadata 保留 int64，必要的静态
-  suffix 乘法在计算前检查 int64 上界，不计算未使用的 total。动态乘积只检查已知常量。
+  suffix 乘法在计算前检查 int64 上界，不计算未使用的 total。`trace1` 到 `trace6` 返回的 Entry 携带实际物化的自动
+  动态 extent 与 suffix 的 `GeometryUse`；typed launch 在调用 handler 前检查这些
+  正乘积不超过 2147483647，越界返回 `gpu.geometry_i32`，并报参数、原存储维度、
+  因子、乘积、录制与发射位置。静态 int64 metadata 和只问 blocks 的大 tile 不受此限。
+  手写 `entry1` 到 `entry6` 必须显式传入与程序相符的义务列表；没有自动物化值时为 `[]`。
 - **记录**：`tileir/prog` 的 `trace_kernel(name, params, body)` 在**宿主运行期**、在记录
   handler 下把 `body` 跑恰好一次，答一个 `TileProg`（SSA 形式的 ADT）。`params` 是入口各参数
   的格式名，按位置。同一个体按同一顺序发同样的操作，得到的记录相等。

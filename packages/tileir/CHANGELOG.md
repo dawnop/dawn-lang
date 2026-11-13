@@ -1,5 +1,12 @@
 # tileir changelog
 
+## 0.31.0
+
+- 录制结果向 typed Entry 传递真正物化的动态 extent 与 suffix 的 i32 检查义务。
+  launch 在设备 handler 之前拒绝越界，并报原参数、存储维度、乘积与两个调用位置。
+- Entry 构造要求显式 GeometryUse 列表；只保留这一种表示，不加旧接口包装。
+  静态 int64 metadata、只问 blocks 的大 tile、一般 i32 回绕和 unsigned 语义不变。
+
 ## 0.30.0
 
 - 离线汇编工具组件固定为 13.5.37，字节码继续使用 13.4。
