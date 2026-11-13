@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 567473be2fc883a0 -->
+<!-- doc-check: translation-of docs/spec.md @ 8d2d214515f1a71a -->
 
 # Dawn Language Specification
 
