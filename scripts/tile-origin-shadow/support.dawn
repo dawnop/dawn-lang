@@ -1,0 +1,278 @@
+
+# ---- appended by scripts/tile-origin-shadow/shadow.py: observe each recording
+# beside the call marks and judge the projection of the snapshot against them.
+
+fn shadow_unit() -> SourceUnit = {
+  let index = shadow_source.make()
+  SourceUnit { module = "main", revision = index.revision, declarations = index.declarations, spans = index.spans,
+    lines = shadow_lines() }
+}
+
+fn shadow_lines() -> List[Int] = list.map(str.split(shadow_text.lines(), ","), s => match parse_int(s) {
+  Some(n) -> n
+  None -> panic("shadow: bad line table")
+})
+
+fn shadow_dt[D](a: Arg[D]) -> Dtype[D] = match a {
+  In(d, _g) -> d
+  Out(d, _g) -> d
+  Shared(d) -> d
+  Scalar(d) -> d
+}
+
+fn shadow_kind(k: Kind) -> String = match k {
+  Api -> "api"
+  Helper -> "helper"
+  Host -> "host"
+  Default -> "default"
+  Perform -> "perform"
+  Body -> "body"
+}
+
+# The names the marks gave the compiler's synthetic syntax calls: a staged
+# `var` is opened, read and written as carry, get and set, a number made a
+# constant is `lit` or `idx_const`, and an operator over tiles, integer tiles
+# or indices is add or addi or idx_add (and the other three alike).
+fn shadow_names(n: OriginCall) -> List[String] = match n.role {
+  "var" -> match n.name {
+    "var_open" -> ["carry"]
+    "var_get" -> ["get"]
+    "var_set" -> ["set"]
+    _ -> [n.name]
+  }
+  "literal" -> ["lit", "idx_const"]
+  "if" -> if n.name == "staged_if" { ["if"] } else { [n.name] }
+  "operator" -> [n.name, n.name ++ "i", "idx_" ++ n.name]
+  _ -> [n.name]
+}
+
+fn shadow_match(n: OriginCall, c: Call) -> Bool =
+  (n.kind == Api || n.kind == Helper) && list.contains(shadow_names(n), c.name) && match c.at {
+    Some(l) -> match n.site {
+      Some(s) -> s.line == loc.line(l) && s.col == loc.col(l)
+      None -> false
+    }
+    None -> true
+  }
+
+# A staged `for` or `if` runs its bodies in its own subtree.
+fn shadow_region(n: OriginCall) -> Bool = n.role == "for" || (n.role == "if" && n.name == "staged_if")
+
+# The nearest ancestor of `id` that is already paired with a row of the marks,
+# as the node's id, or -1 above all of them; -2 when a region that is not
+# paired yet lies between, because then the node belongs to that region's rows.
+fn shadow_anchor(nodes: List[OriginCall], matched: Map[Int, Int], id: Int) -> Int = {
+  var at = nodes[id].parent
+  while at >= 0 {
+    if shmap.has(matched, at) { return at }
+    if shadow_region(nodes[at]) { return -2 }
+    at = nodes[at].parent
+  }
+  -1
+}
+
+fn shadow_compare(name: String, calls: List[Call], snapshot: TraceSnapshot) -> Unit !io = {
+  let unit = shadow_unit()
+  let rows = match origin.rows_of(snapshot) {
+    Ok(r) -> r
+    Err(e) -> {
+      println("FAIL\t${name}\t${e}")
+      return ()
+    }
+  }
+  let projection = match origin.project(rows, [unit], unit.revision, ["dawn\$pkg\$tileref/"]) {
+    Ok(p) -> p
+    Err(e) -> {
+      println("FAIL\t${name}\t${e}")
+      return ()
+    }
+  }
+  # the calls the recorder ran: under the one `trace_calls` call
+  var root = -1
+  for i in range(0, len(rows)) {
+    match rows[i].definition {
+      Some(d) -> if root < 0 && d.declaration == "Nf11:trace_calls" && str.ends_with(d.module, "tileir/prog") { root = i }
+      None -> ()
+    }
+  }
+  if root < 0 {
+    println("FAIL\t${name}\tno recorder call in the snapshot")
+    return ()
+  }
+  var under: List[Bool] = []
+  for i in range(0, len(rows)) { under = under ++ [i == root || (rows[i].parent >= 0 && under[rows[i].parent])] }
+  let nodes = projection.calls
+  let below = under
+  let base = root
+  let scoped = list.filter(nodes, n => below[n.row] && n.row != base && not str.starts_with(origin.last_name(n.declaration), "shadow"))
+  # The marks' rows are paired with nodes one parent at a time, top down: the
+  # children of a row can only be nodes whose nearest paired ancestor is the node
+  # their parent row was paired with, so a row under the wrong parent finds no
+  # node and is reported missing. Within one parent the rows are paired from the
+  # end: a staged body is run once as a trial (what the recorder learns the carries
+  # from) and once for real, and the marks keep only the real one, the later.
+  var matched: Map[Int, Int] = shmap.empty()
+  var found: Map[Int, Int] = shmap.empty()
+  var used: Map[Int, Bool] = shmap.empty()
+  var missing = 0
+  var extra: Map[String, Int] = shmap.empty()
+  for g in range(-1, len(calls)) {
+    let anchor = if g < 0 { -1 } else { shadow_node(found, g) }
+    if g < 0 || anchor >= 0 {
+      let kids = list.filter(range(0, len(calls)), k => calls[k].parent == g)
+      var j = len(scoped)
+      for r in range(0, len(kids)) {
+        let k = kids[len(kids) - 1 - r]
+        let c = calls[k]
+        let owns = list.any(calls, d => d.parent == k)
+        let before = matched
+        var hit = -1
+        var at = j - 1
+        while at >= 0 && hit < 0 {
+          let n = scoped[at]
+          # A region row is kept by the marks where the region value is built;
+          # the compiler's owner is the staged `for` on that line that runs the body.
+          let region = owns && n.role == "for" && match (n.site, c.at) {
+            (Some(sp), Some(l)) -> sp.line == loc.line(l)
+            _ -> false
+          }
+          if (shadow_match(n, c) || region) && shadow_anchor(nodes, before, n.id) == anchor { hit = at } else { at = at - 1 }
+        }
+        if hit < 0 {
+          missing = missing + 1
+          println("MISSING\t${name}\t${k}\t${c.name}\t${c.at}\tparent=${c.parent}")
+        } else {
+          matched = shmap.insert(matched, scoped[hit].id, k)
+          found = shmap.insert(found, k, scoped[hit].id)
+          used = shmap.insert(used, hit, true)
+          j = hit
+        }
+      }
+    }
+  }
+  # An extra node with the same parent, name and site as a paired one is a second
+  # execution of it: a staged body is run once as a trial and its calls are not
+  # rolled back in the snapshot yet (the recorder takes no checkpoint).
+  var paired: Map[String, Bool] = shmap.empty()
+  for s in range(0, len(scoped)) { if shmap.has(used, s) { paired = shmap.insert(paired, shadow_site_key(scoped[s]), true) } }
+  for s in range(0, len(scoped)) {
+    if not shmap.has(used, s) {
+      extra = shadow_tally(extra, scoped[s], shmap.has(paired, shadow_site_key(scoped[s])))
+    }
+  }
+  if name == "__DUMP__" {
+    for k in range(0, len(calls)) { println("OLD\t${k}\t${calls[k].name}\t${calls[k].at}\t${calls[k].parent}\t${shadow_node(found, k)}") }
+    for n in scoped {
+      let at = match n.site { Some(sp) -> "${sp.line}:${sp.col}", None -> "-" }
+      let callee = match n.callee { Some(c) -> "${c.declaration}", None -> "-" }
+      println("NODE\t${n.id}\t${n.parent}\t${shadow_kind(n.kind)}\t${n.role}\t${n.name}\t${at}\t${callee}")
+    }
+  }
+  # every execution is its own node, and a helper's own calls lie in its definition
+  var keys: Map[Int, Bool] = shmap.empty()
+  var dup = 0
+  for n in scoped {
+    if shmap.has(keys, n.key.instance) { dup = dup + 1 }
+    keys = shmap.insert(keys, n.key.instance, true)
+  }
+  var outside = 0
+  var twice: Map[String, Int] = shmap.empty()
+  for n in scoped {
+    if n.kind == Helper {
+      match n.callee {
+        Some(c) -> { twice = shmap.insert(twice, c.declaration, 1 + shadow_count(twice, c.declaration)) }
+        None -> ()
+      }
+      for m in scoped {
+        if m.parent == n.id && m.kind != Body && m.kind != Default && n.callee != None && not origin.within_definition(n, m) {
+          outside = outside + 1
+          println("OUTSIDE\t${name}\t${n.name}\t${m.name}")
+        }
+      }
+    }
+  }
+  for key in shmap.keys(twice) {
+    if shadow_count(twice, key) > 1 { println("TWICE\t${name}\t${key}\t${shadow_count(twice, key)}") }
+  }
+  println("SHADOW\t${name}\told=${len(calls)}\tnew=${len(scoped)}\tmissing=${missing}\tdup=${dup}\toutside=${outside}")
+  for key in shmap.keys(extra) { println("EXTRA\t${name}\t${key}\t${shadow_count(extra, key)}") }
+}
+
+fn shadow_site_key(n: OriginCall) -> String = match n.site {
+  Some(sp) -> "${n.parent}|${n.name}|${sp.lo}|${sp.hi}"
+  None -> "${n.parent}|${n.name}|-"
+}
+
+fn shadow_tally(m: Map[String, Int], n: OriginCall, repeat: Bool) -> Map[String, Int] = {
+  let key = "${if repeat { "trial" } else { shadow_kind(n.kind) }}|${n.role}|${n.name}"
+  shmap.insert(m, key, 1 + shadow_count(m, key))
+}
+
+fn shadow_node(m: Map[Int, Int], k: Int) -> Int = match shmap.get(m, k) {
+  Some(x) -> x
+  None -> -1
+}
+
+fn shadow_count(m: Map[String, Int], key: String) -> Int = match shmap.get(m, key) {
+  Some(x) -> x
+  None -> 0
+}
+
+fn shadow_check(name: String, prog: TileProg, params: List[KParam], markers: List[Marker], body: fn() -> Unit !Dev,
+  hints: ByArch[EntryHints]) -> Unit !io = {
+  let ((again, calls), snapshot) = prov.observe(scope => {
+    let r = trace_calls(name, params, body, hints = hints, markers = markers)
+    (r, prov.completed(scope))
+  })
+  if again != prog { panic("shadow: `${name}` observed recording differs from the plain one") }
+  shadow_compare(name, calls, snapshot)
+}
+
+pub fn shadow_kernel(name: String, params: List[KParam], body: fn() -> Unit !Dev,
+  hints: ByArch[EntryHints] = [], at: Loc = caller()) -> TileProg !io = {
+  let prog = trace_kernel(name, params, body, hints = hints, at = at)
+  shadow_check(name, prog, params, [], body, hints)
+  prog
+}
+
+pub fn shadow1[A](name: String, a: Arg[A],
+  body: fn(Param[A]) -> Unit !Dev, hints: ByArch[EntryHints] = []) -> (TileProg, Entry1[A]) !io = {
+  let (prog, entry) = trace1(name, a, body, hints = hints)
+  shadow_check(name, prog, [], [erase(a)], () => body(param(shadow_dt(a), 0)), hints)
+  (prog, entry)
+}
+
+pub fn shadow2[A, B](name: String, a: Arg[A], b: Arg[B],
+  body: fn(Param[A], Param[B]) -> Unit !Dev, hints: ByArch[EntryHints] = []) -> (TileProg, Entry2[A, B]) !io = {
+  let (prog, entry) = trace2(name, a, b, body, hints = hints)
+  shadow_check(name, prog, [], [erase(a), erase(b)], () => body(param(shadow_dt(a), 0), param(shadow_dt(b), 1)), hints)
+  (prog, entry)
+}
+
+pub fn shadow3[A, B, C](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
+  body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev, hints: ByArch[EntryHints] = []) -> (TileProg, Entry3[A, B, C]) !io = {
+  let (prog, entry) = trace3(name, a, b, c, body, hints = hints)
+  shadow_check(name, prog, [], [erase(a), erase(b), erase(c)], () => body(param(shadow_dt(a), 0), param(shadow_dt(b), 1), param(shadow_dt(c), 2)), hints)
+  (prog, entry)
+}
+
+pub fn shadow4[A, B, C, E](name: String, a: Arg[A], b: Arg[B], c: Arg[C], d: Arg[E],
+  body: fn(Param[A], Param[B], Param[C], Param[E]) -> Unit !Dev, hints: ByArch[EntryHints] = []) -> (TileProg, Entry4[A, B, C, E]) !io = {
+  let (prog, entry) = trace4(name, a, b, c, d, body, hints = hints)
+  shadow_check(name, prog, [], [erase(a), erase(b), erase(c), erase(d)], () => body(param(shadow_dt(a), 0), param(shadow_dt(b), 1), param(shadow_dt(c), 2), param(shadow_dt(d), 3)), hints)
+  (prog, entry)
+}
+
+pub fn shadow5[A, B, C, E, F](name: String, a: Arg[A], b: Arg[B], c: Arg[C], d: Arg[E], e: Arg[F],
+  body: fn(Param[A], Param[B], Param[C], Param[E], Param[F]) -> Unit !Dev, hints: ByArch[EntryHints] = []) -> (TileProg, Entry5[A, B, C, E, F]) !io = {
+  let (prog, entry) = trace5(name, a, b, c, d, e, body, hints = hints)
+  shadow_check(name, prog, [], [erase(a), erase(b), erase(c), erase(d), erase(e)], () => body(param(shadow_dt(a), 0), param(shadow_dt(b), 1), param(shadow_dt(c), 2), param(shadow_dt(d), 3), param(shadow_dt(e), 4)), hints)
+  (prog, entry)
+}
+
+pub fn shadow6[A, B, C, E, F, G](name: String, a: Arg[A], b: Arg[B], c: Arg[C], d: Arg[E], e: Arg[F], f: Arg[G],
+  body: fn(Param[A], Param[B], Param[C], Param[E], Param[F], Param[G]) -> Unit !Dev, hints: ByArch[EntryHints] = []) -> (TileProg, Entry6[A, B, C, E, F, G]) !io = {
+  let (prog, entry) = trace6(name, a, b, c, d, e, f, body, hints = hints)
+  shadow_check(name, prog, [], [erase(a), erase(b), erase(c), erase(d), erase(e), erase(f)], () => body(param(shadow_dt(a), 0), param(shadow_dt(b), 1), param(shadow_dt(c), 2), param(shadow_dt(d), 3), param(shadow_dt(e), 4), param(shadow_dt(f), 5)), hints)
+  (prog, entry)
+}
