@@ -10,6 +10,8 @@
 #   ./scripts/tile-golden/run.sh --record            # re-record the .mlir and .tilebc files
 #   ./scripts/tile-golden/run.sh --shard 1/3         # one round-robin slice of matrix.txt
 #   ./scripts/tile-golden/run.sh --only <item>       # one kernel or one mutant, nothing else
+#   ./scripts/tile-golden/run.sh --prepare <dir>    # build the shared runtime and clean native
+#   ./scripts/tile-golden/run.sh --prebuilt <dir>   # verify and consume that build
 #
 #   ITEM_TIMES=<file> ./scripts/tile-golden/run.sh   # also append `<item> <seconds>`
 #                                                    # per work item, for balancing the
@@ -579,12 +581,16 @@ mode=check
 tileiras="${TILEIRAS:-}"
 without_tileiras=no
 only=
+prepare=
+prebuilt=
 while [ $# -gt 0 ]; do
   case "$1" in
     --record) mode=record ;;
     --tileiras) tileiras="$2"; shift ;;
     --without-tileiras) without_tileiras=yes ;;
     --only) only="$2"; shift ;;
+    --prepare) prepare="$2"; shift ;;
+    --prebuilt) prebuilt="$2"; shift ;;
     *) echo "usage: run.sh [--record] [--shard I/N] [--only <item>] [--tileiras <bin> | --without-tileiras]" >&2; exit 2 ;;
   esac
   shift
@@ -594,6 +600,20 @@ fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
+
+if [ -n "$prepare" ]; then
+  [ -z "$prebuilt" ] && [ -z "$only" ] && [ "$mode" = check ] && [ "$shard_total" = 1 ] ||
+    fail "--prepare requires an unsharded clean build"
+  mkdir -p "$prepare"
+  prepare="$(cd "$prepare" && pwd)"
+  without_tileiras=yes
+fi
+if [ -n "$prebuilt" ]; then
+  [ "$mode" = check ] || fail "--prebuilt cannot record goldens"
+  prebuilt="$(cd "$prebuilt" && pwd)"
+  python3 -B "$root/scripts/tile-prep/full.py" native-verify "$prebuilt" ||
+    fail "prebuilt runtime and clean native identity mismatch"
+fi
 
 # The executable work items, in run order: the kernels above, then the mutants
 # in the order their blocks appear below. matrix.txt is the persistent record
@@ -827,9 +847,13 @@ fi
 
 # The runtime is compiled once; every native build below links this object.
 rt_obj="$work/dawn_rt.o"
+if [ -n "$prebuilt" ]; then
+  rt_obj="$prebuilt/dawn_rt.o"
+else
 "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread \
   -I "$root/runtime/c" -c -o "$rt_obj" "$root/runtime/c/dawn_rt.c" ||
   fail "the C runtime does not compile"
+fi
 
 # A project over a copy of (or the real) packages/tileir, and the real
 # packages/tileref: kernels.dawn takes the static global tables the T7 and TG
@@ -1072,7 +1096,18 @@ producer_want="$(sed -n 's/^const PRODUCER: String = "\(.*\)"$/\1/p' "$here/kern
 # ---------------------------------------------------------------- trace + golden
 
 project "$work/clean" "$root/packages/tileir"
+if [ -n "$prebuilt" ]; then
+  cp "$prebuilt/clean.bin" "$work/clean.bin"
+else
 build_native "$work/clean" "$work/clean.bin"
+fi
+if [ -n "$prepare" ]; then
+  cp "$rt_obj" "$prepare/dawn_rt.o"
+  cp "$work/clean.bin" "$prepare/clean.bin"
+  python3 -B "$root/scripts/tile-prep/full.py" native-seal "$prepare"
+  echo "PASS  prepared runtime and clean native"
+  exit 0
+fi
 
 run_jvm "$work/clean" "$work/version.jvm" --bytecode-version ||
   { cat "$work/version.jvm.err" >&2; fail "kernels --bytecode-version failed on the JVM"; }
