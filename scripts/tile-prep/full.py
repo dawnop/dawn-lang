@@ -12,7 +12,7 @@ import tarfile
 import tempfile
 import time
 
-ROOT = Path.cwd()
+ROOT = Path(__file__).resolve().parents[2]
 TEMP = Path(os.environ.get('RUNNER_TEMP', '/tmp'))
 JDK_URL = 'https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-21.0.2/graalvm-community-jdk-21.0.2_linux-x64_bin.tar.gz'
 JDK_SHA = 'b048069aaa3a99b84f5b957b162cc181a32a4330cbc35402766363c5be76ae48'
@@ -31,6 +31,7 @@ def sha(path):
 
 
 def output(command, **kwargs):
+    kwargs.setdefault('cwd', ROOT)
     return sp.check_output(command, text=True, **kwargs).strip()
 
 
@@ -41,7 +42,7 @@ def emit(path, values):
 
 
 def identity():
-    sp.run(['git', 'diff', '--quiet', 'HEAD'], check=True)
+    sp.run(['git', 'diff', '--quiet', 'HEAD'], cwd=ROOT, check=True)
     return dict(schema=1, repository=os.environ['GITHUB_REPOSITORY'],
                 repository_id=os.environ['GITHUB_REPOSITORY_ID'],
                 checkout=output(['git', 'rev-parse', 'HEAD']),
@@ -51,7 +52,7 @@ def identity():
                 cc=output(['cc', '--version']).splitlines()[0],
                 recipe=sha(__file__), upload_action=UPLOAD, download_action=DOWNLOAD,
                 checkout_action=CHECKOUT, cache_action=CACHE,
-                trust={p: sha(p) for p in ['scripts/seed-release.txt',
+                trust={p: sha(ROOT / p) for p in ['scripts/seed-release.txt',
                     'scripts/seed-checksums.txt', 'scripts/seed-std-checksums.txt',
                     'scripts/tile-golden/toolchain.txt', '.github/actions/dawn-toolchain/action.yml']})
 
@@ -72,6 +73,7 @@ def unpack(archive, dest, compressed=False):
 
 
 def native_identity():
+    sp.run(['git', 'diff', '--quiet', 'HEAD'], cwd=ROOT, check=True)
     return dict(schema=1, tree=output(['git', 'rev-parse', 'HEAD^{tree}']),
         inputs=output(['python3', '-I', '-B', 'scripts/tile-gpu-diff/inputs.py']),
         runner=sha(ROOT / 'scripts/tile-golden/run.sh'),
@@ -154,7 +156,7 @@ def prepare():
     # Dependencies may be cached, but every producer builds this run's compiler.
     for name in ('dawn-selfhost.jar', 'dawn-selfhost.stamp', 'dawn-selfhost.inputs'):
         (ROOT / 'build' / name).unlink(missing_ok=True)
-    sp.run(['./bin/dawn', '--version'], env=env, check=True)
+    sp.run(['./bin/dawn', '--version'], cwd=ROOT, env=env, check=True)
     # A dependency cache contributes candidates, never trusted installed code.
     wheels = TEMP / 'tileiras-wheels'
     wheels.mkdir(exist_ok=True)
@@ -171,7 +173,7 @@ def prepare():
     stage = TEMP / 'execution-closure'
     stage.mkdir()
     sp.run(['./scripts/tile-golden/run.sh', '--prepare', str(stage / 'native')],
-           env=env, check=True)
+           cwd=ROOT, env=env, check=True)
     prepared = time.monotonic()
     # Keep the JVM implementation unchanged. Build tools, headers, sources and
     # native-image's static SDK are not read by the shard execution path.
@@ -216,13 +218,16 @@ def prepare():
         tar.stdout.close()
         if tar.wait() or result.returncode:
             raise RuntimeError('packing failed')
-    emit(os.environ['GITHUB_OUTPUT'], dict(full_sha=sha(bundle),
-        full_manifest=sha(stage / 'manifest.json')))
+    digest = sha(bundle)
+    manifest_digest = sha(stage / 'manifest.json')
+    pack_seconds = time.monotonic() - prepared
+    emit(os.environ['GITHUB_OUTPUT'], dict(full_sha=digest,
+        full_manifest=manifest_digest))
     print('PREP_METRIC ' + json.dumps(dict(bytes=bundle.stat().st_size,
         components=sizes, prepare_seconds=prepared-started,
         assembler_files=[str(p.relative_to(tools)) for p in tools.rglob('*') if p.is_file()],
-        pack_seconds=time.monotonic()-prepared,
-        tar_sha256=sha(bundle), manifest_sha256=sha(stage / 'manifest.json'))), flush=True)
+        pack_seconds=pack_seconds,
+        tar_sha256=digest, manifest_sha256=manifest_digest)), flush=True)
 
 
 def check_manifest(manifest, expected):
