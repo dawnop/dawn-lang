@@ -90,7 +90,7 @@ use jvm/jreflect
 use jvm/classread
 use jvm/operand as operands
 use jvm/outline
-use jvm/outline.{Region}
+use jvm/outline.{Region, Summary}
 use java "dawn.rt.Asm"
 use java "dawn.rt.AsmWriter"
 use java "org.objectweb.asm.ClassWriter"
@@ -2131,7 +2131,14 @@ fn gen_physical_regions(gx: GenCtx, g: Gen, cw: ClassWriter, cf: CFun) -> Gen !i
     }
     # Emit the root directly. Only proper child regions can split again,
     # so a large decision tree makes progress without wrapping itself.
-    let (emitted, falls) = gen_cexpr_body(gx, next, body, false)
+    let (emitted, falls) = match body {
+      CBlock(stmts, tl, ty) -> if len(region.memo) > 0 {
+        gen_block(gx, next, stmts, tl, ty, false, region.memo)
+      } else {
+        gen_cexpr_body(gx, next, body, false)
+      }
+      _ -> gen_cexpr_body(gx, next, body, false)
+    }
     next = emitted
     if falls {
       match region.exit {
@@ -3403,6 +3410,45 @@ pub fn gen_cexpr(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io = 
   (if gx.observed_mode { Gen { ..next, next_slot = g.next_slot } } else { next }, falls)
 }
 
+# A block's statements, then its result. `memo` is the suffix summaries a
+# physical region carries for its own body, or empty: with them the
+# remainder of a long block becomes its region without reading the
+# remainder again (outline.sequence).
+fn gen_block(gx: GenCtx, g: Gen, stmts: List[CStmt], tl: Option[CExpr], ty: Ty, tail: Bool,
+  memo: List[Summary]) -> (Gen, Bool) !io = {
+  let (statements, result, link, after) = outline.sequence(stmts, tl, ty,
+    if gx.observed_mode { g.physical_band } else { 0 }, memo)
+  var g1 = g
+  for s in statements {
+    let (g2, stmt_falls) = gen_cstmt(gx, g1, s)
+    g1 = g2
+    if not stmt_falls { return (g1, false) }
+  }
+  match link {
+    Some(region) -> return gen_physical_call(gx, g1, region)
+    None -> ()
+  }
+  match result {
+    # The remainder of a block this call split, that no region took: what
+    # `gen_cexpr` does with it, without reading it again for a region.
+    Some(CBlock(rest, tail_result, rest_ty)) -> {
+      if len(after) > 0 {
+        let (next, falls) = gen_block(gx, g1, rest, tail_result, rest_ty, tail, after)
+        (if gx.observed_mode { Gen { ..next, next_slot = g1.next_slot } } else { next }, falls)
+      } else {
+        gen_cexpr(gx, g1, CBlock(rest, tail_result, rest_ty), tail)
+      }
+    }
+    Some(t) -> gen_cexpr(gx, g1, t, tail)
+    # A block with no tail expression is typed `Unit` (or `Never`) by
+    # construction, so the value it owes is the singleton.
+    None -> {
+      if not is_bottom(ty) { push_unit(g1.mv) }
+      (g1, true)
+    }
+  }
+}
+
 fn gen_cexpr_body(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
   match e {
     CInt(v) -> {
@@ -3445,25 +3491,7 @@ fn gen_cexpr_body(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
       (g1, falls)
     }
     CIf(cond, thn, els, ty) -> gen_cif(gx, g, cond, thn, els, ty, tail, false)
-    CBlock(stmts, tl, ty) -> {
-      let (statements, result) = outline.sequence(stmts, tl, ty,
-        if gx.observed_mode { g.physical_band } else { 0 })
-      var g1 = g
-      for s in statements {
-        let (g2, stmt_falls) = gen_cstmt(gx, g1, s)
-        g1 = g2
-        if not stmt_falls { return (g1, false) }
-      }
-      match result {
-        Some(t) -> gen_cexpr(gx, g1, t, tail)
-        # A block with no tail expression is typed `Unit` (or `Never`) by
-        # construction, so the value it owes is the singleton.
-        None -> {
-          if not is_bottom(ty) { push_unit(g1.mv) }
-          (g1, true)
-        }
-      }
-    }
+    CBlock(stmts, tl, ty) -> gen_block(gx, g, stmts, tl, ty, tail, [])
     CReturn(vo) ->
       match vo {
         # a bare `return` is only legal in a Unit function, and that function
