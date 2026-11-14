@@ -186,8 +186,9 @@ def union(args):
 def selftest():
     # Fixed fixtures exercise the same verifier without compiling mutants.
     expected = dict(inputs='input', plan='plan', golden='golden')
-    selected = {i: [f'item-{n}' for n in range(i - 1, 430, 19)] for i in range(1, 20)}
-    receipts = [dict(identity=expected.copy(), index=i, total=19, attempt='1',
+    total = 20
+    selected = {i: [f'item-{n}' for n in range(i - 1, 430, total)] for i in range(1, total + 1)}
+    receipts = [dict(identity=expected.copy(), index=i, total=total, attempt='1',
         ran=names.copy(), times={n: 1.0 for n in names}, prebuilt_unchanged=True)
         for i, names in selected.items()]
     validate(receipts, expected, selected)
@@ -255,7 +256,7 @@ if __name__ == '__main__':
     ap.add_argument('command', choices=['receipt', 'union', 'selftest'])
     ap.add_argument('--plan', type=Path, default=ROOT / 'scripts/mutant-coverage/plans/tile-golden.txt')
     ap.add_argument('--index', type=int)
-    ap.add_argument('--total', type=int, default=19)
+    ap.add_argument('--total', type=int, default=20)
     ap.add_argument('--job-prefix', default='tile-golden-')
     ap.add_argument('--out', type=Path, default=Path('tile-evidence'))
     args = ap.parse_args()
