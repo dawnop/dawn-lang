@@ -1,108 +1,9 @@
 name: tile
 
-# packages/tileir's Tile IR against the two records that can say it is wrong:
-# the text and bytecode goldens beside scripts/tile-golden/run.sh (layer 0 of
-# docs/tile-backend-design.md 6.2: both backends, byte for byte, plus the
-# handler's determinism) and NVIDIA's `tileiras` assembling each bytecode
-# golden for sm_86 (layer 1: the one verdict from outside this repository,
-# with a reader and a verifier behind it that name the offset and the
-# operation when they refuse), and every cubin carrying a GLOBAL FUNC named
-# after its kernel. Layer 1's verdict is the exit code AND an empty error
-# stream: knife 7b measured tileiras writing a cubin, exiting 0 and printing a
-# refusal (an f64 `tanh` with a rounding mode it does not accept), which a
-# gate reading only the status would have called green.
-#
-# WHAT LEFT THE PUSH PATH ON 2026-09-11, said plainly because it is a coverage
-# loss and not a rearrangement: sixty-seven mutants and the two-backend byte
-# comparison of 184 kernels no longer run on a push that touches none of the
-# paths below. They run on the next daily schedule instead. A push that does
-# touch those paths still runs all of it before the change can land.
-#
-# Why it was worth it: eleven shards were 5338 job-seconds of run 34484938024,
-# 22.8% of every push, on a run whose span is set by its total (gates.yml's
-# header has that arithmetic). Over the thirty main pushes before the move,
-# the paths below were touched on none of them.
-#
-# What the trigger cannot see, and this is the honest cost rather than zero:
-# scripts/tile-golden/run.sh:20-24 renders every kernel on BOTH backends and
-# compares the bytes, so a change to the compiler's emit side can turn this
-# red without touching anything tile-shaped. scripts/gate-map/gatemap.py does
-# not model that coupling and returns no tile-golden row for
-# selfhost/src/c/emitc.dawn. So the trigger names selfhost/src/c/** and
-# selfhost/src/ir/** by hand: they are the emit side, they were touched on 0
-# of those same thirty pushes, and naming them costs nothing until the day it
-# matters. Everything else gatemap does couple to tile-golden is named too
-# (runtime/c, std/bytes.dawn, std/gpu.dawn, std/narrow.dawn, scripts/narrow-contract,
-# scripts/mutant-coverage, selfhost/src/driver, selfhost/src/main.dawn,
-# bin/dawn); the list below is a superset of what gatemap knows, never a
-# subset.
-#
-# The daily run is the backstop for everything the list still misses. A
-# schedule runs from the default branch only, so this file is read from main
-# whatever is on other branches, and `workflow_dispatch` is here so a person
-# can ask for the same evidence without waiting for the hour.
-#
-# The budget lines below are under gates.yml's `# run-pole:`, the same as the
-# jobs that stayed. scripts/check-gate-budgets.py reads every workflow that
-# carries a `# budget:` line and holds all of them to that one pole; its
-# header says why.
-#
-# The path total is the push total's twin for this file (gates.yml has the
-# rule): the `3x` claims below may not add up past it, it was set on
-# 2026-09-25 at their sum, and raising it takes a
-# `Gate-Budget(path-total): <old>s -> <new>s <why>` line in the commit
-# message. It is its own line and not part of the push total because this
-# file runs only on the pushes that touch the paths below. How often that is
-# drifts on its own (none of the thirty pushes before the move, 19 of the 80
-# main pushes from 09-12 to 09-24), so the nightly budget report in
-# nightly.yml counts it, and says so when it passes one push in five.
-#
-# ON A PUSH, A TREE ALREADY VERIFIED IS NOT RUN AGAIN (2026-09-30). The
-# `dedupe` job below asks scripts/tile-verified.py whether this commit's git
-# tree (`git rev-parse HEAD^{tree}`) already has a green run of this
-# workflow, recorded as an artifact named `tile-verified-v1-<tree>` that
-# tile-shards-complete uploads once all eleven shards and the union check are
-# green (kept 90 days). If it has, the eleven shards and tile-shards-complete
-# are skipped and the step summary names the run that verified it. Only a
-# push is deduplicated: pull_request, schedule and workflow_dispatch always
-# run every shard, so the whole set runs on the pull request and every day,
-# and the schedule stays the backstop for drift the tree cannot see.
-#
-# Why the tree and not the paths or a digest. In the week of 09-22 .. 09-29
-# this file fired on 19 of 57 pushes to main, and 17 of those 19 ran on a
-# tree a pull_request run had verified green about half an hour before: a
-# rebase merge changes the SHA and not the tree. None of the 19 changed a
-# tile golden. Narrowing the paths removes at most 6 of the 19 and drops the
-# driver coupling named above. A digest of the toolchain jar changed on 31
-# of the 57 pushes, more often than the paths fire. A digest of the tile
-# inputs alone leaves out the compiler, which is the emit-side coupling this
-# header exists to name. The tree carries the compiler, the goldens, this
-# file, the tileiras pin and .github/actions at once. Replayed on that week,
-# the push re-runs drop from 19 to 2 (about 82,000 job-seconds a week).
-# scripts/tile-verified.py has the rules a record must meet (made in this
-# repository, by a run whose head repository is this one too, of this file,
-# concluded success, not expired) and the measurements behind this paragraph.
-#
-# A push can also be merged before its pull request's run has finished, and
-# then asks for a record that does not exist yet: on 09-30 .. 10-01 four of
-# the eight pushes that still ran the shards were that race, the record
-# arriving 5.5 to 9.5 minutes after the push asked. So when no record counts,
-# dedupe finds the merged pull request (`commits/<sha>/pulls`), waits up to
-# 15 minutes for its tile run still in progress, and asks again. Replayed on
-# those days, the eight drop to four; the other four are pushes whose tree no
-# run ever verified (main moved under the pull request), and they still run.
-#
-# The `v1-` in the name is an environment version, not a format version:
-# the tree cannot see the runner image or a floating `@v4` tag. When one of
-# those moves in a way that could change a verdict (ubuntu-latest becomes
-# Ubuntu 26 from 2026-10-19), change TILE_VERIFIED_PREFIX below by hand and
-# every tree runs again. Not actions/cache: a cache saved on a pull request
-# belongs to its merge ref, which main cannot read.
-#
-# nightly.yml's totals report counts a tile trigger only when the
-# shards all ran green, so a deduplicated push is not counted as one.
-#
-# path-total: 10330s (the most this file's `3x` claims may add up to)
+# One producer builds the compiler, runtime and clean native execution closure.
+# Shards receive its exact artifact and verify source, run and tool identities.
+# The dispatch baseline and probe are bounded measurements, never verified trees.
+# path-total: 28380s (temporary measurement claims include the separate baseline)
 on:
   push:
     branches: [main]
@@ -130,6 +31,7 @@ on:
       - 'bin/dawn'
       - '.github/workflows/tile.yml'
       - '.github/actions/**'
+      - 'scripts/tile-prep/**'
       # Documentation is not a tile input: no build, golden or device program
       # reads a .md file, and scripts/tile-gpu-diff/inputs.py leaves them out
       # of the ledger digest for the same reason. A README-only change ran
@@ -159,6 +61,7 @@ on:
       - 'bin/dawn'
       - '.github/workflows/tile.yml'
       - '.github/actions/**'
+      - 'scripts/tile-prep/**'
       # Documentation is not a tile input: no build, golden or device program
       # reads a .md file, and scripts/tile-gpu-diff/inputs.py leaves them out
       # of the ledger digest for the same reason. A README-only change ran
@@ -174,14 +77,15 @@ on:
     - cron: '20 5 * * *'
   workflow_dispatch:
     inputs:
-      full_probe:
-        description: Measure the complete shared execution closure
-        type: boolean
-        default: false
+      experiment:
+        description: Shared gate, preparation probe, or independent baseline
+        type: choice
+        options: [shared, probe, baseline]
+        default: shared
       cold:
         description: Bypass producer dependency caches
         type: boolean
-        default: true
+        default: false
 
 concurrency:
   group: tile-${{ github.ref }}
@@ -193,403 +97,7 @@ env:
   TILE_VERIFIED_PREFIX: tile-verified-v1-
 
 jobs:
-  # A bounded dispatch measurement before changing the production shards.
-  # The producer bound retains the old 566s cold dependency tail and adds
-  # the native build, packaging and margin. It is not a measured final claim.
-  full-producer:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_probe }}
-    runs-on: ubuntu-24.04
-    # budget: 3x 800s planning bound including cold dependency recovery
-    timeout-minutes: 40
-    outputs:
-      full_id: ${{ steps.upload.outputs.artifact-id }}
-      full_sha: ${{ steps.pack.outputs.full_sha }}
-      full_manifest: ${{ steps.pack.outputs.full_manifest }}
-      attempt: ${{ github.run_attempt }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: restore producer dependencies
-        if: ${{ !inputs.cold }}
-        continue-on-error: true
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ runner.temp }}/producer-deps
-            ${{ runner.temp }}/tileiras-wheels
-            .dawn/seeds
-            ~/.cache/coursier
-          key: tile-producer-v1-Linux-x64-21.0.2-b048069aaa3a99b8-${{ hashFiles('scripts/seed*.txt', 'selfhost/dawn.lock', 'scripts/tile-golden/toolchain.txt', 'scripts/tile-prep/full.py') }}
-      - name: build and package the execution closure
-        id: pack
-        run: python3 -B scripts/tile-prep/full.py prepare
-      - name: upload the execution closure
-        id: upload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: tile-full-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
-          path: ${{ runner.temp }}/out-full/prep.tar.zst
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 3
-
-  full-consumer-1:
-    needs: full-producer
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_probe && needs.full-producer.result == 'success' }}
-    runs-on: ubuntu-24.04
-    # budget: floor (seconds-scale execution closure probe)
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: start receiving the exact producer artifact
-        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
-      - name: receive the exact producer artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          artifact-ids: ${{ needs.full-producer.outputs.full_id }}
-          path: ${{ runner.temp }}/received
-          merge-multiple: true
-      - name: validate and activate the execution closure
-        env:
-          EXPECTED_SHA: ${{ needs.full-producer.outputs.full_sha }}
-          EXPECTED_MANIFEST: ${{ needs.full-producer.outputs.full_manifest }}
-          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
-          ARTIFACT_ID: ${{ needs.full-producer.outputs.full_id }}
-        run: python3 -B scripts/tile-prep/full.py consume
-      - name: verify identity refusal and execute both backends
-        env:
-          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
-        run: |
-          python3 -B scripts/tile-prep/full.py identity-selftest
-          before=$(stat -c '%Y:%s' build/dawn-selfhost.jar)
-          ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --only vadd --tileiras "$TILEIRAS"
-          test "$before" = "$(stat -c '%Y:%s' build/dawn-selfhost.jar)"
-      - name: retain the transfer measurement
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: full-receipt-1-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/receipt.json
-          if-no-files-found: error
-          retention-days: 3
-
-  full-consumer-2:
-    needs: full-producer
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_probe && needs.full-producer.result == 'success' }}
-    runs-on: ubuntu-24.04
-    # budget: floor (seconds-scale execution closure probe)
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: start receiving the exact producer artifact
-        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
-      - name: receive the exact producer artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          artifact-ids: ${{ needs.full-producer.outputs.full_id }}
-          path: ${{ runner.temp }}/received
-          merge-multiple: true
-      - name: validate and activate the execution closure
-        env:
-          EXPECTED_SHA: ${{ needs.full-producer.outputs.full_sha }}
-          EXPECTED_MANIFEST: ${{ needs.full-producer.outputs.full_manifest }}
-          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
-          ARTIFACT_ID: ${{ needs.full-producer.outputs.full_id }}
-        run: python3 -B scripts/tile-prep/full.py consume
-      - name: verify identity refusal and execute both backends
-        env:
-          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
-        run: |
-          python3 -B scripts/tile-prep/full.py identity-selftest
-          before=$(stat -c '%Y:%s' build/dawn-selfhost.jar)
-          ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --only vadd --tileiras "$TILEIRAS"
-          test "$before" = "$(stat -c '%Y:%s' build/dawn-selfhost.jar)"
-      - name: retain the transfer measurement
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: full-receipt-2-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/receipt.json
-          if-no-files-found: error
-          retention-days: 3
-
-  full-consumer-3:
-    needs: full-producer
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_probe && needs.full-producer.result == 'success' }}
-    runs-on: ubuntu-24.04
-    # budget: floor (seconds-scale execution closure probe)
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: start receiving the exact producer artifact
-        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
-      - name: receive the exact producer artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          artifact-ids: ${{ needs.full-producer.outputs.full_id }}
-          path: ${{ runner.temp }}/received
-          merge-multiple: true
-      - name: validate and activate the execution closure
-        env:
-          EXPECTED_SHA: ${{ needs.full-producer.outputs.full_sha }}
-          EXPECTED_MANIFEST: ${{ needs.full-producer.outputs.full_manifest }}
-          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
-          ARTIFACT_ID: ${{ needs.full-producer.outputs.full_id }}
-        run: python3 -B scripts/tile-prep/full.py consume
-      - name: verify identity refusal and execute both backends
-        env:
-          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
-        run: |
-          python3 -B scripts/tile-prep/full.py identity-selftest
-          before=$(stat -c '%Y:%s' build/dawn-selfhost.jar)
-          ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --only vadd --tileiras "$TILEIRAS"
-          test "$before" = "$(stat -c '%Y:%s' build/dawn-selfhost.jar)"
-      - name: retain the transfer measurement
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: full-receipt-3-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/receipt.json
-          if-no-files-found: error
-          retention-days: 3
-
-  # ELEVEN shards of one matrix (scripts/tile-golden/matrix.txt: the 208
-  # kernels, then the 93 mutants, in run order), dealt by measured cost
-  # through scripts/mutant-coverage/plans/tile-golden.txt since 2026-10-19
-  # (the last paragraph of the cost model below has why); eight round-robin
-  # shards until then, seven until 2026-10-10 (#274), eleven until 2026-09-11
-  # and six until knife T17 (2026-10-02).
-  # Sharding by kind was the plan written down at knife 7b and the phase
-  # measurement retired it: neither half dominates, the kernel half grows
-  # faster (~8s per new kernel against ~21s per new mutant), and a split by
-  # kind would have left one job carrying it. Every Nth item of the mixed list
-  # divides both at once and spreads the outliers with them (`reverse` alone
-  # costs five average kernels).
-  #
-  # Why six rather than eleven. Eleven was reached by nine successive splits,
-  # every one of them forced by the 660s pole and argued as budget headroom
-  # rather than wall clock. This workflow is not queue-bound the way gates.yml
-  # is: six jobs against a ceiling of 20 all start at once, so here the span
-  # really is the longest job, and eleven shards bought nothing but eleven
-  # copies of a ~41s setup. Six is the fewest that keeps a shard under the
-  # 950s pole.
-  #
-  # The arithmetic, from the 25 completed main runs of 09-08T00:18Z ..
-  # 09-10T13:48Z (the 2026-09-10 CI audit's obs.json). The eleven shards'
-  # worst observations are 552 / 496 / 555 / 503 / 529 / 501 / 494 / 515 /
-  # 522 / 522 / 495s, which is 5684s; the setup that eleven shards paid
-  # eleven times is 448 job-seconds of run 34484938024, or 41s each, so the
-  # items are 5684 - 11 * 41 = 5233s of work. Six round-robin shards divide
-  # that evenly by construction: 873s each, plus the one 41s setup a shard
-  # still pays, is 914s.
-  #
-  # That is a ceiling twice over -- a sum of worst cases from runs that were
-  # not the same run -- and it is 36s under the pole. If a real six-way shard
-  # observes past 914s, the restatement collides with the pole and the answer
-  # is a seventh shard, not a taller pole. Seven would be 748 + 41 = 789s.
-  #
-  # Knife U2 (2026-10-02) added four tile-golden mutants. One full local run
-  # measured them at 24.1-24.3s each against a 24.1s mean over the other 67,
-  # so they are ordinary mutants; at the ~21s a mutant costs here that is
-  # 84s of work, 14s a shard, and the planning value is restated from 914s
-  # to 928s, still 22s under the pole. The timeout follows the 3x rule
-  # (2784s, 47 minutes).
-  #
-  # Knife T16 (2026-10-02) added two kernels and four mutants. One full
-  # local run (262 items, 3134s wall) measured the kernels at 6.95 and
-  # 6.63s against a 6.50s mean over the other 185 and the mutants at 24.5
-  # to 25.2s against a 25.3s mean over the other 71, so all six are
-  # ordinary items. At the ~8s a kernel and ~21s a mutant cost here that is
-  # 100s of work, 17s a shard rounded up, and the planning value is
-  # restated from 928s to 945s, 5s under the pole. The next knife that adds
-  # this much is the seventh shard (the arithmetic above). The timeout
-  # follows the 3x rule (2835s, 48 minutes).
-  #
-  # Knife T17 (2026-10-02) added four kernels and two mutants and is that
-  # knife, so the matrix is dealt SEVEN ways. The work, item by item, at the
-  # ~8s a kernel and ~21s a mutant this file has always charged: 5233s
-  # measured over the eleven shards, plus U2's 84s and T16's 100s, plus T17's
-  # 4 x 8 + 2 x 21 = 74s, is 5491s. Seven ways that is 784.4s, 785s rounded
-  # up, plus the one 41s setup every shard still pays: 826s a shard, 124s
-  # under the pole where six shards had 5s. The path total moves by the
-  # seventh setup and T17's work and nothing else: 7 x 826 - 6 x 945 = 112s
-  # (74s of items, 41s of setup, 3s less rounding), 6580s -> 6692s with the
-  # dedupe job's 910s unchanged. A full local run measured the four kernels
-  # and the two mutants as ordinary items (the knife's commit message has the
-  # numbers). The timeout follows the 3x rule (2478s, 42 minutes).
-  #
-  # flash_attn (2026-10-03) is one more kernel and no mutant: 8s of items,
-  # 5499s in all, 785.6s a shard and 786s rounded up, so 827s a shard. The
-  # path total moves by seven times that one second, 6692s -> 6699s; the
-  # timeout is unchanged (2481s is still 42 minutes).
-  #
-  # THE COST MODEL ABOVE IS OUT OF DATE, and knife C (2026-10-03) says by
-  # how much. Read off shard logs of 09-26 .. 10-03, a kernel costs 6.5 to
-  # 11s (the fast and the slow runner, about 1.5x apart), a mutant at -O2
-  # 27 to 39s on the fast runner and 40 to 52s on the slow one, growing
-  # about a quarter in that week as packages/tileir and packages/tileref
-  # grew, and the fixed part of a shard is about 80s, not 41s: the toolchain
-  # and the wheels about 45s plus one -O2 clean build and the JVM's first
-  # start, 25 to 48s. The seven shards observed 798 to 954s at the median
-  # and up to 1076s, against the 827s claimed. The mutant's cost was its
-  # whole-program cc, so run.sh now builds mutants at -O0 (the clean build
-  # and every golden stay -O2): one local tree, all 77 mutants, 33.6s a
-  # mutant at -O2 and 16.7s at -O0, the mutant stage 2617s and 1316s, and
-  # every mutant observing the same exit codes, outputs, bytecode and
-  # tileiras logs file for file at both (run.sh's mutant_project has the
-  # rest). Scaled to CI that is about 19s a mutant on the fast runner and
-  # 25s on the slow one, eleven mutants a shard, so a shard should come down
-  # by about 210 to 275s: the worst observation 1076s to about 800s. That is
-  # a projection. The claims below stay at 827s until three main runs have
-  # been observed at -O0, and are then restated from those observations.
-  #
-  # They were, on 2026-10-05. The nightly audit (issue #274, run
-  # 37305388132) read tile.yml's seven days to 10-05T11:35Z and found every
-  # shard past its 827s claim, 1026 to 1060s, all on runs from before
-  # 55eedb54 reached main. Read again for the -O0 runs alone (19 main runs,
-  # 8a4c6c85 / run 37153044998 .. 611dd421 / run 37303939729), each shard's
-  # worst is 884 / 892 / 906 / 861 / 855 / 867 / 894s, and the median
-  # shard of the last four runs is 540 to 750s. Worst against worst, -O0
-  # took 120 to 199s off a shard, under the projected 210 to 275s.
-  #
-  # Each claim is now its own shard's worst at -O0, held at the observation
-  # rather than a tenth over it: a tenth over 867s or more crosses the 950s
-  # pole, five of the seven are there, and the seven are one matrix dealt
-  # round robin, so they are held alike. Restating to the -O2 runs would put
-  # all seven past the pole. That leaves two things said plainly. The nightly
-  # audit still reads the -O2 runs until its window rolls past 55eedb54 (the
-  # 10-11 nightly), and reports them; a claim may not follow them over the
-  # pole, so those reports are expected and not a restatement to make. And a
-  # shard has 44 to 95s left under the pole, so the next knife that adds
-  # items, or the next slow runner past those figures, is the eighth shard
-  # (906s less an 80s fixed part, seven ways dealt eight, is about 805s), not
-  # a taller pole. The path total moves from 6699s to the new claims' sum plus
-  # dedupe's 910s, 7069s.
-  #
-  #
-  # THE EIGHTH SHARD (2026-10-10, issue #274). Shard 1 took 968s on run
-  # 37820418771, 18s over the 950s pole, and the checker refuses a claim
-  # above the pole, so the claim stopped at 950s and the shard stayed
-  # under-declared. The other six observed 870 to 898s on that and later
-  # runs. The 7-way deal cannot be tuned out of it: the items are dealt by
-  # position, the kernel order is not a lever (matrix.txt), and a shard is
-  # 40 items against a pole that leaves 44 to 95s. So the deal goes to eight.
-  #
-  # The model is read off the job logs of the 30 tile.yml runs of 10-06 ..
-  # 10-10 (140 shard jobs, all at -O0, run ids in the commit message). Two
-  # runner types show up and are about 1.5x apart: a fast one (kernel 8.2s,
-  # mutant 20s, a shard of 500 to 600s) and a slow one (kernel 13s, mutant
-  # 31s, a shard of 800 to 900s). Which one a job gets is not under the
-  # workflow's control, and with seven or eight jobs at least one is slow in
-  # nearly every run, so the slow type is the one the span follows. Per item,
-  # the mean over the 77 slow-type jobs gives the work of each shard under
-  # either deal (position i, N shards, takes items i, i+N, ...); the fixed
-  # part is 60s before the first item (toolchain, clean build, first JVM
-  # start) plus 56s of job overhead around the steps, 73s for shard 1 with
-  # fetch-depth 0 and its extra gates. Replayed on the 7-way deal that
-  # model gives 886 / 839 / 826 / 845 / 851 / 851 / 860s against slow-type
-  # means of 889 / 840 / 825 / 847 / 854 / 848 / 858s observed, and the
-  # worst observations sit 2 to 9% over it (968s on shard 1 was the 9%).
-  #
-  # Dealt eight ways the same model gives 785 / 755 / 756 / 755 / 753 / 754 /
-  # 754 / 763s (36, 35, 35, 35, 35, 35, 35, 35 items; 25 kernels and 10 or 11
-  # mutants each, shard 8 24 and 11), 70 to 106s a shard below the 7-way
-  # model, and on the fast type 494 to 504s. There is no observation of the
-  # eight yet, so each claim is a planning value: the model plus a tenth
-  # (the largest overshoot seen was 9.3%), rounded up to 5s, which is 865 /
-  # 835 / 835 / 835 / 830 / 830 / 830 / 840s, every one under the pole with
-  # 85s or more to spare. The timeouts follow the 3x rule. The job names are
-  # kept. The nightly audit holds a tile.yml claim only to runs of the same
-  # steps (check-gate-budgets.py, "TILE.YML'S SHARDS"), and a shard's steps
-  # include `run.sh --shard I/N`, so the 7-way runs still in its seven-day
-  # window are not compared with the 8-way claims.
-  #
-  # What it costs: one more fixed part (116s of job time) and a taller sum
-  # of claims. The seven old claims added to 6295s and the eight new ones to
-  # 6700s, so the path total goes from 7205s to 7610s with dedupe's 910s.
-  # The real runner time of a full run on the slow type goes from 5958s to
-  # 6075s (+117s, 2%), and the critical path from 886s modelled (968s
-  # observed) to 785s modelled, a hundred seconds shorter.
-  #
-  # ELEVEN SHARDS, DEALT BY COST (2026-10-19, issue #274). The 10-19 budget
-  # restatement left tile-golden-1, -2, -3, -5, -6 and -8 at the 950s pole,
-  # and the 10-06 rule (worst plus one deviation) puts tile-golden-1 at
-  # 1055s. The target this time is lower than the pole: every shard's worst
-  # plus one deviation at or under 800s, so a shard has 150s left under the
-  # pole after its own noise is paid for.
-  #
-  # The model, from the job logs of the 34 green tile.yml runs of 10-12 ..
-  # 10-19 (272 shard jobs, main and pull requests). An item's time is read
-  # from the line that ends the item before it to its own last line. A job's speed is its median kernel time over the
-  # median job's: the kernels cost the same (matrix.txt), every shard carries
-  # about 26 of them, and an item never changed shard in that window, so a
-  # shard's item sum cannot tell a dear shard from a slow runner and the
-  # kernels can. Scaled to the median runner, a kernel is 12.7s (12.4 to
-  # 19.1s), a mutant 30.3s (12.5 to 36.7s), the matrix 5448s. The fixed part
-  # of a shard is 106s on the median job (93s on the fast type, 116s on the
-  # slow), and shard 1's is 16s more. The speeds are not two types but a
-  # spread: 0.62 to 1.12 of the median over the 64 main jobs.
-  #
-  # The replay: every one of those 64 main jobs (the runs the nightly audit
-  # reads) run again on each new shard, its own fixed part plus its own speed
-  # times the shard's work. A shard's estimate is the worst of the 64, which
-  # is worse than the worst of any one shard's eight, and its claim that
-  # worst plus the larger of a tenth and the deviation, rounded up to 5s. On
-  # today's eight round-robin shards the replay gives 876 to 906s against
-  # 835 to 898s observed, and claims of 995 to 1030s.
-  #
-  # Ten shards replay to claims of up to 845s, so ten do not meet the target
-  # whatever the deal. Eleven dealt round robin replay to 750 .. 815s: 93
-  # mutants do not divide by eleven, the shards with nine of them carry 40s
-  # more than the ones with eight, and the dearest is over. Eleven dealt by
-  # cost (longest first onto the lightest shard, shard 1 starting 16s
-  # behind: scripts/mutant-coverage/deal.py) carry 490 to 503s of work and
-  # replay to 765 .. 785s. Twelve would buy 55s more of margin for a twelfth
-  # fixed part and the same pole; the target does not ask for it.
-  #
-  # So the matrix order stops deciding the deal. Every shard passes `--plan`,
-  # which scripts/mutant-coverage/shard.sh reads (item -> shard, the costs
-  # beside it), and the plan lives outside scripts/tile-golden so dealing
-  # again does not move the GPU ledger's input digest. The coverage record
-  # and tile-shards-complete's union are unchanged: a plan that dropped an
-  # item would be refused there, as a wrong `--shard` is. A kernel added
-  # later and not yet in the plan runs on its round-robin shard and the run
-  # prints a NOTE saying how many did; re-deal with deal.py from the plan's
-  # own costs.
-  #
-  # What it costs: three more fixed parts, about 320 job-seconds a full run
-  # on the median runner (6351s modelled for the eight, 6685s for the eleven,
-  # +5%). The critical path goes from 906s modelled (898s observed) to 690s
-  # modelled for the worst runner, and from 810s to 614s on the median one.
-  # The claims are planning values until three runs of the eleven have been
-  # observed, then restated from them. They add up to 8525s against
-  # 7575s for the eight (six of them held at the pole), so the path total
-  # goes from 8485s to 9435s with dedupe's 910s.
-  #
-  # The split cannot reach the verdicts. A kernel's four runs, its two goldens
-  # and its assembly all happen inside one shard, and each mutant compares
-  # against the recorded goldens on disk rather than against its own shard's
-  # kernel output, so the named red sets survive being dealt into seven jobs.
-  # What sharding does introduce is the shard family's one failure: a shard
-  # that silently skips a slice prints the same PASS lines and exits 0. So
-  # each records what it ran, and tile-shards-complete below holds the union
-  # to matrix.txt.
-  #
-  # tileiras is an offline assembler: no GPU, no driver, it links libc, libm
-  # and libpthread only and reads libnvvm.so.4 and execs ptxas from two
-  # sibling wheels. install-tileiras.sh downloads the three wheels
-  # scripts/tile-golden/toolchain.txt pins by exact version and refuses any
-  # whose sha256 differs (a checksum from the same place as the file is not a
-  # check); the pin and the bytecode version the writer emits are held
-  # together by run.sh. The pinned 13.5.37 wheels are 164 MB and nothing outside this file
-  # needs them, which is a second reason these are jobs of their own.
-
-  # The push-only duplicate check; the header has the reasoning and
-  # scripts/tile-verified.py the rules. No toolchain: a checkout, the lookup's
-  # self-test and two Actions API reads. A failed lookup is `skip=false`, and
-  # the shards' `if:` also runs them when this job did not finish, so the one
-  # way to skip is a record that passed every rule.
   dedupe:
-    if: ${{ inputs.full_probe != true }}
     runs-on: ubuntu-24.04
     # Listed in full: a `permissions:` block sets everything it omits to none.
     permissions:
@@ -607,7 +115,7 @@ jobs:
     # budget: 3x 910s the 900s wait cap plus the job itself
     timeout-minutes: 46
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: the verified-tree lookup refuses what it should
         run: python3 scripts/tile-verified.py --self-test
       - name: has this tree already passed tile.yml?
@@ -620,9 +128,715 @@ jobs:
             --prefix "$TILE_VERIFIED_PREFIX" --event "$GITHUB_EVENT_NAME" \
             --sha "$GITHUB_SHA"
 
-  tile-golden-1:
+
+  bootstrap:
     needs: dedupe
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 800s planning bound including cold dependency recovery
+    timeout-minutes: 40
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      sha: ${{ steps.pack.outputs.full_sha }}
+      manifest: ${{ steps.pack.outputs.full_manifest }}
+      attempt: ${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: restore producer dependencies
+        if: ${{ !inputs.cold }}
+        continue-on-error: true
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: 1
+        with:
+          path: |
+            ${{ runner.temp }}/producer-deps
+            ${{ runner.temp }}/tileiras-wheels
+          key: tile-producer-v2-Linux-x64-21.0.2-b048069aaa3a99b8-${{ hashFiles('scripts/seed*.txt', 'selfhost/dawn.lock', 'scripts/tile-golden/toolchain.txt', 'scripts/tile-prep/full.py') }}
+      - name: download recovery remains bounded and progressing transfers finish
+        if: ${{ inputs.experiment == 'probe' }}
+        run: python3 -B scripts/tile-prep/download-contract.py --upstream-recovery
+      - name: build and package the execution closure
+        id: pack
+        run: python3 -B scripts/tile-prep/full.py prepare
+      - name: the artifact identities can refuse
+        if: ${{ inputs.experiment == 'probe' }}
+        env:
+          PRODUCER_ATTEMPT: ${{ github.run_attempt }}
+        run: python3 -B scripts/tile-prep/full.py identity-selftest
+      - name: upload the execution closure
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tile-full-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/out-full/prep.tar.zst
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+
+  tile-golden-1:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tileiras wheel cache refuses altered pins and bytes
+        run: python3 scripts/tile-golden/install-contract.py
+      - name: tile goldens and mutants on both backends, shard 1 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 1/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 1 --total 19
+      - name: GPU diff ledger is current (layer 2 ran at this tree)
+        if: ${{ inputs.experiment != 'probe' }}
+        run: ./scripts/tile-gpu-diff/run.sh --check
+      - name: the layer 2 verdict fold reads every family
+        run: bash scripts/tile-gpu-diff/fold_verdict.sh --selftest
+      - name: the leetgpu ledger (a listed problem has a kernel and a device run)
+        run: |
+          python3 scripts/leetgpu-diff/check.py
+          python3 scripts/leetgpu-diff/check.py --self-test
+
+  tile-golden-2:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 2 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 2/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 2 --total 19
+
+  tile-golden-3:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 3 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 3/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 3 --total 19
+
+  tile-golden-4:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 4 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 4/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 4 --total 19
+
+  tile-golden-5:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 5 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 5/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 5 --total 19
+
+  tile-golden-6:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 6 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 6/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 6 --total 19
+
+  tile-golden-7:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 7 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 7/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 7 --total 19
+
+  tile-golden-8:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 8 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 8/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 8 --total 19
+
+  tile-golden-9:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 9 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 9/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 9 --total 19
+
+  tile-golden-10:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 10 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 10/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 10 --total 19
+
+  tile-golden-11:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 11 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 11/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 11 --total 19
+      - name: the interpreter against tileref (every layer-2 family, no GPU)
+        run: ./scripts/tileinterp-diff/run.sh
+
+  tile-golden-12:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 12 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 12/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 12 --total 19
+
+  tile-golden-13:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 13 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 13/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 13 --total 19
+
+  tile-golden-14:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 14 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 14/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 14 --total 19
+
+  tile-golden-15:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 15 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 15/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 15 --total 19
+
+  tile-golden-16:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 16 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 16/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 16 --total 19
+
+  tile-golden-17:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 17 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 17/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 17 --total 19
+
+  tile-golden-18:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 18 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 18/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 18 --total 19
+
+  tile-golden-19:
+    needs: [dedupe, bootstrap]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && needs.bootstrap.result == 'success' && inputs.experiment != 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 950s planning bound retaining all historical preparation and transfer groups
+    timeout-minutes: 48
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.bootstrap.outputs.artifact_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.bootstrap.outputs.sha }}
+          EXPECTED_MANIFEST: ${{ needs.bootstrap.outputs.manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.bootstrap.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.bootstrap.outputs.artifact_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: tile goldens and mutants on both backends, shard 19 of 19
+        run: ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --tileiras "$TILEIRAS" --shard 19/19 --plan scripts/mutant-coverage/plans/tile-golden.txt
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --index 19 --total 19
+  tile-before-1:
+    needs: dedupe
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 19 kernels and 8 mutants
     # plus shard 1's own 16s of fixed work (the ledger gates and fetch-depth 0),
@@ -633,8 +847,13 @@ jobs:
     # arithmetic.
     # budget: 3x 775s planning value: replayed worst plus one deviation
     timeout-minutes: 39
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           # shard 1 alone reads git: the GPU diff ledger's ancestry test needs
           # the history. The other ten do not, and are not deepened.
@@ -645,7 +864,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: restore the pinned tileiras wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/tileiras-wheels
           key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
@@ -664,7 +883,11 @@ jobs:
       - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 1 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 1/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+        run: ./scripts/tile-golden/run.sh --shard 1/11 --plan scripts/tile-prep/baseline-plan.txt
+
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --baseline --index 1 --total 11 --plan scripts/tile-prep/baseline-plan.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -697,9 +920,9 @@ jobs:
           python3 scripts/leetgpu-diff/check.py
           python3 scripts/leetgpu-diff/check.py --self-test
 
-  tile-golden-2:
+  tile-before-2:
     needs: dedupe
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
     # 614s on the median runner and 690s on the worst of the 64 main jobs
@@ -708,15 +931,20 @@ jobs:
     # observed. The note above has the arithmetic.
     # budget: 3x 785s planning value: replayed worst plus one deviation
     timeout-minutes: 40
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: restore the pinned tileiras wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/tileiras-wheels
           key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
@@ -732,7 +960,11 @@ jobs:
       - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 2 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 2/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+        run: ./scripts/tile-golden/run.sh --shard 2/11 --plan scripts/tile-prep/baseline-plan.txt
+
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --baseline --index 2 --total 11 --plan scripts/tile-prep/baseline-plan.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -742,9 +974,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  tile-golden-3:
+  tile-before-3:
     needs: dedupe
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
     # 611s on the median runner and 686s on the worst of the 64 main jobs
@@ -753,15 +985,20 @@ jobs:
     # observed. The note above has the arithmetic.
     # budget: 3x 780s planning value: replayed worst plus one deviation
     timeout-minutes: 39
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: restore the pinned tileiras wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/tileiras-wheels
           key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
@@ -777,7 +1014,11 @@ jobs:
       - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 3 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 3/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+        run: ./scripts/tile-golden/run.sh --shard 3/11 --plan scripts/tile-prep/baseline-plan.txt
+
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --baseline --index 3 --total 11 --plan scripts/tile-prep/baseline-plan.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -787,9 +1028,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  tile-golden-4:
+  tile-before-4:
     needs: dedupe
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
     # 607s on the median runner and 682s on the worst of the 64 main jobs
@@ -798,15 +1039,20 @@ jobs:
     # observed. The note above has the arithmetic.
     # budget: 3x 775s planning value: replayed worst plus one deviation
     timeout-minutes: 39
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: restore the pinned tileiras wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/tileiras-wheels
           key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
@@ -822,7 +1068,11 @@ jobs:
       - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 4 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 4/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+        run: ./scripts/tile-golden/run.sh --shard 4/11 --plan scripts/tile-prep/baseline-plan.txt
+
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --baseline --index 4 --total 11 --plan scripts/tile-prep/baseline-plan.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -832,9 +1082,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  tile-golden-5:
+  tile-before-5:
     needs: dedupe
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
     # 609s on the median runner and 684s on the worst of the 64 main jobs
@@ -843,15 +1093,20 @@ jobs:
     # observed. The note above has the arithmetic.
     # budget: 3x 775s planning value: replayed worst plus one deviation
     timeout-minutes: 39
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: restore the pinned tileiras wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/tileiras-wheels
           key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
@@ -867,7 +1122,11 @@ jobs:
       - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 5 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 5/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+        run: ./scripts/tile-golden/run.sh --shard 5/11 --plan scripts/tile-prep/baseline-plan.txt
+
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --baseline --index 5 --total 11 --plan scripts/tile-prep/baseline-plan.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -877,9 +1136,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  tile-golden-6:
+  tile-before-6:
     needs: dedupe
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
     # 609s on the median runner and 684s on the worst of the 64 main jobs
@@ -888,15 +1147,20 @@ jobs:
     # observed. The note above has the arithmetic.
     # budget: 3x 775s planning value: replayed worst plus one deviation
     timeout-minutes: 39
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: restore the pinned tileiras wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/tileiras-wheels
           key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
@@ -912,7 +1176,11 @@ jobs:
       - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 6 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 6/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+        run: ./scripts/tile-golden/run.sh --shard 6/11 --plan scripts/tile-prep/baseline-plan.txt
+
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --baseline --index 6 --total 11 --plan scripts/tile-prep/baseline-plan.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -922,9 +1190,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  tile-golden-7:
+  tile-before-7:
     needs: dedupe
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
     # 607s on the median runner and 682s on the worst of the 64 main jobs
@@ -933,15 +1201,20 @@ jobs:
     # observed. The note above has the arithmetic.
     # budget: 3x 775s planning value: replayed worst plus one deviation
     timeout-minutes: 39
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: restore the pinned tileiras wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/tileiras-wheels
           key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
@@ -957,7 +1230,11 @@ jobs:
       - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 7 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 7/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+        run: ./scripts/tile-golden/run.sh --shard 7/11 --plan scripts/tile-prep/baseline-plan.txt
+
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --baseline --index 7 --total 11 --plan scripts/tile-prep/baseline-plan.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -967,9 +1244,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  tile-golden-8:
+  tile-before-8:
     needs: dedupe
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
     # 607s on the median runner and 682s on the worst of the 64 main jobs
@@ -978,15 +1255,20 @@ jobs:
     # observed. The note above has the arithmetic.
     # budget: 3x 775s planning value: replayed worst plus one deviation
     timeout-minutes: 39
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: restore the pinned tileiras wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/tileiras-wheels
           key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
@@ -1002,7 +1284,11 @@ jobs:
       - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 8 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 8/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+        run: ./scripts/tile-golden/run.sh --shard 8/11 --plan scripts/tile-prep/baseline-plan.txt
+
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --baseline --index 8 --total 11 --plan scripts/tile-prep/baseline-plan.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1012,9 +1298,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  tile-golden-9:
+  tile-before-9:
     needs: dedupe
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
     # 607s on the median runner and 682s on the worst of the 64 main jobs
@@ -1023,15 +1309,20 @@ jobs:
     # observed. The note above has the arithmetic.
     # budget: 3x 775s planning value: replayed worst plus one deviation
     timeout-minutes: 39
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: restore the pinned tileiras wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/tileiras-wheels
           key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
@@ -1047,7 +1338,11 @@ jobs:
       - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 9 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 9/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+        run: ./scripts/tile-golden/run.sh --shard 9/11 --plan scripts/tile-prep/baseline-plan.txt
+
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --baseline --index 9 --total 11 --plan scripts/tile-prep/baseline-plan.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1057,9 +1352,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  tile-golden-10:
+  tile-before-10:
     needs: dedupe
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
     # 602s on the median runner and 676s on the worst of the 64 main jobs
@@ -1068,15 +1363,20 @@ jobs:
     # observed. The note above has the arithmetic.
     # budget: 3x 770s planning value: replayed worst plus one deviation
     timeout-minutes: 39
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: restore the pinned tileiras wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/tileiras-wheels
           key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
@@ -1092,7 +1392,11 @@ jobs:
       - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 10 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 10/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+        run: ./scripts/tile-golden/run.sh --shard 10/11 --plan scripts/tile-prep/baseline-plan.txt
+
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --baseline --index 10 --total 11 --plan scripts/tile-prep/baseline-plan.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -1102,9 +1406,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  tile-golden-11:
+  tile-before-11:
     needs: dedupe
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 19 kernels and 8 mutants;
     # 602s on the median runner and 676s on the worst of the 64 main jobs
@@ -1123,15 +1427,20 @@ jobs:
     # at 95s, 50s more than I1's 45s, and shard 11 stays under the 950s pole.
     # budget: 3x 860s planning value: replayed worst plus one deviation, plus 95s of interpreter run
     timeout-minutes: 43
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+    env:
+      MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+      ITEM_TIMES: ${{ runner.temp }}/ITEM_TIMES.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: restore the pinned tileiras wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/tileiras-wheels
           key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
@@ -1147,7 +1456,7 @@ jobs:
       - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 11 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 11/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+        run: ./scripts/tile-golden/run.sh --shard 11/11 --plan scripts/tile-prep/baseline-plan.txt
 
       # Layer 2 without a device (docs/tileinterp-design.md 3): every
       # tile-gpu-diff family with packages/tileinterp in the device's chair,
@@ -1157,6 +1466,10 @@ jobs:
       - name: the interpreter against tileref (every layer-2 family, no GPU)
         run: ./scripts/tileinterp-diff/run.sh
 
+      - name: record successful work and item clocks
+        id: receipt
+        run: python3 -B scripts/tile-prep/coverage.py receipt --baseline --index 11 --total 11 --plan scripts/tile-prep/baseline-plan.txt
+
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
         with:
@@ -1165,81 +1478,31 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # The union guard for this matrix, and the counterpart of gates.yml's
-  # mutant-shards-complete. Sharding introduces exactly one new way to be
-  # wrong, a work item no shard runs, and nothing else can see it: each shard
-  # prints its own PASS lines and exits 0 whether it covered its slice or not.
-  # So each records what it executed and this reassembles the records and
-  # holds their union to scripts/tile-golden/matrix.txt.
-  #
-  # `--only-harness tile-golden` rather than the whole tree: this run dispatches
-  # tile-golden's shards and nothing else, so every other sharded harness would
-  # be reported absent here, correctly and uselessly. gates.yml's guard passes
-  # the mirror-image `--exclude-harness tile-golden`. Both flags are refused for
-  # a name the tree does not carry a matrix for, so neither can quietly cover a
-  # harness that was deleted or renamed.
-  #
-  # `if: !cancelled()` so a red shard cannot swallow the completeness verdict;
-  # the two failures stay separately attributable. Not `always()`: that one is
-  # true in a cancelled run too, so when cancel-in-progress cut a run short
-  # this job still ran, found the cancelled shards' records missing and
-  # reported failure (runs 37127166843 and 37207175626), and a superseded run
-  # read as red. `cancelled()` is about the run, not the shards: a shard that
-  # fails or times out on its own does not cancel the run, so this job still
-  # runs and still refuses the missing record. gates.yml's
-  # mutant-shards-complete made the same move. The self-test runs first because
-  # a guard whose red has never been observed is not a guard. The job is
-  # skipped with the shards when the dedupe job found this tree verified.
-  #
-  # Its last two steps write the verified-tree record the dedupe job reads,
-  # and only when all eleven shards concluded success and the union held. The
-  # artifact's name is the whole key; the small JSON inside is for a person.
+
   tile-shards-complete:
-    needs:
-      - dedupe
-      - tile-golden-1
-      - tile-golden-2
-      - tile-golden-3
-      - tile-golden-4
-      - tile-golden-5
-      - tile-golden-6
-      - tile-golden-7
-      - tile-golden-8
-      - tile-golden-9
-      - tile-golden-10
-      - tile-golden-11
-    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
+    needs: [dedupe, tile-golden-1, tile-golden-2, tile-golden-3, tile-golden-4, tile-golden-5, tile-golden-6, tile-golden-7, tile-golden-8, tile-golden-9, tile-golden-10, tile-golden-11, tile-golden-12, tile-golden-13, tile-golden-14, tile-golden-15, tile-golden-16, tile-golden-17, tile-golden-18, tile-golden-19]
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' && inputs.experiment != 'baseline' }}
     runs-on: ubuntu-24.04
-    # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
+    # budget: floor (lightweight receipt and coverage union)
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - name: the coverage checker can refuse
-        run: python3 scripts/mutant-coverage/check.py --self-test
-      - name: collect every shard's coverage record
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: coverage identities and missing work are refused
+        run: python3 -B scripts/tile-prep/coverage.py selftest
+      - name: the union is every successful item exactly once
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 -B scripts/tile-prep/coverage.py union --total 19 --job-prefix tile-golden- --out "$RUNNER_TEMP/tile-evidence"
+      - name: retain receipts and successful item clocks
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          pattern: mutant-coverage-*
-          path: coverage
-      - name: the union of the shards is the whole matrix
-        run: |
-          python3 scripts/mutant-coverage/check.py \
-            --coverage-dir coverage --only-harness tile-golden
+          name: tile-shared-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tile-evidence
+          if-no-files-found: error
+          retention-days: 7
 
       - name: this tree's verified record
-        if: >-
-          ${{ success()
-          && needs.tile-golden-1.result == 'success'
-          && needs.tile-golden-2.result == 'success'
-          && needs.tile-golden-3.result == 'success'
-          && needs.tile-golden-4.result == 'success'
-          && needs.tile-golden-5.result == 'success'
-          && needs.tile-golden-6.result == 'success'
-          && needs.tile-golden-7.result == 'success'
-          && needs.tile-golden-8.result == 'success'
-          && needs.tile-golden-9.result == 'success'
-          && needs.tile-golden-10.result == 'success'
-          && needs.tile-golden-11.result == 'success' }}
+        if: ${{ success() && inputs.experiment != 'probe' }}
         run: |
           tree=$(git rev-parse 'HEAD^{tree}')
           echo "TILE_TREE=$tree" >> "$GITHUB_ENV"
@@ -1259,3 +1522,25 @@ jobs:
           retention-days: 90
           # a re-run attempt of the same run records the same tree again
           overwrite: true
+
+  baseline-complete:
+    needs: [dedupe, tile-before-1, tile-before-2, tile-before-3, tile-before-4, tile-before-5, tile-before-6, tile-before-7, tile-before-8, tile-before-9, tile-before-10, tile-before-11]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment == 'baseline' }}
+    runs-on: ubuntu-24.04
+    # budget: floor (lightweight receipt and coverage union)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: coverage identities and missing work are refused
+        run: python3 -B scripts/tile-prep/coverage.py selftest
+      - name: the union is every successful item exactly once
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 -B scripts/tile-prep/coverage.py union --total 11 --job-prefix tile-before- --baseline --plan scripts/tile-prep/baseline-plan.txt --out "$RUNNER_TEMP/tile-evidence"
+      - name: retain receipts and successful item clocks
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tile-before-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tile-evidence
+          if-no-files-found: error
+          retention-days: 7
