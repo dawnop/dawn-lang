@@ -1,6 +1,6 @@
 # 效果来源：按观察作用域保留逻辑调用
 
-> 状态：**W2 普通观察已实现，待 P1 发布收口**（P1 分期，2026-10-25）。W1 提供语法与静态身份，W2 提供普通观察及双后端逻辑调用 ABI；控制续延、TCO 压缩与有界日志留给 W3。P1 发布后才做 P2 包迁移。
+> 状态：**W3-R 刀 R1（最小移植）进行中**（2026-11-14 重开）。W1 提供语法与静态身份，W2 提供普通观察及双后端逻辑调用 ABI；W3 补齐控制续延、尾边与有界日志。旧 W3 资格封存；本分支把该实现按当前 main 重做，手写 tile marks 与其全部消费者原样保留。P1 完成与否由后续 R3 资格裁定，P2 才删 marks。
 
 <!-- 为什么写这篇：设备字节相同不能证明源码归属相同。把客观调用来源交给编译器，
      把展示抽象留给观察器，才能退休散在库签名与用户 helper 中的第二套调用协议。 -->
@@ -172,7 +172,7 @@ P1 发布前须写死容量、截断标志、tail-edge 解码与日志所有权�
 checkpoint 失效，再用时报 `creating frame has finished`。这两类错误的完整文案必须在
 JVM 与 native C 一致，并相互区分。`F` 外更早的 checkpoint 不因 `F` 结束而失效。
 这与前述标记栈规则同时成立：同一仍活跃的建立帧可反复回退，但不能借 rewind 删除仍在
-执行的后代帧或复活已经结束的建立帧。续延越域属于 W3，W2 观察下明确拒绝。
+执行的后代帧或复活已经结束的建立帧。W3 续延越域恢复原激活；内部 lease 不复活已退出的用户句柄。
 双后端以独立手写期望树检查目标重用、嵌套失效、跨域和退出后拒绝、epoch 不重号及快照不变。
 
 ## 六、表面语法裁定与候选记录
@@ -391,21 +391,58 @@ plain 指针与原闭包布局，观察路径使用非线性的 canonical 到 ob
 `site`、`definition`。`Site` 字段为 `id, module, file, declaration, start, end, name_start,
 name_end, role, operation`，`Definition` 字段为 `id, module, declaration, start, end, role`。
 `parent`、`site`、`definition` 返回 Option；根无父和调用点，operation envelope 不伪称 handler
-为发起方定义。`file` 使用稳定源单元身份而非机器路径；未知坐标为负数。
+为发起方定义。`file` 使用稳定源单元身份而非机器路径；未知坐标为负数。默认容量表达式遵守同一默认参数规则：嵌套 observe 在外层观察中求默认容量时，该次真实默认调用保留自己的实例，不接入后来内层调用的父链。
+默认参数 thunk 以默认表达式的独立声明路径和起点为坐标基准；不能将父函数起点与子声明混用。内部无书写调用点的合成调用导出 site=None，仍保留已知 Definition，不制造带负坐标的书写 Site。相同 primitive dictionary slot 在模块间复用时，其 Definition 由 primitive 的逻辑名称确定，模块为 intrinsic；后端选择哪份物理 helper 不能改变导出的身份。
 
-`completed` 返回不可变 String 前缀，包含尚活跃根及调用，不声称 scope 已结束。实现编码的
-`S` 行保存 scope/当前 epoch，`F` 行保存 scope、该实例 epoch、instance、parent、状态、Site ID、
-Site 元数据及 definition 元数据；状态 0/1/2 分别为活跃/正常结束/panic 展开。空根明确没有 Site
-和 definition。note 以空行分隔的 `O` envelope 及不可变父链附后。元数据中的百分号、tab、换行、
-回车与 NUL 分别编码为 `%25/%09/%0A/%0D/%00`，避免声明或测试名伪造记录分隔。两个入口共用
-一份静态 Site/definition 身份，动态 instance 不从静态 ID 推导。试探 Origin 的提交归属应与保留日志
-的完整身份比较，不能把所有旧 epoch 一概判为未提交。
+`completed(scope) -> TraceSnapshot !io` 冻结当前可见前缀，包含尚活跃根、调用与 notes，
+不声称 scope 已结束。补裁八撤销 String 返回值，不保留兼容入口。快照复制紧凑动态数据，
+共享不可变静态 Site/Definition 表；记录外壳、Site 值与文本按需物化。之后的 finish、resume、
+discard、rewind 与退出均不能改变它。纯 getter 不读取 TLS、scope registry、当前提交状态或磁盘。
+
+公共结构采用 `InvocationKey { scope, epoch, instance }`；`CallState` 为
+`Active | Returned | Unwound | Suspended | Abandoned`，`Boundary` 为 `Known | UnknownBoundary`，
+`Completeness` 为 `Complete | Truncated`。`SnapshotInfo` 字段为
+`scope, epoch, records, notes, completeness`；`CallRecord` 字段为
+`key, parent: Option[Int], state, site: Option[Int], definition: Option[Int], boundary`。
+parent 是同快照零起点行索引，根为 None，完整快照保证父先子后和祖先闭合。
+site/definition 是所属 StaticTable 中的索引，不是 Site.id/Definition.id。
+
+最小纯接口为 `snapshot_info`、`record_at`、`static_table`、`site_at`、`definition_at`、
+`note_at`、`find_instance`、`render_snapshot`、`render_origin`，以及 Origin 的 `state`、
+`origin_boundary`、`origin_completeness`。record_at/site_at/definition_at/note_at 越界返回 None；
+find_instance 按完整 key 返回可见行索引或 None。回退后的实例 ID 可有洞，保留实例可跨 epoch；
+Truncated 下查不到不等于已回滚。嵌套 scope 各有根和 key，行索引不能跨 scope 串用。
+
+补裁九为同一个快照增加 opaque `RecordView` 与 opaque `IndexSlot`，不复制另一份 trace。
+`records(snapshot) -> RecordView` 持有原快照的正常所有权；`record_count(view)`、`record_scope(view)`
+和 `record_exists(view, row)` 纯读冻结头。`record_epoch`、`record_instance` 返回 Int；
+`record_parent`、`record_site`、`record_definition` 返回 IndexSlot；`record_state`、
+`record_boundary` 仍返回已裁 ADT。后七项均接受 `(RecordView, Int)`，只读该行的类型化标量，
+不为扫描构造 CallRecord/InvocationKey/Option 图。`index_present(slot) -> Bool` 表达有效性，
+`index_value(slot) -> Int` 只在有效时返回索引；缺失时报 `provenance: missing index`。
+标量行访问越界统一报 `provenance: record index out of bounds`，调用方可先查 record_exists；
+便捷 record_at 的越界仍为 None。所有值可外传并正常保留引用，不暴露可变数组或复用 cursor。
+
+StaticTable 的内部事实为编译期生成的类型化 Site/Definition 字段，不再是待解析文本。
+Site/Definition 包装可按需构造，字符串与数字来自结构化静态数据，不扫描分隔符、解析数字或
+复制字段文本；静态全集按程序生命周期共享，不在每次 freeze 中重建。S1/O1 仅显式渲染时编码。
+原 1.241527/1.3184185 ms 失败封存，固定 vadd 交互增量门仍为1ms；首次/重复读取、cold首装、
+静态/动态内存与dump成本先重新注册，再用新产物/进程确认，不用研究的私读原型签通过。
+
+Origin 使用同一冻结记录和静态表表示，捕获时固定 operation 发起方、父链、状态与 epoch，
+不引用可复用 invocation 槽。现有 operation/parent/scope/epoch/instance/site/definition 签名不变。
+Complete 只表示历史未因容量丢失，不表示所有调用均 Returned；UnknownBoundary 独立于完整性。
+截断仅保留祖先闭合前缀并明确标记，不改接父节点、不重排历史。
+
+文本是显式调试/导出格式：render_snapshot/render_origin 使用版本化 S1/O1 头，保留完整性、
+状态和边界，另做 round-trip 与畸形输入负控。普通预览不先打印再解析；跨进程消费者仍须计入
+序列化、I/O、解码、源版本和结构校验。持久化 envelope 另带 recording/build/source revision，
+不能跨运行只用整数 key 拼树。旧 String 相位及其 1.241527 ms 失败原样封存，不追认通过。
 
 C/JVM 都将已知同步 runtime 回调适配到 Observed 入口，桥本身不制造用户帧。静态表只建一次，
 普通入口没有观察检查。C 将观察入口和来源 runtime 放在独立可执行 `dawn_observed` 段，使普通函数与基础 runtime
 保持连续布局；不用会被链接脚本合并到普通 text 前方的 `.text.unlikely` 子段。只有观察产物使用该放置，U0 不受影响。观察帧、记录、checkpoint 与 note 由 scope 持有，退出回收。外传 Origin
-拥有快照字节，不引用 C 栈或已释放 scope。W2 不提供容量上限选项；W3 的控制臂、实际递归尾边和
-未知外部 ABI 在观察下明确拒绝。已有 tile marks 保持原样，观察成本先在通用构建器上测量。
+拥有快照字节，不引用 C 栈或已释放 scope。W3 容量与截断规则如下；控制臂和尾边保留客观记录，未知外部 ABI 显式标记 UnknownBoundary。已有 tile marks 保持原样，观察成本先在通用构建器上测量。
 
 C 的含观察产物中，闭包/trait 入口及无循环间接分派边界按 64 字节对齐，减少冷代码增量对间接调用
 指令缓存边界的扰动。循环体和无观察产物保留后端默认对齐，入口对齐不增加调用边执行的指令，
@@ -433,3 +470,105 @@ C 的 Observed 身体在函数边界持有一个展开 guard，调用点正常�
 放置；不把重复的源码坐标误判为两个逻辑 Site。映射判词从容纳入口读取模式，并据此核对
 精确的目标符号、Fn 接口或 canonical 选择调用，不能把任意一侧目标都当作正确。
 有观察能力的 builder 与 trait/Fn 夹具同时验证两后端的源码配对、物理位置和开关 map 不改产物。
+
+## W3 实现中的生命期约束（2026-10-26）
+
+控制激活在挂起时借用逻辑调用链，续延持有其 session lease；驱动者与挂起者的当前实例独立保存。
+恢复沿用原实例，不重跑函数入口。 Plain 创建的续延保持 Plain，不能借当前驱动者的观察域重进 Observed；跨域恢复不把保存链拼到驱动链，驱动快照不能表示的片段显式标记 UnknownBoundary。用户观察句柄在词法作用域结束后失效，内部 lease 只允许
+恢复或放弃原计算。checkpoint 仍比较创建实例；仍活跃的试探续延阻止 rewind 删除其日志。
+
+Observed 尾边在共享 Core 模式分析后降低成循环，参数求值在切换逻辑帧之前完成。
+每条边保留调用 Site、定义及有序父实例；Plain 使用原循环改写。容量达到后记录显式截断，
+数值计算继续，严格树判词拒绝。记录上限同时约束已回退记录，不能借反复 rewind 无限增长。
+
+## 补裁七的录制表示与重新确认
+
+2026-10-26，原 tile C/M 2.0/3.0 预算按原重议程序撤销，旧失败数据保留，不追认通过。
+W3 改为作用域拥有分块记录与可复用 invocation 池；引用未清零的挂起 invocation 不复用。
+Observed 函数在入口取得一次可变 context，内部记账 helper 显式借用同一 context，Plain ABI 不变。
+Site/definition 元数据保持静态引用，不逐事件复制字符串。JVM 使用同一所有权与记录语义。
+新预算须先在证据目录提交语义 oracle、完整 corpus、N/字节定义、消费者边界和统计预注册，
+再用新构建和新独立进程确认；不得给 JVM 另取事后常数。
+
+## 补裁八的实现与验收状态（2026-10-26）
+
+结构化不可变快照已裁定，当前正在实现，尚未通过 W3/P1。先完成本文和中文 spec 正本，
+再同步英文 spec 与 pin，然后修改产品。记录使用 scope 所有池，导出时复制动态前缀；
+静态表共享，纯访问不访问活跃观察器。不得把研究目录中的插桩原型当产品。
+
+新的交互边界从录制前到可交付预览和来源映射就绪，计入退出、冻结、首次 getter 物化、
+产品完整性/源码匹配、投影/归属索引、lower/render 和规定的清理。独立 N、手写父树和
+变异判词是单独必过的正确性相位；不能用 trusted runtime 省略 Unknown/Truncated、
+未提交实例或源码 span 不匹配的产品拒绝。P1 代理消费者必须列出覆盖与遗漏，不冒称 P2。
+
+新计时前在持久证据根提交新消费者源码/产物、完整 corpus/N、首次与重复访问、文本 dump、
+内存/静态表、JVM 预热/heap/GC、随机与统计预注册。交互增量上界仍为 1.0 ms，
+其余补裁七及 U0/U1/compile/cold/scaling/CI 门不变；完整新相位再失败即交回协调者。
+
+## 补裁十的 JVM 方法与运行时治理（2026-10-26）
+
+补裁九的 JVM record 上界331.323µs超过314.360µs，失败永久保留。新工程先缓存
+invocation Entry 所属记录块与偏移，arrive 隐式建立分到慢路径；普通 finish 单次检查
+同一状态并更新，尾段仍逐条核验。归还池时清 scope/chunk 引用，不改变状态或续延 lease。
+
+Observed JVM 发射回收表达式结束后失效的局部槽；超大方法按最终 Code 字节数与结构化
+控制流边界分成物理 helper。helper 不新增逻辑帧，保持原 Site/Definition、事件顺序、
+上下文与异常内外顺序，不按用户函数名特判，不用事后 ASM 改写。扁平的匹配判词保持原序，
+按语句前缀与余部分区；单个结果经普通参数/返回值传播，继续/跳出/返回仍按原控制流执行，
+不新增可变载体。条件语句的两臂终止也参与区域闭合判定；每次只拆真子区域以保证推进。
+最终尺寸检查同时覆盖
+compiler 与 emitted 观察语料，所有可能热的观察身体及物理 helper 不超过8000B，
+必须用超限热方法负控证明门会拒绝。JVM flags、预热、heap、GC 与全部成本门不变。
+
+新确认须先过正确性/拒绝控制并提交预注册，再用新构建与新进程重测 JVM/native。
+额外报告 nmethod/code cache 总量与 JIT 编译时间，诊断与正式计时分开；
+编译/冷启动5%门不能用热延迟收益抵消。实现已落地，W3/P1 等待全部资格门验收。
+
+## W3 容量、未知边界与资格冻结（补裁十一）
+
+`observe(body, capacity: Int = 1048576)` 在创建 scope 前检查 `1 <= capacity <= 38347921`；
+否则两端拒绝 `provenance: capacity must be between 1 and 38347921`。capacity 包括根，
+限制本域累计实际保存的调用记录，rewind 不返还预算；note 有同样大小的独立累计预算。
+截断是 sticky 的：达到预算后下一次写入只置 Truncated，计算、效果和正常展开继续，
+不回收前缀填入较晚事件，不重编号、重排或把缺失父节点接到幸存祖先。completed 仅导出
+仍可见的祖先闭合前缀。嵌套域各用自己的预算；外层耗尽不影响内层完整保存。
+
+活跃调用与续延的控制身份独立于历史记录容量。checkpoint 仍绑定建立实例并遵守栈纪律，
+即使它建立于未保存的调用；completed 不因此伪造记录。checkpoint 元数据和用户保留的快照
+不是可回收的日志容量。调用结束后其创建标记确定失效。超过容量的 perform 仍有当前操作
+的准确 scope/epoch/instance/Site；其 Origin 标记 Truncated/UnknownBoundary，不提供被丢失的
+父链接，也不把尚存前缀接给它。它是明确不完整的操作 envelope，不是追加到完成日志的行。
+严格来源消费者遇到任一 Truncated 或 UnknownBoundary 即拒绝。
+
+未知外部入口的自身记录标记 UnknownBoundary，已知 Dawn 回调重新使用 Observed 身体；
+不把外部实现猜成 Dawn Definition。外部运行时没有来源 ABI 不再成为 W2 式整体拒绝。
+解释器/comptime 及不支持的共享执行上下文仍按已裁规则拒绝。
+
+补裁十的 JVM 相位维持无资格证据。补裁十一仅批准封存身份的一次同算法新增确认；其身份
+与最终 W3 完整语料资格分开登记，不拿旧 artifact 的通过替代新 artifact。所有本机计时，
+包括独立 idle 训练，必须等协调者交出租约。预注册先固定静默训练算法和完整相位；获得租约后
+以独立 idle 数据冻结阈值，再运行固定 preflight 与全窗 1 秒 collector，环境违规使整相位无效。
+失败或无效回协调者，不删轮补测；不主张反复决策过程具有总体 95% 覆盖率。
+
+自然不可达只回收运行时内存，不触发源码层 release 或 discard；因此其未恢复记录保持
+Suspended，不因 native RC 与 JVM GC 的回收时机不同改成不同状态。Abandoned 由显式 discard
+（含其冻结跨度中继承的 discard）记录。自然回收也不是创建帧正常返回或异常完成；checkpoint
+不能借此恢复已经不可达的计算，仍须当前实例等于原创建实例。
+
+## W3-R 刀 R1：最小移植（2026-11-14）
+
+重开 W3 后第一刀只移植来源机制本身：运行时快照、checker 的捕获与作用域身份、origin 与控制臂、
+发射器的 outlining，以及 `std/provenance` 公共 API。手写 `t_call_enter`、`t_body_enter` 等 marks 与
+所有现有消费者（录制器、Playground tilemap、gpu-map、xmap、mutate.py、flash_attn.map）不动；
+`scripts/tile-golden/run.sh` 的行为不变，来源消费脚本留作合同探针，不接入黄金门禁。因此
+tile 输入应不变，设备字节（256 对 tilebc/MLIR）逐字节不变。
+
+与旧补丁相比的移植约束：生成的嵌入文件（`rtsrc`、`stdsrc`、`provenance_rt`、`asm_diagnostics_rt`）
+只由各自生成器从合并后的正本重生，不手合；`types.dawn` 全部经 `ty_tuple/ty_array/ty_opaque/ty_fn`
+智能构造，不手填类型结构，以保住 #958（空 captures 复用）与 #960（作用域替换的身份证明）；
+中英文 spec 各只保留一份去重后的来源条款，英文译本钉住中文正本摘要。
+
+观察路径成本此刻只报告不拦，因为尚无消费者开启观察。未观察路径要求与 main 结构相同
+（或 U0/U1 配对测量达标），见 `docs/spec.md` 对应条款与裁定。后续刀序：R2 消费适配、
+R3 按协议资格、R4 删 marks、R5 删后复测。不做的：本刀不改 run.sh、不接 Playground、
+不删任何 mark、不放宽 method-size 时限。
