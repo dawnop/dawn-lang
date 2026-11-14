@@ -1,5 +1,13 @@
 # xmap changelog
 
+## 0.3.0
+
+- Tile 录制（`.map`）必须带 `source <摘要>` 行；`table_from_tile(src, revision, map)`
+  对源码摘要不符、缺摘要、定义 span 落在源码之外的录制返回 `Err`，不再映射。
+- helper 的定义范围由录制写入（`call ... def=L:C-L:C`），取代写死的 `fa_exp`/`fa_divide`
+  名单；没有定义范围而父子不在父调用 span 内的录制被拒绝。
+- `Raw` 增加 `revision`，`Call` 增加 `defn`。
+
 ## 0.2.0
 
 - `TileCall` 保留录制 id 与 parent。两个具名 FlashAttention 数值 helper

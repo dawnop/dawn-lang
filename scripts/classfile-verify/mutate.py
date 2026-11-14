@@ -74,8 +74,8 @@ MUTATIONS = {
     # The Never block (run.sh --never-mutants-only), in run order.
     "omit-statement-fallthrough": ((
         EMIT,
-        "        if not stmt_falls { return (g1, false) }",
-        "        if false { return (g1, false) }",
+        "    g1 = g2\n    if not stmt_falls { return (g1, false) }\n  }\n  match link {",
+        "    g1 = g2\n    if false { return (g1, false) }\n  }\n  match link {",
     ),),
     "reject-wide-sam-bottom": ((
         CHECKER,

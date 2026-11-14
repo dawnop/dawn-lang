@@ -48,14 +48,18 @@ pub type Pos = { line: Int, col: Int }
 
 ## One call as flash_attn.map records it: its row, its parent's row (-1 at
 ## the top of the body), its name, its span `[from, to)` and its name's
-## `[from, name_to)`, and the Tile IR lines it wrote itself (1-based,
+## `[from, name_to)`, the span of the definition of what it ran when that is a
+## function written in the same file (`defn`: a helper's own calls lie there,
+## not in the call that ran it), and the Tile IR lines it wrote itself (1-based,
 ## half-open, its children's left out).
-pub type MCall = { id: Int, parent: Int, name: String, from: Pos, to: Pos, name_from: Pos, name_to: Pos, lines: List[(Int, Int)] }
+pub type MCall = { id: Int, parent: Int, name: String, from: Pos, to: Pos, name_from: Pos, name_to: Pos, defn: Option[(Pos, Pos)],
+  lines: List[(Int, Int)] }
 
 ## The whole recording: the kernel, the function's lines in kernels.dawn
 ## (both included), how many operations it recorded, and who owns each line.
 pub type Recorded = {
   name: String,
+  source: String,
   first: Int,
   last: Int,
   ops: Int,
@@ -113,10 +117,10 @@ pub fn words(s: String) -> List[String] = filter(str.split(s, " "), w => w != ""
 pub fn before_or_at(a: Pos, b: Pos) -> Bool = a.line < b.line || (a.line == b.line && a.col <= b.col)
 
 ## flash_attn.map as a `Recorded`. Every line has to be one of the six shapes
-## record.py writes, in its order, and every call its row number in turn; a
+## record.py writes (`source` is the digest of the file it recorded), and every call its row number in turn; a
 ## line of any other shape is an error rather than a line skipped.
 pub fn parse_map(text: String) -> Result[Recorded, String] = {
-  var rec = Recorded { name = "", first = 0, last = 0, ops = 0 - 1, head = [], calls = [], tail = (0, 0) }
+  var rec = Recorded { name = "", source = "", first = 0, last = 0, ops = 0 - 1, head = [], calls = [], tail = (0, 0) }
   var bad = ""
   var n = 0
   for raw in str.split(text, "\n") {
@@ -129,6 +133,12 @@ pub fn parse_map(text: String) -> Result[Recorded, String] = {
         rec = Recorded { ..rec, name = ws[1] }
       } else if rec.name == "" {
         bad = fail("the first line is not `kernel <name>`")
+      } else if ws[0] == "source" && len(ws) == 2 {
+        if rec.source != "" {
+          bad = fail("the source revision is named twice")
+        } else {
+          rec = Recorded { ..rec, source = ws[1] }
+        }
       } else if ws[0] == "fn" && len(ws) == 2 {
         match parse_range(ws[1]) {
           Some((a, b)) -> {
@@ -159,12 +169,16 @@ pub fn parse_map(text: String) -> Result[Recorded, String] = {
           }
         }
       } else if ws[0] == "call" && len(ws) >= 6 {
-        match (parse_int(ws[1]), parse_int(ws[2]), parse_span(ws[4]), parse_span(ws[5]), parse_ranges(list.drop(ws, 6))) {
+        let has_def = len(ws) >= 7 && str.starts_with(ws[6], "def=")
+        let defn: Option[(Pos, Pos)] = if has_def { parse_span(str.drop(ws[6], 4)) } else { None }
+        match (parse_int(ws[1]), parse_int(ws[2]), parse_span(ws[4]), parse_span(ws[5]), parse_ranges(list.drop(ws, if has_def { 7 } else { 6 }))) {
           (Some(id), Some(parent), Some((from, to)), Some((nf, nt)), Some(rs)) -> {
             if id != len(rec.calls) {
               bad = fail("call ${id} is not row ${len(rec.calls)}")
+            } else if has_def && defn == None {
+              bad = fail("`${ws[6]}` is not a definition span")
             } else {
-              let c = MCall { id = id, parent = parent, name = ws[3], from = from, to = to, name_from = nf, name_to = nt, lines = rs }
+              let c = MCall { id = id, parent = parent, name = ws[3], from = from, to = to, name_from = nf, name_to = nt, defn = defn, lines = rs }
               rec = Recorded { ..rec, calls = rec.calls ++ [c] }
             }
           }
@@ -179,6 +193,8 @@ pub fn parse_map(text: String) -> Result[Recorded, String] = {
   }
   if bad != "" {
     Err(bad)
+  } else if rec.source == "" {
+    Err("flash_attn.map names no source revision")
   } else if rec.first == 0 || rec.ops < 0 || rec.tail == (0, 0) || len(rec.head) == 0 {
     Err("flash_attn.map has no fn, ops, head or tail line")
   } else {
@@ -224,8 +240,10 @@ fn text_at(src: List[String], first: Int, a: Pos, b: Pos) -> String =
 
 ## `rec` against the function's text (`src`, starting at kernels.dawn's line
 ## `first`) and its golden (`ir`, one string a line), or why the two do not
-## fit.
-pub fn check(rec: Recorded, first: Int, src: List[String], ir: List[String]) -> Result[KernelMap, String] = {
+## fit. `revision` is the digest of the whole file the function is cut from.
+pub fn check(rec: Recorded, revision: String, first: Int, src: List[String], ir: List[String]) -> Result[KernelMap, String] = {
+  if revision == "" { return Err("no source revision to hold the recording to") }
+  if rec.source != revision { return Err("the recording is of another revision of the source: record again") }
   let last = first + len(src) - 1
   let fault = list.find(rec.calls, c => call_fault(rec.calls, first, last, src, c) != "")
   if rec.first != first || rec.last != last {
@@ -298,19 +316,19 @@ fn spelled(name: String, text: String) -> Bool =
     false
   }
 
-# A numerical helper's child has a definition span, while its parent has
-# the invocation span. Only these two fixed same-file helpers cross that
-# boundary; the source must contain exactly one complete definition.
-fn helper_contains(src: List[String], first: Int, name: String, lo: Int, hi: Int) -> Bool = {
-  if not list.contains(["fa_exp", "fa_divide"], name) { return false }
-  let starts = filter(range(0, len(src)), j => str.starts_with(src[j], "fn ${name}[") || str.starts_with(src[j], "fn ${name}("))
-  if len(starts) != 1 { return false }
-  let start = starts[0]
-  match list.find(range(start + 1, len(src)), j => src[j] == "}") {
-    Some(end) -> first + start <= lo && hi <= first + end
+# A helper's own calls lie in its definition, not in the call that ran it. The
+# relation holds for a call whose recording names a definition span, against
+# the function's own text, and for no call that does not: there is no list of
+# helper names. The span must lie inside the function's lines and begin at the
+# `fn` of the name the call has.
+fn within_definition(src: List[String], first: Int, p: MCall, c: MCall) -> Bool =
+  match p.defn {
+    Some((a, b)) -> {
+      let start = text_at(src, first, a, Pos { line = a.line, col = a.col + len("fn ${p.name}") })
+      start == "fn ${p.name}" && a.line >= first && b.line < first + len(src) && before_or_at(a, c.from) && before_or_at(c.to, b)
+    }
     None -> false
   }
-}
 
 ## Why call `c` (of `calls`) does not fit the text, or "". Once shared
 ## with the explorer page, retired 2026-10-17.
@@ -322,7 +340,7 @@ pub fn call_fault(calls: List[MCall], first: Int, last: Int, src: List[String], 
   let in_parent =
     if c.parent >= 0 && c.parent < c.id {
       let p = calls[c.parent]
-      (before_or_at(p.from, c.from) && before_or_at(c.to, p.to)) || helper_contains(src, first, p.name, c.from.line, c.to.line)
+      (before_or_at(p.from, c.from) && before_or_at(c.to, p.to)) || within_definition(src, first, p, c)
     } else {
       true
     }
@@ -459,7 +477,7 @@ pub fn named_at(calls: List[MCall], l: Int, a: Int, b: Int) -> Option[MCall] =
 # ---- tests ----
 
 fn sample_map() -> String =
-  "kernel k\nfn 10-15\nops 6\nhead 1-4\n"
+  "kernel k\nsource r1\nfn 10-15\nops 6\nhead 1-4\n"
   ++ "call 0 -1 load 11:11-11:32 11:11-11:15 4-12\n"
   ++ "call 1 -1 d_for 12:11-13:26 12:11-12:16 12-13 15-17\n"
   ++ "call 2 1 addf 13:5-13:25 13:5-13:9 13-15\n"
@@ -493,7 +511,7 @@ test "a recording reads back call by call, with its tree and its spans" {
 }
 
 test "the rows put a call's first run on its name's line and a region's later run where its span ends" {
-  match check(must_parse(sample_map()), 10, sample_src(), sample_ir()) {
+  match check(must_parse(sample_map()), "r1", 10, sample_src(), sample_ir()) {
     Ok(m) -> {
       assert map(m.rows, r => r.line) == [10, 11, 12, 13, 14, 15]
       assert map(m.rows, r => map(r.segs, s => s.owner)) == [[0 - 1], [0], [1], [2, 1], [3], [0 - 2]]
@@ -510,34 +528,82 @@ test "a recording that does not fit the text is refused, not drawn" {
   let src = sample_src()
   let ir = sample_ir()
   let shifted = str.replace(sample_map(), "11:11-11:15", "11:12-11:16")
-  match check(must_parse(shifted), 10, src, ir) {
+  match check(must_parse(shifted), "r1", 10, src, ir) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e, "the text at 11:12 is `oad(`") }
   }
   let escaped = str.replace(sample_map(), "call 2 1 addf 13:5-13:25", "call 2 1 addf 13:5-14:2")
-  match check(must_parse(escaped), 10, src, ir) {
+  match check(must_parse(escaped), "r1", 10, src, ir) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e, "not inside its parent") }
   }
   let doubled = str.replace(sample_map(), " 13-15\n", " 12-15\n")
-  match check(must_parse(doubled), 10, src, ir) {
+  match check(must_parse(doubled), "r1", 10, src, ir) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e, "line 12 of its Tile IR is owned 2 times") }
   }
-  match check(must_parse(sample_map()), 11, src, ir) {
+  match check(must_parse(sample_map()), "r1", 11, src, ir) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e, "record again") }
   }
-  match check(must_parse(sample_map()), 10, src, list.take(ir, 21)) {
+  match check(must_parse(sample_map()), "r1", 10, src, list.take(ir, 21)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e, "names line 22 of a 21-line golden") }
   }
 }
 
-test "a map line of any other shape is an error" {
-  match parse_map("kernel k\nfn 10-14\ncall 0 -1 load 11:11 11:11-11:15 4-12\n") {
+fn helper_map(def: String) -> String =
+  "kernel k\nsource r1\nfn 1-7\nops 2\nhead 1-2\n"
+  ++ "call 0 -1 fa_exp 5:3-5:12 5:3-5:9 ${def}\ncall 1 0 exp 2:3-2:9 2:3-2:6 2-3\n"
+  ++ "call 2 -1 fa_exp 6:3-6:12 6:3-6:9 ${def}\ncall 3 2 exp 2:3-2:9 2:3-2:6 3-4\n"
+  ++ "tail 4-5\n"
+
+fn helper_src() -> List[String] =
+  ["fn fa_exp(x: Int) -> Int = {", "  exp(x)", "}", "fn kernel() -> Unit = {", "  fa_exp(1)", "  fa_exp(2)", "}"]
+
+fn helper_ir() -> List[String] = ["a", "b", "c", "d"]
+
+test "a helper's own calls lie in the definition the recording names, once for each of its calls" {
+  match check(must_parse(helper_map("def=1:1-3:2")), "r1", 1, helper_src(), helper_ir()) {
+    Ok(m) -> {
+      assert map(m.calls, c => (c.name, c.parent)) == [("fa_exp", 0 - 1), ("exp", 0), ("fa_exp", 0 - 1), ("exp", 2)]
+      assert m.calls[1].from == m.calls[3].from
+    }
+    Err(e) -> panic(e)
+  }
+}
+
+test "a helper with no recorded definition, a definition not at its fn, or another revision is refused" {
+  match check(must_parse(helper_map("")), "r1", 1, helper_src(), helper_ir()) {
     Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e, "line 3") }
+    Err(e) -> { assert str.contains(e, "not inside its parent's span") }
+  }
+  match check(must_parse(helper_map("def=4:1-7:2")), "r1", 1, helper_src(), helper_ir()) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "not inside its parent's span") }
+  }
+  match check(must_parse(helper_map("def=1:1-3:2")), "r2", 1, helper_src(), helper_ir()) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "another revision") }
+  }
+  match check(must_parse(helper_map("def=1:1-3:2")), "", 1, helper_src(), helper_ir()) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "no source revision") }
+  }
+  match parse_map(str.replace(helper_map("def=1:1-3:2"), "source r1\n", "")) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "names no source revision") }
+  }
+  match parse_map(str.replace(helper_map("def=1:1-3:2"), "def=1:1-3:2", "def=1:1-x")) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "is not a definition span") }
+  }
+}
+
+test "a map line of any other shape is an error" {
+  match parse_map("kernel k\nsource r1\nfn 10-14\ncall 0 -1 load 11:11 11:11-11:15 4-12\n") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "line 4") }
   }
   match parse_map("head 1-4\n") {
     Ok(_) -> { assert false }
@@ -564,7 +630,7 @@ test "a line is cut where the calls on it start, end and name themselves" {
 # region whose head, body and terminator are all on one line, a line whose
 # only call wrote nothing, and Tile IR with the braces the rule skips.
 fn nested_map() -> String =
-  "kernel k\nfn 30-34\nops 5\nhead 1-3\n"
+  "kernel k\nsource r1\nfn 30-34\nops 5\nhead 1-3\n"
   ++ "call 0 -1 mmaf 31:15-31:25 31:15-31:19 3-5\n"
   ++ "call 1 -1 lit 31:27-31:35 31:27-31:30\n"
   ++ "call 2 -1 mul 31:11-31:36 31:11-31:14 5-7\n"
@@ -607,7 +673,7 @@ fn keys_of(m: KernelMap) -> List[Option[Int]] = map(m.rows, r => key_line(m, r))
 ## the run written last (`continue`), a region's terminator over the call
 ## named on its row, or the head's `make_token`-like last line.
 test "a folded row shows the line its outermost named call wrote its result with" {
-  match check(must_parse(nested_map()), 30, nested_src(), nested_ir()) {
+  match check(must_parse(nested_map()), "r1", 30, nested_src(), nested_ir()) {
     Ok(m) -> {
       assert keys_of(m) == [Some(2), Some(6), Some(8), None, Some(12)]
       assert map(m.rows, r => row_lines(r)) == [2, 4, 5, 0, 3]
@@ -615,7 +681,7 @@ test "a folded row shows the line its outermost named call wrote its result with
     Err(e) -> panic(e)
   }
   let ir = map(range(0, 22), k => if k == 1 { "  entry {" } else if k == 15 { "}" } else { "line ${k + 1}" })
-  match check(must_parse(sample_map()), 10, sample_src(), ir) {
+  match check(must_parse(sample_map()), "r1", 10, sample_src(), ir) {
     Ok(m) -> {
       # line 13 names `addf` and ends `d_for`: the call named wins over the
       # terminator; a run of braces only has no result line

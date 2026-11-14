@@ -24,8 +24,10 @@ call after its arguments, a closure handed to a call being that call's
 children). Anything else stops here with both lists printed: a helper with
 an effect, a call under unknown host control flow, a closure bound before the call
 that runs it, a call of a closure. Which names are calls at all is read off
-packages/tileir/src/dev.dawn (its `called("<name>"` marks); every other call,
-`permute(..)` or `neg_inf()`, records nothing and is looked through.
+the recording itself (the names of the rows it ran, and the functions of this
+file it ran for the author, by the compiler's own record of their identity,
+held to the parse); every other call, `permute(..)` or `neg_inf()`, records
+nothing and is looked through.
 Only literal Bool fields of the BF16 policy captured by fa_kernel select a
 source arm; every other host condition keeps the global refusal.
 
@@ -55,6 +57,7 @@ header, its terminator and its closing brace.
 from pathlib import Path
 import copy
 import contextlib
+import hashlib
 import io
 import os
 import re
@@ -66,7 +69,6 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
 GOLDEN = ROOT / "scripts" / "tile-golden"
-DEV = ROOT / "packages" / "tileir" / "src" / "dev.dawn"
 BODY = "flash_attn"
 NAME = "flash_attn_bf16_demo"
 OUT = Path(__file__).resolve().parent / f"{BODY}.map"
@@ -84,6 +86,9 @@ EDITS = [
 ]
 
 MAIN = '''
+use std/provenance.{observe, completed}
+use tileir/origin.{rows_of, callees, Helper}
+
 fn spans(rs: List[(Int, Int)]) -> String =
   list.fold(rs, "", (acc, r) => {
     let (a, b) = r
@@ -91,8 +96,24 @@ fn spans(rs: List[(Int, Int)]) -> String =
   })
 
 pub fn main() -> Unit !io = {
-  let (p, calls) = %TRACE%
+  let ((p, calls), snapshot) = observe(scope => {
+    let recorded = %TRACE%
+    (recorded, completed(scope))
+  })
   if p != trace("%NAME%") { panic("%NAME%: the call marks changed the program") } else { () }
+  match rows_of(snapshot) {
+    Ok(rows) -> match callees(rows, ["dawn\\$pkg\\$tileref/"]) {
+      Ok(facts) -> {
+        for f in facts {
+          if f.kind == Helper {
+            println("helper ${f.name} ${f.module} ${f.declaration} ${f.start} ${f.end} ${f.role}")
+          }
+        }
+      }
+      Err(e) -> panic("%NAME%: ${e}")
+    }
+    Err(e) -> panic("%NAME%: ${e}")
+  }
   match line_map(p, calls) {
     Ok(m) -> {
       if m.text != render(p) { panic("%NAME%: the line map's text is not render's") } else { () }
@@ -274,29 +295,19 @@ HARNESS_DIR = ROOT / "site" / "gpu-map" / "harness"
 def run_harness(src: str) -> str:
     # The harness is a project of its own (site/gpu-map/harness: dawn.toml is
     # committed, src/main.dawn is written here from kernels.dawn and ignored by
-    # git). It is listed in site/native-progs.txt, so site_prog builds it once
-    # with dawnc and the site's one CI cache keeps it; `dawnc run` would emit C
-    # and run cc on every build (about 40 s). Its key reads kernels.dawn
-    # through harness/inputs.txt, since main.dawn does not exist when CI
-    # computes the cache key.
+    # git) and runs on the JVM, because the recording is observed. Keep the
+    # original function text and line count: runtime Loc values independently
+    # verify parser spans. Remove the generated source after use so it is not a
+    # second formatting input to the site.
     (HARNESS_DIR / "src").mkdir(parents=True, exist_ok=True)
     main = HARNESS_DIR / "src" / "main.dawn"
-    # Keep the original function text and line count: runtime Loc values
-    # independently verify parser spans. Remove the generated source after
-    # use so it is not a second formatting input to the site.
-    text = harness_source(src)
-    if not main.exists() or main.read_text(encoding="utf-8") != text:
-        main.write_text(text, encoding="utf-8")
-    r = subprocess.run(["bash", "-c", ". site/dawnc.sh && site_prog gpu_map_harness"],
-                       capture_output=True, text=True, cwd=ROOT,
-                       env={**os.environ, "DAWNC_BIN": dawnc()})
-    if r.returncode != 0 or not r.stdout.strip():
-        fail("the harness did not build:\n" + (r.stderr or r.stdout)[-2000:])
-    exe = ROOT / r.stdout.strip().splitlines()[-1]
-    r = subprocess.run([str(exe)], capture_output=True, text=True, cwd=ROOT)
+    main.write_text(harness_source(src), encoding="utf-8")
+    try:
+        r = subprocess.run([str(ROOT / "bin" / "dawn"), "run", str(HARNESS_DIR)], capture_output=True, text=True, cwd=ROOT)
+    finally:
+        main.unlink(missing_ok=True)
     if r.returncode != 0:
         fail("the harness did not run:\n" + (r.stderr or r.stdout)[-2000:])
-    main.unlink()
     return r.stdout
 
 
@@ -684,10 +695,60 @@ def strategy_controls(src, body, dev, policy, static, rows, paired):
 
 
 
+def row_offset(src: str, at: str) -> int:
+    line, col = map(int, at.split(":"))
+    starts = [0] + [m.end() for m in re.finditer("\n", src)]
+    return starts[line - 1] + col - 1
+
+
+def helpers_of(dump: str, src: str, rows: list, facts: list):
+    """The author's functions that wrote rows, from the recorded identity.
+
+    A fact is the compiler's own record of a function this run called: the
+    module and declaration it is defined in and the span of its definition
+    inside that declaration. It is accepted only against this source's parse:
+    the declaration must be one top level `Fn` of the file, and its span must
+    be that function's whole length, so a recording of another revision is
+    refused here and never highlights text it did not run. A helper counts
+    when a recorded row was written inside its definition, the kernel's own
+    function excepted (it is the root of the walk, not a call of it).
+    """
+    helpers, defs = {}, {}
+    for f in facts:
+        name = f["name"]
+        if name == BODY or name in helpers or f["role"] != "function":
+            continue  # a closure's definition is no `Fn` of the file to expand
+        if f["module"] != "main" or f["declaration"] != f"Nf{len(name)}:{name}":
+            fail(f"helper `{name}` has an identity this map cannot place: {f}")
+        nodes = [n for n in parse_nodes(dump) if n.depth == 1 and n.text.startswith(f"Fn {name} ")]
+        if len(nodes) != 1:
+            fail(f"helper `{name}` is not one function of the file in the parse")
+        node = nodes[0]
+        if f["start"] != 0 or f["end"] != node.hi - node.lo:
+            fail(f"helper `{name}` was recorded with another definition length than the source has "
+                 f"({f['end']} against {node.hi - node.lo}): the recording is of another revision")
+        owns = [r for r in rows if r["at"] != "-" and node.lo <= row_offset(src, r["at"]) < node.hi]
+        if owns:
+            bodies = [k for k in parse_tree(dump, name).kids if k.kind == "Block"]
+            if len(bodies) != 1:
+                fail(f"{name} has no unique block body")
+            helpers[name] = bodies[0]
+            defs[name] = node
+    return helpers, defs
+
+
+def parse_nodes(dump: str):
+    out = []
+    for raw in dump.splitlines():
+        body = raw.lstrip(" ")
+        m = re.search(r" @(\d+)\.\.(\d+)$", body)
+        out.append(Node((len(raw) - len(body)) // 2, body, int(m.group(1)) if m else None, int(m.group(2)) if m else None))
+    return out
+
+
 def record(*, source_path: Path = KERNELS, recording: str | None = None,
            compiler: str | None = None) -> str:
     src = source_path.read_text(encoding="utf-8")
-    dev = set(re.findall(r'called\("([a-z_0-9]+)"', DEV.read_text(encoding="utf-8")))
     ran = run_harness(src) if recording is None else recording
     p = subprocess.run([compiler or dawnc(), "parse", str(source_path)],
                        capture_output=True, text=True, cwd=ROOT)
@@ -699,27 +760,13 @@ def record(*, source_path: Path = KERNELS, recording: str | None = None,
     call = next(k for k in lam.kids if k.kind != "LParam")
     call.kids[1], call.kids[2] = call.kids[2], call.kids[1]
     expect_refused("wrong factory forwarding", lambda: validate_factory(altered))
-    global HELPERS
-    HELPERS = {}
-    for name in ["fa_exp", "fa_divide"]:
-        helper = parse_tree(p.stdout, name)
-        bodies = [k for k in helper.kids if k.kind == "Block"]
-        if len(bodies) != 1:
-            fail(f"{name} has no unique block body")
-        HELPERS[name] = bodies[0]
-    dev |= set(HELPERS)
-    fn = parse_tree(p.stdout, BODY)
-    body = [k for k in fn.kids if k.kind == "Block"]
-    if len(body) != 1:
-        fail(f"{NAME} is not a function with a block body")
-    global SRC
-    SRC = src
-    static = static_calls(body[0], dev, Env(fixed_policy(p.stdout)))
-    rows, head, tail, ops = [], None, None, None
+    rows, head, tail, ops, facts = [], None, None, None, []
     for line in ran.splitlines():
         w = line.split(" ")
         if w[0] == "call":
             rows.append({"id": int(w[1]), "parent": int(w[2]), "name": w[3], "at": w[4], "lines": w[5:]})
+        elif w[0] == "helper":
+            facts.append({"name": w[1], "module": w[2], "declaration": w[3], "start": int(w[4]), "end": int(w[5]), "role": w[6]})
         elif w[0] == "head":
             head = " ".join(w[1:])
         elif w[0] == "tail":
@@ -728,6 +775,18 @@ def record(*, source_path: Path = KERNELS, recording: str | None = None,
             ops = w[1]
     if head is None or tail is None or ops is None:
         fail("the harness printed no head, tail or ops line:\n" + ran[-1000:])
+    global HELPERS
+    HELPERS, defs = helpers_of(p.stdout, src, rows, facts)
+    # The names the recording can show: what it ran, and the helpers whose own
+    # calls it ran (a helper's own row is one of the marks; its identity is not).
+    dev = {r["name"] for r in rows} | set(HELPERS)
+    fn = parse_tree(p.stdout, BODY)
+    body = [k for k in fn.kids if k.kind == "Block"]
+    if len(body) != 1:
+        fail(f"{NAME} is not a function with a block body")
+    global SRC
+    SRC = src
+    static = static_calls(body[0], dev, Env(fixed_policy(p.stdout)))
     paired = pair(static, rows)
     at = place(src)
     validate_pairs(src, rows, paired)
@@ -742,14 +801,19 @@ def record(*, source_path: Path = KERNELS, recording: str | None = None,
         fail("the selected factory recording differs from the full golden text")
     if int(tail.split("-")[1]) - 1 != golden.count("\n"):
         fail(f"the map ends at line {int(tail.split('-')[1]) - 1}, {NAME}.mlir has {golden.count(chr(10))} lines")
-    definitions = [fn, parse_tree(p.stdout, "fa_kernel")] + [parse_tree(p.stdout, name) for name in HELPERS]
+    definitions = [fn, parse_tree(p.stdout, "fa_kernel")] + [defs[name] for name in HELPERS]
     first = src[:min(f.lo for f in definitions)].count("\n") + 1
     last = src[:max(f.hi for f in definitions)].count("\n") + 1
-    out = [f"kernel {NAME}", f"fn {first}-{last}", f"ops {ops}", f"head {head}"]
+    out = [f"kernel {NAME}", f"source {hashlib.sha256(src.encode('utf-8')).hexdigest()}", f"fn {first}-{last}",
+           f"ops {ops}", f"head {head}"]
     for r, s in zip(rows, paired):
         (a, b), (na, nb) = s["span"], s["name_span"]
+        # A helper's row names its definition: its own calls lie in that span,
+        # not in the call that ran it. The span is the recorded identity, held
+        # to this source's parse in helpers_of.
+        definition = [f"def={at(defs[r['name']].lo)}-{at(defs[r['name']].hi)}"] if r["name"] in HELPERS else []
         out.append(" ".join(["call", str(r["id"]), str(r["parent"]), r["name"],
-                             f"{at(a)}-{at(b)}", f"{at(na)}-{at(nb)}"] + r["lines"]))
+                             f"{at(a)}-{at(b)}", f"{at(na)}-{at(nb)}"] + definition + r["lines"]))
     out.append(f"tail {tail}")
     return "\n".join(out) + "\n"
 

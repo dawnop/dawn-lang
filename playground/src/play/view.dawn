@@ -32,9 +32,9 @@ use json/value.{Json, JBool, JInt, JStr, JArr, JObj}
 use json/render.{render}
 use sha2/sha256
 use xmap/xmap.{Spec, Raw, Built, Pane, explore, explore_c}
-use xmap/table.{Call, parse_tile_map, table_from_tile, check_table}
+use xmap/table.{Call, TileMap, parse_tile_map, table_from_tile, check_table}
 use xmap/panes.{Out, tile_pane}
-use xmap/source.{at, src_of}
+use xmap/source.{Src, at, src_of}
 use play/contract.{Outcome, Compiled, CompileError, Timeout, render_check, render_error, wants_tileir}
 use play/exec.{CViewRaw, COk, CFail, CTimedOut, CBroken, CTooLarge, ViewRaw, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
 
@@ -231,7 +231,7 @@ pub fn build_c_view(code: String, raw: CViewRaw) -> Viewed =
   }
 
 fn mapped(code: String, p: ViewParts) -> Viewed =
-  match explore(spec(code), Raw { source = code, ctext = p.ctext, cmap = p.cmap, jmap = p.jmap, javap = p.javap, tile_map = "", golden = "" }) {
+  match explore(spec(code), Raw { source = code, revision = "", ctext = p.ctext, cmap = p.cmap, jmap = p.jmap, javap = p.javap, tile_map = "", golden = "" }) {
     Err(e) -> Done(500, render_error("the compile view failed: ${e}"), false)
     Ok(b) -> Mapped(rest_of(b, "c"), rest_of(b, "jvm"), len(b.gaps))
   }
@@ -354,22 +354,27 @@ pub fn tile_mapped(code: String, tmap: String, golden: String) -> Tiled =
     Err(e) -> TileFailed(500, render_error("the Tile IR view failed: ${e}"))
     Ok(t) -> {
       let src = src_of(code)
-      let table = table_from_tile(src, t)
-      if len(table) == 0 {
-        tile_view(Compiled(golden ++ "\n", 0, false, 0), "the kernel makes no call the page can show")
-      } else {
-        let faults = check_table(src, table, t.first, t.last)
-        let pane = tile_pane("prog", golden, table)
-        let shown = Pane { kind = "tile", file = "prog.tile.txt", total = len(pane.text), text = pane.text, outs = pane.outs }
-        let b = Built { name = "prog", path = "prog.dawn", src = src, first = t.first, last = t.last, calls = table, panes = [shown], gaps = faults ++ pane.gaps, skipped = 0 }
-        TileShown(rest_of(b, "tile"))
+      match table_from_tile(src, sha256.hex(bytes.utf8(code)), t) {
+        Err(e) -> TileFailed(500, render_error("the Tile IR view failed: ${e}"))
+        Ok(table) -> tile_table(code, src, t, table, golden)
       }
     }
   }
 
+fn tile_table(code: String, src: Src, t: TileMap, table: List[Call], golden: String) -> Tiled =
+  if len(table) == 0 {
+    tile_view(Compiled(golden ++ "\n", 0, false, 0), "the kernel makes no call the page can show")
+  } else {
+    let faults = check_table(src, table, t.first, t.last)
+    let pane = tile_pane("prog", golden, table)
+    let shown = Pane { kind = "tile", file = "prog.tile.txt", total = len(pane.text), text = pane.text, outs = pane.outs }
+    let b = Built { name = "prog", path = "prog.dawn", src = src, first = t.first, last = t.last, calls = table, panes = [shown], gaps = faults ++ pane.gaps, skipped = 0 }
+    TileShown(rest_of(b, "tile"))
+  }
+
 test "a pairing becomes calls and a pane with an out for each" {
   let code = "fn k() = ()\n  add(a, b)\n"
-  let tmap = "kernel k\nfn 1-2\nops 3\nhead 1-2\ncall 0 -1 add 2:3-2:12 2:3-2:6 2-3\ntail 3-4\n"
+  let tmap = "kernel k\nsource ${sha256.hex(bytes.utf8(code))}\nfn 1-2\nops 3\nhead 1-2\ncall 0 -1 add 2:3-2:12 2:3-2:6 2-3\ntail 3-4\n"
   match tile_mapped(code, tmap, "m\nadd\nret\n}") {
     TileShown(rest) -> {
       assert str.contains(rest, "\"calls\":[{")
@@ -404,7 +409,7 @@ test "native map errors and timeouts are not cacheable verdicts" {
 
 test "the call boundary keeps a valid prefix and repairs a parent beyond it" {
   let src = src_of("f()")
-  let call = Call { id = 0, parent = -1, name = "f", lo = 0, hi = 3, nlo = 0, nhi = 1, lines = [] }
+  let call = Call { id = 0, parent = -1, name = "f", lo = 0, hi = 3, nlo = 0, nhi = 1, defn = (-1, -1), lines = [] }
   let out = Out { lines = [], marks = [], key = [] }
   for size in [CALL_LIMIT, CALL_LIMIT + 1] {
     let calls = map(range_list(size), i => Call { ..call, id = i, parent = if i == 0 { CALL_LIMIT } else { -1 } })

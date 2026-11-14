@@ -37,15 +37,19 @@ use source.{Src, src_of, at, off, pos, ident_at, text_between}
 ## the row of the call that holds it, -1 at the top. The span `[lo, hi)` and
 ## the name's `[nlo, nhi)` are code point offsets into the source. `lines` is
 ## what the Tile IR recording says the call wrote (`a-b` words), empty
-## otherwise.
-pub type Call = { id: Int, parent: Int, name: String, lo: Int, hi: Int, nlo: Int, nhi: Int, lines: List[String] }
+## otherwise. `defn` is the `[lo, hi)` of the definition of what the call ran
+## when that is a function written in this source (a helper), else `(-1, -1)`:
+## a helper's own calls lie in that span, not in the call that ran it.
+pub type Call = { id: Int, parent: Int, name: String, lo: Int, hi: Int, nlo: Int, nhi: Int, defn: (Int, Int), lines: List[String] }
 
 ## A call row of `flash_attn.map`, before its positions are offsets.
-pub type TileCall = { id: Int, parent: Int, name: String, lo: (Int, Int), hi: (Int, Int), nlo: (Int, Int), nhi: (Int, Int), lines: List[String] }
+pub type TileCall = { id: Int, parent: Int, name: String, lo: (Int, Int), hi: (Int, Int), nlo: (Int, Int), nhi: (Int, Int),
+  defn: Option[((Int, Int), (Int, Int))], lines: List[String] }
 
-## `flash_attn.map` read: the lines `first` to `last` of the kernel's source
-## its function is on, and its calls.
-pub type TileMap = { first: Int, last: Int, calls: List[TileCall] }
+## `flash_attn.map` read: the revision of the source it was recorded from, the
+## lines `first` to `last` of the kernel's source its function is on, and its
+## calls.
+pub type TileMap = { source: String, first: Int, last: Int, calls: List[TileCall] }
 
 # ---- the Tile IR recording ----
 
@@ -77,13 +81,21 @@ fn parse_span(s: String) -> Option[((Int, Int), (Int, Int))] =
 pub fn parse_tile_map(text: String) -> Result[TileMap, String] = {
   let rows = map(filter(str.split(text, "\n"), l => l != ""), l => str.split(l, " "))
   let fnrow = list.find(rows, w => w[0] == "fn")
+  let sources = filter(rows, w => w[0] == "source")
+  if len(sources) != 1 || len(sources[0]) != 2 || sources[0][1] == "" {
+    return Err("the recording names no source revision")
+  }
   var calls: List[TileCall] = []
   for w in rows {
     if w[0] == "call" && len(w) >= 6 && not list.contains(["carry", "get", "set"], w[3]) {
+      let has_def = len(w) >= 7 && str.starts_with(w[6], "def=")
+      let defn: Option[((Int, Int), (Int, Int))] = if has_def { parse_span(str.drop(w[6], 4)) } else { None }
+      if has_def && defn == None { return Err("not a definition span: ${w[6]}") }
       match (parse_span(w[4]), parse_span(w[5]), parse_int(w[1]), parse_int(w[2])) {
         (Some((a, b)), Some((na, nb)), Some(id), Some(parent)) -> {
           if parent < -1 || parent >= id || list.any(calls, c => c.id >= id) { return Err("invalid recorded call identity or parent") }
-          calls = calls ++ [TileCall { id = id, parent = parent, name = w[3], lo = a, hi = b, nlo = na, nhi = nb, lines = list.drop(w, 6) }]
+          calls = calls ++ [TileCall { id = id, parent = parent, name = w[3], lo = a, hi = b, nlo = na, nhi = nb, defn = defn,
+            lines = list.drop(w, if has_def { 7 } else { 6 }) }]
         }
         _ -> {
           return Err("not a call row: ${join(w, " ")}")
@@ -99,7 +111,7 @@ pub fn parse_tile_map(text: String) -> Result[TileMap, String] = {
         match str.split_once(w[1], "-") {
           Some((a, b)) ->
             match (parse_int(a), parse_int(b)) {
-              (Some(x), Some(y)) -> Ok(TileMap { first = x, last = y, calls = calls })
+              (Some(x), Some(y)) -> Ok(TileMap { source = sources[0][1], first = x, last = y, calls = calls })
               _ -> Err("the fn row's lines are not numbers: ${w[1]}")
             }
           None -> Err("the fn row's lines are not a range: ${w[1]}")
@@ -130,23 +142,54 @@ pub fn tree(rows: List[Call]) -> List[Call] = {
 }
 
 ## The calls of the Tile IR recording as the table, in the source's own
-## coordinates.
-pub fn table_from_tile(src: Src, t: TileMap) -> List[Call] = {
-  let raw = map(t.calls, c => {
+## coordinates, or why the recording is not of this source. `revision` is the
+## caller's own digest of `src`; a recording of another revision, or a
+## definition span that is not inside the source, is refused, never mapped.
+pub fn table_from_tile(src: Src, revision: String, t: TileMap) -> Result[List[Call], String] = {
+  if revision == "" { return Err("the source has no revision to hold the recording to") }
+  if t.source != revision { return Err("the recording is of another revision of the source") }
+  var raw: List[Call] = []
+  for c in t.calls {
     let (l0, c0) = c.lo
     let (l1, c1) = c.hi
     let (n0, m0) = c.nlo
     let (n1, m1) = c.nhi
-    Call { id = c.id, parent = c.parent, name = c.name, lo = off(src, l0, c0), hi = off(src, l1, c1), nlo = off(src, n0, m0), nhi = off(src, n1, m1), lines = c.lines }
-  })
+    var defn = (-1, -1)
+    match c.defn {
+      Some(((d0, e0), (d1, e1))) -> {
+        if d0 < 1 || d1 > len(src.lines) || d0 > d1 { return Err("the definition of `${c.name}` is outside the source") }
+        defn = (off(src, d0, e0), off(src, d1, e1))
+      }
+      None -> ()
+    }
+    raw = raw ++ [Call { id = c.id, parent = c.parent, name = c.name, lo = off(src, l0, c0), hi = off(src, l1, c1),
+      nlo = off(src, n0, m0), nhi = off(src, n1, m1), defn = defn, lines = c.lines }]
+  }
+  # A recorded parent holds its child in the call's own span or, for a helper,
+  # in the definition the recording names; anything else is a recording that
+  # does not describe this source.
+  for c in raw {
+    if c.parent >= 0 {
+      match list.find(raw, p => p.id == c.parent) {
+        Some(p) -> {
+          if not ((p.lo <= c.lo && c.hi <= p.hi) || within_definition(p, c)) {
+            return Err("call ${c.id} (`${c.name}`) is inside neither the span nor the definition of its recorded parent")
+          }
+        }
+        None -> {
+          return Err("call ${c.id} (`${c.name}`) has a recorded parent that is not a call of the table")
+        }
+      }
+    }
+  }
   let sorted = sort_by(raw, by_span)
   let lexical = tree(raw)
-  map(range(0, len(sorted)), i => {
+  Ok(map(range(0, len(sorted)), i => {
     let c = sorted[i]
-    let parent = list.find(range(0, len(sorted)), j => sorted[j].id == c.parent && helper_contains(src, sorted[j].name, c.lo, c.hi))
+    let parent = list.find(range(0, len(sorted)), j => sorted[j].id == c.parent && within_definition(sorted[j], c))
     match parent { Some(j) -> Call { ..lexical[i], parent = j }
       None -> lexical[i] }
-  })
+  }))
 }
 
 # ---- the host maps ----
@@ -262,14 +305,14 @@ pub fn table_from_maps(src: Src, module: String, first: Int, last: Int, c: CMap,
     let (lo, hi, nlo) = k
     match ident_at(src, nlo) {
       Some(name) -> {
-        rows = rows ++ [Call { id = 0, parent = -1, name = name, lo = lo, hi = hi, nlo = nlo, nhi = nlo + len(name), lines = [] }]
+        rows = rows ++ [Call { id = 0, parent = -1, name = name, lo = lo, hi = hi, nlo = nlo, nhi = nlo + len(name), defn = (-1, -1), lines = [] }]
       }
       None -> {
         let cw = what_of(c_what(c, module, k))
         let named: Option[(String, Int)] = if cw != "" && cw == what_of(j_what(j, module, k)) { unspelled_name(src, lo, hi, nlo, cw) } else { None }
         match named {
           Some((name, nhi)) -> {
-            rows = rows ++ [Call { id = 0, parent = -1, name = name, lo = lo, hi = hi, nlo = nlo, nhi = nhi, lines = [] }]
+            rows = rows ++ [Call { id = 0, parent = -1, name = name, lo = lo, hi = hi, nlo = nlo, nhi = nhi, defn = (-1, -1), lines = [] }]
           }
           None -> {
             gaps = gaps ++ ["the call at ${pos(at(src, lo))} has its name at ${pos(at(src, nlo))}, which is no identifier"]
@@ -297,7 +340,7 @@ pub fn table_from_c(src: Src, module: String, first: Int, last: Int, c: CMap) ->
     }
     match named {
       Some((name, nhi)) -> {
-        rows = rows ++ [Call { id = 0, parent = -1, name = name, lo = lo, hi = hi, nlo = nlo, nhi = nhi, lines = [] }]
+        rows = rows ++ [Call { id = 0, parent = -1, name = name, lo = lo, hi = hi, nlo = nlo, nhi = nhi, defn = (-1, -1), lines = [] }]
       }
       None -> {
         gaps = gaps ++ ["the call at ${pos(at(src, lo))} has its name at ${pos(at(src, nlo))}, which is no identifier"]
@@ -335,17 +378,12 @@ pub fn spelled(name: String, text: String) -> Bool = {
   })
 }
 
-# The two fixed numerical helpers have separate invocation and definition
-# spans. All other parent edges remain lexically contained in the source.
-fn helper_contains(src: Src, name: String, lo: Int, hi: Int) -> Bool = {
-  if not list.contains(["fa_exp", "fa_divide"], name) { return false }
-  let starts = filter(range(0, len(src.lines)), j => str.starts_with(src.lines[j], "fn ${name}[") || str.starts_with(src.lines[j], "fn ${name}("))
-  if len(starts) != 1 { return false }
-  let start = starts[0]
-  match list.find(range(start + 1, len(src.lines)), j => src.lines[j] == "}") {
-    Some(end) -> src.starts[start] <= lo && hi <= src.starts[end] + len(src.lines[end])
-    None -> false
-  }
+# A helper's own calls lie in its definition, not in the call that ran it. The
+# relation holds for any function the recording names a definition span for,
+# and for nothing else: there is no list of helper names.
+fn within_definition(p: Call, c: Call) -> Bool = {
+  let (dlo, dhi) = p.defn
+  dlo >= 0 && dlo <= c.lo && c.hi <= dhi
 }
 
 ## What is wrong with `table` as a table of the function on lines `first` to
@@ -368,7 +406,7 @@ pub fn check_table(src: Src, table: List[Call], first: Int, last: Int) -> List[S
     }
     if c.parent >= 0 {
       let p = table[c.parent]
-      if not ((p.lo <= c.lo && c.hi <= p.hi) || helper_contains(src, p.name, c.lo, c.hi)) {
+      if not ((p.lo <= c.lo && c.hi <= p.hi) || within_definition(p, c)) {
         gaps = gaps ++ ["${who} is not inside its parent's span"]
       }
     }
@@ -388,7 +426,8 @@ pub fn children_of(table: List[Call]) -> List[List[Int]] =
   map(table, c => map(filter(table, k => k.parent == c.id), k => k.id))
 
 fn sample_map() -> String =
-  "fn 4-9 flash\n"
+  "source r1\n"
+  ++ "fn 4-9 flash\n"
   ++ "call 0 -1 mul 5:3-5:21 5:13-5:14 1-3\n"
   ++ "call 1 0 mma 5:3-5:12 5:3-5:6 4-6\n"
   ++ "call 2 0 get 6:3-6:4 6:3-6:4 4-6\n"
@@ -402,22 +441,28 @@ test "the Tile IR recording is read, var calls left out, and nested by span" {
     Ok(t) -> {
       assert (t.first, t.last) == (4, 9)
       assert map(t.calls, c => c.name) == ["mul", "mma", "add"]
-      let table = table_from_tile(sample_src(), t)
+      let table = mapped(sample_src(), t)
       assert map(table, c => (c.name, c.parent)) == [("mul", -1), ("mma", 0), ("add", -1)]
     }
   }
 }
 
 test "a call that wrote no Tile IR line is still a call of the recording" {
-  match parse_tile_map("fn 4-9 f\ncall 0 -1 lit 5:3-5:8 5:3-5:6\ncall 1 -1 mul 5:9-5:12 5:9-5:12 1-2\n") {
+  match parse_tile_map("source r1\nfn 4-9 f\ncall 0 -1 lit 5:3-5:8 5:3-5:6\ncall 1 -1 mul 5:9-5:12 5:9-5:12 1-2\n") {
     Ok(t) -> {
       assert map(t.calls, c => (c.name, len(c.lines))) == [("lit", 0), ("mul", 1)]
     }
     Err(e) -> { assert e == "" }
   }
-  assert is_err(parse_tile_map("call 0 -1 lit 5:3-5:8 5:3-5:6\n"))
-  assert is_err(parse_tile_map("fn 4-9 f\ncall 0 -1 lit x 5:3-5:6\n"))
+  assert is_err(parse_tile_map("source r1\ncall 0 -1 lit 5:3-5:8 5:3-5:6\n"))
+  assert is_err(parse_tile_map("source r1\nfn 4-9 f\ncall 0 -1 lit x 5:3-5:6\n"))
 }
+
+fn mapped(src: Src, t: TileMap) -> List[Call] =
+  match table_from_tile(src, "r1", t) {
+    Ok(table) -> table
+    Err(e) -> panic(e)
+  }
 
 fn is_err[A](r: Result[A, String]) -> Bool =
   match r {
@@ -427,7 +472,7 @@ fn is_err[A](r: Result[A, String]) -> Bool =
 
 test "a call inside another's span has it as its parent, the innermost one" {
   let src = sample_src()
-  let outer = Call { id = 0, parent = -1, name = "f", lo = 10, hi = 40, nlo = 10, nhi = 11, lines = [] }
+  let outer = Call { id = 0, parent = -1, name = "f", lo = 10, hi = 40, nlo = 10, nhi = 11, defn = (-1, -1), lines = [] }
   let mid = Call { ..outer, name = "g", lo = 12, hi = 30, nlo = 12, nhi = 13 }
   let inner = Call { ..outer, name = "h", lo = 14, hi = 20, nlo = 14, nhi = 15 }
   let t = tree([inner, outer, mid])
@@ -455,7 +500,7 @@ test "a table is checked against the source it names" {
   match parse_tile_map(sample_map()) {
     Err(e) -> { assert e == "" }
     Ok(t) -> {
-      let table = table_from_tile(src, t)
+      let table = mapped(src, t)
       assert check_table(src, table, 4, 9) == []
       assert len(check_table(src, table, 8, 9)) > 0
       let moved = map(table, c => if c.name == "mma" { Call { ..c, nlo = c.nlo + 1, nhi = c.nhi + 1 } } else { c })
@@ -482,14 +527,19 @@ test "an operator or a literal that the maps record as a call is named by its me
   assert spelled("rem", "%")
 }
 
-test "fixed helper calls keep two invocation parents for one definition span" {
-  let text = "fn fa_exp(x: Int) -> Int = {\n  exp(x)\n}\nfn kernel() -> Unit = {\n  fa_exp(1)\n  fa_exp(2)\n}\n"
-  let src = src_of(text)
-  let raw = "kernel kernel\nfn 1-7\nops 2\nhead 1-2\ncall 0 -1 fa_exp 5:3-5:12 5:3-5:9\ncall 1 0 exp 2:3-2:9 2:3-2:6 2-3\ncall 2 -1 fa_exp 6:3-6:12 6:3-6:9\ncall 3 2 exp 2:3-2:9 2:3-2:6 3-4\ntail 4-5\n"
-  match parse_tile_map(raw) {
+fn helper_text() -> String = "fn fa_exp(x: Int) -> Int = {\n  exp(x)\n}\nfn kernel() -> Unit = {\n  fa_exp(1)\n  fa_exp(2)\n}\n"
+
+fn helper_raw(source: String, def: String) -> String =
+  "kernel kernel\n" ++ source ++ "fn 1-7\nops 2\nhead 1-2\n"
+  ++ "call 0 -1 fa_exp 5:3-5:12 5:3-5:9 ${def}\ncall 1 0 exp 2:3-2:9 2:3-2:6 2-3\n"
+  ++ "call 2 -1 fa_exp 6:3-6:12 6:3-6:9 ${def}\ncall 3 2 exp 2:3-2:9 2:3-2:6 3-4\ntail 4-5\n"
+
+test "helper calls keep two invocation parents for one definition span, by the recorded definition" {
+  let src = src_of(helper_text())
+  match parse_tile_map(helper_raw("source r1\n", "def=1:1-3:2")) {
     Err(e) -> panic(e)
     Ok(t) -> {
-      let table = table_from_tile(src, t)
+      let table = mapped(src, t)
       assert check_table(src, table, 1, 7) == []
       let exps = filter(table, c => c.name == "exp")
       assert len(exps) == 2 && exps[0].lo == exps[1].lo
@@ -499,4 +549,43 @@ test "fixed helper calls keep two invocation parents for one definition span" {
       assert len(check_table(src, broken, 1, 7)) > 0
     }
   }
+}
+
+test "the relation names no helpers: another function with a definition span gets it, one without gets none" {
+  # the same recording but for a function called `my_exp` instead of fa_exp
+  let text = "fn my_exp(x: Int) -> Int = {\n  exp(x)\n}\nfn kernel() -> Unit = {\n  my_exp(1)\n  my_exp(2)\n}\n"
+  let raw = str.replace(helper_raw("source r1\n", "def=1:1-3:2"), "fa_exp", "my_exp")
+  match parse_tile_map(raw) {
+    Err(e) -> panic(e)
+    Ok(t) -> {
+      let table = mapped(src_of(text), t)
+      assert check_table(src_of(text), table, 1, 7) == []
+      assert list.all(filter(table, c => c.name == "exp"), c => c.parent >= 0 && table[c.parent].name == "my_exp")
+    }
+  }
+  # without a recorded definition the same rows are not inside their parents and the recording is refused
+  match parse_tile_map(helper_raw("source r1\n", "")) {
+    Err(e) -> panic(e)
+    Ok(t) -> {
+      assert is_err(table_from_tile(src_of(helper_text()), "r1", t))
+    }
+  }
+}
+
+test "a recording with no source revision, or of another one, or with a definition off the source, is refused" {
+  assert is_err(parse_tile_map(helper_raw("", "def=1:1-3:2")))
+  assert is_err(parse_tile_map(helper_raw("source \n", "def=1:1-3:2")))
+  assert is_err(parse_tile_map(helper_raw("source r1\nsource r2\n", "def=1:1-3:2")))
+  match parse_tile_map(helper_raw("source r2\n", "def=1:1-3:2")) {
+    Err(e) -> panic(e)
+    Ok(t) -> {
+      assert is_err(table_from_tile(src_of(helper_text()), "r1", t))
+      assert is_err(table_from_tile(src_of(helper_text()), "", t))
+    }
+  }
+  match parse_tile_map(helper_raw("source r1\n", "def=1:1-9:2")) {
+    Err(e) -> panic(e)
+    Ok(t) -> { assert is_err(table_from_tile(src_of(helper_text()), "r1", t)) }
+  }
+  assert is_err(parse_tile_map(helper_raw("source r1\n", "def=1:1-x")))
 }
