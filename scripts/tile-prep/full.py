@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Build, bind and receive the tile execution closure."""
 import hashlib
-import importlib.metadata
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import shutil
 import subprocess as sp
 import sys
@@ -79,13 +78,15 @@ def native_identity():
         runner=sha(ROOT / 'scripts/tile-golden/run.sh'),
         helper=sha(__file__), system=output(['uname', '-sm']),
         libc=output(['getconf', 'GNU_LIBC_VERSION']),
-        cc=output([os.environ.get('CC', 'cc'), '--version']))
+        cc=output([os.environ.get('CC') or 'cc', '--version']))
 
 
 def native_seal(directory):
+    started = time.monotonic()
     manifest = dict(identity=native_identity(), files={
         name: sha(directory / name) for name in ('dawn_rt.o', 'clean.bin')})
     (directory / 'native.json').write_text(json.dumps(manifest, sort_keys=True) + '\n')
+    print('NATIVE_SEAL_METRIC ' + json.dumps(dict(seconds=time.monotonic()-started)), flush=True)
 
 
 def native_verify(directory):
@@ -201,12 +202,16 @@ def prepare():
         target = tools / 'nvidia/cu13' / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(site / 'nvidia/cu13' / name, target)
+    manifest_started = time.monotonic()
     manifest = dict(identity(), producer_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
         producer_job=os.environ['GITHUB_JOB'], created=time.time(),
         inputs=native_identity()['inputs'], jdk_sha256=JDK_SHA,
         jdk_version='21.0.2', java=output([str(jdk / 'bin/java'), '--version']),
-        tileiras=output([tileiras, '--version']))
+        tileiras=output([tileiras, '--version']), selfhost={
+            name: sha(repo / 'build' / name) for name in
+            ('dawn-selfhost.jar', 'dawn-selfhost.stamp', 'dawn-selfhost.inputs')})
     (stage / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True) + '\n')
+    manifest_seconds = time.monotonic() - manifest_started
     sizes = {p.name: sum(f.stat().st_size for f in p.rglob('*') if f.is_file())
              for p in stage.iterdir() if p.is_dir()}
     dest = TEMP / 'out-full'
@@ -218,8 +223,10 @@ def prepare():
         tar.stdout.close()
         if tar.wait() or result.returncode:
             raise RuntimeError('packing failed')
+    checksum_started = time.monotonic()
     digest = sha(bundle)
     manifest_digest = sha(stage / 'manifest.json')
+    checksum_seconds = time.monotonic() - checksum_started
     pack_seconds = time.monotonic() - prepared
     emit(os.environ['GITHUB_OUTPUT'], dict(full_sha=digest,
         full_manifest=manifest_digest))
@@ -227,6 +234,7 @@ def prepare():
         components=sizes, prepare_seconds=prepared-started,
         assembler_files=[str(p.relative_to(tools)) for p in tools.rglob('*') if p.is_file()],
         pack_seconds=pack_seconds,
+        manifest_seconds=manifest_seconds, checksum_seconds=checksum_seconds,
         tar_sha256=digest, manifest_sha256=manifest_digest)), flush=True)
 
 

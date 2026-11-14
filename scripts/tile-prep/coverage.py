@@ -42,7 +42,7 @@ def contract(plan):
         golden=golden.hexdigest(), recipe=sha(Path(__file__)))
 
 
-def selections(plan, total, allow_fallback=False):
+def selections(plan, total):
     matrix = lines(ROOT / 'scripts/tile-golden/matrix.txt')
     if len(matrix) != 430 or len(set(matrix)) != len(matrix):
         raise ValueError('wrong matrix cardinality')
@@ -63,17 +63,17 @@ def selections(plan, total, allow_fallback=False):
     if header != {'harness': 'tile-golden', 'shards': str(total)}:
         raise ValueError('wrong plan header')
     missing = set(matrix) - set(dealt)
-    if missing and not allow_fallback:
+    if missing:
         raise ValueError('plan has fallback items')
     result = {i: [] for i in range(1, total + 1)}
-    for position, name in enumerate(matrix):
-        result[dealt.get(name, position % total + 1)].append(name)
+    for name in matrix:
+        result[dealt[name]].append(name)
     if any(not values for values in result.values()):
         raise ValueError('empty shard')
     return result
 
 
-def validate(receipts, expected, selected, require_prebuilt=True):
+def validate(receipts, expected, selected):
     if len(receipts) != len(selected):
         raise ValueError('missing or duplicate shard')
     seen = set()
@@ -87,7 +87,7 @@ def validate(receipts, expected, selected, require_prebuilt=True):
             raise ValueError('wrong receipt inputs, plan, golden or source identity')
         if not str(r['attempt']).isdigit() or int(r['attempt']) < 1:
             raise ValueError('wrong consumer attempt')
-        if require_prebuilt and r.get('prebuilt_unchanged') is not True:
+        if r.get('prebuilt_unchanged') is not True:
             raise ValueError('consumer rebuilt or altered the preparation closure')
         if r['ran'] != selected[i] or set(r['times']) != set(r['ran']):
             raise ValueError('missing, duplicate or wrong selected work')
@@ -99,10 +99,11 @@ def validate(receipts, expected, selected, require_prebuilt=True):
 
 
 def verify_prebuilt(closure, build):
+    expected = json.loads((closure / 'manifest.json').read_text())['selfhost']
     for name in ('dawn-selfhost.jar', 'dawn-selfhost.stamp', 'dawn-selfhost.inputs'):
         received = closure / 'repo/build' / name
         actual = build / name
-        if (sha(received), received.stat().st_mtime_ns) != (sha(actual), actual.stat().st_mtime_ns):
+        if (expected[name], received.stat().st_mtime_ns) != (sha(actual), actual.stat().st_mtime_ns):
             raise ValueError('consumer rebuilt or altered ' + name)
     native = closure / 'native'
     for name, digest in json.loads((native / 'native.json').read_text())['files'].items():
@@ -113,7 +114,7 @@ def verify_prebuilt(closure, build):
 
 def receipt(args):
     started = time.monotonic()
-    selected = selections(args.plan, args.total, args.baseline)
+    selected = selections(args.plan, args.total)
     path = Path(os.environ['MUTANT_COVERAGE_DIR']) / f'tile-golden-{args.index}-of-{args.total}.coverage'
     data = lines(path)
     if data[:2] != ['harness=tile-golden', f'shard={args.index}/{args.total}']:
@@ -133,10 +134,8 @@ def receipt(args):
     r = dict(identity=contract(args.plan), index=args.index, total=args.total,
         attempt=os.environ['GITHUB_RUN_ATTEMPT'], ran=ran,
         times={n: timings[n] for n in ran}, raw_times_sha256=sha(Path(os.environ['ITEM_TIMES'])))
-    r['prebuilt_unchanged'] = None
-    if not args.baseline:
-        closure = Path(os.environ['RUNNER_TEMP']) / 'execution-closure'
-        r['prebuilt_unchanged'] = verify_prebuilt(closure, ROOT / 'build')
+    closure = Path(os.environ['RUNNER_TEMP']) / 'execution-closure'
+    r['prebuilt_unchanged'] = verify_prebuilt(closure, ROOT / 'build')
     # Coverage is emitted only by a successful previous harness step. Never
     # infer successful work from zero duration skip ticks or a partial log.
     if any(t <= 0 for t in r['times'].values()):
@@ -157,8 +156,7 @@ def union(args):
         if job['result'] != 'success':
             raise ValueError(f'shard {i} did not succeed')
         receipts.append(json.loads(job['outputs']['receipt']))
-    validate(receipts, contract(args.plan), selections(args.plan, args.total, args.baseline),
-             require_prebuilt=not args.baseline)
+    validate(receipts, contract(args.plan), selections(args.plan, args.total))
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / 'receipts.json').write_text(json.dumps(receipts, indent=2) + '\n')
     costs = {n: t for r in receipts for n, t in r['times'].items()}
@@ -207,6 +205,8 @@ def selftest():
         for name in ('dawn-selfhost.jar', 'dawn-selfhost.stamp', 'dawn-selfhost.inputs'):
             (source / name).write_bytes(name.encode())
             shutil.copy2(source / name, build / name)
+        (closure / 'manifest.json').write_text(json.dumps(dict(selfhost={
+            p.name: sha(p) for p in source.iterdir()})))
         native = closure / 'native'
         native.mkdir()
         for name in ('clean.bin', 'dawn_rt.o'):
@@ -239,7 +239,6 @@ if __name__ == '__main__':
     ap.add_argument('--plan', type=Path, default=ROOT / 'scripts/mutant-coverage/plans/tile-golden.txt')
     ap.add_argument('--index', type=int)
     ap.add_argument('--total', type=int, default=19)
-    ap.add_argument('--baseline', action='store_true')
     ap.add_argument('--job-prefix', default='tile-golden-')
     ap.add_argument('--out', type=Path, default=Path('tile-evidence'))
     args = ap.parse_args()
