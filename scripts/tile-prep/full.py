@@ -18,6 +18,8 @@ JDK_URL = 'https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-21
 JDK_SHA = 'b048069aaa3a99b84f5b957b162cc181a32a4330cbc35402766363c5be76ae48'
 UPLOAD = 'ea165f8d65b6e75b540449e92b4886f43607fa02'
 DOWNLOAD = 'd3f86a106a0bac45b974a628896c90dbdf5c8093'
+CHECKOUT = '11d5960a326750d5838078e36cf38b85af677262'
+CACHE = '0057852bfaa89a56745cba8c7296529d2fc39830'
 
 
 def sha(path):
@@ -39,6 +41,7 @@ def emit(path, values):
 
 
 def identity():
+    sp.run(['git', 'diff', '--quiet', 'HEAD'], check=True)
     return dict(schema=1, repository=os.environ['GITHUB_REPOSITORY'],
                 repository_id=os.environ['GITHUB_REPOSITORY_ID'],
                 checkout=output(['git', 'rev-parse', 'HEAD']),
@@ -47,6 +50,7 @@ def identity():
                 libc=output(['getconf', 'GNU_LIBC_VERSION']),
                 cc=output(['cc', '--version']).splitlines()[0],
                 recipe=sha(__file__), upload_action=UPLOAD, download_action=DOWNLOAD,
+                checkout_action=CHECKOUT, cache_action=CACHE,
                 trust={p: sha(p) for p in ['scripts/seed-release.txt',
                     'scripts/seed-checksums.txt', 'scripts/seed-std-checksums.txt',
                     'scripts/tile-golden/toolchain.txt', '.github/actions/dawn-toolchain/action.yml']})
@@ -83,6 +87,7 @@ def native_seal(directory):
 
 
 def native_verify(directory):
+    started = time.monotonic()
     manifest = json.loads((directory / 'native.json').read_text())
     if manifest['identity'] != native_identity():
         raise RuntimeError('wrong native source, toolchain or platform identity')
@@ -91,14 +96,16 @@ def native_verify(directory):
     for name, digest in manifest['files'].items():
         if sha(directory / name) != digest:
             raise RuntimeError('altered native file: ' + name)
+    print('NATIVE_VERIFY_METRIC ' + json.dumps(dict(seconds=time.monotonic()-started)), flush=True)
 
 
-def download():
-    cache = TEMP / 'producer-deps'
+def download(url=JDK_URL, expected_sha=JDK_SHA, cache=None,
+             speed_time=45, attempt_delay=10, stage_delay=15):
+    cache = cache or TEMP / 'producer-deps'
     cache.mkdir(exist_ok=True)
     archive = cache / 'graalvm.tar.gz'
     if archive.exists():
-        if sha(archive) == JDK_SHA:
+        if sha(archive) == expected_sha:
             print('JDK_DEPENDENCY_CACHE verified hit', flush=True)
             return archive
         archive.unlink()
@@ -109,17 +116,17 @@ def download():
             candidate.unlink(missing_ok=True)
             start = time.monotonic()
             result = sp.run(['curl', '--fail', '--location', '--show-error', '--silent',
-                '--connect-timeout', '15', '--speed-limit', '1024', '--speed-time', '45',
+                '--connect-timeout', '15', '--speed-limit', '1024', '--speed-time', str(speed_time),
                 '--output', str(candidate), '--write-out',
                 '%{http_code} %{time_connect} %{time_starttransfer} %{time_total} %{size_download}\n',
-                JDK_URL], capture_output=True, text=True)
+                url], capture_output=True, text=True)
             fields = result.stdout.split()
             status = int(fields[0]) if fields and fields[0].isdigit() else 0
             print('DOWNLOAD_METRIC ' + json.dumps(dict(stage=stage + 1,
                 attempt=attempt + 1, elapsed=time.monotonic() - start,
                 exit=result.returncode, timing=fields, error=result.stderr)), flush=True)
             if result.returncode == 0:
-                if sha(candidate) != JDK_SHA:
+                if sha(candidate) != expected_sha:
                     candidate.unlink(missing_ok=True)
                     raise RuntimeError('JDK checksum mismatch')
                 candidate.replace(archive)
@@ -127,13 +134,13 @@ def download():
             candidate.unlink(missing_ok=True)
             # Permanent HTTP errors end this stage, preserving the original
             # outer recovery stage even when its first GET cannot be retried.
-            if status and status < 500 and status not in (408, 429):
+            if result.returncode == 22 and 400 <= status < 500 and status not in (408, 429):
                 break
             if attempt < 2:
-                time.sleep(10)
+                time.sleep(attempt_delay)
         if stage == 0:
             print('::warning title=GraalVM setup retried::The first logical download stage failed; retrying after 15 seconds.', flush=True)
-            time.sleep(15)
+            time.sleep(stage_delay)
     raise RuntimeError('both GraalVM download stages failed')
 
 
@@ -148,6 +155,17 @@ def prepare():
     for name in ('dawn-selfhost.jar', 'dawn-selfhost.stamp', 'dawn-selfhost.inputs'):
         (ROOT / 'build' / name).unlink(missing_ok=True)
     sp.run(['./bin/dawn', '--version'], env=env, check=True)
+    # A dependency cache contributes candidates, never trusted installed code.
+    wheels = TEMP / 'tileiras-wheels'
+    wheels.mkdir(exist_ok=True)
+    for line in (ROOT / 'scripts/tile-golden/toolchain.txt').read_text().splitlines():
+        if line.startswith('wheel '):
+            _, spec, digest = line.split()
+            name, version = spec.split('==')
+            for candidate in wheels.glob(name.replace('-', '_') + '-' + version + '-*.whl'):
+                if sha(candidate) != digest.removeprefix('sha256='):
+                    candidate.unlink()
+                    print('WHEEL_DEPENDENCY_CACHE rejected corrupt candidate: ' + spec, flush=True)
     tileiras = output(['./scripts/tile-golden/install-tileiras.sh',
                       str(TEMP / 'tileiras'), str(TEMP / 'tileiras-wheels')], env=env)
     stage = TEMP / 'execution-closure'
@@ -160,7 +178,7 @@ def prepare():
     runtime = stage / 'jdk'
     runtime.mkdir()
     shutil.copytree(jdk / 'lib', runtime / 'lib', symlinks=True,
-        ignore=shutil.ignore_patterns('src.zip', 'static', 'svm'))
+        ignore=shutil.ignore_patterns('src.zip', 'static', 'svm', 'ct.sym'))
     shutil.copytree(jdk / 'conf', runtime / 'conf', symlinks=True)
     shutil.copytree(jdk / 'legal', runtime / 'legal', symlinks=True)
     (runtime / 'bin').mkdir()
@@ -177,10 +195,10 @@ def prepare():
     site, = (TEMP / 'tileiras/lib').glob('python*/site-packages')
     tools = stage / 'assembler'
     tools.mkdir()
-    for child in site.iterdir():
-        if child.name == 'nvidia' or child.name.startswith('nvidia_'):
-            if child.is_dir():
-                shutil.copytree(child, tools / child.name, symlinks=True)
+    for name in ('bin/tileiras', 'bin/ptxas', 'bin/tileirdisasm', 'lib/libnvvm.so.4'):
+        target = tools / 'nvidia/cu13' / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(site / 'nvidia/cu13' / name, target)
     manifest = dict(identity(), producer_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
         producer_job=os.environ['GITHUB_JOB'], created=time.time(),
         inputs=native_identity()['inputs'], jdk_sha256=JDK_SHA,
@@ -202,6 +220,7 @@ def prepare():
         full_manifest=sha(stage / 'manifest.json')))
     print('PREP_METRIC ' + json.dumps(dict(bytes=bundle.stat().st_size,
         components=sizes, prepare_seconds=prepared-started,
+        assembler_files=[str(p.relative_to(tools)) for p in tools.rglob('*') if p.is_file()],
         pack_seconds=time.monotonic()-prepared,
         tar_sha256=sha(bundle), manifest_sha256=sha(stage / 'manifest.json'))), flush=True)
 
@@ -219,13 +238,17 @@ def check_manifest(manifest, expected):
         raise RuntimeError('wrong GPU inputs')
 
 
+def check_package(bundle, expected_sha):
+    if sha(bundle) != expected_sha:
+        raise RuntimeError('wrong or altered package')
+
+
 def consume():
     started = time.monotonic()
     bundle = TEMP / 'received/prep.tar.zst'
     if not os.environ['ARTIFACT_ID'].isdigit():
         raise RuntimeError('missing exact artifact ID')
-    if sha(bundle) != os.environ['EXPECTED_SHA']:
-        raise RuntimeError('wrong or altered package')
+    check_package(bundle, os.environ['EXPECTED_SHA'])
     hashed = time.monotonic()
     dest = TEMP / 'execution-closure'
     unpack(bundle, dest, compressed=True)
@@ -276,6 +299,30 @@ def identity_selftest():
             print('PASS identity refusal: ' + field, flush=True)
         else:
             raise RuntimeError('accepted wrong ' + field)
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        fixture = directory / 'package'
+        fixture.write_bytes(b'package one')
+        digest = sha(fixture)
+        check_package(fixture, digest)
+        for name, value in [('wrong package', b'package two'), ('tampered package', b'package onE')]:
+            fixture.write_bytes(value)
+            try:
+                check_package(fixture, digest)
+            except RuntimeError:
+                print('PASS identity refusal: ' + name, flush=True)
+            else:
+                raise RuntimeError('accepted ' + name)
+        shutil.copytree(TEMP / 'execution-closure/native', directory / 'native')
+        native_verify(directory / 'native')
+        with (directory / 'native/clean.bin').open('ab') as stream:
+            stream.write(b'altered')
+        try:
+            native_verify(directory / 'native')
+        except RuntimeError:
+            print('PASS identity refusal: altered clean native', flush=True)
+        else:
+            raise RuntimeError('accepted altered clean native')
 
 
 if __name__ == '__main__':
