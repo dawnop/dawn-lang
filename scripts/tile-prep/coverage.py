@@ -11,7 +11,9 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import subprocess as sp
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -71,7 +73,7 @@ def selections(plan, total, allow_fallback=False):
     return result
 
 
-def validate(receipts, expected, selected):
+def validate(receipts, expected, selected, require_prebuilt=True):
     if len(receipts) != len(selected):
         raise ValueError('missing or duplicate shard')
     seen = set()
@@ -85,6 +87,8 @@ def validate(receipts, expected, selected):
             raise ValueError('wrong receipt inputs, plan, golden or source identity')
         if not str(r['attempt']).isdigit() or int(r['attempt']) < 1:
             raise ValueError('wrong consumer attempt')
+        if require_prebuilt and r.get('prebuilt_unchanged') is not True:
+            raise ValueError('consumer rebuilt or altered the preparation closure')
         if r['ran'] != selected[i] or set(r['times']) != set(r['ran']):
             raise ValueError('missing, duplicate or wrong selected work')
         if any(not math.isfinite(t) or t <= 0 for t in r['times'].values()):
@@ -92,6 +96,19 @@ def validate(receipts, expected, selected):
         ran += r['ran']
     if len(ran) != 430 or len(set(ran)) != 430:
         raise ValueError('union misses or repeats work')
+
+
+def verify_prebuilt(closure, build):
+    for name in ('dawn-selfhost.jar', 'dawn-selfhost.stamp', 'dawn-selfhost.inputs'):
+        received = closure / 'repo/build' / name
+        actual = build / name
+        if (sha(received), received.stat().st_mtime_ns) != (sha(actual), actual.stat().st_mtime_ns):
+            raise ValueError('consumer rebuilt or altered ' + name)
+    native = closure / 'native'
+    for name, digest in json.loads((native / 'native.json').read_text())['files'].items():
+        if sha(native / name) != digest:
+            raise ValueError('consumer altered ' + name)
+    return True
 
 
 def receipt(args):
@@ -116,6 +133,10 @@ def receipt(args):
     r = dict(identity=contract(args.plan), index=args.index, total=args.total,
         attempt=os.environ['GITHUB_RUN_ATTEMPT'], ran=ran,
         times={n: timings[n] for n in ran}, raw_times_sha256=sha(Path(os.environ['ITEM_TIMES'])))
+    r['prebuilt_unchanged'] = None
+    if not args.baseline:
+        closure = Path(os.environ['RUNNER_TEMP']) / 'execution-closure'
+        r['prebuilt_unchanged'] = verify_prebuilt(closure, ROOT / 'build')
     # Coverage is emitted only by a successful previous harness step. Never
     # infer successful work from zero duration skip ticks or a partial log.
     if any(t <= 0 for t in r['times'].values()):
@@ -136,7 +157,8 @@ def union(args):
         if job['result'] != 'success':
             raise ValueError(f'shard {i} did not succeed')
         receipts.append(json.loads(job['outputs']['receipt']))
-    validate(receipts, contract(args.plan), selections(args.plan, args.total, args.baseline))
+    validate(receipts, contract(args.plan), selections(args.plan, args.total, args.baseline),
+             require_prebuilt=not args.baseline)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / 'receipts.json').write_text(json.dumps(receipts, indent=2) + '\n')
     costs = {n: t for r in receipts for n, t in r['times'].items()}
@@ -151,7 +173,8 @@ def selftest():
     expected = dict(inputs='input', plan='plan', golden='golden')
     selected = {i: [f'item-{n}' for n in range(i - 1, 430, 19)] for i in range(1, 20)}
     receipts = [dict(identity=expected.copy(), index=i, total=19, attempt='1',
-        ran=names.copy(), times={n: 1.0 for n in names}) for i, names in selected.items()]
+        ran=names.copy(), times={n: 1.0 for n in names}, prebuilt_unchanged=True)
+        for i, names in selected.items()]
     validate(receipts, expected, selected)
     changes = {
         'missing shard': lambda r: r.pop(),
@@ -163,6 +186,7 @@ def selftest():
         'missing mutant': lambda r: r[0]['ran'].pop(),
         'repeated mutant': lambda r: r[0]['ran'].append(r[0]['ran'][0]),
         'missing clock': lambda r: r[0]['times'].pop(r[0]['ran'][0]),
+        'consumer rebuild': lambda r: r[0].__setitem__('prebuilt_unchanged', False),
     }
     for name, change in changes.items():
         candidate = copy.deepcopy(receipts)
@@ -173,6 +197,40 @@ def selftest():
             print('PASS coverage refusal: ' + name)
         else:
             raise AssertionError('accepted ' + name)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        closure = root / 'closure'
+        source = closure / 'repo/build'
+        source.mkdir(parents=True)
+        build = root / 'build'
+        build.mkdir()
+        for name in ('dawn-selfhost.jar', 'dawn-selfhost.stamp', 'dawn-selfhost.inputs'):
+            (source / name).write_bytes(name.encode())
+            shutil.copy2(source / name, build / name)
+        native = closure / 'native'
+        native.mkdir()
+        for name in ('clean.bin', 'dawn_rt.o'):
+            (native / name).write_bytes(name.encode())
+        (native / 'native.json').write_text(json.dumps(dict(files={
+            name: sha(native / name) for name in ('clean.bin', 'dawn_rt.o')})))
+        verify_prebuilt(closure, build)
+        jar = build / 'dawn-selfhost.jar'
+        before = jar.stat()
+        os.utime(jar, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+        try:
+            verify_prebuilt(closure, build)
+        except ValueError:
+            print('PASS closure refusal: identical bytes with rebuilt jar timestamp')
+        else:
+            raise AssertionError('accepted rebuilt jar timestamp')
+        shutil.copy2(source / jar.name, jar)
+        (native / 'dawn_rt.o').write_bytes(b'altered runtime')
+        try:
+            verify_prebuilt(closure, build)
+        except ValueError:
+            print('PASS closure refusal: altered runtime object')
+        else:
+            raise AssertionError('accepted altered runtime object')
 
 
 if __name__ == '__main__':
