@@ -6,6 +6,9 @@ once per compiler/target/source/options key, reused by both RC configurations
 and all mutants; cold caches run the same assertions. Every mutant must build
 successfully before a named assertion or sanitizer cause can kill it.
 """
+import argparse
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import hashlib
 import json
@@ -113,10 +116,11 @@ def native_package(work, name, simple, probe, mode="all"):
 
 
 def build(driver, pkg, binary, env, inline=False, sanitized=False):
-    current = dict(env, DAWN_NO_INLINE_RC="" if inline else "1", F3_SAN="1" if sanitized else "")
-    Path(env["F3_CC_LOG"]).write_text("")
+    current = dict(env, DAWN_NO_INLINE_RC="" if inline else "1", F3_SAN="1" if sanitized else "",
+                   F3_CC_LOG=str(Path(binary).with_name(Path(binary).name + ".cc.jsonl")))
+    Path(current["F3_CC_LOG"]).write_text("")
     run([driver, "build", pkg / "src/sqlite.dawn", "-o", binary], env=current)
-    rows = [json.loads(line) for line in Path(env["F3_CC_LOG"]).read_text().splitlines()]
+    rows = [json.loads(line) for line in Path(current["F3_CC_LOG"]).read_text().splitlines()]
     stubs = [row for row in rows if "-c" in row and any(a.endswith("sqlite_stub.c") for a in row)]
     assert len(stubs) == 1, rows
     assert ("-DDAWN_RT_INLINE_RC" in stubs[0]) == inline, stubs
@@ -132,7 +136,34 @@ def execute(binary, env, loader, library=None, mode=None, good=True):
     return run([binary], env=current, good=good, cwd=binary.parent)
 
 
-def native(driver, work, cache, env):
+def ordered_cases(items, jobs, worker):
+    """Bound independent private cases and expose results in registry order."""
+    if jobs not in (1, 2):
+        raise ValueError("SQLite native jobs must be one or two")
+    if jobs == 1:
+        for item in items:
+            yield worker(item)
+        return
+    iterator = iter(items)
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        pending = deque()
+        try:
+            for _ in range(jobs):
+                item = next(iterator, None)
+                if item is not None:
+                    pending.append(pool.submit(worker, item))
+            while pending:
+                result = pending.popleft().result()
+                yield result
+                item = next(iterator, None)
+                if item is not None:
+                    pending.append(pool.submit(worker, item))
+        finally:
+            for future in pending:
+                future.cancel()
+
+
+def native(driver, work, cache, env, jobs=1):
     simple = prepare(cache / "downloads", work)
     probe = work / "sql_gate.so"
     loader = work / "loader.o"
@@ -188,7 +219,8 @@ pub fn main() -> Unit !io = match sq_open(":memory:", false) {
         "no-simple": "no such tokenizer: simple",
         "swallow-extension": "panic: empty-entry: accepted",
     }
-    for name, expected in failures.items():
+    def mutant_case(item):
+        name, expected = item
         mode = "fts" if name == "no-simple" else "commit" if name == "commit-rollback" else "all"
         tree, pkg = native_package(work, "mutant-" + name, simple, probe, mode)
         run([sys.executable, HERE / "mutate.py", name, tree])
@@ -200,7 +232,9 @@ pub fn main() -> Unit !io = match sq_open(":memory:", false) {
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / (name + ".log")).write_text(r.stdout + r.stderr)
         assert r.returncode and re.search(expected, r.stdout + r.stderr), (name, expected, r.returncode, r.stdout, r.stderr)
-        ok("negative control " + name + ": exit " + str(r.returncode) + ", " + expected)
+        return "negative control " + name + ": exit " + str(r.returncode) + ", " + expected
+    for message in ordered_cases(failures.items(), jobs, mutant_case):
+        ok(message)
     cleanup_pkg = work / "cleanup-panic"
     shutil.copytree(PACKAGE, cleanup_pkg)
     source = cleanup_pkg / "src/sqlite.dawn"
@@ -326,6 +360,12 @@ pub fn main() -> Unit !io = {
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    backend = parser.add_mutually_exclusive_group()
+    backend.add_argument("--native", action="store_true")
+    backend.add_argument("--backends", action="store_true")
+    parser.add_argument("--native-jobs", type=int, choices=(1, 2), default=1)
+    args = parser.parse_args()
     start = time.monotonic()
     run([DAWN, "--version"])
     cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "dawn/sqlite-contract"
@@ -342,9 +382,9 @@ def main():
         env = dict(os.environ, CC=str(wrapper(work)), F3_REAL_CC=CC, F3_CC_LOG=str(work / "cc.jsonl"),
                    DAWN_PKG_CACHE=str(work / "pkg-cache"), ASAN_OPTIONS="detect_leaks=1:halt_on_error=1",
                    UBSAN_OPTIONS="halt_on_error=1")
-        if "--backends" not in sys.argv:
-            native(driver, work, cache, env)
-        if "--native" not in sys.argv:
+        if not args.backends:
+            native(driver, work, cache, env, args.native_jobs)
+        if not args.native:
             backends(driver, work, env)
     print(f"sqlite contract: OK ({time.monotonic() - start:.2f}s)", flush=True)
 
