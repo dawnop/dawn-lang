@@ -81,7 +81,9 @@ build_asm_fixture() {
   javac --release 17 -d "$classes" \
     "$here/fixtures/asm/src/org/objectweb/asm/ClassWriter.java" \
     "$here/fixtures/asm/src/org/objectweb/asm/FieldVisitor.java" \
-    "$here/fixtures/asm/src/org/objectweb/asm/MethodVisitor.java"
+    "$here/fixtures/asm/src/org/objectweb/asm/MethodVisitor.java" \
+    "$here/fixtures/asm/src/org/objectweb/asm/MethodTooLargeException.java" \
+    "$here/fixtures/asm/src/org/objectweb/asm/ClassTooLargeException.java"
   jar --create --file "$target/asm-stub-1.jar" -C "$classes" .
   cat > "$target/asm-stub-1.pom" <<'EOF'
 <project xmlns="http://maven.apache.org/POM/4.0.0">
