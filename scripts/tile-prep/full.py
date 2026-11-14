@@ -89,10 +89,10 @@ def native_seal(directory):
     print('NATIVE_SEAL_METRIC ' + json.dumps(dict(seconds=time.monotonic()-started)), flush=True)
 
 
-def native_verify(directory):
+def native_verify(directory, expected=None):
     started = time.monotonic()
     manifest = json.loads((directory / 'native.json').read_text())
-    if manifest['identity'] != native_identity():
+    if manifest['identity'] != (native_identity() if expected is None else expected):
         raise RuntimeError('wrong native source, toolchain or platform identity')
     if set(manifest['files']) != {'dawn_rt.o', 'clean.bin'}:
         raise RuntimeError('wrong native closure')
@@ -250,7 +250,7 @@ def prepare():
         tar_sha256=digest, manifest_sha256=manifest_digest)), flush=True)
 
 
-def check_manifest(manifest, expected):
+def check_manifest(manifest, expected, expected_inputs=None):
     if any(manifest.get(k) != v for k, v in expected.items()):
         raise RuntimeError('wrong producer identity')
     if manifest['producer_attempt'] != os.environ['PRODUCER_ATTEMPT']:
@@ -259,7 +259,7 @@ def check_manifest(manifest, expected):
         raise RuntimeError('expired package')
     if manifest['jdk_sha256'] != JDK_SHA or manifest['jdk_version'] != '21.0.2':
         raise RuntimeError('wrong JDK identity')
-    if manifest['inputs'] != native_identity()['inputs']:
+    if manifest['inputs'] != (native_identity()['inputs'] if expected_inputs is None else expected_inputs):
         raise RuntimeError('wrong GPU inputs')
 
 
@@ -282,8 +282,11 @@ def consume():
         raise RuntimeError('altered manifest')
     manifest = json.loads((dest / 'manifest.json').read_text())
     expected = identity()
-    check_manifest(manifest, expected)
-    native_verify(dest / 'native')
+    # Both manifests describe this same source snapshot. Reuse its identity
+    # within this receive; run.sh independently checks it again before use.
+    expected_native = native_identity()
+    check_manifest(manifest, expected, expected_native['inputs'])
+    native_verify(dest / 'native', expected_native)
     verified = time.monotonic()
     shutil.copytree(dest / 'repo', ROOT, dirs_exist_ok=True)
     jdk = dest / 'jdk'
