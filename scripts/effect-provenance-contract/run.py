@@ -98,7 +98,7 @@ def main():
     args = parser.parse_args()
     args.compiler = args.compiler.resolve()
     run = Run(args)
-    cases = ['continuation-modes', 'actual-goldens', 'cli-preview', 'w3-resources', 'w3-local-observer', 'w3-mutants', 'w3-foreign', 'w3-bounded', 'w3-control-matrix', 'method-size', 'snapshot', 'snapshot_bulk', 'snapshot_metadata', 'snapshot_defaults', 'snapshot_control', 'snapshot_flags', 'builder', 'modes', 'callbacks', 'bracket_exits', 'generic_capture', 'builtin_functions', 'bounded_functions', 'associated', 'origin_api', 'checkpoints', 'nested', 'shadow', 'evidence', 'unwind', 'staged', 'modules', 'packages', 'shared-probe', 'observed-bench', 'escape', 'runtime-errors', 'w3', 'mutations']
+    cases = ['continuation-modes', 'actual-goldens', 'tile-origin-shadow', 'cli-preview', 'w3-resources', 'w3-local-observer', 'w3-mutants', 'w3-foreign', 'w3-bounded', 'w3-control-matrix', 'method-size', 'snapshot', 'snapshot_bulk', 'snapshot_metadata', 'snapshot_defaults', 'snapshot_control', 'snapshot_flags', 'builder', 'modes', 'callbacks', 'bracket_exits', 'generic_capture', 'builtin_functions', 'bounded_functions', 'associated', 'origin_api', 'checkpoints', 'nested', 'shadow', 'evidence', 'unwind', 'staged', 'modules', 'packages', 'shared-probe', 'observed-bench', 'escape', 'runtime-errors', 'w3', 'mutations']
     selected = args.only if args.only is not None else cases
     for name in selected:
         if name == 'continuation-modes':
@@ -106,6 +106,16 @@ def main():
         elif name == 'actual-goldens':
             from full_golden import check
             check(run)
+        elif name == 'tile-origin-shadow':
+            # The compiler's call identity against the hand written marks, over
+            # every golden kernel and the Playground sample, then the refusals of
+            # the projection each held by a mutant (scripts/tile-origin-shadow).
+            for script in ['shadow.py', 'mutants.py']:
+                result = run.command('tile-origin-'+script.split('.')[0], [sys.executable, ROOT/'scripts/tile-origin-shadow'/script,
+                    *(['--compiler', run.args.compiler, '--java', run.args.java, '--out', run.out/'tile-origin-shadow'] if script == 'shadow.py' else [])])
+                assert result.returncode == 0, script+'\n'+result.stdout[-4000:]+result.stderr[-2000:]
+            run.results.append({'case': 'tile origin shadow and projection mutants', 'backend': 'jvm', 'passed': True})
+            print('PASS tile origin identity against the marks on all goldens and the sample, projection mutants killed', flush=True)
         elif name == 'cli-preview':
             from preview_matrix import check
             check(run)

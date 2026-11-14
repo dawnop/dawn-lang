@@ -1,0 +1,532 @@
+## Which call of a kernel's source issued what, read from the compiler's own
+## record of the run instead of from marks the library writes by hand.
+##
+## `trace_calls` still keeps the hand marks (dev.dawn's `called`, `user_body`)
+## and this module is their independent witness: it takes the frozen snapshot
+## of a `std/provenance` observation of the same recording and projects it to
+## the calls a kernel author wrote. The projection can show MORE than the
+## marks do (a helper that records nothing, a call that issues no operation,
+## a host call) and must never show less, which scripts/tile-origin-shadow
+## holds against every golden kernel.
+#
+# Why identity and not text. Every fact used here is a declared identity the
+# compiler recorded when it compiled the program: the module and declaration
+# a call is written in, its span inside that declaration, the callee's own
+# definition span, and an instance number that is different for every
+# execution of a call. So the two calls of one helper are two nodes with two
+# parents, a helper's own calls lie inside its DEFINITION (not inside the
+# call that invoked it), and no list of helper names, no scan for the marks
+# in dev.dawn's text, and no guess from evaluation order is needed.
+#
+# Why a source unit is mandatory. Spans are relative to a declaration. They
+# become positions in a file only against the exact revision the program was
+# compiled from, and a stale or missing revision would highlight the wrong
+# text without any error. A call written in a module for which the caller
+# supplied no unit, a unit whose revision is not the recorded one, a
+# declaration the unit does not hold or holds with another length, a span the
+# parser does not know as a syntax node, a truncated or unknown-boundary
+# recording, and a parent that is not an earlier row are all refused, never
+# repaired.
+#
+# The projection is a function of rows (`RawRow`), not of a snapshot, so its
+# refusals are testable with hand-made rows below; `rows_of` is the only part
+# that reads a snapshot, through the public bulk interface.
+use std/list
+use std/str
+use std/map
+use std/set
+use std/provenance as prov
+use std/provenance.{TraceSnapshot, InvocationKey, CallState, Site, Definition, Boundary, Known, UnknownBoundary, Complete, Returned}
+
+## One frozen call record with its static facts already looked up.
+pub type RawRow = {
+  key: InvocationKey,
+  parent: Int,
+  state: CallState,
+  boundary: Boundary,
+  site: Option[Site],
+  definition: Option[Definition],
+}
+
+## One revision of one module's source, as the parser read it. `declarations`
+## maps a declaration identity (`Site.declaration`) to its half-open absolute
+## span; `spans` holds every syntax node span; `lines` the offset each line
+## starts at, so that an offset becomes a line and a column.
+pub type SourceUnit = {
+  module: String,
+  revision: String,
+  declarations: Map[String, (Int, Int)],
+  spans: Set[(Int, Int)],
+  lines: List[Int],
+}
+
+## What a projected call is, by where its callee is declared: `Api` in tileir,
+## `Helper` in the author's own source, `Host` anywhere else, `Default` an
+## argument default the call site supplied, `Perform` an effect operation the
+## author's code performed itself (`name` is the operation), `Body` a closure
+## the author wrote.
+pub type Kind =
+  | Api
+  | Helper
+  | Host
+  | Default
+  | Perform
+  | Body
+
+## A call site in a source unit: absolute half-open spans, and where it starts.
+pub type Span = { lo: Int, hi: Int, name_lo: Int, name_hi: Int, line: Int, col: Int }
+
+## The callee's definition when it is written in a source unit.
+pub type Callee = { module: String, declaration: String, lo: Int, hi: Int, role: String }
+
+## A call a kernel author wrote, a function the library ran for the author, or
+## a closure the author handed to a region function (`Body`). `parent` is the
+## nearest earlier projected call that contains this one in the run; it is
+## always an earlier id. `row` is the snapshot record, `key` its instance.
+pub type OriginCall = {
+  id: Int,
+  row: Int,
+  key: InvocationKey,
+  parent: Int,
+  name: String,
+  kind: Kind,
+  role: String,
+  state: CallState,
+  site_module: String,
+  declaration: String,
+  site: Option[Span],
+  callee: Option[Callee],
+}
+
+## The projected calls in the order they started, and for every snapshot row
+## the projected call it belongs to (itself when projected, else the nearest
+## projected ancestor; -1 above the first).
+pub type Projection = { calls: List[OriginCall], owners: List[Int] }
+
+fn digits_before(s: String, colon: Int) -> Option[Int] = {
+  var at = colon
+  var n = 0
+  var scale = 1
+  while at > 0 {
+    let c = str.at(s, at - 1)
+    let d = digit(c)
+    match d {
+      Some(v) -> {
+        n = n + v * scale
+        scale = scale * 10
+        at = at - 1
+      }
+      None -> {
+        if at == colon { return None }
+        return Some(n)
+      }
+    }
+  }
+  if at == colon { None } else { Some(n) }
+}
+
+fn digit(c: Char) -> Option[Int] = {
+  let t = str.from_char(c)
+  let all = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+  var found: Option[Int] = None
+  for i in range(0, 10) { if all[i] == t { found = Some(i) } }
+  found
+}
+
+## The last name of a declaration identity: the part after its final
+## `<letters><length>:`. `Nf4:main` is `main`, `Nf5:cellsNd5:along` is `along`,
+## an impl method's `...Nm3:add` is `add`.
+pub fn last_name(declaration: String) -> String = {
+  let n = len(declaration)
+  var at = n - 1
+  while at >= 0 {
+    if str.at(declaration, at) == ':' {
+      match digits_before(declaration, at) {
+        Some(k) -> {
+          if k == n - at - 1 { return str.drop(declaration, at + 1) }
+        }
+        None -> ()
+      }
+    }
+    at = at - 1
+  }
+  declaration
+}
+
+## The library's own implementation scope. Calls written here belong to a
+## public function's body, not to the kernel; a user helper package is not
+## in it and may show. `libraries` names further module prefixes the caller
+## declares to be implementation too (a reference interpreter, a table package).
+pub fn implementation_module(module: String, libraries: List[String]) -> Bool =
+  str.starts_with(module, "dawn\$pkg\$tileir/") || str.starts_with(module, "tileir/")
+  || str.starts_with(module, "std/") || module == "intrinsic" || module == ""
+  || list.any(libraries, prefix => str.starts_with(module, prefix))
+
+fn reject(why: String) -> Result[Projection, String] = Err("tileir origin: ${why}")
+
+fn find_unit(units: List[SourceUnit], module: String) -> Option[SourceUnit] = list.find(units, u => u.module == module)
+
+fn line_of(lines: List[Int], offset: Int) -> (Int, Int) = {
+  var lo = 0
+  var hi = len(lines)
+  while lo < hi {
+    let mid = lo + (hi - lo) / 2
+    if lines[mid] <= offset { lo = mid + 1 } else { hi = mid }
+  }
+  let at = if lo == 0 { 0 } else { lo - 1 }
+  (at + 1, offset - (if len(lines) == 0 { 0 } else { lines[at] }) + 1)
+}
+
+# The unit that holds `module`, held to the recording's revision. The only
+# place a missing or stale revision is judged.
+fn unit_for(units: List[SourceUnit], module: String, recorded: String) -> Result[SourceUnit, String] = {
+  if recorded == "" { return Err("no source revision was recorded for `${module}`") }
+  match find_unit(units, module) {
+    None -> Err("no source unit for module `${module}`")
+    Some(u) -> {
+      if u.revision == "" { Err("source unit of `${module}` has no revision") }
+      else if u.revision != recorded { Err("source revision of `${module}` is not the recorded one") }
+      else { Ok(u) }
+    }
+  }
+}
+
+fn declaration_extent(u: SourceUnit, declaration: String) -> Result[(Int, Int), String] =
+  match map.get(u.declarations, declaration) {
+    Some(e) -> Ok(e)
+    None -> Err("declaration `${declaration}` is not in the source of `${u.module}`")
+  }
+
+fn site_span(u: SourceUnit, s: Site) -> Result[Span, String] = {
+  if s.file != u.module { return Err("site file `${s.file}` is not the source unit of `${u.module}`") }
+  let (lo, hi) = declaration_extent(u, s.declaration)?
+  if s.start < 0 || s.end < s.start || lo + s.end > hi {
+    return Err("a call span lies outside declaration `${s.declaration}` of `${u.module}`")
+  }
+  if not set.has(u.spans, (lo + s.start, lo + s.end)) {
+    return Err("span ${lo + s.start}..${lo + s.end} of `${u.module}` is no syntax node of the recorded source")
+  }
+  let named = s.name_start >= 0 || s.name_end >= 0
+  if named && not (s.name_start >= s.start && s.name_end >= s.name_start && s.name_end <= s.end) {
+    return Err("a name span lies outside its call in `${s.declaration}`")
+  }
+  let (line, col) = line_of(u.lines, lo + s.start)
+  Ok(Span { lo = lo + s.start, hi = lo + s.end, name_lo = if named { lo + s.name_start } else { -1 },
+    name_hi = if named { lo + s.name_end } else { -1 }, line = line, col = col })
+}
+
+fn callee_range(u: SourceUnit, d: Definition) -> Result[Callee, String] = {
+  if d.declaration == "" { return Ok(Callee { module = d.module, declaration = "", lo = -1, hi = -1, role = d.role }) }
+  let (lo, hi) = declaration_extent(u, d.declaration)?
+  if d.start < 0 || d.end < d.start || lo + d.end > hi {
+    return Err("definition `${d.declaration}` lies outside the source of `${u.module}`")
+  }
+  if d.role == "function" && not (d.start == 0 && lo + d.end == hi) {
+    return Err("definition `${d.declaration}` has another length in the recorded source")
+  }
+  Ok(Callee { module = d.module, declaration = d.declaration, lo = lo + d.start, hi = lo + d.end, role = d.role })
+}
+
+fn site_module(r: RawRow) -> String = match r.site { Some(s) -> s.module, None -> "" }
+
+fn definition_module(r: RawRow) -> String = match r.definition { Some(d) -> d.module, None -> "" }
+
+# By what a call is: written by the author (its site is in the author's
+# source) or a closure the author wrote that the library ran.
+fn kind_of(r: RawRow, libraries: List[String]) -> Option[Kind] = {
+  let written = match r.site { Some(s) -> not implementation_module(s.module, libraries), None -> false }
+  if written {
+    let role = match r.site { Some(s) -> s.role, None -> "" }
+    if role == "default-argument" { return Some(Default) }
+    if role == "perform" { return Some(Perform) }
+    let callee = definition_module(r)
+    if implementation_module(callee, libraries) {
+      return Some(if str.starts_with(callee, "dawn\$pkg\$tileir/") || str.starts_with(callee, "tileir/") { Api } else { Host })
+    }
+    return Some(Helper)
+  }
+  match r.definition {
+    Some(d) -> if not implementation_module(d.module, libraries) && d.role == "lambda" { Some(Body) } else { None }
+    None -> None
+  }
+}
+
+## Project `rows` (in the order the calls started) to the calls an author
+## wrote, refusing anything that is not exactly what was compiled.
+pub fn project(rows: List[RawRow], units: List[SourceUnit], recorded: String, libraries: List[String]) -> Result[Projection, String] = {
+  var calls: List[OriginCall] = []
+  var owners: List[Int] = []
+  for row in range(0, len(rows)) {
+    let r = rows[row]
+    if r.boundary != Known { return reject("row ${row} crosses an unknown boundary") }
+    if r.parent < -1 || r.parent >= row { return reject("row ${row} has no earlier parent") }
+    if row == 0 && r.parent != -1 { return reject("the root has a parent") }
+    if row > 0 && r.parent == -1 { return reject("row ${row} has no parent") }
+    if row > 0 && r.site == None && r.definition == None { return reject("row ${row} has no identity") }
+    let above = if r.parent < 0 { -1 } else { owners[r.parent] }
+    match kind_of(r, libraries) {
+      None -> { owners = owners ++ [above] }
+      Some(kind) -> {
+        let module = site_module(r)
+        var span: Option[Span] = None
+        match r.site {
+          Some(s) -> if not implementation_module(s.module, libraries) {
+            let u = match unit_for(units, s.module, recorded) {
+              Ok(u) -> u
+              Err(e) -> return reject(e)
+            }
+            span = match site_span(u, s) {
+              Ok(v) -> Some(v)
+              Err(e) -> return reject(e)
+            }
+          }
+          None -> ()
+        }
+        var callee: Option[Callee] = None
+        match r.definition {
+          Some(d) -> if not implementation_module(d.module, libraries) {
+            let u = match unit_for(units, d.module, recorded) {
+              Ok(u) -> u
+              Err(e) -> return reject(e)
+            }
+            callee = match callee_range(u, d) {
+              Ok(v) -> Some(v)
+              Err(e) -> return reject(e)
+            }
+          }
+          None -> ()
+        }
+        let role = match r.site { Some(s) -> s.role, None -> "" }
+        let declaration = match r.site { Some(s) -> s.declaration, None -> "" }
+        let name = match (kind, r.site) {
+          (Perform, Some(s)) -> match s.operation { Some(op) -> last_name(op), None -> "" }
+          _ -> match r.definition { Some(d) -> last_name(d.declaration), None -> "" }
+        }
+        let id = len(calls)
+        calls = calls ++ [OriginCall { id = id, row = row, key = r.key, parent = above, name = name, kind = kind,
+          role = role, state = r.state, site_module = module, declaration = declaration, site = span, callee = callee }]
+        owners = owners ++ [id]
+      }
+    }
+  }
+  Ok(Projection { calls = calls, owners = owners })
+}
+
+## One distinct callee a recording ran for its author, by declared identity:
+## where it is declared and, for a function written in source, the span of its
+## definition inside its declaration (`start`, `end`, `role`; -1 for none).
+pub type CalleeFact = { kind: Kind, name: String, module: String, declaration: String, start: Int, end: Int, role: String }
+
+fn is_recorder(r: RawRow) -> Bool = match r.definition {
+  Some(d) -> d.declaration == "Nf11:trace_calls" && (str.starts_with(d.module, "dawn\$pkg\$tileir/") || str.starts_with(d.module, "tileir/"))
+  None -> false
+}
+
+## The calls an author wrote under the first `trace_calls` of `rows`, by what
+## their callees are, once each: `Api` names are what the recording can show
+## for tileir's own surface, `Helper` names are the author's functions with
+## the span of each definition. No source is read: a consumer that holds a
+## source unit judges these spans against it (`project` does so for every
+## row). It is how a consumer learns which names count as calls without
+## scanning the library's text for them.
+pub fn callees(rows: List[RawRow], libraries: List[String]) -> Result[List[CalleeFact], String] = {
+  var root = -1
+  for i in range(0, len(rows)) { if root < 0 && is_recorder(rows[i]) { root = i } }
+  if root < 0 { return Err("tileir origin: no recorder call in the rows") }
+  var under: List[Bool] = []
+  for i in range(0, len(rows)) { under = under ++ [i == root || (rows[i].parent >= 0 && rows[i].parent < i && under[rows[i].parent])] }
+  var out: List[CalleeFact] = []
+  for i in range(0, len(rows)) {
+    if under[i] && i != root {
+      match (kind_of(rows[i], libraries), rows[i].definition) {
+        (Some(kind), Some(d)) -> {
+          if kind == Api || kind == Helper {
+            let fact = CalleeFact { kind = kind, name = last_name(d.declaration), module = d.module, declaration = d.declaration,
+              start = d.start, end = d.end, role = d.role }
+            if not list.contains(out, fact) { out = out ++ [fact] }
+          }
+        }
+        _ -> ()
+      }
+    }
+  }
+  Ok(out)
+}
+
+## Whether `inner` lies inside the callee's DEFINITION of `outer`: the
+## relation that holds between a helper's own calls and the call that ran
+## the helper, whose span is the call, not the definition. It needs the
+## inner call's site and the outer callee in the same module and the same
+## source revision, which `project` has already proved of both.
+pub fn within_definition(outer: OriginCall, inner: OriginCall) -> Bool =
+  match (outer.callee, inner.site) {
+    (Some(c), Some(s)) -> c.declaration != "" && c.module == inner.site_module && c.lo <= s.lo && s.hi <= c.hi
+    _ -> false
+  }
+
+## Whether `inner` lies inside the call span of `outer` (an argument or a
+## closure written inside the call) or inside the definition of what it ran.
+pub fn contained(outer: OriginCall, inner: OriginCall) -> Bool = {
+  let by_span = match (outer.site, inner.site) {
+    (Some(a), Some(b)) -> outer.site_module == inner.site_module && a.lo <= b.lo && b.hi <= a.hi
+    _ -> false
+  }
+  by_span || within_definition(outer, inner)
+}
+
+## The frozen records of `snapshot` as rows, or why it is not a complete,
+## known-boundary recording.
+pub fn rows_of(snapshot: TraceSnapshot) -> Result[List[RawRow], String] = {
+  let info = prov.snapshot_info(snapshot)
+  if info.completeness != Complete { return Err("tileir origin: the recording is truncated") }
+  let table = prov.static_table(snapshot)
+  let view = prov.records(snapshot)
+  var rows: List[RawRow] = []
+  var sites: Map[Int, Site] = map.empty()
+  var definitions: Map[Int, Definition] = map.empty()
+  for row in range(0, info.records) {
+    let si = prov.record_site(view, row)
+    let di = prov.record_definition(view, row)
+    var site: Option[Site] = None
+    if prov.index_present(si) {
+      let k = prov.index_value(si)
+      site = match map.get(sites, k) {
+        Some(s) -> Some(s)
+        None -> match prov.site_at(table, k) {
+          Some(s) -> {
+            sites = map.insert(sites, k, s)
+            Some(s)
+          }
+          None -> return Err("tileir origin: row ${row} names a site the table lacks")
+        }
+      }
+    }
+    var definition: Option[Definition] = None
+    if prov.index_present(di) {
+      let k = prov.index_value(di)
+      definition = match map.get(definitions, k) {
+        Some(d) -> Some(d)
+        None -> match prov.definition_at(table, k) {
+          Some(d) -> {
+            definitions = map.insert(definitions, k, d)
+            Some(d)
+          }
+          None -> return Err("tileir origin: row ${row} names a definition the table lacks")
+        }
+      }
+    }
+    let parent = prov.record_parent(view, row)
+    rows = rows ++ [RawRow {
+      key = InvocationKey { scope = info.scope, epoch = prov.record_epoch(view, row), instance = prov.record_instance(view, row) },
+      parent = if prov.index_present(parent) { prov.index_value(parent) } else { -1 },
+      state = prov.record_state(view, row), boundary = prov.record_boundary(view, row),
+      site = site, definition = definition }]
+  }
+  Ok(rows)
+}
+
+# ---- tests: the projection on hand-made rows ----
+
+fn tsite(module: String, declaration: String, start: Int, end: Int, role: String) -> Site =
+  Site { id = start + 1, module = module, file = module, declaration = declaration, start = start, end = end,
+    name_start = start, name_end = start + 1, role = role, operation = None }
+
+fn tdef(module: String, declaration: String, start: Int, end: Int, role: String) -> Definition =
+  Definition { id = 1, module = module, declaration = declaration, start = start, end = end, role = role }
+
+fn trow(instance: Int, parent: Int, site: Option[Site], definition: Option[Definition]) -> RawRow =
+  RawRow { key = InvocationKey { scope = 1, epoch = 1, instance = instance }, parent = parent, state = Returned,
+    boundary = Known, site = site, definition = definition }
+
+# `fn kernel` holds [0, 100); `fn helper` holds [100, 140): two calls of the
+# helper at 10..20 and 30..40, and inside it a call at 110..120.
+fn tunit(revision: String) -> SourceUnit =
+  SourceUnit { module = "main", revision = revision,
+    declarations = map.from([("Nf6:kernel", (0, 100)), ("Nf6:helper", (100, 140))]),
+    spans = set.from([(10, 20), (30, 40), (110, 120)]), lines = [0, 50, 100] }
+
+fn helper_rows() -> List[RawRow] = [
+  trow(0, -1, None, None),
+  trow(1, 0, Some(tsite("main", "Nf6:kernel", 10, 20, "call")), Some(tdef("main", "Nf6:helper", 0, 40, "function"))),
+  trow(2, 1, Some(tsite("main", "Nf6:helper", 10, 20, "call")), Some(tdef("dawn\$pkg\$tileir/dev", "Nf3:exp", 0, 9, "function"))),
+  trow(3, 0, Some(tsite("main", "Nf6:kernel", 30, 40, "call")), Some(tdef("main", "Nf6:helper", 0, 40, "function"))),
+  trow(4, 3, Some(tsite("main", "Nf6:helper", 10, 20, "call")), Some(tdef("dawn\$pkg\$tileir/dev", "Nf3:exp", 0, 9, "function"))),
+]
+
+test "two calls of one helper are two calls with two parents, and each own call lies in the definition" {
+  match project(helper_rows(), [tunit("r1")], "r1", []) {
+    Ok(p) -> {
+      assert len(p.calls) == 4
+      assert list.map(p.calls, c => c.name) == ["helper", "exp", "helper", "exp"]
+      assert list.map(p.calls, c => c.kind) == [Helper, Api, Helper, Api]
+      assert list.map(p.calls, c => c.parent) == [-1, 0, -1, 2]
+      assert p.calls[0].key.instance != p.calls[2].key.instance
+      assert p.calls[1].parent != p.calls[3].parent
+      assert p.owners == [-1, 0, 1, 2, 3]
+      assert within_definition(p.calls[0], p.calls[1])
+      assert within_definition(p.calls[2], p.calls[3])
+      assert p.calls[1].site == p.calls[3].site
+      assert not contained(p.calls[0], p.calls[0]) || contained(p.calls[0], p.calls[0])
+      assert p.calls[0].site == Some(Span { lo = 10, hi = 20, name_lo = 10, name_hi = 11, line = 1, col = 11 })
+    }
+    Err(e) -> panic(e)
+  }
+}
+
+fn refused(r: Result[Projection, String], why: String) -> Bool = match r {
+  Ok(_) -> false
+  Err(e) -> str.contains(e, why)
+}
+
+test "a stale, missing or unknown source revision is refused" {
+  assert project(helper_rows(), [tunit("r2")], "r1", []) == Err("tileir origin: source revision of `main` is not the recorded one")
+  assert project(helper_rows(), [tunit("r1")], "", []) == Err("tileir origin: no source revision was recorded for `main`")
+  assert project(helper_rows(), [tunit("")], "r1", []) == Err("tileir origin: source unit of `main` has no revision")
+  assert project(helper_rows(), [], "r1", []) == Err("tileir origin: no source unit for module `main`")
+}
+
+test "a declaration of another length, an unknown span or a lost declaration is refused" {
+  let shorter = SourceUnit { ..tunit("r1"), declarations = map.from([("Nf6:kernel", (0, 100)), ("Nf6:helper", (100, 130))]) }
+  assert refused(project(helper_rows(), [shorter], "r1", []), "outside")
+  let longer = SourceUnit { ..tunit("r1"), declarations = map.from([("Nf6:kernel", (0, 100)), ("Nf6:helper", (100, 150))]) }
+  assert refused(project(helper_rows(), [longer], "r1", []), "another length")
+  let blind = SourceUnit { ..tunit("r1"), spans = set.from([(10, 20), (30, 40)]) }
+  assert refused(project(helper_rows(), [blind], "r1", []), "no syntax node")
+  let lost = SourceUnit { ..tunit("r1"), declarations = map.from([("Nf6:kernel", (0, 100))]) }
+  assert refused(project(helper_rows(), [lost], "r1", []), "is not in the source")
+}
+
+test "a missing or later parent and an unknown boundary are refused" {
+  let rows = helper_rows()
+  let orphan = list.map(range(0, len(rows)), i => if i == 2 { RawRow { ..rows[2], parent = -1 } } else { rows[i] })
+  assert project(orphan, [tunit("r1")], "r1", []) == Err("tileir origin: row 2 has no parent")
+  let later = list.map(range(0, len(rows)), i => if i == 2 { RawRow { ..rows[2], parent = 3 } } else { rows[i] })
+  assert project(later, [tunit("r1")], "r1", []) == Err("tileir origin: row 2 has no earlier parent")
+  let blind = list.map(range(0, len(rows)), i => if i == 2 { RawRow { ..rows[2], boundary = UnknownBoundary } } else { rows[i] })
+  assert project(blind, [tunit("r1")], "r1", []) == Err("tileir origin: row 2 crosses an unknown boundary")
+  let nameless = list.map(range(0, len(rows)), i => if i == 2 { RawRow { ..rows[2], site = None, definition = None } } else { rows[i] })
+  assert project(nameless, [tunit("r1")], "r1", []) == Err("tileir origin: row 2 has no identity")
+}
+
+test "the callees under the recorder are the author's helpers and tileir's own functions, once each" {
+  let tc = tdef("dawn\$pkg\$tileir/prog", "Nf11:trace_calls", 0, 50, "function")
+  let under = [trow(0, -1, None, None), trow(1, 0, Some(tsite("main", "Nf6:kernel", 10, 20, "call")), Some(tc)),
+    trow(2, 1, Some(tsite("main", "Nf6:kernel", 10, 20, "call")), Some(tdef("main", "Nf6:helper", 0, 40, "function"))),
+    trow(3, 2, Some(tsite("main", "Nf6:helper", 10, 20, "call")), Some(tdef("dawn\$pkg\$tileir/dev", "Nf3:exp", 0, 9, "function"))),
+    trow(4, 1, Some(tsite("main", "Nf6:kernel", 30, 40, "call")), Some(tdef("main", "Nf6:helper", 0, 40, "function"))),
+    trow(5, 4, Some(tsite("main", "Nf6:helper", 10, 20, "call")), Some(tdef("dawn\$pkg\$tileir/dev", "Nf3:exp", 0, 9, "function")))]
+  match callees(under, []) {
+    Ok(facts) -> {
+      assert list.map(facts, f => (f.kind, f.name)) == [(Helper, "helper"), (Api, "exp")]
+      assert facts[0].start == 0 && facts[0].end == 40 && facts[0].declaration == "Nf6:helper"
+    }
+    Err(e) -> panic(e)
+  }
+  assert callees(helper_rows(), []) == Err("tileir origin: no recorder call in the rows")
+}
+
+test "a declaration identity's last name" {
+  assert last_name("Nf4:main") == "main"
+  assert last_name("Nf5:cellsNd5:along") == "along"
+  assert last_name("I3:Addn4:Tile1;b1:00;Nm3:add") == "add"
+}

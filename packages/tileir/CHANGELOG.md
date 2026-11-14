@@ -1,5 +1,14 @@
 # tileir changelog
 
+## 0.33.0
+
+- 新模块 `origin`：把一次 `std/provenance` 观察的冻结快照投影为作者写下的调用
+  （`project`），或只给出被调用者的声明身份（`callees`）。身份来自编译器记录的
+  模块、声明与相对 span，同一 helper 的两次调用是两个实例、两个父节点；缺源码版本、
+  版本不符、声明长度不符、未知边界、截断、缺父节点一律拒绝。
+- 手写调用标记（`called`、`user_body` 与四个 `Dev` 操作）原样保留，`origin` 只是它们的
+  独立旁证；`scripts/tile-origin-shadow` 对全部 golden 与 Playground 样例逐例比较。
+
 ## 0.32.0
 
 - 对固定工具 tileiras 13.5.37，拒绝捕获外层 SSA、创建非标量中间 tile 或
