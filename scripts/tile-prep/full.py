@@ -108,7 +108,11 @@ def download(url=JDK_URL, expected_sha=JDK_SHA, cache=None,
     cache.mkdir(exist_ok=True)
     archive = cache / 'graalvm.tar.gz'
     if archive.exists():
-        if sha(archive) == expected_sha:
+        verifying = time.monotonic()
+        valid = sha(archive) == expected_sha
+        print('DEPENDENCY_VERIFY_METRIC ' + json.dumps(dict(kind='jdk-cache',
+            seconds=time.monotonic()-verifying, valid=valid)), flush=True)
+        if valid:
             print('JDK_DEPENDENCY_CACHE verified hit', flush=True)
             return archive
         archive.unlink()
@@ -129,7 +133,11 @@ def download(url=JDK_URL, expected_sha=JDK_SHA, cache=None,
                 attempt=attempt + 1, elapsed=time.monotonic() - start,
                 exit=result.returncode, timing=fields, error=result.stderr)), flush=True)
             if result.returncode == 0:
-                if sha(candidate) != expected_sha:
+                verifying = time.monotonic()
+                valid = sha(candidate) == expected_sha
+                print('DEPENDENCY_VERIFY_METRIC ' + json.dumps(dict(kind='jdk-download',
+                    seconds=time.monotonic()-verifying, valid=valid)), flush=True)
+                if not valid:
                     candidate.unlink(missing_ok=True)
                     raise RuntimeError('JDK checksum mismatch')
                 candidate.replace(archive)
@@ -166,7 +174,11 @@ def prepare():
             _, spec, digest = line.split()
             name, version = spec.split('==')
             for candidate in wheels.glob(name.replace('-', '_') + '-' + version + '-*.whl'):
-                if sha(candidate) != digest.removeprefix('sha256='):
+                verifying = time.monotonic()
+                valid = sha(candidate) == digest.removeprefix('sha256=')
+                print('DEPENDENCY_VERIFY_METRIC ' + json.dumps(dict(kind='wheel-cache',
+                    seconds=time.monotonic()-verifying, valid=valid)), flush=True)
+                if not valid:
                     candidate.unlink()
                     print('WHEEL_DEPENDENCY_CACHE rejected corrupt candidate: ' + spec, flush=True)
     tileiras = output(['./scripts/tile-golden/install-tileiras.sh',
