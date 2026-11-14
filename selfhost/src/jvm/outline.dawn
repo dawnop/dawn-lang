@@ -2,41 +2,140 @@
 # Only closed expression regions may move: no nonlocal return/jump or writes
 # to multiple caller bindings. A single assigned result returns as a scalar;
 # free values are ordinary typed JVM parameters.
-use ir/core.{CExpr, CStmt, CLocal, CBlock, CIf, CBinary, CAnd, COr, CReturn, CBreak, CContinue,
+use ir/core.{CExpr, CStmt, CLocal, CBlock, CIf, CBinary, CAnd, COr, CAdd, CInt, CReturn, CBreak, CContinue,
   CCall, CIntrinsic, CClosure, CSLet, CSAssign, CSLoop, CSIf, CSDiscard, cex_ty, diverges }
 use ir/walk
-use check/types.{Ty, TyError, TyNever, TyUnit}
+use check/types.{Ty, TyError, TyNever, TyUnit, TyInt}
+use std/list
 use std/map
 use std/set
 
-pub type Region = { body: CExpr, inputs: List[(Int, Ty)], ret: Ty, exit: Option[(Int, Int)] }
-type Scan = {
+## `memo` is empty, or the summary of every statement suffix of this region's
+## own body (one more entry than it has statements; empty when a nonlocal break
+## makes the emitter rewrite the body): what `sequence` would
+## otherwise recompute by walking the whole remainder at every level of a
+## long flat block. The summaries are only what `region` reads, so a region
+## built from them is the region `region` would build.
+pub type Region = { body: CExpr, inputs: List[(Int, Ty)], ret: Ty, exit: Option[(Int, Int)], memo: List[Summary] }
+
+## What `region` decides from, with what the block itself binds already taken
+## out: the locals it reads from outside, the outer locals it writes, the
+## loop targets it jumps to from outside, whether a `continue` has no loop of
+## its own, whether it reads a spill slot or returns.
+pub type Facts = {
+  free: Map[Int, Ty], neg: Bool, writes: Set[Int], jumps: Set[Int], bad_continue: Bool,
+  returns: Bool, return_values: Map[Int, Ty]
+}
+
+## What `region` needs to know of a block holding a suffix of statements and
+## the block's result: those facts and its cost.
+pub type Summary = { facts: Facts, weight: Int }
+
+pub type Scan = {
   bound: Set[Int], reads: Map[Int, Ty], writes: Set[Int], loops: Set[Int],
   jumps: Set[Int], continues: Set[Int], returns: Bool, return_values: Map[Int, Ty]
 }
 
-pub fn cost(e: CExpr) -> Int = walk.fold_expr(e, 0, (n, x) => n + match x {
+fn cost_e(n: Int, x: CExpr) -> Int = n + match x {
   CCall(_, _, _, _) | CIntrinsic(_, _, _, _) -> 12
   CClosure(_, _, _, _) -> 4
   _ -> 1
-}, (n, _s) => n + 1)
+}
 
-fn scan(e: CExpr) -> Scan = walk.fold_expr(e,
+fn cost_s(n: Int, _s: CStmt) -> Int = n + 1
+
+pub fn cost(e: CExpr) -> Int = walk.fold_expr(e, 0, cost_e, cost_s)
+
+# What one statement adds to the cost of a block it is in: the block's own
+# node is counted once, apart from its statements.
+fn stmt_weight(s: CStmt) -> Int = walk.fold_stmt(s, 0, cost_e, cost_s)
+
+fn empty_scan() -> Scan =
   Scan { bound = set.empty(), reads = map.empty(), writes = set.empty(),
-    loops = set.empty(), jumps = set.empty(), continues = set.empty(), returns = false, return_values = map.empty() },
-  (s, x) => match x {
-    CLocal(id, ty) -> Scan { ..s, reads = map.insert(s.reads, id, ty) }
-    CReturn(Some(CLocal(id, ty))) -> Scan { ..s, return_values = map.insert(s.return_values, id, ty) }
-    CReturn(_) -> Scan { ..s, returns = true }
-    CBreak(id) -> Scan { ..s, jumps = set.insert(s.jumps, id) }
-    CContinue(id) -> Scan { ..s, continues = set.insert(s.continues, id) }
-    _ -> s
-  }, (s, x) => match x {
-    CSLet(id, _, _) -> Scan { ..s, bound = set.insert(s.bound, id) }
-    CSAssign(id, _) -> Scan { ..s, writes = set.insert(s.writes, id) }
-    CSLoop(id, _, _) -> Scan { ..s, loops = set.insert(s.loops, id) }
-    _ -> s
-  })
+    loops = set.empty(), jumps = set.empty(), continues = set.empty(), returns = false, return_values = map.empty() }
+
+fn scan_e(s: Scan, x: CExpr) -> Scan = match x {
+  CLocal(id, ty) -> Scan { ..s, reads = map.insert(s.reads, id, ty) }
+  CReturn(Some(CLocal(id, ty))) -> Scan { ..s, return_values = map.insert(s.return_values, id, ty) }
+  CReturn(_) -> Scan { ..s, returns = true }
+  CBreak(id) -> Scan { ..s, jumps = set.insert(s.jumps, id) }
+  CContinue(id) -> Scan { ..s, continues = set.insert(s.continues, id) }
+  _ -> s
+}
+
+fn scan_s(s: Scan, x: CStmt) -> Scan = match x {
+  CSLet(id, _, _) -> Scan { ..s, bound = set.insert(s.bound, id) }
+  CSAssign(id, _) -> Scan { ..s, writes = set.insert(s.writes, id) }
+  CSLoop(id, _, _) -> Scan { ..s, loops = set.insert(s.loops, id) }
+  _ -> s
+}
+
+fn scan(e: CExpr) -> Scan = walk.fold_expr(e, empty_scan(), scan_e, scan_s)
+
+fn scan_stmt(s: CStmt) -> Scan = walk.fold_stmt(s, empty_scan(), scan_e, scan_s)
+
+fn facts_of(s: Scan) -> Facts = {
+  var free: Map[Int, Ty] = map.empty()
+  var neg = false
+  for entry in map.entries(s.reads) {
+    let (id, ty) = entry
+    if id < 0 { neg = true }
+    if not set.has(s.bound, id) { free = map.insert(free, id, ty) }
+  }
+  var writes: Set[Int] = set.empty()
+  for id in set.to_list(s.writes) { if not set.has(s.bound, id) { writes = set.insert(writes, id) } }
+  var jumps: Set[Int] = set.empty()
+  for id in set.to_list(s.jumps) { if not set.has(s.loops, id) { jumps = set.insert(jumps, id) } }
+  var bad = false
+  for id in set.to_list(s.continues) { if not set.has(s.loops, id) { bad = true } }
+  Facts { free = free, neg = neg, writes = writes, jumps = jumps, bad_continue = bad, returns = s.returns,
+    return_values = s.return_values }
+}
+
+# The facts of `statement; rest` from the facts of the statement (`first`, with
+# the ids it binds) and of the rest: what the rest reads of what the statement
+# binds is no longer free.
+fn prepend(first: Facts, bound: Set[Int], rest: Facts) -> Facts = {
+  var free = rest.free
+  var writes = rest.writes
+  for id in set.to_list(bound) {
+    free = map.remove(free, id)
+    writes = set.remove(writes, id)
+  }
+  for entry in map.entries(first.free) {
+    let (id, ty) = entry
+    free = map.insert(free, id, ty)
+  }
+  for id in set.to_list(first.writes) { writes = set.insert(writes, id) }
+  var jumps = rest.jumps
+  for id in set.to_list(first.jumps) { jumps = set.insert(jumps, id) }
+  var values = rest.return_values
+  for entry in map.entries(first.return_values) {
+    let (id, ty) = entry
+    values = map.insert(values, id, ty)
+  }
+  Facts { free = free, neg = first.neg || rest.neg, writes = writes, jumps = jumps,
+    bad_continue = first.bad_continue || rest.bad_continue, returns = first.returns || rest.returns, return_values = values }
+}
+
+## The summary of the block holding `statements[i:]` and `result`, for every
+## `i` from 0 to the length: one walk of the whole block in place of one walk
+## of every remainder.
+pub fn suffixes(statements: List[CStmt], result: Option[CExpr]) -> List[Summary] = {
+  var acc = match result {
+    Some(r) -> Summary { facts = facts_of(scan(r)), weight = 1 + cost(r) }
+    None -> Summary { facts = facts_of(empty_scan()), weight = 1 }
+  }
+  var backwards: List[Summary] = [acc]
+  var i = len(statements)
+  while i > 0 {
+    i = i - 1
+    let one = scan_stmt(statements[i])
+    acc = Summary { facts = prepend(facts_of(one), one.bound, acc.facts), weight = acc.weight + stmt_weight(statements[i]) }
+    backwards = backwards ++ [acc]
+  }
+  list.reverse(backwards)
+}
 
 # Core's general diverges predicate deliberately only follows expression
 # tails. Lowered match decisions also terminate through statement if arms.
@@ -66,23 +165,35 @@ fn exits(e: CExpr) -> Bool = {
 # Flat match decisions need a proper remainder region too. Keeping a bounded
 # prefix in place preserves every test and exception in its original order;
 # the remainder receives the same live bindings through an ordinary call.
-pub fn sequence(statements: List[CStmt], result: Option[CExpr], ty: Ty,
-  band: Int) -> (List[CStmt], Option[CExpr]) = {
-  if band <= 0 || len(statements) < 2 { return (statements, result) }
+#
+# The remainder of a long block is itself split the same way, one bounded
+# prefix at a time, and each remainder needs the region facts of everything
+# after the prefix. Reading those off the remainder at every level costs
+# the length of the block once for every level, which is quadratic for a
+# straight list of twelve thousand elements. So the facts of every suffix
+# are computed in one pass (`suffixes`), the first time a block is split, and
+# travel with the remainder's region (`Region.memo`) for the next level. The
+# third answer is that remainder as a region when it can move, else None and
+# the remainder is the second answer, as before; the fourth is the summaries
+# of that remainder's own suffixes, for the caller to hand to the next level
+# when the remainder stays where it is (empty when nothing was split).
+pub fn sequence(statements: List[CStmt], result: Option[CExpr], ty: Ty, band: Int,
+  memo: List[Summary]) -> (List[CStmt], Option[CExpr], Option[Region], List[Summary]) = {
+  if band <= 0 || len(statements) < 2 { return (statements, result, None, []) }
   var count = 0
   var weight = 0
   while count < len(statements) && (count == 0 || weight < band * 3) {
-    weight = weight + cost(CBlock([statements[count]], None, TyUnit))
+    weight = weight + 1 + stmt_weight(statements[count])
     count = count + 1
   }
-  if count == len(statements) { return (statements, result) }
-  var prefix: List[CStmt] = []
-  var rest: List[CStmt] = []
-  for i in 0..len(statements) {
-    if i < count { prefix = prefix ++ [statements[i]] }
-    else { rest = rest ++ [statements[i]] }
-  }
-  (prefix, Some(CBlock(rest, result, ty)))
+  if count == len(statements) { return (statements, result, None, []) }
+  let prefix = list.take(statements, count)
+  let rest = CBlock(list.drop(statements, count), result, ty)
+  let table = if len(memo) == len(statements) + 1 { memo } else { suffixes(statements, result) }
+  let here = table[count]
+  let after = list.drop(table, count)
+  if here.weight < band { return (prefix, Some(rest), None, after) }
+  (prefix, Some(rest), region_with(rest, here.facts, after), after)
 }
 
 ## The band is selected from final Code lengths, not from source names or a
@@ -93,15 +204,21 @@ pub fn region(e: CExpr, band: Int) -> Option[Region] = {
   match e { CBlock(_, _, _) | CIf(_, _, _, _) | CBinary(CAnd, _, _, _) | CBinary(COr, _, _, _) -> (), _ -> return None }
   let weight = cost(e)
   if weight < band { return None }
-  let s = scan(e)
-  if s.returns { return None }
-  var jumps: List[Int] = []
-  var writes: List[Int] = []
-  for id in set.to_list(s.continues) { if not set.has(s.loops, id) { return None } }
-  for id in set.to_list(s.jumps) { if not set.has(s.loops, id) { jumps = jumps ++ [id] } }
-  for id in set.to_list(s.writes) { if not set.has(s.bound, id) { writes = writes ++ [id] } }
+  region_with(e, facts_of(scan(e)), [])
+}
+
+# `region` once the cost is known to reach the band and `f` holds the facts of `e`.
+fn region_with(e: CExpr, f: Facts, memo: List[Summary]) -> Option[Region] = {
+  if f.returns || f.bad_continue || f.neg { return None }
+  # Leave room for context and keep every physical signature within the same
+  # conservative C2 argument policy as compiler methods.
+  if len(f.free) > 28 { return None }
+  # more than a few outer writes or jumps is no region this can move
+  if len(f.writes) > 64 || len(f.jumps) > 64 { return None }
+  let jumps = set.to_list(f.jumps)
+  let writes = set.to_list(f.writes)
   var exit: Option[(Int, Int)] = None
-  let returns = map.keys(s.return_values)
+  let returns = map.keys(f.return_values)
   if len(returns) > 0 {
     # A partition of an already outlined match may end in the same scalar
     # return on every path. Propagate that physical return through its caller.
@@ -123,20 +240,14 @@ pub fn region(e: CExpr, band: Int) -> Option[Region] = {
       exit = Some((jumps[0], writes[0]))
     }
   }
+  # in binder order, so that the parameters of a region do not depend on the
+  # order its facts were assembled in
   var inputs: List[(Int, Ty)] = []
-  for id in map.keys(s.reads) {
-    # JVM spills use slot-derived negative IDs. Only stable Core binders
-    # may cross a physical signature; its local slots are allocated anew.
-    if id < 0 { return None }
-    if not set.has(s.bound, id) { inputs = inputs ++ [(id, map.get(s.reads, id).expect("region input"))] }
-  }
-  # Leave room for context and keep every physical signature within the same
-  # conservative C2 argument policy as compiler methods.
-  if len(inputs) > 28 { return None }
-  let ty = if len(returns) == 1 { map.get(s.return_values, returns[0]).expect("region return") }
+  for id in sort(map.keys(f.free)) { inputs = inputs ++ [(id, map.get(f.free, id).expect("region input"))] }
+  let ty = if len(returns) == 1 { map.get(f.return_values, returns[0]).expect("region return") }
   else { cex_ty(e) }
   if ty == TyError { return None }
-  Some(Region { body = e, inputs = inputs, ret = ty, exit = exit })
+  Some(Region { body = e, inputs = inputs, ret = ty, exit = exit, memo = match exit { Some((target, _)) -> if target >= 0 { [] } else { memo }, None -> memo } })
 }
 
 ## Only this region's nonlocal break changes into a physical return. All
@@ -144,4 +255,48 @@ pub fn region(e: CExpr, band: Int) -> Option[Region] = {
 pub fn exit_body(e: CExpr, target: Int, output: Int, ty: Ty) -> CExpr = match e {
   CBreak(id) -> if id == target { CReturn(Some(CLocal(output, ty))) } else { e }
   _ -> walk.map_kids(e, x => exit_body(x, target, output, ty))
+}
+
+# ---- tests ----
+
+fn chain_block(n: Int) -> (List[CStmt], Option[CExpr]) = {
+  var stmts: List[CStmt] = [CSLet(1, TyInt, CInt(0))]
+  for i in range(0, n) {
+    stmts = stmts ++ [CSLet(i + 2, TyInt, CBinary(CAdd, CLocal(1, TyInt), CLocal(1, TyInt), TyInt)), CSAssign(1, CLocal(i + 2, TyInt))]
+  }
+  (stmts, Some(CLocal(1, TyInt)))
+}
+
+test "the summary of every suffix of a block is the facts and the cost of that block" {
+  let (stmts, result) = chain_block(40)
+  let table = suffixes(stmts, result)
+  assert len(table) == len(stmts) + 1
+  for k in range(0, len(stmts) + 1) {
+    let block = CBlock(list.drop(stmts, k), result, TyInt)
+    let plain = facts_of(scan(block))
+    assert table[k].weight == cost(block)
+    assert sort(map.keys(table[k].facts.free)) == sort(map.keys(plain.free))
+    assert sort(set.to_list(table[k].facts.writes)) == sort(set.to_list(plain.writes))
+    assert table[k].facts.returns == plain.returns
+    assert table[k].facts.neg == plain.neg
+  }
+}
+
+test "a long block is split one bounded prefix at a time, each remainder carrying the rest of the summaries" {
+  let (stmts, result) = chain_block(200)
+  var level = stmts
+  var memo: List[Summary] = []
+  for _i in range(0, 6) {
+    let (prefix, rest, _link, after) = sequence(level, result, TyInt, 10, memo)
+    assert len(prefix) < len(level)
+    assert len(after) == len(level) - len(prefix) + 1
+    match rest {
+      Some(CBlock(next, _, _)) -> {
+        assert len(next) == len(level) - len(prefix)
+        level = next
+        memo = after
+      }
+      _ -> { assert false }
+    }
+  }
 }
