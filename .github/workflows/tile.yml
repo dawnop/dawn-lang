@@ -102,7 +102,7 @@ name: tile
 # nightly.yml's totals report counts a tile trigger only when the
 # shards all ran green, so a deduplicated push is not counted as one.
 #
-# path-total: 9530s (the most this file's `3x` claims may add up to)
+# path-total: 10330s (the most this file's `3x` claims may add up to)
 on:
   push:
     branches: [main]
@@ -173,6 +173,15 @@ on:
     # night as a verdict.
     - cron: '20 5 * * *'
   workflow_dispatch:
+    inputs:
+      full_probe:
+        description: Measure the complete shared execution closure
+        type: boolean
+        default: false
+      cold:
+        description: Bypass producer dependency caches
+        type: boolean
+        default: true
 
 concurrency:
   group: tile-${{ github.ref }}
@@ -184,6 +193,165 @@ env:
   TILE_VERIFIED_PREFIX: tile-verified-v1-
 
 jobs:
+  # A bounded dispatch measurement before changing the production shards.
+  # The producer bound retains the old 566s cold dependency tail and adds
+  # the native build, packaging and margin. It is not a measured final claim.
+  full-producer:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_probe }}
+    runs-on: ubuntu-24.04
+    # budget: 3x 800s planning bound including cold dependency recovery
+    timeout-minutes: 40
+    outputs:
+      full_id: ${{ steps.upload.outputs.artifact-id }}
+      full_sha: ${{ steps.pack.outputs.full_sha }}
+      full_manifest: ${{ steps.pack.outputs.full_manifest }}
+      attempt: ${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: restore producer dependencies
+        if: ${{ !inputs.cold }}
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/producer-deps
+            ${{ runner.temp }}/tileiras-wheels
+            .dawn/seeds
+            ~/.cache/coursier
+          key: tile-producer-v1-Linux-x64-21.0.2-b048069aaa3a99b8-${{ hashFiles('scripts/seed*.txt', 'selfhost/dawn.lock', 'scripts/tile-golden/toolchain.txt', 'scripts/tile-prep/full.py') }}
+      - name: build and package the execution closure
+        id: pack
+        run: python3 -B scripts/tile-prep/full.py prepare
+      - name: upload the execution closure
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tile-full-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/out-full/prep.tar.zst
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+
+  full-consumer-1:
+    needs: full-producer
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_probe && needs.full-producer.result == 'success' }}
+    runs-on: ubuntu-24.04
+    # budget: floor (seconds-scale execution closure probe)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.full-producer.outputs.full_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.full-producer.outputs.full_sha }}
+          EXPECTED_MANIFEST: ${{ needs.full-producer.outputs.full_manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.full-producer.outputs.full_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: verify identity refusal and execute both backends
+        env:
+          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
+        run: |
+          python3 -B scripts/tile-prep/full.py identity-selftest
+          before=$(stat -c '%Y:%s' build/dawn-selfhost.jar)
+          ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --only vadd --tileiras "$TILEIRAS"
+          test "$before" = "$(stat -c '%Y:%s' build/dawn-selfhost.jar)"
+      - name: retain the transfer measurement
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: full-receipt-1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/receipt.json
+          if-no-files-found: error
+          retention-days: 3
+
+  full-consumer-2:
+    needs: full-producer
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_probe && needs.full-producer.result == 'success' }}
+    runs-on: ubuntu-24.04
+    # budget: floor (seconds-scale execution closure probe)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.full-producer.outputs.full_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.full-producer.outputs.full_sha }}
+          EXPECTED_MANIFEST: ${{ needs.full-producer.outputs.full_manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.full-producer.outputs.full_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: verify identity refusal and execute both backends
+        env:
+          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
+        run: |
+          python3 -B scripts/tile-prep/full.py identity-selftest
+          before=$(stat -c '%Y:%s' build/dawn-selfhost.jar)
+          ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --only vadd --tileiras "$TILEIRAS"
+          test "$before" = "$(stat -c '%Y:%s' build/dawn-selfhost.jar)"
+      - name: retain the transfer measurement
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: full-receipt-2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/receipt.json
+          if-no-files-found: error
+          retention-days: 3
+
+  full-consumer-3:
+    needs: full-producer
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_probe && needs.full-producer.result == 'success' }}
+    runs-on: ubuntu-24.04
+    # budget: floor (seconds-scale execution closure probe)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: start receiving the exact producer artifact
+        run: echo "RECEIVE_STARTED=$(date +%s.%N)" >> "$GITHUB_ENV"
+      - name: receive the exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.full-producer.outputs.full_id }}
+          path: ${{ runner.temp }}/received
+          merge-multiple: true
+      - name: validate and activate the execution closure
+        env:
+          EXPECTED_SHA: ${{ needs.full-producer.outputs.full_sha }}
+          EXPECTED_MANIFEST: ${{ needs.full-producer.outputs.full_manifest }}
+          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
+          ARTIFACT_ID: ${{ needs.full-producer.outputs.full_id }}
+        run: python3 -B scripts/tile-prep/full.py consume
+      - name: verify identity refusal and execute both backends
+        env:
+          PRODUCER_ATTEMPT: ${{ needs.full-producer.outputs.attempt }}
+        run: |
+          python3 -B scripts/tile-prep/full.py identity-selftest
+          before=$(stat -c '%Y:%s' build/dawn-selfhost.jar)
+          ./scripts/tile-golden/run.sh --prebuilt "$RUNNER_TEMP/execution-closure/native" --only vadd --tileiras "$TILEIRAS"
+          test "$before" = "$(stat -c '%Y:%s' build/dawn-selfhost.jar)"
+      - name: retain the transfer measurement
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: full-receipt-3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/receipt.json
+          if-no-files-found: error
+          retention-days: 3
+
   # ELEVEN shards of one matrix (scripts/tile-golden/matrix.txt: the 208
   # kernels, then the 93 mutants, in run order), dealt by measured cost
   # through scripts/mutant-coverage/plans/tile-golden.txt since 2026-10-19
@@ -421,6 +589,7 @@ jobs:
   # the shards' `if:` also runs them when this job did not finish, so the one
   # way to skip is a record that passed every rule.
   dedupe:
+    if: ${{ inputs.full_probe != true }}
     runs-on: ubuntu-24.04
     # Listed in full: a `permissions:` block sets everything it omits to none.
     permissions:
@@ -453,7 +622,7 @@ jobs:
 
   tile-golden-1:
     needs: dedupe
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 19 kernels and 8 mutants
     # plus shard 1's own 16s of fixed work (the ledger gates and fetch-depth 0),
@@ -530,7 +699,7 @@ jobs:
 
   tile-golden-2:
     needs: dedupe
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
     # 614s on the median runner and 690s on the worst of the 64 main jobs
@@ -575,7 +744,7 @@ jobs:
 
   tile-golden-3:
     needs: dedupe
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
     # 611s on the median runner and 686s on the worst of the 64 main jobs
@@ -620,7 +789,7 @@ jobs:
 
   tile-golden-4:
     needs: dedupe
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
     # 607s on the median runner and 682s on the worst of the 64 main jobs
@@ -665,7 +834,7 @@ jobs:
 
   tile-golden-5:
     needs: dedupe
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
     # 609s on the median runner and 684s on the worst of the 64 main jobs
@@ -710,7 +879,7 @@ jobs:
 
   tile-golden-6:
     needs: dedupe
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
     # 609s on the median runner and 684s on the worst of the 64 main jobs
@@ -755,7 +924,7 @@ jobs:
 
   tile-golden-7:
     needs: dedupe
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
     # 607s on the median runner and 682s on the worst of the 64 main jobs
@@ -800,7 +969,7 @@ jobs:
 
   tile-golden-8:
     needs: dedupe
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
     # 607s on the median runner and 682s on the worst of the 64 main jobs
@@ -845,7 +1014,7 @@ jobs:
 
   tile-golden-9:
     needs: dedupe
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
     # 607s on the median runner and 682s on the worst of the 64 main jobs
@@ -890,7 +1059,7 @@ jobs:
 
   tile-golden-10:
     needs: dedupe
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
     # 602s on the median runner and 676s on the worst of the 64 main jobs
@@ -935,7 +1104,7 @@ jobs:
 
   tile-golden-11:
     needs: dedupe
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # 2026-10-19 (#274), eleven shards dealt by cost: 19 kernels and 8 mutants;
     # 602s on the median runner and 676s on the worst of the 64 main jobs
@@ -1039,7 +1208,7 @@ jobs:
       - tile-golden-9
       - tile-golden-10
       - tile-golden-11
-    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && inputs.full_probe != true && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-24.04
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
     timeout-minutes: 5
