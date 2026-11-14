@@ -49,6 +49,18 @@
 | S3 | [#856](https://github.com/dawnop/dawn-lang/pull/856)，合入 `0dbaee49`（提交 head `cff471d3`） | 条件访存、原子与循环，区域 token、保守 fork 冲突 |
 | S4 | [#858](https://github.com/dawnop/dawn-lang/pull/858)，验收冻结 `9cb37a89`（交付 head 见 PR） | 最终输入负控总表、三本串行设备台账、全门及 tile CI、文档收尾；tileir 保持 0.25.1 |
 
+## 自动来源 P1 后续核账（2026-10-26）
+
+本项延续 [自动来源设计](../effect-provenance-design.md)，不改变 M7 历史任务边界。
+W1（#890）已交付静态身份与 `origin` 臂语法；W2（#891）已交付普通效果、
+Plain/Observed 双入口与 checkpoint 创建帧纪律。W3 收口 control 续延、逻辑 tail 边、
+累计容量、展开与资源释放，并将导出改为公共类型化不可变快照和结构化静态表。
+
+W3 尚未放行：早先 JVM 相位的 A/A 上界 1.067644 超出 1.05，维持无资格证据。
+当前按补裁十一先完成非计时控制及完整门禁，剩余计时须等待协调者分配本机租约。
+完整生成、golden/CI、规模、U0/U1、编译与冷启动预算全部保留；P1 tag 由协调者合入后切，
+tileir 及旧调用标记迁移留给 P2，种子推进留给 W4。
+
 ## 序 1 — 补齐常见标准库函数（✅）
 
 **语言侧**（`dawn-lang`，提交 `1784358`）：新增六个内建。

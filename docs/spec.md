@@ -2232,7 +2232,7 @@ handler 的作用域内，与 `with x <- f(…)` 完全同构，并继承它的�
   `resume` 之前；重复、逆序、缺名与缺箭头分别诊断。`)` 至 `=>` 之间的既有逻辑换行规则
   不变，`=>` 后允许换行。绑定与操作参数共享本臂参数域，拒绝重名，可遮蔽外层变量，
   只在本臂身体可见。
-- **普通观察（W2）。** `std/provenance.observe[T, !e](body: fn(TraceScope) -> T !e) -> T !io !e`
+- **观察入口。** `std/provenance.observe[T, !e](body: fn(TraceScope) -> T !e, capacity: Int = 1048576) -> T !io !e`
   是按已解析的标准声明身份识别的具名 intrinsic。同名用户函数没有特权；入口不能取为函数值，
   身体须为字面 lambda 或 `with` 生成的结构化身体。每次调用建立独立观察根。`TraceScope`
   是不可逃逸的词法句柄，只能将该绑定直接用于 `note`、`completed`、`checkpoint`、`rewind`。
@@ -2248,16 +2248,63 @@ handler 的作用域内，与 `with x <- f(…)` 完全同构，并继承它的�
   路径。`definition` 返回 `Option[Definition]`，字段为 `id, module, declaration, start, end, role`。
   operation envelope 不将 handler 定义冒充发起方定义；其父链保存真正的调用定义。
   真实未知的坐标为负数，不编造位置。
+- 默认参数的来源定义使用该默认表达式自身的声明路径与坐标起点。没有书写调用点的内部合成调用保留已知 Definition，调用 Site 为 None。相同 primitive dictionary slot 共享逻辑 Definition 身份，不因后端选择的物理 helper 所在模块而改变。
 - **观察日志。** `note(scope, origin) -> Unit !io` 添加不可变操作快照；
-  `completed(scope) -> String !io` 复制包括活跃调用在内的当前日志前缀。二者不修改来源快照。
+  续延按创建时保存的模式恢复。Plain 创建的续延在观察域中恢复仍执行 Plain；跨观察域恢复不拼接驱动者和保存的父链，当前快照不能表示的片段带 UnknownBoundary。
+  默认容量遵守通常默认参数求值与来源规则；嵌套观察在外层执行的默认容量调用有独立实例，内层调用仍以当前活跃父实例为父，不接到已返回的默认调用上。
+  `completed(scope) -> TraceSnapshot !io` 冻结包括活跃调用和 notes 的当前可见前缀。
+  不保留 String 返回版本或并列快速入口；二者不修改已有来源快照。
   同 Site、同定义的两次调用具有不同实例身份；零 perform、零输出调用也保留。静态 Site 与定义
   身份不随 Plain/Observed 入口改变。调用进入、正常返回、`return`、`?` 与 panic 展开维护逻辑帧，
   实参先在调用者内完成求值。metadata 与 effect evidence 分开，handler 的词法选择不变。
   直接调用、Fn 桥、trait 动态/default/去虚拟化、跨模块/包与库回调遵守同一观察协议；
   普通入口保持既有 ABI。共享 Core 在会删除逻辑调用的优化前求 Plain/Observed 可达掩码，
   仅发射可达入口，动态目标按调用者模式选择；内部目标缺观察入口是编译错误，不回落普通入口。
-  解释器与 comptime 明确拒绝观察。W2 在观察下明确拒绝控制臂的 resume/discard/suspend、
-  实际执行的自递归尾边与不支持的外部 ABI 边界，不产生看似完整的缺边树。TCO 压缩与有界日志属于 W3。
+  解释器与 comptime 明确拒绝观察。控制续延持有原观察激活，恢复沿用模式与逻辑实例，
+  不经 Plain 入口重新进入。尾调用保留可解码父边；未知外部 ABI 记录 UnknownBoundary。
+  自然不可达只回收内存，未恢复记录保持 Suspended；只有显式 discard（含冻结跨度内继承的
+  discard）提交 Abandoned，不依赖 native RC 或 JVM GC 的回收时机。
+- **有界观察。** `observe(body, capacity: Int = 1048576)` 的容量包括根，限制本域累计保存
+  的调用记录；notes 使用同大小的独立累计预算。rewind 不返还预算或清除 Truncated。
+  `1 <= capacity <= 38347921`，否则两端报 `provenance: capacity must be between 1 and 38347921`。
+  耗尽后计算继续，只保存可见祖先闭合前缀，不能回填较晚调用、重排或改接缺失父节点。
+  活跃控制身份和 checkpoint 创建帧纪律独立于日志是否保存。超过容量的 operation Origin
+  保留真实当前身份与 Site，标记 Truncated/UnknownBoundary，父链接不提供，不冒充完成日志行。
+  各嵌套域独立计量；用户显式持有的 checkpoint/快照另占其正常生命期空间。
+- **结构化快照。** opaque `TraceSnapshot` 复制紧凑动态数据，共享 immutable `StaticTable`；
+  后续 finish/resume/discard/rewind/作用域退出不改变旧值，记录、Site 值与文本按需物化。
+  `InvocationKey = { scope: Int, epoch: Int, instance: Int }`；
+  `CallState = Active | Returned | Unwound | Suspended | Abandoned`；
+  `Boundary = Known | UnknownBoundary`；`Completeness = Complete | Truncated`。
+  `SnapshotInfo` 字段为 `scope, epoch, records, notes, completeness`（前四项 Int）；
+  `CallRecord` 字段为 `key: InvocationKey, parent: Option[Int], state: CallState, site: Option[Int],
+  definition: Option[Int], boundary: Boundary`。parent 是同快照零起点行索引，根为 None；
+  完整快照保证父先子后、祖先闭合。site/definition 是所属静态表的索引，不是 Site.id/Definition.id。
+  纯接口为 `snapshot_info(TraceSnapshot) -> SnapshotInfo`、
+  `record_at(TraceSnapshot, Int) -> Option[CallRecord]`、`static_table(TraceSnapshot) -> StaticTable`、
+  `site_at(StaticTable, Int) -> Option[Site]`、`definition_at(StaticTable, Int) -> Option[Definition]`、
+  `note_at(TraceSnapshot, Int) -> Option[Origin]`、`find_instance(TraceSnapshot, InvocationKey) -> Option[Int]`、
+  `render_snapshot(TraceSnapshot) -> String`、`render_origin(Origin) -> String`。
+  同一快照另有 opaque `RecordView` 和 `IndexSlot`：`records(TraceSnapshot) -> RecordView`
+  正常持有原快照；`record_count(RecordView) -> Int`、`record_scope(RecordView) -> Int`、
+  `record_exists(RecordView, Int) -> Bool` 读取冻结头和范围。接受 `(RecordView, Int)` 的
+  `record_epoch`、`record_instance` 返回 Int；`record_parent`、`record_site`、`record_definition`
+  返回 IndexSlot；`record_state` 返回 CallState，`record_boundary` 返回 Boundary。
+  这些标量访问不强制构造逐行记录或 Option。`index_present(IndexSlot) -> Bool` 查询有效性，
+  `index_value(IndexSlot) -> Int` 在缺失时报 `provenance: missing index`；标量行访问越界报
+  `provenance: record index out of bounds`，record_at 等便捷访问的越界仍返回 None。
+  视图不可变、不复用外传 cursor，逃逸值正常持有引用。静态 Site/Definition 按类型化字段生成
+  并共享，getter 不解析文本或逐字段复制字符串；文本只在显式 render 时编码。
+  Origin 另有纯 getter `state(Origin) -> CallState`、`origin_boundary(Origin) -> Boundary`、
+  `origin_completeness(Origin) -> Completeness`；既有纯 getter 签名不变。全部访问只读冻结数据，
+  不读 TLS、scope registry、当前提交状态或磁盘。便捷行/静态项/note 越界返回 None；
+  批量标量访问使用前述拒绝合同。find_instance 按完整 key
+  查询当前快照的可见成员。回退后 ID 可有洞，保留祖先可跨 epoch；Truncated 下缺失不证明回滚。
+  Complete 表示没有因容量丢失历史，不表示所有调用均 Returned，UnknownBoundary 独立保留。
+  截断只保留祖先闭合前缀并标记 Truncated，不能改接或重排父节点。嵌套 scope 各有根和 key，
+  行索引不能跨 scope 使用。Origin 冻结捕获时的父链、状态、epoch 和 operation 发起方身份，
+  不引用活跃帧或可复用槽；notes 同样不可变。S1/O1 版本化文本只由显式 render 产生，
+  不是数据模型；外部传输另带 recording/build/source revision 身份并校验结构、完整性和源码匹配。
 - **观察 checkpoint。** `checkpoint(scope) -> Checkpoint !io` 保存本域日志与 note 边界；
   `rewind(scope, c) -> Unit !io` 回退后保留目标 `c` 及所有更早建立的 checkpoint，允许反复回退
   同一目标，并使之后建立的 checkpoint 全部失效。顺序按建立次序，不能用相同日志边界合并。
@@ -2270,7 +2317,7 @@ handler 的作用域内，与 `with x <- f(…)` 完全同构，并继承它的�
   `provenance: checkpoint belongs to another scope`，已退出域为 `provenance: scope has exited`，
   已结束建立帧为 `provenance: creating frame has finished`，仍活跃的更深帧为
   `provenance: not in the creating frame`，不同执行上下文为 `provenance: different execution context`。
-  续延越域属于 W3，W2 明确拒绝。
+  续延越创建域恢复仍使用原激活；内部 lease 不使已退出的用户 TraceScope 重新有效。
 - 一个 `handle` 一个效果；同一效果重复 `handle` 是内层遮蔽外层，合法。
 - 允许 handle 一个块里实际没发出的效果（无害的死证据）。
 - **handler 局部状态（格子）**：臂表的开头可以声明若干 `var`，每个是**这次安装**私有的
