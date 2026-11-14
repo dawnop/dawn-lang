@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build, bind and receive the tile execution closure."""
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -40,15 +41,27 @@ def emit(path, values):
             stream.write(f'{key}={value}\n')
 
 
-def identity():
+def source_snapshot():
+    """Read one source snapshot for checks performed in the same phase."""
     sp.run(['git', 'diff', '--quiet', 'HEAD'], cwd=ROOT, check=True)
+    checkout, tree = output(['git', 'rev-parse', 'HEAD', 'HEAD^{tree}']).splitlines()
+    spec = importlib.util.spec_from_file_location('tile_gpu_inputs',
+        ROOT / 'scripts/tile-gpu-diff/inputs.py')
+    inputs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(inputs)
+    return dict(checkout=checkout, tree=tree, inputs=inputs.digest(),
+        system=output(['uname', '-sm']), libc=output(['getconf', 'GNU_LIBC_VERSION']),
+        cc=output([os.environ.get('CC') or 'cc', '--version']))
+
+
+def identity(snapshot=None):
+    snapshot = source_snapshot() if snapshot is None else snapshot
     return dict(schema=1, repository=os.environ['GITHUB_REPOSITORY'],
                 repository_id=os.environ['GITHUB_REPOSITORY_ID'],
-                checkout=output(['git', 'rev-parse', 'HEAD']),
-                tree=output(['git', 'rev-parse', 'HEAD^{tree}']),
-                run=os.environ['GITHUB_RUN_ID'], system=output(['uname', '-sm']),
-                libc=output(['getconf', 'GNU_LIBC_VERSION']),
-                cc=output(['cc', '--version']).splitlines()[0],
+                checkout=snapshot['checkout'], tree=snapshot['tree'],
+                run=os.environ['GITHUB_RUN_ID'], system=snapshot['system'],
+                libc=snapshot['libc'],
+                cc=(output(['cc', '--version']) if os.environ.get('CC') else snapshot['cc']).splitlines()[0],
                 recipe=sha(__file__), upload_action=UPLOAD, download_action=DOWNLOAD,
                 checkout_action=CHECKOUT, cache_action=CACHE,
                 trust={p: sha(ROOT / p) for p in ['scripts/seed-release.txt',
@@ -71,14 +84,12 @@ def unpack(archive, dest, compressed=False):
                 raise RuntimeError('zstd extraction failed')
 
 
-def native_identity():
-    sp.run(['git', 'diff', '--quiet', 'HEAD'], cwd=ROOT, check=True)
-    return dict(schema=1, tree=output(['git', 'rev-parse', 'HEAD^{tree}']),
-        inputs=output(['python3', '-I', '-B', 'scripts/tile-gpu-diff/inputs.py']),
+def native_identity(snapshot=None):
+    snapshot = source_snapshot() if snapshot is None else snapshot
+    return dict(schema=1, tree=snapshot['tree'], inputs=snapshot['inputs'],
         runner=sha(ROOT / 'scripts/tile-golden/run.sh'),
-        helper=sha(__file__), system=output(['uname', '-sm']),
-        libc=output(['getconf', 'GNU_LIBC_VERSION']),
-        cc=output([os.environ.get('CC') or 'cc', '--version']))
+        helper=sha(__file__), system=snapshot['system'],
+        libc=snapshot['libc'], cc=snapshot['cc'])
 
 
 def native_seal(directory):
@@ -281,10 +292,11 @@ def consume():
     if sha(dest / 'manifest.json') != os.environ['EXPECTED_MANIFEST']:
         raise RuntimeError('altered manifest')
     manifest = json.loads((dest / 'manifest.json').read_text())
-    expected = identity()
+    snapshot = source_snapshot()
+    expected = identity(snapshot)
     # Both manifests describe this same source snapshot. Reuse its identity
     # within this receive; run.sh independently checks it again before use.
-    expected_native = native_identity()
+    expected_native = native_identity(snapshot)
     check_manifest(manifest, expected, expected_native['inputs'])
     native_verify(dest / 'native', expected_native)
     verified = time.monotonic()

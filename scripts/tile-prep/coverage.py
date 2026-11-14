@@ -7,6 +7,7 @@ so the control path does not need an artifact transfer for every shard.
 import argparse
 import copy
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -33,11 +34,15 @@ def contract(plan):
     for p in sorted((ROOT / 'scripts/tile-golden').iterdir()):
         if p.suffix in ('.mlir', '.tilebc', '.disasm', '.lines'):
             golden.update(p.name.encode() + b'\0' + p.read_bytes())
-    git = lambda rev: sp.check_output(['git', 'rev-parse', rev], cwd=ROOT, text=True).strip()
-    return dict(schema=1, checkout=git('HEAD'), tree=git('HEAD^{tree}'),
+    checkout, tree = sp.check_output(['git', 'rev-parse', 'HEAD', 'HEAD^{tree}'],
+                                    cwd=ROOT, text=True).splitlines()
+    spec = importlib.util.spec_from_file_location('tile_gpu_inputs',
+        ROOT / 'scripts/tile-gpu-diff/inputs.py')
+    inputs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(inputs)
+    return dict(schema=1, checkout=checkout, tree=tree,
         repository=os.environ['GITHUB_REPOSITORY_ID'], run=os.environ['GITHUB_RUN_ID'],
-        inputs=sp.check_output(['python3', '-I', '-B', 'scripts/tile-gpu-diff/inputs.py'],
-                               cwd=ROOT, text=True).strip(),
+        inputs=inputs.digest(),
         plan=sha(plan), matrix=sha(ROOT / 'scripts/tile-golden/matrix.txt'),
         golden=golden.hexdigest(), recipe=sha(Path(__file__)))
 
@@ -122,7 +127,8 @@ def receipt(args):
     ran = [s.removeprefix('ran=') for s in data[2:]]
     if ran != selected[args.index]:
         raise ValueError('actual ran differs from selector')
-    raw = lines(Path(os.environ['ITEM_TIMES']))
+    raw_bytes = Path(os.environ['ITEM_TIMES']).read_bytes()
+    raw = [s for s in raw_bytes.decode().splitlines() if s and not s.startswith('#')]
     timings = {}
     for line in raw:
         name, value = line.split()
@@ -133,7 +139,7 @@ def receipt(args):
         raise ValueError('incomplete raw item clock')
     r = dict(identity=contract(args.plan), index=args.index, total=args.total,
         attempt=os.environ['GITHUB_RUN_ATTEMPT'], ran=ran,
-        times={n: timings[n] for n in ran}, raw_times_sha256=sha(Path(os.environ['ITEM_TIMES'])))
+        times={n: timings[n] for n in ran}, raw_times_sha256=hashlib.sha256(raw_bytes).hexdigest())
     closure = Path(os.environ['RUNNER_TEMP']) / 'execution-closure'
     r['prebuilt_unchanged'] = verify_prebuilt(closure, ROOT / 'build')
     # Coverage is emitted only by a successful previous harness step. Never
