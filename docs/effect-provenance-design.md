@@ -1,6 +1,6 @@
 # 效果来源：按观察作用域保留逻辑调用
 
-> 状态：**W3-R 刀 R1（最小移植）进行中**（2026-11-14 重开）。W1 提供语法与静态身份，W2 提供普通观察及双后端逻辑调用 ABI；W3 补齐控制续延、尾边与有界日志。旧 W3 资格封存；本分支把该实现按当前 main 重做，手写 tile marks 与其全部消费者原样保留。P1 完成与否由后续 R3 资格裁定，P2 才删 marks。
+> 状态：**W3-R 刀 R1 已合并，刀 R2（通用消费适配）进行中**（2026-11-14 重开）。W1 提供语法与静态身份，W2 提供普通观察及双后端逻辑调用 ABI；W3 补齐控制续延、尾边与有界日志。旧 W3 资格封存；本分支把该实现按当前 main 重做，手写 tile marks 与其全部消费者原样保留。P1 完成与否由后续 R3 资格裁定，P2 才删 marks。
 
 <!-- 为什么写这篇：设备字节相同不能证明源码归属相同。把客观调用来源交给编译器，
      把展示抽象留给观察器，才能退休散在库签名与用户 helper 中的第二套调用协议。 -->
@@ -572,3 +572,36 @@ tile 输入应不变，设备字节（256 对 tilebc/MLIR）逐字节不变。
 （或 U0/U1 配对测量达标），见 `docs/spec.md` 对应条款与裁定。后续刀序：R2 消费适配、
 R3 按协议资格、R4 删 marks、R5 删后复测。不做的：本刀不改 run.sh、不接 Playground、
 不删任何 mark、不放宽 method-size 时限。
+
+## 附：W3-R 刀 R2，快照到调用的消费适配
+
+手写标记全部保留。R2 在它们旁边加一条独立的、来自编译器声明身份的视图，并让消费者
+用这条视图的关系取代文本扫描与名单。
+
+- **适配器。** [`packages/tileir/src/origin.dawn`](../packages/tileir/src/origin.dawn) 把一次观察的
+  冻结快照（`rows_of`）投影为作者写下的调用（`project`），或只给出被调用者的声明身份
+  （`callees`）。身份只用编译器记录的事实：调用点所在的模块与声明、声明内相对 span、
+  被调用者的定义 span、每次执行各自的实例号。同一 helper 的两次调用是两个节点、两个
+  父节点；helper 自己的调用落在它的**定义**里，不在调用它的那次调用的 span 里，
+  这条关系对任何带定义 span 的函数成立，没有函数名单。
+- **拒绝而不修补。** 缺源码单元、缺记录的源码版本、版本不符、声明长度不符、span 不是
+  语法节点、声明不在源码里、未知边界、截断、缺父节点或父节点不在前、行无身份，都返回
+  `Err`。`scripts/tile-origin-shadow/mutants.py` 逐条删去这些拒绝，要求包自己的测试变红。
+- **影子比较。** [`scripts/tile-origin-shadow`](../scripts/tile-origin-shadow/shadow.py) 用文本插桩把全部
+  256 例 golden 与 Playground 的 flash_attn 样例各在观察下录制一次，旧 `Call` 行的每一行必须在新
+  视图里按（名字、调用点）找到，并且父节点关系一致；新视图可以更多。差异按类别列出：
+  tileir 自己的函数（无标记）、helper 内的调用、运算符与字面量、默认实参调用、宿主调用、
+  helper 自己执行的 `perform`、staged `for`/`if` 的主体，以及 staged 主体**试探执行**留下的重复
+  节点（录制器的 trial 尚未用 checkpoint/rewind 回滚，R4 才会消失）。区域行在旧视图里挂在构造
+  `d_range` 的位置，在新视图里挂在运行主体的 `for` 语句上，这正是 R4 要把 `DRange` 改到使用
+  位置的原因。操作范围（ops/globals 区间）仍由旧标记给出：快照里每个 effect 操作是一条 handler
+  记录，但录制器的每个臂没有携带自己的 operation origin，逐操作归属要等 R4。
+- **消费者。** `site/gpu-map/record.py` 的名单（`called(` 正则、`fa_exp`/`fa_divide`）改为录制出的
+  名字与 helper 声明身份，并与解析树核对定义长度；`.map` 增加 `source <摘要>` 行与 `def=` 定义范围，
+  `packages/xmap` 的 `table_from_tile` 与 `site/src/gen/gpumap.dawn` 的 `check` 改为按定义范围判断
+  helper 子调用，缺摘要或摘要不符、定义落在源码外都拒绝；Playground 的 `tilemap.dawn` 不再读
+  `dev.dawn` 文本，探针打印被调用者身份，名字与 helper 来自录制，helper 的定义长度与解析树核对。
+- **outline 的二次增长。** 观察模式下平铺长块逐层把余下部分作为 region 时，每层都重扫整个
+  余下部分的成本与自由变量。现在第一次切分一次算出每个后缀的事实（`outline.suffixes`），随
+  region 或递归调用传给下一层；12000 元素列表夹具的编译从约 147 s 降到约 7 s，24000 元素约 20 s。
+
