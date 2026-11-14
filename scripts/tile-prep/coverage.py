@@ -158,6 +158,17 @@ def union(args):
         receipts.append(json.loads(job['outputs']['receipt']))
     validate(receipts, contract(args.plan), selections(args.plan, args.total))
     args.out.mkdir(parents=True, exist_ok=True)
+    # Preserve the original matrix and harness-set checker. The records come
+    # from the already verified successful receipts, without another transfer.
+    coverage = args.out / 'coverage'
+    coverage.mkdir()
+    for r in receipts:
+        (coverage / f"tile-golden-{r['index']}-of-{r['total']}.coverage").write_text(
+            'harness=tile-golden\n' + f"shard={r['index']}/{r['total']}\n" +
+            ''.join(f'ran={name}\n' for name in r['ran']))
+    sp.run(['python3', '-B', str(ROOT / 'scripts/mutant-coverage/check.py'),
+            '--coverage-dir', str(coverage), '--only-harness', 'tile-golden'],
+           cwd=ROOT, check=True)
     (args.out / 'receipts.json').write_text(json.dumps(receipts, indent=2) + '\n')
     costs = {n: t for r in receipts for n, t in r['times'].items()}
     (args.out / 'ITEM_TIMES.txt').write_text(''.join(f'{n} {costs[n]:.2f}\n' for n in lines(ROOT / 'scripts/tile-golden/matrix.txt')))
