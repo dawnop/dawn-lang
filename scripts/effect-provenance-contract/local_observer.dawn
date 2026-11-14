@@ -1,0 +1,27 @@
+# The first control activation starts Plain, then its remainder creates an
+# observer. A later resumption must restore that new observer and its cursor.
+use std/io.{println}
+use std/provenance as p
+use std/provenance.{TraceSnapshot, Complete}
+ctl effect Ask { fn ask() -> Int }
+type Stage = Ready(value: Int, snapshot: TraceSnapshot) | Paused(k: fn(Int) -> Stage !io)
+fn scenario() -> Stage !io = {
+  with handle Ask { ask() resume k => Paused(k) }
+  let (value, snapshot) = p.observe(scope => {
+    let value = ask()
+    (value, p.completed(scope))
+  })
+  Ready(value, snapshot)
+}
+pub fn main() -> Unit !io = match scenario() {
+  Paused(k) -> match k(42) {
+    Ready(value, snapshot) -> {
+      if value != 42 || p.snapshot_info(snapshot).records != 3 { panic("restored activation records") }
+      if p.snapshot_info(snapshot).completeness != Complete { panic("restored activation completeness") }
+      println("42 Plain activation restores its later observer")
+      println(p.render_snapshot(snapshot))
+    }
+    _ -> panic("unexpected second suspension")
+  }
+  _ -> panic("missing suspension")
+}

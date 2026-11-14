@@ -8487,9 +8487,6 @@ fn check_handle(
 ) -> (Cx, Ty, TExpr) !io = {
   var cx1 = cx
   for arm in arms {
-    if arm.binder != None && len(cx1.frame.observation_scopes) > 0 {
-      cx1 = cerr(cx1, "control arms under observation are not supported in W2", arm.lo, arm.hi)
-    }
     match arm.origin {
       Some(o) -> if len(cx1.frame.observation_scopes) == 0 {
         cx1 = cerr_h(cx1, "origin requires a lexical observation scope", o.lo, o.hi,
@@ -8944,8 +8941,15 @@ fn check_control_arm(
   }
   let k_ty = ty_fn([fret], answer, cont_row(reff), capture.empty_function())
   let kp = LambdaParam { name = kname, ann = None, lo = a.bhi - len(kname), hi = a.bhi }
-  let (cxb, at, ax) = check_lambda(cx1, origin_params(a) ++ [kp], a.body, true, true, true,
-    Some(hid), None, Some(ty_fn(origin_types(a, fptys) ++ [k_ty], answer, EPure, capture.empty_function())), a.lo, a.hi, [])
+  let authority: Option[Int] = if a.origin != None && len(cx1.frame.observation_scopes) > 0 {
+    Some(cx1.frame.observation_scopes[len(cx1.frame.observation_scopes) - 1])
+  } else { None }
+  cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, origin_scope = authority } }
+  # The origin initializer is erased from the ABI by check_lambda. Keep it
+  # last, after the real continuation parameter that the runtime supplies.
+  let params = a.params ++ [kp] ++ list.drop(origin_params(a), len(a.params))
+  let (cxb, at, ax) = check_lambda(cx1, params, a.body, true, true, true,
+    Some(hid), None, Some(ty_fn(origin_types(a, fptys ++ [k_ty]), answer, EPure, capture.empty_function())), a.lo, a.hi, [])
   cx1 = cxb
   let (_, aret, aeff) = fn_ty_parts(at)
   if not assignable(cx1, aret, answer) {
@@ -11284,11 +11288,6 @@ fn check_call(
   cx1 = used_signature(cx1, original)
   if observation.entry(s) { cx1 = Cx { ..cx1, observation_used = true } }
   if observation.entry(s) && not cx1.is_std_module {
-    let literal = len(args) == 1 && match args[0] { ELambda(_, _, _, _, _, _) -> true, _ -> false }
-    if not literal {
-      cx1 = cerr_h(cx1, "observe requires a literal callback", lo, hi,
-        "the lexical TraceScope must be established at this call")
-    }
     if cx1.frame.isolated {
       cx1 = cerr(cx1, "observation is not supported by the interpreter or at compile time", lo, hi)
     }
@@ -12038,6 +12037,13 @@ fn infer_call_arg(
   let saved_read = cx1.frame.trace_read
   let saved_entry = cx1.frame.observation_entry
   let literal_entry = observation.entry(s) && pidx[i] == 0
+  if literal_entry && not cx1.is_std_module {
+    let literal = match a { ELambda(_, _, _, _, _, _) -> true, _ -> false }
+    if not literal {
+      cx1 = cerr_h(cx1, "observe requires a literal callback", e_lo(a), e_hi(a),
+        "the lexical TraceScope must be established at this call")
+    }
+  }
   let read = observation.action(s) && pidx[i] == 0
   if saved_read != read || saved_entry != literal_entry {
     cx1 = Cx { ..cx1, frame = Frame { ..cx1.frame, trace_read = read, observation_entry = literal_entry } }
@@ -17349,9 +17355,10 @@ pub(pkg) fn assemble_module_bodies(products: ModuleBodies) -> (Cx, TModule) = {
             # the parameter default's own path under its parent's, the key
             # `identity.located` gives the default expression
             decl = tf.decl ++ identity.path_text([identity.Named(identity.ParameterDefault, tf.sig.param_names[k])]),
-            # its body was resolved with the parent's resolver
-            # (`tast_positions.function`), so it is measured from the parent too
-            base = tf.base
+            # Its resolved body uses file coordinates. The default owns
+            # a separate declaration path, so provenance coordinates must
+            # start at that expression rather than at the parent function.
+            base = x_lo(dd.body)
           }]
           cx1 = write_signature(cx1, ds.name, ds)
         }

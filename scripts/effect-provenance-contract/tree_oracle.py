@@ -179,10 +179,10 @@ def judge(output, source, module):
     else:
         raise AssertionError('unknown handwritten tree')
     lines = recording.rstrip('\n').splitlines()
-    assert lines[0] == 'S\t1\t1', ('scope prefix', lines[0])
+    assert lines[0] == 'S1\t1\t1\t0', ('scope prefix', lines[0])
     frames = [line.split('\t') for line in lines[1:]]
     assert len(frames) == len(tree)+1, ('call count', len(frames), len(tree)+1)
-    assert frames[0] == ['F', '1', '1', '1', '0', '0', '0', '', ''], 'root'
+    assert frames[0] == ['F', '1', '1', '1', '0', '0', '0', '', '', '0'], 'root'
     observer_base = source.index('provenance.observe')
     observer_end = source.index('\n  })', observer_base)+len('\n  })')
     for instance, (actual, expected) in enumerate(zip(frames[1:], tree), 2):
@@ -210,13 +210,13 @@ def judge(output, source, module):
             db, de = extent(source, decl)
             definition = [module, decl.key, '0', str(de-db), 'function']
         assert actual[15:20] == definition, ('definition', instance, definition, actual[15:20])
-        assert len(actual) == 21 and int(actual[20]) > 0, ('definition ID', instance, actual)
+        assert len(actual) == 22 and int(actual[20]) > 0, ('definition ID', instance, actual)
 
 
 # The Origin is captured at perform before the pure inspection calls run.
 # Its parent chain has five frames even though the completion log has seven.
-API_PARENTS = [0, 1, 2, 3, 4, 5, 6]
-API_DEFINITIONS = ['', 'Nf4:main', 'Nf4:main', 'Nf6:helper', 'Nf4:main', 'Nf8:describe', 'Nf9:operation']
+API_PARENTS = [0, 1, 2, 3, 4, 5, 6, 7]
+API_DEFINITIONS = ['', 'Nf4:main', 'Nf4:main', 'Nf6:helper', 'Nf4:main', 'Nf8:describe', 'Nf9:operation', 'Nf10:origin_rep']
 
 
 def judge_api(output, source):
@@ -225,11 +225,11 @@ def judge_api(output, source):
     assert operation == 'origin_api:Ne4:ReadNo3:ask', ('operation identity', operation)
     assert location == '("origin_api", "origin_api", "Nf6:helper", "perform", true)', ('static Site', location)
     assert definition == '("origin_api", "Nf6:helper", "function")', ('parent definition', definition)
-    assert recording[0] == 'S\t1\t1'
+    assert recording[0] == 'S1\t1\t1\t0'
     frames = [line.split('\t') for line in recording[1:]]
-    assert len(frames) == 7, ('zero-result pure inspection calls', len(frames))
+    assert len(frames) == 8, ('zero-result pure inspection calls', len(frames))
     assert [int(f[4]) for f in frames] == API_PARENTS
-    assert [int(f[5]) for f in frames] == [0, 0, 0, 1, 1, 1, 1]
+    assert [int(f[5]) for f in frames] == [0, 0, 0, 1, 1, 1, 1, 1]
     assert [f[16] if len(f) > 16 else '' for f in frames] == API_DEFINITIONS
     # The last ordinary pure call crosses into std; the private byte reader
     # is a named intrinsic and must not manufacture another logical frame.

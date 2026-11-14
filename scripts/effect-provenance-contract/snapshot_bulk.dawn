@@ -1,0 +1,70 @@
+# Bulk scalars and row values must describe the same frozen facts. The
+# returned view owns its snapshot after scope exit, rewind and later reads.
+use std/io
+use std/provenance as p
+use std/provenance.{TraceSnapshot, RecordView, IndexSlot, Active, Returned}
+fn require(ok: Bool) -> Unit = if not ok { panic("bulk snapshot contract failed") }
+fn index(slot: IndexSlot) -> Option[Int] =
+  if p.index_present(slot) { Some(p.index_value(slot)) } else { None }
+fn check(snapshot: TraceSnapshot) -> RecordView = {
+  let view = p.records(snapshot)
+  let info = p.snapshot_info(snapshot)
+  require(p.record_count(view) == info.records && p.record_scope(view) == info.scope)
+  require(not p.record_exists(view, -1) && not p.record_exists(view, info.records))
+  for row in range(0, info.records) {
+    require(p.record_exists(view, row))
+    let record = p.record_at(snapshot, row).expect("missing row")
+    require(p.record_epoch(view, row) == record.key.epoch)
+    require(p.record_instance(view, row) == record.key.instance)
+    require(p.record_scope(view) == record.key.scope)
+    require(index(p.record_parent(view, row)) == record.parent)
+    require(index(p.record_site(view, row)) == record.site)
+    require(index(p.record_definition(view, row)) == record.definition)
+    require(p.record_state(view, row) == record.state)
+    require(p.record_boundary(view, row) == record.boundary)
+  }
+  view
+}
+fn isolated() -> RecordView !io = {
+  let frozen = p.observe(scope => p.completed(scope))
+  check(frozen)
+}
+fn helper(n: Int) -> Int = n + 1
+pub fn main() -> Unit !io = {
+  let (value, tentative, committed, nested) = p.observe(scope => {
+    let mark = p.checkpoint(scope)
+    let _trial = helper(3)
+    let trial = p.completed(scope)
+    p.rewind(scope, mark)
+    let value = helper(41)
+    let formal = p.completed(scope)
+    let nested = p.observe(inner => p.completed(inner))
+    (value, trial, formal, nested)
+  })
+  require(value == 42)
+  let old = check(tentative)
+  let current = check(committed)
+  let inner = check(nested)
+  require(p.record_count(old) == 3 && p.record_count(current) == 3 && p.record_count(inner) == 2)
+  require(p.record_instance(old, 2) == 3 && p.record_epoch(old, 2) == 1)
+  require(p.record_instance(current, 2) == 4 && p.record_epoch(current, 2) == 2)
+  require(p.record_state(current, 0) == Active && p.record_state(current, 2) == Returned)
+  require(p.record_scope(current) != p.record_scope(inner))
+  let retained = isolated()
+  require(p.record_count(retained) == 2 && p.record_state(retained, 0) == Active)
+  require(p.record_instance(retained, 1) == 2 && p.record_scope(retained) != p.record_scope(current))
+  if len(args()) > 0 {
+    io.println("42 public bulk rejection")
+    let value = match args()[0] {
+      "low" -> p.record_epoch(current, -1)
+      "high" -> p.record_instance(current, p.record_count(current))
+      "missing" -> p.index_value(p.record_parent(current, 0))
+      _ -> panic("unknown bulk control")
+    }
+    io.println("${value}")
+  }
+  io.println("42 bulk scalars equal immutable rows across rollback and scopes")
+  io.println(p.render_snapshot(tentative))
+  io.println("@@committed")
+  io.println(p.render_snapshot(committed))
+}

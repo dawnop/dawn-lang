@@ -1,0 +1,46 @@
+# Default expressions own child declaration coordinates. Internal list
+# construction has a known definition but no invented written call site.
+use std/io
+use std/provenance as p
+fn optional(a: Option[Int] = None) -> Int = match a { None -> 42, Some(value) -> value }
+fn seven() -> Int = 7
+fn default_call(n: Int = seven()) -> Int = n
+fn require(ok: Bool) -> Unit = if not ok { panic("default source coordinates failed") }
+pub fn main() -> Unit !io = {
+  let (value, frozen) = p.observe(scope => {
+    let a = optional()
+    let b = default_call()
+    let values = [-1]
+    (a + b + len(values), p.completed(scope))
+  })
+  require(value == 50)
+  let table = p.static_table(frozen)
+  var defaults = 0
+  var implicit = 0
+  for i in range(0, p.snapshot_info(frozen).records) {
+    let row = p.record_at(frozen, i).expect("missing record")
+    match row.definition {
+      None -> ()
+      Some(index) -> {
+        let definition = p.definition_at(table, index).expect("missing definition")
+        if definition.module == "snapshot_defaults" {
+          if definition.declaration == "Nf8:optionalNd1:a" {
+            require(definition.start == 0 && definition.end == 4)
+            defaults = defaults + 1
+          }
+          if definition.declaration == "Nf12:default_callNd1:n" {
+            require(definition.start == 0 && definition.end == 7)
+            defaults = defaults + 1
+          }
+        }
+        if definition.module == "std/pvec" && definition.declaration == "Nf10:from_array" {
+          require(row.site == None)
+          implicit = implicit + 1
+        }
+      }
+    }
+  }
+  require(defaults == 2 && implicit == 1)
+  io.println("50 independent default coordinates and implicit call identity")
+  io.println(p.render_snapshot(frozen))
+}

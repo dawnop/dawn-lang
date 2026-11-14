@@ -1,12 +1,12 @@
 # Mode reachability consumes pristine calls first. Only the Plain branch may
-# replace self calls with parameter assignment and a loop; Observed retains
-# the call and its source identity for the W2 refusal and future tail edges.
+# replace self calls with parameter assignment and a loop. Observed records
+# each logical tail edge before the same physical loop transition.
 use ir/core.{CFun, CModule, CExpr, CStmt, CSite, CLocal, CCall,
   CDirect, CDynamic, CClosure, CIf, CBlock, CReturn, CContinue,
-  CSLet, CSAssign, CSLoop, fn_key }
+  CSLet, CSAssign, CSLoop, CSDiscard, CIntrinsic, fn_key }
 use ir/lower.{LMod, emitted_core}
 use ir/walk
-use check/types.{TyNever}
+use check/types.{TyNever, TyUnit}
 use std/map
 use std/list
 use std/str
@@ -29,8 +29,8 @@ fn tail_branch(f: CFun, e: CExpr) -> List[CSite] = match e {
   _ -> []
 }
 
-## Logical tail edges are refused only when executed in W2. The base case
-## remains an ordinary call, and explicit returns retain their tail position.
+## Tail sites follow the existing self-tail guarantee. Mutual calls remain
+## ordinary calls on both entries, retaining each callee and parent edge.
 pub fn tail_sites(f: CFun) -> List[CSite] = {
   let sites = walk.fold_expr(f.body, tail_branch(f, f.body), (acc, e) => match e {
     CReturn(Some(value)) -> acc ++ tail_branch(f, value)
@@ -39,16 +39,17 @@ pub fn tail_sites(f: CFun) -> List[CSite] = {
   list.fold(sites, [], (acc, site) => if list.contains(acc, site) { acc } else { acc ++ [site] })
 }
 
-fn rewrite(f: CFun, banks: Map[CSite, Int], loop_id: Int, e: CExpr, tail: Bool) -> CExpr = {
+fn rewrite(f: CFun, banks: Map[CSite, Int], loop_id: Int, e: CExpr, tail: Bool, observed: Bool = false) -> CExpr = {
   match e {
     CCall(_, args, _, site) -> if tail && self_call(f, e) {
       let first = map.get(banks, site).expect("tail call temporary bank")
       var statements: List[CStmt] = []
       var i = 0
       for p in f.params {
-        statements = statements ++ [CSLet(first + i, p.ty, rewrite(f, banks, loop_id, args[i], false))]
+        statements = statements ++ [CSLet(first + i, p.ty, rewrite(f, banks, loop_id, args[i], false, observed))]
         i = i + 1
       }
+      if observed { statements = statements ++ [CSDiscard(CIntrinsic("provenance_tail", [], TyUnit, site))] }
       i = 0
       for p in f.params {
         statements = statements ++ [CSAssign(p.sym, CLocal(first + i, p.ty))]
@@ -56,19 +57,19 @@ fn rewrite(f: CFun, banks: Map[CSite, Int], loop_id: Int, e: CExpr, tail: Bool) 
       }
       return CBlock(statements, Some(CContinue(loop_id)), TyNever)
     }
-    CReturn(Some(value)) -> return CReturn(Some(rewrite(f, banks, loop_id, value, true)))
-    CIf(condition, yes, no, ty) -> return CIf(rewrite(f, banks, loop_id, condition, false),
-      rewrite(f, banks, loop_id, yes, tail),
-      walk.map_opt(no, x => rewrite(f, banks, loop_id, x, tail)), ty)
+    CReturn(Some(value)) -> return CReturn(Some(rewrite(f, banks, loop_id, value, true, observed)))
+    CIf(condition, yes, no, ty) -> return CIf(rewrite(f, banks, loop_id, condition, false, observed),
+      rewrite(f, banks, loop_id, yes, tail, observed),
+      walk.map_opt(no, x => rewrite(f, banks, loop_id, x, tail, observed)), ty)
     CBlock(statements, result, ty) -> return CBlock(
-      list.map(statements, s => walk.map_stmt(s, x => rewrite(f, banks, loop_id, x, false))),
-      walk.map_opt(result, x => rewrite(f, banks, loop_id, x, tail)), ty)
+      list.map(statements, s => walk.map_stmt(s, x => rewrite(f, banks, loop_id, x, false, observed))),
+      walk.map_opt(result, x => rewrite(f, banks, loop_id, x, tail, observed)), ty)
     _ -> ()
   }
-  walk.map_kids(e, x => rewrite(f, banks, loop_id, x, false))
+  walk.map_kids(e, x => rewrite(f, banks, loop_id, x, false, observed))
 }
 
-fn plain_fn(f: CFun, first: Int) -> (CFun, Int) = {
+fn plain_fn(f: CFun, first: Int, observed: Bool = false) -> (CFun, Int) = {
   if not str.ends_with(f.definition.role, "-tail") { return (f, first) }
   let empty: List[CSite] = []
   let sites = walk.fold_expr(f.body, empty, (acc, e) => {
@@ -86,7 +87,7 @@ fn plain_fn(f: CFun, first: Int) -> (CFun, Int) = {
     next = next + len(f.params) }
   let loop_id = walk.fold_expr(f.body, -1, (acc, _expression) => acc,
     (acc, s) => match s { CSLoop(id, _, _) -> if id > acc { id } else { acc }, _ -> acc }) + 1
-  let body = rewrite(f, banks, loop_id, f.body, true)
+  let body = rewrite(f, banks, loop_id, f.body, true, observed)
   (CFun { ..f, body = CBlock([CSLoop(loop_id, CReturn(Some(body)), None)], None, f.ret) }, next)
 }
 
@@ -97,7 +98,8 @@ pub fn plain(lm: LMod) -> LMod = {
   var transformed: Map[String, CFun] = map.empty()
   var next = lm.next_sym
   for f in emitted_core(lm).fns {
-    logical = map.insert(logical, fn_key(f), f)
+    let (observed_body, _) = plain_fn(f, next, true)
+    logical = map.insert(logical, fn_key(f), observed_body)
     let (body, after) = plain_fn(f, next)
     transformed = map.insert(transformed, fn_key(f), body)
     next = after
@@ -119,6 +121,20 @@ pub fn plain_module(m: CModule) -> CModule = {
   var next = m.next_sym
   for f in m.fns {
     let (body, after) = plain_fn(f, next)
+    fns = fns ++ [body]
+    next = after
+  }
+  CModule { ..m, fns = fns, next_sym = next }
+}
+
+## Observed keeps each logical tail edge before replacing the physical call.
+## This runs before native ownership analysis so loop assignments retain the
+## same simultaneous evaluation and release discipline as Plain.
+pub fn observed_module(m: CModule) -> CModule = {
+  var fns: List[CFun] = []
+  var next = m.next_sym
+  for f in m.fns {
+    let (body, after) = plain_fn(f, next, true)
     fns = fns ++ [body]
     next = after
   }

@@ -1000,12 +1000,14 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
       let (st2, value) = observed_value(st1, v, ty, s, "")
       (note_call(st2, len(st.out), callee, s, value), value)
     }
-    CExtern(sym, args, _, _, site) -> {
-      let st = if st.observed_mode { line(st, "dawn_prov_unsupported(\"external ABI boundary\");") } else { st }
+    CExtern(sym, args, _, ty, site) -> {
       let borrowed = list.map(args, _a => false)
       let (st1, cargs) = emit_ordered(st, args, borrowed)
       let v = "DAWN_EXTERN(" ++ sym ++ ")(" ++ join(cargs, ", ") ++ ")"
-      (if st.mapping { noted(st1, len(st.out), "extern c " ++ sym, site, v) } else { st1 }, v)
+      let (opened, guard) = if st.observed_mode { prov_open(st1, site, "") } else { (st1, "") }
+      let marked = if st.observed_mode { line(opened, "dawn_prov_unknown_ctx(dawn_prov_ctx);") } else { opened }
+      let (closed, value) = if st.observed_mode { prov_value(marked, v, ty, guard) } else { (marked, v) }
+      (if st.mapping { noted(closed, len(st.out), "extern c " ++ sym, site, value) } else { closed }, value)
     }
     CIntrinsic(name, args, ty, s) -> {
       let (st1, v) = if str.starts_with(name, "provenance_") {
@@ -2112,11 +2114,6 @@ pub(pkg) fn extern_c_type(t: Ty) -> String = match t {
 }
 
 fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
-  if st.observed_mode && (str.starts_with(name, "ctl_") || name == "discard") {
-    let checked = line(st, "dawn_prov_unsupported(\"control operations\");")
-    let (next, value) = emit_intrinsic(CSt { ..checked, observation = false, observed_mode = false }, name, args, ty)
-    return (CSt { ..next, observation = st.observation, observed_mode = st.observed_mode }, value)
-  }
   # an intrinsic borrows its arguments except at the owned positions the
   # reuse analysis lists -- the same classification chk_walk reads
   let owned = intr_owned_args(name)
@@ -2718,7 +2715,8 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     }
   var head: List[String] = [entry_attribute(st, f, false) ++ fn_signature_def(f, shadowed, st.observed_mode) ++ " {\n"]
   if observed {
-    head = head ++ [pad(1) ++ "DAWN_CLEANUP(dawn_prov_function_cleanup) dawn_prov_function_guard dawn_prov_callback = dawn_prov_enter_function(\"" ++ c_escape(frame_definition.expect("provenance frame definition")) ++ "\");\n"]
+    head = head ++ [pad(1) ++ "dawn_prov_thread_state *dawn_prov_ctx = dawn_prov_context();\n"]
+    head = head ++ [pad(1) ++ "DAWN_CLEANUP(dawn_prov_function_cleanup) dawn_prov_function_guard dawn_prov_callback = dawn_prov_enter_function_ctx(dawn_prov_ctx, dawn_prov_definition_${provenance.definition_slot_id(frame_definition.expect("provenance frame definition"))}, \"" ++ c_escape(frame_definition.expect("provenance frame definition")) ++ "\");\n"]
     for i in 0..st3.prov_guards {
       head = head ++ [pad(1) ++ "dawn_prov_guard dawn_prov_g${i} = {0};\n"]
     }
@@ -2930,6 +2928,84 @@ fn out_bytes(lines: List[String]) -> Int = {
 ## program's own `main`, and `dawn test` on this backend appends a generated
 ## runner instead. Either lands in the last unit, and needs nothing from the
 ## others that the head does not declare.
+
+## Keep optional static metadata emission out of the module driver so the
+## compiler stays within the existing JVM method size limit.
+fn provenance_string_ref(strings: Map[String, Int], value: String) -> String =
+  "&dawn_prov_string_${map.get(strings, value).expect("static provenance string") }"
+
+fn emit_provenance_fields(initial: CSt, ordered: List[(Int, String)], definitions: List[String]) -> CSt = {
+  var strings: Map[String, Int] = map.empty()
+  for item in ordered { let (id, metadata) = item
+    let site = provenance.static_site(id, metadata)
+    for value in [site.owner, site.declaration, site.role, site.operation] {
+      if not map.has(strings, value) { strings = map.insert(strings, value, len(strings)) }
+    }
+  }
+  for metadata in definitions {
+    let d = provenance.static_definition(metadata)
+    for value in [d.owner, d.declaration, d.role] {
+      if not map.has(strings, value) { strings = map.insert(strings, value, len(strings)) }
+    }
+  }
+  var st = initial
+  for entry in map.entries(strings) { let (value, index) = entry
+    st = line(st, str_static_def("dawn_prov_string_${index}", value))
+  }
+  st = line(st, "const dawn_prov_site_fields dawn_prov_static_sites[] = {")
+  for item in ordered { let (id, metadata) = item
+    let x = provenance.static_site(id, metadata)
+    let fields = [to_string(id), to_string(x.start), to_string(x.end), to_string(x.name_start), to_string(x.name_end),
+      provenance_string_ref(strings, x.owner), provenance_string_ref(strings, x.declaration),
+      provenance_string_ref(strings, x.role), provenance_string_ref(strings, x.operation)]
+    st = line(st, "  {" ++ join(fields, ", ") ++ "},")
+  }
+  if len(ordered) == 0 { st = line(st, "  {0},") }
+  st = line(st, "};")
+  st = line(st, "const dawn_prov_definition_fields dawn_prov_static_definitions[] = {")
+  for metadata in definitions {
+    let x = provenance.static_definition(metadata)
+    let fields = [to_string(x.id), to_string(x.start), to_string(x.end),
+      provenance_string_ref(strings, x.owner), provenance_string_ref(strings, x.declaration), provenance_string_ref(strings, x.role)]
+    st = line(st, "  {" ++ join(fields, ", ") ++ "},")
+  }
+  if len(definitions) == 0 { st = line(st, "  {0},") }
+  line(st, "};")
+}
+
+fn emit_provenance_tables(initial: CSt, site_table: Map[Int, String], definitions: List[String]) -> CSt = {
+  var st = initial
+  st = line(st, "const dawn_prov_site dawn_prov_sites[] = {")
+  for item in map.entries(site_table) {
+    let (id, metadata) = item
+    st = line(st, "  {${id}, \"" ++ c_escape(metadata) ++ "\"},")
+  }
+  if len(site_table) == 0 { st = line(st, "  {0, NULL},") }
+  st = line(st, "};")
+  st = line(st, "const size_t dawn_prov_sites_n = ${len(site_table)};")
+  st = line(st, "const char *const dawn_prov_definitions[] = {")
+  for d in definitions { st = line(st, "  \"" ++ c_escape(d) ++ "\",") }
+  if len(definitions) == 0 { st = line(st, "  \"\",") }
+  st = line(st, "};")
+  st = line(st, "const size_t dawn_prov_definitions_n = ${len(definitions)};")
+  var slot = 0
+  let ordered = sort_by(map.entries(site_table), (a, b) => { let (x, _a) = a
+    let (y, _b) = b
+    if x < y { -1 } else if x > y { 1 } else { 0 } })
+  st = emit_provenance_fields(st, ordered, definitions)
+  for entry in ordered { let (id, _metadata) = entry
+    st = line(st, "enum { dawn_prov_site_${id} = ${slot} };")
+    slot = slot + 1
+  }
+  slot = 0
+  for d in definitions {
+    st = line(st, "enum { dawn_prov_definition_${provenance.definition_slot_id(d)} = ${slot} };")
+    slot = slot + 1
+  }
+
+  st
+}
+
 fn emit_units(
   units: List[EmitMod],
   qset: Set[String],
@@ -3015,14 +3091,7 @@ fn emit_units(
     [rtsrc.source("dawn_provenance.c").expect("provenance runtime") ++ "\n"]
   } else { [] }
   if st.observation {
-    st = line(st, "const dawn_prov_site dawn_prov_sites[] = {")
-    for item in map.entries(site_table) {
-      let (id, metadata) = item
-      st = line(st, "  {${id}, \"" ++ c_escape(metadata) ++ "\"},")
-    }
-    if len(site_table) == 0 { st = line(st, "  {0, NULL},") }
-    st = line(st, "};")
-    st = line(st, "const size_t dawn_prov_sites_n = ${len(site_table)};")
+    st = emit_provenance_tables(st, site_table, provenance.static_definitions(site_modules, live))
   }
   let tables = st.out
   st = CSt { ..st, out = [] }
@@ -3771,10 +3840,10 @@ fn prov_open(st: CSt, site: CSite, intrinsic: String) -> (CSt, String) = {
   let guard = "dawn_prov_g${st.prov_guards}"
   let callback = provenance.metadata(st.cur_owner, st.declaration, provenance.callback_site(site))
   var next = line(CSt { ..st, prov_guards = st.prov_guards + 1 },
-    guard ++ ".token = DAWN_PROV_BEFORE(${provenance.site_id(metadata)}, " ++ static_metadata(st, metadata) ++
-      ", ${provenance.site_id(callback)}, " ++ static_metadata(st, callback) ++ ");")
+    guard ++ ".token = DAWN_PROV_BEFORE(dawn_prov_site_${provenance.site_id(metadata)}, " ++ static_metadata(st, metadata) ++
+      ", dawn_prov_site_${provenance.site_id(callback)}, " ++ static_metadata(st, callback) ++ ");")
   if intrinsic != "" {
-    next = line(next, "if (" ++ guard ++ ".token) dawn_prov_arrive(\"" ++ c_escape(provenance.intrinsic_definition(intrinsic)) ++ "\");")
+    next = line(next, "if (" ++ guard ++ ".token) dawn_prov_arrive_ctx(dawn_prov_ctx, dawn_prov_definition_${provenance.definition_slot_id(provenance.intrinsic_definition(intrinsic))}, \"" ++ c_escape(provenance.intrinsic_definition(intrinsic)) ++ "\");")
   }
   (next, guard)
 }
@@ -3782,16 +3851,13 @@ fn prov_open(st: CSt, site: CSite, intrinsic: String) -> (CSt, String) = {
 fn prov_value(st: CSt, value: String, ty: Ty, guard: String) -> (CSt, String) = {
   let (named, temp) = fresh(st)
   var next = line(named, c_type(ty) ++ " " ++ temp ++ " = " ++ value ++ ";")
-  next = line(next, "if (" ++ guard ++ ".token) { dawn_prov_finish(" ++ guard ++ ".token, 1); " ++ guard ++ ".token = 0; }")
+  next = line(next, "if (" ++ guard ++ ".token) { dawn_prov_finish_ctx(dawn_prov_ctx, " ++ guard ++ ".token, 1); " ++ guard ++ ".token = 0; }")
   (next, temp)
 }
 
 fn observed_value(st: CSt, value: String, ty: Ty, site: CSite, intrinsic: String) -> (CSt, String) = {
-  if not st.observation { return (st, value) }
-  let checked = if list.contains(st.prov_tail, site) {
-    line(st, "dawn_prov_unsupported(\"tail calls\");")
-  } else { st }
-  let (next, guard) = prov_open(checked, site, intrinsic)
+  if not st.observation || site == CNoSite { return (st, value) }
+  let (next, guard) = prov_open(st, site, intrinsic)
   prov_value(next, value, ty, guard)
 }
 
@@ -3814,7 +3880,7 @@ fn emit_intrinsic_protocol(st: CSt, name: String, args: List[CExpr], ty: Ty, sit
     let (index, arity) = callback
     let slot = next.nslots + 1
     next = line(CSt { ..next, nslots = slot }, slot_lv(slot) ++ " = dawn_prov_wrap((dawn_clo*)(" ++ cargs[index] ++ "), ${arity}, " ++
-        (if site == CNoSite { "-1, NULL" } else { "${provenance.site_id(metadata)}, " ++ static_metadata(st, metadata) }) ++ ");")
+        (if site == CNoSite { "-1, NULL" } else { "dawn_prov_site_${provenance.site_id(metadata)}, " ++ static_metadata(st, metadata) }) ++ ");")
     proxies = proxies ++ [slot]
     cargs = list.take(cargs, index) ++ ["((dawn_clo*)" ++ slot_lv(slot) ++ ")"] ++ list.drop(cargs, index + 1)
   }
@@ -3836,15 +3902,23 @@ fn provenance_target(name: String) -> String = match name {
   "provenance_origin" -> "dawn_prov_origin"
   "provenance_field" -> "dawn_prov_field"
   "provenance_number" -> "dawn_prov_number"
-  "provenance_parent" -> "dawn_prov_parent"
+  "provenance_word" -> "dawn_prov_word"
+  "provenance_header" -> "dawn_prov_header"
+  "provenance_column" -> "dawn_prov_column"
+  "provenance_render_snapshot" -> "dawn_prov_render_snapshot"
+  "provenance_render_origin" -> "dawn_prov_render_origin"
   _ -> panic("emitc: unknown provenance primitive " ++ name)
 }
 
 fn emit_provenance(st: CSt, name: String, args: List[CExpr], ty: Ty, site: CSite) -> (CSt, String) = {
   let (next, values) = emit_ordered(st, args, all_flags(len(args), false))
+  if name == "provenance_tail" {
+    let metadata = provenance.metadata(st.cur_owner, st.declaration, site)
+    return (next, "(dawn_prov_tail_ctx(dawn_prov_ctx, dawn_prov_site_${provenance.site_id(metadata)}, " ++ static_metadata(st, metadata) ++ "), DAWN_UNIT)")
+  }
   if name == "provenance_observe" {
     let metadata = provenance.metadata(st.cur_owner, st.declaration, site)
-    return (next, provenance_target(name) ++ "(" ++ join(values, ", ") ++ ", ${provenance.site_id(metadata)}, " ++ static_metadata(st, metadata) ++ ")")
+    return (next, provenance_target(name) ++ "(" ++ join(values, ", ") ++ ", dawn_prov_site_${provenance.site_id(metadata)}, " ++ static_metadata(st, metadata) ++ ", dawn_prov_static_table())")
   }
   let call = provenance_target(name) ++ "(" ++ join(values, ", ") ++ ")"
   if peel_opaque(ty) == TyUnit { (line(next, call ++ ";"), "DAWN_UNIT") }

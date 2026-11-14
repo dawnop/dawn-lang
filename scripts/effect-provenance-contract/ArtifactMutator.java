@@ -12,6 +12,7 @@ public final class ArtifactMutator {
   private static long firstId, secondId;
   private static int handlerStart;
   private static String source;
+  private static final Set<Long> handlerIds=new HashSet<>(),handlerSlots=new HashSet<>();
   private ArtifactMutator() {}
   public static void main(String[] args) throws Exception {
     String mode = args[2];
@@ -25,8 +26,38 @@ public final class ArtifactMutator {
         entries.put(entry.getName(), jar.getInputStream(entry).readAllBytes());
       }
     }
+    if(mode.equals("handler")) {
+      for(Map.Entry<String,byte[]> entry:entries.entrySet()) {
+        if(!entry.getKey().equals("builder$provenance_sites.class")) continue;
+        new ClassReader(entry.getValue()).accept(new ClassVisitor(Opcodes.ASM9) {
+          public MethodVisitor visitMethod(int access,String name,String desc,String signature,String[] exceptions) {
+            return new MethodVisitor(Opcodes.ASM9) {
+              public void visitLdcInsn(Object value) {
+                if(value instanceof String && ((String)value).startsWith("builder\tNf6:helper\t") && ((String)value).contains("\tperform\t")) handlerIds.add(Long.parseLong(name.substring(5)));
+              }
+            };
+          }
+        },0);
+      }
+      for(Map.Entry<String,byte[]> entry:entries.entrySet()) {
+        if(!entry.getKey().startsWith("dawn/provenance/Indices$")) continue;
+        new ClassReader(entry.getValue()).accept(new ClassVisitor(Opcodes.ASM9) {
+          public MethodVisitor visitMethod(int access,String name,String desc,String signature,String[] exceptions) {
+            boolean target=name.startsWith("site$") && handlerIds.contains(Long.parseLong(name.substring(5)));
+            return new MethodVisitor(Opcodes.ASM9) {
+              public void visitLdcInsn(Object value) { if(target && value instanceof Long) handlerSlots.add((Long)value); }
+              public void visitInsn(int opcode) { if(target && (opcode==Opcodes.LCONST_0 || opcode==Opcodes.LCONST_1)) handlerSlots.add((long)(opcode-Opcodes.LCONST_0)); }
+            };
+          }
+        },0);
+      }
+      if(handlerSlots.isEmpty()) throw new AssertionError("missing typed perform slots");
+    }
     if (mode.equals("route") || mode.equals("devirtualized")) {
-      new ClassReader(entries.get("modes.class")).accept(new ClassVisitor(Opcodes.ASM9) {
+      for (Map.Entry<String, byte[]> candidate : entries.entrySet()) {
+      if (!candidate.getKey().equals("modes.class") &&
+          !candidate.getKey().startsWith("modes$observed$")) continue;
+      new ClassReader(candidate.getValue()).accept(new ClassVisitor(Opcodes.ASM9) {
         public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
           return new MethodVisitor(Opcodes.ASM9) {
             public void visitLdcInsn(Object value) {
@@ -38,6 +69,7 @@ public final class ArtifactMutator {
           };
         }
       }, 0);
+      }
       if (lifted == null) throw new AssertionError("missing independently selected factory lambda");
     }
     if (mode.equals("chain")) {
@@ -72,8 +104,23 @@ public final class ArtifactMutator {
             public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
               MethodVisitor delegate = super.visitMethod(access, name, descriptor, signature, exceptions);
               return new MethodVisitor(Opcodes.ASM9, delegate) {
-                private boolean query;
+                private boolean query,arrayIndexPending; private int frozenWrites,arrayIndex=-1;
+                public void visitVarInsn(int opcode,int variable) {
+                  if(opcode==Opcodes.ALOAD && variable==0 && entry.getKey().startsWith("dawn/provenance/StaticData$0$")) arrayIndexPending=true;
+                  super.visitVarInsn(opcode,variable);
+                }
+                public void visitIntInsn(int opcode,int value) {
+                  if(arrayIndexPending && (opcode==Opcodes.BIPUSH || opcode==Opcodes.SIPUSH)) { arrayIndex=value; arrayIndexPending=false; }
+                  super.visitIntInsn(opcode,value);
+                }
+                public void visitInsn(int opcode) {
+                  if(arrayIndexPending && opcode>=Opcodes.ICONST_M1 && opcode<=Opcodes.ICONST_5) { arrayIndex=opcode-Opcodes.ICONST_0; arrayIndexPending=false; }
+                  super.visitInsn(opcode);
+                }
                 public void visitMethodInsn(int opcode, String owner, String method, String desc, boolean itf) {
+                  if (mode.equals("chain") && desc.equals("()J") && method.equals("site$"+secondId)) {
+                    owner = "dawn/provenance/Indices$"+(firstId % 256); method = "site$"+firstId; changes++;
+                  }
                   boolean route = mode.equals("route") && name.equals("applyObserved") && owner.equals("modes") && method.equals(lifted);
                   boolean pure = mode.equals("pure") && owner.equals("builder") && method.equals("pure$observed");
                   boolean trait = owner.equals("dawn/tr/modes$Step") && (
@@ -91,6 +138,15 @@ public final class ArtifactMutator {
                     desc = desc.substring(0, end-1)+desc.substring(end);
                     changes++;
                   }
+                  if (name.equals("freeze") && owner.equals("dawn/rt/Provenance") && method.equals("put")) {
+                    int column = frozenWrites++;
+                    if (mode.equals("instance") && column == 5 || mode.equals("parent") && column == 6) {
+                      super.visitInsn(Opcodes.POP2);
+                      super.visitInsn(mode.equals("instance") ? Opcodes.LCONST_0 : Opcodes.LCONST_1);
+                      if (mode.equals("parent")) super.visitInsn(Opcodes.LNEG);
+                      changes++;
+                    }
+                  }
                   super.visitMethodInsn(opcode, owner, method, desc, itf);
                 }
                 public void visitFieldInsn(int opcode, String owner, String field, String desc) {
@@ -101,6 +157,8 @@ public final class ArtifactMutator {
                   super.visitFieldInsn(opcode, owner, field, desc);
                 }
                 public void visitLdcInsn(Object value) {
+                  if(arrayIndexPending && value instanceof Integer) { arrayIndex=(Integer)value; arrayIndexPending=false; }
+                  if(mode.equals("handler") && entry.getKey().startsWith("dawn/provenance/StaticData$0$") && handlerSlots.contains((long)arrayIndex) && value.equals("Nf6:helper")) { value="Nf4:main"; changes++; }
                   if (mode.equals("query") && value instanceof String && name.endsWith("$observed")
                       && ((String)value).startsWith("builder\tNf4:main\t"+handlerStart+"\t")
                       && ((String)value).contains("\thandler\t")) query = true;
@@ -110,13 +168,15 @@ public final class ArtifactMutator {
                   }
                   if (mode.equals("syntax") && value instanceof String) {
                     String text = (String)value;
-                    for (String role : new String[]{"operator", "literal", "var", "for", "if"})
+                    for (String role : new String[]{"operator", "literal", "var", "for", "if"}) {
                       text = text.replace("\t"+role+"\t", "\tunknown\t");
+                      if(entry.getKey().startsWith("dawn/provenance/StaticData$0$") && text.equals(role)) text="unknown";
+                    }
                     if (!text.equals(value)) { value = text; changes++; }
                   }
                   if (mode.equals("handler") && value instanceof String) {
                     String text = (String)value;
-                    if (text.startsWith("builder\tNf6:helper\t") && text.contains("\tperform\t")) {
+                    if ((text.startsWith("builder\tNf6:helper\t") || text.contains("\tbuilder\tNf6:helper\t")) && text.contains("\tperform\t")) {
                       value = text.replace("builder\tNf6:helper\t", "builder\tNf4:main\t"); changes++;
                     }
                   }

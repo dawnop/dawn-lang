@@ -136,6 +136,7 @@ type Rch = {
   work: List[(Int, Int)],
   mode: Int,
   mode_analysis: Bool,
+  local_values: Map[Int, CExpr],
   # the module whose body is being walked, for the per-module half of
   # `dict_edge`. Set once per work item rather than threaded through `walk`.
   cur: String,
@@ -551,7 +552,11 @@ fn folded_use(st: Rch, ty: Ty) -> Rch =
 
 fn walk_stmt(st0: Rch, s: CStmt) -> Rch =
   match s {
-    CSLet(_, ty, init) -> walk(type_use(st0, ty), init)
+    CSLet(id, ty, init) -> {
+      let next = walk(type_use(st0, ty), init)
+      if next.mode_analysis { Rch { ..next, local_values = map.insert(next.local_values, id, init) } }
+      else { next }
+    }
     CSAssign(_, value) -> walk(st0, value)
     CSDiscard(e) -> walk(st0, e)
     CSLoop(_, body, step) -> {
@@ -662,7 +667,7 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
         }
       }
       if st.mode_analysis && name == "provenance_observe" && len(args) > 0 {
-        let next = walk(Rch { ..called, mode = 2 }, args[0])
+        let next = walk(Rch { ..called, mode = 2 }, resolved_value(called.local_values, args[0]))
         walk_list(Rch { ..next, mode = st.mode }, lists.drop(args, 1))
       } else { walk_list(called, args) }
     }
@@ -742,7 +747,29 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
           Some(t) -> walk(st, t)
           None -> st
         }
-      walk_list(walk_list(st, j.args), sam_ev_exprs(j))
+      let arguments = walk_list(walk_list(st, j.args), sam_ev_exprs(j))
+      if st0.mode_analysis && len(j.call.sam_convs) > 0 {
+        # Java can retain a callback and invoke it later from another Dawn
+        # mode. Keep both entry families without capturing an observer.
+        var callbacks = arguments
+        for mode in [1, 2] {
+          callbacks = Rch { ..callbacks, mode = mode }
+          for conversion in j.call.sam_convs {
+            let (_, _, _, parameters, _) = conversion
+            var i = 0
+            for f in callbacks.idx.fns {
+              # The callback can arrive through a captured local or a
+              # parameter, just like an ordinary internal dynamic edge.
+              if str.starts_with(f.name, "lambda$") && len(f.params) + len(f.evs) == len(parameters) + 1 {
+                callbacks = touch(callbacks, Some(i))
+              }
+              i = i + 1
+            }
+          }
+          callbacks = walk_list(callbacks, j.args)
+        }
+        Rch { ..callbacks, mode = st0.mode }
+      } else { arguments }
     }
     CDup(inner, _) | CSteal(inner, _) -> walk(st0, inner)
     CReset(inner, _, _) -> walk(st0, inner)
@@ -780,7 +807,7 @@ pub fn live_set(
   var st = Rch {
     idx = idx,
     seen = set.empty(), mode_seen = set.empty(),
-    work = [], mode = 1, mode_analysis = mode_analysis,
+    work = [], mode = 1, mode_analysis = mode_analysis, local_values = map.empty(),
     cur = "",
     seen_dicts = set.empty(),
     seen_own_dicts = set.empty(),
@@ -823,7 +850,7 @@ pub fn live_set(
       let f = st.idx.fns[fi]
       st = type_use(st, f.ret)
       for p in f.captures ++ f.params ++ f.dicts ++ f.evs { st = type_use(st, p.ty) }
-      st = walk(Rch { ..st, cur = f.owner }, f.body)
+      st = walk(Rch { ..st, cur = f.owner, local_values = map.empty() }, f.body)
     }
   }
   var live: Set[String] = set.empty()
@@ -856,7 +883,7 @@ pub fn live_set(
     mi = mi + 1
   }
   if mode_analysis {
-    match validate_observed(idx, observed) {
+    match validate_observed(idx, observed, live) {
       Some(error) -> panic(error)
       None -> ()
     }
@@ -927,6 +954,14 @@ fn missing_node(idx: Idx, observed: Set[String], e: CExpr) -> Option[String] = m
       None
     }
   }
+  CForeign(j, _, _) -> {
+    for conversion in j.call.sam_convs {
+      let (_, _, _, parameters, _) = conversion
+      let error = missing_dynamic(idx, observed, len(parameters) + 1)
+      if error != None { return error }
+    }
+    None
+  }
   CIntrinsic(name, _, _, _) -> {
     for callback in runtime_callbacks(name) {
       let (_, arity) = callback
@@ -938,15 +973,39 @@ fn missing_node(idx: Idx, observed: Set[String], e: CExpr) -> Option[String] = m
   _ -> None
 }
 
-fn validate_observed(idx: Idx, observed: Set[String]) -> Option[String] = {
+# Ordered/default argument lowering can bind the literal observer before
+# its intrinsic. Resolve that immutable value without broadening all Fn2s.
+fn resolved_value(bindings: Map[Int, CExpr], expression: CExpr) -> CExpr = {
+  var value = expression
+  var seen: Set[Int] = set.empty()
+  while true {
+    match value {
+      CLocal(id, _) -> {
+        if set.has(seen, id) { return value }
+        seen = set.insert(seen, id)
+        match map.get(bindings, id) { Some(next) -> { value = next }, None -> return value }
+      }
+      CBox(inner, _) | CUnbox(inner, _) -> { value = inner }
+      _ -> return value
+    }
+  }
+  value
+}
+
+fn validate_observed(idx: Idx, observed: Set[String], reachable: Set[String] = set.empty()) -> Option[String] = {
   for f in idx.fns {
     let active = set.has(observed, fn_key(f))
+    let empty_bindings: Map[Int, CExpr] = map.empty()
+    let bindings = core_walk.fold_expr(f.body, empty_bindings, (values, _e) => values,
+      (values, statement) => match statement { CSLet(id, _, init) -> map.insert(values, id, init), _ -> values })
     let empty: Option[String] = None
     let error = core_walk.fold_expr(f.body, empty, (previous, e) => {
       if previous != None { return previous }
       if active { return missing_node(idx, observed, e) }
+      if not set.has(reachable, fn_key(f)) { return None }
       match e {
-        CIntrinsic("provenance_observe", args, _, _) -> if len(args) > 0 { missing_node(idx, observed, args[0]) }
+        CForeign(_, _, _) -> missing_node(idx, observed, e)
+        CIntrinsic("provenance_observe", args, _, _) -> if len(args) > 0 { missing_node(idx, observed, resolved_value(bindings, args[0])) }
         else { Some("provenance: observation entry has no callback") }
         _ -> None
       }

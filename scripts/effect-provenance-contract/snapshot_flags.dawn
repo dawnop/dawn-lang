@@ -1,0 +1,44 @@
+# The runtime probe supplies frozen flag combinations; this reader uses only
+# the public language API, so storage details cannot satisfy the typed checks.
+use std/io
+use std/provenance as p
+use std/provenance.{TraceSnapshot, Origin, CallState, Boundary, Completeness,
+  Active, Returned, Unwound, Suspended, Abandoned, Known, UnknownBoundary, Complete, Truncated }
+effect Read { fn ask() -> Origin }
+fn read() -> Origin !Read = ask()
+fn status(value: CallState) -> String = match value {
+  Active -> "Active", Returned -> "Returned", Unwound -> "Unwound", Suspended -> "Suspended", Abandoned -> "Abandoned"
+}
+fn boundary(value: Boundary) -> String = match value { Known -> "Known", UnknownBoundary -> "UnknownBoundary" }
+fn completeness(value: Completeness) -> String = match value { Complete -> "Complete", Truncated -> "Truncated" }
+pub fn describe(snapshot: TraceSnapshot) -> String = {
+  let info = p.snapshot_info(snapshot)
+  let record = p.record_at(snapshot, 1).expect("missing record")
+  let view = p.records(snapshot)
+  if p.record_state(view, 1) != record.state || p.record_boundary(view, 1) != record.boundary ||
+    p.record_epoch(view, 1) != record.key.epoch || p.record_instance(view, 1) != record.key.instance {
+    panic("bulk flags differ from row values")
+  }
+  let table = p.static_table(snapshot)
+  let site = p.site_at(table, record.site.expect("missing index")).expect("missing Site")
+  let definition = p.definition_at(table, record.definition.expect("missing definition"))
+    .expect("missing Definition")
+  let origin = p.note_at(snapshot, 0).expect("missing note")
+  let op_site = p.site(origin).expect("missing operation Site")
+  let unknown = p.definition(origin) == None
+  "${(info.scope, info.epoch, info.records, info.notes)} ${completeness(info.completeness)} ${status(record.state)} ${boundary(record.boundary)} ${site.id} ${definition.id} ${status(p.state(origin))} ${boundary(p.origin_boundary(origin))} ${completeness(p.origin_completeness(origin))} ${p.instance(origin)} ${unknown} ${op_site.id}"
+}
+pub fn text(snapshot: TraceSnapshot) -> String = p.render_snapshot(snapshot)
+pub fn origin_text(origin: Origin) -> String = p.render_origin(origin)
+pub fn main() -> Unit !io = {
+  let frozen = p.observe(scope => {
+    with handle Read { ask() origin o => { p.note(scope, o)
+      o } }
+    let _origin = read()
+    p.completed(scope)
+  })
+  io.println(describe(frozen))
+  io.println(text(frozen))
+  let origin = p.note_at(frozen, 0).expect("missing note")
+  io.println(origin_text(origin))
+}

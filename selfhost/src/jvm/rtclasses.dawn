@@ -4937,6 +4937,9 @@ pub fn gen_asm_class() -> Bytes !io = {
   b.visitVarInsn(OP_ALOAD, 4)
   b.visitInsn(OP_ACONST_NULL)
   b.visitMethodInsn(OP_INVOKEVIRTUAL, cwc, "visit", visit_desc, false)
+  b.visitVarInsn(OP_ALOAD, 0)
+  b.visitVarInsn(OP_ALOAD, 3)
+  b.visitMethodInsn(OP_INVOKESTATIC, "dawn/rt/AsmDiagnostics", "attach", "(Ljava/lang/Object;Ljava/lang/String;)V", false)
   b.visitInsn(OP_RETURN)
   close_mv(b)
 
@@ -4957,6 +4960,9 @@ pub fn gen_asm_class() -> Bytes !io = {
   bi.visitVarInsn(OP_ALOAD, 5)
   bi.visitInsn(OP_AASTORE)
   bi.visitMethodInsn(OP_INVOKEVIRTUAL, cwc, "visit", visit_desc, false)
+  bi.visitVarInsn(OP_ALOAD, 0)
+  bi.visitVarInsn(OP_ALOAD, 3)
+  bi.visitMethodInsn(OP_INVOKESTATIC, "dawn/rt/AsmDiagnostics", "attach", "(Ljava/lang/Object;Ljava/lang/String;)V", false)
   bi.visitInsn(OP_RETURN)
   close_mv(bi)
 
@@ -4992,6 +4998,38 @@ pub fn gen_asm_class() -> Bytes !io = {
 }
 
 pub const ASM_WRITER_CLASS: String = "dawn/rt/AsmWriter"
+
+# Keep the exact capacity exceptions available to the partitioning policy.
+# Other failures retain their Java cause before ForeignError renders it.
+fn gen_asm_finish(cw: ClassWriter) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC, "toByteArray", "()[B").expect("writer finish")
+  let start = Label.new()
+  let end = Label.new()
+  let method_large = Label.new()
+  let class_large = Label.new()
+  let unexpected = Label.new()
+  m.visitTryCatchBlock(start, end, method_large, "org/objectweb/asm/MethodTooLargeException")
+  m.visitTryCatchBlock(start, end, class_large, "org/objectweb/asm/ClassTooLargeException")
+  m.visitTryCatchBlock(start, end, unexpected, "java/lang/RuntimeException")
+  m.visitCode()
+  m.visitLabel(start)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "org/objectweb/asm/ClassWriter", "toByteArray", "()[B", false)
+  m.visitLabel(end)
+  m.visitInsn(OP_ARETURN)
+  m.visitLabel(method_large)
+  m.visitInsn(OP_ATHROW)
+  m.visitLabel(class_large)
+  m.visitInsn(OP_ATHROW)
+  m.visitLabel(unexpected)
+  m.visitVarInsn(OP_ASTORE, 1)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKESTATIC, "dawn/rt/AsmDiagnostics", "failure",
+    "(Ljava/lang/RuntimeException;Ljava/lang/Object;)Ljava/lang/RuntimeException;", false)
+  m.visitInsn(OP_ATHROW)
+  close_mv(m)
+}
 
 ## dawn/rt/AsmWriter: a `ClassWriter` that can answer the common-superclass
 ## question about classes that do not exist yet.
@@ -5193,6 +5231,7 @@ pub fn gen_asm_writer_class() -> Bytes !io = {
   ask.visitInsn(OP_ARETURN)
   close_mv(ask)
 
+  gen_asm_finish(cw)
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
 }
@@ -5315,7 +5354,7 @@ fn throw_panic(m: MethodVisitor, msg: String) -> Unit !io = {
 ## The value crossing every boundary here is erased (`types.erased_ctl_ty`), so
 ## the descriptors are fixed and lowering does the boxing -- an operation's
 ## parameter types are not this class's business.
-pub fn gen_ctl_class(supers: List[String]) -> Bytes !io = {
+pub fn gen_ctl_class(supers: List[String], observation: Bool = false) -> Bytes !io = {
   let cw = AsmWriter.of(COMPUTE_FRAMES, ctl_supers(supers)).expect("writer")
   Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, CTL_CLASS, obj(),
     "java/lang/Runnable")
@@ -5349,6 +5388,7 @@ pub fn gen_ctl_class(supers: List[String]) -> Bytes !io = {
   # set for the length of one `discard`: the frozen frames wake inside `yield`
   # and that is where the poison becomes a throw
   Asm.fieldOn(cw, ACC_PUBLIC, "poison", "Z")
+  if observation { Asm.fieldOn(cw, ACC_PUBLIC, "provenance", obj_desc()) }
 
   let cl = Asm.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
   cl.visitCode()
@@ -5375,6 +5415,11 @@ pub fn gen_ctl_class(supers: List[String]) -> Bytes !io = {
   init.visitVarInsn(OP_ALOAD, 0)
   init.visitVarInsn(OP_ALOAD, 4)
   init.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "evs", obj_desc())
+  if observation {
+    init.visitVarInsn(OP_ALOAD, 0)
+    init.visitMethodInsn(OP_INVOKESTATIC, "dawn/rt/Provenance", "capture", "()${obj_desc()}", false)
+    init.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "provenance", obj_desc())
+  }
   # The scope is this activation's identity. Its name is for a debugger only:
   # `Continuation.yield` compares scopes by reference, so two activations of
   # one handler are two scopes however they are spelled.
@@ -5406,21 +5451,27 @@ pub fn gen_ctl_class(supers: List[String]) -> Bytes !io = {
   run.visitVarInsn(OP_ALOAD, 0)
   run.visitVarInsn(OP_ALOAD, 0)
   run.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "rest", obj_desc())
-  run.visitTypeInsn(OP_CHECKCAST, fn_iface(1))
+  if not observation { run.visitTypeInsn(OP_CHECKCAST, fn_iface(1)) }
   run.visitVarInsn(OP_ALOAD, 0)
   run.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "evs", obj_desc())
-  run.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply",
-    erased_apply_desc(1), true)
+  if observation {
+    run.visitVarInsn(OP_ALOAD, 0)
+    run.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "provenance", obj_desc())
+    run.visitMethodInsn(OP_INVOKESTATIC, "dawn/rt/Provenance", "controlBody",
+      "(${obj_desc()}${obj_desc()}${obj_desc()})${obj_desc()}", false)
+  } else {
+    run.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
+  }
   run.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "result", obj_desc())
   run.visitInsn(OP_RETURN)
   close_mv(run)
 
   gen_ctl_enter(cw)
-  gen_ctl_drive(cw)
+  gen_ctl_drive(cw, observation)
   gen_ctl_yield(cw)
   gen_ctl_lookup(cw)
   gen_ctl_apply_arm(cw)
-  gen_ctl_discard(cw)
+  gen_ctl_discard(cw, observation)
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
@@ -5465,7 +5516,7 @@ fn gen_ctl_enter(cw: ClassWriter) -> Unit !io = {
 ## this method panics `ctl_nested` and `ctl_cross_thread` with
 ## "cannot suspend across this frame (MONITOR)", while `ctl_resume`, whose
 ## handlers are single-layer and never bubble past a `drive` frame, stays green.
-fn gen_ctl_drive(cw: ClassWriter) -> Unit !io = {
+fn gen_ctl_drive(cw: ClassWriter, observation: Bool = false) -> Unit !io = {
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "drive",
     "(" ++ ctl_desc() ++ ")" ++ obj_desc()).expect("mv")
   m.visitCode()
@@ -5476,9 +5527,32 @@ fn gen_ctl_drive(cw: ClassWriter) -> Unit !io = {
   ctl_top_get(m)
   m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "prev", ctl_desc())
   ctl_top_set_local(m, 0)
+  let obs_start = Label.new()
+  let obs_end = Label.new()
+  let obs_failed = Label.new()
+  let obs_done = Label.new()
+  if observation {
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "provenance", obj_desc())
+    m.visitMethodInsn(OP_INVOKESTATIC, "dawn/rt/Provenance", "mount", "(${obj_desc()})${obj_desc()}", false)
+    m.visitVarInsn(OP_ASTORE, 4)
+    m.visitTryCatchBlock(obs_start, obs_end, obs_failed, "java/lang/Throwable")
+    m.visitLabel(obs_start)
+  }
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "cont", cont_desc())
   m.visitMethodInsn(OP_INVOKEVIRTUAL, CONT_CLASS, "run", "()V", false)
+  if observation {
+    m.visitLabel(obs_end)
+    ctl_provenance_unmount(m, 4)
+    m.visitJumpInsn(OP_GOTO, obs_done)
+    m.visitLabel(obs_failed)
+    m.visitVarInsn(OP_ASTORE, 5)
+    ctl_provenance_unmount(m, 4)
+    m.visitVarInsn(OP_ALOAD, 5)
+    m.visitInsn(OP_ATHROW)
+    m.visitLabel(obs_done)
+  }
   # pop, whether it finished or suspended into this prompt. A yield past this
   # prompt never gets here at all: it freezes this frame too.
   m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "TOP", tl_desc())
@@ -5520,11 +5594,30 @@ fn gen_ctl_drive(cw: ClassWriter) -> Unit !io = {
   m.visitMethodInsn(OP_INVOKESPECIAL, CTL_K_CLASS, "<init>",
     "(" ++ ctl_desc() ++ ")V", false)
   m.visitVarInsn(OP_ALOAD, 3)
-  m.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "applyArm",
-    "(" ++ obj_desc() ++ obj_array_desc() ++ obj_desc() ++ obj_desc() ++ ")" ++
-      obj_desc(), false)
+  if observation {
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "provenance", obj_desc())
+    m.visitMethodInsn(OP_INVOKESTATIC, "dawn/rt/Provenance", "controlArm",
+      "(${obj_desc()}${obj_array_desc()}${obj_desc()}${obj_desc()}${obj_desc()})${obj_desc()}", false)
+  } else {
+    m.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "applyArm",
+      "(" ++ obj_desc() ++ obj_array_desc() ++ obj_desc() ++ obj_desc() ++ ")" ++
+        obj_desc(), false)
+  }
   m.visitInsn(OP_ARETURN)
   close_mv(m)
+  ()
+}
+
+fn ctl_provenance_unmount(m: MethodVisitor, saved: Int) -> Unit !io = {
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "provenance", obj_desc())
+  m.visitVarInsn(OP_ALOAD, saved)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "cont", cont_desc())
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, CONT_CLASS, "isDone", "()Z", false)
+  m.visitMethodInsn(OP_INVOKESTATIC, "dawn/rt/Provenance", "unmount",
+    "(${obj_desc()}${obj_desc()}Z)V", false)
   ()
 }
 
@@ -5726,7 +5819,7 @@ fn gen_ctl_discard_restore(m: MethodVisitor, saved_slot: Int) -> Unit !io = {
 ## activation is left done, and `CtlK.used` has already been set by the caller,
 ## so a continuation resumed after this panics in the one-shot family rather
 ## than running a release a second time.
-fn gen_ctl_discard(cw: ClassWriter) -> Unit !io = {
+fn gen_ctl_discard(cw: ClassWriter, observation: Bool = false) -> Unit !io = {
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "discard",
     "(" ++ ctl_desc() ++ ")V").expect("mv")
   m.visitCode()
@@ -5755,6 +5848,14 @@ fn gen_ctl_discard(cw: ClassWriter) -> Unit !io = {
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitInsn(OP_ICONST_1)
   m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "poison", "Z")
+  if observation {
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "provenance", obj_desc())
+    m.visitInsn(OP_DUP)
+    m.visitMethodInsn(OP_INVOKESTATIC, "dawn/rt/Provenance", "abandon", "(${obj_desc()})V", false)
+    m.visitMethodInsn(OP_INVOKESTATIC, "dawn/rt/Provenance", "mount", "(${obj_desc()})${obj_desc()}", false)
+    m.visitVarInsn(OP_ASTORE, 4)
+  }
   m.visitLabel(try_start)
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitFieldInsn(OP_GETFIELD, CTL_CLASS, "cont", cont_desc())
@@ -5768,6 +5869,7 @@ fn gen_ctl_discard(cw: ClassWriter) -> Unit !io = {
   # stopped it and no other release was skipped.
   m.visitLabel(h_poison)
   m.visitVarInsn(OP_ASTORE, 2)
+  if observation { ctl_provenance_unmount(m, 4) }
   gen_ctl_discard_restore(m, 1)
   m.visitVarInsn(OP_ALOAD, 2)
   m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "getSuppressed",
@@ -5786,10 +5888,12 @@ fn gen_ctl_discard(cw: ClassWriter) -> Unit !io = {
   # away, and the state has to be put back before it carries on.
   m.visitLabel(h_any)
   m.visitVarInsn(OP_ASTORE, 2)
+  if observation { ctl_provenance_unmount(m, 4) }
   gen_ctl_discard_restore(m, 1)
   m.visitVarInsn(OP_ALOAD, 2)
   m.visitInsn(OP_ATHROW)
   m.visitLabel(done)
+  if observation { ctl_provenance_unmount(m, 4) }
   gen_ctl_discard_restore(m, 1)
   m.visitInsn(OP_RETURN)
   close_mv(m)
@@ -5873,7 +5977,7 @@ pub fn gen_ctl_cont_class(supers: List[String]) -> Bytes !io = {
 ## Each suspension makes a fresh one, so a handler that resumes many times is
 ## many one-shot continuations over one activation, not one continuation resumed
 ## many times.
-pub fn gen_ctl_k_class(supers: List[String]) -> Bytes !io = {
+pub fn gen_ctl_k_class(supers: List[String], observation: Bool = false) -> Bytes !io = {
   let cw = AsmWriter.of(COMPUTE_FRAMES, ctl_supers(supers)).expect("writer")
   Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, CTL_K_CLASS, obj(),
     fn_iface(2))
@@ -5913,6 +6017,17 @@ pub fn gen_ctl_k_class(supers: List[String]) -> Bytes !io = {
     "(" ++ ctl_desc() ++ ")" ++ obj_desc(), false)
   m.visitInsn(OP_ARETURN)
   close_mv(m)
+  if observation {
+    let o = Asm.methodOn(cw, ACC_PUBLIC, "applyObserved", "(${obj_desc()}${obj_desc()}J)${obj_desc()}")
+      .expect("mv")
+    o.visitCode()
+    o.visitVarInsn(OP_ALOAD, 0)
+    o.visitVarInsn(OP_ALOAD, 1)
+    o.visitVarInsn(OP_ALOAD, 2)
+    o.visitMethodInsn(OP_INVOKEVIRTUAL, CTL_K_CLASS, "apply", erased_apply_desc(2), false)
+    o.visitInsn(OP_ARETURN)
+    close_mv(o)
+  }
   # `Fn2.discardK`, overridden. The ticket is the same one a resumption spends
   # and it is spent in the same field, so discard-then-resume,
   # resume-then-discard and discard-twice are one test with one family of
@@ -6043,17 +6158,32 @@ pub fn rt_ctl_yield() -> RtMethod = rt(CTL_CLASS, "yield", ctl_yield_desc())
 ## scripts/intrinsic-parity.py, which reads both.
 # Optional observation payloads obey the same checked runtime-call contract
 # as the generated core runtime. Plain programs do not carry these classes.
+pub fn rt_provenance_external_callback() -> RtMethod =
+  rt("dawn/rt/Provenance", "externalCallback", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")
+
+pub fn rt_provenance_table() -> RtMethod =
+  rt("dawn/rt/Provenance", "table", "([Ljava/lang/Object;[Ljava/lang/Object;)Ldawn/rt/Tuple2;")
+
+pub fn rt_provenance_context() -> RtMethod =
+  rt("dawn/rt/Provenance", "context", "()Ljava/lang/Object;")
+
+pub fn rt_provenance_unknown() -> RtMethod =
+  rt("dawn/rt/Provenance", "unknownContext", "(Ljava/lang/Object;)V")
+
+pub fn rt_provenance_tail() -> RtMethod =
+  rt("dawn/rt/Provenance", "tailContext", "(Ljava/lang/Object;JLjava/lang/String;)V")
+
 pub fn rt_provenance_before() -> RtMethod =
-  rt("dawn/rt/Provenance", "beforeAt", "(JLjava/lang/String;JLjava/lang/String;)J")
+  rt("dawn/rt/Provenance", "beforeAtContext", "(Ljava/lang/Object;JLjava/lang/String;JLjava/lang/String;)J")
 
 pub fn rt_provenance_arrive() -> RtMethod =
-  rt("dawn/rt/Provenance", "arrive", "(Ljava/lang/String;)J")
+  rt("dawn/rt/Provenance", "arriveContext", "(Ljava/lang/Object;JLjava/lang/String;)J")
 
 pub fn rt_provenance_finish() -> RtMethod =
-  rt("dawn/rt/Provenance", "finish", "(JZ)V")
+  rt("dawn/rt/Provenance", "finishContext", "(Ljava/lang/Object;JZ)V")
 
-pub fn rt_provenance_unsupported() -> RtMethod =
-  rt("dawn/rt/Provenance", "unsupported", "(Ljava/lang/String;)V")
+pub fn rt_provenance_failure() -> RtMethod =
+  rt("dawn/rt/Provenance", "failureContext", "(Ljava/lang/Object;JLjava/lang/Throwable;)V")
 
 pub fn rt_provenance_check_function() -> RtMethod =
   rt("dawn/rt/Provenance", "checkFunction", "(Ljava/lang/Object;)V")
@@ -6062,13 +6192,13 @@ pub fn rt_provenance_callback() -> RtMethod =
   rt("dawn/rt/Provenance", "callback", "(Ljava/lang/Object;JJLjava/lang/String;)Ljava/lang/Object;")
 
 pub fn rt_provenance_observe() -> RtMethod =
-  rt("dawn/rt/Provenance", "observe", "(Ljava/lang/Object;Ljava/lang/Object;JLjava/lang/String;)Ljava/lang/Object;")
+  rt("dawn/rt/Provenance", "observe", "(Ljava/lang/Object;JLjava/lang/Object;JLjava/lang/String;Ldawn/rt/Tuple2;)Ljava/lang/Object;")
 
 pub fn rt_provenance_note() -> RtMethod =
-  rt("dawn/rt/Provenance", "note", "(JLjava/lang/String;)V")
+  rt("dawn/rt/Provenance", "note", "(JLdawn/rt/Tuple4;)V")
 
 pub fn rt_provenance_completed() -> RtMethod =
-  rt("dawn/rt/Provenance", "completed", "(J)Ljava/lang/String;")
+  rt("dawn/rt/Provenance", "completed", "(J)Ldawn/rt/Tuple3;")
 
 pub fn rt_provenance_checkpoint() -> RtMethod =
   rt("dawn/rt/Provenance", "checkpoint", "(J)Ljava/lang/String;")
@@ -6077,7 +6207,7 @@ pub fn rt_provenance_rewind() -> RtMethod =
   rt("dawn/rt/Provenance", "rewind", "(JLjava/lang/String;)V")
 
 pub fn rt_provenance_origin() -> RtMethod =
-  rt("dawn/rt/Provenance", "origin", "(J)Ljava/lang/String;")
+  rt("dawn/rt/Provenance", "origin", "(J)Ldawn/rt/Tuple4;")
 
 pub fn rt_provenance_field() -> RtMethod =
   rt("dawn/rt/Provenance", "field", "(Ljava/lang/String;J)Ljava/lang/String;")
@@ -6085,8 +6215,16 @@ pub fn rt_provenance_field() -> RtMethod =
 pub fn rt_provenance_number() -> RtMethod =
   rt("dawn/rt/Provenance", "number", "(Ljava/lang/String;J)J")
 
-pub fn rt_provenance_parent() -> RtMethod =
-  rt("dawn/rt/Provenance", "parent", "(Ljava/lang/String;)Ljava/lang/String;")
+pub fn rt_provenance_word() -> RtMethod =
+  rt("dawn/rt/Provenance", "word", "([BJ)J")
+pub fn rt_provenance_header() -> RtMethod =
+  rt("dawn/rt/Provenance", "header", "(Ldawn/rt/Tuple3;J)J")
+pub fn rt_provenance_column() -> RtMethod =
+  rt("dawn/rt/Provenance", "column", "(Ldawn/rt/Tuple3;JJ)J")
+pub fn rt_provenance_render_snapshot() -> RtMethod =
+  rt("dawn/rt/Provenance", "renderSnapshot", "(Ldawn/rt/Tuple3;)Ljava/lang/String;")
+pub fn rt_provenance_render_origin() -> RtMethod =
+  rt("dawn/rt/Provenance", "renderOrigin", "(Ldawn/rt/Tuple4;)Ljava/lang/String;")
 
 pub fn emitter_rt_methods() -> List[RtMethod] = [
   rt_strings_cmp(),
@@ -6108,10 +6246,15 @@ pub fn emitter_rt_methods() -> List[RtMethod] = [
   rt_io_cast(),
   rt_ctl_enter(),
   rt_ctl_yield(),
+  rt_provenance_external_callback(),
+  rt_provenance_table(),
+  rt_provenance_context(),
+  rt_provenance_unknown(),
+  rt_provenance_tail(),
   rt_provenance_before(),
   rt_provenance_arrive(),
   rt_provenance_finish(),
-  rt_provenance_unsupported(),
+  rt_provenance_failure(),
   rt_provenance_check_function(),
   rt_provenance_callback(),
   rt_provenance_observe(),
@@ -6122,5 +6265,9 @@ pub fn emitter_rt_methods() -> List[RtMethod] = [
   rt_provenance_origin(),
   rt_provenance_field(),
   rt_provenance_number(),
-  rt_provenance_parent()
+  rt_provenance_word(),
+  rt_provenance_header(),
+  rt_provenance_column(),
+  rt_provenance_render_snapshot(),
+  rt_provenance_render_origin()
 ]

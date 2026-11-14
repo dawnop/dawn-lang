@@ -1,0 +1,147 @@
+# Physical regions keep structured control flow and its logical calls intact.
+# Only closed expression regions may move: no nonlocal return/jump or writes
+# to multiple caller bindings. A single assigned result returns as a scalar;
+# free values are ordinary typed JVM parameters.
+use ir/core.{CExpr, CStmt, CLocal, CBlock, CIf, CBinary, CAnd, COr, CReturn, CBreak, CContinue,
+  CCall, CIntrinsic, CClosure, CSLet, CSAssign, CSLoop, CSIf, CSDiscard, cex_ty, diverges }
+use ir/walk
+use check/types.{Ty, TyError, TyNever, TyUnit}
+use std/map
+use std/set
+
+pub type Region = { body: CExpr, inputs: List[(Int, Ty)], ret: Ty, exit: Option[(Int, Int)] }
+type Scan = {
+  bound: Set[Int], reads: Map[Int, Ty], writes: Set[Int], loops: Set[Int],
+  jumps: Set[Int], continues: Set[Int], returns: Bool, return_values: Map[Int, Ty]
+}
+
+pub fn cost(e: CExpr) -> Int = walk.fold_expr(e, 0, (n, x) => n + match x {
+  CCall(_, _, _, _) | CIntrinsic(_, _, _, _) -> 12
+  CClosure(_, _, _, _) -> 4
+  _ -> 1
+}, (n, _s) => n + 1)
+
+fn scan(e: CExpr) -> Scan = walk.fold_expr(e,
+  Scan { bound = set.empty(), reads = map.empty(), writes = set.empty(),
+    loops = set.empty(), jumps = set.empty(), continues = set.empty(), returns = false, return_values = map.empty() },
+  (s, x) => match x {
+    CLocal(id, ty) -> Scan { ..s, reads = map.insert(s.reads, id, ty) }
+    CReturn(Some(CLocal(id, ty))) -> Scan { ..s, return_values = map.insert(s.return_values, id, ty) }
+    CReturn(_) -> Scan { ..s, returns = true }
+    CBreak(id) -> Scan { ..s, jumps = set.insert(s.jumps, id) }
+    CContinue(id) -> Scan { ..s, continues = set.insert(s.continues, id) }
+    _ -> s
+  }, (s, x) => match x {
+    CSLet(id, _, _) -> Scan { ..s, bound = set.insert(s.bound, id) }
+    CSAssign(id, _) -> Scan { ..s, writes = set.insert(s.writes, id) }
+    CSLoop(id, _, _) -> Scan { ..s, loops = set.insert(s.loops, id) }
+    _ -> s
+  })
+
+# Core's general diverges predicate deliberately only follows expression
+# tails. Lowered match decisions also terminate through statement if arms.
+fn exits(e: CExpr) -> Bool = {
+  if cex_ty(e) == TyNever || diverges(e) { return true }
+  match e {
+    CBlock(statements, result, _) -> {
+      for statement in statements {
+        let done = match statement {
+          CSLet(_, _, value) | CSAssign(_, value) | CSDiscard(value) -> exits(value)
+          CSIf(condition, yes, no) -> exits(condition) || match no {
+            Some(other) -> exits(yes) && exits(other), None -> false
+          }
+          _ -> false
+        }
+        if done { return true }
+      }
+      match result { Some(value) -> exits(value), None -> false }
+    }
+    CIf(condition, yes, no, _) -> exits(condition) || match no {
+      Some(other) -> exits(yes) && exits(other), None -> false
+    }
+    _ -> false
+  }
+}
+
+# Flat match decisions need a proper remainder region too. Keeping a bounded
+# prefix in place preserves every test and exception in its original order;
+# the remainder receives the same live bindings through an ordinary call.
+pub fn sequence(statements: List[CStmt], result: Option[CExpr], ty: Ty,
+  band: Int) -> (List[CStmt], Option[CExpr]) = {
+  if band <= 0 || len(statements) < 2 { return (statements, result) }
+  var count = 0
+  var weight = 0
+  while count < len(statements) && (count == 0 || weight < band * 3) {
+    weight = weight + cost(CBlock([statements[count]], None, TyUnit))
+    count = count + 1
+  }
+  if count == len(statements) { return (statements, result) }
+  var prefix: List[CStmt] = []
+  var rest: List[CStmt] = []
+  for i in 0..len(statements) {
+    if i < count { prefix = prefix ++ [statements[i]] }
+    else { rest = rest ++ [statements[i]] }
+  }
+  (prefix, Some(CBlock(rest, result, ty)))
+}
+
+## The band is selected from final Code lengths, not from source names or a
+## workload oracle. Prefer whole branches/blocks to tiny protocol helpers.
+## Oversized decision trees may split recursively at their closed branches;
+## the helper root itself is emitted directly so extraction always progresses.
+pub fn region(e: CExpr, band: Int) -> Option[Region] = {
+  match e { CBlock(_, _, _) | CIf(_, _, _, _) | CBinary(CAnd, _, _, _) | CBinary(COr, _, _, _) -> (), _ -> return None }
+  let weight = cost(e)
+  if weight < band { return None }
+  let s = scan(e)
+  if s.returns { return None }
+  var jumps: List[Int] = []
+  var writes: List[Int] = []
+  for id in set.to_list(s.continues) { if not set.has(s.loops, id) { return None } }
+  for id in set.to_list(s.jumps) { if not set.has(s.loops, id) { jumps = jumps ++ [id] } }
+  for id in set.to_list(s.writes) { if not set.has(s.bound, id) { writes = writes ++ [id] } }
+  var exit: Option[(Int, Int)] = None
+  let returns = map.keys(s.return_values)
+  if len(returns) > 0 {
+    # A partition of an already outlined match may end in the same scalar
+    # return on every path. Propagate that physical return through its caller.
+    if len(returns) != 1 || len(jumps) > 0 || not exits(e) { return None }
+    let output = returns[0]
+    for id in writes { if id != output { return None } }
+    exit = Some((-2, output))
+  } else if len(jumps) > 0 || len(writes) > 0 {
+    # A match arm can return its one result to the enclosing match loop.
+    # No mutable carrier or additional allocation is needed: the physical
+    # call returns that value, then the caller performs the original break.
+    if len(jumps) == 0 && len(writes) == 1 && cex_ty(e) == TyUnit {
+      # A decision-tree arm updates one caller local and falls through.
+      # Return that scalar; -1 distinguishes this from a loop exit. The
+      # caller supplies its old value for a branch that does not assign.
+      exit = Some((-1, writes[0]))
+    } else {
+      if len(jumps) != 1 || len(writes) != 1 || not exits(e) { return None }
+      exit = Some((jumps[0], writes[0]))
+    }
+  }
+  var inputs: List[(Int, Ty)] = []
+  for id in map.keys(s.reads) {
+    # JVM spills use slot-derived negative IDs. Only stable Core binders
+    # may cross a physical signature; its local slots are allocated anew.
+    if id < 0 { return None }
+    if not set.has(s.bound, id) { inputs = inputs ++ [(id, map.get(s.reads, id).expect("region input"))] }
+  }
+  # Leave room for context and keep every physical signature within the same
+  # conservative C2 argument policy as compiler methods.
+  if len(inputs) > 28 { return None }
+  let ty = if len(returns) == 1 { map.get(s.return_values, returns[0]).expect("region return") }
+  else { cex_ty(e) }
+  if ty == TyError { return None }
+  Some(Region { body = e, inputs = inputs, ret = ty, exit = exit })
+}
+
+## Only this region's nonlocal break changes into a physical return. All
+## nested loop targets, calls, source sites and their order remain unchanged.
+pub fn exit_body(e: CExpr, target: Int, output: Int, ty: Ty) -> CExpr = match e {
+  CBreak(id) -> if id == target { CReturn(Some(CLocal(output, ty))) } else { e }
+  _ -> walk.map_kids(e, x => exit_body(x, target, output, ty))
+}

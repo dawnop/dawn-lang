@@ -1,0 +1,90 @@
+# The command line preview consumer uses only the public immutable interface.
+# Correctness oracles and expected event counts live in the separate runner.
+use std/provenance as p
+use std/provenance.{TraceSnapshot, IndexSlot, InvocationKey, CallState, Site, Definition, Complete, Known}
+use std/map
+use std/set
+pub type SourceIndex = { revision: String, declarations: Map[String, (Int, Int)], spans: Set[(Int, Int)] }
+pub type Node = { key: InvocationKey, parent: Int, state: CallState, site: Option[Site], definition: Option[Definition] }
+pub type Mapping = { nodes: List[Node], owners: List[Int] }
+fn require(ok: Bool, why: String) -> Unit = if not ok { panic("preview: ${why}") }
+fn slot(value: IndexSlot) -> Int = if p.index_present(value) { p.index_value(value) } else { -1 }
+fn source_match(source: SourceIndex, declaration: String, lo: Int, hi: Int, syntax: Bool) -> Unit = {
+  let extent = map.get(source.declarations, declaration)
+    .expect("preview: source declaration missing")
+  let (base, limit) = extent
+  require(lo >= 0 && hi >= lo && base + hi <= limit, "source declaration or range mismatch")
+  if syntax { require(set.has(source.spans, (base + lo, base + hi)), "source syntax mismatch") }
+}
+fn user_definition(value: Option[Definition]) -> Bool = match value {
+  Some(d) -> d.module == "main" && d.declaration != "", None -> false
+}
+pub fn consume(snapshot: TraceSnapshot, source: SourceIndex, artifact_revision: String) -> Mapping = {
+  require(source.revision == artifact_revision, "source revision mismatch")
+  let info = p.snapshot_info(snapshot)
+  require(info.completeness == Complete, "truncated provenance")
+  let table = p.static_table(snapshot)
+  let view = p.records(snapshot)
+  require(p.record_scope(view) == info.scope && p.record_count(view) == info.records, "scope mismatch")
+  var owners: List[Int] = []
+  var nodes: List[Node] = []
+  var sites: Map[Int, Site] = map.empty()
+  var definitions: Map[Int, Definition] = map.empty()
+  for row in range(0, info.records) {
+    require(p.record_boundary(view, row) == Known, "unknown boundary")
+    let state = p.record_state(view, row)
+    let parent = slot(p.record_parent(view, row))
+    require(parent >= -1 && parent < row, "invalid parent index")
+    var owner = if parent < 0 { -1 } else { owners[parent] }
+    let si = slot(p.record_site(view, row))
+    let di = slot(p.record_definition(view, row))
+    let site: Option[Site] = if si < 0 { None } else {
+      let value = match map.get(sites, si) {
+        Some(s) -> s
+        None -> {
+          let s = p.site_at(table, si).expect("preview: missing Site")
+          if s.module == "main" {
+            require(s.file == "main", "source file mismatch")
+            source_match(source, s.declaration, s.start, s.end, true)
+            require((s.name_start == -1 && s.name_end == -1) ||
+                (s.name_start >= s.start && s.name_end >= s.name_start && s.name_end <= s.end), "source name range mismatch")
+          }
+          sites = map.insert(sites, si, s)
+          s
+        }
+      }
+      Some(value)
+    }
+    let definition: Option[Definition] = if di < 0 { None } else {
+      let value = match map.get(definitions, di) {
+        Some(d) -> d
+        None -> {
+          let d = p.definition_at(table, di).expect("preview: missing Definition")
+          if d.module == "main" {
+            if d.declaration != "" { source_match(source, d.declaration, d.start, d.end, false) }
+            else { require(d.start == -1 && d.end == -1 &&
+                (d.role == "primitive-slot" || d.role == "derived-relation" || d.role == "constructor-value"), "unknown synthetic definition") }
+          }
+          definitions = map.insert(definitions, di, d)
+          d
+        }
+      }
+      Some(value)
+    }
+    require(row == 0 || si >= 0 || di >= 0, "unknown call identity")
+    let user_site = match site { Some(s) -> s.module == "main", None -> false }
+    if user_site || user_definition(definition) {
+      let key = InvocationKey { scope = info.scope, epoch = p.record_epoch(view, row), instance = p.record_instance(view, row) }
+      nodes = nodes ++ [Node { key, parent = owner, state, site, definition }]
+      owner = len(nodes) - 1
+    }
+    owners = owners ++ [owner]
+  }
+  for i in range(0, info.notes) {
+    let origin = p.note_at(snapshot, i).expect("preview: missing note")
+    require(p.origin_completeness(origin) == Complete && p.origin_boundary(origin) == Known, "incomplete origin")
+    let key = InvocationKey { scope = p.scope(origin), epoch = p.epoch(origin), instance = p.instance(origin) }
+    require(match p.find_instance(snapshot, key) { Some(_) -> true, None -> false }, "uncommitted origin")
+  }
+  Mapping { nodes, owners }
+}

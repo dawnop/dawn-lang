@@ -1,0 +1,29 @@
+# A host producer supplies unusual typed fields, then exits and releases its
+# table. This reader must preserve literal escapes and Unicode without parsing.
+use std/io
+use std/provenance as p
+use std/provenance.{TraceSnapshot, Returned}
+fn require(ok: Bool) -> Unit = if not ok { panic("structured metadata changed fields") }
+pub fn inspect(snapshot: TraceSnapshot) -> String = {
+  let view = p.records(snapshot)
+  let table = p.static_table(snapshot)
+  let site = p.site_at(table, p.index_value(p.record_site(view, 1))).expect("missing Site")
+  let definition = p.definition_at(table, p.index_value(p.record_definition(view, 1)))
+    .expect("missing Definition")
+  require(site.id == 999 && definition.id == 888)
+  require(site.module == "unit%09\t雪" && site.file == site.module)
+  require(site.declaration == "decl%25\n雪" && definition.declaration == site.declaration)
+  require(site.role == "call" && site.operation == Some("op%09\t雪"))
+  require(site.start == 1 && site.end == 7 && site.name_start == 2 && site.name_end == 4)
+  require(definition.module == site.module && definition.start == 0 && definition.end == 9 && definition.role == "function")
+  require(p.record_state(view, 1) == Returned && p.record_instance(view, 1) == 2)
+  require(p.site_at(table, -1) == None && p.site_at(table, 1) == None)
+  require(p.definition_at(table, -1) == None && p.definition_at(table, 1) == None)
+  "42 typed metadata preserves escaped text and Unicode after table release"
+}
+pub fn text(snapshot: TraceSnapshot) -> String = p.render_snapshot(snapshot)
+pub fn main() -> Unit !io = {
+  let frozen = p.observe(scope => p.completed(scope))
+  if len(args()) > 0 { io.println(inspect(frozen)) }
+  io.println("42 metadata reader compiled")
+}

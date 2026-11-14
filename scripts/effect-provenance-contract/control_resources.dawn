@@ -1,0 +1,26 @@
+# Host lifecycle probes keep a spent ticket alive while checking that its
+# completed activation no longer pins a closed observation or invocation pool.
+use std/io.{println}
+use std/provenance as p
+use std/str
+ctl effect Ask { fn ask() -> Int }
+pub type Stage = Ready(value: Int) | Paused(k: fn(Int) -> Stage !io)
+fn work(fail: Bool) -> Stage !Ask !io = {
+  let held = "held across ${fail}"
+  let n = ask()
+  if fail { panic("resource unwind") }
+  Ready(n + 2 + len(held) - len(held))
+}
+pub fn make(fail: Bool) -> Stage !io = p.observe(scope => {
+  let _checkpoint = p.checkpoint(scope)
+  with handle Ask { ask() resume k => Paused(k) }
+  work(fail)
+})
+pub fn finish(stage: Stage) -> Stage !io = match stage { Paused(k) -> k(40), _ -> stage }
+pub fn stop(stage: Stage) -> Unit !io = match stage { Paused(k) -> discard(k), _ -> () }
+pub fn fail_finish(stage: Stage) -> Bool !io = match catch_panic(() => finish(stage)) {
+  Err(error) -> if str.contains(error.message, "resource unwind") { true } else { panic("unexpected resource failure: ${error.message}") }
+  Ok(_) -> false
+}
+pub fn value(stage: Stage) -> Int = match stage { Ready(n) -> n, _ -> -1 }
+pub fn main() -> Unit !io = println("control resource producer")

@@ -1,0 +1,82 @@
+# Capacity limits history, including retired trials, without limiting the
+# calculation. These expectations come from the source recursion counts.
+use std/io.{println}
+use std/list
+use std/provenance as p
+use std/provenance.{TraceSnapshot, Origin, Complete, Truncated, Returned, UnknownBoundary, Active}
+effect Capture { fn capture() -> Origin }
+fn loop(n: Int) -> Int = if n == 0 { 42 } else { loop(n - 1) }
+fn even(n: Int) -> Int = if n == 0 { 42 } else { odd(n - 1) }
+fn odd(n: Int) -> Int = if n == 0 { 42 } else { even(n - 1) }
+fn require(ok: Bool) -> Unit = if not ok { panic("bounded log contract") }
+fn prefix(snapshot: TraceSnapshot, count: Int) -> Unit = {
+  let view = p.records(snapshot)
+  require(p.record_count(view) == count && p.snapshot_info(snapshot).completeness == Truncated)
+  for i in range(0, count) {
+    require(p.record_instance(view, i) == i + 1)
+    if i == 0 { require(not p.index_present(p.record_parent(view, i))) }
+    else { require(p.index_value(p.record_parent(view, i)) == i - 1) }
+    if i >= 2 { require(p.record_state(view, i) == Returned) }
+  }
+}
+pub fn main() -> Unit !io = {
+  let (value, snapshot) = p.observe(scope => {
+    let value = loop(1000000)
+    (value, p.completed(scope))
+  }, capacity = 5)
+  require(value == 42)
+  prefix(snapshot, 5)
+  let rolled = p.observe(scope => {
+    let marker = p.checkpoint(scope)
+    let trial = loop(3)
+    p.rewind(scope, marker)
+    let formal = loop(3)
+    (trial + formal, p.completed(scope))
+  }, capacity = 7)
+  let (total, snapshot2) = rolled
+  let view2 = p.records(snapshot2)
+  require(total == 84 && p.record_count(view2) == 3)
+  require(p.snapshot_info(snapshot2).epoch == 2 && p.snapshot_info(snapshot2).completeness == Truncated)
+  require(p.record_instance(view2, 2) == 7 && p.record_epoch(view2, 2) == 2)
+  require(p.index_value(p.record_parent(view2, 2)) == 1 && p.record_state(view2, 2) == Returned)
+  let (inner, outer) = p.observe(scope => {
+    let inner = p.observe(nested => { let value = loop(3)
+      (value, p.completed(nested)) }, capacity = 64)
+    (inner, p.completed(scope))
+  }, capacity = 3)
+  let (answer, inner_snapshot) = inner
+  require(answer == 42 && p.snapshot_info(inner_snapshot).completeness == Complete)
+  require(p.snapshot_info(outer).completeness == Truncated && p.snapshot_info(outer).records == 3)
+  let (mutual, mutual_snapshot) = p.observe(scope => {
+    let value = even(20)
+    (value, p.completed(scope))
+  })
+  require(mutual == 42 && p.snapshot_info(mutual_snapshot).records == 23)
+  let (folded, fold_snapshot) = p.observe(scope => {
+    let value = list.fold(range(0, 100000), 0, (acc, n) => acc + n)
+    (value, p.completed(scope))
+  }, capacity = 16)
+  require(folded == 4999950000 && p.snapshot_info(fold_snapshot).records == 16)
+  require(p.snapshot_info(fold_snapshot).completeness == Truncated)
+  let (origin, note_snapshot) = p.observe(scope => {
+    with handle Capture { capture() origin o => {
+      p.note(scope, o)
+      p.note(scope, o)
+      o
+    } }
+    let origin = capture()
+    (origin, p.completed(scope))
+  }, capacity = 1)
+  require(p.snapshot_info(note_snapshot).records == 1 && p.snapshot_info(note_snapshot).notes == 1)
+  require(p.snapshot_info(note_snapshot).completeness == Truncated)
+  require(p.origin_completeness(origin) == Truncated && p.origin_boundary(origin) == UnknownBoundary)
+  require(p.state(origin) == Active && (match p.parent(origin) { None -> true, Some(_) -> false }) && p.instance(origin) > 1)
+  require((match p.definition(origin) { None -> true, Some(_) -> false }) && (match p.site(origin) { None -> false, Some(_) -> true }))
+  require(p.scope(origin) == p.snapshot_info(note_snapshot).scope)
+  println("42 bounded prefix cumulative rollback nested scopes million tail steps")
+  println(p.render_snapshot(snapshot))
+  println("@@rollback")
+  println(p.render_snapshot(snapshot2))
+  println("@@mutual")
+  println(p.render_snapshot(mutual_snapshot))
+}

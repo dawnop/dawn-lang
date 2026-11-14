@@ -1157,7 +1157,16 @@ pub fn ty_loc() -> Ty = ty_opaque(LOC_OPAQUE_ID, "Loc", "std/loc", [], TyString,
 # The origin binder is typed before its body is checked. This is the stable
 # identity of std/provenance's ordinary opaque declaration, not a new prelude
 # name. check/provenance tests it against the declaration-key derivation.
-pub fn ty_origin() -> Ty = ty_opaque(123946331297243, "Origin", "std/provenance", [], TyString, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
+pub fn provenance_table_type() -> Ty = {
+  let numbers = ty_tuple([TyInt, TyInt, TyInt, TyInt, TyInt])
+  let strings = ty_tuple([TyString, TyString, TyString, TyString, TyString])
+  ty_tuple([ty_array(ty_tuple([numbers, strings])), ty_array(ty_tuple([TyInt, TyString, TyString, TyInt, TyInt, TyString]))])
+}
+pub fn provenance_static_type() -> Ty = ty_opaque(78044713322789, "StaticTable", "std/provenance", [], provenance_table_type(), capture.empty_arguments(), capture.opaque_head(0, 0, 0))
+pub fn provenance_origin_type() -> Ty = ty_tuple([TyBytes, provenance_table_type(), TyInt, TyString])
+pub fn provenance_snapshot_type() -> Ty = ty_tuple([TyBytes, provenance_table_type(), ty_array(provenance_origin_type())])
+pub fn ty_origin() -> Ty = ty_opaque(123946331297243, "Origin", "std/provenance", [],
+  ty_tuple([TyBytes, provenance_static_type(), TyInt, TyString]), capture.empty_arguments(), capture.opaque_head(0, 0, 0))
 
 ## Who may write a compiler-owned type name. This is surface policy, including
 ## the distinct return-only access used by Never.
@@ -4632,21 +4641,25 @@ fn provenance_builtins() -> List[Sig] = {
   let e = EffVar("e", -1)
   [
     {
-      let identity_base = tp1(bsig("provenance_observe", [ty_fn([TyInt], t, e, capture.empty_function())], ["body"], t), t)
+      let identity_base = tp1(bsig("provenance_observe", [ty_fn([TyInt], t, e, capture.empty_function()), TyInt], ["body", "capacity"], t), t)
       let identity_eff: Eff = eff_union([EIo, e])
       Sig { ..identity_base,
         eff = identity_eff,
         eparams = [e],
         scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
     },
-    eff1(bsig("provenance_note", [TyInt, TyString], ["scope", "origin"], TyUnit), EIo),
-    eff1(bsig("provenance_completed", [TyInt], ["scope"], TyString), EIo),
+    eff1(bsig("provenance_note", [TyInt, provenance_origin_type()], ["scope", "origin"], TyUnit), EIo),
+    eff1(bsig("provenance_completed", [TyInt], ["scope"], provenance_snapshot_type()), EIo),
     eff1(bsig("provenance_checkpoint", [TyInt], ["scope"], TyString), EIo),
     eff1(bsig("provenance_rewind", [TyInt, TyString], ["scope", "checkpoint"], TyUnit), EIo),
-    eff1(bsig("provenance_origin", [TyInt], ["scope"], TyString), EIo),
+    eff1(bsig("provenance_origin", [TyInt], ["scope"], provenance_origin_type()), EIo),
     bsig("provenance_field", [TyString, TyInt], ["origin", "index"], TyString),
     bsig("provenance_number", [TyString, TyInt], ["origin", "index"], TyInt),
-    bsig("provenance_parent", [TyString], ["origin"], TyString),
+    bsig("provenance_word", [TyBytes, TyInt], ["data", "index"], TyInt),
+    bsig("provenance_header", [provenance_snapshot_type(), TyInt], ["view", "field"], TyInt),
+    bsig("provenance_column", [provenance_snapshot_type(), TyInt, TyInt], ["view", "row", "field"], TyInt),
+    bsig("provenance_render_snapshot", [provenance_snapshot_type()], ["snapshot"], TyString),
+    bsig("provenance_render_origin", [provenance_origin_type()], ["origin"], TyString),
   ]
 }
 
@@ -5505,7 +5518,7 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # a backend -- lowering replaces the call with its argument.
   internal = set.insert(internal, "char_unchecked")
 
-  for op in ["observe", "note", "completed", "checkpoint", "rewind", "origin", "field", "number", "parent"] {
+  for op in ["observe", "note", "completed", "checkpoint", "rewind", "origin", "field", "number", "word", "header", "column", "render_snapshot", "render_origin"] {
     internal = set.insert(internal, "provenance_" ++ op)
   }
   erased = set.insert(erased, "provenance_observe")
@@ -6337,7 +6350,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 161
+  assert map_size2(bs) == 165
 }
 
 test "the reclaim's failure is a value, under the one name left" {

@@ -39,7 +39,7 @@ def mutations(run):
                 else:
                     text = base.with_suffix('.c').read_text()
                     if mode == 'route':
-                        match = re.search(r'\n(?:DAWN_PROV_CODE )?\w+ (dawn_modes__lambda_\w+)_observed\([^\n]+\) \{\n[^\n]+dawn_prov_enter_function\("modes\\tNf4:make\\t[^\n]+\\tlambda\\t', text)
+                        match = re.search(r'\n(?:DAWN_PROV_CODE )?\w+ (dawn_modes__lambda_\w+)_observed\([^\n]+\) \{\n  dawn_prov_thread_state \*dawn_prov_ctx = dawn_prov_context\(\);\n[^\n]+dawn_prov_enter_function_ctx\(dawn_prov_ctx, [^,]+, "modes\\tNf4:make\\t[^\n]+\\tlambda\\t', text)
                         assert match, 'missing independently selected factory lambda'
                         name = match[1]+'__clo'
                         old = '{(void*)'+name+', (void*)'+name+'_observed}'
@@ -59,6 +59,9 @@ def mutations(run):
                         for role in ['literal', 'operator', 'var', 'for', 'if']:
                             assert r'\t'+role+r'\t' in text, role
                             text = text.replace(r'\t'+role+r'\t', r'\tunknown\t')
+                        pattern = r'(static dawn_str \w+ = \{\{DAWN_IMMORTAL, DAWN_K_STR\}, )[0-9]+(, ")(literal|operator|var|for|if)("\};)'
+                        text, changed = re.subn(pattern, lambda m: m[1]+'7'+m[2]+'unknown'+m[4], text)
+                        assert changed > 0, 'missing typed syntax role fields'
                         old = new = 'dawn_prov_sites'
                     elif mode == 'chain':
                         content = source.read_text(); main = content.index('fn main()')
@@ -68,27 +71,38 @@ def mutations(run):
                         assert len(entries) == 2, ('chain Site constants', entries)
                         entries.sort(key=lambda entry: int(entry[1].split(r'\t')[3]))
                         (first_id, first_text), (second_id, second_text) = entries
-                        text = text.replace(second_id, first_id)
+                        text = '\n'.join(line if line.startswith('enum {') else line.replace('dawn_prov_site_'+second_id, 'dawn_prov_site_'+first_id) for line in text.split('\n'))
+
                         old, new = second_text, first_text
                     elif mode == 'query':
                         content = source.read_text(); main = content.index('fn main()')
                         lo = content.index('query(n) origin source', main)-main
-                        pattern = r'(\n[^\n]+_observed\([^\n]+\) \{\n[^\n]+dawn_prov_enter_function\("builder\\tNf4:main\\t'+str(lo)+r'\\t[^\n]+\\thandler\\t[^\n]+\n)(.*?)(\n}\n)'
+                        pattern = r'(\n[^\n]+_observed\([^\n]+\) \{\n  dawn_prov_thread_state \*dawn_prov_ctx = dawn_prov_context\(\);\n[^\n]+dawn_prov_enter_function_ctx\(dawn_prov_ctx, [^,]+, "builder\\tNf4:main\\t'+str(lo)+r'\\t[^\n]+\\thandler\\t[^\n]+\n)(.*?)(\n}\n)'
                         match = re.search(pattern, text, re.S)
                         assert match and 'dawn_prov_note(' in match[2], 'query handler selection'
                         changed = match[0].replace('dawn_prov_note(', 'test_skip_note(')
-                        text = '#include "dawn_rt.h"\nstatic void test_skip_note(int64_t s, dawn_str *o) { (void)s; (void)o; }\n'+text
+                        text = '#include "dawn_rt.h"\nstatic void test_skip_note(int64_t s, dawn_adt *o) { (void)s; (void)o; }\n'+text
                         old, new = match[0], changed
                     elif mode == 'pure':
                         old, new = '= dawn_builder__pure_observed(', '= dawn_builder__pure('
                     elif mode == 'instance':
-                        old, new = '(long long)r->id, (long long)r->parent,', '(long long)r->site, (long long)r->parent,'
+                        old, new = 'dawn_prov_put_word(data, at + 1, r->id);', 'dawn_prov_put_word(data, at + 1, r->site);'
                     elif mode == 'parent':
-                        old, new = '(long long)r->id, (long long)r->parent,', '(long long)r->id, (long long)r->id,'
+                        old, new = 'dawn_prov_put_word(data, at + 2, parent);', 'dawn_prov_put_word(data, at + 2, -1);'
                     else:
                         pattern = r'"builder\\tNf6:helper\\t[^"\n]*\\tperform\\t[^"\n]*"'
                         strings = re.findall(pattern, text)
                         assert strings, 'missing perform Site constants'
+                        ids = {m[0] for m in re.findall(r'\{([0-9]+), "(builder\\tNf6:helper\\t[^"\n]*\\tperform\\t[^"\n]*)"\}', text)}
+                        helper = re.search(r'static dawn_str (\w+) = [^\n]*, "Nf6:helper"\};', text)[1]
+                        main = re.search(r'static dawn_str (\w+) = [^\n]*, "Nf4:main"\};', text)[1]
+                        changed = 0; lines = []
+                        for line in text.split('\n'):
+                            if any(line.startswith('  {'+id+', ') for id in ids) and '&'+helper in line:
+                                line = line.replace('&'+helper, '&'+main); changed += 1
+                            lines.append(line)
+                        assert changed > 0, 'missing typed perform declaration fields'
+                        text = '\n'.join(lines)
                         old, new = strings[0], strings[0].replace('Nf6:helper', 'Nf4:main')
                     assert old in text, (label, 'mutation anchor missing')
                     text = text.replace(old, new)

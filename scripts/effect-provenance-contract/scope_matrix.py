@@ -30,7 +30,7 @@ def escape_matrix(run):
         ('handler-cell', 'effect Keep { fn keep() -> Unit }', '{ with handle Keep { var saved: TraceScope = scope\n keep() => () }\n keep()\n 42 }', 'TraceScope is a lexical handle'),
         ('mutable', '', '{ var copy = scope\n 42 }', 'TraceScope is a lexical handle'),
         ('return', '', '{ let escaped = provenance.observe(inner => inner)\n 42 }', 'TraceScope is a lexical handle'),
-        ('capture', '', '{ let escaped = () => provenance.completed(scope)\n 42 }', 'TraceScope cannot be captured by an escaping closure'),
+        ('capture', '', '{ let escaped = () => provenance.render_snapshot(provenance.completed(scope))\n 42 }', 'TraceScope cannot be captured by an escaping closure'),
         ('implicit-capture', 'effect Ask { fn ask() -> Origin }', '{ let escaped = () => { let scope = 0\n with handle Ask { ask() origin source => source }\n ask() }\n 42 }', 'TraceScope cannot be captured by an escaping closure'),
         ('argument', 'fn take(value: TraceScope) -> Int = 42', 'take(scope)', 'TraceScope is a lexical handle'),
         ('generic', 'fn take[T](value: T) -> Int = 42', 'take(scope)', 'TraceScope is a lexical handle'),
@@ -40,7 +40,7 @@ def escape_matrix(run):
     ]
     for name, declarations, body, message in cases:
         positive = source(run, 'escape-'+name+'-positive', declarations,
-                          'provenance.observe(scope => { let rows = provenance.completed(scope)\n 42 })')
+                          'provenance.observe(scope => { let rows = provenance.render_snapshot(provenance.completed(scope))\n 42 })')
         run.execute('escape-'+name+'-positive', positive, exact('42\n'))
         negative = source(run, 'escape-'+name+'-negative', declarations,
                           'provenance.observe(scope => '+body+')')
@@ -108,38 +108,27 @@ def runtime_errors(run):
         run.execute('checkpoint-'+name+'-negative', invalid, exact('provenance: '+message+'\n'))
 
 
-def w3_refusals(run):
+def w3_controls(run):
     cases = [
         ('resume', 'ctl effect Ask { fn ask() -> Int }',
-         '{ with handle Ask { ask() resume k => k(7) }\n ask() }', 7),
+         '{ with handle Ask { ask() resume k => k(7) }\n ask() }'),
         ('discard', 'ctl effect Ask { fn ask() -> Int }',
-         '{ with handle Ask { ask() resume k => { discard(k)\n 7 } }\n ask() }', 7),
+         '{ with handle Ask { ask() resume k => { discard(k)\n 7 } }\n ask() }'),
         ('suspend', 'ctl effect Ask { fn ask() -> Int }',
-         '{ with handle Ask { ask() resume k => 7 }\n ask() }', 7),
-        ('tail', 'fn loop(n: Int) -> Int = if n == 0 { 7 } else { loop(n - 1) }',
-         'loop(2)', 7),
+         '{ with handle Ask { ask() resume k => 7 }\n ask() }'),
+        ('tail', 'fn loop(n: Int) -> Int = if n == 0 { 7 } else { loop(n - 1) }', 'loop(2)'),
     ]
-    for name, declarations, body, expected in cases:
-        # A named helper outside lexical observation reaches the runtime
-        # refusal. Lexically observed control arms are refused even earlier.
+    for name, declarations, body in cases:
         if name != 'tail':
             declarations += '\nfn scenario() -> Int = '+body
             body = 'scenario()'
-        positive = source(run, 'w3-'+name+'-positive', declarations, body)
-        run.execute('w3-'+name+'-positive', positive, exact(str(expected)+'\n'))
-        expression = 'match catch_panic(() => provenance.observe(scope => '+body+')) { Ok(value) -> "accepted"\n Err(error) -> error.message }'
-        negative = source(run, 'w3-'+name+'-negative', declarations, expression)
-        boundary = 'tail calls' if name == 'tail' else 'control operations'
-        run.execute('w3-'+name+'-negative', negative,
-                    exact('provenance: '+boundary+' under observation is not supported in W2\n'))
+        for observed in [False, True]:
+            expression = 'provenance.observe(scope => '+body+')' if observed else body
+            path = source(run, 'w3-'+name+('-observed' if observed else '-plain'), declarations, expression)
+            run.execute(path.stem, path, exact('7\n'))
     for origin in ['', ' origin event']:
         label = 'combined-origin' if origin else 'lexical-control'
         declarations = 'ctl effect Ask { fn ask() -> Int }'
-        positive = source(run, 'w3-'+label+'-positive', declarations,
-                          '{ with handle Ask { ask() resume k => k(7) }\n ask() }')
-        run.execute('w3-'+label+'-positive', positive, exact('7\n'))
         body = 'provenance.observe(scope => { with handle Ask { ask()'+origin+' resume k => k(7) }\n ask() })'
-        negative = source(run, 'w3-'+label+'-negative', declarations, body)
-        run.rejection('w3-'+label+'-negative', negative, 'control arms under observation are not supported in W2')
-    base = source(run, 'tail-base-positive', cases[-1][1], 'provenance.observe(scope => loop(0))')
-    run.execute('tail-base-positive', base, exact('7\n'))
+        path = source(run, 'w3-'+label, declarations, body)
+        run.execute(path.stem, path, exact('7\n'))

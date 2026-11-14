@@ -1,0 +1,30 @@
+# The creation mode belongs to the saved activation, not its later caller.
+# Its unobserved remainder cannot be guessed into the driver's source tree.
+use std/io
+use std/provenance as p
+use std/provenance.{UnknownBoundary, Known}
+ctl effect Ask { fn ask() -> Int }
+type Stage = Done(n: Int) | Paused(k: fn(Int) -> Stage)
+fn leaf(n: Int) -> Int = n + 1
+fn scenario() -> Stage = {
+  with handle Ask { ask() resume k => Paused(k) }
+  Done(leaf(ask()))
+}
+pub fn main() -> Unit !io = {
+  let saved = scenario()
+  let (value, snapshot) = p.observe(scope => {
+    let n = match saved { Paused(k) -> match k(41) { Done(n) -> n, _ -> -1 }, _ -> -1 }
+    (n, p.completed(scope))
+  })
+  let view = p.records(snapshot)
+  if value != 42 || p.record_count(view) != 3 { panic("saved Plain activation was re-entered as Observed") }
+  if p.record_boundary(view, 0) != Known || p.record_boundary(view, 1) != Known || p.record_boundary(view, 2) != UnknownBoundary {
+    panic("missing explicit context boundary")
+  }
+  for row in 0..3 {
+    let record = p.record_at(snapshot, row).expect("missing row")
+    if record.parent != (if row == 0 { None } else { Some(row - 1) }) { panic("driver parent chain") }
+  }
+  io.println("42 saved Plain mode stays Plain under an observed driver")
+  io.println(p.render_snapshot(snapshot))
+}
