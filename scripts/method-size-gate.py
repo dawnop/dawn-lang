@@ -196,6 +196,27 @@ def measure(entries, vendored):
     return out
 
 
+def observed_method(cls, method):
+    """Execution ABI and physical container, never a source function allowlist."""
+    name = method_name(method)
+    return name != "<clinit>" and (
+        name.endswith("$observed") or name == "applyObserved"
+        or "$observed$" in cls or name.startswith("$observed$part$")
+        or cls == "dawn/rt/Provenance" or cls.startswith("dawn/rt/Provenance$"))
+
+
+def measure_observed(entries):
+    out = {"vendored": [], "embed": [], "test": [], "checked": [], "plain": []}
+    for data in entries:
+        cls, _, methods = read_class(data)
+        for method, size in methods:
+            kind = "checked" if observed_method(cls, method) else "plain"
+            out[kind].append((size, cls, method))
+    for rows in out.values():
+        rows.sort(reverse=True)
+    return out
+
+
 def jar_entries(jar):
     with zipfile.ZipFile(jar) as z:
         for n in z.namelist():
@@ -348,7 +369,23 @@ def selftest(jar):
         ("longs count once, not twice", [synth("check/a", [("f", 10, params(k - 1, "J"), 9)])], 0),
         ("a wide vendored method", [synth("org/objectweb/asm/X", [("f", 10, params(k), 9)])], 0),
     ]
+    observed_cases = [
+        ("observed body at the limit", "app", "hot$observed", LIMIT, 0),
+        ("oversized observed hot body", "app", "hot$observed", LIMIT + 1, 1),
+        ("oversized physical region", "app", "$observed$part$0", LIMIT + 1, 1),
+        ("oversized companion body", "app$observed$1", "body", LIMIT + 1, 1),
+        ("oversized function dispatch", "app$closure$1", "applyObserved", LIMIT + 1, 1),
+        ("oversized runtime hot helper", "dawn/rt/Provenance", "finishContext", LIMIT + 1, 1),
+        ("ordinary body is outside observed selection", "app", "plain", LIMIT + 1, 0),
+        ("static initialization is cold", "app$observed$1", "<clinit>", LIMIT + 1, 0),
+    ]
     bad = 0
+    for label, cls, name, size, want in observed_cases:
+        got = verdict(measure_observed([synth(cls, [(name, size)])]), LIMIT,
+                      quiet=True, arg_limit=256)
+        if got != want:
+            print(f"SELFTEST FAIL {label}: exit {got}, wanted {want}", file=sys.stderr)
+            bad += 1
     fake_vendor = ["org/objectweb/asm", "coursierapi"]
     for label, entries, want in cases:
         got = verdict(measure(entries, fake_vendor), LIMIT, quiet=True)
@@ -394,7 +431,7 @@ def selftest(jar):
         print(f"note: {jar} not built, threshold mutant on the real jar skipped")
     if bad:
         return 1
-    print(f"OK: method-size gate self-test, {len(cases)} synthetic cases, reader round trip"
+    print(f"OK: method-size gate self-test, {len(cases)+len(observed_cases)} synthetic cases, reader round trip"
           + (", threshold and argument mutants on the real jar" if jar.is_file() else ""))
     return 0
 
@@ -402,6 +439,8 @@ def selftest(jar):
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--jar", type=Path, default=DEFAULT_JAR)
+    ap.add_argument("--observed-jar", type=Path, action="append", default=[],
+                    help="also check every emitted observed body and physical helper")
     ap.add_argument("--limit", type=int, default=LIMIT)
     ap.add_argument("--arg-limit", type=int, default=ARG_LIMIT)
     ap.add_argument("--top", type=int, default=0, help="list the N largest checked methods")
@@ -412,8 +451,22 @@ def main(argv):
     if not a.jar.is_file():
         print(f"FAIL: {a.jar} not found; build it with ./bin/dawn --version", file=sys.stderr)
         return 2
-    return verdict(measure(jar_entries(a.jar), vendored_packages()), a.limit, a.top,
-                   arg_limit=a.arg_limit)
+    status = verdict(measure(jar_entries(a.jar), vendored_packages()), a.limit, a.top,
+                     arg_limit=a.arg_limit)
+    for jar in a.observed_jar:
+        if not jar.is_file():
+            print(f"FAIL: observed corpus {jar} not found", file=sys.stderr)
+            return 2
+        measured = measure_observed(jar_entries(jar))
+        if not measured["checked"]:
+            print(f"FAIL: {jar}: no observed methods read", file=sys.stderr)
+            return 1
+        print(f"Observed code gate {jar}: {len(measured['plain'])} ordinary/cold methods excluded")
+        # The compiler argument policy is unchanged. User methods retain the
+        # language's existing JVM ABI limit; physical helpers reserve context
+        # and stay below the stricter compiler argument policy themselves.
+        status |= verdict(measured, a.limit, a.top, arg_limit=256)
+    return status
 
 
 if __name__ == "__main__":

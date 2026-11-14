@@ -5,8 +5,13 @@ import dawn.rt.PanicError;
 
 public final class RuntimeProbe {
   private RuntimeProbe() {}
+  private static final String HELPER="helper\t\t0\t1\tfunction\t101", PURE="pure\t\t0\t1\tfunction\t102", QUERY="query\t\t0\t1\tfunction\t103";
+  private static final dawn.rt.Tuple2 TABLE = Provenance.table(
+    new Object[]{ProbeTables.site(11,"helper"),ProbeTables.site(12,"pure"),ProbeTables.site(13,"query"),new dawn.rt.Tuple2(new dawn.rt.Tuple5(14L,0L,1L,0L,1L),new dawn.rt.Tuple5("pure","pure","","perform","Ask:ask"))},
+    new Object[]{new dawn.rt.Tuple6(101L,"helper","",0L,1L,"function"),new dawn.rt.Tuple6(102L,"pure","",0L,1L,"function"),new dawn.rt.Tuple6(103L,"query","",0L,1L,"function")});
+  private static long open() { return Provenance.open(TABLE); }
   private static void run(String mode) {
-    long s = Provenance.open();
+    long s = mode.startsWith("bounded_") ? Provenance.open(TABLE,1) : open();
     if (mode.equals("cross_thread")) {
       final String[] message = {null};
       Thread worker = new Thread(() -> {
@@ -22,13 +27,13 @@ public final class RuntimeProbe {
     if (mode.equals("cleanup")) {
       Provenance.close(s, true);
       for (int i = 0; i < 1000; i++) {
-        long id = Provenance.open();
-        long token = Provenance.before(11, "helper"); Provenance.arrive("helper");
+        long id = open();
+        long token = Provenance.before(11, "helper"); Provenance.arrive(HELPER);
         String mark = Provenance.checkpoint(id);
-        long nested = Provenance.before(12, "pure"); Provenance.arrive("pure"); Provenance.finish(nested, true);
+        long nested = Provenance.before(12, "pure"); Provenance.arrive(PURE); Provenance.finish(nested, true);
         Provenance.rewind(id, mark); Provenance.finish(token, true);
-        String prefix = Provenance.completed(id); Provenance.close(id, true);
-        if (!prefix.startsWith("S\t")) throw new AssertionError("lost snapshot");
+        String prefix = Provenance.renderSnapshot(Provenance.completed(id)); Provenance.close(id, true);
+        if (!prefix.startsWith("S1\t")) throw new AssertionError("lost snapshot");
       }
       try {
         Class<?> sessions = Class.forName("dawn.rt.Provenance$Sessions");
@@ -42,32 +47,60 @@ public final class RuntimeProbe {
       System.out.println("clean"); return;
     }
     if (mode.equals("reuse")) {
-      long f = Provenance.before(11, "helper"); Provenance.arrive("helper");
-      String c = Provenance.checkpoint(s);
-      long a = Provenance.before(12, "pure"); Provenance.arrive("pure"); Provenance.finish(a, true);
+      long f = Provenance.before(11, "helper"); Provenance.arrive(HELPER);
+          String c = Provenance.checkpoint(s);
+      long a = Provenance.before(12, "pure"); Provenance.arrive(PURE); Provenance.finish(a, true);
       Provenance.rewind(s, c);
-      long b = Provenance.before(12, "pure"); Provenance.arrive("pure"); Provenance.finish(b, true);
+      long b = Provenance.before(12, "pure"); Provenance.arrive(PURE); Provenance.finish(b, true);
       Provenance.rewind(s, c);
       String inner = Provenance.checkpoint(s);
-      long q = Provenance.before(13, "query"); Provenance.arrive("query"); Provenance.finish(q, true);
+      long q = Provenance.before(13, "query"); Provenance.arrive(QUERY); Provenance.finish(q, true);
       Provenance.rewind(s, inner); Provenance.rewind(s, c);
       Provenance.finish(f, true);
-      System.out.println(Provenance.completed(s));
+      System.out.println(Provenance.renderSnapshot(Provenance.completed(s)));
       Provenance.close(s, true); return;
+    }
+    if (mode.equals("unknown")) {
+      long f=Provenance.before(11,"helper"); Provenance.unknownContext(Provenance.context()); Provenance.finish(f,true);
+      System.out.println(Provenance.renderSnapshot(Provenance.completed(s))); Provenance.close(s,true); return;
+    }
+    if (mode.startsWith("bounded_")) {
+      long f=mode.equals("bounded_tail_epoch") ? Provenance.before(14,"pure\t\t0\t1\t0\t1\tperform\tAsk:ask") : Provenance.before(11,"helper"); Provenance.arrive(HELPER);
+      String mark=Provenance.checkpoint(s);
+      if (mode.equals("bounded_tail_epoch")) {
+        long child=Provenance.before(12,"pure"); Provenance.arrive(PURE); Provenance.finish(child,true);
+        Provenance.rewind(s,mark); Provenance.tail(14,"pure\t\t0\t1\t0\t1\tperform\tAsk:ask");
+        String text=Provenance.renderOrigin(Provenance.origin(s));
+        if(!text.contains("\nF\t1\t1\t2\t0\t0\t14\tpure")) throw new AssertionError(text);
+        Provenance.finish(f,true); Provenance.close(s,true);
+        System.out.println("1 2 original operation identity after rewind and tail"); return;
+      }
+      if (mode.equals("bounded_suspended")) {
+        Object target=Provenance.capture(), driver=Provenance.mount(target);
+        Provenance.before(12,"pure"); Provenance.arrive(PURE);
+        Provenance.unmount(target,driver,false); Provenance.rewind(s,mark);
+      }
+      if (mode.equals("bounded_finished")) { Provenance.finish(f,true); Provenance.rewind(s,mark); }
+      if (mode.equals("bounded_deeper")) { Provenance.before(12,"pure"); Provenance.arrive(PURE); Provenance.rewind(s,mark); }
+      for (int i=0;i<2;i++) {
+        long child=Provenance.before(12,"pure"); Provenance.arrive(PURE); Provenance.finish(child,true); Provenance.rewind(s,mark);
+      }
+      Provenance.finish(f,true);
+      System.out.println(Provenance.renderSnapshot(Provenance.completed(s))); Provenance.close(s,true); return;
     }
     String c = Provenance.checkpoint(s);
     if (mode.equals("invalidated")) {
       String later = Provenance.checkpoint(s); Provenance.rewind(s, c); Provenance.rewind(s, later);
     } else if (mode.equals("other")) {
-      long other = Provenance.open(); Provenance.rewind(other, c);
+      long other = open(); Provenance.rewind(other, c);
     } else if (mode.equals("exited")) {
-      Provenance.close(s, true); long other = Provenance.open(); Provenance.rewind(other, c);
+      Provenance.close(s, true); long other = open(); Provenance.rewind(other, c);
     } else if (mode.equals("deeper")) {
-      Provenance.before(11, "helper"); Provenance.arrive("helper"); Provenance.rewind(s, c);
+      Provenance.before(11, "helper"); Provenance.arrive(HELPER); Provenance.rewind(s, c);
     } else if (mode.equals("finished") || mode.equals("same_site")) {
-      long f = Provenance.before(11, "helper"); Provenance.arrive("helper");
+      long f = Provenance.before(11, "helper"); Provenance.arrive(HELPER);
       c = Provenance.checkpoint(s); Provenance.finish(f, true);
-      if (mode.equals("same_site")) { Provenance.before(11, "helper"); Provenance.arrive("helper"); }
+      if (mode.equals("same_site")) { Provenance.before(11, "helper"); Provenance.arrive(HELPER); }
       Provenance.rewind(s, c);
     } else { throw new AssertionError(mode); }
   }

@@ -3783,7 +3783,17 @@ fn walk_method(
           None -> ()
         }
       }
-      q = walk_method_children(qc, q, target, args, if len(bound) > 0 { bound } else { targs })
+      let children = if len(bound) > 0 { bound } else { targs }
+      # A module qualifier is never a receiver. Arranged calls also bind
+      # filled defaults, so their arity alone cannot distinguish UFCS.
+      let qualified = match target {
+        EVar(qual, _, _) -> map.has(qc.entry.cx.module_fn_sigs, (qual, name))
+        _ -> false
+      }
+      if qualified {
+        q = walk_e(qc, q, target, None)
+        q = walk_call_args(qc, q, args, children)
+      } else { q = walk_method_children(qc, q, target, args, children) }
     }
     Some(XCallBuiltin(bname, targs, _, _, _, _, _, _)) -> {
       if bname == name {

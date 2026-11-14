@@ -2846,6 +2846,8 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use, void *ev) {
  * payload is carried across the handoff and re-raised by the driver, where
  * the rest of the chain is. Kind and message travel untouched, so
  * `catch_fault` still refuses a panic that crossed a suspension. */
+const dawn_control_observer *dawn_control_observation;
+
 #ifndef __wasi__
 
 /* The widest operation a control arm can answer, and the same number the JVM
@@ -2884,6 +2886,8 @@ typedef struct dawn_ctl {
    * driver's frame and unwinds through it on the way out. */
   bool bubbling;
   dawn_failure fail;
+  const dawn_control_observer *observer;
+  void *observation;
 } dawn_ctl;
 
 struct dawn_carrier {
@@ -2900,6 +2904,7 @@ struct dawn_carrier {
    * get to release what they hold. False for a bare drop, true for `discard`. */
   bool run_releases;
   dawn_ctl *act;
+  void *driver_observation;
 };
 
 /* The prompt chain. A plain global and not `DAWN_STACK_LOCAL`, and that is
@@ -2963,11 +2968,19 @@ static void dawn_ctl_switch_to(dawn_carrier *c) {
     fputs("dawn: a continuation was resumed after its stack ran out\n", stderr);
     abort();
   }
+  const dawn_control_observer *observer = c->act->observer;
+  void *saved_observation = observer ? observer->capture() : NULL;
+  c->driver_observation = saved_observation;
   pthread_mutex_lock(&c->m);
   c->turn = 1;
   pthread_cond_broadcast(&c->cv);
   while (c->turn == 1) pthread_cond_wait(&c->cv, &c->m);
   pthread_mutex_unlock(&c->m);
+  if (observer) {
+    observer->relate(saved_observation, c->act->observation);
+    observer->attach(saved_observation);
+    observer->release(saved_observation);
+  }
   dawn_ctl_cur = saved;
 }
 
@@ -2993,17 +3006,23 @@ static _Noreturn void dawn_ctl_discard(bool run_releases) {
 }
 
 static void dawn_ctl_hand_back(dawn_carrier *c) {
+  if (c->act->observer) c->act->observer->save(c->act->observation, 0);
   pthread_mutex_lock(&c->m);
   c->turn = 0;
   pthread_cond_broadcast(&c->cv);
   while (c->turn == 0) pthread_cond_wait(&c->cv, &c->m);
   pthread_mutex_unlock(&c->m);
   dawn_ctl_cur = c;
-  if (c->die) dawn_ctl_discard(c->run_releases);
+  if (c->act->observer) c->act->observer->attach(c->act->observation);
+  if (c->die) {
+    if (c->act->observer) c->act->observer->abandon(c->act->observation, c->run_releases);
+    dawn_ctl_discard(c->run_releases);
+  }
 }
 
 /* The last handoff: the carrier is done and nothing will resume it. */
 static void dawn_ctl_hand_back_final(dawn_carrier *c) {
+  if (c->act->observer) c->act->observer->save(c->act->observation, 1);
   pthread_mutex_lock(&c->m);
   c->finished = true;
   c->turn = 0;
@@ -3018,6 +3037,7 @@ static void *dawn_ctl_carrier_main(void *arg) {
   while (c->turn == 0) pthread_cond_wait(&c->cv, &c->m);
   pthread_mutex_unlock(&c->m);
   dawn_ctl_cur = c;
+  if (f->observer) f->observer->attach(f->observation);
   if (!c->die) {
     /* The base of this stack. It takes every kind, and it is the only thing
      * on the chain that this carrier's own frames can unwind to -- see
@@ -3030,7 +3050,8 @@ static void *dawn_ctl_carrier_main(void *arg) {
     dawn_handlers = &base;
     if (setjmp(base.jb) == 0) {
       dawn_clo *r = (dawn_clo *)f->rest;
-      f->result = ((void *(*)(dawn_clo *, void *))r->fn)(r, dawn_dup(f->evs));
+      void *entry = f->observer ? f->observer->select(r->fn) : r->fn;
+      f->result = ((void *(*)(dawn_clo *, void *))entry)(r, dawn_dup(f->evs));
     } else if (dawn_ctl_discarding) {
       dawn_ctl_discarding = false;
       dawn_ctl_discard_walking = false;
@@ -3173,6 +3194,7 @@ static void dawn_ctl_dispose(void *p) {
    * this walk's business, so both are put back. */
   dawn_ctl_top = saved_top;
   dawn_ctl_pending = saved_pending;
+  if (f->observer) f->observer->release(f->observation);
   dawn_drop(f->rest);
   dawn_drop(f->evs);
   dawn_drop(f->result);
@@ -3232,39 +3254,45 @@ static dawn_clo *dawn_ctl_k_new(dawn_ctl *f) {
  * reason -- which arm suspended is not known until it does -- and the
  * arguments are borrowed here and owned by a closure's parameters, so each
  * one is duplicated exactly like `dawn_bracket` duplicates its resource. */
-static void *dawn_ctl_apply_arm(dawn_clo *arm, int64_t n, void **args,
-                                dawn_clo *k, void *env) {
-  void *e = dawn_dup(env);
+typedef struct {
+  const dawn_control_observer *observer;
+  void *previous;
+} dawn_ctl_arm_observation;
+static void dawn_ctl_arm_observation_cleanup(dawn_ctl_arm_observation *guard) {
+  if (guard->observer) guard->observer->arm_leave(guard->previous);
+}
+static inline __attribute__((always_inline)) void *dawn_ctl_call_arm(
+    void *entry, dawn_clo *arm, int64_t n, void **args, dawn_clo *k, void *e) {
   switch (n) {
     case 0:
-      return ((void *(*)(dawn_clo *, void *, void *))arm->fn)(arm, k, e);
+      return ((void *(*)(dawn_clo *, void *, void *))entry)(arm, k, e);
     case 1:
-      return ((void *(*)(dawn_clo *, void *, void *, void *))arm->fn)(
+      return ((void *(*)(dawn_clo *, void *, void *, void *))entry)(
         arm, dawn_dup(args[0]), k, e);
     case 2:
-      return ((void *(*)(dawn_clo *, void *, void *, void *, void *))arm->fn)(
+      return ((void *(*)(dawn_clo *, void *, void *, void *, void *))entry)(
         arm, dawn_dup(args[0]), dawn_dup(args[1]), k, e);
     case 3:
-      return ((void *(*)(dawn_clo *, void *, void *, void *, void *, void *))arm->fn)(
+      return ((void *(*)(dawn_clo *, void *, void *, void *, void *, void *))entry)(
         arm, dawn_dup(args[0]), dawn_dup(args[1]), dawn_dup(args[2]), k, e);
     case 4:
       return ((void *(*)(dawn_clo *, void *, void *, void *, void *, void *,
-                         void *))arm->fn)(
+                         void *))entry)(
         arm, dawn_dup(args[0]), dawn_dup(args[1]), dawn_dup(args[2]),
         dawn_dup(args[3]), k, e);
     case 5:
       return ((void *(*)(dawn_clo *, void *, void *, void *, void *, void *,
-                         void *, void *))arm->fn)(
+                         void *, void *))entry)(
         arm, dawn_dup(args[0]), dawn_dup(args[1]), dawn_dup(args[2]),
         dawn_dup(args[3]), dawn_dup(args[4]), k, e);
     case 6:
       return ((void *(*)(dawn_clo *, void *, void *, void *, void *, void *,
-                         void *, void *, void *))arm->fn)(
+                         void *, void *, void *))entry)(
         arm, dawn_dup(args[0]), dawn_dup(args[1]), dawn_dup(args[2]),
         dawn_dup(args[3]), dawn_dup(args[4]), dawn_dup(args[5]), k, e);
     case 7:
       return ((void *(*)(dawn_clo *, void *, void *, void *, void *, void *,
-                         void *, void *, void *, void *))arm->fn)(
+                         void *, void *, void *, void *))entry)(
         arm, dawn_dup(args[0]), dawn_dup(args[1]), dawn_dup(args[2]),
         dawn_dup(args[3]), dawn_dup(args[4]), dawn_dup(args[5]),
         dawn_dup(args[6]), k, e);
@@ -3274,6 +3302,19 @@ static void *dawn_ctl_apply_arm(dawn_clo *arm, int64_t n, void **args,
   dawn_panic(DAWN_LIT("dawn: a control arm answers an operation with more "
                       "than 7 parameters"));
   return NULL;
+}
+
+/* A plain activation keeps the original tail call; only an observed one pays
+ * for the scoped guard, which makes its call a non-tail call. */
+static void *dawn_ctl_apply_arm(dawn_ctl *activation, dawn_clo *arm, int64_t n, void **args,
+                                dawn_clo *k, void *env) {
+  const dawn_control_observer *observer = activation->observer;
+  if (!observer) return dawn_ctl_call_arm(arm->fn, arm, n, args, k, dawn_dup(env));
+  DAWN_CLEANUP(dawn_ctl_arm_observation_cleanup) dawn_ctl_arm_observation guard = {
+    observer, observer->arm_enter(activation->observation)
+  };
+  void *e = dawn_dup(env);
+  return dawn_ctl_call_arm(observer->select(arm->fn), arm, n, args, k, e);
 }
 
 /* Run this activation until it either finishes or suspends into *this*
@@ -3342,7 +3383,7 @@ static void *dawn_ctl_drive(dawn_ctl *f) {
   f->env = NULL;
   f->nargs = 0;
   k = dawn_ctl_k_new(f);
-  return dawn_ctl_apply_arm(arm, n, args, k, env);
+  return dawn_ctl_apply_arm(f, arm, n, args, k, env);
 }
 
 static void dawn_ctl_slot_drop(dawn_ctl **slot) {
@@ -3357,6 +3398,8 @@ void *dawn_ctl_enter(int64_t hid, void *rest, void *evs) {
   memset(f, 0, sizeof *f);
   dawn_hdr_init(&f->h, DAWN_K_CTL);
   f->hid = hid;
+  f->observer = dawn_control_observation;
+  f->observation = f->observer ? f->observer->capture() : NULL;
   f->rest = dawn_dup(rest);
   f->evs = dawn_dup(evs);
   f->carrier = dawn_ctl_carrier_new(f);

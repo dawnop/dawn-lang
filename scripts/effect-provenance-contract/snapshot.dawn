@@ -1,0 +1,74 @@
+# Freeze time and typed identities are checked independently of debug text.
+# All inspection happens after observation, so it cannot change its own log.
+use std/io
+use std/provenance as p
+use std/provenance.{TraceSnapshot, Origin, CallRecord, InvocationKey, Active, Returned, Complete, Known}
+
+fn require(ok: Bool) -> Unit = if not ok { panic("snapshot contract failed") }
+fn absent(value: Option[Origin]) -> Bool = match value { None -> true, Some(_) -> false }
+fn helper(n: Int) -> Int = n + 1
+fn row(snapshot: TraceSnapshot, index: Int) -> CallRecord =
+  p.record_at(snapshot, index).expect("missing frozen row")
+fn check(snapshot: TraceSnapshot, scope: Int, epoch: Int, count: Int) -> Unit = {
+  let info = p.snapshot_info(snapshot)
+  require(info.scope == scope && info.epoch == epoch && info.records == count)
+  require(info.notes == 0 && info.completeness == Complete)
+  require(p.record_at(snapshot, -1) == None && p.record_at(snapshot, count) == None)
+  require(absent(p.note_at(snapshot, -1)) && absent(p.note_at(snapshot, 0)))
+  require(row(snapshot, 0).parent == None && row(snapshot, 0).state == Active)
+  require(row(snapshot, 1).parent == Some(0) && row(snapshot, 1).state == Active)
+  for index in range(0, count) {
+    let record = row(snapshot, index)
+    require(record.boundary == Known)
+    require(p.find_instance(snapshot, record.key) == Some(index))
+  }
+}
+pub fn main() -> Unit !io = {
+  let (value, before, trial, after, inner) = p.observe(outer => {
+    let before = p.completed(outer)
+    let mark = p.checkpoint(outer)
+    let _tentative = helper(6)
+    let trial = p.completed(outer)
+    p.rewind(outer, mark)
+    let value = helper(41)
+    let after = p.completed(outer)
+    let inner = p.observe(inner => {
+      let _value = helper(2)
+      p.completed(inner)
+    })
+    (value, before, trial, after, inner)
+  })
+  require(value == 42)
+  check(before, 1, 1, 2)
+  check(trial, 1, 1, 3)
+  check(after, 1, 2, 3)
+  check(inner, 2, 1, 3)
+  let tentative = row(trial, 2)
+  let committed = row(after, 2)
+  require(tentative.key.instance == 3 && tentative.key.epoch == 1)
+  require(committed.key.instance == 4 && committed.key.epoch == 2)
+  require(tentative.state == Returned && committed.state == Returned)
+  require(committed.parent == Some(1))
+  require(p.find_instance(after, tentative.key) == None)
+  require(p.find_instance(trial, committed.key) == None)
+  require(p.find_instance(after, InvocationKey { ..committed.key, scope = 2 }) == None)
+  require(p.find_instance(after, InvocationKey { ..committed.key, epoch = 1 }) == None)
+  let table = p.static_table(after)
+  let site_index = committed.site.expect("missing static Site index")
+  let definition_index = committed.definition.expect("missing static Definition index")
+  let site = p.site_at(table, site_index).expect("missing static Site")
+  let definition = p.definition_at(table, definition_index).expect("missing static Definition")
+  require(site.module == "snapshot" && site.declaration == "Nf4:main" && site.role == "call")
+  require(site.id > 0 && site.id != site_index)
+  require(definition.module == "snapshot" && definition.declaration == "Nf6:helper")
+  require(definition.id > 0 && definition.id != definition_index)
+  require(p.site_at(table, -1) == None && p.site_at(table, 2147483647) == None)
+  require(p.definition_at(table, -1) == None && p.definition_at(table, 2147483647) == None)
+  io.println("42 immutable snapshots rollback scopes and typed static indices")
+  io.println("${(site.id, site.start, site.end, site.name_start, site.name_end, definition.id)}")
+  io.println(p.render_snapshot(before))
+  io.println("@@trial")
+  io.println(p.render_snapshot(trial))
+  io.println("@@after")
+  io.println(p.render_snapshot(after))
+}

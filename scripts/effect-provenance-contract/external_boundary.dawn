@@ -1,0 +1,13 @@
+# The native implementation crosses an actual external ABI. JVM executes
+# its ordinary Dawn fallback, which does not invent a foreign boundary.
+use std/io.{println}
+use std/provenance as p
+fn native_add(n: Int) -> Int !io = extern c "prov_probe_add" else n + 1
+pub fn main() -> Unit !io = {
+  let (value, snapshot) = p.observe(scope => {
+    let value = native_add(41)
+    (value, p.completed(scope))
+  })
+  println("${value}")
+  println(p.render_snapshot(snapshot))
+}

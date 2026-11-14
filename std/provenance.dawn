@@ -1,114 +1,209 @@
-## Scoped observations expose execution facts without changing lexical effect
-## selection. The compiler recognizes these declarations by resolved identity;
-## TraceScope is a lexical capability, whereas Origin owns immutable data.
-# Checkpoints use reusable savepoints and belong to their creating call instance.
-# The five entry bodies are intrinsic declaration sentinels. Both backends
-# lower their resolved identities; an older compiler cannot execute them.
-## A lexical observation capability. It is not a first-class value.
+## Observation exports frozen facts; text is an explicit rendering choice.
+# Private bytes contain compact copied dynamic words, never live scope or pool
+# pointers. Static tables share immutable metadata. Public getters materialize
+# only the requested Dawn value and cannot consult execution state.
+## Lexical capability for the creating observe callback.
 pub opaque type TraceScope = Int
-
-## An immutable operation snapshot and logical parent chain.
-pub opaque type Origin = String
-
-## A reusable savepoint bound to its creating logical call instance.
+alias SiteFields = ((Int, Int, Int, Int, Int), (String, String, String, String, String))
+alias DefinitionFields = (Int, String, String, Int, Int, String)
+## Immutable shared source site and definition metadata.
+pub opaque type StaticTable = (Array[SiteFields], Array[DefinitionFields])
+## Frozen effect origin and its ancestor chain.
+pub opaque type Origin = (Bytes, StaticTable, Int, String)
+## Immutable copy of visible records and notes at completion.
+pub opaque type TraceSnapshot = (Bytes, StaticTable, Array[Origin])
+## Typed scalar access to the records of one frozen snapshot.
+pub opaque type RecordView = TraceSnapshot
+## Optional record or static table index; inspect before reading its value.
+pub opaque type IndexSlot = Int
+## Scope owned rollback mark, valid only in its creating scope.
 pub opaque type Checkpoint = String
 
-## Run a literal callback under a fresh observation root. The callback may
-## return immutable Origins, but the TraceScope itself cannot escape.
-pub fn observe[T, !e](body: fn(TraceScope) -> T !e) -> T !io !e = todo()
+## Logical invocation identity, including its scope and creation epoch.
+pub type InvocationKey = { scope: Int, epoch: Int, instance: Int }
+## Frozen lifecycle state of a logical invocation.
+pub type CallState = Active | Returned | Unwound | Suspended | Abandoned
+## Whether the recorded segment has known Dawn source metadata.
+pub type Boundary = Known | UnknownBoundary
+## Whether capacity retained the entire visible history.
+pub type Completeness = Complete | Truncated
+## Frozen snapshot header and visible record and note counts.
+pub type SnapshotInfo = { scope: Int, epoch: Int, records: Int, notes: Int, completeness: Completeness }
+## One typed logical call record with optional metadata indices.
+pub type CallRecord = {
+  key: InvocationKey,
+  parent: Option[Int],
+  state: CallState,
+  site: Option[Int],
+  definition: Option[Int],
+  boundary: Boundary
+}
+## Static source span, declaration, role and optional performed operation.
+pub type Site = {
+  id: Int, module: String, file: String, declaration: String,
+  start: Int, end: Int, name_start: Int, name_end: Int,
+  role: String, operation: Option[String]
+}
+## Static identity and declaration span of a logical callee.
+pub type Definition = { id: Int, module: String, declaration: String, start: Int, end: Int, role: String }
 
-## Append an immutable operation snapshot to this observation's notes.
+## The literal body receives a lexical capability, never a first class handle.
+pub fn observe[T, !e](body: fn(TraceScope) -> T !e, capacity: Int = 1048576) -> T !io !e = todo()
+## Append a frozen effect origin to this scope subject to its note capacity.
 pub fn note(scope: TraceScope, origin: Origin) -> Unit !io = todo()
-
-## Copy the current prefix, including active calls. Scope exit happens later.
-pub fn completed(scope: TraceScope) -> String !io = todo()
-
-## Save the log boundary in the current logical call instance.
+## Freeze the visible prefix now, including active calls and immutable notes.
+pub fn completed(scope: TraceScope) -> TraceSnapshot !io = todo()
+## Save the visible prefix and active stack for a lexical rollback.
 pub fn checkpoint(scope: TraceScope) -> Checkpoint !io = todo()
-
-## Restore a boundary in its still-active creating frame. Later markers expire;
-## the target and earlier markers remain reusable, and the epoch advances.
+## Restore a checkpoint prefix and start a new epoch without refilling capacity.
 pub fn rewind(scope: TraceScope, checkpoint: Checkpoint) -> Unit !io = todo()
 
-## Declaration-relative coordinates. `file` is the stable source-unit identity,
-## not a build-machine path. Negative coordinates denote an explicit unknown.
-pub type Site = {
-  id: Int,
-  module: String,
-  file: String,
-  declaration: String,
-  start: Int,
-  end: Int,
-  name_start: Int,
-  name_end: Int,
-  role: String,
-  operation: Option[String]
+fn snapshot_rep(value: TraceSnapshot) -> (Bytes, StaticTable, Array[Origin]) = value
+fn origin_rep(value: Origin) -> (Bytes, StaticTable, Int, String) = value
+fn table_rep(value: StaticTable) -> (Array[SiteFields], Array[DefinitionFields]) = value
+
+fn optional_index(index: Int) -> Option[Int] = if index < 0 { None } else { Some(index) }
+fn call_state(value: Int) -> CallState = match value {
+  0 -> Active, 1 -> Returned, 2 -> Unwound, 3 -> Suspended, 4 -> Abandoned,
+  _ -> panic("provenance: invalid frozen call state")
 }
+fn completeness(value: Int) -> Completeness = if value == 0 { Complete } else { Truncated }
+fn boundary(value: Int) -> Boundary = if value == 0 { Known } else { UnknownBoundary }
 
-## A function, lambda or runtime primitive's stable definition identity.
-pub type Definition = {
-  id: Int,
-  module: String,
-  declaration: String,
-  start: Int,
-  end: Int,
-  role: String
+## Read the immutable scope, epoch, counts and completeness header.
+pub fn snapshot_info(snapshot: TraceSnapshot) -> SnapshotInfo = {
+  let (data, _table, notes) = snapshot_rep(snapshot)
+  SnapshotInfo { scope = word(data, 0), epoch = word(data, 1), records = word(data, 2),
+    notes = array_len(notes), completeness = completeness(word(data, 3)) }
 }
+## Share the immutable site and definition tables of this snapshot.
+pub fn static_table(snapshot: TraceSnapshot) -> StaticTable = {
+  let (_data, table, _notes) = snapshot_rep(snapshot)
+  table
+}
+## Materialize a record; return None for an index outside the frozen prefix.
+pub fn record_at(snapshot: TraceSnapshot, index: Int) -> Option[CallRecord] = {
+  let (data, _table, _notes) = snapshot_rep(snapshot)
+  if index < 0 || index >= word(data, 2) { return None }
+  let at = 4 + index * 7
+  Some(CallRecord {
+    key = InvocationKey { scope = word(data, 0), epoch = word(data, at), instance = word(data, at + 1) },
+    parent = optional_index(word(data, at + 2)), state = call_state(word(data, at + 3)),
+    site = optional_index(word(data, at + 4)), definition = optional_index(word(data, at + 5)),
+    boundary = boundary(word(data, at + 6))
+  })
+}
+## Materialize a static site; return None for an out of range index.
+pub fn site_at(table: StaticTable, index: Int) -> Option[Site] = {
+  let (sites, _definitions) = table_rep(table)
+  if index < 0 || index >= array_len(sites) { return None }
+  let ((id, start, end, name_start, name_end), (owner, file, declaration, role, op)) = array_get(sites, index)
+  Some(Site { id = id, module = owner, file = file, declaration = declaration,
+    start = start, end = end, name_start = name_start, name_end = name_end, role = role,
+    operation = if op == "" { None } else { Some(op) } })
+}
+## Materialize a definition; return None for an out of range index.
+pub fn definition_at(table: StaticTable, index: Int) -> Option[Definition] = {
+  let (_sites, definitions) = table_rep(table)
+  if index < 0 || index >= array_len(definitions) { return None }
+  let (id, owner, declaration, start, end, role) = array_get(definitions, index)
+  Some(Definition { id = id, module = owner, declaration = declaration,
+    start = start, end = end, role = role })
+}
+## Scalar scans retain the same frozen facts without materializing rows.
+pub fn records(snapshot: TraceSnapshot) -> RecordView = snapshot
+## Return the number of frozen rows in a bulk view.
+pub fn record_count(view: RecordView) -> Int = header(view, 2)
+## Return the owning scope identity of every row in this view.
+pub fn record_scope(view: RecordView) -> Int = header(view, 0)
+## Check whether a row index belongs to this frozen view.
+pub fn record_exists(view: RecordView, row: Int) -> Bool = row >= 0 && row < header(view, 2)
+## Read the creation epoch of a valid frozen row.
+pub fn record_epoch(view: RecordView, row: Int) -> Int = column(view, row, 0)
+## Read the logical invocation identity of a valid frozen row.
+pub fn record_instance(view: RecordView, row: Int) -> Int = column(view, row, 1)
+## Read the optional parent row index, without materializing a record.
+pub fn record_parent(view: RecordView, row: Int) -> IndexSlot = column(view, row, 2)
+## Read the frozen lifecycle state of a valid row.
+pub fn record_state(view: RecordView, row: Int) -> CallState = call_state(column(view, row, 3))
+## Read the optional static site index of a valid row.
+pub fn record_site(view: RecordView, row: Int) -> IndexSlot = column(view, row, 4)
+## Read the optional static definition index of a valid row.
+pub fn record_definition(view: RecordView, row: Int) -> IndexSlot = column(view, row, 5)
+## Read whether a valid row crosses an unknown external segment.
+pub fn record_boundary(view: RecordView, row: Int) -> Boundary = boundary(column(view, row, 6))
+fn index_int(slot: IndexSlot) -> Int = slot
+## Check whether an optional index has a value.
+pub fn index_present(slot: IndexSlot) -> Bool = index_int(slot) >= 0
+## Read a present index; panic with a deterministic message if it is absent.
+pub fn index_value(slot: IndexSlot) -> Int = {
+  let value = index_int(slot)
+  if value < 0 { panic("provenance: missing index") } else { value }
+}
+## Return an immutable note, or None outside the note sequence.
+pub fn note_at(snapshot: TraceSnapshot, index: Int) -> Option[Origin] = {
+  let (_data, _table, notes) = snapshot_rep(snapshot)
+  if index < 0 || index >= array_len(notes) { None } else { Some(array_get(notes, index)) }
+}
+## Find a row by its full scope, creation epoch and invocation key.
+pub fn find_instance(snapshot: TraceSnapshot, key: InvocationKey) -> Option[Int] = {
+  let (data, _table, _notes) = snapshot_rep(snapshot)
+  if key.scope != word(data, 0) { return None }
+  var lo = 0
+  var hi = word(data, 2)
+  while lo < hi {
+    let mid = lo + (hi - lo) / 2
+    let id = word(data, 4 + mid * 7 + 1)
+    if id < key.instance { lo = mid + 1 } else { hi = mid }
+  }
+  if lo < word(data, 2) && word(data, 4 + lo * 7 + 1) == key.instance && word(data, 4 + lo * 7) == key.epoch {
+    Some(lo)
+  } else { None }
+}
+## Explicitly render a frozen snapshot as deterministic diagnostic text.
+pub fn render_snapshot(snapshot: TraceSnapshot) -> String = todo()
+## Explicitly render a frozen origin and ancestor chain as diagnostic text.
+pub fn render_origin(origin: Origin) -> String = todo()
 
-## The operation's resolved identity, independent of handler installation.
-pub fn operation(origin: Origin) -> String = origin_field(origin, -1)
-
-## The immutable parent snapshot. The observation root has no parent.
+## Read the performed operation name stored with an origin.
+pub fn operation(origin: Origin) -> String = { let (_data, _table, _row, op) = origin_rep(origin)
+  op }
+## Return the next frozen ancestor, or None at the root.
 pub fn parent(origin: Origin) -> Option[Origin] = {
-  let value = origin_parent(origin)
-  if value == "" { None } else { Some(value) }
+  let (data, table, row, op) = origin_rep(origin)
+  let p = word(data, 4 + row * 7 + 2)
+  if p < 0 { None } else { Some((data, table, p, op)) }
 }
-
-## These identities survive scope exit and rewind. A tentative Origin is not
-## rewritten to a later epoch or a different instance.
-pub fn scope(origin: Origin) -> Int = origin_number(origin, 1)
-## The epoch in which this immutable instance was created.
-pub fn epoch(origin: Origin) -> Int = origin_number(origin, 2)
-## The instance identity, never reused after rewind.
-pub fn instance(origin: Origin) -> Int = origin_number(origin, 3)
-
-## The current call's static Site, or None at the observation root.
+## Read the origin scope identity.
+pub fn scope(origin: Origin) -> Int = { let (data, _table, _row, _op) = origin_rep(origin)
+  word(data, 0) }
+## Read the origin invocation creation epoch.
+pub fn epoch(origin: Origin) -> Int = { let (data, _table, row, _op) = origin_rep(origin)
+  word(data, 4 + row * 7) }
+## Read the origin logical invocation identity.
+pub fn instance(origin: Origin) -> Int = { let (data, _table, row, _op) = origin_rep(origin)
+  word(data, 4 + row * 7 + 1) }
+## Return the origin static site when the segment is known.
 pub fn site(origin: Origin) -> Option[Site] = {
-  let id = origin_number(origin, 6)
-  if id == 0 { return None }
-  let op = origin_field(origin, 14)
-  Some(Site {
-    id = id,
-    module = origin_field(origin, 7),
-    file = origin_field(origin, 7),
-    declaration = origin_field(origin, 8),
-    start = origin_number(origin, 9),
-    end = origin_number(origin, 10),
-    name_start = origin_number(origin, 11),
-    name_end = origin_number(origin, 12),
-    role = origin_field(origin, 13),
-    operation = if op == "" { None } else { Some(op) }
-  })
+  let (data, table, row, _op) = origin_rep(origin)
+  site_at(table, word(data, 4 + row * 7 + 4))
 }
-
-## Operations have an operation identity; their Origin never claims that the
-## handler body was the issuing definition. Ordinary parent calls have one.
+## Return the origin callee definition when it is known.
 pub fn definition(origin: Origin) -> Option[Definition] = {
-  let owner = origin_field(origin, 15)
-  if owner == "" { return None }
-  Some(Definition {
-    id = origin_number(origin, 20),
-    module = owner,
-    declaration = origin_field(origin, 16),
-    start = origin_number(origin, 17),
-    end = origin_number(origin, 18),
-    role = if owner == "intrinsic" { "intrinsic" } else { origin_field(origin, 19) }
-  })
+  let (data, table, row, _op) = origin_rep(origin)
+  definition_at(table, word(data, 4 + row * 7 + 5))
 }
+## Read the frozen lifecycle state of the origin invocation.
+pub fn state(origin: Origin) -> CallState = { let (data, _table, row, _op) = origin_rep(origin)
+  call_state(word(data, 4 + row * 7 + 3)) }
+## Read whether this origin crosses an unknown external segment.
+pub fn origin_boundary(origin: Origin) -> Boundary = { let (data, _table, row, _op) = origin_rep(origin)
+  boundary(word(data, 4 + row * 7 + 6)) }
+## Read whether the origin ancestor capture exhausted capacity.
+pub fn origin_completeness(origin: Origin) -> Completeness = { let (data, _table, _row, _op) = origin_rep(origin)
+  completeness(word(data, 3)) }
 
-# Private named intrinsics inspect only immutable snapshot bytes. Their
-# sentinels remain readable by the bootstrap seed and are never called by
-# emitted code. They do not read a current scope or grant observation access.
-fn origin_field(origin: Origin, index: Int) -> String = todo()
-fn origin_number(origin: Origin, index: Int) -> Int = todo()
-fn origin_parent(origin: Origin) -> String = todo()
+# Named intrinsics preserve an ordinary seed-readable declaration surface.
+fn word(data: Bytes, index: Int) -> Int = todo()
+fn header(view: RecordView, field: Int) -> Int = todo()
+fn column(view: RecordView, row: Int, field: Int) -> Int = todo()

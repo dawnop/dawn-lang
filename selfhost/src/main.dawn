@@ -68,6 +68,7 @@ use jvm/codegen.{
   no_override, gen_adt
 }
 use embed/provenance_rt
+use embed/asm_diagnostics_rt
 use jvm/rtclasses.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class, gen_unit_class,
   gen_bytes_class, gen_mem_class, gen_io_class, gen_gpu_class, gen_fn_comparator, gen_ord_interface,
@@ -80,7 +81,7 @@ use jvm/rtclasses.{
   gen_ctl_class, gen_ctl_cont_class, gen_ctl_k_class, CTL_CLASS, CTL_CONT_CLASS, CTL_K_CLASS,
   gen_ctl_discard_class, CTL_DISCARD_CLASS
 }
-use jvm/emit.{emit_module, emit_module_mapped, gen_trait_interface, gen_provenance_sites, JModMap}
+use jvm/emit.{emit_module, emit_module_mapped, gen_trait_interface, gen_provenance_sites, gen_provenance_data, gen_provenance_indices, JModMap}
 use jvm/jmap
 use ir/core.{CModule, ConstValue, CMode}
 use ir/reach
@@ -553,6 +554,7 @@ fn collect_program_full(
   # ClassWriter through them (jvm-base-plan §5.7). Conditional because the
   # class names ASM types -- see program_has_asm.
   if program_has_asm(std_mods, mods) {
+    classes = classes ++ asm_diagnostics_rt.classes()
     classes = classes ++ [(ASM_CLASS, gen_asm_class())]
     # The frame half of the same story: a ClassWriter subclass answering the
     # common-superclass question from the compiler's own hierarchy, which is
@@ -694,12 +696,12 @@ fn collect_program_full(
       let tr = trait_of(traits, tid)
       classes = classes ++ [(tr_iface(None, tr.name), gen_trait_interface(sup, adts, tr, true))]
     }
-    classes = classes ++ provenance_rt.classes() ++ gen_provenance_sites(provenance_sites)
+    classes = classes ++ provenance_rt.classes() ++ gen_provenance_sites(provenance_sites) ++ gen_provenance_data(provenance_sites, provenance.static_definitions(payload_core, live)) ++ gen_provenance_indices(provenance_sites, provenance.static_definitions(payload_core, live))
   }
   if needs_ctl {
-    classes = classes ++ [(CTL_CLASS, gen_ctl_class(sup))]
+    classes = classes ++ [(CTL_CLASS, gen_ctl_class(sup, provenance.enabled(live)))]
     classes = classes ++ [(CTL_CONT_CLASS, gen_ctl_cont_class(sup))]
-    classes = classes ++ [(CTL_K_CLASS, gen_ctl_k_class(sup))]
+    classes = classes ++ [(CTL_K_CLASS, gen_ctl_k_class(sup, provenance.enabled(live)))]
   }
 
   # const values by declaring module, so importers can materialize them

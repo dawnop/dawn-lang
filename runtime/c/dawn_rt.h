@@ -1431,4 +1431,19 @@ void *dawn_cell_take(void *c);
 void dawn_panic(dawn_str *msg);
 void dawn_fault(dawn_str *msg);
 
+/* Optional observation follows the control baton, not an OS thread. Plain
+ * artifacts leave this table null; generated observation code installs it. */
+typedef struct dawn_control_observer {
+  void *(*capture)(void);
+  void (*release)(void *);
+  void (*attach)(void *);
+  void (*save)(void *, int);
+  void (*relate)(void *, void *);
+  void *(*select)(void *);
+  void (*abandon)(void *, int);
+  void *(*arm_enter)(void *);
+  void (*arm_leave)(void *);
+} dawn_control_observer;
+extern const dawn_control_observer *dawn_control_observation;
+
 #endif /* DAWN_RT_H */

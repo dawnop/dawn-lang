@@ -93,6 +93,7 @@ fi
 echo "PASS  the reference source is not in the working tree"
 
 ./bin/dawn --version > /dev/null
+python3 scripts/gen-asm-diagnostics.py --javac "$(command -v javac)" --check
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -173,6 +174,8 @@ emit "$work/ddc" "$work/shadow"
 emit "$work/canary-emit" "$work/canary"
 
 javac -cp "$root/build/dawn-selfhost.jar" -d "$work" scripts/asm-adapter-contract/Diff.java
+javac -cp "$root/build/dawn-selfhost.jar" -d "$work" scripts/asm-adapter-contract/ErrorControls.java
+java -XX:-UsePerfData "${add_exports[@]}" -cp "$work:$root/build/dawn-selfhost.jar" ErrorControls "$work"
 # The emitted directories are deliberately *not* on the class path: Diff reads
 # those class files as bytes and defines each in its own loader, so there is no
 # question about which `dawn.rt.Asm` a check looked at. It carries the same

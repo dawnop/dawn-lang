@@ -1,0 +1,46 @@
+# Handwritten five-row control for the command line public bulk consumer.
+use std/io
+use std/provenance as p
+use std/provenance.{TraceSnapshot, Origin}
+use provenance_preview as preview
+use provenance_preview.{SourceIndex}
+use provenance_source as index
+use std/map
+use std/set
+use std/str
+use std/list
+effect Read { fn ask() -> Origin }
+fn leaf() -> Int = 42
+pub fn capture() -> TraceSnapshot !io = p.observe(scope => {
+  if leaf() != 42 { panic("value control") }
+  with handle Read { ask() origin o => { p.note(scope, o)
+    o } }
+  let _origin = ask()
+  p.completed(scope)
+})
+pub fn check(snapshot: TraceSnapshot, mode: String) -> String = {
+  let source = index.make()
+  let input = match mode {
+    "revision" -> SourceIndex { ..source, revision = "wrong revision" }
+    "declaration" -> SourceIndex { ..source, declarations = map.empty() }
+    "span" -> SourceIndex { ..source, spans = set.empty() }
+    _ -> source
+  }
+  match catch_panic(() => preview.consume(snapshot, input, index.revision())) {
+    Ok(mapping) -> {
+      if len(mapping.nodes) != 4 || mapping.owners != [-1, 0, 1, 2, 3] { panic("handwritten projection mismatch") }
+      if list.map(mapping.nodes, node => node.parent) != [-1, 0, 0, 2] { panic("handwritten parent projection mismatch") }
+      "accepted"
+    }
+    Err(error) -> error.message
+  }
+}
+pub fn main() -> Unit !io = {
+  let snapshot = capture()
+  if check(snapshot, "good") != "accepted" { panic("valid public bulk consumer") }
+  for mode in ["revision", "declaration", "span"] {
+    if not str.contains(check(snapshot, mode), "preview:") { panic("bad source accepted") }
+  }
+  io.println("42 CLI bulk tree and source refusals")
+  io.println(p.render_snapshot(snapshot))
+}

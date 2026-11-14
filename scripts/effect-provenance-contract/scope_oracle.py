@@ -10,7 +10,7 @@ def judge_checkpoints(output, source):
     a, b, c, d, recording = output.split('\n', 4)
     assert [a, b, c, d] == ['(3, 4, 5)', '(1, 1, 5)', '(1, 2, 7)', '(1, 3, 9)'], 'tentative Origin identities are immutable'
     header, frames, notes = rows(recording)
-    assert header == 'S\t1\t3'
+    assert header == 'S1\t1\t3\t0'
     # Two rolled-back helpers and their operations disappear from the view.
     # IDs are never recycled; retained ancestors keep their original epochs.
     expected = [(1, 1, 0, 0), (2, 1, 1, 0), (3, 1, 2, 0),
@@ -25,12 +25,12 @@ def judge_checkpoints(output, source):
     for actual, base, call, name, role in selected:
         lo = source.index(call, base)-base
         assert actual[9:14] == [str(lo), str(lo+len(call)), str(lo), str(lo+len(name)), role], actual
-        assert len(actual) == 21 and int(actual[6]) > 0 and int(actual[20]) > 0
+        assert len(actual) == 22 and int(actual[6]) > 0 and int(actual[20]) > 0
     assert frames[3][15:17] == ['checkpoints', 'Nf6:helper']
     assert frames[4][14] == 'checkpoints:Ne5:QueryNo3:ask'
     assert len(notes) == 1, 'rewind also truncates the observer projection notes'
     envelope, *chain = notes[0].splitlines()
-    assert envelope.startswith('O\t')
+    assert envelope.startswith('O1\t')
     assert [int(line.split('\t')[3]) for line in chain] == [9, 8, 3, 2, 1]
     assert [int(line.split('\t')[2]) for line in chain] == [3, 3, 1, 1, 1]
 
@@ -39,7 +39,7 @@ def judge_associated(output, source):
     value, recording = output.split('\n', 1)
     assert value == '(42, 42)', ('projected evidence result', value)
     header, frames, notes = rows(recording)
-    assert header == 'S\t1\t1' and not notes
+    assert header == 'S1\t1\t1\t0' and not notes
     # Written from the source evaluation order: relay reads the projection
     # through both a dictionary method and a Fn; the default reads it twice.
     expected = [
@@ -62,7 +62,7 @@ def judge_associated(output, source):
     for instance, (frame, (parent, status, definition, role, site_role)) in enumerate(zip(frames, expected), 1):
         assert frame[:6] == ['F', '1', '1', str(instance), str(parent), str(status)], frame
         if instance > 1:
-            assert len(frame) == 21 and frame[15:17] == ['associated', definition], frame
+            assert len(frame) == 22 and frame[15:17] == ['associated', definition], frame
             assert frame[19] == role and frame[13] == site_role, frame
             assert int(frame[6]) > 0 and int(frame[20]) > 0
             assert frame[14] == ('associated:Ne3:AskNo3:ask' if site_role == 'perform' else ''), frame
@@ -79,7 +79,7 @@ def judge_modules(output):
     value, recording = output.split('\n', 1)
     assert value == '13', ('numeric output', value)
     header, frames, notes = rows(recording)
-    assert header == 'S\t1\t1' and not notes
+    assert header == 'S1\t1\t1\t0' and not notes
     expected = [(0, 0, '', '', ''), (1, 0, 'main', 'Nf4:main', 'lambda'),
                 (2, 1, 'library', 'Nf7:through', 'function'),
                 (3, 1, 'model', 'Nr4:StepNm5:twice', 'function'),
@@ -89,7 +89,7 @@ def judge_modules(output):
     for instance, (actual, (parent, status, owner, definition, role)) in enumerate(zip(frames, expected), 1):
         assert actual[:6] == ['F', '1', '1', str(instance), str(parent), str(status)], actual
         if instance > 1:
-            assert len(actual) == 21 and actual[15:17] == [owner, definition] and actual[19] == role, actual
+            assert len(actual) == 22 and actual[15:17] == [owner, definition] and actual[19] == role, actual
     # The library-created dictionary copy and the Plain-created user closure
     # both route to the caller's Observed entry without a bridge frame.
     assert [(row[7], row[8]) for row in frames[2:]] == [
@@ -99,25 +99,28 @@ def judge_modules(output):
 
 def judge_nested(output, source):
     value, rest = output.split('\n', 1)
-    assert value == '(1, 1, 6)', 'Origin uses the handler lexical capability'
+    assert value == '(1, 1, 7)', 'Origin uses the handler lexical capability'
     inner, outer = rest.split('\nOUTER\n')
     ih, ir, inn = rows(inner)
     oh, outer_rows, notes = rows(outer)
-    assert ih == 'S\t2\t1' and oh == 'S\t1\t1'
+    assert ih == 'S1\t2\t1\t0' and oh == 'S1\t1\t1\t0'
     assert not inn and len(notes) == 1
     for scope, actual, parents, statuses in [
             (2, ir, [0, 1, 2, 3], [0, 0, 1, 1]),
-            (1, outer_rows, [0, 1, 2, 3, 4, 5], [0, 0, 0, 1, 1, 1])]:
+            (1, outer_rows, [0, 1, 2, 3, 3, 5, 6], [0, 0, 0, 1, 1, 1, 1])]:
         assert len(actual) == len(parents), ('root call count', scope, len(actual))
         for instance, (frame, parent, status) in enumerate(zip(actual, parents, statuses), 1):
             assert frame[:6] == ['F', str(scope), '1', str(instance), str(parent), str(status)], frame
-    assert ir[1][6:] == outer_rows[3][6:], 'nested observer has one static identity'
-    assert ir[2][6:] == outer_rows[4][6:] and ir[3][6:] == outer_rows[5][6:]
+    # The new public capacity default is evaluated in the outer scope. Its
+    # returned frame is a sibling of the inner body, never its parent.
+    assert outer_rows[3][13]=='default-argument' and outer_rows[3][15:17]==['std/provenance','Nf7:observeNd8:capacity']
+    assert ir[1][6:] == outer_rows[4][6:], 'nested observer has one static identity'
+    assert ir[2][6:] == outer_rows[5][6:] and ir[3][6:] == outer_rows[6][6:]
     # The origin snapshot is frozen before any handler-side observation and
     # retains the outer with-rest and observer, rather than the inner root.
     envelope, *chain = notes[0].splitlines()
-    assert envelope.startswith('O\t')
-    assert [int(row.split('\t')[3]) for row in chain] == [6, 5, 4, 3, 2, 1]
+    assert envelope.startswith('O1\t')
+    assert [int(row.split('\t')[3]) for row in chain] == [7, 6, 5, 3, 2, 1]
     assert all(row.split('\t')[1] == '1' for row in chain)
     base = source.index('fn helper(')
     lo = source.index('ask()', base)-base
@@ -174,7 +177,7 @@ def judge_staged(output, source):
     value, recording = output.split('\n', 1)
     assert value == '7', ('numeric result', value)
     header, frames, notes = rows(recording)
-    assert header == 'S\t1\t1' and not notes
+    assert header == 'S1\t1\t1\t0' and not notes
     assert len(frames) == len(STAGED_TREE), ('complete staged tree', len(frames), len(STAGED_TREE))
     identities = {'': 0, **{entry[0]: i for i, entry in enumerate(STAGED_TREE, 1)}}
     for instance, (actual, (label, parent_name, role, callee)) in enumerate(zip(frames, STAGED_TREE), 1):
@@ -192,7 +195,7 @@ def judge_staged(output, source):
             assert actual[15:17] == ['intrinsic', callee.split(':')[1]] and actual[19] == 'intrinsic'
         else:
             assert actual[16].endswith('Nm'+str(len(callee))+':'+callee), (instance, 'callee', callee, actual)
-        assert len(actual) == 21 and int(actual[6]) > 0 and int(actual[20]) > 0
+        assert len(actual) == 22 and int(actual[6]) > 0 and int(actual[20]) > 0
     # The original syntax is present even when the source had no callee name.
     assert all(frame[7] == 'staged' and int(frame[9]) >= 0 for frame in frames[1:])
     for role in ['literal', 'operator', 'var', 'for', 'if']:
@@ -203,7 +206,7 @@ def judge_unwind(output, source):
     value, recording = output.split('\n', 1)
     assert value == '(7, None, 2, 3)', ('numeric answer', value)
     header, frames, notes = rows(recording)
-    assert header == 'S\t1\t1' and not notes
+    assert header == 'S1\t1\t1\t0' and not notes
     parents = [0, 1, 2, 2, 2, 5, 6, 2, 2]
     definitions = ['', 'Nf4:main', 'Nf5:early', 'Nf5:maybe',
                    'Nf5:depth', 'Nf5:depth', 'Nf5:depth', 'Nf4:bump', 'Nf4:bump']
@@ -211,7 +214,7 @@ def judge_unwind(output, source):
     for instance, (row, parent, definition) in enumerate(zip(frames, parents, definitions), 1):
         assert row[:6] == ['F', '1', '1', str(instance), str(parent), '0' if instance <= 2 else '1'], row
         if instance > 1:
-            assert row[16] == definition and len(row) == 21
+            assert row[16] == definition and len(row) == 22
     # Both method calls have the same expression start and different complete
     # spans/name spans. A line or a definition alone cannot distinguish them.
     first, second = frames[7], frames[8]
@@ -229,17 +232,17 @@ def judge_evidence(output, source):
     value, recording = output.split('\n', 1)
     assert value == '111', 'handler helper resolves outer lexical evidence'
     header, frames, notes = rows(recording)
-    assert header == 'S\t1\t1'
+    assert header == 'S1\t1\t1\t0'
     parents = [0, 1, 2, 3, 4, 5, 6, 7]
     roles = ['', 'call', 'handler-rest', 'handler-rest', 'call', 'perform', 'call', 'perform']
     assert len(frames) == len(parents) and len(notes) == 2
     for instance, (frame, parent, role) in enumerate(zip(frames, parents, roles), 1):
         assert frame[:6] == ['F', '1', '1', str(instance), str(parent), '0' if instance <= 4 else '1'], frame
         if instance > 1:
-            assert len(frame) == 21 and frame[13] == role
+            assert len(frame) == 22 and frame[13] == role
     for note, expected in zip(notes, [[6, 5, 4, 3, 2, 1], [8, 7, 6, 5, 4, 3, 2, 1]]):
         envelope, *chain = note.splitlines()
-        assert envelope.startswith('O\t')
+        assert envelope.startswith('O1\t')
         assert [int(row.split('\t')[3]) for row in chain] == expected
     assert frames[5][6:15] == frames[7][6:15], 'same perform Site, separate instances'
     assert frames[5][20] != frames[7][20], 'different lexical handler definitions'
@@ -249,7 +252,7 @@ def judge_shadow(output, source):
     value, recording = output.split('\n', 1)
     assert value == '(42, 1, 4)', 'lexical capability identity survives name shadowing'
     header, frames, notes = rows(recording)
-    assert header == 'S\t1\t1' and len(frames) == 4 and not notes
+    assert header == 'S1\t1\t1\t0' and len(frames) == 4 and not notes
     for instance, (row, parent, status) in enumerate(zip(frames, [0, 1, 2, 3], [0, 0, 1, 1]), 1):
         assert row[:6] == ['F', '1', '1', str(instance), str(parent), str(status)], row
     assert frames[3][14] == 'shadow:Ne3:AskNo3:ask'
@@ -260,7 +263,7 @@ def judge_observed_bench(output):
     value, recording = output.split('\n', 1)
     assert value == '4', 'two builder iterations compute n squared'
     header, frames, notes = rows(recording)
-    assert header == 'S\t1\t1' and len(frames) == 12 and len(notes) == 4
+    assert header == 'S1\t1\t1\t0' and len(frames) == 12 and len(notes) == 4
     parents = [0, 1, 2, 3, 4, 5, 5, 5, 4, 9, 9, 9]
     for instance, (frame, parent) in enumerate(zip(frames, parents), 1):
         assert frame[:6] == ['F', '1', '1', str(instance), str(parent), '0' if instance <= 3 else '1'], frame
@@ -269,5 +272,5 @@ def judge_observed_bench(output):
                 [11, 9, 4, 3, 2, 1], [12, 9, 4, 3, 2, 1]]
     for note, chain in zip(notes, expected):
         envelope, *parents = note.splitlines()
-        assert envelope.startswith('O\t')
+        assert envelope.startswith('O1\t')
         assert [int(row.split('\t')[3]) for row in parents] == chain

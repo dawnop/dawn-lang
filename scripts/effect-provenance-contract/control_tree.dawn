@@ -1,0 +1,17 @@
+# The independent oracle expects five loop instances and the full control
+# call graph. Removing either fact must leave the printed arithmetic intact.
+use std/io.{println}
+use std/provenance as p
+ctl effect Ask { fn ask() -> Int }
+fn loop(n: Int) -> Int = if n == 0 { 42 } else { loop(n - 1) }
+fn control() -> Int = { with handle Ask { ask() resume k => k(40) }
+  ask() + 2 }
+pub fn main() -> Unit !io = {
+  let (value, snapshot) = p.observe(scope => {
+    let a = loop(4)
+    let b = control()
+    (a + b, p.completed(scope))
+  })
+  println("${value}")
+  println(p.render_snapshot(snapshot))
+}

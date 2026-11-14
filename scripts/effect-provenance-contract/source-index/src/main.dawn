@@ -1,0 +1,20 @@
+# A preview validates against the parser's current source revision, not a
+# hand tree or a log-derived event count. The index is a build input that a
+# consumer can cache by source revision; matching stays in each preview.
+use std/io
+use selfhost/front/parser
+use selfhost/front/astdump
+use selfhost/check/identity
+pub fn main() -> Unit !io = {
+  let source = match io.with_fs_real(() => io.read_file(args()[0])) {
+    Ok(value) -> value, Err(_) -> panic("cannot read source revision")
+  }
+  let (module, diags) = parser.parse_module(source)
+  if len(diags) != 0 { panic("source revision does not parse") }
+  for entry in identity.located(module) {
+    let key = identity.path_text(entry.entry.key.path)
+    io.println("${key}\t${entry.span.lo}\t${entry.span.hi}")
+  }
+  io.println("@@ast")
+  io.println(astdump.render_module(module, diags))
+}

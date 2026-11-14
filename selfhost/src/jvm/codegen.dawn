@@ -314,11 +314,42 @@ pub fn class_bytes_from(
   match catch_fault(finish) {
     Ok(bs) -> bs.expect("bytes")
     Err(e) -> {
-      console_eprint(too_large_text(e.message, cls, src, sites))
+      console_eprint(if capacity_failure(e.kind) { too_large_text(e.message, cls, src, sites) }
+      else { writer_failure_text(e, cls, "final") })
       let _ = io.exit(1)
       panic("io.exit returned")
     }
   }
+
+## Only these typed failures are evidence for another physical partition.
+pub fn capacity_failure(kind: String) -> Bool =
+  kind == "org.objectweb.asm.MethodTooLargeException" ||
+  kind == "org.objectweb.asm.ClassTooLargeException"
+
+## Preserve the rendered cause and stack; unknown bytecode fields stay unknown.
+pub fn writer_failure_text(error: ForeignError, cls: String, phase: String) -> String = {
+  let context = if error.kind == "dawn.rt.AsmDiagnostics\$Failure" { "" }
+  else { "method=unknown pc=unknown opcode=unknown operand=unknown\n" }
+  let cause = match error.cause { Some(text) -> "\ncaused by: " ++ text, None -> "" }
+  "error: JVM bytecode emission failed: class=" ++ cls ++ " phase=" ++ phase ++
+    "; cause=" ++ error.kind ++ "\n" ++ context ++ error.message ++ cause ++ "\n"
+}
+
+test "only typed capacity failures permit another partition" {
+  assert capacity_failure("org.objectweb.asm.MethodTooLargeException")
+  assert capacity_failure("org.objectweb.asm.ClassTooLargeException")
+  assert not capacity_failure("java.lang.IllegalArgumentException")
+  assert not capacity_failure("java.lang.NullPointerException")
+}
+
+test "unexpected writer errors retain class and cause without guessing an opcode" {
+  let text = writer_failure_text(ForeignError { kind = "java.lang.IllegalArgumentException",
+    message = "", cause = Some("original cause") }, "sample/Owner", "probe")
+  assert str.contains(text, "class=sample/Owner phase=probe")
+  assert str.contains(text, "opcode=unknown")
+  assert str.contains(text, "original cause")
+  assert not str.contains(text, "does not fit")
+}
 
 ## The method ASM refused, when its text names one of `cls`'s own: ASM writes
 ## `Method too large: <class>.<method> <descriptor>`. A class that is too large

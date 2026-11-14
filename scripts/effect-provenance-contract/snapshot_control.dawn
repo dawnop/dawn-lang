@@ -1,0 +1,116 @@
+# A saved activation can outlive the observer; frozen data must outlive both.
+# The same public readers are used before and after resume and discard.
+use std/io
+use std/provenance as p
+use std/provenance.{TraceSnapshot, Origin, InvocationKey, Complete, Known, Suspended, Abandoned}
+ctl effect Ask { fn ask() -> Int }
+type Step = Done(value: Int) | Paused(k: fn(Int) -> Step, origin: Origin)
+fn scenario() -> Step !Ask = Done(ask() + 2)
+type LocalStage = LocalDone(value: Int, snapshot: TraceSnapshot) | LocalPaused(k: fn(Int) -> LocalStage !io)
+fn local_observer() -> LocalStage !io = {
+  with handle Ask { ask() resume k => LocalPaused(k) }
+  let (value, snapshot) = p.observe(scope => {
+    let value = ask()
+    (value, p.completed(scope))
+  })
+  LocalDone(value, snapshot)
+}
+fn require(ok: Bool, at: Loc = caller()) -> Unit = if not ok { panic("control snapshot contract failed", at = at) }
+fn abandoned(snapshot: TraceSnapshot) -> Int = {
+  var n = 0
+  for index in range(0, p.snapshot_info(snapshot).records) {
+    let record = p.record_at(snapshot, index).expect("missing row")
+    if record.state == Abandoned { n = n + 1 }
+  }
+  n
+}
+pub fn main() -> Unit !io = {
+  let (saved, frozen) = p.observe(scope => {
+    let saved = {
+      with handle Ask {
+        ask() origin o resume k => { p.note(scope, o)
+          Paused(k, o) }
+      }
+      scenario()
+    }
+    (saved, p.completed(scope))
+  })
+  require(p.snapshot_info(frozen).records == 6)
+  require(p.snapshot_info(frozen).notes == 1)
+  let text = p.render_snapshot(frozen)
+  let view = p.records(frozen)
+  require(p.record_count(view) == 6 && p.record_state(view, 4) == Suspended)
+  match saved {
+    Paused(k, origin) -> {
+      require(p.state(origin) == Suspended)
+      require(p.origin_completeness(origin) == Complete && p.origin_boundary(origin) == Known)
+      let before = p.render_origin(origin)
+      let ancestor = p.parent(origin).expect("missing frozen ancestor")
+      let ancestor_text = p.render_origin(ancestor)
+      require(p.operation(ancestor) == p.operation(origin))
+      match k(40) { Done(value) -> require(value == 42), _ -> panic("unexpected resuspension") }
+      require(p.state(origin) == Suspended && p.render_origin(origin) == before)
+      require(p.render_snapshot(frozen) == text)
+      require(p.record_state(view, 4) == Suspended && p.record_instance(view, 4) == p.instance(origin))
+      require(p.render_origin(ancestor) == ancestor_text)
+      let key = InvocationKey { scope = p.scope(origin), epoch = p.epoch(origin), instance = p.instance(origin) }
+      require(p.find_instance(frozen, key) == Some(4))
+    }
+    _ -> panic("expected saved continuation")
+  }
+  let discarded = p.observe(scope => {
+    let result = {
+      with handle Ask {
+        ask() origin o resume k => { p.note(scope, o)
+          discard(k)
+          Done(42) }
+      }
+      scenario()
+    }
+    match result { Done(value) -> if value != 42 { panic("discard value") }, _ -> panic("discard suspended") }
+    p.completed(scope)
+  })
+  let count = abandoned(discarded)
+  if count != 3 {
+    io.println(p.render_snapshot(discarded))
+    panic("expected three abandoned frames, got ${count}")
+  }
+  let note = p.note_at(discarded, 0).expect("missing discarded Origin")
+  require(p.state(note) == Suspended)
+  let twice = p.observe(scope => {
+    with handle Ask { ask() origin o resume k => Paused(k, o) }
+    let first = ask()
+    let second = ask()
+    Done(first + second)
+  })
+  match twice {
+    Paused(first_k, first_origin) -> {
+      let immutable_first = p.render_origin(first_origin)
+      match first_k(20) {
+        Paused(second_k, second_origin) -> {
+          require(p.scope(second_origin) == p.scope(first_origin))
+          require(p.instance(second_origin) != p.instance(first_origin))
+          require(p.state(second_origin) == Suspended && p.operation(second_origin) == p.operation(first_origin))
+          match second_k(22) { Done(value) -> require(value == 42), _ -> panic("third suspension") }
+          require(p.render_origin(first_origin) == immutable_first)
+        }
+        _ -> panic("expected second suspension after lexical scope exit")
+      }
+    }
+    _ -> panic("expected first suspension")
+  }
+  match local_observer() {
+    LocalPaused(k) -> match k(42) {
+      LocalDone(value, snapshot) -> {
+        require(value == 42 && p.snapshot_info(snapshot).completeness == Complete)
+        require(p.snapshot_info(snapshot).records == 3)
+      }
+      _ -> panic("local observer suspended twice")
+    }
+    _ -> panic("local observer did not suspend")
+  }
+  io.println("42 frozen continuation snapshots resume and abandonment")
+  io.println(text)
+  io.println("@@discarded")
+  io.println(p.render_snapshot(discarded))
+}

@@ -3,10 +3,11 @@
 # from an evidence slot or substitute a handler's installation location.
 use check/tast.{CallSource}
 use check/identity
-use ir/core.{CSite, CAt, CSyntax, CNoSite, CFun, CModule, CCall, CIntrinsic, fn_key}
+use ir/core.{CSite, CAt, CSyntax, CNoSite, CFun, CModule, CCall, CIntrinsic, CForeign, CExtern, fn_key}
 use ir/reach.{Live}
 use ir/reach
 use ir/walk
+use std/list
 use std/map
 use std/set
 use std/str
@@ -58,12 +59,17 @@ pub fn definition(f: CFun) -> String = {
   let role = if str.ends_with(f.definition.role, "-tail") {
     str.slice(f.definition.role, 0, len(f.definition.role) - 5)
   } else { f.definition.role }
-  escape(f.owner) ++ "\t" ++ escape(f.origin) ++ "\t${f.definition.lo}\t${f.definition.hi}\t" ++ escape(role) ++ "\t${definition_id(f)}"
+  let owner = if role == "primitive-slot" { "intrinsic" } else { f.owner }
+  let declaration = if role == "primitive-slot" { f.name } else { f.origin }
+  escape(owner) ++ "\t" ++ escape(declaration) ++ "\t${f.definition.lo}\t${f.definition.hi}\t" ++ escape(role) ++ "\t${definition_id(f)}"
 }
 
 ## Entry families retain one Core identity even for synthetic bodies with
 ## no source span. An optimization entry name never participates in this ID.
-pub fn definition_id(f: CFun) -> Int = identity.derive_text("definition\t" ++ fn_key(f))
+pub fn definition_id(f: CFun) -> Int =
+  if f.definition.role == "primitive-slot" {
+    identity.derive_text("primitive-definition\t" ++ f.name)
+  } else { identity.derive_text("definition\t" ++ fn_key(f)) }
 
 pub fn intrinsic_definition(name: String) -> String =
   "intrinsic\t" ++ escape(name) ++ "\t-1\t-1\tintrinsic\t${identity.derive_text("intrinsic\t" ++ name)}"
@@ -134,9 +140,12 @@ pub fn site_table(modules: List[CModule], live: Option[Live]) -> Map[Int, String
         CCall(_, _, _, site) -> if observed {
           add_site(add_site(acc, f.owner, f.origin, site), f.owner, f.origin, callback_site(site))
         } else { acc }
+        CForeign(_, _, site) | CExtern(_, _, _, _, site) -> if observed {
+          add_site(add_site(acc, f.owner, f.origin, site), f.owner, f.origin, callback_site(site))
+        } else { acc }
         CIntrinsic(name, _, _, site) -> {
           var next = acc
-          if name == "provenance_observe" || (observed && not str.starts_with(name, "provenance_") && site != CNoSite) {
+          if name == "provenance_observe" || (observed && name == "provenance_tail") || (observed && not str.starts_with(name, "provenance_") && site != CNoSite) {
             next = add_site(next, f.owner, f.origin, site)
             if observed { next = add_site(next, f.owner, f.origin, callback_site(site)) }
           }
@@ -151,6 +160,60 @@ pub fn site_table(modules: List[CModule], live: Option[Live]) -> Map[Int, String
   }
   table
 }
+
+## Freeze all possible definitions once; export never interns per event.
+pub fn static_definitions(modules: List[CModule], live: Option[Live]) -> List[String] = {
+  var values: Set[String] = set.empty()
+  if not enabled(live) { return [] }
+  for module in modules {
+    for f in module.fns {
+      let observed = match live { Some(l) -> set.has(l.observed, fn_key(f)), None -> true }
+      if not observed { continue }
+      match frame_definition(f) { Some(d) -> { values = set.insert(values, d) }, None -> () }
+      values = walk.fold_expr(f.body, values, (acc, e) => match e {
+        CIntrinsic(name, _, _, _) -> if str.starts_with(name, "provenance_") { acc }
+        else { set.insert(acc, intrinsic_definition(name)) }
+        _ -> acc
+      }, (acc, _statement) => acc)
+    }
+  }
+  list.sort(set.to_list(values))
+}
+
+## Parse the compiler's checked spelling while generating immutable data.
+## Runtime getters receive typed fields, never a text decoding obligation.
+pub type StaticSite = {
+  id: Int, owner: String, declaration: String, start: Int, end: Int,
+  name_start: Int, name_end: Int, role: String, operation: String
+}
+pub type StaticDefinition = { id: Int, owner: String, declaration: String, start: Int, end: Int, role: String }
+pub fn static_site(id: Int, metadata: String) -> StaticSite = {
+  let fields = str.split(metadata, "\t")
+  if len(fields) != 8 { panic("provenance: invalid compiler Site") }
+  StaticSite { id = id, owner = unescape(fields[0]), declaration = unescape(fields[1]),
+    start = parse_int(fields[2])
+      .expect("static Site start"), end = parse_int(fields[3])
+      .expect("static Site end"),
+    name_start = parse_int(fields[4])
+      .expect("static Site name start"), name_end = parse_int(fields[5])
+      .expect("static Site name end"),
+    role = unescape(fields[6]), operation = unescape(fields[7]) }
+}
+pub fn static_definition(metadata: String) -> StaticDefinition = {
+  let fields = str.split(metadata, "\t")
+  if len(fields) != 6 { panic("provenance: invalid compiler Definition") }
+  StaticDefinition { id = parse_int(fields[5]).expect("static Definition id"),
+    owner = unescape(fields[0]), declaration = unescape(fields[1]),
+    start = parse_int(fields[2])
+      .expect("static Definition start"), end = parse_int(fields[3])
+      .expect("static Definition end"),
+    role = unescape(fields[4]) }
+}
+
+## Artifact-local slots are constants, distinct from semantic IDs. Buckets
+## bound each generated JVM constant pool without a hot lookup or interning.
+pub fn slot_owner(id: Int) -> String = "dawn/provenance/Indices\$${id % 256}"
+pub fn definition_slot_id(metadata: String) -> Int = identity.derive_text("static-definition-slot\t" ++ metadata)
 
 pub fn table_class(owner: String) -> String = owner ++ "\$provenance_sites"
 pub fn table_method(id: Int) -> String = "site\$${id}"

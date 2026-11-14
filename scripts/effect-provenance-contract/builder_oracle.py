@@ -28,16 +28,16 @@ def judge(output: str, source: str):
     assert value == '(3, 5)', ('numeric output', value)
     sections = recording.rstrip('\n').split('\n\n')
     lines = sections[0].splitlines()
-    assert lines[0] == 'S\t1\t1', ('prefix header', lines[0])
+    assert lines[0] == 'S1\t1\t1\t0', ('prefix header', lines[0])
     actual = [line.split('\t') for line in lines[1:]]
     assert len(actual) == len(TREE), ('call count', len(actual))
     for fields, expected in zip(actual, TREE):
         instance, parent, callee, status, expression, declaration = expected
         assert fields[:7] == ['F', '1', '1', str(instance), str(parent), str(status), fields[6]]
         if callee == 'root':
-            assert fields[6:] == ['0', '', '']
+            assert fields[6:] == ['0', '', '', '0']
             continue
-        assert len(fields) == 21, ('frame shape', fields)
+        assert len(fields) == 22, ('frame shape', fields)
         assert fields[7] == 'builder'
         assert fields[8] == 'Nf'+str(len(declaration))+':'+declaration
         base = source.index('fn '+declaration)
@@ -68,7 +68,7 @@ def judge(output: str, source: str):
     assert len(sections[1:]) == 4, 'operation count'
     for note, chain in zip(sections[1:], NOTE_CHAINS):
         envelope, *parents = note.splitlines()
-        assert envelope.startswith('O\t')
+        assert envelope.startswith('O1\t')
         rows = [line.split('\t') for line in parents]
         assert [int(row[3]) for row in rows] == chain, ('immutable origin parent chain', chain, rows)
         assert all(row[5] == '0' for row in rows), 'Origin must retain the perform-time prefix'
