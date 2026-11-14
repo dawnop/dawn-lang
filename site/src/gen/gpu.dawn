@@ -73,6 +73,7 @@ use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html}
 use gen/common.{must_read, must_list, write_page, map_doc_url, doc_files, fn_source, fn_head, pad2}
 use gen/fingerprint.{fingerprint}
+use sha2/sha256
 use gen/corpus.{corpus_path}
 use gen/tutorial.{chapter_titles}
 use md/ast.{Block}
@@ -804,7 +805,7 @@ pub fn load_facts() -> Facts !Fs = {
     golden = golden,
     ledgers = read_ledgers(),
     kernel = cut,
-    flash = load_map(cut),
+    flash = load_map(cut, sha256.hex(bytes.utf8(src))),
     bytes = size,
     mutants = muts,
     cards = api_cards(src),
@@ -813,8 +814,8 @@ pub fn load_facts() -> Facts !Fs = {
 }
 
 ## flash_attn's call map, checked against `cut` (its function in
-## kernels.dawn) and its golden.
-pub fn load_map(cut: Cut) -> KernelMap !Fs = {
+## kernels.dawn) and its golden. `revision` is the digest of the whole file.
+pub fn load_map(cut: Cut, revision: String) -> KernelMap !Fs = {
   let rec =
     match parse_map(must_read(map_file())) {
       Ok(r) -> r
@@ -824,7 +825,7 @@ pub fn load_map(cut: Cut) -> KernelMap !Fs = {
     panic("${map_file()} records `${rec.name}`, not `${kernel_name()}`")
   }
   let ir = str.split(str.trim_end(must_read("scripts/tile-golden/${kernel_name()}.mlir")), "\n")
-  match check(rec, cut.first, str.split(cut.text, "\n"), ir) {
+  match check(rec, revision, cut.first, str.split(cut.text, "\n"), ir) {
     Ok(m) -> m
     Err(e) -> panic("`${kernel_name()}` does not line up with its Tile IR: ${e}")
   }

@@ -42,7 +42,7 @@ use std/list
 use std/io
 use std/io.{Fs, with_fs_real, with_proc_real, with_clock_real, with_env_real, Instant, now, now_wall_ns, elapsed_ns}
 use play/contract.{Outcome, Compiled, CompileError, Timeout, wants_tileir}
-use play/tilemap.{plan, Plan, dev_names, probe_source, read_recording, tile_map}
+use play/tilemap.{plan, prepare, Prepared, probe_source, read_recording, recorded_names, tile_map}
 use play/config.{dawn_bin, native_bin, java_bin, javap_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root, packages_root}
 
 ## The most output, in bytes, a response carries. Bytes rather than
@@ -898,21 +898,13 @@ fn tile_try(code: String, native: Bool) -> Tried !io =
     ))
   }
 
-# The plan for `code`: the version-matched parser in a unit, then the walk of the
-# dump (play/tilemap.dawn). Nothing of the visitor's is run.
-fn tile_plan(code: String, native: Bool) -> Result[Plan, String] !io = {
-  let names = with_fs_real(() => match io.read_file("${packages_root()}/tileir/src/dev.dawn") {
-    Ok(text) -> dev_names(text)
-    Err(_) -> []
-  })
-  if len(names) == 0 {
-    Err("the recording's call names are unavailable")
-  } else {
-    with_fs_real(() => with_files([("orig.dawn", code)], msg => Err(msg), (dir, box) => parsed(dir, box, code, names, native)))
-  }
-}
+# The program to run for `code`: the version-matched parser in a unit, then the
+# parse dump of it (play/tilemap.dawn). Nothing of the visitor's is run. The walk
+# of the source waits for the recording: what counts as a call is what it ran.
+fn tile_plan(code: String, native: Bool) -> Result[Prepared, String] !io =
+  with_fs_real(() => with_files([("orig.dawn", code)], msg => Err(msg), (dir, box) => parsed(dir, box, code, native)))
 
-fn parsed(dir: String, box: String, code: String, names: List[String], native: Bool) -> Result[Plan, String] !io = {
+fn parsed(dir: String, box: String, code: String, native: Bool) -> Result[Prepared, String] !io = {
   let out = "${dir}/parse.txt"
   let unit = fresh_unit()
   let parser = if native { native_bin() } else { dawn_bin() }
@@ -920,12 +912,12 @@ fn parsed(dir: String, box: String, code: String, names: List[String], native: B
     None -> Err("the parse timed out")
     Some(0) -> {
       let (dump, cut) = read_capped_to(out, PARSE_LIMIT, dir)
-      if cut { Err("the parse is too large to map") } else { plan(code, dump, names) }
+      if cut { Err("the parse is too large to map") } else { prepare(code, dump) }
     }
     Some(_) -> {
       let (diags, cut) = read_capped_to(out, PARSE_LIMIT, dir)
       if native && not cut && native_declined(diags) {
-        parsed(dir, box, code, names, false)
+        parsed(dir, box, code, false)
       } else {
         Err("the program does not parse")
       }
@@ -934,7 +926,7 @@ fn parsed(dir: String, box: String, code: String, names: List[String], native: B
 }
 
 # Build and run the instrumented project; what it printed is the recording.
-fn tile_probe(dir: String, box: String, code: String, p: Plan) -> Tried !io =
+fn tile_probe(dir: String, box: String, code: String, p: Prepared) -> Tried !io =
   match compile_input(dir, box, box) {
     Err(diags) ->
       if str.starts_with(diags, "compilation timed out") {
@@ -956,9 +948,12 @@ fn tile_probe(dir: String, box: String, code: String, p: Plan) -> Tried !io =
         } else {
           match read_recording(out) {
             Err(why) -> TriedNot(why)
-            Ok(rec) -> match tile_map(code, p, rec) {
+            Ok(rec) -> match plan(code, p.dump, recorded_names(rec), rec.helpers) {
               Err(why) -> TriedNot(why)
-              Ok(map) -> TriedMapped(map, join(rec.text, "\n"), ms)
+              Ok(walked) -> match tile_map(code, walked, rec) {
+                Err(why) -> TriedNot(why)
+                Ok(map) -> TriedMapped(map, join(rec.text, "\n"), ms)
+              }
             }
           }
         }

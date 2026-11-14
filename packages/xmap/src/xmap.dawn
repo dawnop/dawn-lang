@@ -43,13 +43,15 @@ pub type Spec = { name: String, path: String, fn_name: String, module: String, k
 
 ## What the compilers printed, as text: the source, the C text and its map,
 ## the JVM map and `javap -c -p -s` of the class, and, for a kernel, the Tile
-## IR recording and the golden Tile IR text (`""` otherwise).
-pub type Raw = { source: String, ctext: String, cmap: String, jmap: String, javap: String, tile_map: String, golden: String }
+## IR recording and the golden Tile IR text (`""` otherwise). `revision` is the
+## caller's digest of `source`, which a Tile IR recording must name to be used.
+pub type Raw = { source: String, revision: String, ctext: String, cmap: String, jmap: String, javap: String, tile_map: String, golden: String }
 
 ## The raw material parsed. A caller that wants to change one part (a test
 ## that injects a defect) changes it here and calls [`map_program`].
 pub type Inputs = {
   src: Src,
+  revision: String,
   ctext: List[String],
   c_total: Int,
   cmap: CMap,
@@ -130,6 +132,7 @@ pub fn parse_raw(spec: Spec, raw: Raw) -> Result[Inputs, String] =
 fn inputs(raw: Raw, c: CMap, j: JMap, tile: Option[TileMap]) -> Inputs =
   Inputs {
     src = src_of(raw.source),
+    revision = raw.revision,
     ctext = str.split(raw.ctext, "\n"),
     c_total = line_count(raw.ctext),
     cmap = c,
@@ -157,7 +160,16 @@ fn pane_of(kind: String, spec: Spec, total: Int, b: PaneBuild) -> Pane =
 pub fn map_program(spec: Spec, inp: Inputs) -> Built = {
   let src = inp.src
   let (first, last, table, table_gaps) = match inp.tile {
-    Some(t) -> (t.first, t.last, table_from_tile(src, t), [])
+    Some(t) -> match table_from_tile(src, inp.revision, t) {
+      Ok(table) -> {
+        let clean: List[String] = []
+        (t.first, t.last, table, clean)
+      }
+      Err(e) -> {
+        let none: List[Call] = []
+        (t.first, t.last, none, ["${spec.name}: the Tile IR recording: ${e}"])
+      }
+    }
     None -> {
       let l = len(src.lines) - if str.ends_with(src.text, "\n") { 1 } else { 0 }
       let (calls, gaps) = table_from_maps(src, spec.module, 1, l, inp.cmap, inp.jmap)
@@ -304,6 +316,7 @@ fn demo_spec() -> Spec = Spec { name = "demo", path = "demo.dawn", fn_name = "ma
 fn demo_raw() -> Raw =
   Raw {
     source = "fn main() -> Unit !io = {\n  println(show(1))\n}\n",
+    revision = "",
     ctext = "// header\nvoid main(void) {\n  dawn_println(dawn_show(1));\n}\n",
     cmap = "dawnmap\t1\tc\ntext\t4\nsrc\tdemo\tdemo.dawn\n"
       ++ "fn\t2\t4\tdemo\tNf4:main\tdawn_main\n"
