@@ -172,29 +172,39 @@ fn exits(e: CExpr) -> Bool = {
 # the length of the block once for every level, which is quadratic for a
 # straight list of twelve thousand elements. So the facts of every suffix
 # are computed in one pass (`suffixes`), the first time a block is split, and
-# travel with the remainder's region (`Region.memo`) for the next level. The
-# third answer is that remainder as a region when it can move, else None and
-# the remainder is the second answer, as before; the fourth is the summaries
-# of that remainder's own suffixes, for the caller to hand to the next level
-# when the remainder stays where it is (empty when nothing was split).
-pub fn sequence(statements: List[CStmt], result: Option[CExpr], ty: Ty, band: Int,
-  memo: List[Summary]) -> (List[CStmt], Option[CExpr], Option[Region], List[Summary]) = {
-  if band <= 0 || len(statements) < 2 { return (statements, result, None, []) }
+# travel with the remainder's region (`Region.memo`) for the next level.
+# Copying the remainder at every level is the same quadratic cost, so the
+# remainder is never copied until a region takes it: `statements` stays the one
+# list, `from` says where the remainder starts, and the table is indexed the
+# same way (entry `i` summarises `statements[i:]`).
+#
+# The answers: how many statements from `from` stay in place (the whole rest
+# when it is not split), the remainder as a region when it can move, else None
+# and the remainder is `statements[from + count:]` as before, and the table for
+# the caller to hand to the next level (empty when nothing was split).
+pub fn sequence(statements: List[CStmt], from: Int, result: Option[CExpr], ty: Ty, band: Int,
+  memo: List[Summary]) -> (Int, Option[Region], List[Summary]) = {
+  let remaining = len(statements) - from
+  if band <= 0 || remaining < 2 { return (remaining, None, []) }
   var count = 0
   var weight = 0
-  while count < len(statements) && (count == 0 || weight < band * 3) {
-    weight = weight + 1 + stmt_weight(statements[count])
+  while count < remaining && (count == 0 || weight < band * 3) {
+    weight = weight + 1 + stmt_weight(statements[from + count])
     count = count + 1
   }
-  if count == len(statements) { return (statements, result, None, []) }
-  let prefix = list.take(statements, count)
-  let rest = CBlock(list.drop(statements, count), result, ty)
+  if count == remaining { return (remaining, None, []) }
   let table = if len(memo) == len(statements) + 1 { memo } else { suffixes(statements, result) }
-  let here = table[count]
-  let after = list.drop(table, count)
-  if here.weight < band { return (prefix, Some(rest), None, after) }
-  (prefix, Some(rest), region_with(rest, here.facts, after), after)
+  let here = table[from + count]
+  if here.weight < band { return (count, None, table) }
+  (count, region_after(statements, from + count, result, ty, here.facts, table), table)
 }
+
+# The remainder `statements[at:]` as a region, built only if its facts allow
+# one: the copy of the remainder and of its summaries is paid by a region that
+# is taken, not by every level that looks.
+fn region_after(statements: List[CStmt], at: Int, result: Option[CExpr], ty: Ty, f: Facts,
+  table: List[Summary]) -> Option[Region] =
+  region_with(() => CBlock(list.drop(statements, at), result, ty), ty, f, () => list.drop(table, at))
 
 ## The band is selected from final Code lengths, not from source names or a
 ## workload oracle. Prefer whole branches/blocks to tiny protocol helpers.
@@ -204,11 +214,14 @@ pub fn region(e: CExpr, band: Int) -> Option[Region] = {
   match e { CBlock(_, _, _) | CIf(_, _, _, _) | CBinary(CAnd, _, _, _) | CBinary(COr, _, _, _) -> (), _ -> return None }
   let weight = cost(e)
   if weight < band { return None }
-  region_with(e, facts_of(scan(e)), [])
+  region_with(() => e, cex_ty(e), facts_of(scan(e)), () => [])
 }
 
-# `region` once the cost is known to reach the band and `f` holds the facts of `e`.
-fn region_with(e: CExpr, f: Facts, memo: List[Summary]) -> Option[Region] = {
+# `region` once the cost is known to reach the band and `f` holds the facts of
+# the expression `make()` builds, whose type is `ety`. Most candidates are
+# refused on the facts alone, so the expression and its memo are built by
+# thunks and only when something needs them.
+fn region_with(make: fn() -> CExpr, ety: Ty, f: Facts, memo: fn() -> List[Summary]) -> Option[Region] = {
   if f.returns || f.bad_continue || f.neg { return None }
   # Leave room for context and keep every physical signature within the same
   # conservative C2 argument policy as compiler methods.
@@ -222,7 +235,7 @@ fn region_with(e: CExpr, f: Facts, memo: List[Summary]) -> Option[Region] = {
   if len(returns) > 0 {
     # A partition of an already outlined match may end in the same scalar
     # return on every path. Propagate that physical return through its caller.
-    if len(returns) != 1 || len(jumps) > 0 || not exits(e) { return None }
+    if len(returns) != 1 || len(jumps) > 0 || not exits(make()) { return None }
     let output = returns[0]
     for id in writes { if id != output { return None } }
     exit = Some((-2, output))
@@ -230,13 +243,13 @@ fn region_with(e: CExpr, f: Facts, memo: List[Summary]) -> Option[Region] = {
     # A match arm can return its one result to the enclosing match loop.
     # No mutable carrier or additional allocation is needed: the physical
     # call returns that value, then the caller performs the original break.
-    if len(jumps) == 0 && len(writes) == 1 && cex_ty(e) == TyUnit {
+    if len(jumps) == 0 && len(writes) == 1 && ety == TyUnit {
       # A decision-tree arm updates one caller local and falls through.
       # Return that scalar; -1 distinguishes this from a loop exit. The
       # caller supplies its old value for a branch that does not assign.
       exit = Some((-1, writes[0]))
     } else {
-      if len(jumps) != 1 || len(writes) != 1 || not exits(e) { return None }
+      if len(jumps) != 1 || len(writes) != 1 || not exits(make()) { return None }
       exit = Some((jumps[0], writes[0]))
     }
   }
@@ -245,9 +258,9 @@ fn region_with(e: CExpr, f: Facts, memo: List[Summary]) -> Option[Region] = {
   var inputs: List[(Int, Ty)] = []
   for id in sort(map.keys(f.free)) { inputs = inputs ++ [(id, map.get(f.free, id).expect("region input"))] }
   let ty = if len(returns) == 1 { map.get(f.return_values, returns[0]).expect("region return") }
-  else { cex_ty(e) }
+  else { ety }
   if ty == TyError { return None }
-  Some(Region { body = e, inputs = inputs, ret = ty, exit = exit, memo = match exit { Some((target, _)) -> if target >= 0 { [] } else { memo }, None -> memo } })
+  Some(Region { body = make(), inputs = inputs, ret = ty, exit = exit, memo = match exit { Some((target, _)) -> if target >= 0 { [] } else { memo() }, None -> memo() } })
 }
 
 ## Only this region's nonlocal break changes into a physical return. All
@@ -282,21 +295,37 @@ test "the summary of every suffix of a block is the facts and the cost of that b
   }
 }
 
-test "a long block is split one bounded prefix at a time, each remainder carrying the rest of the summaries" {
+test "a long block is split one bounded prefix at a time, the remainder is read from a later start and never copied" {
   let (stmts, result) = chain_block(200)
-  var level = stmts
+  var from = 0
   var memo: List[Summary] = []
   for _i in range(0, 6) {
-    let (prefix, rest, _link, after) = sequence(level, result, TyInt, 10, memo)
-    assert len(prefix) < len(level)
-    assert len(after) == len(level) - len(prefix) + 1
-    match rest {
-      Some(CBlock(next, _, _)) -> {
-        assert len(next) == len(level) - len(prefix)
-        level = next
-        memo = after
+    let (count, link, after) = sequence(stmts, from, result, TyInt, 10, memo)
+    assert count > 0 && from + count < len(stmts)
+    assert len(after) == len(stmts) + 1
+    # a region taken from here holds exactly the statements after the prefix,
+    # with the summaries of exactly those suffixes
+    match link {
+      Some(region) -> match region.body {
+        CBlock(rest, _, _) -> {
+          assert len(rest) == len(stmts) - from - count
+          assert len(region.memo) == len(rest) + 1
+        }
+        _ -> { assert false }
       }
-      _ -> { assert false }
+      None -> ()
     }
+    from = from + count
+    memo = after
   }
+}
+
+test "a block that does not split leaves every statement in place" {
+  let (stmts, result) = chain_block(3)
+  let (count, link, after) = sequence(stmts, 0, result, TyInt, 1000, [])
+  assert count == len(stmts)
+  assert link == None
+  assert len(after) == 0
+  let (tail, _l, _a) = sequence(stmts, len(stmts) - 1, result, TyInt, 1, [])
+  assert tail == 1
 }
