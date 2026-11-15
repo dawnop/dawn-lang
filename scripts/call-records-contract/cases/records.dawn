@@ -1,0 +1,76 @@
+# The calls a compiler-written recorder sees, as one transcript. Each case is
+# a path the generated enter/exit/body brackets must balance on: a plain
+# return, an early `return`, `?`, a recursive call, a closure run once and
+# several times, a closure forwarded to another recorded function, and a
+# function whose declared row does not name the recorder at all.
+pub effect Rec calls(enter = r_enter, exit = r_exit, body_enter = r_benter, body_exit = r_bexit) {
+  fn r_enter(name: String, at: Option[Loc]) -> Unit
+  fn r_exit() -> Unit
+  fn r_benter() -> Unit
+  fn r_bexit() -> Unit
+  fn r_val(n: Int) -> Int
+}
+
+pub fn plain(n: Int, at: Loc = caller()) -> Int !Rec = r_val(n) * 2
+
+pub fn nosite(n: Int) -> Int !Rec = r_val(n)
+
+pub fn early(n: Int) -> Int !Rec = {
+  if n > 3 { return n }
+  plain(n)
+}
+
+pub fn maybe(n: Int) -> Option[Int] !Rec = {
+  let a = pick(n)?
+  Some(plain(a))
+}
+
+fn pick(n: Int) -> Option[Int] = if n > 0 { Some(n) } else { None }
+
+pub fn countdown(n: Int) -> Int !Rec = if n <= 0 { 0 } else { n + countdown(n - 1) }
+
+pub fn twice(body: fn(Int) -> Int !Rec, n: Int) -> Int !Rec = body(n) + body(n + 1)
+
+pub fn forward(body: fn(Int) -> Int !Rec, n: Int) -> Int !Rec = twice(body, n)
+
+pub fn local_use(body: fn(Int) -> Int !Rec) -> Int !Rec = {
+  let k = body(1)
+  twice(x => body(x) + k, 2)
+}
+
+fn hidden(n: Int) -> Int !Rec = r_val(n)
+
+pub fn calls_hidden(n: Int) -> Int !Rec = hidden(n) + 1
+
+pub fn bare(n: Int) -> Int = n + 1
+
+pub fn main() -> Unit !io = {
+  let (r, log) = {
+    with handle Rec {
+      var log: List[String] = []
+      r_enter(name, at) => { log = log ++ ["enter ${name} ${if at == None { "-" } else { "at" }}"] }
+      r_exit() => { log = log ++ ["exit"] }
+      r_benter() => { log = log ++ ["benter"] }
+      r_bexit() => { log = log ++ ["bexit"] }
+      r_val(n) => n + 100
+    }
+    let a = plain(1)
+    let b = nosite(2)
+    let c = early(1) + early(9)
+    let d = match maybe(1) {
+      Some(v) -> v
+      None -> 0
+    }
+    let e = match maybe(0) {
+      Some(v) -> v
+      None -> -1
+    }
+    let f = countdown(2)
+    let g = forward(x => plain(x), 5)
+    let h = local_use(x => plain(x))
+    let i = calls_hidden(3) + bare(1)
+    ([a, b, c, d, e, f, g, h, i], log)
+  }
+  for l in log { println(l) }
+  println("${r}")
+}

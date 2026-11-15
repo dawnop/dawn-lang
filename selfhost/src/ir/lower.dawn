@@ -13,7 +13,7 @@
 #   2. Nothing implicit. A discarded value gets a CSDiscard; a boxed value
 #      gets a CBox. If a backend has to re-derive it, it is not lowered.
 
-use check/types.{ty_adt, ty_tuple, ty_fn, signature_scope_inert, ev_record_name, ty_scope_refs, scope_key_name, ScopedEffect, TyI64Buf, TyF64Buf, EvidenceLabel, apply_scope_arguments, ev_pack_ty, fn_runtime_params, sig_runtime_params, EvidenceRole, ScopedLabelSlot, evidence_roles, evidence_labels, evidence_label_role, evidence_label_type, Intr,
+use check/types.{ty_adt, ty_tuple, ty_fn, signature_scope_inert, ev_record_name, ty_scope_refs, scope_key_name, ScopedEffect, TyI64Buf, TyF64Buf, EvidenceLabel, apply_scope_arguments, ev_pack_ty, fn_runtime_params, sig_runtime_params, EvidenceRole, ScopedLabelSlot, LabelSlot, CallPlan, evidence_roles, evidence_labels, evidence_label_role, evidence_label_type, Intr,
   intrinsics,
   subst, subst_scopes,
   reduce_via_bindings,
@@ -43,6 +43,7 @@ use std/str
 use check/provenance as observation
 use check/scope_infer
 use check/trait_contract
+use ir/walk
 use check/identity
 use check/tast_positions
 use check/tast.{CallSource, call_source, witness_application,
@@ -171,7 +172,13 @@ pub type LSt = {
   # is pure, so running it again gives the value the table holds.
   ct_inline: Bool,
   # Preserve logical calls until execution-mode reachability has been fixed.
-  keep_calls: Bool
+  keep_calls: Bool,
+  # The call this frame owes before every `return` it executes: the exit of a
+  # function the compiler records (docs/call-records-design.md 2.3). None in
+  # every other frame, and in a lifted closure even inside a recorded
+  # function, because a closure's `return` leaves the closure, not the
+  # function that wrote it.
+  on_return: Option[CExpr]
 }
 
 ## The function currently being lowered, as its own body sees it. Two things
@@ -3425,7 +3432,8 @@ fn lift_lambda(
     tail = true,
     self_tail = false,
     ev_env = [],
-    ev_own = own
+    ev_own = own,
+    on_return = None
   }, body)
   let cbody1 = adapt_in(cbody0, tex_ty(body), ret_of_fn_ty(ty))
   let cbody = wrap_self_loop(st2.self_tail && not st.keep_calls, lid, cbody1, ret_of_fn_ty(ty))
@@ -3451,7 +3459,8 @@ fn lift_lambda(
     tail = st.tail,
     self_tail = st.self_tail,
     ev_env = st.ev_env,
-    ev_own = st.ev_own
+    ev_own = st.ev_own,
+    on_return = st.on_return
   }, CClosure(name, st2.owner, cap_args, ty))
 }
 
@@ -3735,7 +3744,7 @@ test "a builtin taken as a value lowers as the call it wraps" {
     self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false, keep_calls = false
+    ct_inline = false, keep_calls = false, on_return = None
   }
   for n in lowered_intrinsics() {
     let sg = map.get(it, n).expect("a lowered name is an intrinsic").sig
@@ -4026,9 +4035,9 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         Some(inner) -> {
           let (st1, cv) = lower_expr(LSt { ..st, tail = true }, inner)
           if diverges(cv) { return (st1, cv) }
-          (st1, CReturn(Some(adapt_in(cv, tex_ty(inner), st1.ret_ty))))
+          emit_return(st1, Some(adapt_in(cv, tex_ty(inner), st1.ret_ty)))
         }
-        None -> (st, CReturn(None))
+        None -> emit_return(st, None)
       }
     XBreak(_, _) -> (st, CBreak(st.cur_loop))
     XContinue(_, _) -> (st, CContinue(st.cur_loop))
@@ -4593,7 +4602,7 @@ test "dictionary constructors and slots keep their argument shape in either requ
     self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false, keep_calls = false
+    ct_inline = false, keep_calls = false, on_return = None
   }
   for bridge in [false, true] {
     # Exercise both slot producers directly. The explicit implementation is
@@ -4670,7 +4679,7 @@ test "a tuple literal scrutinee is matched by component unless an arm needs the 
     self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false, keep_calls = false
+    ct_inline = false, keep_calls = false, on_return = None
   }
   let tt = ty_tuple([TyInt, TyInt])
   let lit = XTupleLit([XInt(1, 0, 0), XInt(2, 0, 0)], 0, 0, tt)
@@ -4879,22 +4888,22 @@ fn lower_propagate(st: LSt, operand: TExpr, ty: Ty) -> (LSt, CExpr) = {
   match ot {
     TyAdt(adt, _, _, _) ->
       if adt == OPTION_ID {
-        (st2, CBlock(
+        let (st3, early_none) = emit_return(st2, Some(CCtor(OPTION_ID, NONE_CI, [], ot)))
+        (st3, CBlock(
           [CSLet(sym, ot, ov),
-            CSIf(CIsCtor(subj, OPTION_ID, NONE_CI),
-              CReturn(Some(CCtor(OPTION_ID, NONE_CI, [], ot))), None)],
-          Some(read_field(st2, subj, ot, OPTION_ID, SOME_CI, 0)), ty))
+            CSIf(CIsCtor(subj, OPTION_ID, NONE_CI), early_none, None)],
+          Some(read_field(st3, subj, ot, OPTION_ID, SOME_CI, 0)), ty))
       } else if adt == RESULT_ID {
         let err_ty = field_ty(ot, RESULT_ID, ERR_CI, 0)
-        (st2, CBlock(
+        let (st3, early_err) = emit_return(st2, Some(CCtor(RESULT_ID, ERR_CI,
+          # re-wrapping, not consuming: the payload stays at its
+          # declared (erased) type, so nothing is unboxed here
+          [CField(subj, RESULT_ID, ERR_CI, 0,
+            declared_field_ty(st2, RESULT_ID, ERR_CI, 0))], ot)))
+        (st3, CBlock(
           [CSLet(sym, ot, ov),
-            CSIf(CIsCtor(subj, RESULT_ID, ERR_CI),
-              CReturn(Some(CCtor(RESULT_ID, ERR_CI,
-                # re-wrapping, not consuming: the payload stays at its
-                # declared (erased) type, so nothing is unboxed here
-                [CField(subj, RESULT_ID, ERR_CI, 0,
-                  declared_field_ty(st2, RESULT_ID, ERR_CI, 0))], ot))), None)],
-          Some(read_field(st2, subj, ot, RESULT_ID, OK_CI, 0)), ty))
+            CSIf(CIsCtor(subj, RESULT_ID, ERR_CI), early_err, None)],
+          Some(read_field(st3, subj, ot, RESULT_ID, OK_CI, 0)), ty))
       } else {
         panic("lower: `?` on a non-Option/Result type")
       }
@@ -5401,6 +5410,172 @@ fn index_at(st: LSt, app: capture.TraitApplication, c: CExpr, i: CExpr, subject:
 
 # ---- functions and modules ----
 
+# ---- compiler-written call records (docs/call-records-design.md) ----
+
+## `return v` in a frame that owes an exit first: evaluate `v`, perform the
+## exit, then return the value just evaluated. The order is the point: a
+## return expression can itself call recorded functions, and their records
+## must close before this function's does. In every other frame it is the
+## plain return, so a program with no recording effect lowers exactly as it
+## did before the clause existed.
+fn emit_return(st: LSt, v: Option[CExpr]) -> (LSt, CExpr) =
+  match st.on_return {
+    None -> (st, CReturn(v))
+    Some(exit) ->
+      match v {
+        Some(value) -> {
+          let (st1, tmp) = fresh_sym(st)
+          let vt = cex_ty(value)
+          (st1, CBlock([CSLet(tmp, vt, value), CSDiscard(exit)], Some(CReturn(Some(CLocal(tmp, vt)))), TyNever))
+        }
+        None -> (st, CBlock([CSDiscard(exit)], Some(CReturn(None)), TyNever))
+      }
+  }
+
+## One of a recording effect's four operations, performed from the frame being
+## lowered: the same field read and closure call an operation written in
+## source becomes (`check_call`'s `op_of` arm), built here because there is no
+## source to check. The evidence is the frame's own slot for the label, which
+## exists because the function's declared row names the effect.
+fn hook_call(st: LSt, eid: Int, idx: Int, args: List[CExpr]) -> CExpr = {
+  let evty = ty_adt(eid, [], capture.empty_arguments())
+  let recv = ev_slot(st, label_key(eid), LabelSlot(eid), None)
+  let op = read_field(st, recv, evty, eid, 0, idx)
+  let env_idx = len(adt_of(st.adts, eid).ctors[0].fields) - 1
+  let env = ev_value(read_field(st, recv, evty, eid, 0, env_idx))
+  CCall(CDynamic(op), args ++ [env], TyUnit, CNoSite)
+}
+
+## The arguments of the recorded enter: the declared name and the call site
+## the function's own `caller()` parameter holds, or None when it has none.
+fn enter_args(st: LSt, f: TFun, plan: CallPlan) -> List[CExpr] = {
+  let hook_ty = declared_field_ty(st, plan.eid, 0, plan.hooks.enter)
+  let at_ty = params_of_fn_ty(hook_ty)[1]
+  let at = match plan.at {
+    Some(k) -> {
+      let pty = sig_runtime_params(f.sig)[k]
+      let declared = declared_field_ty(st, OPTION_ID, SOME_CI, 0)
+      CCtor(OPTION_ID, SOME_CI, [adapt_in(CLocal(f.param_syms[k], pty), pty, declared)], at_ty)
+    }
+    None -> CCtor(OPTION_ID, NONE_CI, [], at_ty)
+  }
+  [CStr(plan.name), at]
+}
+
+## The thin closure that brackets a closure parameter: calling it performs
+## the body enter, calls the closure it wraps with the pack it was handed,
+## and performs the body exit. It captures the raw parameter and nothing
+## else, and it forwards its own evidence pack because its row is the row of
+## the closure it wraps (`fn() -> T !E`).
+fn thin_closure(st: LSt, plan: CallPlan, fty: Ty, raw: Int) -> (LSt, CExpr) = {
+  let (st1, lam) = fresh_lam(st)
+  let (st2, cap) = fresh_sym(st1)
+  var ps: List[CParam] = []
+  var args: List[CExpr] = []
+  var st3 = st2
+  for pt in params_of_fn_ty(fty) {
+    let (stn, sym) = fresh_sym(st3)
+    st3 = stn
+    ps = ps ++ [CParam { sym = sym, ty = pt, mode = COwned }]
+    args = args ++ [CLocal(sym, pt)]
+  }
+  let (st4, evps) = fn_value_evs(st3)
+  let pack = match evps {
+    [pp] -> CLocal(pp.sym, pp.ty)
+    _ -> ev_placeholder()
+  }
+  let inner = LSt { ..st4, ev_env = [], ev_own = Some(pack) }
+  let ret = ret_of_fn_ty(fty)
+  let (st5, r) = fresh_sym(st4)
+  let call = CCall(CDynamic(CLocal(cap, fty)), args ++ [pack], ret, CNoSite)
+  let body = CBlock([
+    CSDiscard(hook_call(inner, plan.eid, plan.hooks.body_enter, [])),
+    CSLet(r, ret, call),
+    CSDiscard(hook_call(inner, plan.eid, plan.hooks.body_exit, []))
+  ], Some(CLocal(r, ret)), ret)
+  let fun = CFun {
+    definition = synthetic_definition("call-body"),
+    name = lam,
+    owner = st5.owner,
+    captures = [CParam { sym = cap, ty = fty, mode = COwned }],
+    params = ps,
+    dicts = [],
+    evs = evps,
+    ret = ret,
+    body = body,
+    is_test = false,
+    impl_of = None,
+    default_of = None,
+    origin = st5.origin
+  }
+  (LSt { ..st5, lifted = st5.lifted ++ [fun] }, CClosure(lam, st5.owner, [CLocal(raw, fty)], fty))
+}
+
+## Swap each bracketed parameter for a thin closure over its raw value: the
+## function's real parameter becomes a fresh symbol, and the original symbol
+## the body reads is bound to the thin closure first thing. Answers the
+## parameters, the bindings and the (bracketed, raw) pairs.
+fn bracket_params(st: LSt, plan: CallPlan, params: List[CParam]) -> (LSt, List[CParam], List[CStmt], List[(Int, Int)]) = {
+  var st1 = st
+  var ps: List[CParam] = []
+  var lets: List[CStmt] = []
+  var pairs: List[(Int, Int)] = []
+  var i = 0
+  for p in params {
+    if list.contains(plan.bodies, i) {
+      let (st2, raw) = fresh_sym(st1)
+      let (st3, clo) = thin_closure(st2, plan, p.ty, raw)
+      st1 = st3
+      ps = ps ++ [CParam { sym = raw, ty = p.ty, mode = COwned }]
+      lets = lets ++ [CSLet(p.sym, p.ty, clo)]
+      pairs = pairs ++ [(p.sym, raw)]
+    } else {
+      ps = ps ++ [p]
+    }
+    i = i + 1
+  }
+  (st1, ps, lets, pairs)
+}
+
+## A bracketed closure handed straight to another recorded function's
+## bracketed parameter is passed raw: the callee brackets it once, and a
+## second bracket here would nest the body marks twice (the recorder tells a
+## kernel's own body from a library's by that nesting).
+fn forward_raw(st: LSt, e: CExpr, pairs: List[(Int, Int)]) -> CExpr = {
+  let e1 = walk.map_kids(e, k => forward_raw(st, k, pairs))
+  match e1 {
+    CCall(CDirect(o, n), args, ty, site) ->
+      match sig_of(st, o, n) {
+        Some(sg) -> match sg.calls {
+          Some(cp) -> {
+            var out: List[CExpr] = []
+            var k = 0
+            for a in args {
+              var swapped = a
+              if list.contains(cp.bodies, k) {
+                match a {
+                  CLocal(sym, lty) -> {
+                    for pr in pairs {
+                      let (bracketed, raw) = pr
+                      if sym == bracketed { swapped = CLocal(raw, lty) }
+                    }
+                  }
+                  _ -> ()
+                }
+              }
+              out = out ++ [swapped]
+              k = k + 1
+            }
+            CCall(CDirect(o, n), out, ty, site)
+          }
+          None -> e1
+        }
+        None -> e1
+      }
+    _ -> e1
+  }
+}
+
 ## `continue` inside a lowered `for` must run the step before jumping, but
 ## Core's CContinue jumps to the loop head. The step is therefore emitted at
 ## the top of the next iteration instead of the bottom of this one for
@@ -5449,7 +5624,10 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   # spec §12.4 covers plain top-level functions and local named ones. An impl
   # method, a trait default and a test keep the shape they had, so that the
   # rewrite lands in one place at a time.
-  let plain = f.impl_of == None && f.default_of == None && not f.is_test
+  # A recorded function is not a loop either: each recursive call is a record
+  # of its own, so the self tail call must stay a call.
+  let plan: Option[CallPlan] = if f.is_test || f.default_of != None { None } else { f.sig.calls }
+  let plain = f.impl_of == None && f.default_of == None && not f.is_test && plan == None
   let sc: Option[SelfCtx] =
     if plain {
       Some(SelfCtx {
@@ -5465,21 +5643,50 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     } else {
       None
     }
-  let st_in = LSt {
+  let st_base = LSt {
     ..stl,
     ret_ty = f.sig.ret,
     self_ctx = sc,
-    tail = true,
+    tail = plan == None,
     self_tail = false,
     ev_env = ev_env,
     ev_own = None,
     base = f.base,
-    origin = f.decl
+    origin = f.decl,
+    on_return = None
+  }
+  var st_in = st_base
+  var prologue: List[CStmt] = []
+  var raw_pairs: List[(Int, Int)] = []
+  match plan {
+    Some(pl) -> {
+      let (stb, ps, lets, pairs) = bracket_params(st_in, pl, params)
+      params = ps
+      prologue = lets
+      raw_pairs = pairs
+      st_in = LSt { ..stb, on_return = Some(hook_call(stb, pl.eid, pl.hooks.exit, [])) }
+    }
+    None -> ()
   }
   let (st1, body0) = lower_expr(st_in, f.body)
   # the tail value is a return too
   let body1 = adapt_in(body0, tex_ty(f.body), f.sig.ret)
-  let body = wrap_self_loop(st1.self_tail && not st.keep_calls, lid, body1, f.sig.ret)
+  let body2 = wrap_self_loop(st1.self_tail && not st.keep_calls, lid, body1, f.sig.ret)
+  let body = match plan {
+    None -> body2
+    Some(pl) -> {
+      let entered = prologue ++ [CSDiscard(hook_call(st_in, pl.eid, pl.hooks.enter, enter_args(st_in, f, pl)))]
+      let inner = if len(raw_pairs) > 0 { forward_raw(st1, body2, raw_pairs) } else { body2 }
+      match f.sig.ret {
+        TyNever -> CBlock(entered, Some(inner), f.sig.ret)
+        _ -> {
+          let (_, rv) = fresh_sym(st1)
+          CBlock(entered ++ [CSLet(rv, f.sig.ret, inner), CSDiscard(hook_call(st_in, pl.eid, pl.hooks.exit, []))],
+            Some(CLocal(rv, f.sig.ret)), f.sig.ret)
+        }
+      }
+    }
+  }
   (LSt {
     ..st1,
     ret_ty = st.ret_ty,
@@ -5489,7 +5696,9 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     ev_env = st.ev_env,
     ev_own = st.ev_own,
     base = st.base,
-    origin = st.origin
+    origin = st.origin,
+    on_return = st.on_return,
+    next_sym = if plan == None { st1.next_sym } else { st1.next_sym + 1 }
   }, CFun {
     definition = definition_at(st_in, f.base, x_hi(f.body), if st1.self_tail { "function-tail" } else { "function" }),
     name = f.name,
@@ -5569,7 +5778,7 @@ pub fn lower_expr_in(
     ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false, keep_calls = false
+    ct_inline = false, keep_calls = false, on_return = None
   }
   let (st1, ce) = lower_expr(st, e)
   (ce, st1.lifted, st1.dicts, st1.next_lam)
@@ -5621,7 +5830,7 @@ pub fn lower_fn_only(
     ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = true, keep_calls = false
+    ct_inline = true, keep_calls = false, on_return = None
   }
   let (st1, cf) = lower_fn(st, owner, f)
   (cf, st1.lifted, st1.dicts, st1.next_lam)
@@ -5702,7 +5911,7 @@ pub fn lower_module_full(
     ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false, keep_calls = keep_calls
+    ct_inline = false, keep_calls = keep_calls, on_return = None
   }
   var fns: List[(CFun, List[CFun])] = []
   var flat: List[CFun] = []
@@ -6117,6 +6326,7 @@ test "the flat module and the grouped functions are one lowering" {
         trait_id = None,
         op_of = None,
         inferring = false,
+        calls = None,
         scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
     },
     param_syms = [1, 2],
@@ -6239,6 +6449,7 @@ test "emitted_core carries the test bodies and what they hoisted" {
         trait_id = None,
         op_of = None,
         inferring = false,
+        calls = None,
         scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
     },
     param_syms = [1, 2],
@@ -6347,6 +6558,7 @@ test "a written call's site is measured from its declaration, and a call nobody 
       trait_id = None,
       op_of = None,
       inferring = false,
+      calls = None,
       scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
   let none_tid: Option[Int] = None

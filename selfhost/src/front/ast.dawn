@@ -602,6 +602,24 @@ pub type EffectOp = {
   nhi: Int
 }
 
+## One role of an effect's `calls(...)` clause, bound to the operation the
+## author named for it. The spans are the operation's name, so a checker
+## refusal lands on the word that is wrong and not on the whole clause.
+pub type CallHook = { op: String, lo: Int, hi: Int }
+
+## `effect E calls(enter = a, exit = b, body_enter = c, body_exit = d) { ... }`
+## (docs/call-records-design.md 2.1). All four roles are required: an enter
+## with no exit, or a body bracket with no partner, cannot be balanced, so a
+## clause that leaves one out is a parse error and not a default.
+pub type CallsDecl = {
+  enter: CallHook,
+  exit: CallHook,
+  body_enter: CallHook,
+  body_exit: CallHook,
+  lo: Int,
+  hi: Int
+}
+
 ## `is_ctl` is the `ctl` prefix: this effect's operations may be suspended by a
 ## control arm (docs/oneshot-design.md §11.6 S1). Suspendability is declared
 ## here rather than read off the arms because whether an arm binds a
@@ -615,6 +633,7 @@ pub type EffectDeclR = {
   scope: ScopeSyntax,
   vis: Vis,
   is_ctl: Bool,
+  calls: Option[CallsDecl],
   name: String,
   ops: List[EffectOp],
   lo: Int,

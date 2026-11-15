@@ -16,7 +16,7 @@ use check/types.{ty_adt, ty_fn, signature_scope_inert, ty_scope_refs, eff_scopes
   trait_audience, builtin_type_audience, internal_std_modules,
   eff_subsumes, eff_suffix, eff_show, eff_labels, eff_assocs, eff_params_of, subst_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
-  EffectI, ev_record_name, erased_ev_ty,
+  EffectI, EffectCalls, CallPlan, ev_record_name, erased_ev_ty,
   Adts, AdtI, CtorI, FieldI,
   TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, no_eparam_names, ty_show, fn_return_show,
   sig_render, subst, assoc_effect_advice,
@@ -43,7 +43,7 @@ use front/ast.{parameter_names, TScoped, TCaptured, TKindArg, no_scope_syntax,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_uses, DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod,
   Param, Expr, Decl, DImpl, ImplView, FnDecl, EBool, DFn, EVar, EApply, DConst, EInt, module_effects,
-  DEffect, EffectDeclR, AssocBind, ImportName, import_local,
+  DEffect, EffectDeclR, CallHook, AssocBind, ImportName, import_local,
   Vis, VisPrivate, VisPkg, VisPub, vis_exported,
   e_lo, e_hi
 }
@@ -1294,6 +1294,7 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
     let empty_ev: Map[String, Eff] = map.empty()
     var fields: List[FieldI] = []
     var op_names: List[String] = []
+    var op_shapes: List[(List[Ty], Ty)] = []
     var seen: Set[String] = set.empty()
     for op in d.ops {
       if set.has(seen, op.name) {
@@ -1360,6 +1361,7 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       let idx = len(fields)
       fields = fields ++ [FieldI { name = op.name, ty = ty_fn(ptys, ret, EPure, capture.empty_function()) }]
       op_names = op_names ++ [op.name]
+      op_shapes = op_shapes ++ [(ptys, ret)]
       let sig = {
         let identity_scope_params: capture.Params = params
         let identity_param_tys: List[Ty] = ptys
@@ -1383,6 +1385,7 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
           trait_id = None,
           op_of = Some((eid, idx)),
           inferring = false,
+          calls = None,
           scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
       }
       cx1 = bind_fn(cx1, op.name, sig, OLocal("operation"), op.nlo, op.nhi)
@@ -1401,6 +1404,8 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
     # declaration order -- so a field in front of the operations would shift
     # every one of them by one, silently.
     fields = fields ++ [FieldI { name = "env", ty = erased_ev_ty() }]
+    let (calls_cx, effect_calls) = resolve_calls_clause(cx1, d, op_names, op_shapes)
+    cx1 = calls_cx
     let rec_name = ev_record_name(d.name)
     # the evidence record is unspellable (`ev$E`), so it can never appear in a
     # written header -- but it shares the effect's audience so that nothing
@@ -1434,7 +1439,8 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
         # the `ctl` prefix, carried straight through from the declaration: the
         # front end decides whether it was written and nothing here reinterprets
         # it (docs/oneshot-design.md §11.6 S1)
-        ctl = d.is_ctl
+        ctl = d.is_ctl,
+        calls = effect_calls
       })
     }
   }
@@ -1670,6 +1676,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
           trait_id = Some(tid),
           op_of = None,
           inferring = false,
+          calls = None,
           scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
       }
       # A declared effect in one of these types used to be refused by
@@ -2365,6 +2372,8 @@ fn impl_method_sigs(
     cx1 = cx4
     let eparams = eff_params_of(cx1.current_eff_vars)
     cx1 = Cx { ..cx1, current_eff_vars = saved_ev }
+    let (impl_plan_cx, impl_plan) = call_plan_of(cx1, me.name, eff, ptys, [], me.nlo, me.nhi)
+    cx1 = impl_plan_cx
     let msig = {
       let identity_scope_params: capture.Params = cx1.current_capture_params
       let identity_param_tys: List[Ty] = ptys
@@ -2391,6 +2400,7 @@ fn impl_method_sigs(
         trait_id = None,
         op_of = None,
         inferring = false,
+        calls = impl_plan,
         scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
     }
     # Align the two signatures' effect variables before comparing them. Both
@@ -2731,6 +2741,130 @@ pub(pkg) fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[Li
   (cx1, out)
 }
 
+## The four operations of a `calls` clause, resolved against the effect's own
+## operations (docs/call-records-design.md 2.1).
+##
+## What is checked is exactly what the generated code relies on: each name is
+## an operation of this effect (not an imported function that happens to share
+## the spelling), no operation serves two roles, `enter` takes the declared
+## name and the call site (`String`, `Option[Loc]`), and the other three take
+## nothing; all four answer `Unit`. A role with the wrong shape would otherwise
+## surface as a type error inside generated code, where nobody wrote anything.
+fn resolve_calls_clause(
+  cx: Cx,
+  d: EffectDeclR,
+  op_names: List[String],
+  op_shapes: List[(List[Ty], Ty)]
+) -> (Cx, Option[EffectCalls]) = {
+  let c = match d.calls {
+    Some(c) -> c
+    None -> return (cx, None)
+  }
+  var cx1 = cx
+  var ok = true
+  var idxs: List[Int] = []
+  let roles: List[(String, CallHook)] = [("enter", c.enter), ("exit", c.exit), ("body_enter", c.body_enter), ("body_exit", c.body_exit)]
+  for r in roles {
+    let (role, h) = r
+    var found = -1
+    var k = 0
+    for n in op_names {
+      if n == h.op { found = k }
+      k = k + 1
+    }
+    if found < 0 {
+      cx1 = cerr_h(cx1, "`calls` names `" ++ h.op ++ "` for `" ++ role ++ "`, which is not an operation of effect `" ++ d.name ++ "`",
+        h.lo, h.hi, "bind each role to an operation declared in this effect's body")
+      ok = false
+      idxs = idxs ++ [0 - 1]
+      continue
+    }
+    if list.contains(idxs, found) {
+      cx1 = cerr_h(cx1, "operation `" ++ h.op ++ "` serves two roles of `calls`", h.lo, h.hi,
+        "each role needs an operation of its own")
+      ok = false
+    }
+    let (ptys, ret) = op_shapes[found]
+    let no_params: List[String] = []
+    let want_params = if role == "enter" { ["String", "Option[Loc]"] } else { no_params }
+    var shown: List[String] = []
+    for t in ptys { shown = shown ++ [ty_show(cx1.adts, t)] }
+    if shown != want_params || ty_show(cx1.adts, ret) != "Unit" {
+      let sigtext = if role == "enter" { "fn(String, Option[Loc]) -> Unit" } else { "fn() -> Unit" }
+      cx1 = cerr_h(cx1, "operation `" ++ h.op ++ "` cannot serve as `" ++ role ++ "` of `calls`", h.lo, h.hi,
+        "the `" ++ role ++ "` operation must have the shape " ++ sigtext)
+      ok = false
+    }
+    idxs = idxs ++ [found]
+  }
+  if not ok { return (cx1, None) }
+  (cx1, Some(EffectCalls { enter = idxs[0], exit = idxs[1], body_enter = idxs[2], body_exit = idxs[3] }))
+}
+
+## What the compiler writes into a function whose declared row names a
+## recording effect (docs/call-records-design.md 2.2 to 2.4), or None.
+##
+## The rule is keyed by the effect and not by the package: a function is
+## written for when its *declared* row has a label whose effect has a `calls`
+## clause. An effect variable that merely instantiates to the recorder does
+## not count, so one function never changes shape with its instantiation. The
+## caller decides whether the function is in the recorded surface (a public
+## function, or an impl method); a private helper's operations belong to the
+## public call that reached it.
+##
+## `at` is the one parameter that defaults to `caller()`; a second one makes
+## the choice ambiguous and is refused where the function is written.
+fn call_plan_of(
+  cx: Cx,
+  name: String,
+  eff: Eff,
+  ptys: List[Ty],
+  caller_params: List[Int],
+  lo: Int,
+  hi: Int
+) -> (Cx, Option[CallPlan]) = {
+  var eid = -1
+  var hooks: Option[EffectCalls] = None
+  for l in eff_labels(eff) {
+    let (lid, _) = l
+    match map.get(cx.effect_infos, lid) {
+      Some(info) -> match info.calls {
+        Some(h) -> if eid < 0 {
+          eid = lid
+          hooks = Some(h)
+        }
+        None -> ()
+      }
+      None -> ()
+    }
+  }
+  let h = match hooks {
+    Some(h) -> h
+    None -> return (cx, None)
+  }
+  if len(caller_params) > 1 {
+    return (cerr_h(cx, "`" ++ name ++ "` has " ++ to_string(len(caller_params)) ++ " parameters defaulting to `caller()`", lo, hi,
+      "a recorded function reports one call site; keep one `at: Loc = caller()` parameter"), None)
+  }
+  var bodies: List[Int] = []
+  var k = 0
+  for t in ptys {
+    match t {
+      TyFn(_, _, fe, _, _) -> {
+        for fl in eff_labels(fe) {
+          let (fid, _) = fl
+          if fid == eid && not list.contains(bodies, k) { bodies = bodies ++ [k] }
+        }
+      }
+      _ -> ()
+    }
+    k = k + 1
+  }
+  let no_at: Option[Int] = None
+  let at = if len(caller_params) == 1 { Some(caller_params[0]) } else { no_at }
+  (cx, Some(CallPlan { eid = eid, hooks = h, name = name, at = at, bodies = bodies }))
+}
+
 ## Pass 3: function signatures. Returns each function's signature filed under
 ## its path `[Named(FunctionDecl, name)]`. The effect variables each signature
 ## introduced ride in `Sig.eparams`; body checking reads them back from there
@@ -2820,6 +2954,16 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = 
     cx1 = Cx { ..cx1, current_tparams = saved_tp, current_eff_vars = saved_ev, current_capture_params = saved_capture }
     # until the body is checked, an unannotated fn assumes the worst effect
     let final_eff = if inferring && len(d.effs) == 0 { EIo } else { eff }
+    let no_indices: List[Int] = []
+    let fn_caller_params = if caller_is_builtin { caller_param_indices(d) } else { no_indices }
+    let no_plan: Option[CallPlan] = None
+    let (plan_cx, plan) =
+      if d.vis == VisPub && not inferring && len(scope_params.scopes) == 0 {
+        call_plan_of(cx1, d.name, final_eff, ptys, fn_caller_params, d.nlo, d.nhi)
+      } else {
+        (cx1, no_plan)
+      }
+    cx1 = plan_cx
     let sig = {
       let identity_scope_params: capture.Params = scope_params
       let identity_param_tys: List[Ty] = ptys
@@ -2831,7 +2975,7 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = 
         param_tys = identity_param_tys,
         param_names = map(d.params, p => p.name),
         param_defaults = map(d.params, p => default_text(p)),
-        caller_params = if caller_is_builtin { caller_param_indices(d) } else { [] },
+        caller_params = fn_caller_params,
         ret = identity_ret,
         eff = identity_eff,
         is_builtin = false,
@@ -2842,6 +2986,7 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = 
         trait_id = None,
         op_of = None,
         inferring = inferring,
+        calls = plan,
         scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
     }
     sigs = path_table_add(sigs, path_text([Named(FunctionDecl, d.name)]), sig)

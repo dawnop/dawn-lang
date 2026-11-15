@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 499aa0ed3be5134a -->
+<!-- doc-check: translation-of docs/spec.md @ 924e453cd0ce37f1 -->
 
 # Dawn Language Specification
 
@@ -159,7 +159,7 @@ true false not
 ```
 
 Keywords cannot be used as identifiers. `panic` and `todo` are built-in functions, not keywords.
-There are fifteen further **contextual keywords**. Each has a special meaning in exactly one
+There are sixteen further **contextual keywords**. Each has a special meaning in exactly one
 syntactic position and remains an ordinary identifier everywhere else (`let in = 1` and a field
 named `test` are both legal):
 
@@ -177,6 +177,7 @@ named `test` are both legal):
 | `handle` | after `with`, when the next token is not `<-` (§6.5) |
 | `opaque` | directly before `type`, introducing an opaque type (§2.7) |
 | `ctl` | directly before `effect`, declaring a suspendable effect (§6.5) |
+| `calls` | after an effect's name and before its `{`, directly followed by `(`: `effect E calls(enter = a, …) { … }` (§6.5) |
 | `origin` | after a handler arm's parameter list and before `resume`: `op(a) origin o => …` (§6.5) |
 | `resume` | after a handler arm's parameter list: `op(a) resume k => …` (§6.5) |
 | `pkg` | only after `pub(`: `pub(pkg)` (§10.4) |
@@ -2745,6 +2746,59 @@ ctl effect Fetch {
   same-named operation brought in by another effect) is an error too. The operations of a
   `pub effect` come in together with `use m.{Ask}`, and `m.ask(…)` can also be written.
 - An effect itself carries no type parameters; `effect Yield[T]` is currently unsupported.
+- A `calls(…)` clause may follow the effect's name, before the `{`, declaring the effect a **call
+  recorder** (the next subsection). `calls` is a contextual keyword with meaning only in that
+  position, directly followed by `(`.
+
+#### Call records: the `calls` clause
+
+```dawn
+pub effect Dev calls(enter = t_call_enter, exit = t_call_exit,
+  body_enter = t_body_enter, body_exit = t_body_exit) {
+  fn t_call_enter(name: String, at: Option[Loc]) -> Unit
+  fn t_call_exit() -> Unit
+  fn t_body_enter() -> Unit
+  fn t_body_exit() -> Unit
+  fn t_block_id(axis: Int) -> Int
+}
+```
+
+`calls` binds four roles to operations the effect declares itself: `enter` takes
+`fn(String, Option[Loc]) -> Unit`, and `exit`, `body_enter` and `body_exit` take `fn() -> Unit`.
+All four roles must be written, each with an operation of its own, and each name must be an
+operation of this effect. Anything else is a compile error, reported at the offending role name.
+
+**Writing `calls` on a `ctl effect` is a compile error.** A continuation can be dropped, and a
+dropped continuation leaves an `enter` that never meets its `exit`, so balance cannot hold;
+silently ignoring the clause would let the record stop closing without a word. An effect with a
+Scope parameter is refused for the same reason.
+
+Once declared, the compiler writes call records by effect, not by package. A function is written
+for exactly when its **declared** effect row names an effect with a `calls` clause (an effect
+variable that merely instantiates to the recorder does not count, so a function never changes
+shape with its instantiation) and it is a `pub fn` or an impl method. Private and `pub(pkg)`
+functions are not written for: the operations they issue belong to the public call that reached
+them. What is written:
+
+- The body starts with `enter(name, at)`. `name` is the declared name (an impl method's is the
+  method name); `at` is the value of the function's one `at: Loc = caller()` parameter (§8.4), or
+  `None` when there is none. More than one such parameter is a compile error.
+- `exit()` runs before every way out: the block's tail value, `return`, and the early return of
+  `?`. `return e` evaluates `e`, then `exit()`, then returns. A `panic` does not run `exit()` (it
+  ends the run; one swallowed by `catch_panic` is balanced by the recorder's own rollback, exactly
+  as hand-written marks are). A function returning `Never` gets no tail `exit()`.
+- Each parameter of function type whose declared row names the effect is replaced on entry by a
+  thin wrapper: every call runs `body_enter()`, calls the original closure, then `body_exit()`. The
+  body reads the wrapper for every use of that parameter, **except** a direct forward: passing the
+  parameter itself as the argument for the same kind of parameter of another written-for function
+  hands over the original, and the callee wraps it once, not twice.
+- A written-for function is not turned into a loop by self tail calls (§12.4): each recursive call
+  is a record of its own.
+- A program with no such effect gets byte-for-byte the Core and emitted classes it got before.
+
+The generated calls use the function's own evidence for the effect; the calling convention and the
+function's type do not change. The design, its acceptance criteria and comparisons are in
+[`docs/call-records-design.md`](call-records-design.md).
 
 #### Spelling and propagation
 

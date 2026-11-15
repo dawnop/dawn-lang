@@ -45,7 +45,7 @@ use front/ast.{no_scope_syntax,
   PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
-  DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module, ParseMarks, ExampleOf, example_spelling,
+  DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, CallsDecl, CallHook, Module, ParseMarks, ExampleOf, example_spelling,
   Vis, VisPrivate, VisPkg, VisPub,
   e_lo, e_hi, t_lo, t_hi, pat_lo, pat_hi
 }
@@ -1942,6 +1942,72 @@ fn trait_method(p: P, st: St) -> PR[TraitMethod] = {
   }))
 }
 
+## calls(enter = a, exit = b, body_enter = c, body_exit = d)
+##
+## The clause that makes an effect a call recorder: the compiler writes an
+## enter and an exit round every public function whose declared row names the
+## effect, and a body bracket round the closures such a function receives
+## (docs/call-records-design.md). The roles bind to operations the effect
+## declares itself; the checker resolves the names and the signatures.
+##
+## A `ctl` effect is refused here, where the word is: a suspension can drop
+## its continuation, and a dropped continuation leaves an enter with no exit,
+## so the balance the clause promises cannot hold. Refusing is the only honest
+## answer -- ignoring the clause would record a tree that silently stops
+## closing. A scoped effect (`Mem[@s]`) is refused for the same kind of
+## reason: its evidence is selected by a scope key, which a generated call
+## has no way to supply.
+fn calls_clause(p: P, st: St, is_ctl: Bool, scoped: Bool) -> PR[CallsDecl] = {
+  let head = cur(p, st)
+  if is_ctl {
+    return Err((st, perr_h(p, st, "a `ctl` effect cannot declare `calls`",
+      "a suspended computation may never resume, so an enter could never be balanced by its exit")))
+  }
+  if scoped {
+    return Err((st, perr_h(p, st, "an effect with a Scope parameter cannot declare `calls`",
+      "generated enter and exit calls cannot supply the scope key")))
+  }
+  let (st1, _) = want(p, st, IDENT, "`calls`")?
+  let (st2, _) = want(p, st1, LPAREN, "`(`")?
+  var cur_st = skip_nl(p, st2)
+  var enter: Option[CallHook] = None
+  var exit: Option[CallHook] = None
+  var body_enter: Option[CallHook] = None
+  var body_exit: Option[CallHook] = None
+  while not at_kind(p, cur_st, RPAREN) {
+    let (st3, role) = want(p, cur_st, IDENT, "a role (`enter`, `exit`, `body_enter` or `body_exit`)")?
+    let (st4, _) = want(p, st3, EQ, "`=` (a role is bound with `role = operation`)")?
+    let (st5, op) = want(p, st4, IDENT, "an operation name (lowercase)")?
+    let hook = CallHook { op = op.text, lo = op.lo, hi = op.hi }
+    let dup = pd("the role `" ++ role.text ++ "` is bound twice", role.lo, role.hi)
+    if role.text == "enter" {
+      if enter != None { return Err((st3, dup)) }
+      enter = Some(hook)
+    } else if role.text == "exit" {
+      if exit != None { return Err((st3, dup)) }
+      exit = Some(hook)
+    } else if role.text == "body_enter" {
+      if body_enter != None { return Err((st3, dup)) }
+      body_enter = Some(hook)
+    } else if role.text == "body_exit" {
+      if body_exit != None { return Err((st3, dup)) }
+      body_exit = Some(hook)
+    } else {
+      return Err((st3, pd_h("unknown role `" ++ role.text ++ "` in `calls`", role.lo, role.hi,
+        "the roles are enter, exit, body_enter and body_exit")))
+    }
+    cur_st = skip_nl(p, st5)
+    if at_kind(p, cur_st, COMMA) { cur_st = skip_nl(p, adv1(p, cur_st)) } else { break }
+  }
+  let (st6, close) = want(p, cur_st, RPAREN, "`)`")?
+  match (enter, exit, body_enter, body_exit) {
+    (Some(a), Some(b), Some(c), Some(d)) ->
+      Ok((st6, CallsDecl { enter = a, exit = b, body_enter = c, body_exit = d, lo = head.lo, hi = close.hi }))
+    _ -> Err((st6, pd_h("`calls` needs all four roles", head.lo, close.hi,
+      "enter, exit, body_enter and body_exit: a call or a body that opens must be able to close")))
+  }
+}
+
 ## effect Ask { fn ask() -> Int }, or ctl effect Async { fn wait() -> Unit }
 ##
 ## The shape is a trait body without a subject: operation signatures, no
@@ -1968,7 +2034,14 @@ fn effect_decl(p: P, st: St, vis: Vis, is_ctl: Bool) -> PR[Decl] = {
     return Err((after, perr_h(p, after, "an effect cannot declare type or effect parameters",
       "only the compiler-owned Mem declaration takes a Scope parameter")))
   }
-  let st3 = skip_nl(p, after)
+  let no_calls: Option[CallsDecl] = None
+  let (after_calls, calls) = if is_word(p, after, 0, "calls") && kind_ahead(p, after, 1) == LPAREN {
+    let (st_c, c) = calls_clause(p, after, is_ctl, len(scope.binders) > 0)?
+    (st_c, Some(c))
+  } else {
+    (after, no_calls)
+  }
+  let st3 = skip_nl(p, after_calls)
   let (st4, _) = want(p, st3, LBRACE, "`{` (the effect body)")?
   var st5 = skip_nl(p, st4)
   var ops: List[EffectOp] = []
@@ -1985,6 +2058,7 @@ fn effect_decl(p: P, st: St, vis: Vis, is_ctl: Bool) -> PR[Decl] = {
     scope = scope,
     vis = vis,
     is_ctl = is_ctl,
+    calls = calls,
     name = name.text,
     ops = ops,
     lo = kw.lo,

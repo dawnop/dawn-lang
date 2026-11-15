@@ -408,7 +408,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 41319s (the most this file's `3x` claims may add up to)
+# push-total: 41559s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2252,8 +2252,12 @@ jobs:
     runs-on: ubuntu-24.04
     # Complete contracts use disjoint private outputs and retain every oracle.
     # Fresh complete executions will replace this provisional planning value.
-    # budget: 3x 580s worst observed in measured paired runs plus four percent
-    timeout-minutes: 29
+    # R4-f adds the call record contract below (the full hand-written against
+    # compiler-written comparison, the Playground samples, the transcript cases
+    # and refusals, and the author-layer mutant): 55s locally on a warm machine,
+    # charged at 200s with doubled rounded headroom. 580 + 200 = 780s.
+    # budget: 3x 780s planning value (580s previous claim plus 200s for the call record contract)
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2279,6 +2283,18 @@ jobs:
 
       - name: effect provenance method size and mutation cases
         run: ./scripts/effect-provenance-contract/run.sh --reuse-runtime --cases method-size mutations
+
+      # The compiler writes the call records tileir writes by hand today
+      # (docs/call-records-design.md). The same kernels are recorded with the
+      # hand-written marks and with the marks derived away and `Dev` declaring
+      # `calls(..)`, and the two tables are compared field by field: 255
+      # golden programs, the two Playground samples, the transcript cases and
+      # the refusals, and the author-layer mutant that must turn it red.
+      - name: Call record contract
+        run: |
+          python3 scripts/call-records-contract/run.py
+          python3 scripts/call-records-contract/run.py --samples
+          python3 scripts/call-records-contract/mutants.py author
 
       # The first bulk Array/Bytes primitives. Byte order, wrapping, sign
       # extension and the two panic sentences are contract clauses that the
@@ -3204,8 +3220,11 @@ jobs:
     # rounded headroom.
     # F3 adds every SQLite JVM/WASI refusal and path/URL package consumers:
     # 12.3s locally; reserve 40s with the existing driver and pinned SDK.
-    # budget: 3x 820s planning value (780s previous claim plus 40s for SQLite backend checks)
-    timeout-minutes: 41
+    # R4-f adds the native half of the call record contract: the transcript
+    # cases on the driver built above, held to the same expected file as the
+    # JVM run. 14s locally; charged at 40s with doubled rounded headroom.
+    # budget: 3x 860s planning value (820s previous claim plus 40s for the native call record cases)
+    timeout-minutes: 43
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -3284,6 +3303,11 @@ jobs:
           ./bin/dawn __emitc selfhost/src/nmain.dawn --split "$RUNNER_TEMP/nmain"
           scripts/cc-units.sh -o "$RUNNER_TEMP/dawnc" "$RUNNER_TEMP/nmain"
           echo "DAWNC_BIN=$RUNNER_TEMP/dawnc" >>"$GITHUB_ENV"
+
+      # The compiler-written call records on the native backend: the same
+      # transcript the JVM run is held to (docs/call-records-design.md).
+      - name: Call record cases on native
+        run: python3 scripts/call-records-contract/run.py --cases --native "$DAWNC_BIN"
 
       # catch/bracket/raise on wasm, held to the native run byte for byte,
       # plus the leak ledger this target has in place of LeakSanitizer and
