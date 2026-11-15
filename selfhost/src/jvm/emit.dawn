@@ -41,7 +41,7 @@ use front/ast.{no_scope_syntax,
   Decl, DFn, DImpl, DTrait, DTest, FnDecl, TraitMethod, TypeRef, TNamed, TQual, EUnit, VisPub
 }
 use jvm/codegen.{
-  class_bytes, class_bytes_from, capacity_failure, writer_failure_text, check_arg_slots, MethodSite, no_sites,
+  class_bytes, class_bytes_from, capacity_failure, huge_observed_text, refuse_site_table, writer_failure_text, check_arg_slots, MethodSite, no_sites,
   desc_of, method_desc, jvm_repr, RLong, RDouble, RBool, RRef, RBottom, slots_of,
   is_bottom, load_slot, hash_of, dict_class, gen_adt, parameterised_scaffold,
   dict_arg_field, dict_ctor_desc, EqOverride, singleton_scaffold, subject_name, impl_symbol, wide_ctor
@@ -323,6 +323,9 @@ pub type Gen = {
   sam_classes: List[SamC],
   observed_classes: List[(String, ClassWriter)],
   observed_count: Int,
+  # observed methods left over HotSpot's 8000-byte limit, by `class.method`,
+  # each with the declaration it was cut from, so the warning can point at it
+  huge_at: Map[String, String],
   const_fields: List[ConstF],
   const_by_key: Map[String, Int],
   # the labelled emission's marks for the method being written, and its rows
@@ -1633,7 +1636,8 @@ fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
 ## parameter slots -- is set up here.
 ## Per-module constant metadata tables need no generated initialization or allocation code.
 ## Getters are compiler runtime code; they never introduce user call frames.
-pub fn gen_provenance_sites(table: Map[Int, String]) -> List[(String, Bytes)] !io = {
+pub fn gen_provenance_sites(table: Map[Int, String], paths: Map[String, String]) ->
+  List[(String, Bytes)] !Fs !Exit !Console !io = {
   var owners: Map[String, List[(Int, String)]] = map.empty()
   for item in map.entries(table) {
     let (id, metadata) = item
@@ -1643,7 +1647,6 @@ pub fn gen_provenance_sites(table: Map[Int, String]) -> List[(String, Bytes)] !i
   var classes: List[(String, Bytes)] = []
   for entry in map.entries(owners) {
     let (owner, sites) = entry
-    if len(sites) > 16000 { panic("provenance: static Site table exceeds the JVM classfile limit") }
     let cls = provenance.table_class(owner)
     let cw = Asm.plain(COMPUTE_FRAMES).expect("Site table writer")
     Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, cls, obj())
@@ -1657,7 +1660,13 @@ pub fn gen_provenance_sites(table: Map[Int, String]) -> List[(String, Bytes)] !i
       close_mv(m)
     }
     cw.visitEnd()
-    classes = classes ++ [(cls, cw.toByteArray().expect("Site table bytes"))]
+    match catch_fault(() => cw.toByteArray()) {
+      Ok(data) -> { classes = classes ++ [(cls, data.expect("Site table bytes"))] }
+      Err(error) -> {
+        if not capacity_failure(error.kind) { panic(writer_failure_text(error, cls, "site table")) }
+        refuse_site_table(owner, len(sites), map.get(paths, owner).unwrap_or(""))
+      }
+    }
   }
   classes
 }
@@ -2004,6 +2013,7 @@ fn gen_cbody(gx: GenCtx, g: Gen, cw: ClassWriter, cf: CFun, name: String,
   }
   let physical = if physical_class == "" { gx.class_name } else { physical_class }
   var band = 0
+  var over: List[String] = []
   while true {
     let probe = AsmWriter.of(COMPUTE_FRAMES, gx.supers).expect("method size writer")
     Asm.beginOn(probe, V52, ACC_PUBLIC + ACC_FINAL, physical, obj())
@@ -2027,20 +2037,26 @@ fn gen_cbody(gx: GenCtx, g: Gen, cw: ClassWriter, cf: CFun, name: String,
       }
     }
     var largest = 0
-    var largest_name = ""
+    over = []
     for method in classread.class_methods(data) {
-      if method.code_length > largest { largest = method.code_length
-        largest_name = method.name }
+      if method.code_length > largest { largest = method.code_length }
+      if method.code_length > 8000 { over = over ++ [method.name] }
     }
     # Accept a valid final partition. Reducing the region band is not
     # monotone: an otherwise legal large arm can fall outside the smaller
     # eligibility window and return to the caller. Do not discard a layout
     # already below the unchanged JIT limit to pursue optional headroom.
-    if largest <= 8000 { break }
-    if band == 1 { panic("codegen: observed control region " ++ physical ++ "." ++ largest_name ++ " exceeds 8000 bytes: " ++ to_string(largest)) }
+    # 8000 is HotSpot's HugeMethodLimit: past it a method is never compiled,
+    # which makes it slow, not wrong. When even the finest band leaves a
+    # method over it, keep that layout and let `report_huge_observed` say so;
+    # the only hard limit is the class file's 64 KiB, which the writer reports.
+    if largest <= 8000 || band == 1 { break }
     band = if band == 0 { 80 } else { if band == 2 { 1 } else { band / 2 } }
   }
-  gen_cbody_write(gx, g, cw, cf, name, desc, lifted, physical_class, band)
+  let out = gen_cbody_write(gx, g, cw, cf, name, desc, lifted, physical_class, band)
+  var huge = out.huge_at
+  for method in over { huge = map.insert(huge, physical ++ "." ++ method, name) }
+  Gen { ..out, huge_at = huge }
 }
 
 fn physical_desc(gx: GenCtx, region: Region) -> String = {
@@ -2831,7 +2847,7 @@ fn emit_module_with(
     pending_sam = [],
     clos_ctr = 0,
     closures = [],
-    sam_classes = [], observed_classes = [], observed_count = 0,
+    sam_classes = [], observed_classes = [], observed_count = 0, huge_at = map.empty(),
     physical_owner = "", physical_band = 0, physical_next = 0, physical_pending = [],
     const_fields = [],
     const_by_key = no_ckey,
@@ -2935,21 +2951,33 @@ fn emit_module_with(
     out = out ++ [gen_sam_class(supers, s)]
   }
   let emitted = out ++ [(class_name, class_bytes_from(() => cw.toByteArray(), class_name, src, sites))]
-  if provenance.enabled(live) { check_observed_code(emitted) }
+  if provenance.enabled(live) { report_huge_observed(emitted, g.huge_at, src, sites) }
   (emitted, g.jrows, g.jfns)
 }
 
 # This reads the finished class, after constant-pool widths and jump widening.
 # The independent gate reads the same Code attribute without using ASM.
-fn check_observed_code(classes: List[(String, Bytes)]) -> Unit = {
+# A method over HotSpot's 8000-byte HugeMethodLimit is reported, once per
+# declaration, and never refused: it is only interpreted, not broken.
+fn report_huge_observed(classes: List[(String, Bytes)], at: Map[String, String], src: String,
+  sites: Map[String, MethodSite]) ->
+  Unit !Fs !Console !io = {
+  var seen: Set[String] = set.empty()
   for entry in classes {
     let (owner, data) = entry
     for method in classread.class_methods(data) {
       let observed = str.ends_with(method.name, "\$observed") || method.name == "applyObserved" ||
         str.starts_with(method.name, "\$observed\$part\$") || str.contains(owner, "\$observed\$")
       if observed && method.name != "<clinit>" && method.code_length > 8000 {
-        panic("codegen: final observed method " ++ owner ++ "." ++ method.name ++
-            " exceeds 8000 bytes: " ++ to_string(method.code_length))
+        let entry_name = map.get(at, owner ++ "." ++ method.name).unwrap_or(method.name)
+        let key = match str.index_of(entry_name, "\$observed") {
+          Some(i) -> str.take(entry_name, i)
+          None -> ""
+        }
+        let id = owner ++ "." ++ key
+        if set.has(seen, id) { continue }
+        seen = set.insert(seen, id)
+        console_eprint(huge_observed_text(owner, method.name, method.code_length, key, src, sites))
       }
     }
   }
@@ -4864,7 +4892,7 @@ fn mapped_fixture(mapping: Bool) -> (Bytes, Gen) !io = {
   let g = Gen { prov_callback = -1, prov_context = -1, prov_declaration = "", prov_tail = [],
     mv = scratch_mv(), lift_descs = map.empty(), syms = map.empty(), slots = map.empty(), next_slot = 0,
     method_ret = TyUnit, rets_null = false, cloops = [], sam_ctr = 0, pending_sam = [], clos_ctr = 0,
-    closures = [], sam_classes = [], observed_classes = [], observed_count = 0,
+    closures = [], sam_classes = [], observed_classes = [], observed_count = 0, huge_at = map.empty(),
     physical_owner = "", physical_band = 0, physical_next = 0, physical_pending = [], const_fields = [], const_by_key = map.empty(), marks = [], jrows = [],
     jfns = []
   }

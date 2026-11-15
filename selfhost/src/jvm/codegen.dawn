@@ -335,6 +335,20 @@ pub fn writer_failure_text(error: ForeignError, cls: String, phase: String) -> S
     "; cause=" ++ error.kind ++ "\n" ++ context ++ error.message ++ cause ++ "\n"
 }
 
+test "a huge observed method is a warning, not an error" {
+  let text = io.with_fs_real(() => huge_observed_text("m\$observed\$0", "\$observed\$part\$3", 9001, "f", "/nowhere.dawn", no_sites()))
+  assert str.starts_with(text, "warning: observed method `m\$observed\$0.\$observed\$part\$3` is 9001 bytes")
+  assert str.contains(text, "past the 8000 bytes HotSpot will compile")
+  assert str.contains(text, "--> /nowhere.dawn")
+  assert not str.contains(text, "error:")
+}
+
+test "a refused Site table names the module and its own limit" {
+  let text = io.with_fs_real(() => site_table_text("big", 24003, ""))
+  assert str.starts_with(text, "error: module `big` has 24003 observed call sites")
+  assert str.contains(text, "65,535 constant pool entries")
+}
+
 test "only typed capacity failures permit another partition" {
   assert capacity_failure("org.objectweb.asm.MethodTooLargeException")
   assert capacity_failure("org.objectweb.asm.ClassTooLargeException")
@@ -401,6 +415,56 @@ fn too_large_text(
     # not know: the module's own file is the whole of what is left to say
     None -> flat_text(head, src, size_hint(false, ""))
   }
+}
+
+## An observed method whose final Code is past HotSpot's `HugeMethodLimit`
+## (8000 bytes) that the outliner could not cut any smaller. The class file
+## still holds it, so the build succeeds; the JVM only never compiles it, so it
+## runs in the interpreter. That is a cost, not a defect in the program, which
+## is why this is a warning and the 64 KiB limit above is the error.
+## `fn_key` is the declaration the method came from ("" when it has none).
+pub fn huge_observed_text(
+  cls: String,
+  method: String,
+  size: Int,
+  fn_key: String,
+  src: String,
+  sites: Map[String, MethodSite]
+) -> String !Fs = {
+  let head = "observed method `" ++ cls ++ "." ++ method ++ "` is " ++ to_string(size) ++
+    " bytes of bytecode, past the 8000 bytes HotSpot will compile"
+  let hint = "it runs interpreted under `observe`; split the function into smaller ones " ++
+    "(a long straight run of statements or one big list literal cannot be cut automatically)"
+  let text = match map.get(sites, fn_key) {
+    Some(st) -> match io.read_file(st.path) {
+      Ok(t) -> render(st.path, t, mk_diag(head, st.nlo, st.nhi, hint))
+      Err(_) -> flat_text(head, st.path, hint)
+    }
+    None -> flat_text(head, src, hint)
+  }
+  "warning: " ++ str.drop(text, len("error: "))
+}
+
+## The Site table of one module is a class of one static method per site, and
+## a class holds at most 65,535 constant pool entries (JVMS 4.1): every site
+## costs a method name, a string constant and the string itself.
+fn site_table_text(owner: String, sites: Int, src: String) -> String !Fs = {
+  let head = "module `" ++ owner ++ "` has " ++ to_string(sites) ++ " observed call sites, " ++
+    "more than its static Site table can hold (a class file has at most 65,535 constant pool entries, " ++
+    "about three per site)"
+  let hint = "split the module, or the functions that run under `observe`, so fewer call sites are observed"
+  if src == "" { return flat_text(head, src, hint) }
+  match io.read_file(src) {
+    Ok(t) -> render(src, t, mk_diag(head, 0, 0, hint))
+    Err(_) -> flat_text(head, src, hint)
+  }
+}
+
+## Print the Site table refusal and stop, like `class_bytes_from`.
+pub fn refuse_site_table(owner: String, sites: Int, src: String) -> Unit !Fs !Exit !Console !io = {
+  console_eprint(site_table_text(owner, sites, src))
+  let _ = io.exit(1)
+  panic("io.exit returned")
 }
 
 fn located(msg: String, cls: String, sites: Map[String, MethodSite]) ->

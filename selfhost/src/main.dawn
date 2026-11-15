@@ -678,6 +678,8 @@ fn collect_program_full(
     Some(value) -> value.observation || value.provenance_data
     None -> provenance.has_data(payload_core)
   }
+  var site_paths: Map[String, String] = map.empty()
+  for cm in mods { site_paths = map.insert(site_paths, cm.class_name, cm.path) }
   if needs_observation {
     var plain_classes: List[(String, Bytes)] = []
     for item in classes {
@@ -696,7 +698,7 @@ fn collect_program_full(
       let tr = trait_of(traits, tid)
       classes = classes ++ [(tr_iface(None, tr.name), gen_trait_interface(sup, adts, tr, true))]
     }
-    classes = classes ++ provenance_rt.classes() ++ gen_provenance_sites(provenance_sites) ++ gen_provenance_data(provenance_sites, provenance.static_definitions(payload_core, live)) ++ gen_provenance_indices(provenance_sites, provenance.static_definitions(payload_core, live))
+    classes = classes ++ provenance_rt.classes() ++ gen_provenance_sites(provenance_sites, site_paths) ++ gen_provenance_data(provenance_sites, provenance.static_definitions(payload_core, live)) ++ gen_provenance_indices(provenance_sites, provenance.static_definitions(payload_core, live))
   }
   if needs_ctl {
     classes = classes ++ [(CTL_CLASS, gen_ctl_class(sup, provenance.enabled(live)))]
