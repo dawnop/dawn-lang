@@ -35,6 +35,7 @@ import { sampleOfSearch, targetOfSearch, withView, type Target } from './compile
 import { playEndpoints } from './endpoints'
 import { Splitter, applyBasis, defaultStore, type Axis, type Mode } from './panes'
 import { SAMPLES } from './samples'
+import { digest, resolveDraft, type Draft } from './draft'
 import './playground.css'
 
 // base64 <-> UTF-8, for sharing code in the URL hash.
@@ -75,7 +76,6 @@ const LIMITS =
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
 
 const DRAFT_KEY = 'dawn-playground-draft'
-interface Draft { file: number; code: string; base: string }
 
 // Storage can be missing or throw (private windows, blocked site data), and a
 // draft is a convenience: every failure reads as "no draft".
@@ -85,7 +85,12 @@ function loadDraft(): Draft | null {
     if (!raw) return null
     const d = JSON.parse(raw) as Partial<Draft>
     if (typeof d.code !== 'string' || typeof d.file !== 'number') return null
-    return { file: d.file, code: d.code, base: typeof d.base === 'string' ? d.base : '' }
+    return {
+      file: d.file,
+      code: d.code,
+      base: typeof d.base === 'string' ? d.base : '',
+      ...(typeof d.src === 'string' ? { src: d.src } : {}),
+    }
   } catch {
     return null
   }
@@ -137,6 +142,11 @@ function mount(root: HTMLElement) {
   const fname = el('span', 'dp-fname')
   const checking = el('span', 'dp-checking', 'Checking…')
   checking.hidden = true
+  const stale = el('span', 'dp-stale', 'This sample has changed since your edits. ')
+  const staleBtn = el('button', 'dp-stale-btn', 'Use the current sample')
+  staleBtn.type = 'button'
+  stale.append(staleBtn)
+  stale.hidden = true
   const spacer = el('div', 'dp-spacer')
   const version = el('span', 'dp-version')
   version.title = 'The compiler release the run service uses'
@@ -151,7 +161,7 @@ function mount(root: HTMLElement) {
   runBtn.type = 'button'
   runBtn.append('Run ', el('kbd', undefined, isMac ? '⌘⏎' : 'Ctrl ⏎'))
   runBtn.title = isMac ? 'Run (⌘ Enter)' : 'Run (Ctrl Enter)'
-  bar.append(fname, checking, spacer, version, viewBtn, shareBtn, runBtn)
+  bar.append(fname, checking, stale, spacer, version, viewBtn, shareBtn, runBtn)
 
   // The editor and, when asked for, the generated code beside it (stacked
   // under it on a narrow screen): one row, so the console stays below both.
@@ -304,7 +314,17 @@ function mount(root: HTMLElement) {
           SAMPLES.map((s) => s.file),
         )
       : null
-  const draft = fromHash == null && named == null ? loadDraft() : null
+  let draft = fromHash == null && named == null ? loadDraft() : null
+  // Digest of the sample text the buffer started from, saved with the draft. A
+  // draft whose sample has since changed is dropped when it was never edited;
+  // otherwise it is kept, marked stale until the user reverts to the sample.
+  let draftSrc = ''
+  if (draft) {
+    const inRange = draft.file >= 0 && draft.file < SAMPLES.length
+    const r = resolveDraft(draft, inRange ? SAMPLES[draft.file].code : null)
+    if (r.kind === 'open') draft = null
+    else draftSrc = r.src
+  }
   let current = 0
   let scratch = ''
   let initialCode = SAMPLES[0].code
@@ -320,6 +340,7 @@ function mount(root: HTMLElement) {
     scratch = draft.base
     initialCode = draft.code
   }
+  if (fromHash == null && current >= 0 && !draft) draftSrc = digest(SAMPLES[current].code)
   const baseline = () => (current >= 0 ? SAMPLES[current].code : scratch)
   const checkEndpoint = endpoints.check
   const healthEndpoint = endpoints.health
@@ -330,6 +351,7 @@ function mount(root: HTMLElement) {
     const dirty = view && view.state.doc.toString() !== baseline()
     fname.textContent = dirty ? `${name} •` : name
     fileBtns.forEach((b, i) => b.classList.toggle('active', i === current))
+    stale.hidden = !(current >= 0 && draftSrc !== digest(SAMPLES[current].code))
   }
 
   function isDirty() {
@@ -338,8 +360,8 @@ function mount(root: HTMLElement) {
 
   // Opening a sample replaces the buffer, so unsaved edits get a chance to
   // stay. Clicking the open sample again is a revert, and asks the same way.
-  function openSample(i: number) {
-    if (isDirty()) {
+  function openSample(i: number, confirmed = false) {
+    if (!confirmed && isDirty()) {
       const name = current >= 0 ? SAMPLES[current].file : 'shared.dawn'
       const ask = i === current
         ? `Revert ${name} to the original sample? Your edits will be lost.`
@@ -347,11 +369,17 @@ function mount(root: HTMLElement) {
       if (!confirm(ask)) return
     }
     current = i
+    draftSrc = digest(SAMPLES[i].code)
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: SAMPLES[i].code } })
     outPanel.hidden = true
     outPanel.dataset.phase = ''
     refreshChrome()
   }
+  staleBtn.addEventListener('click', () => {
+    if (current >= 0 && confirm(`Replace your edits to ${SAMPLES[current].file} with the current sample?`)) {
+      openSample(current, true)
+    }
+  })
 
   // ---- editor ----
   const view = new EditorView({
@@ -419,7 +447,7 @@ function mount(root: HTMLElement) {
     if (draftTimer != null) clearTimeout(draftTimer)
     draftTimer = setTimeout(() => {
       draftTimer = null
-      saveDraft({ file: current, code: view.state.doc.toString(), base: current >= 0 ? '' : scratch })
+      saveDraft({ file: current, code: view.state.doc.toString(), base: current >= 0 ? '' : scratch, src: current >= 0 ? draftSrc : '' })
     }, 500)
   }
   // A pending write must not be lost to closing the tab inside the debounce.
@@ -427,7 +455,7 @@ function mount(root: HTMLElement) {
     if (draftTimer == null) return
     clearTimeout(draftTimer)
     draftTimer = null
-    saveDraft({ file: current, code: view.state.doc.toString(), base: current >= 0 ? '' : scratch })
+    saveDraft({ file: current, code: view.state.doc.toString(), base: current >= 0 ? '' : scratch, src: current >= 0 ? draftSrc : '' })
   })
 
   // ---- compiler version, from the run service's /health ----

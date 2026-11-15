@@ -57,6 +57,7 @@ import {
 import { playEndpoints } from '../src/endpoints'
 import { compileViewTests } from './compile-selftest'
 import { panesTests } from './panes-selftest'
+import { draftTests } from './draft-selftest'
 
 let fails = 0
 function expect(name: string, got: unknown, want: unknown) {
@@ -1213,6 +1214,7 @@ fails += compileViewTests(expect)
 fails += await docRenderTests(expect)
 fails += sanitizeTests(expect)
 fails += panesTests(expect)
+fails += draftTests(expect)
 
 console.log(fails === 0 ? 'ALL PASS' : `${fails} FAILURES`)
 process.exit(fails === 0 ? 0 : 1)
