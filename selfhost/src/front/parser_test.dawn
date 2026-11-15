@@ -12,7 +12,7 @@ use front/ast.{Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambd
   OpAdd, OpMul,
   PLit, POr, PCtor, PQual, PTuple, PList,
   SLetPat, SWhile, SLocalFn,
-  DFn, DType, DConst, DUseModule, DImpl, DTest, example_spelling,
+  DFn, DType, DConst, DUseModule, DImpl, DTest, DEffect, example_spelling,
   TQual, TNamed, TFn, Vis, VisPrivate, VisPkg, VisPub, e_lo, e_hi
 }
 
@@ -2300,4 +2300,50 @@ test "origin has a clause span and a distinct local name span" {
   let out = rendered(src)
   assert str.contains(out, "Arm ask origin o@")
   assert str.contains(out, " resume k@")
+}
+
+test "an effect's calls clause binds four roles and is contextual" {
+  let src = "pub effect Dev calls(enter = a, exit = b,\n  body_enter = c, body_exit = d) {\n  fn a(name: String, at: Option[Loc]) -> Unit\n  fn b() -> Unit\n  fn c() -> Unit\n  fn d() -> Unit\n}"
+  let (m, ds) = parse_module(src)
+  assert ds == []
+  match m.decls[0] {
+    DEffect(e) -> {
+      match e.calls {
+        Some(c) -> {
+          assert c.enter.op == "a" && c.exit.op == "b" && c.body_enter.op == "c" && c.body_exit.op == "d"
+        }
+        None -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  assert str.contains(rendered(src), "Calls enter=a exit=b body_enter=c body_exit=d")
+
+  # the roles may come in any order, and an effect without the clause dumps as before
+  let (_, reordered) = parse_module("effect E calls(exit = b, enter = a, body_exit = d, body_enter = c) {\n  fn a(n: String, at: Option[Loc]) -> Unit\n}")
+  assert reordered == []
+  assert not str.contains(rendered("effect Ask {\n  fn ask() -> Int\n}"), "Calls")
+
+  # all four roles, each once, from a known set
+  for bad in [
+    "effect E calls(enter = a, exit = b) {\n  fn a() -> Unit\n}",
+    "effect E calls(enter = a, exit = b, exit = c, body_enter = d, body_exit = e) {\n  fn a() -> Unit\n}",
+    "effect E calls(enter = a, leave = b, body_enter = c, body_exit = d) {\n  fn a() -> Unit\n}"
+  ] {
+    let (_, errors) = parse_module(bad)
+    assert len(errors) > 0
+  }
+
+  # a ctl effect cannot be balanced, so the clause is refused where it is written
+  let (_, ctl) = parse_module("ctl effect E calls(enter = a, exit = b, body_enter = c, body_exit = d) {\n  fn a() -> Unit\n}")
+  assert len(ctl) > 0
+  assert str.contains(ctl[0].msg, "a `ctl` effect cannot declare `calls`")
+
+  # contextual, never reserved: still a function name, a parameter name and a type name's neighbour
+  let (m2, d2) = parse_module("fn calls(calls: Int) -> Int = calls\nfn probe() -> Int = calls(1)")
+  assert d2 == []
+  match m2.decls[0] {
+    DFn(f) -> { assert f.name == "calls" }
+    _ -> { assert false }
+  }
 }

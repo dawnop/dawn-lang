@@ -2383,7 +2383,33 @@ pub type Sig = {
   # scope plus a closure call, never a call of a symbol that exists
   op_of: Option[(Int, Int)],
   # the return type (and effect) is still being inferred; ret is a placeholder
-  inferring: Bool
+  inferring: Bool,
+  # What the compiler writes into this function's body when its declared row
+  # names an effect with a `calls` clause (docs/call-records-design.md): None
+  # for every function that is not written for, which is every function that
+  # existed before the clause did. Lives on the signature because a call site
+  # in another module has to know whether the callee already brackets the
+  # closure it is handed (`CallPlan.bodies`), and a signature is what crosses
+  # the module boundary.
+  calls: Option[CallPlan]
+}
+
+## The operations an effect's `calls` clause names, as indices into the
+## effect's evidence record (the position the operation was declared at).
+pub type EffectCalls = { enter: Int, exit: Int, body_enter: Int, body_exit: Int }
+
+## The compiler-written call record of one function (docs/call-records-design.md
+## 2.2 to 2.4). `eid` is the recording effect, `hooks` its four operations,
+## `name` the declared name the enter reports, `at` the index of the one
+## parameter that defaults to `caller()` (None when there is none), and
+## `bodies` the indices of the closure parameters whose row names the effect,
+## each of which gets the body bracket.
+pub type CallPlan = {
+  eid: Int,
+  hooks: EffectCalls,
+  name: String,
+  at: Option[Int],
+  bodies: List[Int]
 }
 
 ## The proof is derived metadata, not an additional semantic field.
@@ -2457,7 +2483,11 @@ pub type EffectI = {
   # property of the *effect* and not of an installation, because the consumer
   # that cannot be written any other way -- the SAM conversion point -- has
   # only the row, and a row names effects.
-  ctl: Bool
+  ctl: Bool,
+  # The `calls` clause: which four operations record a call, resolved to
+  # their positions in the evidence record. None for an effect that does not
+  # declare one (docs/call-records-design.md 2.1).
+  calls: Option[EffectCalls]
 }
 
 pub alias Effects = Map[Int, EffectI]
@@ -2731,6 +2761,7 @@ test "a signature's ABI row lays its labels out by effect id" {
       trait_id = None,
       op_of = None,
       inferring = false,
+      calls = None,
       scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
   assert eff_labels(sig_abi_eff(s)) == [(23, "Zulus"), (41, "Mimas"), (59, "Alpha")]
@@ -3296,6 +3327,7 @@ test "a default renders as its source text, cut at the shown width" {
       trait_id = None,
       op_of = None,
       inferring = false,
+      calls = None,
       scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
   let adts = prelude_adts()
@@ -3772,6 +3804,7 @@ fn prelude_method(tid: Int, tv: Ty, name: String, ptys: List[Ty], pnames: List[S
       trait_id = Some(tid),
       op_of = None,
       inferring = false,
+      calls = None,
       scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
 
@@ -3816,6 +3849,7 @@ fn prelude_trait_definitions() -> List[(Int, TraitI)] = {
       trait_id = Some(ORD_ID),
       op_of = None,
       inferring = false,
+      calls = None,
       scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
   let ord = TraitI { scope_params = capture.empty_params(), assoc_bounds = [],
@@ -4441,6 +4475,7 @@ fn bsig(name: String, ptys: List[Ty], pnames: List[String], ret: Ty) -> Sig =
       trait_id = None,
       op_of = None,
       inferring = false,
+      calls = None,
       scope_inert = signature_scope_inert(identity_scope_params, identity_constraints, identity_param_tys, identity_ret, identity_eff) }
   }
 
@@ -5815,9 +5850,9 @@ test "effect rendering" {
 
 test "a row is suspendable only where it names a `ctl` label" {
   let plain = EffectI { id = 7, name = "Ask", owner = None, audience = AWorld, ops = ["ask"],
-    ctl = false }
+    ctl = false, calls = None }
   let async = EffectI { id = 9, name = "Async", owner = None, audience = AWorld, ops = ["wait"],
-    ctl = true }
+    ctl = true, calls = None }
   var effs: Effects = map.empty()
   effs = map.insert(effs, 7, plain)
   effs = map.insert(effs, 9, async)

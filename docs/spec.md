@@ -123,7 +123,7 @@ trait impl effect
 true false not
 ```
 
-关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有十五个，
+关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有十六个，
 它们只在各自唯一的语法位置有特殊含义，在别处仍是普通标识符（`let in = 1`、字段名 `test` 都合法）：
 
 | 词 | 唯一的语法位置 |
@@ -140,6 +140,7 @@ true false not
 | `handle` | `with` 之后且下一个 token 不是 `<-`（§6.5） |
 | `opaque` | 紧接 `type`，引入不透明类型（§2.7） |
 | `ctl` | 紧接 `effect`，声明可挂起的效果（§6.5） |
+| `calls` | 效果名之后、`{` 之前且后面紧跟 `(`：`effect E calls(enter = a, …) { … }`（§6.5） |
 | `origin` | handler 臂参数表之后、`resume` 之前：`op(a) origin o => …`（§6.5） |
 | `resume` | handler 臂的参数表之后：`op(a) resume k => …`（§6.5） |
 | `pkg` | 只在 `pub(` 之后：`pub(pkg)`（§10.4） |
@@ -2183,6 +2184,48 @@ ctl effect Fetch {
   同名操作）同名也是错误。`pub effect` 的操作随 `use m.{Ask}` 一起进来，
   也可以写 `m.ask(…)`。
 - 效果本身不带类型参数；`effect Yield[T]` 当前不支持。
+- 效果名之后、`{` 之前可以写一个 `calls(…)` 子句，声明这个效果是**调用记录器**（见下一小节）。
+  `calls` 是上下文关键字，只在这个位置、且后面紧跟 `(` 时有意义。
+
+#### 调用记录：`calls` 子句
+
+```dawn
+pub effect Dev calls(enter = t_call_enter, exit = t_call_exit,
+  body_enter = t_body_enter, body_exit = t_body_exit) {
+  fn t_call_enter(name: String, at: Option[Loc]) -> Unit
+  fn t_call_exit() -> Unit
+  fn t_body_enter() -> Unit
+  fn t_body_exit() -> Unit
+  fn t_block_id(axis: Int) -> Int
+}
+```
+
+`calls` 把四个角色绑定到本效果自己声明的操作：`enter` 取 `fn(String, Option[Loc]) -> Unit`，
+`exit`、`body_enter`、`body_exit` 取 `fn() -> Unit`。四个角色必须写全、各用各的操作、
+名字必须是本效果的操作；不满足是编译错误，诊断落在不合规的角色名上。
+
+**`ctl effect` 上写 `calls` 是编译错误**：续延可以被放弃，放弃后 `enter` 永远等不到 `exit`，
+配平无从谈起；静默忽略这个子句会让记录悄悄不再闭合，所以拒绝。带 Scope 参数的效果同理拒绝。
+
+声明之后，编译器按效果（而不是按包）代写调用记录。一个函数被代写，当且仅当它**声明的**效果行
+含一个带 `calls` 的效果（由效果变量实例化而来的不算，所以函数不随实例化变形），并且它是
+`pub fn`，或是一个 impl 方法；私有函数与 `pub(pkg)` 函数不被代写，它们发出的操作归属于
+到达它们的那次公共调用。代写的内容是：
+
+- 函数体入口先执行 `enter(name, at)`。`name` 是声明名（impl 方法取方法名）；`at` 取该函数
+  唯一的 `at: Loc = caller()` 形参的值（§8.4），没有则 `None`；多于一个是编译错误。
+- 每一个返回路径之前执行 `exit()`：块尾的值、`return`、`?` 的提前返回。`return e` 先求 `e`，
+  再 `exit()`，再返回。`panic` 不执行 `exit()`（它终止运行；被 `catch_panic` 吃掉的情形
+  由录制器自己的回滚配平，与手写标记相同）。返回类型为 `Never` 的函数不插尾部 `exit()`。
+- 函数每个形参若是函数类型、且它声明的效果行含该效果，入口处换成一层薄包：每次调用先
+  `body_enter()`，调用原闭包，再 `body_exit()`。函数体里对该形参的每一次使用读的都是薄包；
+  **例外**是原样转发：把这个形参直接作实参交给另一个被代写函数的同类形参时传原值，由被调方
+  包一次，不叠两层。
+- 被代写的函数不做自递归尾调用成循环（§12.4）：每一次递归调用都是一条记录。
+- 不含这样的效果的程序，生成的 Core 与发射类逐字节不变。
+
+代写使用的是该函数自己的效果证据，调用约定不变，函数类型不变。设计、判据与对照见
+[`docs/call-records-design.md`](call-records-design.md)。
 
 #### 拼写与传播
 
