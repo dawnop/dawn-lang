@@ -599,8 +599,11 @@ R3 按协议资格、R4 删 marks、R5 删后复测。不做的：本刀不改 r
 - **消费者。** `site/gpu-map/record.py` 的名单（`called(` 正则、`fa_exp`/`fa_divide`）改为录制出的
   名字与 helper 声明身份，并与解析树核对定义长度；`.map` 增加 `source <摘要>` 行与 `def=` 定义范围，
   `packages/xmap` 的 `table_from_tile` 与 `site/src/gen/gpumap.dawn` 的 `check` 改为按定义范围判断
-  helper 子调用，缺摘要或摘要不符、定义落在源码外都拒绝；Playground 的 `tilemap.dawn` 不再读
-  `dev.dawn` 文本，探针打印被调用者身份，名字与 helper 来自录制，helper 的定义长度与解析树核对。
+  helper 子调用，缺摘要或摘要不符、定义落在源码外都拒绝。Playground 不是观察的消费者：
+  实测（W3-R）发现观察探针要把整个可达程序重编一份 observed 孪生，Playground 增量
+  warm 约 +2.3/+3.4 s，成本无法收回，所以它退回手写 marks 视图（`dev.dawn` 的 `called(`
+  文本与 `fa_exp`/`fa_divide`），`tilemap.dawn` 只是给 marks 配对的结果补上 `source` 行与
+  helper 的 `def=` 定义范围，以满足 xmap 的新契约。
 - **outline 的二次增长。** 观察模式下平铺长块逐层把余下部分作为 region 时，每层都重扫整个
   余下部分的成本与自由变量。现在第一次切分一次算出每个后缀的事实（`outline.suffixes`），随
   region 或递归调用传给下一层；12000 元素列表夹具的编译从约 147 s 降到约 7 s，24000 元素约 20 s。
