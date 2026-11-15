@@ -588,22 +588,15 @@ fn fn_body(f: Node) -> Option[Node] = {
 ## occupies, and the calls its body makes.
 pub type Plan = { program: String, kernel: String, first: Int, last: Int, calls: List[SCall], defs: List[(String, Int, Int)] }
 
-## One function the recording says it ran that is written in the visitor's
-## program: the compiler's own record of its identity (the module and
-## declaration it is defined in, and the span of its definition inside that
-## declaration), as the probe prints it.
-pub type Helper = { name: String, module: String, declaration: String, start: Int, end: Int, role: String }
-
-## What the visitor's program needs before it runs: the program with its trace
-## call wrapped in the probe's, the kernel, and the dump kept for the walk that
-## follows the recording.
-pub type Prepared = { program: String, kernel: String, dump: String }
-
-type Target = { root: Node, trace: Trace, kernel_fn: Node, body: Node }
-
-# The unique plain trace call, its IO context and the kernel it records, or why
-# the program is not mapped.
-fn target(code: String, dump: String) -> Result[Target, String] =
+## The plan for `code` from the dump `dump` of it and the names of the
+## functions the recording sees (`called("<name>"` marks of dev.dawn), or why
+## the program is not mapped. The program must record exactly one kernel, with
+## `trace1` to `trace6` called plainly (positional arguments, no hints), and
+## the kernel must be a function of the same file, directly or through a
+## factory whose lambda forwards its parameters unchanged. The trace site's
+## own named callable must explicitly include IO; parse-only lambdas cannot
+## authorize the IO probe.
+pub fn plan(code: String, dump: String, dev: List[String]) -> Result[Plan, String] =
   match parse_dump(dump) {
     Err(e) -> Err(e)
     Ok(root) -> {
@@ -623,91 +616,40 @@ fn target(code: String, dump: String) -> Result[Target, String] =
           Some(f) ->
             match fn_body(f) {
               None -> Err("`${t.kernel}` has no body to walk")
-              Some(body) -> Ok(Target { root = root, trace = t, kernel_fn = f, body = body })
+              Some(body) -> {
+                let helpers = filter(map(["fa_exp", "fa_divide"], name => match kernel_fn(root, name) {
+                  Some(f) -> match fn_body(f) { Some(b) -> (name, b)
+                    None -> ("", root) }
+                  None -> ("", root)
+                }), p => { let (name, _body) = p
+                  name != "" })
+                let names = dev ++ map(helpers, p => { let (name, _body) = p
+                  name })
+                match walk(body, names, Env { tiles = [], cells = [], decls = [], policy = captured_policy(root, t.value), helpers = helpers }, code) {
+                  Err(e) -> Err(e)
+                  Ok((calls, _env)) -> {
+                    let s = src_of(code)
+                    let begin = list.fold(helpers, f.lo, (lo, p) => { let (name, _body) = p
+                      match kernel_fn(root, name) { Some(h) -> if h.lo < lo { h.lo } else { lo }
+                        None -> lo } })
+                    let (first, _c) = at(s, begin)
+                    let end = list.fold(helpers, f.hi, (hi, p) => { let (name, _body) = p
+                      match kernel_fn(root, name) { Some(h) -> if h.hi > hi { h.hi } else { hi }
+                        None -> hi } })
+                    let (last, _d) = at(s, end)
+                    let again = join(map(t.args, a => {
+                      let (alo, ahi) = a
+                      str.slice(code, alo, ahi)
+                    }), ", ")
+                    let renamed = str.take(code, t.lo) ++ "explore_probe.tap${t.arity}(" ++ str.slice(code, t.lo, t.hi) ++ ", " ++ again ++ ")" ++ str.drop(code, t.hi)
+                    let defs = map(helpers, h => { let (name, _body) = h
+                      match kernel_fn(root, name) { Some(d) -> (name, d.lo, d.hi)
+                        None -> (name, 0, 0) } })
+                    Ok(Plan { program = "use explore_probe\n" ++ renamed, kernel = t.kernel, first = first, last = last, calls = calls, defs = defs })
+                  }
+                }
+              }
             }
-        }
-      }
-    }
-  }
-
-fn probe_program(code: String, t: Trace) -> String = {
-  let again = join(map(t.args, a => {
-    let (alo, ahi) = a
-    str.slice(code, alo, ahi)
-  }), ", ")
-  let renamed = str.take(code, t.lo) ++ "explore_probe.tap${t.arity}(" ++ str.slice(code, t.lo, t.hi) ++ ", " ++ again ++ ")" ++ str.drop(code, t.hi)
-  "use explore_probe\n" ++ renamed
-}
-
-## The program to run for `code` from the dump `dump` of it, or why it is not
-## mapped. Nothing of the visitor's is run.
-pub fn prepare(code: String, dump: String) -> Result[Prepared, String] =
-  match target(code, dump) {
-    Err(e) -> Err(e)
-    Ok(tg) -> Ok(Prepared { program = probe_program(code, tg.trace), kernel = tg.trace.kernel, dump = dump })
-  }
-
-# The functions of the file the recording ran for the author, accepted against
-# this dump: each must be one top level function of the file whose definition
-# has the length the compiler recorded, or the recording is of another revision
-# of the source and nothing is mapped. A function counts as a helper when the
-# recording shows a call under its own name (its marks give it a row).
-fn helper_bodies(root: Node, kernel: String, facts: List[Helper], ran: List[String]) -> Result[List[(String, Node, Node)], String] = {
-  var out: List[(String, Node, Node)] = []
-  for h in facts {
-    if h.name != kernel && list.contains(ran, h.name) && not list.any(out, x => { let (n, _b, _f) = x
-      n == h.name }) {
-      if h.module != "main" || h.role != "function" || h.declaration != "Nf${len(h.name)}:${h.name}" {
-        return Err("the recorded helper `${h.name}` has an identity this map cannot place")
-      }
-      let found = filter(root.kids, k => k.kind == "Fn" && second_word(k.text) == h.name)
-      if len(found) != 1 { return Err("the recorded helper `${h.name}` is not one function of this file") }
-      let f = found[0]
-      if h.start != 0 || h.end != f.hi - f.lo {
-        return Err("the recorded helper `${h.name}` has another definition length than this source: the recording is of another revision")
-      }
-      match fn_body(f) {
-        Some(b) -> { out = out ++ [(h.name, b, f)] }
-        None -> { return Err("the recorded helper `${h.name}` has no body to walk") }
-      }
-    }
-  }
-  Ok(out)
-}
-
-## The plan for `code` from the dump `dump` of it, the names of the calls the
-## recording ran (`dev`) and the functions of the file it ran for the author
-## (`facts`), or why the program is not mapped. The program must record
-## exactly one kernel, with `trace1` to `trace6` called plainly (positional
-## arguments, no hints), and the kernel must be a function of the same file,
-## directly or through a factory whose lambda forwards its parameters
-## unchanged. The trace site's own named callable must explicitly include IO;
-## parse-only lambdas cannot authorize the IO probe. No name is known in
-## advance: what counts as a call is what the recording ran.
-pub fn plan(code: String, dump: String, dev: List[String], facts: List[Helper]) -> Result[Plan, String] =
-  match target(code, dump) {
-    Err(e) -> Err(e)
-    Ok(tg) -> match helper_bodies(tg.root, tg.trace.kernel, facts, dev) {
-      Err(e) -> Err(e)
-      Ok(found) -> {
-        let helpers = map(found, x => { let (name, body, _f) = x
-          (name, body) })
-        let names = dev ++ map(helpers, p => { let (name, _body) = p
-          name })
-        match walk(tg.body, names, Env { tiles = [], cells = [], decls = [], policy = captured_policy(tg.root, tg.trace.value), helpers = helpers }, code) {
-          Err(e) -> Err(e)
-          Ok((calls, _env)) -> {
-            let s = src_of(code)
-            let begin = list.fold(found, tg.kernel_fn.lo, (lo, x) => { let (_n, _b, f) = x
-              if f.lo < lo { f.lo } else { lo } })
-            let (first, _c) = at(s, begin)
-            let end = list.fold(found, tg.kernel_fn.hi, (hi, x) => { let (_n, _b, f) = x
-              if f.hi > hi { f.hi } else { hi } })
-            let (last, _d) = at(s, end)
-            Ok(Plan { program = probe_program(code, tg.trace), kernel = tg.trace.kernel, first = first, last = last, calls = calls,
-              defs = map(found, x => { let (n, _b, f) = x
-                (n, f.lo, f.hi) }) })
-          }
         }
       }
     }
@@ -721,7 +663,7 @@ pub fn plan(code: String, dump: String, dev: List[String], facts: List[Helper]) 
 pub type Row = { id: Int, parent: Int, name: String, lines: List[String] }
 
 ## What the instrumented program printed, read.
-pub type Recording = { ops: String, head: String, tail: String, rows: List[Row], helpers: List[Helper], callees: List[String], text: List[String] }
+pub type Recording = { ops: String, head: String, tail: String, rows: List[Row], text: List[String] }
 
 const MARK: String = "@@tile "
 
@@ -735,8 +677,6 @@ pub fn read_recording(output: String) -> Result[Recording, String] = {
   var tail = ""
   var ended = false
   var rows: List[Row] = []
-  var helpers: List[Helper] = []
-  var callees: List[String] = []
   var text: List[String] = []
   for l in lines {
     let rest = str.drop(l, len(MARK))
@@ -758,17 +698,6 @@ pub fn read_recording(output: String) -> Result[Recording, String] = {
           return Err("the recording has a call row with no numbers")
         }
       }
-    } else if w[0] == "callee" && len(w) == 2 {
-      callees = callees ++ [w[1]]
-    } else if w[0] == "helper" && len(w) == 7 {
-      match (parse_int(w[4]), parse_int(w[5])) {
-        (Some(a), Some(b)) -> {
-          helpers = helpers ++ [Helper { name = w[1], module = w[2], declaration = w[3], start = a, end = b, role = w[6] }]
-        }
-        _ -> {
-          return Err("the recording has a helper row with no numbers")
-        }
-      }
     } else if w[0] == "error" {
       return Err("tileir could not map the kernel: ${str.drop(rest, 6)}")
     } else if w[0] == "end" {
@@ -778,7 +707,7 @@ pub fn read_recording(output: String) -> Result[Recording, String] = {
   if not ended || ops == "" || tail == "" || len(text) == 0 {
     Err("the program printed no complete recording")
   } else {
-    Ok(Recording { ops = ops, head = head, tail = tail, rows = rows, helpers = helpers, callees = callees, text = text })
+    Ok(Recording { ops = ops, head = head, tail = tail, rows = rows, text = text })
   }
 }
 
@@ -853,12 +782,13 @@ pub fn tile_map(code: String, p: Plan, rec: Recording) -> Result[String, String]
               if str.slice(code, c.nlo, c.nhi) != c.text {
                 return Err("the parser's name span for `${r.name}` holds `${str.slice(code, c.nlo, c.nhi)}`, not `${c.text}`")
               }
-              let definition = match list.find(p.defs, d => { let (n, _lo, _hi) = d
-                n == r.name }) {
-                Some((_n, lo, hi)) -> ["def=${span_text(s, lo, hi)}"]
+              # A helper's own calls lie in its definition, not in the call that ran it.
+              let defn = match list.find(p.defs, d => { let (name, _lo, _hi) = d
+                name == r.name }) {
+                Some((_name, lo, hi)) -> ["def=${span_text(s, lo, hi)}"]
                 None -> []
               }
-              out = out ++ [join(["call", "${r.id}", "${r.parent}", r.name, span_text(s, c.lo, c.hi), span_text(s, c.nlo, c.nhi)] ++ definition ++ r.lines, " ")]
+              out = out ++ [join(["call", "${r.id}", "${r.parent}", r.name, span_text(s, c.lo, c.hi), span_text(s, c.nlo, c.nhi)] ++ defn ++ r.lines, " ")]
             }
           }
         }
@@ -867,10 +797,20 @@ pub fn tile_map(code: String, p: Plan, rec: Recording) -> Result[String, String]
       }
   }
 
-## The names of the calls a recording can show, once each: the rows it kept and
-## the functions the compiler's own record says ran a call mark, so that a row
-## lost from the recording is still a call the source has to account for.
-pub fn recorded_names(rec: Recording) -> List[String] = list.unique(map(rec.rows, r => r.name) ++ rec.callees)
+## The names the recording sees, out of the text of `dev.dawn`: every
+## `called("<name>"` mark.
+pub fn dev_names(dev_source: String) -> List[String] = {
+  var names: List[String] = []
+  for piece in list.drop(str.split(dev_source, "called(\""), 1) {
+    match str.split_once(piece, "\"") {
+      Some((name, _rest)) -> {
+        names = names ++ [name]
+      }
+      None -> ()
+    }
+  }
+  list.unique(names)
+}
 
 # ---- the probe ----
 
@@ -892,8 +832,6 @@ const PROBE_LINES: List[String] = [
   "use tileir/dev.{Dev, Param, param}",
   "use tileir/prog.{TileProg, Arg, In, Out, Shared, Scalar, Call, trace_calls, erase, op_count}",
   "use tileir/render.{line_map}",
-  "use std/provenance.{observe, completed, TraceSnapshot}",
-  "use tileir/origin.{rows_of, callees, Helper}",
   "",
   "fn dt[D](a: Arg[D]) -> Dtype[D] = match a {",
   "  In(d, _g) -> d",
@@ -927,87 +865,48 @@ const PROBE_LINES: List[String] = [
   "    Err(e) -> println(\"\\n@@tile error \" ++ e)",
   "  }",
   "",
-  "fn helpers(snapshot: TraceSnapshot) -> Unit !io =",
-  "  match rows_of(snapshot) {",
-  "    Ok(rows) -> match callees(rows, []) {",
-  "      Ok(facts) -> {",
-  "        for f in facts {",
-  "          if f.marked {",
-  "            println(\"@@tile callee \" ++ f.name)",
-  "          }",
-  "          if f.kind == Helper {",
-  "            println(\"@@tile helper \" ++ f.name ++ \" \" ++ f.module ++ \" \" ++ f.declaration ++ \" \" ++ to_string(f.start) ++ \" \" ++ to_string(f.end) ++ \" \" ++ f.role)",
-  "          }",
-  "        }",
-  "      }",
-  "      Err(e) -> println(\"\\n@@tile error \" ++ e)",
-  "    }",
-  "    Err(e) -> println(\"\\n@@tile error \" ++ e)",
-  "  }",
-  "",
-  "fn check(p: TileProg, q: TileProg, calls: List[Call], snapshot: TraceSnapshot) -> Unit !io =",
-  "  if p != q { println(\"\\n@@tile error the call marks changed the program\") } else {",
-  "    helpers(snapshot)",
-  "    show(q, calls)",
-  "  }",
+  "fn check(p: TileProg, q: TileProg, calls: List[Call]) -> Unit !io =",
+  "  if p != q { println(\"\\n@@tile error the call marks changed the program\") } else { show(q, calls) }",
   "",
   "pub fn tap1[A](r: (TileProg, Entry1[A]), name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev) -> (TileProg, Entry1[A]) !io = {",
   "  let (p, _e) = r",
-  "  let ((q, calls), snapshot) = observe(scope => {",
-  "    let r = trace_calls(name, [], () => body(param(dt(a), 0)), markers = [erase(a)])",
-  "    (r, completed(scope))",
-  "  })",
-  "  check(p, q, calls, snapshot)",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0)), markers = [erase(a)])",
+  "  check(p, q, calls)",
   "  r",
   "}",
   "",
   "pub fn tap2[A, B](r: (TileProg, Entry2[A, B]), name: String, a: Arg[A], b: Arg[B], body: fn(Param[A], Param[B]) -> Unit !Dev) -> (TileProg, Entry2[A, B]) !io = {",
   "  let (p, _e) = r",
-  "  let ((q, calls), snapshot) = observe(scope => {",
-  "    let r = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1)), markers = [erase(a), erase(b)])",
-  "    (r, completed(scope))",
-  "  })",
-  "  check(p, q, calls, snapshot)",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1)), markers = [erase(a), erase(b)])",
+  "  check(p, q, calls)",
   "  r",
   "}",
   "",
   "pub fn tap3[A, B, C](r: (TileProg, Entry3[A, B, C]), name: String, a: Arg[A], b: Arg[B], c: Arg[C], body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev) -> (TileProg, Entry3[A, B, C]) !io = {",
   "  let (p, _e) = r",
-  "  let ((q, calls), snapshot) = observe(scope => {",
-  "    let r = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2)), markers = [erase(a), erase(b), erase(c)])",
-  "    (r, completed(scope))",
-  "  })",
-  "  check(p, q, calls, snapshot)",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2)), markers = [erase(a), erase(b), erase(c)])",
+  "  check(p, q, calls)",
   "  r",
   "}",
   "",
   "pub fn tap4[A, B, C, E](r: (TileProg, Entry4[A, B, C, E]), name: String, a: Arg[A], b: Arg[B], c: Arg[C], d: Arg[E], body: fn(Param[A], Param[B], Param[C], Param[E]) -> Unit !Dev) -> (TileProg, Entry4[A, B, C, E]) !io = {",
   "  let (p, _e) = r",
-  "  let ((q, calls), snapshot) = observe(scope => {",
-  "    let r = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2), param(dt(d), 3)), markers = [erase(a), erase(b), erase(c), erase(d)])",
-  "    (r, completed(scope))",
-  "  })",
-  "  check(p, q, calls, snapshot)",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2), param(dt(d), 3)), markers = [erase(a), erase(b), erase(c), erase(d)])",
+  "  check(p, q, calls)",
   "  r",
   "}",
   "",
   "pub fn tap5[A, B, C, E, F](r: (TileProg, Entry5[A, B, C, E, F]), name: String, a: Arg[A], b: Arg[B], c: Arg[C], d: Arg[E], f: Arg[F], body: fn(Param[A], Param[B], Param[C], Param[E], Param[F]) -> Unit !Dev) -> (TileProg, Entry5[A, B, C, E, F]) !io = {",
   "  let (p, _e) = r",
-  "  let ((q, calls), snapshot) = observe(scope => {",
-  "    let r = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2), param(dt(d), 3), param(dt(f), 4)), markers = [erase(a), erase(b), erase(c), erase(d), erase(f)])",
-  "    (r, completed(scope))",
-  "  })",
-  "  check(p, q, calls, snapshot)",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2), param(dt(d), 3), param(dt(f), 4)), markers = [erase(a), erase(b), erase(c), erase(d), erase(f)])",
+  "  check(p, q, calls)",
   "  r",
   "}",
   "",
   "pub fn tap6[A, B, C, E, F, G](r: (TileProg, Entry6[A, B, C, E, F, G]), name: String, a: Arg[A], b: Arg[B], c: Arg[C], d: Arg[E], f: Arg[F], g: Arg[G], body: fn(Param[A], Param[B], Param[C], Param[E], Param[F], Param[G]) -> Unit !Dev) -> (TileProg, Entry6[A, B, C, E, F, G]) !io = {",
   "  let (p, _e) = r",
-  "  let ((q, calls), snapshot) = observe(scope => {",
-  "    let r = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2), param(dt(d), 3), param(dt(f), 4), param(dt(g), 5)), markers = [erase(a), erase(b), erase(c), erase(d), erase(f), erase(g)])",
-  "    (r, completed(scope))",
-  "  })",
-  "  check(p, q, calls, snapshot)",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2), param(dt(d), 3), param(dt(f), 4), param(dt(g), 5)), markers = [erase(a), erase(b), erase(c), erase(d), erase(f), erase(g)])",
+  "  check(p, q, calls)",
   "  r",
   "}",
   "",
@@ -1046,7 +945,7 @@ test "a factory maps only a lambda forwarding the kernel parameters in order" {
 }
 
 test "the plan of a kernel names it, its lines, its calls in evaluation order, and wraps its trace call" {
-  match plan(VADD_CODE, VADD_DUMP, dev(), []) {
+  match plan(VADD_CODE, VADD_DUMP, dev()) {
     Ok(p) -> {
       assert p.kernel == "vadd"
       assert (p.first, p.last) == (7, 8)
@@ -1059,8 +958,8 @@ test "the plan of a kernel names it, its lines, its calls in evaluation order, a
 }
 
 test "a program with no plain trace call, or two, is not mapped and says so" {
-  assert failed(plan("fn main() = ()\n", "Module\n  Fn main pub=false eff= name@3..7 @0..14\n", dev(), []))
-  assert failed(plan(VADD_CODE, "", dev(), []))
+  assert failed(plan("fn main() = ()\n", "Module\n  Fn main pub=false eff= name@3..7 @0..14\n", dev()))
+  assert failed(plan(VADD_CODE, "", dev()))
 }
 
 # Keep the real vadd parse spans and move only the callable boundary around
@@ -1074,7 +973,7 @@ fn context_dump(header: String, wrappers: List[String]) -> String = {
   }), "\n") ++ "\n" ++ nested ++ "\n"
 }
 
-fn plan_reason(dump: String) -> String = match plan(VADD_CODE, dump, dev(), []) {
+fn plan_reason(dump: String) -> String = match plan(VADD_CODE, dump, dev()) {
   Err(e) -> e
   Ok(_p) -> "mapped"
 }
@@ -1133,7 +1032,7 @@ test "a pure trace refusal uses original code-point positions before the probe i
       None -> word
     }
   }), " ")), "\n")
-  assert plan(prefix ++ VADD_CODE, str.replace(shifted, "eff=io", "eff=_"), dev(), []) == Err("the trace call in pure function `main` at line 13 cannot be mapped by an IO probe")
+  assert plan(prefix ++ VADD_CODE, str.replace(shifted, "eff=io", "eff=_"), dev()) == Err("the trace call in pure function `main` at line 13 cannot be mapped by an IO probe")
 }
 
 test "the recording is read only when it ends" {
@@ -1142,7 +1041,6 @@ test "the recording is read only when it ends" {
     Ok(r) -> {
       assert r.text == ["a"]
       assert r.rows == [Row { id = 0, parent = -1, name = "add", lines = ["2-3"] }]
-      assert r.helpers == []
       assert (r.ops, r.head, r.tail) == ("3", "1-2", "3-4")
     }
     Err(e) -> { assert e == "" }
@@ -1153,12 +1051,11 @@ test "the recording is read only when it ends" {
 }
 
 test "the pairing writes the map, and stops at the first name that differs" {
-  match (plan(VADD_CODE, VADD_DUMP, dev(), []), read_recording("@@tile text m\n@@tile text add\n@@tile ops 5\n@@tile head 1-2\n@@tile call 0 -1 load_cell 2-3\n@@tile call 1 -1 load_cell 3-4\n@@tile call 2 -1 add 4-5\n@@tile call 3 -1 store_cell 5-6\n@@tile tail 6-7\n@@tile end\n")) {
+  match (plan(VADD_CODE, VADD_DUMP, dev()), read_recording("@@tile text m\n@@tile text add\n@@tile ops 5\n@@tile head 1-2\n@@tile call 0 -1 load_cell 2-3\n@@tile call 1 -1 load_cell 3-4\n@@tile call 2 -1 add 4-5\n@@tile call 3 -1 store_cell 5-6\n@@tile tail 6-7\n@@tile end\n")) {
     (Ok(p), Ok(rec)) -> {
       match tile_map(VADD_CODE, p, rec) {
         Ok(text) -> {
-          assert str.contains(text, "kernel vadd\nsource ")
-          assert str.contains(text, "\nfn 7-8\nops 5\nhead 1-2\n")
+          assert str.contains(text, "kernel vadd\nsource ${sha256.hex(bytes.utf8(VADD_CODE))}\nfn 7-8\nops 5\nhead 1-2\n")
           assert str.contains(text, "call 0 -1 load_cell 8:23-8:35 8:23-8:32 2-3\n")
           assert str.contains(text, "call 1 -1 load_cell 8:37-8:49 8:37-8:46 3-4\n")
           assert str.contains(text, "call 3 -1 store_cell 8:3-8:51 8:3-8:13 5-6\n")
@@ -1172,42 +1069,8 @@ test "the pairing writes the map, and stops at the first name that differs" {
   }
 }
 
-test "the names the recording can show are its rows and the functions that ran a mark, once each" {
-  match read_recording("@@tile callee read_at\n@@tile text m\n@@tile ops 5\n@@tile head 1-2\n@@tile call 0 -1 load_cell 2-3\n@@tile call 1 -1 load_cell 3-4\n@@tile call 2 -1 add 4-5\n@@tile tail 6-7\n@@tile end\n") {
-    Ok(rec) -> { assert recorded_names(rec) == ["load_cell", "add", "read_at"] }
-    Err(e) -> { assert e == "" }
-  }
-}
-
-test "a helper is a function of the file the recording ran under its own name, held to the dump's length" {
-  # Fn vadd is @165..291 in VADD_DUMP: 126 code points
-  let fact = Helper { name = "vadd", module = "main", declaration = "Nf4:vadd", start = 0, end = 126, role = "function" }
-  match prepare(VADD_CODE, VADD_DUMP) {
-    Ok(p) -> {
-      assert p.kernel == "vadd" && p.dump == VADD_DUMP
-      assert str.starts_with(p.program, "use explore_probe\n")
-    }
-    Err(e) -> { assert e == "" }
-  }
-  # the kernel itself is never its own helper, and a function with no row of its own is none
-  assert plan(VADD_CODE, VADD_DUMP, dev(), [fact]) == plan(VADD_CODE, VADD_DUMP, dev(), [])
-  let other = Helper { ..fact, name = "mine", declaration = "Nf4:mine" }
-  assert plan(VADD_CODE, VADD_DUMP, dev(), [other]) == plan(VADD_CODE, VADD_DUMP, dev(), [])
-  # the recorded function has another length, another declaration, another module or is not in the file
-  assert failed(plan(VADD_CODE, VADD_DUMP, ["mine"] ++ dev(), [Helper { ..other, end = 127 }]))
-  assert failed(plan(VADD_CODE, VADD_DUMP, ["mine"] ++ dev(), [Helper { ..other, start = 1 }]))
-  assert failed(plan(VADD_CODE, VADD_DUMP, ["mine"] ++ dev(), [Helper { ..other, declaration = "Nf4:vadd" }]))
-  assert failed(plan(VADD_CODE, VADD_DUMP, ["mine"] ++ dev(), [Helper { ..other, module = "std/list" }]))
-  assert failed(plan(VADD_CODE, VADD_DUMP, ["mine"] ++ dev(), [other]))
-}
-
-test "a helper row of the recording is read, and one with no numbers is not" {
-  let base = "@@tile text a\n@@tile ops 3\n@@tile head 1-2\n@@tile call 0 -1 add 2-3\n@@tile tail 3-4\n@@tile end\n"
-  match read_recording("@@tile helper fa_exp main Nf6:fa_exp 0 126 function\n" ++ base) {
-    Ok(r) -> { assert r.helpers == [Helper { name = "fa_exp", module = "main", declaration = "Nf6:fa_exp", start = 0, end = 126, role = "function" }] }
-    Err(e) -> { assert e == "" }
-  }
-  assert failed(read_recording("@@tile helper fa_exp main Nf6:fa_exp x 126 function\n" ++ base))
+test "the names the recording sees are the called marks of dev.dawn" {
+  assert dev_names("pub fn a() = called(\"alpha\", () => 1)\npub fn b() = called(\"beta\", () => 2)\ncalled(\"alpha\"") == ["alpha", "beta"]
 }
 
 test "the probe is the module the plan names, one tap for each marker count" {
