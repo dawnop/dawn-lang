@@ -152,6 +152,32 @@ pub fn main() -> Unit !io = {
     assert result.returncode != 0 and 'Method too large:' in result.stderr, result.stderr
     assert '64 KiB' in result.stderr and 'Exception in thread' not in result.stderr, result.stderr
     run.results.append({'case': 'hard classfile capacity retains normal diagnostic', 'backend': 'jvm', 'passed': True})
+    # HotSpot's 8000 bytes decides speed, not validity. A shape the outliner
+    # cannot cut below it (a long run of statements that all write one
+    # variable, or one huge list literal) used to crash the compiler with a
+    # panic; it now builds, says so with a warning at the declaration, and
+    # runs. Only the class file's own 64 KiB and the Site table refuse.
+    flat = {'flat_statements': ('1500', 'fn leaf(n: Int) -> Int = n + 1\nfn body(n: Int) -> Int = {\n  var t = 0\n'
+                                + '  t = t + leaf(n)\n'*1500 + '  t\n}\n', 'body(0)', 'fn body'),
+            'flat_list': ('3000', 'fn large(n: Int) -> List[Int] = ['+', '.join(['n']*3000)+']\n', 'len(large(0))', 'fn large')}
+    for name, (expected, definitions, call, anchor) in flat.items():
+        source = run.out/(name+'.dawn')
+        source.write_text('use std/provenance\n'+definitions
+            +'pub fn main() -> Unit !io = println(to_string(provenance.observe(_scope => '+call+')))\n')
+        jar = run.out/(name+'.jar')
+        result = run.command(name+'-build', run.compiler('build', source, '-o', jar))
+        assert result.returncode == 0 and 'panic' not in result.stderr, (name, result.stderr[-2000:])
+        assert 'warning: observed method' in result.stderr and 'past the 8000 bytes HotSpot will compile' in result.stderr, result.stderr[-2000:]
+        assert str(source)+':' in result.stderr and anchor in result.stderr, result.stderr[-2000:]
+        result = run.command(name+'-run', [run.args.java, '-Xverify:all', '-jar', jar])
+        assert result.returncode == 0 and result.stdout == expected+'\n', (name, result.stdout, result.stderr)
+    sites = run.out/'size_sites.dawn'
+    sites.write_text('use std/provenance\nfn leaf(n: Int) -> Int = n + 1\nfn body(n: Int) -> Int = {\n  var t = 0\n'
+        +'  t = t + leaf(n)\n'*12000+'  t\n}\npub fn main() -> Unit !io = println(to_string(provenance.observe(_scope => body(0))))\n')
+    result = run.command('size-sites-refusal', run.compiler('build', sites, '-o', run.out/'size_sites.jar'))
+    assert result.returncode != 0 and 'panic' not in result.stderr and 'Exception in thread' not in result.stderr, result.stderr[-2000:]
+    assert 'observed call sites, more than its static Site table can hold' in result.stderr and str(sites)+':1:1' in result.stderr, result.stderr[-2000:]
+    run.results.append({'case': 'unsplittable observed bodies build with a warning, the Site table refuses with a position', 'backend': 'jvm', 'passed': True})
     project = run.out/'observed-size-corpus'
     names = observed_corpus(project)
     run.build('observed-size-corpus', project, 'jvm')
