@@ -98,7 +98,7 @@ def main():
     args = parser.parse_args()
     args.compiler = args.compiler.resolve()
     run = Run(args)
-    cases = ['continuation-modes', 'actual-goldens', 'tile-origin-shadow', 'cli-preview', 'w3-resources', 'w3-local-observer', 'w3-mutants', 'w3-foreign', 'w3-bounded', 'w3-control-matrix', 'method-size', 'snapshot', 'snapshot_bulk', 'snapshot_metadata', 'snapshot_defaults', 'snapshot_control', 'snapshot_flags', 'builder', 'modes', 'callbacks', 'bracket_exits', 'generic_capture', 'builtin_functions', 'bounded_functions', 'associated', 'origin_api', 'checkpoints', 'nested', 'shadow', 'evidence', 'unwind', 'staged', 'modules', 'packages', 'shared-probe', 'observed-bench', 'escape', 'runtime-errors', 'w3', 'mutations']
+    cases = ['continuation-modes', 'actual-goldens', 'tile-origin-shadow', 'cli-preview', 'w3-resources', 'w3-local-observer', 'w3-mutants', 'w3-foreign', 'w3-bounded', 'w3-control-matrix', 'method-size', 'snapshot', 'snapshot_bulk', 'snapshot_metadata', 'snapshot_defaults', 'snapshot_control', 'snapshot_flags', 'builder', 'modes', 'callbacks', 'bracket_exits', 'generic_capture', 'builtin_functions', 'bounded_functions', 'associated', 'origin_api', 'checkpoints', 'nested', 'shadow', 'evidence', 'unwind', 'staged', 'modules', 'packages', 'shared-probe', 'multi-tu-observe', 'observed-bench', 'escape', 'runtime-errors', 'w3', 'mutations']
     selected = args.only if args.only is not None else cases
     for name in selected:
         if name == 'continuation-modes':
@@ -210,6 +210,9 @@ def main():
             from scope_oracle import judge_observed_bench
             source = HERE/'observed_bench.dawn'
             run.execute(name, source, judge_observed_bench, ['tree', '2'])
+        elif name == 'multi-tu-observe':
+            from multi_tu import multi_tu_observe
+            multi_tu_observe(run)
         elif name == 'shared-probe':
             from shared_probe import shared_probe
             shared_probe(run)

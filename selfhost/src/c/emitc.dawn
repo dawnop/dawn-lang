@@ -2909,8 +2909,8 @@ fn out_bytes(lines: List[String]) -> Int = {
 ## Everything the program needs except an entry point, as one text that is
 ## also K translation units (docs/c-tu-split-design.md §5.1):
 ##
-##   the shared head   includes, every prototype, an `extern` line per
-##                     dictionary and constant builder
+##   the shared head   includes, the observed slot enums, every prototype, an
+##                     `extern` line per dictionary and constant builder
 ##   unit 0            the Unicode tables, the dictionaries, the constant
 ##                     builders, then the first run of function bodies
 ##   unit 1 .. K-1     the following runs of bodies, in emission order
@@ -2988,22 +2988,33 @@ fn emit_provenance_tables(initial: CSt, site_table: Map[Int, String], definition
   if len(definitions) == 0 { st = line(st, "  \"\",") }
   st = line(st, "};")
   st = line(st, "const size_t dawn_prov_definitions_n = ${len(definitions)};")
+  let ordered = sort_by(map.entries(site_table), (a, b) => { let (x, _a) = a
+    let (y, _b) = b
+    if x < y { -1 } else if x > y { 1 } else { 0 } })
+  emit_provenance_fields(st, ordered, definitions)
+}
+
+## The slot names every observed body writes (`dawn_prov_site_<id>`,
+## `dawn_prov_definition_<id>`). They are enum constants, so a translation
+## unit can only use one it has seen declared: they belong in the shared head
+## with the prototypes, not in unit 0 beside the tables, or a body that lands
+## in any other unit names an undeclared identifier.
+fn provenance_slot_lines(site_table: Map[Int, String], definitions: List[String]) -> List[String] = {
+  var out: List[String] = []
   var slot = 0
   let ordered = sort_by(map.entries(site_table), (a, b) => { let (x, _a) = a
     let (y, _b) = b
     if x < y { -1 } else if x > y { 1 } else { 0 } })
-  st = emit_provenance_fields(st, ordered, definitions)
   for entry in ordered { let (id, _metadata) = entry
-    st = line(st, "enum { dawn_prov_site_${id} = ${slot} };")
+    out = out ++ ["enum { dawn_prov_site_${id} = ${slot} };\n"]
     slot = slot + 1
   }
   slot = 0
   for d in definitions {
-    st = line(st, "enum { dawn_prov_definition_${provenance.definition_slot_id(d)} = ${slot} };")
+    out = out ++ ["enum { dawn_prov_definition_${provenance.definition_slot_id(d)} = ${slot} };\n"]
     slot = slot + 1
   }
-
-  st
+  out
 }
 
 fn emit_units(
@@ -3090,8 +3101,10 @@ fn emit_units(
   let provenance_runtime: List[String] = if st.observation {
     [rtsrc.source("dawn_provenance.c").expect("provenance runtime") ++ "\n"]
   } else { [] }
+  var slot_lines: List[String] = []
   if st.observation {
     st = emit_provenance_tables(st, site_table, provenance.static_definitions(site_modules, live))
+    slot_lines = provenance_slot_lines(site_table, provenance.static_definitions(site_modules, live))
   }
   let tables = st.out
   st = CSt { ..st, out = [] }
@@ -3306,7 +3319,7 @@ fn emit_units(
   }
 
   let nunits = tu_count(total)
-  var head: List[String] = preamble ++ protos ++ dict_decls
+  var head: List[String] = preamble ++ slot_lines ++ protos ++ dict_decls
   var i = 0
   while i < len(st.cdefs) {
     head = head ++ ["void* " ++ const_symbol(i) ++ "(void);\n"]
