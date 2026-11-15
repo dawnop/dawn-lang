@@ -315,7 +315,7 @@ pub fn project(rows: List[RawRow], units: List[SourceUnit], recorded: String, li
 ## One distinct callee a recording ran for its author, by declared identity:
 ## where it is declared and, for a function written in source, the span of its
 ## definition inside its declaration (`start`, `end`, `role`; -1 for none).
-pub type CalleeFact = { kind: Kind, name: String, module: String, declaration: String, start: Int, end: Int, role: String }
+pub type CalleeFact = { kind: Kind, name: String, module: String, declaration: String, start: Int, end: Int, role: String, marked: Bool }
 
 fn is_recorder(r: RawRow) -> Bool = match r.definition {
   Some(d) -> d.declaration == "Nf11:trace_calls" && (str.starts_with(d.module, "dawn\$pkg\$tileir/") || str.starts_with(d.module, "tileir/"))
@@ -325,7 +325,9 @@ fn is_recorder(r: RawRow) -> Bool = match r.definition {
 ## The calls an author wrote under the first `trace_calls` of `rows`, by what
 ## their callees are, once each: `Api` names are what the recording can show
 ## for tileir's own surface, `Helper` names are the author's functions with
-## the span of each definition. No source is read: a consumer that holds a
+## the span of each definition. `marked` says the call ran one of the
+## library's own call marks (`called`, `called_bare`, `called_at`), which is
+## what gives today's recorder a row for it. No source is read: a consumer that holds a
 ## source unit judges these spans against it (`project` does so for every
 ## row). It is how a consumer learns which names count as calls without
 ## scanning the library's text for them.
@@ -335,6 +337,22 @@ pub fn callees(rows: List[RawRow], libraries: List[String]) -> Result[List[Calle
   if root < 0 { return Err("tileir origin: no recorder call in the rows") }
   var under: List[Bool] = []
   for i in range(0, len(rows)) { under = under ++ [i == root || (rows[i].parent >= 0 && rows[i].parent < i && under[rows[i].parent])] }
+  # the nearest call the author wrote above a call mark: what the mark is for
+  var marked: Set[Int] = set.empty()
+  for i in range(0, len(rows)) {
+    if under[i] && is_mark(rows[i]) {
+      var at = rows[i].parent
+      while at > root {
+        match kind_of(rows[at], libraries) {
+          Some(Api) | Some(Helper) -> {
+            marked = set.insert(marked, at)
+            at = -1
+          }
+          _ -> { at = rows[at].parent }
+        }
+      }
+    }
+  }
   var out: List[CalleeFact] = []
   for i in range(0, len(rows)) {
     if under[i] && i != root {
@@ -342,8 +360,16 @@ pub fn callees(rows: List[RawRow], libraries: List[String]) -> Result[List[Calle
         (Some(kind), Some(d)) -> {
           if kind == Api || kind == Helper {
             let fact = CalleeFact { kind = kind, name = last_name(d.declaration), module = d.module, declaration = d.declaration,
-              start = d.start, end = d.end, role = d.role }
-            if not list.contains(out, fact) { out = out ++ [fact] }
+              start = d.start, end = d.end, role = d.role, marked = set.has(marked, i) }
+            let same = list.find(out, f => f.kind == fact.kind && f.name == fact.name && f.module == fact.module && f.declaration == fact.declaration)
+            match same {
+              None -> { out = out ++ [fact] }
+              Some(old) -> {
+                if fact.marked && not old.marked {
+                  out = list.map(out, f => if f == old { fact } else { f })
+                }
+              }
+            }
           }
         }
         _ -> ()
@@ -351,6 +377,12 @@ pub fn callees(rows: List[RawRow], libraries: List[String]) -> Result[List[Calle
     }
   }
   Ok(out)
+}
+
+fn is_mark(r: RawRow) -> Bool = match r.definition {
+  Some(d) -> (str.starts_with(d.module, "dawn\$pkg\$tileir/") || str.starts_with(d.module, "tileir/"))
+    && (d.declaration == "Nf9:called_at" || d.declaration == "Nf6:called" || d.declaration == "Nf11:called_bare")
+  None -> false
 }
 
 ## Whether `inner` lies inside the callee's DEFINITION of `outer`: the
@@ -518,11 +550,24 @@ test "the callees under the recorder are the author's helpers and tileir's own f
   match callees(under, []) {
     Ok(facts) -> {
       assert list.map(facts, f => (f.kind, f.name)) == [(Helper, "helper"), (Api, "exp")]
+      assert list.map(facts, f => f.marked) == [false, false]
       assert facts[0].start == 0 && facts[0].end == 40 && facts[0].declaration == "Nf6:helper"
     }
     Err(e) -> panic(e)
   }
   assert callees(helper_rows(), []) == Err("tileir origin: no recorder call in the rows")
+}
+
+test "a callee that ran a call mark is told, whatever rows were kept" {
+  let tc = tdef("dawn\$pkg\$tileir/prog", "Nf11:trace_calls", 0, 50, "function")
+  let rows = [trow(0, -1, None, None), trow(1, 0, Some(tsite("main", "Nf6:kernel", 10, 20, "call")), Some(tc)),
+    trow(2, 1, Some(tsite("main", "Nf6:kernel", 10, 20, "call")), Some(tdef("dawn\$pkg\$tileir/dev", "Nf3:exp", 0, 9, "function"))),
+    trow(3, 2, Some(tsite("dawn\$pkg\$tileir/dev", "Nf3:exp", 3, 5, "call")), Some(tdef("dawn\$pkg\$tileir/dev", "Nf6:called", 0, 9, "function"))),
+    trow(4, 1, Some(tsite("main", "Nf6:kernel", 30, 40, "call")), Some(tdef("dawn\$pkg\$tileir/dev", "Nf4:perm", 0, 9, "function")))]
+  match callees(rows, []) {
+    Ok(facts) -> { assert list.map(facts, f => (f.name, f.marked)) == [("exp", true), ("perm", false)] }
+    Err(e) -> panic(e)
+  }
 }
 
 test "a declaration identity's last name" {

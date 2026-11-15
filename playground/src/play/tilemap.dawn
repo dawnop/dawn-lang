@@ -721,7 +721,7 @@ pub fn plan(code: String, dump: String, dev: List[String], facts: List[Helper]) 
 pub type Row = { id: Int, parent: Int, name: String, lines: List[String] }
 
 ## What the instrumented program printed, read.
-pub type Recording = { ops: String, head: String, tail: String, rows: List[Row], helpers: List[Helper], text: List[String] }
+pub type Recording = { ops: String, head: String, tail: String, rows: List[Row], helpers: List[Helper], callees: List[String], text: List[String] }
 
 const MARK: String = "@@tile "
 
@@ -736,6 +736,7 @@ pub fn read_recording(output: String) -> Result[Recording, String] = {
   var ended = false
   var rows: List[Row] = []
   var helpers: List[Helper] = []
+  var callees: List[String] = []
   var text: List[String] = []
   for l in lines {
     let rest = str.drop(l, len(MARK))
@@ -757,6 +758,8 @@ pub fn read_recording(output: String) -> Result[Recording, String] = {
           return Err("the recording has a call row with no numbers")
         }
       }
+    } else if w[0] == "callee" && len(w) == 2 {
+      callees = callees ++ [w[1]]
     } else if w[0] == "helper" && len(w) == 7 {
       match (parse_int(w[4]), parse_int(w[5])) {
         (Some(a), Some(b)) -> {
@@ -775,7 +778,7 @@ pub fn read_recording(output: String) -> Result[Recording, String] = {
   if not ended || ops == "" || tail == "" || len(text) == 0 {
     Err("the program printed no complete recording")
   } else {
-    Ok(Recording { ops = ops, head = head, tail = tail, rows = rows, helpers = helpers, text = text })
+    Ok(Recording { ops = ops, head = head, tail = tail, rows = rows, helpers = helpers, callees = callees, text = text })
   }
 }
 
@@ -864,8 +867,10 @@ pub fn tile_map(code: String, p: Plan, rec: Recording) -> Result[String, String]
       }
   }
 
-## The names of the calls a recording ran, once each.
-pub fn recorded_names(rec: Recording) -> List[String] = list.unique(map(rec.rows, r => r.name))
+## The names of the calls a recording can show, once each: the rows it kept and
+## the functions the compiler's own record says ran a call mark, so that a row
+## lost from the recording is still a call the source has to account for.
+pub fn recorded_names(rec: Recording) -> List[String] = list.unique(map(rec.rows, r => r.name) ++ rec.callees)
 
 # ---- the probe ----
 
@@ -927,6 +932,9 @@ const PROBE_LINES: List[String] = [
   "    Ok(rows) -> match callees(rows, []) {",
   "      Ok(facts) -> {",
   "        for f in facts {",
+  "          if f.marked {",
+  "            println(\"@@tile callee \" ++ f.name)",
+  "          }",
   "          if f.kind == Helper {",
   "            println(\"@@tile helper \" ++ f.name ++ \" \" ++ f.module ++ \" \" ++ f.declaration ++ \" \" ++ to_string(f.start) ++ \" \" ++ to_string(f.end) ++ \" \" ++ f.role)",
   "          }",
@@ -1164,9 +1172,9 @@ test "the pairing writes the map, and stops at the first name that differs" {
   }
 }
 
-test "the names the recording ran are the rows it has, once each" {
-  match read_recording("@@tile text m\n@@tile ops 5\n@@tile head 1-2\n@@tile call 0 -1 load_cell 2-3\n@@tile call 1 -1 load_cell 3-4\n@@tile call 2 -1 add 4-5\n@@tile tail 6-7\n@@tile end\n") {
-    Ok(rec) -> { assert recorded_names(rec) == ["load_cell", "add"] }
+test "the names the recording can show are its rows and the functions that ran a mark, once each" {
+  match read_recording("@@tile callee read_at\n@@tile text m\n@@tile ops 5\n@@tile head 1-2\n@@tile call 0 -1 load_cell 2-3\n@@tile call 1 -1 load_cell 3-4\n@@tile call 2 -1 add 4-5\n@@tile tail 6-7\n@@tile end\n") {
+    Ok(rec) -> { assert recorded_names(rec) == ["load_cell", "add", "read_at"] }
     Err(e) -> { assert e == "" }
   }
 }

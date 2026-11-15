@@ -29,12 +29,11 @@ pub fn main() -> Unit !io = with_fs_real(() => {
   let a = args()
   let code = read(a[1])
   let dump = read(a[2])
-  let dev = tilemap.dev_names(read(a[3]))
-  let p = match tilemap.plan(code, dump, dev) {
-    Ok(p) -> p
-    Err(e) -> panic("source plan: " ++ e)
-  }
   if a[0] == "prepare" {
+    let p = match tilemap.prepare(code, dump) {
+      Ok(p) -> p
+      Err(e) -> panic("source plan: " ++ e)
+    }
     let _p = write_file(a[4] ++ "/src/main.dawn", p.program)
     let _q = write_file(a[4] ++ "/src/explore_probe.dawn", tilemap.probe_source())
     println("PASS source plan")
@@ -42,6 +41,11 @@ pub fn main() -> Unit !io = with_fs_real(() => {
     let rec = match tilemap.read_recording(read(a[4])) {
       Ok(r) -> r
       Err(e) -> panic("source recording: " ++ e)
+    }
+    # what counts as a call is what the recording ran, as the Playground does
+    let p = match tilemap.plan(code, dump, tilemap.recorded_names(rec), rec.helpers) {
+      Ok(p) -> p
+      Err(e) -> panic("source plan: " ++ e)
     }
     match tilemap.tile_map(code, p, rec) {
       Ok(m) -> print(m)
