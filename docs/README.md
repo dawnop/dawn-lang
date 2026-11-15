@@ -47,6 +47,8 @@ Scaled MMA accumulator coverage: [gpu-g31-4-scaled-mma-acc-design.md](gpu-g31-4-
 
 效果来源提案：[effect-provenance-design.md](effect-provenance-design.md)，按观察作用域保留逻辑调用，含来源负控与分期验收；语言机制尚未实现。
 
+编译器代写调用记录：[call-records-design.md](call-records-design.md)，效果的 `calls` 子句与 Core 变换，与手写 marks 并存对拍；R4-f0 设计与 R4-f1 实现。
+
 ## 当前全仓审查（v2）
 
 SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
