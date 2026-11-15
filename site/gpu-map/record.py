@@ -105,6 +105,9 @@ pub fn main() -> Unit !io = {
     Ok(rows) -> match callees(rows, ["dawn\\$pkg\\$tileref/"]) {
       Ok(facts) -> {
         for f in facts {
+          if f.marked {
+            println("callee ${f.name}")
+          }
           if f.kind == Helper {
             println("helper ${f.name} ${f.module} ${f.declaration} ${f.start} ${f.end} ${f.role}")
           }
@@ -760,11 +763,13 @@ def record(*, source_path: Path = KERNELS, recording: str | None = None,
     call = next(k for k in lam.kids if k.kind != "LParam")
     call.kids[1], call.kids[2] = call.kids[2], call.kids[1]
     expect_refused("wrong factory forwarding", lambda: validate_factory(altered))
-    rows, head, tail, ops, facts = [], None, None, None, []
+    rows, head, tail, ops, facts, callees = [], None, None, None, [], set()
     for line in ran.splitlines():
         w = line.split(" ")
         if w[0] == "call":
             rows.append({"id": int(w[1]), "parent": int(w[2]), "name": w[3], "at": w[4], "lines": w[5:]})
+        elif w[0] == "callee":
+            callees.add(w[1])
         elif w[0] == "helper":
             facts.append({"name": w[1], "module": w[2], "declaration": w[3], "start": int(w[4]), "end": int(w[5]), "role": w[6]})
         elif w[0] == "head":
@@ -777,9 +782,11 @@ def record(*, source_path: Path = KERNELS, recording: str | None = None,
         fail("the harness printed no head, tail or ops line:\n" + ran[-1000:])
     global HELPERS
     HELPERS, defs = helpers_of(p.stdout, src, rows, facts)
-    # The names the recording can show: what it ran, and the helpers whose own
-    # calls it ran (a helper's own row is one of the marks; its identity is not).
-    dev = {r["name"] for r in rows} | set(HELPERS)
+    # The names the recording can show: the rows it kept, the functions the
+    # compiler's record says ran a call mark (a row lost from the recording is
+    # still a call the source must account for) and the helpers whose own calls
+    # it ran (a helper's own row is one of the marks; its identity is not).
+    dev = {r["name"] for r in rows} | set(HELPERS) | callees
     fn = parse_tree(p.stdout, BODY)
     body = [k for k in fn.kids if k.kind == "Block"]
     if len(body) != 1:
