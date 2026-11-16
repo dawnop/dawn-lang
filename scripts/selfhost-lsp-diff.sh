@@ -171,7 +171,7 @@ fn span(n: Int) -> Span = Span { n = n }
 impl StagedIter[Span, ^{}] {
   type Item = Val
   effect StagedIter = !io
-  fn staged_for(r: Span, body: fn(Val) -> Unit !io ^{}) -> Unit !io = body(Val { name = "i" })
+  fn staged_for(r: Span, body: fn(Val) -> Unit !io ^{}, at: Loc) -> Unit !io = body(Val { name = "i" })
 }
 
 impl StagedVar[Val, ^{}] {

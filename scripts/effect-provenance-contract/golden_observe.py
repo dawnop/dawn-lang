@@ -45,7 +45,7 @@ def instrument(project, compiler, java):
     cached='  let first = provenance_trace(name)\n  let second = provenance_trace(name)'
     if text.count(cached)!=1: raise ValueError('two-trace source anchor changed')
     text=text.replace(cached,'  let preview_source = source_index.make()\n  let first = provenance_trace(name, preview_source)\n  let second = provenance_trace(name, preview_source)')
-    text+='\nfn provenance_trace(name: String, source: SourceIndex = source_index.make()) -> TileProg !io = {\n  let (program, snapshot) = provenance.observe(scope => {\n    let program = trace_raw(name)\n    (program, provenance.completed(scope))\n  })\n  let mapping = preview.consume(snapshot, source, source_index.revision())\n  if len(mapping.owners) == 0 || len(mapping.nodes) == 0 { panic("preview: empty source mapping") }\n  program\n}\n'
+    text+='\nfn provenance_trace(name: String, source: SourceIndex = source_index.make()) -> TileProg !io = {\n  let (program, snapshot) = provenance.observe(scope => {\n    let program = trace_raw(name)\n    (program, provenance.completed(scope))\n  }, capacity = 4194304)\n  let mapping = preview.consume(snapshot, source, source_index.revision())\n  if len(mapping.owners) == 0 || len(mapping.nodes) == 0 { panic("preview: empty source mapping") }\n  program\n}\n'
     text+='\npub fn provenance_check_case(name: String) -> (String, Bytes) !io = {\n  let program = trace_twice(name)\n  (render(program), encode(program))\n}\n'
     source.write_text(text)
     prepare_index(project, compiler, java)
