@@ -27,7 +27,8 @@ export function digest(text: string): string {
 }
 
 export type Restore =
-  | { kind: 'open' } // no draft, or one to discard: open the default sample
+  | { kind: 'open' } // no draft: open the default sample
+  | { kind: 'sample'; file: number } // an untouched copy of an old sample: open the same sample, as it is now
   | { kind: 'draft'; src: string; stale: boolean }
 
 // `sample` is the current text of the sample the draft is for, or null for a
@@ -40,6 +41,6 @@ export function resolveDraft(d: Draft | null, sample: string | null): Restore {
     return d.code === sample ? { kind: 'draft', src: now, stale: false } : { kind: 'draft', src: '', stale: true }
   }
   if (d.src === now) return { kind: 'draft', src: now, stale: false }
-  if (digest(d.code) === d.src) return { kind: 'open' } // untouched copy of an old sample
+  if (digest(d.code) === d.src) return { kind: 'sample', file: d.file }
   return { kind: 'draft', src: d.src, stale: true }
 }
