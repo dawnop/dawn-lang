@@ -586,16 +586,10 @@ R3 按协议资格、R4 删 marks、R5 删后复测。不做的：本刀不改 r
   这条关系对任何带定义 span 的函数成立，没有函数名单。
 - **拒绝而不修补。** 缺源码单元、缺记录的源码版本、版本不符、声明长度不符、span 不是
   语法节点、声明不在源码里、未知边界、截断、缺父节点或父节点不在前、行无身份，都返回
-  `Err`。`scripts/tile-origin-shadow/mutants.py` 逐条删去这些拒绝，要求包自己的测试变红。
-- **影子比较。** [`scripts/tile-origin-shadow`](../scripts/tile-origin-shadow/shadow.py) 用文本插桩把全部
-  256 例 golden 与 Playground 的 flash_attn 样例各在观察下录制一次，旧 `Call` 行的每一行必须在新
-  视图里按（名字、调用点）找到，并且父节点关系一致；新视图可以更多。差异按类别列出：
-  tileir 自己的函数（无标记）、helper 内的调用、运算符与字面量、默认实参调用、宿主调用、
-  helper 自己执行的 `perform`、staged `for`/`if` 的主体，以及 staged 主体**试探执行**留下的重复
-  节点（录制器的 trial 尚未用 checkpoint/rewind 回滚，R4 才会消失）。区域行在旧视图里挂在构造
-  `d_range` 的位置，在新视图里挂在运行主体的 `for` 语句上，这正是 R4 要把 `DRange` 改到使用
-  位置的原因。操作范围（ops/globals 区间）仍由旧标记给出：快照里每个 effect 操作是一条 handler
-  记录，但录制器的每个臂没有携带自己的 operation origin，逐操作归属要等 R4。
+  `Err`。`scripts/tile-origin-mutants/mutants.py` 逐条删去这些拒绝，要求包自己的测试变红。
+- **影子比较（R4-f2 起已删，补裁十）。** 它曾把每个 golden 的观察投影与手写标记的旧 `Call` 行逐行比较；
+  手写标记已由编译器代写取代，投影看不到代写给 impl 方法的行，不重做投影，比较用例连同 `origin` 里只为认
+  标记而存在的 `is_mark`/`marked` 一并删除。包自己的拒绝测试仍由 `scripts/tile-origin-mutants` 守住。
 - **消费者。** `site/gpu-map/record.py` 的名单（`called(` 正则、`fa_exp`/`fa_divide`）改为录制出的
   名字与 helper 声明身份，并与解析树核对定义长度；`.map` 增加 `source <摘要>` 行与 `def=` 定义范围，
   `packages/xmap` 的 `table_from_tile` 与 `site/src/gen/gpumap.dawn` 的 `check` 改为按定义范围判断

@@ -24,8 +24,7 @@ call after its arguments, a closure handed to a call being that call's
 children). Anything else stops here with both lists printed: a call under
 unknown host control flow, a closure bound before the call that runs it, a call
 of a closure. Which names are calls at all is read off the recording itself (the
-names of the rows it ran, and the functions of this file it ran for the author,
-by the compiler's own record of their identity, held to the parse); every
+names of the rows it ran); every
 other call, `permute(..)` or `neg_inf()`, records nothing and is looked
 through. A helper of the kernel's file (`fa_exp`) is one call among the rest:
 `Dev` declares `calls(..)`, so every public function with the effect is
@@ -86,8 +85,6 @@ EDITS = [
 ]
 
 MAIN = '''
-use std/provenance.{observe, completed}
-use tileir/origin.{rows_of, callees}
 
 fn spans(rs: List[(Int, Int)]) -> String =
   list.fold(rs, "", (acc, r) => {
@@ -96,24 +93,8 @@ fn spans(rs: List[(Int, Int)]) -> String =
   })
 
 pub fn main() -> Unit !io = {
-  let ((p, calls), snapshot) = observe(scope => {
-    let recorded = %TRACE%
-    (recorded, completed(scope))
-  })
+  let (p, calls) = %TRACE%
   if p != trace("%NAME%") { panic("%NAME%: the call marks changed the program") } else { () }
-  match rows_of(snapshot) {
-    Ok(rows) -> match callees(rows, ["dawn\\$pkg\\$tileref/"]) {
-      Ok(facts) -> {
-        for f in facts {
-          if f.marked {
-            println("callee ${f.name}")
-          }
-        }
-      }
-      Err(e) -> panic("%NAME%: ${e}")
-    }
-    Err(e) -> panic("%NAME%: ${e}")
-  }
   match line_map(p, calls) {
     Ok(m) -> {
       if m.text != render(p) { panic("%NAME%: the line map's text is not render's") } else { () }
@@ -295,7 +276,7 @@ HARNESS_DIR = ROOT / "site" / "gpu-map" / "harness"
 def run_harness(src: str) -> str:
     # The harness is a project of its own (site/gpu-map/harness: dawn.toml is
     # committed, src/main.dawn is written here from kernels.dawn and ignored by
-    # git) and runs on the JVM, because the recording is observed. Keep the
+    # git) and runs on the JVM, because the recording runs the kernel. Keep the
     # original function text and line count: runtime Loc values independently
     # verify parser spans. Remove the generated source after use so it is not a
     # second formatting input to the site.
@@ -680,13 +661,11 @@ def record(*, source_path: Path = KERNELS, recording: str | None = None,
     call = next(k for k in lam.kids if k.kind != "LParam")
     call.kids[1], call.kids[2] = call.kids[2], call.kids[1]
     expect_refused("wrong factory forwarding", lambda: validate_factory(altered))
-    rows, head, tail, ops, callees = [], None, None, None, set()
+    rows, head, tail, ops = [], None, None, None
     for line in ran.splitlines():
         w = line.split(" ")
         if w[0] == "call":
             rows.append({"id": int(w[1]), "parent": int(w[2]), "name": w[3], "at": w[4], "lines": w[5:]})
-        elif w[0] == "callee":
-            callees.add(w[1])
         elif w[0] == "head":
             head = " ".join(w[1:])
         elif w[0] == "tail":
@@ -695,11 +674,9 @@ def record(*, source_path: Path = KERNELS, recording: str | None = None,
             ops = w[1]
     if head is None or tail is None or ops is None:
         fail("the harness printed no head, tail or ops line:\n" + ran[-1000:])
-    # The names the recording can show: the rows it kept, the functions the
-    # compiler's record says ran a call mark (a row lost from the recording is
-    # still a call the source must account for), and the range constructors a
-    # staged `for` loops over (the loop's own row is `staged_for`).
-    dev = {r["name"] for r in rows} | callees | range_heads()
+    # The names the recording can show: the rows it kept and the range
+    # constructors a staged `for` loops over (the loop's own row is `staged_for`).
+    dev = {r["name"] for r in rows} | range_heads()
     fn = parse_tree(p.stdout, BODY)
     body = [k for k in fn.kids if k.kind == "Block"]
     if len(body) != 1:
