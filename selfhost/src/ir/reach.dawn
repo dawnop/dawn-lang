@@ -585,6 +585,13 @@ fn walk_list(st0: Rch, es: List[CExpr]) -> Rch = {
 fn walk(st0: Rch, e: CExpr) -> Rch =
   walk_node(type_use(st0, cex_ty(e)), e)
 
+# Every provenance primitive except the observation entry reads or writes the
+# runtime's provenance state, so a program that reaches one needs the provenance
+# runtime emitted even when it never observes anything. The list used to name
+# only field, number and parent: a reader of a frozen snapshot (word, header,
+# column) then reached C without its declarations, and without its definitions.
+fn is_provenance_data(name: String) -> Bool = str.starts_with(name, "provenance_") && name != "provenance_observe"
+
 fn walk_node(st0: Rch, e: CExpr) -> Rch =
   match e {
     CInt(_) -> st0
@@ -652,7 +659,7 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
       let st = Rch { ..st0, u = mark(st0.u, name),
         ctl = st0.ctl || name == "ctl_run" || name == "ctl_yield",
         observation = st0.observation || name == "provenance_observe",
-        provenance_data = st0.provenance_data || name == "provenance_field" || name == "provenance_number" || name == "provenance_parent" }
+        provenance_data = st0.provenance_data || is_provenance_data(name) }
       var called = st
       if st.mode_analysis {
         for callback in runtime_callbacks(name) {
@@ -1500,6 +1507,22 @@ pub fn runtime_callbacks(name: String) -> List[(Int, Int)] =
   if name == "catch_panic" || name == "catch_fault" { [(0, 1)] }
   else if name == "bracket" { [(1, 2), (2, 2)] }
   else { [] }
+
+test "every provenance primitive except observe asks for the provenance runtime without observation" {
+  # The snapshot readers (word, header, column) once reached C with neither a
+  # declaration nor a definition because only field, number and parent set the
+  # flag: nightly #968/#969, and nothing on the push path built such a program.
+  for name in ["provenance_note", "provenance_completed", "provenance_checkpoint", "provenance_rewind",
+    "provenance_origin", "provenance_field", "provenance_number", "provenance_word", "provenance_header",
+    "provenance_column", "provenance_render_snapshot", "provenance_render_origin"] {
+    let main = tfn("app", "main", CIntrinsic(name, [], TyUnit, CNoSite))
+    let live = live_set([tmod("app", [main])], ["app"], [])
+    assert live.provenance_data
+    assert not live.observation
+  }
+  let plain = live_set([tmod("app", [tfn("app", "main", CUnit)])], ["app"], [])
+  assert not plain.provenance_data
+}
 
 test "a missing internal observed entry is a compile error before either backend emits" {
   let helper = tfn("app", "helper", CUnit)
