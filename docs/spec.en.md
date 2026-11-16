@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 924e453cd0ce37f1 -->
+<!-- doc-check: translation-of docs/spec.md @ 7e29af2e9e75779e -->
 
 # Dawn Language Specification
 
@@ -1134,8 +1134,10 @@ application across module boundaries. Cell content support and installation life
 checks remain independent of ordinary closure value captures.
 
 - **`StagedIter`** and **`StagedVar`** (behind the staged `for`, §4.7):
-  `trait StagedIter[R: ^{c}, ^c] { type Item: ^{c}  effect StagedIter = !()  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter ^{c}) -> Unit !R.StagedIter }`,
+  `trait StagedIter[R: ^{c}, ^c] { type Item: ^{c}  effect StagedIter = !()  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter ^{c}, at: Loc = caller()) -> Unit !R.StagedIter }`,
   `trait StagedVar[T: ^{c}, ^c] { type Cell: ^{c}  effect StagedVar = !()  fn var_open(v: T) -> T.Cell !T.StagedVar  fn var_get(c: T.Cell) -> T !T.StagedVar  fn var_set(c: T.Cell, v: T) -> Unit !T.StagedVar }`.
+  `staged_for`'s `at` is the site of the expression the `for` ranges over, passed by the checker when it
+  rewrites the loop; an impl writes it as a plain `at: Loc` with no default.
   The language consumes both traits' method names, so they do **not** enter the function
   namespace. Neither can be derived. Each has one associated effect named like the trait and
   pure by default, as the arithmetic and literal traits have, so generic code over a type that

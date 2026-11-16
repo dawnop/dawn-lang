@@ -43,7 +43,7 @@ store_cell(o, acc / l)
 trait StagedIter[R: ^{c}, ^c] {
   type Item: ^{c}
   effect StagedIter = !()
-  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter ^{c}) -> Unit !R.StagedIter
+  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter ^{c}, at: Loc = caller()) -> Unit !R.StagedIter
 }
 trait StagedVar[T: ^{c}, ^c] {
   type Cell: ^{c}

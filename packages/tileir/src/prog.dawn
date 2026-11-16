@@ -2622,6 +2622,7 @@ type Snap = {
   frames: List[Frame],
   marks: List[Mark],
   calls: List[Call],
+  events: List[CallEv],
   spans: List[(Int, Int)],
   held: Map[Int, Held],
   aims: Map[Int, Int],
@@ -2713,6 +2714,86 @@ fn kernel_side(marks: List[Mark]) -> Bool =
     }
   }
 
+# One call or body mark the recording saw, with where it happened: the
+# number of the operation about to be recorded and the count of globals so
+# far. `call_table` replays them into the rows of `trace_calls`.
+type CallEv =
+  | EvEnter(name: String, site: Option[Loc], op: Int, globals: Int)
+  | EvExit(op: Int, globals: Int)
+  | EvBodyEnter
+  | EvBodyExit
+
+# Whether the recording is one call from its first mark to its last, with no
+# closure of its own run directly inside it: the kernel's entry function,
+# which `Dev`'s `calls(..)` records like any public function that has the
+# effect. The outermost recorded frame of such a recording is the root: it
+# is the context the kernel runs in, not a call the kernel made, so its
+# direct calls are the kernel's top-level calls. A frame that runs a closure
+# of its own is a region call (`d_range`, `d_loop`, ...), never a root, and a
+# recording of several top-level calls has no single frame to be one.
+fn single_entry(events: List[CallEv]) -> Bool = {
+  if len(events) < 2 {
+    return false
+  }
+  match events[0] {
+    EvEnter(_n, _s, _o, _g) -> ()
+    _ -> { return false }
+  }
+  var depth = 0
+  var k = 0
+  var single = true
+  for ev in events {
+    match ev {
+      EvEnter(_n, _s, _o, _g) -> { depth = depth + 1 }
+      EvExit(_o, _g) -> {
+        depth = depth - 1
+        if depth == 0 && k != len(events) - 1 { single = false }
+      }
+      EvBodyEnter -> { if depth == 1 { single = false } }
+      EvBodyExit -> ()
+    }
+    k = k + 1
+  }
+  single && depth == 0
+}
+
+## The table of calls the kernel made, replayed from the marks the recording
+## saw: a row for each call written at the top of the body or directly inside
+## a closure the kernel handed to a region function, none for what a public
+## function calls on its own behalf. The outermost frame is dropped first
+## when it is the kernel's entry function (`single_entry`).
+fn call_table(events: List[CallEv]) -> List[Call] = {
+  let marks_in = if single_entry(events) { list.take(list.drop(events, 1), len(events) - 2) } else { events }
+  var marks: List[Mark] = []
+  var calls: List[Call] = []
+  for ev in marks_in {
+    match ev {
+      EvEnter(called_name, site, at, ng) -> {
+        if kernel_side(marks) {
+          calls = calls ++ [Call { name = called_name, at = site, parent = open_row(marks), ops_from = at, ops_to = at,
+            globals_from = ng, globals_to = ng }]
+          marks = marks ++ [Row(len(calls) - 1)]
+        } else {
+          marks = marks ++ [Inner]
+        }
+      }
+      EvExit(at, ng) -> {
+        match marks[len(marks) - 1] {
+          Row(k) -> {
+            let rows = calls
+            calls = list.map(range(0, len(rows)), j => if j == k { Call { ..rows[j], ops_to = at, globals_to = ng } } else { rows[j] })
+          }
+          _ -> ()
+        }
+        marks = list.take(marks, len(marks) - 1)
+      }
+      EvBodyEnter -> { marks = marks ++ [if in_row(marks) { KernelBody } else { InnerBody }] }
+      EvBodyExit -> { marks = list.take(marks, len(marks) - 1) }
+    }
+  }
+  calls
+}
+
 ## `trace_kernel`, and beside the program the side table of the calls the
 ## kernel made, in the order they started. The program is the one
 ## `trace_kernel` answers: it is the same handler, and the marks put nothing
@@ -2752,7 +2833,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
   # the entry's hints are checked before the body runs, like the shapes of its parameters
   let hints = wire_entry(entry_hints)
   check_by_value(entry, params)
-  let (globals, ops, calls, geometry) = {
+  let (globals, ops, events, geometry) = {
     with handle Dev {
       var next: Int = 1
       var tok: Int = 0
@@ -2762,6 +2843,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
       var frames: List[Frame] = []
       var marks: List[Mark] = []
       var calls: List[Call] = []
+      var events: List[CallEv] = []
       var spans: List[(Int, Int)] = []
       var name: Ctx = entry
       var held: Map[Int, Held] = map.empty()
@@ -2781,6 +2863,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
       var trials: List[Snap] = []
       var results: List[ResultState] = []
       t_call_enter(called_name, site) => {
+        events = events ++ [EvEnter(called_name, site, op_number(frames, ops), len(globals))]
         if kernel_side(marks) {
           let at = op_number(frames, ops)
           calls = calls ++ [Call { name = called_name, at = site, parent = open_row(marks), ops_from = at, ops_to = at,
@@ -2793,6 +2876,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
         name = ctx_now(entry, marks, calls, spans)
       }
       t_call_exit() => {
+        events = events ++ [EvExit(op_number(frames, ops), len(globals))]
         if len(marks) == 0 { refuse(name, "a call mark closes nothing") } else { () }
         match marks[len(marks) - 1] {
           Row(k) -> {
@@ -2812,10 +2896,12 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
         name = ctx_now(entry, marks, calls, spans)
       }
       t_body_enter() => {
+        events = events ++ [EvBodyEnter]
         marks = marks ++ [if in_row(marks) { KernelBody } else { InnerBody }]
         name = ctx_now(entry, marks, calls, spans)
       }
       t_body_exit() => {
+        events = events ++ [EvBodyExit]
         if len(marks) == 0 { refuse(name, "a body mark closes nothing") } else { () }
         match marks[len(marks) - 1] {
           KernelBody -> ()
@@ -3825,7 +3911,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
       }
       t_trial_begin() => {
         trials = trials ++ [Snap { next = next, tok = tok, region_tokens = region_tokens, ops = ops, globals = globals, frames = frames, marks = marks,
-          calls = calls, spans = spans, held = held, aims = aims, cell_views = cell_views, spreads = spreads, cell_blocks = cell_blocks,
+          calls = calls, events = events, spans = spans, held = held, aims = aims, cell_views = cell_views, spreads = spreads, cell_blocks = cell_blocks,
           pending = pending, cell_tvs = cell_tvs, cell_marks = cell_marks, sub_views = sub_views, dyn_exts = dyn_exts, geometry = geometry,
           carries = carries, carry_rows = carry_rows, carry_sets = carry_sets, results = results }]
         ()
@@ -3844,6 +3930,7 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
         frames = sn.frames
         marks = sn.marks
         calls = sn.calls
+        events = sn.events
         spans = sn.spans
         name = ctx_now(entry, marks, calls, spans)
         held = sn.held
@@ -4803,8 +4890,9 @@ fn record_calls[^c](entry: Ctx, params: List[KParam], roles: List[Access], geoms
     if len(trials) != 0 { refuse(name, "the body ended inside a trial") } else { () }
     if len(frames) != 0 { refuse(name, "the body ended with ${len(frames)} region(s) still open") } else { () }
     if len(marks) != 0 { refuse(name, "the body ended with ${len(marks)} call or body mark(s) still open") } else { () }
-    (globals, ops, calls, geometry)
+    (globals, ops, events, geometry)
   }
+  let calls = call_table(events)
   (TileProg { name = entry.kernel, params = params, globals = globals, ops = [MakeToken(0)] ++ ops, hints = hints, producer = None, debug = None }, calls, geometry)
 }
 
@@ -7011,7 +7099,7 @@ test "PR-1 (n9): a place that wants a rank-0 tile refuses a wider one while the 
   assert str.starts_with(marked(() => trace_kernel("r", [ByPtr("f64")], () => {
     let acc = carry(broadcast(f_const(F64, 0.0), [8]))
     for _k in d_range(idx_of(arange(8)), idx_const(2), step = By(idx_const(1))) { acc.set(acc.get()) }
-  })), "tileir: kernel `r`: op #5 `d_range`: lower bound is tile<8xi32>, and it must be the rank-0 tile<i32>")
+  })), "tileir: kernel `r`: op #5 `staged_for`: lower bound is tile<8xi32>, and it must be the rank-0 tile<i32>")
   let ga = cells([128, 64], [64, 32], along = [Axis(0), Free])
   assert str.starts_with(marked(() => trace2("r", In(F16, ga), Out(F16, cells([128, 32], [64, 32])), (a, c) => {
     store_cell(c, load_at(a, [idx_of(arange(4))]))

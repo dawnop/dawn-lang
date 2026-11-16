@@ -1595,6 +1595,37 @@ fn summed(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 # The rows of `calls` as (name, parent) pairs.
 fn tree_of(calls: List[Call]) -> List[(String, Int)] = list.map(calls, c => (c.name, c.parent))
 
+# A public function with the effect is a call of its own, and a kernel may be
+# written as one: its entry function.
+pub fn entered(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let z = idx_const(0)
+  let t = load(x, z, [8])
+  store(out, z, t)
+}
+
+test "the kernel's own entry function is the root of the table: its calls are the top level, and it is no call of its own" {
+  let (_p, calls) = trace_calls("entered", [ByPtr("f64"), ByPtr("f64")], () => entered(param(F64, 0), param(F64, 1)))
+  assert tree_of(calls) == [("idx_const", 0 - 1), ("load", 0 - 1), ("store", 0 - 1)]
+  # the same calls written in the body itself make the same table
+  let (_q, written) = trace_calls("entered", [ByPtr("f64"), ByPtr("f64")], () => {
+    let z = idx_const(0)
+    let t = load(param(F64, 0), z, [8])
+    store(param(F64, 1), z, t)
+  })
+  assert tree_of(written) == tree_of(calls)
+  # two top-level calls have no single frame to be the root: both are calls
+  let (_r, two) = trace_calls("two", [ByPtr("f64"), ByPtr("f64")], () => {
+    entered(param(F64, 0), param(F64, 1))
+    entered(param(F64, 0), param(F64, 1))
+  })
+  assert tree_of(two) == [("entered", 0 - 1), ("entered", 0 - 1)]
+  # a region call that is the whole body is a call, not a root: the closure it runs is its body
+  let (_s, loop) = trace_calls("loop", [ByPtr("f64")], () => {
+    for _k in d_range(2, 9) { let _z = idx_const(0) }
+  })
+  assert tree_of(loop) == [("staged_for", 0 - 1), ("idx_const", 0)]
+}
+
 # The text of the lines `rs` (1-based, half-open) name, each trimmed.
 fn texts(m: LineMap, rs: List[(Int, Int)]) -> List[String] = {
   let all = str.split(m.text, "\n")
@@ -1615,7 +1646,7 @@ test "what a loop's body calls are the d_range's children, and the d_range keeps
   # `carry`, `get` and `set` are calls that record nothing, and the trial
   # that found the loop's carry left no row behind
   assert tree_of(calls) == [("block_id", 0 - 1), ("tile_at", 0 - 1), ("load", 0 - 1), ("idx_const", 0 - 1),
-    ("carry", 0 - 1), ("idx_const", 0 - 1), ("d_range", 0 - 1), ("get", 6), ("tile_at", 6), ("load", 6), ("add", 6),
+    ("carry", 0 - 1), ("idx_const", 0 - 1), ("staged_for", 0 - 1), ("get", 6), ("tile_at", 6), ("load", 6), ("add", 6),
     ("set", 6), ("tile_at", 0 - 1), ("get", 0 - 1), ("store", 0 - 1)]
   # a call's range holds its children's
   assert calls[6].ops_from < calls[8].ops_from && calls[10].ops_to < calls[6].ops_to
@@ -1666,8 +1697,8 @@ fn nested(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 
 test "regions inside regions nest the rows: each call's parent is the region whose closure it is in" {
   let (p, calls) = trace_calls("nested", [ByPtr("f64"), ByPtr("f64")], () => nested(param(F64, 0), param(F64, 1)))
-  assert tree_of(calls) == [("idx_const", 0 - 1), ("idx_const", 0 - 1), ("load", 0 - 1), ("carry", 0 - 1), ("d_range", 0 - 1),
-    ("d_range", 4), ("get", 5), ("d_reduce", 5), ("max", 7), ("broadcast", 5), ("add", 5), ("set", 5), ("get", 0 - 1),
+  assert tree_of(calls) == [("idx_const", 0 - 1), ("idx_const", 0 - 1), ("load", 0 - 1), ("carry", 0 - 1), ("staged_for", 0 - 1),
+    ("staged_for", 4), ("get", 5), ("d_reduce", 5), ("max", 7), ("broadcast", 5), ("add", 5), ("set", 5), ("get", 0 - 1),
     ("store", 0 - 1)]
   let m = must_map(p, calls)
   assert every_line_once(m)
@@ -1797,8 +1828,8 @@ test "the map agrees with sentinels: every line is the call that ran between the
   })
   # the constant is made where it is first used, by the broadcast, so the
   # `f_const` call has no line of its own
-  assert slots == [["head", "broadcast", "lt"], ["idx_const"], ["load"], ["idx_const"], ["d_range"], ["load"], ["d_scan", "lt"],
-    ["max", "lt"], ["d_scan"], ["add"], ["d_range"], ["store"], ["tail"]]
+  assert slots == [["head", "broadcast", "lt"], ["idx_const"], ["load"], ["idx_const"], ["staged_for"], ["load"], ["d_scan", "lt"],
+    ["max", "lt"], ["d_scan"], ["add"], ["staged_for"], ["store"], ["tail"]]
 }
 
 fn tabled(x: Param[Float], out: Param[Float]) -> Unit !Dev = {

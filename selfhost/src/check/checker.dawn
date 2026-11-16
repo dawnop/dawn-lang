@@ -10316,8 +10316,14 @@ fn check_staged_for(cx: Cx, pat: Pattern, from: Expr, ft: Ty, fx: TExpr, body: E
   # The one call the author wrote: `for` is how the loop is spelled, so the
   # call keeps the statement's site, named where the `for` starts. The cells'
   # opens and reads around it are the checker's own and carry none.
+  # `at`: the site of the iterable, the one place the loop's range is written
+  # (a placeholder the declaration's exit turns into the constant, as for any
+  # `caller()` default).
+  let no_wits: List[WitRef] = []
+  let no_evs: List[TExpr] = []
+  let loop_site = XCallBuiltin("caller", [], no_wits, no_evs, owner_off(cx, flo), owner_off(cx, fhi), NO_NAME, ty_loc())
   let (cxf, call) = staged_call(cx1, STAGED_ITER_ID, "staged_for", ft,
-    [XLocal(rsid, "\$staged", owner_off(cx, flo), owner_off(cx, fhi), ft), lam], wr, TyUnit, lo, hi,
+    [XLocal(rsid, "\$staged", owner_off(cx, flo), owner_off(cx, fhi), ft), lam, loop_site], wr, TyUnit, lo, hi,
     owner_off(cx, lo))
   cx1 = cxf
   stmts = stmts ++ [TSExpr(call, olo, ohi)]
@@ -10519,7 +10525,7 @@ fn check_staged_if(cx: Cx, ct: Ty, cond: TExpr, thn: Expr, els: Option[Expr], ex
 fn staged_src(body: String) -> String =
   "type V = { n: Int }\ntype C = { n: Int }\ntype R = { n: Int }\n" ++
   "impl StagedIter[R, ^{}] {\n  type Item = V\n" ++
-  "  fn staged_for(r: R, body: fn(V) -> Unit ^{}) -> Unit = body(V { n = 0 })\n}\n" ++
+  "  fn staged_for(r: R, body: fn(V) -> Unit ^{}, at: Loc) -> Unit = body(V { n = 0 })\n}\n" ++
   "impl StagedVar[V, ^{}] {\n  type Cell = C\n" ++
   "  fn var_open(v: V) -> C = C { n = v.n }\n  fn var_get(c: C) -> V = V { n = c.n }\n" ++
   "  fn var_set(c: C, v: V) -> Unit = ()\n}\n" ++
@@ -10544,7 +10550,7 @@ fn staged_shape(tm: TModule) -> (List[String], Bool, List[String]) = {
               if source.role != "var" { panic("staged var source lost its role") }
               opens = opens ++ [n]
             }
-            TSExpr(XCallFn(_, "staged_for", [XLocal(..), XLambda(..)], _, _, Some(_), _, _, nlo, _, source), ..) -> {
+            TSExpr(XCallFn(_, "staged_for", [XLocal(..), XLambda(..), _], _, _, Some(_), _, _, nlo, _, source), ..) -> {
               if source.role != "for" || source.nhi != nlo + 3 { panic("staged for source lost its keyword span") }
               called = true
             }
@@ -10609,7 +10615,7 @@ test "an inner staged loop passes the outer cell through and opens only its own"
   let inner_opens = match arith_body(tm, "f") {
     XBlock([_, TSExpr(XBlock(outer, ..), ..)], ..) ->
       match outer[2] {
-        TSExpr(XCallFn(_, "staged_for", [_, XLambda(_, _, XBlock(body, ..), ..)], ..), ..) ->
+        TSExpr(XCallFn(_, "staged_for", [_, XLambda(_, _, XBlock(body, ..), ..), _], ..), ..) ->
           match body[1] {
             TSExpr(XBlock(ss, ..), ..) -> {
               var ns: List[String] = []

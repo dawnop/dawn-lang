@@ -909,8 +909,9 @@ application across module boundaries. Cell content support and installation life
 checks remain independent of ordinary closure value captures.
 
 - **`StagedIter`** 与 **`StagedVar`**（背后是 staged `for`，§4.7）：
-  `trait StagedIter[R: ^{c}, ^c] { type Item: ^{c}  effect StagedIter = !()  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter ^{c}) -> Unit !R.StagedIter }`，
+  `trait StagedIter[R: ^{c}, ^c] { type Item: ^{c}  effect StagedIter = !()  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter ^{c}, at: Loc = caller()) -> Unit !R.StagedIter }`，
   `trait StagedVar[T: ^{c}, ^c] { type Cell: ^{c}  effect StagedVar = !()  fn var_open(v: T) -> T.Cell !T.StagedVar  fn var_get(c: T.Cell) -> T !T.StagedVar  fn var_set(c: T.Cell, v: T) -> Unit !T.StagedVar }`。
+  `staged_for` 的 `at` 是 `for` 所遍历的表达式的位置，由检查器在改写循环时传入；impl 把它写作不带默认值的 `at: Loc`。
   两者的方法名由语言消费，**不**进入函数命名空间；不可 derive；各带一个与 trait 同名的关联效果，
   默认纯（与算术、字面量 trait 同），所以同时实现两者的类型在泛型代码里写 `!T.StagedIter`、
   `!T.StagedVar` 不会混淆；语言不为任何类型提供 impl。两个名字同样从此在 trait 与效果位置被占用。

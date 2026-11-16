@@ -21,15 +21,15 @@ The two are paired strictly, level by level of the tree: under each parent,
 the names of the kernel's calls in the order they ran must be EXACTLY the
 names the parser finds in evaluation order (arguments left to right, each
 call after its arguments, a closure handed to a call being that call's
-children). Anything else stops here with both lists printed: a helper with
-an effect, a call under unknown host control flow, a closure bound before the call
-that runs it, a call of a closure. Which names are calls at all is read off
-the recording itself (the names of the rows it ran, and the functions of this
-file it ran for the author, by the compiler's own record of their identity,
-held to the parse); every other call, `permute(..)` or `neg_inf()`, records
-nothing and is looked through.
-Only literal Bool fields of the BF16 policy captured by fa_kernel select a
-source arm; every other host condition keeps the global refusal.
+children). Anything else stops here with both lists printed: a call under
+unknown host control flow, a closure bound before the call that runs it, a call
+of a closure. Which names are calls at all is read off the recording itself (the
+names of the rows it ran, and the functions of this file it ran for the author,
+by the compiler's own record of their identity, held to the parse); every
+other call, `permute(..)` or `neg_inf()`, records nothing and is looked
+through. A helper of the kernel's file (`fa_exp`) is one call among the rest:
+`Dev` declares `calls(..)`, so every public function with the effect is
+recorded, and what the helper calls on its own behalf is its own operations.
 
 The generator is a pure function of files on disk (site/build.sh says why:
 scripts/site-dist-diff.sh runs it on two backends and compares), so the pairing
@@ -87,7 +87,7 @@ EDITS = [
 
 MAIN = '''
 use std/provenance.{observe, completed}
-use tileir/origin.{rows_of, callees, Helper}
+use tileir/origin.{rows_of, callees}
 
 fn spans(rs: List[(Int, Int)]) -> String =
   list.fold(rs, "", (acc, r) => {
@@ -107,9 +107,6 @@ pub fn main() -> Unit !io = {
         for f in facts {
           if f.marked {
             println("callee ${f.name}")
-          }
-          if f.kind == Helper {
-            println("helper ${f.name} ${f.module} ${f.declaration} ${f.start} ${f.end} ${f.role}")
           }
         }
       }
@@ -357,22 +354,18 @@ class Env:
     `tiles` the names bound to something tile-valued (so that an operator over
     them is a recorded call and an operator over host numbers is not)."""
 
-    def __init__(self, policy=None):
-        self.policy = policy or {}
+    def __init__(self):
         self.decls, self.cells, self.tiles = [], set(), set()
 
 
-OPERATORS = {"ADD": {"add", "addi", "idx_add"}, "SUB": {"sub", "subi", "idx_sub"},
-             "MUL": {"mul", "muli", "idx_mul"}, "DIV": {"div", "divi", "idx_div"},
-             "REM": {"idx_rem"}}
+OPERATORS = {"ADD": {"add", "addi"}, "SUB": {"sub", "subi"},
+             "MUL": {"mul", "muli"}, "DIV": {"div", "divi"},
+             "REM": {"rem"}}
 SRC = ""
 
 
 def node_name(n: Node) -> str:
     return n.text.split(" ")[1]
-
-
-HELPERS = {}
 
 
 def tile_valued(n: Node, dev: set, env: Env) -> bool:
@@ -428,11 +421,11 @@ def static_calls(n: Node, dev: set, env: "Env" = None) -> list:
             calls += static_calls(k, dev, env)
         if name in env.cells:
             m = re.search(r"name@(\d+)\.\.(\d+)", n.text)
-            calls.append({"names": {"set"}, "span": (n.lo, n.hi), "name_span": (int(m.group(1)), int(m.group(2))),
+            calls.append({"names": {"var_set"}, "span": (n.lo, n.hi), "name_span": (int(m.group(1)), int(m.group(2))),
                           "text": name, "kids": []})
         return calls
     if kind == "Var" and node_name(n) in env.cells:
-        return [{"names": {"get"}, "span": (n.lo, n.hi), "name_span": (n.lo, n.hi), "text": node_name(n), "kids": []}]
+        return [{"names": {"var_get"}, "span": (n.lo, n.hi), "name_span": (n.lo, n.hi), "text": node_name(n), "kids": []}]
     if kind == "Binary":
         op = n.text.split(" ")[1]
         m = re.search(r"op@(\d+)\.\.(\d+)", n.text)
@@ -462,19 +455,15 @@ def static_calls(n: Node, dev: set, env: "Env" = None) -> list:
         opened = []
         for name, let in carried:
             at = let.lo + SRC[let.lo:let.hi].index(name, 3)
-            opened.append({"names": {"carry"}, "span": (let.lo, let.hi), "name_span": (at, at + len(name)),
+            opened.append({"names": {"var_open"}, "span": (let.lo, let.hi), "name_span": (at, at + len(name)),
                            "text": name, "kids": []})
-        inside = Env(env.policy)
+        inside = Env()
         inside.decls, inside.tiles, inside.cells = env.decls, set(env.tiles), set(name for name, _ in carried)
         kids = static_calls(n.kids[2], dev, inside)
-        closed = [{"names": {"get"}, "span": (n.lo, n.hi), "name_span": (n.lo, n.lo + 3), "text": "for", "kids": []}
+        closed = [{"names": {"var_get"}, "span": (n.lo, n.hi), "name_span": (n.lo, n.lo + 3), "text": "for", "kids": []}
                   for _ in carried]
-        return before + opened + [{"names": {node_name(head)}, "span": (n.lo, n.hi), "name_span": (head.lo, head.hi),
+        return before + opened + [{"names": {"staged_for"}, "span": (n.lo, n.hi), "name_span": (head.lo, head.hi),
                                    "text": node_name(head), "site": n.kids[1].lo, "kids": kids}] + closed
-    if kind == "If" and len(n.kids) == 3 and n.kids[0].kind == "FieldAccess":
-        cond = n.kids[0]
-        if len(cond.kids) == 1 and cond.kids[0].kind == "Var" and node_name(cond.kids[0]) == "math" and node_name(cond) in env.policy:
-            return static_calls(n.kids[1 if env.policy[node_name(cond)] else 2], dev, env)
     if kind in ("If", "Match", "For", "While") and any_call(n, dev):
         fail(f"a call under host control flow at {n.lo}..{n.hi}")
     if kind in ("Apply", "MethodCall"):
@@ -498,22 +487,18 @@ def static_calls(n: Node, dev: set, env: "Env" = None) -> list:
                         closures += static_calls(k, dev, env)
             else:
                 before += static_calls(a, dev, env)
-                if inner.kind in ("Float", "Int") and callee in dev and callee != "lit":
+                if inner.kind in ("Float", "Int") and callee in dev and callee != "from_float":
                     # A bare number handed to a call of the recording may be
                     # made a tile constant by the compiler before the call
-                    # runs (`mma(a, b, 0.0)`), and that is a recorded `lit`
-                    # row with no call of its own in the source. It may also
+                    # runs (`mma(a, b, 0.0)`), and that is a recorded
+                    # `from_float` row with no call of its own in the source. It may also
                     # stay a host number (`full(.., 0.0)`), so the entry is
                     # optional: `pair` takes it when the run has the `lit`
                     # row here and leaves it when it does not.
-                    before.append({"names": {"lit"}, "optional": True, "span": (inner.lo, inner.hi),
+                    before.append({"names": {"from_float"}, "optional": True, "span": (inner.lo, inner.hi),
                                    "name_span": (inner.lo, inner.hi), "text": SRC[inner.lo:inner.hi], "kids": []})
         if head is not None and head.kind != "Var":
             before = static_calls(head, dev, env) + before
-        if callee in HELPERS:
-            inside = Env(env.policy)
-            inside.tiles = {"x", "y"}
-            closures = static_calls(HELPERS[callee], dev, inside)
         if callee in dev:
             return before + [{"names": {callee}, "span": (n.lo, n.hi), "name_span": name_span, "text": callee,
                               "kids": closures}]
@@ -569,18 +554,18 @@ def pair(static: list, rows: list) -> list:
 
 def selftest() -> None:
     """The pairing's rules on made-up rows, so that a change to them is caught
-    without a kernel: a bare number is a `lit` row where the run has one and
+    without a kernel: a bare number is a `from_float` row where the run has one and
     nothing where it has none, and anything else still stops."""
     def call(name, **kw):
         return {"names": {name}, "span": (0, 0), "name_span": (0, 0), "text": name, "kids": [], **kw}
-    lit = call("lit", optional=True)
+    lit = call("from_float", optional=True)
     row = lambda i, name: {"id": i, "parent": -1, "name": name, "lines": []}
-    ok = pair([call("load"), lit, call("mma")], [row(0, "load"), row(1, "lit"), row(2, "mma")])
+    ok = pair([call("load"), lit, call("mma")], [row(0, "load"), row(1, "from_float"), row(2, "mma")])
     assert len(ok) == 3 and ok[1] is lit
     assert pair([lit, call("full")], [row(0, "full")])[0]["names"] == {"full"}
-    for static, rows in (([call("load"), call("mma")], [row(0, "load"), row(1, "lit"), row(2, "mma")]),
-                         ([lit, call("mma")], [row(0, "lit"), row(1, "lit"), row(2, "mma")]),
-                         ([lit, call("mma")], [row(0, "mma"), row(1, "lit")])):
+    for static, rows in (([call("load"), call("mma")], [row(0, "load"), row(1, "from_float"), row(2, "mma")]),
+                         ([lit, call("mma")], [row(0, "from_float"), row(1, "from_float"), row(2, "mma")]),
+                         ([lit, call("mma")], [row(0, "mma"), row(1, "from_float")])):
         try:
             with contextlib.redirect_stderr(io.StringIO()):
                 pair(static, rows)
@@ -623,29 +608,6 @@ def validate_factory(factory):
         fail("fa_kernel does not forward its parameters unchanged")
 
 
-def fixed_policy(dump):
-    """Read the literal Bool fields of the exact BF16 capture used by the harness.
-
-    This is one fixed strategy constructor, not an interpreter. Changes to
-    its shape or an unknown condition fail closed. The runtime locations
-    independently distinguish identical call names in the two source arms.
-    """
-    fn = parse_tree(dump, "fa_bf16_math")
-    bodies = [k for k in fn.kids if k.kind == "Record"]
-    if len(bodies) != 1 or node_name(bodies[0]) != "FaNumerics" or "spread=false" not in bodies[0].text:
-        fail("fa_bf16_math is not a literal FaNumerics constructor")
-    fields = {}
-    for field in bodies[0].kids:
-        name = node_name(field).removeprefix("name=")
-        if len(field.kids) == 1 and field.kids[0].kind == "Bool":
-            if name in fields:
-                fail(f"duplicate numeric policy field {name}")
-            fields[name] = node_name(field.kids[0]) == "true"
-    if set(fields) != {"base2", "exp_ftz", "approx_div", "div_ftz"}:
-        fail("fa_bf16_math does not provide exactly the fixed Bool policy fields")
-    return fields
-
-
 def validate_pairs(src, rows, paired):
     at = place(src)
     for r, s in zip(rows, paired):
@@ -665,7 +627,7 @@ def expect_refused(label, action):
     raise AssertionError(f"{label} stayed green")
 
 
-def strategy_controls(src, body, dev, policy, static, rows, paired):
+def strategy_controls(src, body, dev, static, rows, paired):
     """Faults over this real recording, including two same-named exp sites."""
     queries = [r for r in rows if r["name"] == "tile_shape"]
     if len(queries) != 1 or queries[0]["lines"]:
@@ -673,71 +635,26 @@ def strategy_controls(src, body, dev, policy, static, rows, paired):
     casts = [r for r in rows if r["name"] == "to"]
     if len(casts) != 1 or not casts[0]["lines"]:
         fail("the BF16 probability cast must own real IR")
-    wrong = dict(policy, base2=not policy["base2"])
-    expect_refused("wrong strategy arm", lambda: pair(static_calls(body, dev, Env(wrong)), rows))
     exp_rows = [i for i, row in enumerate(rows) if row["name"] == "fa_exp"]
     if len(exp_rows) != 2:
         fail("the BF16 instance did not record both base-2 exponentials")
     moved = copy.deepcopy(paired)
     moved[exp_rows[0]] = copy.deepcopy(paired[exp_rows[1]])
     expect_refused("same-name wrong source span", lambda: validate_pairs(src, rows, moved))
-    missing = copy.deepcopy(static)
+
     def drop_call(calls, name):
         return [dict(c, kids=drop_call(c["kids"], name)) for c in calls if name not in c["names"]]
     for name in ["fa_exp", "tile_shape"]:
         expect_refused("missing " + name, lambda: pair(drop_call(static, name), rows))
-    unknown = copy.deepcopy(body)
-    def spoil(n):
-        if n.kind == "FieldAccess" and node_name(n) == "base2":
-            n.kids[0].text = "Var unknown_capture"
-        for k in n.kids:
-            spoil(k)
-    unknown = copy.deepcopy(HELPERS["fa_exp"])
-    spoil(unknown)
-    expect_refused("unknown host condition", lambda: static_calls(unknown, dev, Env(policy)))
 
 
-
-def row_offset(src: str, at: str) -> int:
-    line, col = map(int, at.split(":"))
-    starts = [0] + [m.end() for m in re.finditer("\n", src)]
-    return starts[line - 1] + col - 1
-
-
-def helpers_of(dump: str, src: str, rows: list, facts: list):
-    """The author's functions that wrote rows, from the recorded identity.
-
-    A fact is the compiler's own record of a function this run called: the
-    module and declaration it is defined in and the span of its definition
-    inside that declaration. It is accepted only against this source's parse:
-    the declaration must be one top level `Fn` of the file, and its span must
-    be that function's whole length, so a recording of another revision is
-    refused here and never highlights text it did not run. A helper counts
-    when a recorded row was written inside its definition, the kernel's own
-    function excepted (it is the root of the walk, not a call of it).
-    """
-    helpers, defs = {}, {}
-    for f in facts:
-        name = f["name"]
-        if name == BODY or name in helpers or f["role"] != "function":
-            continue  # a closure's definition is no `Fn` of the file to expand
-        if f["module"] != "main" or f["declaration"] != f"Nf{len(name)}:{name}":
-            fail(f"helper `{name}` has an identity this map cannot place: {f}")
-        nodes = [n for n in parse_nodes(dump) if n.depth == 1 and n.text.startswith(f"Fn {name} ")]
-        if len(nodes) != 1:
-            fail(f"helper `{name}` is not one function of the file in the parse")
-        node = nodes[0]
-        if f["start"] != 0 or f["end"] != node.hi - node.lo:
-            fail(f"helper `{name}` was recorded with another definition length than the source has "
-                 f"({f['end']} against {node.hi - node.lo}): the recording is of another revision")
-        owns = [r for r in rows if r["at"] != "-" and node.lo <= row_offset(src, r["at"]) < node.hi]
-        if owns:
-            bodies = [k for k in parse_tree(dump, name).kids if k.kind == "Block"]
-            if len(bodies) != 1:
-                fail(f"{name} has no unique block body")
-            helpers[name] = bodies[0]
-            defs[name] = node
-    return helpers, defs
+def range_heads() -> set:
+    """The public functions of tileir/dev.dawn that answer a range type, which
+    a staged `for` loops over: the loop is recorded as `staged_for`, and the
+    source spells it with the constructor's name."""
+    dev = (ROOT / "packages" / "tileir" / "src" / "dev.dawn").read_text(encoding="utf-8")
+    return set(re.findall(r"^pub fn (\w+)(?:\[[^\n]*\])?\([^\n]*\) -> DRange\[", dev, re.M)) | \
+        set(re.findall(r"^pub fn (\w+)[^\n]*\n[^\n]*\) -> DRange\[", dev, re.M))
 
 
 def parse_nodes(dump: str):
@@ -763,15 +680,13 @@ def record(*, source_path: Path = KERNELS, recording: str | None = None,
     call = next(k for k in lam.kids if k.kind != "LParam")
     call.kids[1], call.kids[2] = call.kids[2], call.kids[1]
     expect_refused("wrong factory forwarding", lambda: validate_factory(altered))
-    rows, head, tail, ops, facts, callees = [], None, None, None, [], set()
+    rows, head, tail, ops, callees = [], None, None, None, set()
     for line in ran.splitlines():
         w = line.split(" ")
         if w[0] == "call":
             rows.append({"id": int(w[1]), "parent": int(w[2]), "name": w[3], "at": w[4], "lines": w[5:]})
         elif w[0] == "callee":
             callees.add(w[1])
-        elif w[0] == "helper":
-            facts.append({"name": w[1], "module": w[2], "declaration": w[3], "start": int(w[4]), "end": int(w[5]), "role": w[6]})
         elif w[0] == "head":
             head = " ".join(w[1:])
         elif w[0] == "tail":
@@ -780,25 +695,23 @@ def record(*, source_path: Path = KERNELS, recording: str | None = None,
             ops = w[1]
     if head is None or tail is None or ops is None:
         fail("the harness printed no head, tail or ops line:\n" + ran[-1000:])
-    global HELPERS
-    HELPERS, defs = helpers_of(p.stdout, src, rows, facts)
     # The names the recording can show: the rows it kept, the functions the
     # compiler's record says ran a call mark (a row lost from the recording is
-    # still a call the source must account for) and the helpers whose own calls
-    # it ran (a helper's own row is one of the marks; its identity is not).
-    dev = {r["name"] for r in rows} | set(HELPERS) | callees
+    # still a call the source must account for), and the range constructors a
+    # staged `for` loops over (the loop's own row is `staged_for`).
+    dev = {r["name"] for r in rows} | callees | range_heads()
     fn = parse_tree(p.stdout, BODY)
     body = [k for k in fn.kids if k.kind == "Block"]
     if len(body) != 1:
         fail(f"{NAME} is not a function with a block body")
     global SRC
     SRC = src
-    static = static_calls(body[0], dev, Env(fixed_policy(p.stdout)))
+    static = static_calls(body[0], dev, Env())
     paired = pair(static, rows)
     at = place(src)
     validate_pairs(src, rows, paired)
-    strategy_controls(src, body[0], dev, fixed_policy(p.stdout), static, rows, paired)
-    print("PASS fresh recording controls: wrong arm, same-name span, missing helper, missing tile_shape, wrong factory forwarding, unknown host branch", file=sys.stderr)
+    strategy_controls(src, body[0], dev, static, rows, paired)
+    print("PASS fresh recording controls: same-name span, missing helper, missing tile_shape, wrong factory forwarding", file=sys.stderr)
     golden = (GOLDEN / f"{NAME}.mlir").read_text(encoding="utf-8")
     cast_lines = [golden.splitlines()[i - 1] for span in next(r for r in rows if r["name"] == "to")["lines"]
                   for i in range(*map(int, span.split("-")))]
@@ -808,45 +721,30 @@ def record(*, source_path: Path = KERNELS, recording: str | None = None,
         fail("the selected factory recording differs from the full golden text")
     if int(tail.split("-")[1]) - 1 != golden.count("\n"):
         fail(f"the map ends at line {int(tail.split('-')[1]) - 1}, {NAME}.mlir has {golden.count(chr(10))} lines")
-    definitions = [fn, parse_tree(p.stdout, "fa_kernel")] + [defs[name] for name in HELPERS]
+    definitions = [fn, parse_tree(p.stdout, "fa_kernel")]
     first = src[:min(f.lo for f in definitions)].count("\n") + 1
     last = src[:max(f.hi for f in definitions)].count("\n") + 1
     out = [f"kernel {NAME}", f"source {hashlib.sha256(src.encode('utf-8')).hexdigest()}", f"fn {first}-{last}",
            f"ops {ops}", f"head {head}"]
     for r, s in zip(rows, paired):
         (a, b), (na, nb) = s["span"], s["name_span"]
-        # A helper's row names its definition: its own calls lie in that span,
-        # not in the call that ran it. The span is the recorded identity, held
-        # to this source's parse in helpers_of.
-        definition = [f"def={at(defs[r['name']].lo)}-{at(defs[r['name']].hi)}"] if r["name"] in HELPERS else []
         out.append(" ".join(["call", str(r["id"]), str(r["parent"]), r["name"],
-                             f"{at(a)}-{at(b)}", f"{at(na)}-{at(nb)}"] + definition + r["lines"]))
+                             f"{at(a)}-{at(b)}", f"{at(na)}-{at(nb)}"] + r["lines"]))
     out.append(f"tail {tail}")
     return "\n".join(out) + "\n"
 
 
-def without_helper_marks(src: str) -> str:
-    """Edit only a copy, retaining line numbers and both numerical branches."""
+def without_helper_records(src: str) -> str:
+    """Edit only a copy, retaining line numbers and both numerical branches:
+    the two helpers stop being public functions with the effect, so the
+    compiler no longer writes a call for them (the new spelling of deleting
+    their marks)."""
     for name in ("fa_exp", "fa_divide"):
-        pattern = re.compile(r"^fn " + name + r"\[.*?^\}\n", re.M | re.S)
-        helpers = list(pattern.finditer(src))
-        if len(helpers) != 1:
-            fail(f"{name}: expected 1 helper definition, got {len(helpers)}")
-        helper = helpers[0].group()
-        changed = helper
-        for mark in (f't_call_enter("{name}", Some(at))', "t_body_enter()",
-                     "t_body_exit()", "t_call_exit()"):
-            line = "  " + mark + "\n"
-            if changed.count(line) != 1:
-                fail(f"{name}: {mark}: expected 1 match")
-            changed = changed.replace(line, "\n")
-        src = src[:helpers[0].start()] + changed + src[helpers[0].end():]
-    # These imports are used only by the eight deleted calls. Removing their
-    # names preserves the line count, so an unused-import error is not a red.
-    imports = ", t_call_enter, t_call_exit, t_body_enter, t_body_exit"
-    if src.count(imports) != 1:
-        fail("helper mark imports: expected 1 match")
-    return src.replace(imports, "")
+        old = "pub fn " + name + "["
+        if src.count(old) != 1:
+            fail(f"{name}: expected 1 public helper definition, got {src.count(old)}")
+        src = src.replace(old, "fn " + name + "[")
+    return src
 
 
 def call_origin_control() -> None:
@@ -862,7 +760,7 @@ def call_origin_control() -> None:
     products = []
     counts = []
     with tempfile.TemporaryDirectory(prefix="tile-call-origin.") as work:
-        for variant, text in (("baseline", source), ("deleted", without_helper_marks(source))):
+        for variant, text in (("baseline", source), ("deleted", without_helper_records(source))):
             project = Path(work) / variant
             (project / "src").mkdir(parents=True)
             (project / "dawn.toml").write_text(
@@ -896,19 +794,19 @@ def call_origin_control() -> None:
                 diagnostic = errors.getvalue()
                 if (variant != "deleted" or error.code != 1
                         or "source calls" not in diagnostic or "recording ran" not in diagnostic
-                        or "fa_divide" not in diagnostic or "'div'" not in diagnostic):
+                        or "'div'" not in diagnostic):
                     fail(f"{variant} failed for the wrong reason:\n{diagnostic}")
-                print("PASS deleted marks: compilation and recording succeeded; strict pairing REJECTED")
+                print("PASS private helpers: compilation and recording succeeded; strict pairing REJECTED")
                 print(diagnostic.strip())
             else:
                 if variant == "deleted":
-                    fail("deleting the helper marks escaped strict source pairing")
+                    fail("making the helpers private escaped strict source pairing")
                 if mapped != OUT.read_text(encoding="utf-8"):
                     fail("baseline does not reproduce the checked-in source map")
                 print("PASS baseline: strict pairing and checked-in map")
-    if products[0] != products[1] or counts != [45, 42]:
-        fail(f"expected identical device products and calls 45 -> 42, got {counts}")
-    print("PASS identical MLIR and bytecode; calls 45 -> 42")
+    if products[0] != products[1] or counts != [42, 42]:
+        fail(f"expected identical device products and calls 42 -> 42, got {counts}")
+    print("PASS identical MLIR and bytecode; calls 42 -> 42")
     print(f"call-origin control wall time: {time.monotonic() - started:.2f}s")
 
 

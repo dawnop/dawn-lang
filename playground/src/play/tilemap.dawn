@@ -15,7 +15,7 @@
 # must be exactly the names the recording ran) so a wrong highlight cannot be
 # the result of a guess; the cost is that code the walk does not understand
 # (a call under host control flow, a closure bound before the call that runs
-# it, a helper that records) is unmapped rather than approximated.
+# it) is unmapped rather than approximated.
 #
 # Where the pieces are. Everything here is a function of strings: the source,
 # the `dawn parse` dump of it, and what the instrumented program printed. The
@@ -126,22 +126,22 @@ pub type SCall = { names: List[String], optional: Bool, lo: Int, hi: Int, nlo: I
 # not), the `var`s of the loop being walked (each mention a recorded `get`,
 # each assignment a `set`), and the `var`s declared so far with the span of
 # their declaration.
-type Env = { tiles: List[String], cells: List[String], decls: List[(String, Int, Int)], policy: List[(String, Bool)], helpers: List[(String, Node)] }
+type Env = { tiles: List[String], cells: List[String], decls: List[(String, Int, Int)] }
 
 fn call_of(names: List[String], lo: Int, hi: Int, nlo: Int, nhi: Int, text: String, kids: List[SCall]) -> SCall =
   SCall { names = names, optional = false, lo = lo, hi = hi, nlo = nlo, nhi = nhi, text = text, kids = kids }
 
 fn operator_names(op: String) -> List[String] =
   if op == "ADD" {
-    ["add", "addi", "idx_add"]
+    ["add", "addi"]
   } else if op == "SUB" {
-    ["sub", "subi", "idx_sub"]
+    ["sub", "subi"]
   } else if op == "MUL" {
-    ["mul", "muli", "idx_mul"]
+    ["mul", "muli"]
   } else if op == "DIV" {
-    ["div", "divi", "idx_div"]
+    ["div", "divi"]
   } else if op == "REM" {
-    ["idx_rem"]
+    ["rem"]
   } else {
     []
   }
@@ -208,7 +208,7 @@ fn walk(n: Node, dev: List[String], env: Env, src: String) -> Result[(List[SCall
   } else if n.kind == "Assign" {
     walk_assign(n, dev, env, src)
   } else if n.kind == "Var" && list.contains(env.cells, second_word(n.text)) {
-    Ok(([call_of(["get"], n.lo, n.hi, n.lo, n.hi, second_word(n.text), [])], env))
+    Ok(([call_of(["var_get"], n.lo, n.hi, n.lo, n.hi, second_word(n.text), [])], env))
   } else if n.kind == "Binary" && len(n.kids) == 2 {
     walk_binary(n, dev, env, src)
   } else if n.kind == "Unary" && second_word(n.text) == "NEG" && tile_valued(n, dev, env) {
@@ -218,11 +218,6 @@ fn walk(n: Node, dev: List[String], env: Env, src: String) -> Result[(List[SCall
     }
   } else if n.kind == "For" && len(n.kids) == 3 && staged_head(n.kids[1], dev) != "" {
     walk_staged_for(n, dev, env, src)
-  } else if n.kind == "If" && len(n.kids) == 3 && len(env.policy) > 0 {
-    match selected_arm(n.kids[0], env.policy) {
-      None -> Err("an unknown host policy condition at ${where_is(src, n.lo)}")
-      Some(on) -> walk(n.kids[if on { 1 } else { 2 }], dev, env, src)
-    }
   } else if (n.kind == "If" || n.kind == "Match" || n.kind == "For" || n.kind == "While") && any_call(n, dev) {
     Err("a call under host control flow at ${where_is(src, n.lo)}")
   } else if n.kind == "Apply" || n.kind == "MethodCall" {
@@ -241,7 +236,7 @@ fn walk_let(n: Node, dev: List[String], env: Env, src: String) -> Result[(List[S
       let is_var = str.contains(n.text, "mut=true")
       let tiles = if is_tile || is_var { env2.tiles ++ [name] } else { env2.tiles }
       let decls = if is_var { env2.decls ++ [(name, n.lo, n.hi)] } else { env2.decls }
-      Ok((cs, Env { ..env2, tiles = tiles, decls = decls, policy = if name == "math" { [] } else { env2.policy } }))
+      Ok((cs, Env { ..env2, tiles = tiles, decls = decls }))
     }
   }
 }
@@ -253,7 +248,7 @@ fn walk_assign(n: Node, dev: List[String], env: Env, src: String) -> Result[(Lis
     Ok((cs, env2)) ->
       if list.contains(env.cells, name) {
         match tagged(n.text, "name@") {
-          Some((a, b)) -> Ok((cs ++ [call_of(["set"], n.lo, n.hi, a, b, name, [])], env2))
+          Some((a, b)) -> Ok((cs ++ [call_of(["var_set"], n.lo, n.hi, a, b, name, [])], env2))
           None -> Err("an assignment at ${where_is(src, n.lo)} has no name span")
         }
       } else {
@@ -309,7 +304,7 @@ fn walk_staged_for(n: Node, dev: List[String], env: Env, src: String) -> Result[
         match str.index_of(str.drop(str.slice(src, lo, hi), 3), name) {
           Some(i) -> {
             let at_name = lo + 3 + i
-            opened = opened ++ [call_of(["carry"], lo, hi, at_name, at_name + len(name), name, [])]
+            opened = opened ++ [call_of(["var_open"], lo, hi, at_name, at_name + len(name), name, [])]
           }
           None -> {
             return Err("the declaration of `${name}` at ${where_is(src, lo)} does not hold its name")
@@ -323,8 +318,8 @@ fn walk_staged_for(n: Node, dev: List[String], env: Env, src: String) -> Result[
       match walk(n.kids[2], dev, inside, src) {
         Err(e) -> Err(e)
         Ok((kids, inner)) -> {
-          let closed = map(carried, _d => call_of(["get"], n.lo, n.hi, n.lo, n.lo + 3, "for", []))
-          let region = call_of([second_word(head.text)], n.lo, n.hi, head.lo, head.hi, second_word(head.text), kids)
+          let closed = map(carried, _d => call_of(["var_get"], n.lo, n.hi, n.lo, n.lo + 3, "for", []))
+          let region = call_of(["staged_for"], n.lo, n.hi, head.lo, head.hi, second_word(head.text), kids)
           Ok((before ++ opened ++ [region] ++ closed, Env { ..env2, decls = inner.decls }))
         }
       }
@@ -376,14 +371,14 @@ fn walk_apply(n: Node, dev: List[String], env0: Env, src: String) -> Result[(Lis
           env = env2
         }
       }
-      if (inner.kind == "Float" || inner.kind == "Int") && list.contains(dev, callee) && callee != "lit" {
+      if (inner.kind == "Float" || inner.kind == "Int") && list.contains(dev, callee) && callee != "from_float" {
         # A bare number handed to a call of the recording may be made a tile
         # constant by the compiler before the call runs (`mma(a, b, 0.0)`),
-        # and that is a recorded `lit` row with no call of its own in the
+        # and that is a recorded `from_float` row with no call of its own in the
         # source. It may also stay a host number (`full(.., 0.0)`), so the
-        # entry is optional: the pairing takes it when the run has the `lit`
+        # entry is optional: the pairing takes it when the run has the `from_float`
         # row here and leaves it when it does not.
-        before = before ++ [SCall { names = ["lit"], optional = true, lo = inner.lo, hi = inner.hi, nlo = inner.lo, nhi = inner.hi, text = str.slice(src, inner.lo, inner.hi), kids = [] }]
+        before = before ++ [SCall { names = ["from_float"], optional = true, lo = inner.lo, hi = inner.hi, nlo = inner.lo, nhi = inner.hi, text = str.slice(src, inner.lo, inner.hi), kids = [] }]
       }
     }
   }
@@ -400,18 +395,6 @@ fn walk_apply(n: Node, dev: List[String], env0: Env, src: String) -> Result[(Lis
           }
         }
       }
-    None -> ()
-  }
-  match list.find(env.helpers, p => { let (name, _body) = p
-    name == callee }) {
-    Some((_name, body)) -> {
-      # Only the fixed, same-file numerical helpers are expanded. Their own
-      # call marks retain the invocation as a parent of the definition's calls.
-      match walk(body, dev, Env { ..env, tiles = ["x", "y"], cells = [], decls = [], helpers = [] }, src) {
-        Err(e) -> return Err(e)
-        Ok((kids, _inner)) -> { closures = kids }
-      }
-    }
     None -> ()
   }
   match name_span {
@@ -497,54 +480,16 @@ fn trace_kernel(root: Node, value: Node, arity: Int) -> Option[String] = {
   }
 }
 
-# Deliberately bounded wiring for the page's fixed BF16 instance. There is no
-# host evaluator: one literal record constructor is forwarded unchanged by
-# the same-file factory. Other expressions keep the existing refusal.
-fn captured_policy(root: Node, value: Node) -> List[(String, Bool)] = {
-  if value.kind != "Apply" || len(value.kids) != 3 || value.kids[0].kind != "Var" || second_word(value.kids[0].text) != "fa_kernel" { return [] }
-  if value.kids[1].kind != "Ctor" || second_word(value.kids[1].text) != "BF16" { return [] }
-  let math = value.kids[2]
-  if math.kind != "Apply" || len(math.kids) != 1 || math.kids[0].kind != "Var" || second_word(math.kids[0].text) != "fa_bf16_math" { return [] }
-  let factory = match kernel_fn(root, "fa_kernel") { Some(f) -> f
-    None -> return [] }
-  let lambda = match fn_body(factory) { Some(f) -> f
-    None -> return [] }
-  let rest = filter(lambda.kids, p => p.kind != "LParam")
-  if lambda.kind != "Lambda" || len(rest) != 1 { return [] }
-  let call = rest[0]
-  if call.kind != "Apply" || len(call.kids) != 8 || second_word(call.kids[0].text) != "flash_attn"
-    || call.kids[6].kind != "Var" || second_word(call.kids[6].text) != "dt"
-    || call.kids[7].kind != "Var" || second_word(call.kids[7].text) != "math" { return [] }
-  let factory_params = filter(factory.kids, p => p.kind == "Param")
-  if len(factory_params) != 2 || second_word(factory_params[0].text) != "dt" || second_word(factory_params[1].text) != "math" { return [] }
-  let constructor = match kernel_fn(root, "fa_bf16_math") { Some(f) -> f
-    None -> return [] }
-  if list.any(constructor.kids, k => k.kind == "Param") { return [] }
-  let record = match fn_body(constructor) { Some(f) -> f
-    None -> return [] }
-  if record.kind != "Record" || second_word(record.text) != "FaNumerics" || not str.contains(record.text, "spread=false") { return [] }
-  var policy: List[(String, Bool)] = []
-  for f in record.kids {
-    if len(f.kids) == 1 && f.kids[0].kind == "Bool" {
-      let key = str.drop(second_word(f.text), len("name="))
-      if list.any(policy, p => { let (k, _v) = p
-        k == key }) { return [] }
-      policy = policy ++ [(key, second_word(f.kids[0].text) == "true")]
-    }
-  }
-  let keys = map(policy, p => { let (key, _v) = p
-    key })
-  if len(keys) != 4 || list.any(["base2", "exp_ftz", "approx_div", "div_ftz"], k => not list.contains(keys, k)) { return [] }
-  policy
-}
+## The functions of this file that the recording sees: top level `pub fn`s
+## whose declared effect row has `Dev`, which `Dev`'s `calls(..)` clause makes
+## calls of their own (a helper is a call like any other; what it calls on its
+## own behalf is its operations, not rows).
+fn recorded_here(root: Node) -> List[String] =
+  map(filter(root.kids, k => k.kind == "Fn" && str.contains(k.text, " pub=true ") && list.contains(effect_atoms(k.text), "Dev")), k => second_word(k.text))
 
-fn selected_arm(cond: Node, policy: List[(String, Bool)]) -> Option[Bool] = {
-  if cond.kind != "FieldAccess" || len(cond.kids) != 1 || cond.kids[0].kind != "Var" || second_word(cond.kids[0].text) != "math" { return None }
-  match list.find(policy, p => { let (key, _v) = p
-    key == second_word(cond.text) }) {
-    Some((_key, value)) -> Some(value)
-    None -> None
-  }
+fn effect_atoms(text: String) -> List[String] = {
+  let fields = filter(str.split(text, " "), w => str.starts_with(w, "eff="))
+  if len(fields) != 1 { [] } else { str.split(str.drop(fields[0], len("eff=")), ",") }
 }
 
 fn find_traces(root: Node, n: Node, outer: ProbeContext, out: List[Trace]) -> List[Trace] = {
@@ -586,10 +531,10 @@ fn fn_body(f: Node) -> Option[Node] = {
 ## What the walk of the visitor's program found: the program with its trace
 ## call wrapped in the probe's, the kernel's name, the lines its function
 ## occupies, and the calls its body makes.
-pub type Plan = { program: String, kernel: String, first: Int, last: Int, calls: List[SCall], defs: List[(String, Int, Int)] }
+pub type Plan = { program: String, kernel: String, first: Int, last: Int, calls: List[SCall] }
 
 ## The plan for `code` from the dump `dump` of it and the names of the
-## functions the recording sees (`called("<name>"` marks of dev.dawn), or why
+## functions the recording sees (`dev_names` of dev.dawn), or why
 ## the program is not mapped. The program must record exactly one kernel, with
 ## `trace1` to `trace6` called plainly (positional arguments, no hints), and
 ## the kernel must be a function of the same file, directly or through a
@@ -617,35 +562,19 @@ pub fn plan(code: String, dump: String, dev: List[String]) -> Result[Plan, Strin
             match fn_body(f) {
               None -> Err("`${t.kernel}` has no body to walk")
               Some(body) -> {
-                let helpers = filter(map(["fa_exp", "fa_divide"], name => match kernel_fn(root, name) {
-                  Some(f) -> match fn_body(f) { Some(b) -> (name, b)
-                    None -> ("", root) }
-                  None -> ("", root)
-                }), p => { let (name, _body) = p
-                  name != "" })
-                let names = dev ++ map(helpers, p => { let (name, _body) = p
-                  name })
-                match walk(body, names, Env { tiles = [], cells = [], decls = [], policy = captured_policy(root, t.value), helpers = helpers }, code) {
+                let names = dev ++ recorded_here(root)
+                match walk(body, names, Env { tiles = [], cells = [], decls = [] }, code) {
                   Err(e) -> Err(e)
                   Ok((calls, _env)) -> {
                     let s = src_of(code)
-                    let begin = list.fold(helpers, f.lo, (lo, p) => { let (name, _body) = p
-                      match kernel_fn(root, name) { Some(h) -> if h.lo < lo { h.lo } else { lo }
-                        None -> lo } })
-                    let (first, _c) = at(s, begin)
-                    let end = list.fold(helpers, f.hi, (hi, p) => { let (name, _body) = p
-                      match kernel_fn(root, name) { Some(h) -> if h.hi > hi { h.hi } else { hi }
-                        None -> hi } })
-                    let (last, _d) = at(s, end)
+                    let (first, _c) = at(s, f.lo)
+                    let (last, _d) = at(s, f.hi)
                     let again = join(map(t.args, a => {
                       let (alo, ahi) = a
                       str.slice(code, alo, ahi)
                     }), ", ")
                     let renamed = str.take(code, t.lo) ++ "explore_probe.tap${t.arity}(" ++ str.slice(code, t.lo, t.hi) ++ ", " ++ again ++ ")" ++ str.drop(code, t.hi)
-                    let defs = map(helpers, h => { let (name, _body) = h
-                      match kernel_fn(root, name) { Some(d) -> (name, d.lo, d.hi)
-                        None -> (name, 0, 0) } })
-                    Ok(Plan { program = "use explore_probe\n" ++ renamed, kernel = t.kernel, first = first, last = last, calls = calls, defs = defs })
+                    Ok(Plan { program = "use explore_probe\n" ++ renamed, kernel = t.kernel, first = first, last = last, calls = calls })
                   }
                 }
               }
@@ -782,13 +711,7 @@ pub fn tile_map(code: String, p: Plan, rec: Recording) -> Result[String, String]
               if str.slice(code, c.nlo, c.nhi) != c.text {
                 return Err("the parser's name span for `${r.name}` holds `${str.slice(code, c.nlo, c.nhi)}`, not `${c.text}`")
               }
-              # A helper's own calls lie in its definition, not in the call that ran it.
-              let defn = match list.find(p.defs, d => { let (name, _lo, _hi) = d
-                name == r.name }) {
-                Some((_name, lo, hi)) -> ["def=${span_text(s, lo, hi)}"]
-                None -> []
-              }
-              out = out ++ [join(["call", "${r.id}", "${r.parent}", r.name, span_text(s, c.lo, c.hi), span_text(s, c.nlo, c.nhi)] ++ defn ++ r.lines, " ")]
+              out = out ++ [join(["call", "${r.id}", "${r.parent}", r.name, span_text(s, c.lo, c.hi), span_text(s, c.nlo, c.nhi)] ++ r.lines, " ")]
             }
           }
         }
@@ -797,20 +720,48 @@ pub fn tile_map(code: String, p: Plan, rec: Recording) -> Result[String, String]
       }
   }
 
-## The names the recording sees, out of the text of `dev.dawn`: every
-## `called("<name>"` mark.
+## The names a kernel's source may call that the recording sees, out of the
+## text of `dev.dawn`: every `pub fn` whose declared row ends in `!Dev` (what
+## `Dev`'s `calls(..)` records), and every `pub fn` that answers a range type
+## (`d_range`), which a staged `for` loops over and which is the loop's own
+## `staged_for` call, not a call of its own.
 pub fn dev_names(dev_source: String) -> List[String] = {
   var names: List[String] = []
-  for piece in list.drop(str.split(dev_source, "called(\""), 1) {
-    match str.split_once(piece, "\"") {
-      Some((name, _rest)) -> {
-        names = names ++ [name]
-      }
-      None -> ()
+  for piece in list.drop(str.split(dev_source, "\npub fn "), 1) {
+    let name = take_name(piece)
+    let head = match str.split_once(piece, "\n") {
+      Some((first, rest)) -> first ++ "\n" ++ continued(rest)
+      None -> piece
+    }
+    if name != "" && (returns_dev(head) || returns_range(head)) {
+      names = names ++ [name]
     }
   }
   list.unique(names)
 }
+
+fn take_name(piece: String) -> String = {
+  var out = ""
+  for c in str.chars(piece) {
+    if c == "[" || c == "(" || c == " " { return out }
+    out = out ++ c
+  }
+  out
+}
+
+# The lines of a signature that continue onto indented lines.
+fn continued(rest: String) -> String = {
+  var out = ""
+  for l in str.split(rest, "\n") {
+    if str.starts_with(l, "  ") && not str.starts_with(l, "  #") { out = out ++ l ++ "\n" } else { return out }
+  }
+  out
+}
+
+# `-> T !Dev =`: the return row is the one followed by the body's `=`.
+fn returns_dev(sig: String) -> Bool = str.contains(sig, " !Dev =") || str.contains(sig, " !Dev ^{") && str.contains(sig, "} =")
+
+fn returns_range(sig: String) -> Bool = str.contains(sig, ") -> DRange[")
 
 # ---- the probe ----
 
@@ -924,7 +875,7 @@ fn failed[T](r: Result[T, String]) -> Bool =
     Ok(_) -> false
   }
 
-fn dev() -> List[String] = ["load_cell", "store_cell", "add", "full", "lit"]
+fn dev() -> List[String] = ["load_cell", "store_cell", "add", "full", "from_float"]
 
 fn test_node(text: String, kids: List[Node]) -> Node =
   Node { kind = first_word(text), text = text, lo = 0, hi = 0, kids = kids }
@@ -1069,8 +1020,9 @@ test "the pairing writes the map, and stops at the first name that differs" {
   }
 }
 
-test "the names the recording sees are the called marks of dev.dawn" {
-  assert dev_names("pub fn a() = called(\"alpha\", () => 1)\npub fn b() = called(\"beta\", () => 2)\ncalled(\"alpha\"") == ["alpha", "beta"]
+test "the names the recording sees are the public functions with the Dev row, and the range constructors" {
+  let text = "\npub fn a(x: Int) -> Int !Dev = 1\npub fn b[D](t: Tile[D],\n  at: Loc = caller()) -> Tile[D] !Dev = {\n  t\n}\npub fn pure(x: Int) -> Int = x\npub fn region(body: fn() -> Unit !Dev ^{c}) -> Unit = ()\npub fn d_range(lo: Int) -> DRange[Int] = DRange { lower = lo }\n"
+  assert dev_names(text) == ["a", "b", "d_range"]
 }
 
 test "the probe is the module the plan names, one tap for each marker count" {
@@ -1078,30 +1030,4 @@ test "the probe is the module the plan names, one tap for each marker count" {
   for k in [1, 2, 3, 4, 5, 6] {
     assert str.contains(src, "pub fn tap${k}[")
   }
-}
-
-test "a fixed policy selects only a literal field of the forwarded BF16 capture" {
-  let n = (text: String, kids: List[Node]) => test_node(text, kids)
-  let names = ["q", "k", "v", "o", "scale"]
-  let call = n("Apply", [n("Var flash_attn", [])] ++ map(names, x => n("Var ${x}", [])) ++ [n("Var dt", []), n("Var math", [])])
-  let factory = n("Fn fa_kernel", map(["dt", "math"], x => n("Param ${x}", [])) ++ [n("Lambda", map(names, x => n("LParam ${x}", [])) ++ [call])])
-  let record = n("Record FaNumerics spread=false", map(["base2", "exp_ftz", "approx_div", "div_ftz"], x => n("Arg name=${x}", [n("Bool true", [])])))
-  let root = n("Module", [factory, n("Fn fa_bf16_math", [record])])
-  let value = n("Apply", [n("Var fa_kernel", []), n("Ctor BF16", []), n("Apply", [n("Var fa_bf16_math", [])])])
-  let policy = captured_policy(root, value)
-  assert len(policy) == 4
-  let cond = n("FieldAccess base2", [n("Var math", [])])
-  assert selected_arm(cond, policy) == Some(true)
-  assert selected_arm(n("FieldAccess base2", [n("Var unknown", [])]), policy) == None
-  let altered = Node { ..call, kids = list.take(call.kids, 7) ++ [n("Apply", [n("Var other_math", [])])] ++ list.drop(call.kids, 8) }
-  let bad_factory = Node { ..factory, kids = filter(factory.kids, k => k.kind != "Lambda") ++ [n("Lambda", map(names, x => n("LParam ${x}", [])) ++ [altered])] }
-  assert captured_policy(n("Module", [bad_factory, n("Fn fa_bf16_math", [record])]), value) == []
-  assert captured_policy(root, Node { ..value, kids = [value.kids[0], n("Ctor F64", [])] ++ list.drop(value.kids, 2) }) == []
-  let env = Env { tiles = [], cells = [], decls = [], policy = policy, helpers = [] }
-  let choose = n("If", [cond, n("Apply", [n("Var exp2", []), n("Var s", [])]), n("Apply", [n("Var exp", []), n("Var s", [])])])
-  match walk(choose, ["exp", "exp2"], env, "") {
-    Ok((calls, _env)) -> { assert map(calls, c => c.names) == [["exp2"]] }
-    Err(_e) -> { assert false }
-  }
-  assert failed(walk(Node { ..choose, kids = [n("Var unknown", [])] ++ list.drop(choose.kids, 1) }, ["exp", "exp2"], env, ""))
 }
