@@ -4355,8 +4355,8 @@ rm -rf "$mutant_pkg_gm"
 cp -r "$root/packages/tileir" "$mutant_pkg_gm"
 before=$(digest "$mutant_pkg_gm/src/dev.dawn")
 python3 "$here/mutate.py" "$mutant_pkg_gm/src/dev.dawn" gather-mask-dropped \
-  '    let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape_of(hi), handle_of(mask), handle_of(pad))' \
-  '    let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape_of(hi), None, None)'
+  '  let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape_of(hi), handle_of(mask), handle_of(pad))' \
+  '  let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape_of(hi), None, None)'
 after=$(digest "$mutant_pkg_gm/src/dev.dawn")
 echo "      gather-mask-dropped: packages/tileir/src/dev.dawn md5 $before -> $after"
 
