@@ -115,10 +115,10 @@ TAG=$(tr -d ' \n' < scripts/seed-release.txt)
 # revision whose bytes define this gate.
 ECO_URL=${DAWNOP_SITE_URL:-https://github.com/dawnop/dawnop-site.git}
 ECO_REPO=dawnop/dawnop-site
-ECO_REV=94fbd9450b07823969f19fc0a3aff61f9a474812
+ECO_REV=f04363784f5d211d6d4925bae23c9e937d0baa4c
 # seed_tree_sha per production source root at ECO_REV; advance them together
 ECO_TREES=(
-  'backend-dawn/core/src 8e7131235a47e922c0b7602804b3c1c268b416e4ca18e87e0202c61a41365852'
+  'backend-dawn/core/src 5aa05a9103ba83e1fb5b56941be84bc5a18f04b97f24b7139e2a31caa2b699ca'
   'backend-dawn/app/jvm/src c2708c9f2820df68ee80678dcc1189204cc084520ccbe204081687e19a2006f0'
   'backend-dawn/app/native/src 6e8a08db15d37f33119426e1edcc290d66857b9c94d8a8c4e1f3d4ebc5f01b6f'
 )
