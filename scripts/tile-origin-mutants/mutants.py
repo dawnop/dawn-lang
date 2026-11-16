@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Each refusal of tileir/origin must be one a test would notice.
 
-    python3 scripts/tile-origin-shadow/mutants.py
+    python3 scripts/tile-origin-mutants/mutants.py
 
 Every mutant removes one refusal (a stale or missing source revision, a
 declaration of another length, a span that is no syntax node, a missing or later

@@ -7,7 +7,7 @@
   模块、声明与相对 span，同一 helper 的两次调用是两个实例、两个父节点；缺源码版本、
   版本不符、声明长度不符、未知边界、截断、缺父节点一律拒绝。
 - 手写调用标记（`called`、`user_body` 与四个 `Dev` 操作）原样保留，`origin` 只是它们的
-  独立旁证；`scripts/tile-origin-shadow` 对全部 golden 与 Playground 样例逐例比较。
+  独立旁证；`scripts/tile-origin-mutants` 对全部 golden 与 Playground 样例逐例比较。
 
 ## 0.32.0
 
