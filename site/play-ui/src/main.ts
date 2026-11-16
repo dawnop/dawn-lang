@@ -319,10 +319,14 @@ function mount(root: HTMLElement) {
   // draft whose sample has since changed is dropped when it was never edited;
   // otherwise it is kept, marked stale until the user reverts to the sample.
   let draftSrc = ''
+  let dropped = -1 // the sample whose untouched draft was dropped: reopen it, current
   if (draft) {
     const inRange = draft.file >= 0 && draft.file < SAMPLES.length
     const r = resolveDraft(draft, inRange ? SAMPLES[draft.file].code : null)
-    if (r.kind === 'open') draft = null
+    if (r.kind === 'sample') {
+      dropped = r.file
+      draft = null
+    } else if (r.kind === 'open') draft = null
     else draftSrc = r.src
   }
   let current = 0
@@ -335,6 +339,9 @@ function mount(root: HTMLElement) {
   } else if (named != null) {
     current = named
     initialCode = SAMPLES[named].code
+  } else if (dropped >= 0) {
+    current = dropped
+    initialCode = SAMPLES[dropped].code
   } else if (draft) {
     current = draft.file >= 0 && draft.file < SAMPLES.length ? draft.file : -1
     scratch = draft.base

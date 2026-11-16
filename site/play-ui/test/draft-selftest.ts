@@ -24,7 +24,8 @@ export function draftTests(expect: Expect): number {
   t('unchanged sample, untouched draft: restored, not stale', resolveDraft(draft(oldSample, digest(oldSample)), oldSample), { kind: 'draft', src: digest(oldSample), stale: false })
 
   // changed sample, untouched draft
-  t('changed sample, untouched draft: dropped', resolveDraft(draft(oldSample, digest(oldSample)), newSample), { kind: 'open' })
+  t('changed sample, untouched draft: dropped, the same file opens', resolveDraft(draft(oldSample, digest(oldSample)), newSample), { kind: 'sample', file: 0 })
+  t('the file is the draft\'s own', resolveDraft({ ...draft(oldSample, digest(oldSample)), file: 3 }, newSample), { kind: 'sample', file: 3 })
 
   // changed sample, edited draft
   t('changed sample, edited draft: kept and stale', resolveDraft(draft(mine, digest(oldSample)), newSample), { kind: 'draft', src: digest(oldSample), stale: true })
