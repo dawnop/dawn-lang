@@ -37,7 +37,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, FloatDtype
   idx_of, Fixed, Dyn, strided_view, gather_scatter_view, load_gather, atomic_red_view, At, Rows, NoPadding, PadZero,
   PadNegZero, PadNan, PadPosInf, PadNegInf, Padding, broadcast, reshape, idx_as_tile, le_i, atomic_cas, atomic_add, load_cell, load_at,
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
-  blocks_of, read_prefix, read_at, read_blocks, tile_shape, t_call_enter, t_call_exit, t_body_enter, t_body_exit, t_idx_const, lanes_strided, retile }
+  blocks_of, read_prefix, read_at, read_blocks, tile_shape, t_idx_const, lanes_strided, retile }
 use tileir/prog.{TileOp, TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, trace6, cells, In, Out, Shared,
   Whole, Scalar, trace_calls, erase, Convert, MmaFScaled, MakeToken, IdxConst, IdxMul, CellViewOf, Load }
 use tileir/render.{render, text_debug}
@@ -2378,28 +2378,17 @@ fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[
   store_cell(o, fa_divide(math, acc, l))
 }
 
-type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool }
+pub type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool }
 fn fa_bf16_math() -> FaNumerics[F32] = FaNumerics { zero = f32(0.0), neg_inf = f32(-INFINITY), base2 = true, exp_ftz = true, approx_div = true, div_ftz = true }
 
-# Explicit call and body marks keep private numerical helpers in the source
-# tree, with their call sites separate from the operations in their bodies.
-fn fa_exp[A: FloatDtype](math: FaNumerics[A], x: Tile[A], at: Loc = caller()) -> Tile[A] !Dev = {
-  t_call_enter("fa_exp", Some(at))
-  t_body_enter()
-  let result = if math.base2 { exp2(x, ftz = math.exp_ftz) } else { exp(x) }
-  t_body_exit()
-  t_call_exit()
-  result
-}
+# Public `!Dev` functions are recorded as calls of their own (`Dev` declares
+# `calls(..)`), so these two keep their call sites separate from the
+# operations in their bodies without writing a mark.
+pub fn fa_exp[A: FloatDtype](math: FaNumerics[A], x: Tile[A], at: Loc = caller()) -> Tile[A] !Dev =
+  if math.base2 { exp2(x, ftz = math.exp_ftz) } else { exp(x) }
 
-fn fa_divide[A: FloatDtype](math: FaNumerics[A], x: Tile[A], y: Tile[A], at: Loc = caller()) -> Tile[A] !Dev = {
-  t_call_enter("fa_divide", Some(at))
-  t_body_enter()
-  let result = if math.approx_div { div(x, y, approx = true, ftz = math.div_ftz) } else { x / y }
-  t_body_exit()
-  t_call_exit()
-  result
-}
+pub fn fa_divide[A: FloatDtype](math: FaNumerics[A], x: Tile[A], y: Tile[A], at: Loc = caller()) -> Tile[A] !Dev =
+  if math.approx_div { div(x, y, approx = true, ftz = math.div_ftz) } else { x / y }
 
 # The two supported instances capture their policy before recording.
 fn fa_kernel[D: FloatDtype, A: FloatDtype + ScalarDtype](dt: Dtype[D], math: FaNumerics[A]) -> fn(Param[D], Param[D], Param[D], Param[A], Param[A]) -> Unit !Dev =
@@ -7261,7 +7250,7 @@ fn bounds_constant(value: Int, form: Int = 0, at: Loc = caller()) -> TileProg =
         _ -> panic("unknown index literal")
       }
     }
-    else if form == 2 { for _i in d_range(0, value, at = at) { () } }
+    else if form == 2 { for _i in d_range(0, value) { () } }
     else { let _x = t_idx_const(value) }
   }, at = at)
 
@@ -7300,10 +7289,12 @@ fn bounds_pointer(stride: Int, source: String, at: Loc = caller()) -> TileProg =
     else { let _v = lanes_strided(b, [2], [stride], at = at) }
   }, at = at)
 
-fn bounds_refused[T](body: fn() -> T, fragment: String, at: Loc) -> Unit = {
+# `sited = false` for a refusal inside a staged `for`: the loop's site is the
+# `for`'s own iterable, not the `at` the caller passed to the kernel.
+fn bounds_refused[T](body: fn() -> T, fragment: String, at: Loc, sited: Bool = true) -> Unit = {
   let why = mm_refusal(body)
   bounds_expect(str.contains(why, fragment), "missing ${fragment}: ${why}")
-  bounds_expect(str.contains(why, " at ${at}"), "caller location missing: ${why}")
+  bounds_expect(not sited || str.contains(why, " at ${at}"), "caller location missing: ${why}")
   bounds_expect(str.contains(why, "op #"), "operation number missing: ${why}")
 }
 
@@ -7319,7 +7310,7 @@ fn bounds_check(group: String) -> Unit = {
     }
     for value in [-2147483649, 2147483648, 4294967296, 4294967297, 9223372036854775807, -9223372036854775808] {
       for form in [0, 1, 2, 3] {
-        bounds_refused(() => bounds_constant(value, form, at = at), "index constant ${value} is outside signed i32", at)
+        bounds_refused(() => bounds_constant(value, form, at = at), "index constant ${value} is outside signed i32", at, sited = form != 2)
       }
     }
   } else if group == "ceil" {
@@ -7406,8 +7397,8 @@ fn bounds_check(group: String) -> Unit = {
     let why = mm_refusal(() => bounds_constant(4294967296))
     bounds_expect(str.contains(why, " at ${loc.path(at)}:${line + 1}:"), "default caller location missing: ${why}")
     bounds_refused(() => trace_kernel("nested_index", [], () => {
-      for _i in d_range(0, 2, at = at) { let _x: Idx = 4294967296 }
-    }, at = at), "inside the body of a `d_range`", at)
+      for _i in d_range(0, 2) { let _x: Idx = 4294967296 }
+    }, at = at), "inside the body of a `d_range`", at, sited = false)
   } else if group == "lower" {
     let p = bounds_constant(0)
     for value in [-2147483649, 2147483648, 4294967296, 4294967297] {

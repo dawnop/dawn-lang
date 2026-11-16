@@ -7,7 +7,7 @@ use std/io
 use std/gpu.{Axis, Free, ScalarDtype}
 use std/float.{INFINITY}
 use std/list
-use tileir/dev.{Dev, Param, Tile, FloatDtype, host_float, idx_const, tile_shape, blocks_of, t_call_enter, t_call_exit, t_body_enter, t_body_exit, load_cell, store_cell, load_at, full, zeros, mma, transpose, scalar, max, exp, exp2, div, to, reduce_max, reduce_sum, d_range}
+use tileir/dev.{Dev, Param, Tile, FloatDtype, host_float, idx_const, tile_shape, blocks_of, load_cell, store_cell, load_at, full, zeros, mma, transpose, scalar, max, exp, exp2, div, to, reduce_max, reduce_sum, d_range}
 use tileir/prog.{trace5, cells, In, Out, Scalar}
 use tileinterp/interp.{interp_ref}
 use std/math.{exp as host_exp}
@@ -86,27 +86,15 @@ pub fn main() -> Unit !io = {
 }
 
 # Numerical definitions and independent host reference support the algorithm.
-type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool }
+pub type FaNumerics[A] = { zero: A, neg_inf: A, base2: Bool, exp_ftz: Bool, approx_div: Bool, div_ftz: Bool }
 
 fn fa_bf16_math() -> FaNumerics[F32] = FaNumerics { zero = f32(0.0), neg_inf = f32(-INFINITY), base2 = true, exp_ftz = true, approx_div = true, div_ftz = true }
 
-fn fa_exp[A: FloatDtype](math: FaNumerics[A], x: Tile[A], at: Loc = caller()) -> Tile[A] !Dev = {
-  t_call_enter("fa_exp", Some(at))
-  t_body_enter()
-  let result = if math.base2 { exp2(x, ftz = math.exp_ftz) } else { exp(x) }
-  t_body_exit()
-  t_call_exit()
-  result
-}
+pub fn fa_exp[A: FloatDtype](math: FaNumerics[A], x: Tile[A], at: Loc = caller()) -> Tile[A] !Dev =
+  if math.base2 { exp2(x, ftz = math.exp_ftz) } else { exp(x) }
 
-fn fa_divide[A: FloatDtype](math: FaNumerics[A], x: Tile[A], y: Tile[A], at: Loc = caller()) -> Tile[A] !Dev = {
-  t_call_enter("fa_divide", Some(at))
-  t_body_enter()
-  let result = if math.approx_div { div(x, y, approx = true, ftz = math.div_ftz) } else { x / y }
-  t_body_exit()
-  t_call_exit()
-  result
-}
+pub fn fa_divide[A: FloatDtype](math: FaNumerics[A], x: Tile[A], y: Tile[A], at: Loc = caller()) -> Tile[A] !Dev =
+  if math.approx_div { div(x, y, approx = true, ftz = math.div_ftz) } else { x / y }
 
 fn fa_kernel[D: FloatDtype, A: FloatDtype + ScalarDtype](dt: Dtype[D], math: FaNumerics[A]) -> fn(Param[D], Param[D], Param[D], Param[A], Param[A]) -> Unit !Dev =
   (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, dt, math)

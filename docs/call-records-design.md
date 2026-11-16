@@ -1,7 +1,7 @@
 # 编译器代写调用记录：效果的 `calls` 子句与 Core 变换
 
-> 状态：**current**（R4-f0 设计与 R4-f1 钩子声明加 Core 变换已落地，分支 `lang/r4f`；手写 marks 与代写**并存**，
-> 删除属 R4-f2）。依据：W3-R 终局调研（Rust `#[track_caller]`、tracing `#[instrument]`、GCC
+> 状态：**current**（R4-f0 设计、R4-f1 钩子声明加 Core 变换、R4-f2 删除手写 marks 均已落地；
+> 第十节记 f2）。依据：W3-R 终局调研（Rust `#[track_caller]`、tracing `#[instrument]`、GCC
 > `-finstrument-functions`、Scala sourcecode、Swift SE-0274 的一手出处）与补裁七、补裁八。
 > 提交哈希见文末「落地进度」。
 
@@ -139,6 +139,9 @@ r
 - **I4 设备字节：** 钩子只在宿主录制层，tilebc/MLIR 与它们无关。
 
 ## 四、f1：并存期的逐字段对拍
+
+（这一节是 f1 当时的状态：手写 marks 与代写并存。f2 之后手写版已删除，下表的“手写”一侧由
+`scripts/call-records-contract/run.py --baseline` 指向删除前的检出重现；现状见第十节。）
 
 f1 **不删任何手写 mark**，在分支上提供两份 tileir，同一批 kernel 程序各编一次、各录一次，比较调用表。手写版就是预言，不需要新预言。
 
@@ -283,11 +286,47 @@ xmap-samples 在 f1 不动：手写 mark 还在，它们照旧运行。
 10. **不删录制器的栈式机制，不做 observe 视图替代。** 见非目标 1。
 11. **不在 f1 解决 `staged_for` 的 `at` 与「`pub` 的 kernel 入口」两个边界。** 都要裁决，写在第四节，由 f2 前裁。
 
+## 十、f2：删除手写 marks
+
+删除的东西：`dev.dawn` 里 228 处 `called(`/`called_bare(`/`user_body(` 使用点（185 + 29 + 14）与四个定义
+（`called`、`called_bare`、`called_at`、`user_body`），样例与黄金里作者侧的 `t_call_enter`/`t_body_enter` 手写对
+（`fa_exp`、`fa_divide`），Playground 与站点里的固定 helper 名单和对 `called(` 的文本扫描，以及与之配套的 helper 展开
+（`captured_policy`、`HELPERS`、`def=` 定义范围）。保留的是录制器的栈机制与四个钩子操作，它们现在是编译器的目标。
+
+**根帧政策（补裁九第 4 条）。** 录制器把一次录制重放成调用表（`prog.call_table`，由事件日志重放；处理臂里的栈只用来给
+拒绝信息命名）。若录制恰是一帧从头到尾，且这帧自己没有运行闭包（不是 `d_range` 一类区域调用），则它是 kernel 入口：
+被丢掉，它内部的调用是顶层 Call。这是录制器的一条规则，编译器里没有为 kernel 开特例。两条边界写在
+`render.dawn` 的测试里：两个顶层调用没有单一的帧可当根；整个函数体就是一个区域调用时它是调用，不是根。
+
+**`staged_for` 的位置（补裁九第 2 条）。** `StagedIter` 的方法签名加第三个形参 `at: Loc = caller()`，检查器改写 `for` 时
+传入**被遍历表达式**的位置（`for j in d_range(..)` 里 `d_range(` 的起点）；impl 写作不带默认值的 `at: Loc`
+（impl 方法本不接默认值，调用经 trait 签名分派）。`call_plan_of` 对 impl 方法读 trait 签名的 `caller_params`，所以
+`at` 的来源规则仍只有一条：函数唯一的 `caller()` 形参。`d_range` 与 `DRange` 不再带 `at`：位置是使用处，不是值的创建处。
+黄金里 59 行 `staged_for` 的 `at` 与手写版逐字段相同（手写版报 `d_range(` 的调用点，同一位置）。
+
+**展示名。** 一律是声明名，没有映射表。255 个黄金程序里实际出现十二对：`d_range→staged_for`、`carry→var_open`、
+`get→var_get`、`set→var_set`、`if→staged_if`、`lit→from_float`、`idx_add/sub/mul/div/rem→add/sub/mul/div/rem`、
+`idx_const→from_int`。消费这些名字的地方同步改了：Playground 的 tilemap、`site/gpu-map/record.py`、`packages/xmap`
+的 `spelled`、站点 GPU 页的 `ops_for` 与测试。
+
+**一处行集变化：作者 helper 的内部调用。** 手写版里 `fa_exp`、`fa_divide` 写了 `t_body_enter`，所以它们体内的
+`exp2`、`div` 是 kernel 的行（`fa_exp` 的子行）。编译器只对**闭包形参**代写 body 标记，helper 没有闭包形参，所以
+`fa_exp` 现在是一行，它的 `exp2` 归它自己的操作。黄金里 24 行、flash_attn 样例里 3 行因此消失（对拍把基线的这些行折叠后
+逐字段全等）。`fa_exp`/`fa_divide` 在样例与黄金里改为 `pub fn`（补裁九第 3 条：记录的是 API 边界）。
+
+**对拍的现在形式。** 手写版已不存在，常驻的合同是 `run.py` 对 `rows.expected`（255 个黄金 4564 行）与
+`rows-samples.expected`（两个样例 46 行）。`--baseline DIR` 对删除前的检出重现一次性的等价证明。负控：作者层
+（效果不再声明 `calls`、helper 不再是 `pub fn`）必须红；编译器层变异体不变；`site/gpu-map/record.py
+--check-call-origin` 的删除对照改为“helper 变私有”，MLIR 与字节码逐字节不变而严格配对必须拒绝。
+
+**未处理：观察孪生。** `tileir/origin.dawn` 里的 `is_mark` 用 `called`/`called_at`/`called_bare` 的声明名认记录标记，
+这些声明已不存在，所以它的 `marked` 恒为假。观察孪生的去留按补裁七第 4 条另裁，这里不动。
+
 ## 九、落地进度
 
 | 刀 | 内容 | 状态 | 提交 |
 |---|---|---|---|
 | R4-f0 | 本设计文档 | 完成 | 见 PR |
 | R4-f1 | `calls` 子句（parser、检查、LSP 词表、spec）、`Sig.calls`、`lower_fn` 变换、对拍与负控 | 完成 | 见 PR |
-| R4-f2 | 删手写 marks 与名单，作者侧 mark，展示名改为声明名 | 待裁（两个边界，第四节） | |
-| R4-f3 | 成本实测（判据 4） | 待 f2 | |
+| R4-f2 | 删手写 marks 与名单，作者侧 mark，展示名改为声明名，`staged_for` 的 `at`，根帧政策 | 完成 | 见 PR |
+| R4-f3 | 成本实测（判据 4） | 待 f2 合并 | |

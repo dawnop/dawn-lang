@@ -732,7 +732,7 @@ def kernel_text(text: str, name: str) -> str:
     on = False
     braced = False
     for line in text.splitlines():
-        if not on and re.match(r"^(?:fn|type) " + re.escape(name) + r"(?=[(\[ =])", line):
+        if not on and re.match(r"^(?:pub )?(?:fn|type) " + re.escape(name) + r"(?=[(\[ =])", line):
             on = True
             braced = line.rstrip().endswith("{")
             out.append(line)

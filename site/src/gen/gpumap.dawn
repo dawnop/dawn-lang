@@ -287,28 +287,29 @@ pub fn check(rec: Recorded, revision: String, first: Int, src: List[String], ir:
 }
 
 # Whether the source text at a call's name span is how that call is spelled:
-# the callee's own name, or the operator `a + b` is (`add`, `addi`,
-# `idx_add`...), or, for the three calls a `var` makes (`carry` where a loop
-# opens it, `get` where it is read or the loop hands it back, `set` where it is
-# assigned), the variable's name or the loop's `for`. A `lit` is also spelled by
+# the callee's own name, or the operator `a + b` is (`add`, `addi`...),
+# or, for the three calls a `var` makes (`var_open` where a loop
+# opens it, `var_get` where it is read or the loop hands it back, `var_set` where it is
+# assigned), the variable's name or the loop's `for`, and a `staged_for` by the range
+# constructor it loops over (`d_range`). A `from_float` is also spelled by
 # the bare number it was made from (`mma(a, b, 0.0)`), which has no call of its
 # own; packages/xmap's `spelled` reads it the same way.
 fn spelled(name: String, text: String) -> Bool =
   if text == name {
     true
-  } else if name == "lit" {
+  } else if name == "from_float" || name == "from_int" {
     list.any(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"], d => str.starts_with(text, d))
-  } else if name == "carry" || name == "get" || name == "set" {
+  } else if name == "var_open" || name == "var_get" || name == "var_set" || name == "staged_for" {
     text != ""
-  } else if str.starts_with(name, "add") || str.starts_with(name, "idx_add") {
+  } else if str.starts_with(name, "add") {
     text == "+"
-  } else if str.starts_with(name, "sub") || str.starts_with(name, "idx_sub") {
+  } else if str.starts_with(name, "sub") {
     text == "-"
-  } else if str.starts_with(name, "mul") || str.starts_with(name, "idx_mul") {
+  } else if str.starts_with(name, "mul") {
     text == "*"
-  } else if str.starts_with(name, "div") || str.starts_with(name, "idx_div") {
+  } else if str.starts_with(name, "div") {
     text == "/"
-  } else if str.starts_with(name, "idx_rem") {
+  } else if str.starts_with(name, "rem") {
     text == "%"
   } else if str.starts_with(name, "neg") {
     text == "-"
@@ -694,9 +695,9 @@ test "a folded row shows the line its outermost named call wrote its result with
   }
 }
 
-test "a lit is spelled by a bare number and no other call is" {
-  assert spelled("lit", "lit")
-  assert spelled("lit", "0.0")
-  assert not spelled("lit", "x")
+test "a from_float is spelled by a bare number and no other call is" {
+  assert spelled("from_float", "from_float")
+  assert spelled("from_float", "0.0")
+  assert not spelled("from_float", "x")
   assert not spelled("mma", "0.0")
 }
