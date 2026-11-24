@@ -38,7 +38,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, FloatDtype
   PadNegZero, PadNan, PadPosInf, PadNegInf, Padding, broadcast, reshape, idx_as_tile, le_i, atomic_cas, atomic_add, load_cell, load_at,
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
   blocks_of, read_prefix, read_at, read_blocks, tile_shape, t_idx_const, lanes_strided, retile }
-use tileir/prog.{TileOp, TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, trace6, cells, In, Out, Shared,
+use tileir/prog.{TileOp, TileProg, Cells, Arg, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, trace6, cells, In, Out, Shared,
   Whole, Scalar, trace_calls, erase, Convert, MmaFScaled, MakeToken, IdxConst, IdxMul, CellViewOf, Load }
 use tileir/render.{render, text_debug}
 use tileir/bytecode.{encode, bytecode_version}
@@ -570,6 +570,124 @@ fn mm_format_check[D: MmElem](dt: Dtype[D]) -> Unit = {
   let _f = mm_record(dt, Sm90, mm_shape())
   mm_expect(str.contains(mm_refusal(() => mm_record(dt, Sm90, MmShape { m = 256, n = 256, k = 255 })), "positive multiples"))
 }
+
+# ---- the dtype-generic GEMM and its fused epilogues (G14-1) ----
+#
+# C = epilogue(A * B) for a 16-bit float input format and an f32 accumulator:
+# the shape of every production GEMM (cuTile's `ct.mma` examples, CUTLASS's
+# mixed-input kernels) and the first matmul here whose accumulator is not its
+# output. `matmul`, `matmul_f16` and `matmul_i8` above keep their own bodies
+# and bytes; this one is a factory.
+#
+# The accumulator format is a function of the input format, not a second
+# parameter: `GemmElem` names it (`D.Acc`) and every signature below is written
+# against that projection. Asking for a bf16 GEMM with an f64 accumulator, or
+# giving it an epilogue over the wrong accumulator, is therefore a checker
+# error and not an assembler refusal (scripts/tile-golden/gemm-rejected.dawn).
+# One impl is one supported pair; there is no runtime table to panic from.
+#
+# An epilogue is a function of the finished accumulator tile: it runs on the
+# registers before the one store, so bias, scale and activation cost no
+# extra pass over C (the CUTLASS epilogue stage, the cuTile `astype` after
+# `mma`). It may take one extra kernel operand, a bias row or a launch-time
+# scalar, which the factory records beside the three buffers of the matmul.
+pub trait GemmElem[D] {
+  type Acc
+  fn gemm_acc(dt: Dtype[D]) -> Dtype[D.Acc]
+  fn gemm_plan(dt: Dtype[D], arch: Arch) -> MmPlan
+  fn gemm_zero(dt: Dtype[D], shape: List[Int]) -> Tile[D.Acc] !Dev
+  fn gemm_mma(a: Tile[D], b: Tile[D], acc: Tile[D.Acc]) -> Tile[D.Acc] !Dev
+}
+
+# Plans are unmeasured: they are the f16 matmul's measured cells (docs
+# tile-backend-design.md, P4-e), whose operand tiles are the same, with the
+# f32 accumulator the only difference. The filter of `recording_policy` holds
+# them, and tile-gpu-diff's gemm family runs each on its card; no timing is
+# claimed for them.
+impl GemmElem[BF16] {
+  type Acc = F32
+  fn gemm_acc(dt: Dtype[BF16]) -> Dtype[F32] = F32
+  fn gemm_plan(dt: Dtype[BF16], arch: Arch) -> MmPlan = match arch {
+    Sm90 -> MmPlan { tiles = MmTiles { tm = 128, tn = 128, tk = 64 }, hints = [] }
+    Sm100 -> MmPlan { tiles = MmTiles { tm = 256, tn = 128, tk = 128 }, hints = [for_arch(arch_name(arch), entry_hints(num_cta_in_cga = Some(2)))] }
+    _ -> MmPlan { tiles = MmTiles { tm = 64, tn = 64, tk = 32 }, hints = [] }
+  }
+  fn gemm_zero(dt: Dtype[BF16], shape: List[Int]) -> Tile[F32] !Dev = full(shape, f32(0.0))
+  fn gemm_mma(a: Tile[BF16], b: Tile[BF16], acc: Tile[F32]) -> Tile[F32] !Dev = mma(a, b, acc)
+}
+
+# The K loop: the accumulator travels through it as its carried value, as in
+# `mm_body`, and leaves it unconverted for the epilogue.
+fn gemm_acc_loop[D: GemmElem](dt: Dtype[D], a: Param[D], b: Param[D], cfg: MmTiles, shape: MmShape) -> Tile[D.Acc] !Dev = {
+  var acc = gemm_zero(dt, [cfg.tm, cfg.tn])
+  for k in d_range(0, shape.k / cfg.tk) { acc = gemm_mma(load_at(a, [k]), load_at(b, [k]), acc) }
+  acc
+}
+
+# The domain and filter every matmul-shaped factory holds a plan to.
+fn mm_domain(arch: Arch, selected: MmPlan, shape: MmShape, at: Loc) -> Unit = {
+  let c = selected.tiles
+  recording_policy(arch, c.tm, selected.hints, at = at)
+  if c.tn <= 0 || c.tk <= 0 { panic("matmul: tile dimensions must be positive", at = at) } else { () }
+  if shape.m <= 0 || shape.n <= 0 || shape.k <= 0 || shape.m % c.tm != 0 || shape.n % c.tn != 0 || shape.k % c.tk != 0 {
+    panic("matmul: dimensions must be positive multiples of the configured tiles", at = at)
+  } else { () }
+}
+
+# A GEMM whose epilogue needs nothing but the accumulator. `out` is the C
+# buffer's format and the epilogue's result type.
+pub fn gemm_record[D: GemmElem, O](name: String, dt: Dtype[D], out: Dtype[O], arch: Arch, shape: MmShape,
+    epilogue: fn(Tile[D.Acc]) -> Tile[O] !Dev, plan: Option[MmPlan] = None, at: Loc = caller()) -> TileProg = {
+  let selected = match plan { Some(p) -> p
+    None -> gemm_plan(dt, arch) }
+  mm_domain(arch, selected, shape, at)
+  let c = selected.tiles
+  let (p, _e) = trace3(name,
+    In(dt, cells([shape.m, shape.k], [c.tm, c.tk], along = [Axis(0), Free])),
+    In(dt, cells([shape.k, shape.n], [c.tk, c.tn], along = [Free, Axis(1)])),
+    Out(out, cells([shape.m, shape.n], [c.tm, c.tn])),
+    (a, b, o) => store_cell(o, epilogue(gemm_acc_loop(dt, a, b, c, shape))), hints = selected.hints)
+  p
+}
+
+# A GEMM whose epilogue reads one more operand: the third kernel parameter,
+# described by `extra` (a bias row's cells, or a launch-time `Scalar`).
+pub fn gemm_record_with[D: GemmElem, X, O](name: String, dt: Dtype[D], extra: Arg[X], out: Dtype[O], arch: Arch, shape: MmShape,
+    epilogue: fn(Tile[D.Acc], Param[X]) -> Tile[O] !Dev, plan: Option[MmPlan] = None, at: Loc = caller()) -> TileProg = {
+  let selected = match plan { Some(p) -> p
+    None -> gemm_plan(dt, arch) }
+  mm_domain(arch, selected, shape, at)
+  let c = selected.tiles
+  let (p, _e) = trace4(name,
+    In(dt, cells([shape.m, shape.k], [c.tm, c.tk], along = [Axis(0), Free])),
+    In(dt, cells([shape.k, shape.n], [c.tk, c.tn], along = [Free, Axis(1)])),
+    extra,
+    Out(out, cells([shape.m, shape.n], [c.tm, c.tn])),
+    (a, b, x, o) => store_cell(o, epilogue(gemm_acc_loop(dt, a, b, c, shape), x)), hints = selected.hints)
+  p
+}
+
+# The epilogues, over the f32 accumulator both impls so far share. The
+# activation is applied to the f32 sum and the conversion comes last: relu
+# commutes with a monotone rounding, but adding a bias does not (two roundings
+# against one), which is what the device mutants of tile-gpu-diff's gemm
+# family rest on.
+fn gemm_identity(acc: Tile[F32]) -> Tile[F32] !Dev = acc
+fn gemm_scale(acc: Tile[F32], alpha: Param[F32]) -> Tile[F32] !Dev = acc * scalar(alpha)
+fn gemm_bias_relu(acc: Tile[F32], bias: Param[F32]) -> Tile[BF16] !Dev =
+  max(acc + load_at(bias, [idx_const(0)]), f_const(F32, f32(0.0))).to(BF16)
+
+# The bias is one row of N, cut like B's columns: every block of a column
+# reads the same cell, broadcast down the rows of the accumulator.
+fn gemm_bias_arg(shape: MmShape, tn: Int) -> Arg[F32] = In(F32, cells([1, shape.n], [1, tn], along = [Free, Axis(1)]))
+
+pub fn gemm_bf16(name: String, arch: Arch, shape: MmShape) -> TileProg = gemm_record(name, BF16, F32, arch, shape, gemm_identity)
+
+pub fn gemm_bf16_scale(name: String, arch: Arch, shape: MmShape) -> TileProg =
+  gemm_record_with(name, BF16, Scalar(F32), F32, arch, shape, gemm_scale)
+
+pub fn gemm_bf16_bias_relu(name: String, arch: Arch, shape: MmShape) -> TileProg =
+  gemm_record_with(name, BF16, gemm_bias_arg(shape, gemm_plan(BF16, arch).tiles.tn), BF16, arch, shape, gemm_bias_relu)
 
 # The batched GEMM: BMM_B independent 64x64 products in 32x32 tiles, the
 # batch on the grid's THIRD axis. leetgpu 30.
@@ -5768,6 +5886,12 @@ fn trace(name: String) -> TileProg = match name {
   "matmul_f16_sm100" -> mm_named("matmul_f16_sm100", Sm100, F16)
   "matmul_i8_sm90" -> mm_named("matmul_i8_sm90", Sm90, I8)
   "matmul_i8_sm100" -> mm_named("matmul_i8_sm100", Sm100, I8)
+  "gemm_bf16" -> gemm_bf16("gemm_bf16", Generic, mm_shape())
+  "gemm_bf16_sm90" -> gemm_bf16("gemm_bf16_sm90", Sm90, mm_shape())
+  "gemm_bf16_sm100" -> gemm_bf16("gemm_bf16_sm100", Sm100, mm_shape())
+  "gemm_scale_bf16" -> gemm_bf16_scale("gemm_scale_bf16", Generic, mm_shape())
+  "gemm_bias_relu_bf16" -> gemm_bf16_bias_relu("gemm_bias_relu_bf16", Generic, mm_shape())
+  "gemm_bias_relu_bf16_sm100" -> gemm_bf16_bias_relu("gemm_bias_relu_bf16_sm100", Sm100, mm_shape())
   "batched_matmul" -> {
     let (p, _e) = trace3("batched_matmul", In(F64, Whole), In(F64, Whole),
       Out(F64, cells([BMM_B, BMM_M, BMM_N], [1, BMM_T, BMM_T], along = [Axis(2), Axis(0), Axis(1)])), batched_matmul)
@@ -7083,6 +7207,19 @@ fn flash_policy_check(name: String, p: TileProg, bf16: Bool) -> Unit = {
   if mmas != 2 { panic("generic ${name}: two MMA operations") }
 }
 
+# The GEMM family's cubins come from the same factory and the architecture's
+# selected plan, under the names tile-gpu-diff's gemm family launches.
+fn gemm_records(arch: Arch, dir: String) -> Unit !io = {
+  for p in [gemm_bf16("gemm_bf16", arch, mm_shape()),
+            gemm_bf16_scale("gemm_scale_bf16", arch, mm_shape()),
+            gemm_bf16_bias_relu("gemm_bias_relu_bf16", arch, mm_shape())] {
+    match with_fs_real(() => write_bytes("${dir}/${p.name}.tilebc", encode(p))) {
+      Ok(_) -> ()
+      Err(e) -> panic("gemm: cannot write ${p.name}: ${e}")
+    }
+  }
+}
+
 # Extra device samples use the actual factory and the architecture's selected
 # configuration. They are not additional golden entries or tuning candidates.
 fn flash_output_records(arch: Arch, dir: String) -> Unit !io = {
@@ -7590,6 +7727,7 @@ pub fn main() -> Unit !io = match args() {
     println("PASS flash and matmul recording policies, domains and caller locations")
   }
   ["--flash-output-record", arch, dir] -> flash_output_records(arch_from_name(arch), dir)
+  ["--gemm-record", arch, dir] -> gemm_records(arch_from_name(arch), dir)
   ["--staged-token-checks"] -> {
     staged_token_checks()
     println("PASS staged if token merge and conservative fork conflicts")
@@ -7631,6 +7769,7 @@ pub fn main() -> Unit !io = match args() {
         ++ "|count_eq|subarray_sum|rainbow|int_ops"
         ++ "|staged_load|staged_store|staged_for|staged_atomic|staged_asym|staged_effect_nested|staged_unit|staged_value|staged_nested|staged_one|bitwise_i8|bitwise_i16|bitwise_i32|bitwise_i64|bitwise_mask|shift_i8|shift_i16|shift_i32|shift_i64|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
         ++ "|matmul_f16_sm90|matmul_f16_sm100|matmul_i8_sm90|matmul_i8_sm100"
+        ++ "|gemm_bf16|gemm_bf16_sm90|gemm_bf16_sm100|gemm_scale_bf16|gemm_bias_relu_bf16|gemm_bias_relu_bf16_sm100"
         ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
         ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"
         ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
