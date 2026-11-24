@@ -2992,6 +2992,51 @@ grep -q 'A2 finite dyadic mean' "$work/a2-red/device.err" ||
   { cat "$work/a2-red/device.err" >&2; fail "A2 precision mutant missed its named oracle"; }
 echo "PASS  mutant: flash-output-bf16 (valid cubin, finite dyadic mean oracle red)"
 
+# G14-1: the GEMM factory's three epilogues on this card, from the same
+# factory and the architecture's selected plan. Exact corpus for the identity,
+# the scale and the fused bias, relu and bf16 conversion; a tolerance tier for
+# arbitrary bf16 inputs. The plans are unmeasured defaults, so this run is the
+# only claim about them: they assemble, launch and compute on this card.
+mkdir -p "$work/gemm"
+"$root/bin/dawn" run "$asm_proj" -- --gemm-record "$gpu_name" "$work/gemm" > "$work/gemm/record.out" 2> "$work/gemm/record.err" ||
+  { cat "$work/gemm/record.err" >&2; fail "gemm recording failed"; }
+for k in gemm_bf16 gemm_scale_bf16 gemm_bias_relu_bf16; do
+  assemble_golden "$k" "$work/gemm/$k.tilebc" "$work/gemm/$k.cubin"
+done
+build_native "$root/std" "$work/gemm.bin" "$here/gemm_diff.dawn"
+rc=0
+device "$work/gemm.bin" "$gpu_name" "$work/gemm/gemm_bf16.cubin" "$work/gemm/gemm_scale_bf16.cubin" "$work/gemm/gemm_bias_relu_bf16.cubin" > "$work/gemm.out" 2> "$work/gemm.err" || rc=$?
+cat "$work/gemm.out"
+gemm_result="$(verdict_of "$work/gemm.out")"
+[ "$rc" = 0 ] && [ "$gemm_result" = pass ] ||
+  { cat "$work/gemm.err" >&2; fail "gemm_diff disagreed with its independent reference (exit $rc)"; }
+
+# Each numerical fault is a legal recording: it must assemble and launch and
+# then be rejected by the named oracle of the epilogue it breaks.
+for m in gemm-bias-after-convert gemm-relu-before-bias gemm-scale-dropped; do
+  variant="$work/$m-tree"
+  mkdir -p "$variant/scripts/tile-golden" "$work/$m-out"
+  cp "$golden/kernels.dawn" "$variant/scripts/tile-golden/kernels.dawn"
+  python3 "$golden/mutate.py" "$m" "$variant"
+  cp "$variant/scripts/tile-golden/kernels.dawn" "$asm_proj/src/main.dawn"
+  "$root/bin/dawn" run "$asm_proj" -- --gemm-record "$gpu_name" "$work/$m-out" > "$work/$m-out/record.out" 2> "$work/$m-out/record.err" ||
+    { cat "$work/$m-out/record.err" >&2; fail "$m failed to record"; }
+  cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
+  for k in gemm_bf16 gemm_scale_bf16 gemm_bias_relu_bf16; do
+    assemble_golden "$k" "$work/$m-out/$k.tilebc" "$work/$m-out/$k.cubin"
+  done
+  rc=0
+  device "$work/gemm.bin" "$gpu_name" "$work/$m-out/gemm_bf16.cubin" "$work/$m-out/gemm_scale_bf16.cubin" "$work/$m-out/gemm_bias_relu_bf16.cubin" > "$work/$m-out/device.out" 2> "$work/$m-out/device.err" || rc=$?
+  [ "$rc" != 0 ] || fail "$m stayed green"
+  case "$m" in
+    gemm-scale-dropped) oracle='scale exact: lane' ;;
+    *) oracle='bias relu bf16 exact: lane' ;;
+  esac
+  grep -q "$oracle" "$work/$m-out/device.err" ||
+    { cat "$work/$m-out/device.err" >&2; fail "$m missed its named oracle ($oracle)"; }
+  echo "PASS  mutant: $m (valid cubins, the $oracle oracle is red)"
+done
+
 # The ledger records one verdict for the tree: every family passes (or was
 # skipped on purpose), or it is the first thing that stopped one of them. The
 # list is in run order and is the only place the fold reads; fold_verdict.sh
@@ -6457,7 +6502,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
   scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn scripts/tile-gpu-diff/scalar_diff.dawn scripts/tile-gpu-diff/entry6_diff.dawn scripts/tile-gpu-diff/read_layout_diff.dawn \
-  scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
+  scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/gemm_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
   scripts/tile-gpu-diff/rounding.dawn scripts/tile-gpu-diff/rounding_cases.py \
   scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py scripts/tile-gpu-diff/fold_verdict.sh)"
 [ -z "$dirty" ] ||
@@ -6478,6 +6523,7 @@ summary="$summary $(sed -n 's/^probe read-layout /read-layout=/p' "$work/read-la
 summary="$summary bitwise:$(sed -n 's/^tiers //p' "$work/bitwise.out" | tail -n 1)"
 summary="$summary shift:$(sed -n 's/^tiers //p' "$work/shift.out" | tail -n 1)"
 summary="$summary staged:$(sed -n 's/^tiers //p' "$work/staged.out" | tail -n 1)"
+summary="$summary gemm:$(sed -n 's/^tiers //p' "$work/gemm.out" | tail -n 1)"
 summary="$summary arch=$arch_probe"
 summary="$summary asm=$asm_probe"
 if [ -n "$note" ]; then line="$line # inputs=$inputs_digest $note; $summary"; else line="$line # inputs=$inputs_digest $summary"; fi

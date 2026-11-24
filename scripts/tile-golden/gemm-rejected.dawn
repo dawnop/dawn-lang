@@ -1,0 +1,20 @@
+# Checker refusals for the GEMM factory. The accumulator format is a function
+# of the input format (`GemmElem`'s `Acc`), so a format without an impl, an
+# epilogue over the wrong accumulator and an epilogue whose result is not the
+# output buffer's format are refused where the factory is called, before any
+# recording or assembler. `kernels` is scripts/tile-golden's kernels.dawn,
+# which run.sh copies beside this file as a module.
+use std/narrow.{F32, BF16}
+use std/dtype.{F64}
+use tileir/dev.{Dev, Tile}
+use tileir/prog.{Scalar}
+use kernels.{Generic, gemm_record, gemm_record_with, mm_shape}
+
+fn keep_f32(acc: Tile[F32]) -> Tile[F32] !Dev = acc
+fn keep_f64(acc: Tile[Float]) -> Tile[Float] !Dev = acc
+
+pub fn f32_input() -> Unit = { let _p = gemm_record("g", F32, F32, Generic, mm_shape(), keep_f32) }
+pub fn f64_input() -> Unit = { let _p = gemm_record("g", F64, F64, Generic, mm_shape(), keep_f64) }
+pub fn wrong_accumulator() -> Unit = { let _p = gemm_record("g", BF16, F64, Generic, mm_shape(), keep_f64) }
+pub fn wrong_output() -> Unit = { let _p = gemm_record("g", BF16, BF16, Generic, mm_shape(), keep_f32) }
+pub fn missing_operand() -> Unit = { let _p = gemm_record_with("g", BF16, Scalar(F32), F32, Generic, mm_shape(), keep_f32) }

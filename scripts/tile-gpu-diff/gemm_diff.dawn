@@ -1,0 +1,193 @@
+# Layer 2 for the GEMM factory (G14-1): bf16 inputs, f32 accumulator, and the
+# three epilogues scripts/tile-golden records (identity, launch-time scale,
+# bias plus relu converted to bf16).
+#
+#   gemm_diff <arch> <gemm_bf16.cubin> <gemm_scale_bf16.cubin> <gemm_bias_relu_bf16.cubin>
+#
+# Two corpora, and they claim different things.
+#
+# EXACT. Every input is an integer in [-48, 47] over 16 (six bits, exact in
+# bf16), so every product is a multiple of 1/256 below 9 and every partial sum
+# of the 256 products is a multiple of 1/256 below 2304: at most twenty bits,
+# which f32 holds. The device's order of accumulation therefore cannot show,
+# and the f64 host sum is the answer to the last bit. That is what lets the
+# identity, the scale (3/8, itself exact) and the fused epilogue be held to
+# equality. It verifies the data path, the layout and the launch grid; it says
+# nothing about rounding in a general f32 accumulation.
+#
+# Most sums need more than the eight significand bits bf16 has, and the bias
+# is a multiple of 1/512 of the size of their rounding step, so converting the
+# f32 sum once and converting the accumulator first and then adding the bias
+# (the gemm-bias-after-convert mutant) give different bf16 results on a large
+# share of lanes; a relu taken before the bias (gemm-relu-before-bias) differs
+# wherever the sum is negative. Both are legal recordings with wrong numbers,
+# which only this run rejects.
+#
+# GENERAL. Arbitrary bf16 values of both signs, the plain GEMM only, held to a
+# tolerance against an f64 reference over the same bf16 inputs. It answers "no
+# large error" and does not claim a rounding precision.
+use std/io
+use std/gpu
+use std/gpu.{Axis, Free, Gpu, DeviceBuffer, Entry3, Entry4}
+use std/narrow
+use std/narrow.{F32, BF16}
+use std/list
+use std/map
+use std/math
+
+const M: Int = 256
+const N: Int = 256
+const K: Int = 256
+
+fn require(ok: Bool, why: String) -> Unit = if not ok { panic("G14-1 gemm ${why}") }
+
+# The tiles each architecture's plan selects (scripts/tile-golden gemm_plan).
+fn tm_of(arch: String) -> Int = if arch == "sm_100" { 256 } else if arch == "sm_90" { 128 } else { 64 }
+fn tn_of(arch: String) -> Int = if arch == "sm_90" || arch == "sm_100" { 128 } else { 64 }
+fn tk_of(arch: String) -> Int = if arch == "sm_100" { 128 } else if arch == "sm_90" { 64 } else { 32 }
+
+fn mix(i: Int, k: Int) -> Int = (i * 31 + k * 17 + (i * k) % 7 * 5) % 96 - 48
+
+fn a_exact(i: Int, k: Int) -> Float = to_float(mix(i, k)) / 16.0
+fn b_exact(k: Int, j: Int) -> Float = to_float(mix(j + 5, k * 3 + 1)) / 16.0
+fn bias_of(j: Int) -> Float = to_float((j * 37) % 255 - 127) / 512.0
+
+# Arbitrary values, rounded to bf16 where they are made so that the reference
+# and the device see the same inputs.
+fn a_general(i: Int, k: Int) -> Float = narrow.to_f64(narrow.bf16(math.sin(to_float(i * 257 + k * 13 + 1)) * 1.5))
+fn b_general(k: Int, j: Int) -> Float = narrow.to_f64(narrow.bf16(math.cos(to_float(k * 131 + j * 7 + 3)) * 0.75))
+
+fn matrix(rows: Int, cols: Int, f: fn(Int, Int) -> Float) -> List[Float] =
+  list.map(range(0, rows * cols), x => f(x / cols, x % cols))
+
+# The f64 product of two row-major matrices of the bf16 values held in `a` and `b`.
+fn reference(a: List[Float], b: List[Float]) -> List[Float] =
+  list.map(range(0, M * N), x => {
+    let i = x / N
+    let j = x % N
+    list.fold(range(0, K), 0.0, (s, k) => s + a[i * K + k] * b[k * N + j])
+  })
+
+fn upload(xs: List[Float]) -> Result[DeviceBuffer[BF16], ForeignError] !Gpu = {
+  let b: DeviceBuffer[BF16] = gpu.alloc(BF16, len(xs))?
+  gpu.copy_from_host(b, list.map(xs, x => narrow.bf16(x)))?
+  Ok(b)
+}
+
+fn download(b: DeviceBuffer[F32]) -> Result[List[Float], ForeignError] !Gpu = {
+  let got = gpu.copy_to_host(b)?
+  Ok(list.map(got, x => narrow.to_f64(x)))
+}
+
+fn out_f32() -> Result[DeviceBuffer[F32], ForeignError] !Gpu = {
+  let o: DeviceBuffer[F32] = gpu.alloc(F32, M * N)?
+  gpu.copy_from_host(o, list.map(range(0, M * N), _i => narrow.f32(-12345.0)))?
+  Ok(o)
+}
+
+fn in_a(tm: Int, tk: Int) -> gpu.EntryArg = gpu.arg_in([M, K], [tm, tk], [Axis(0), Free])
+fn in_b(tk: Int, tn: Int) -> gpu.EntryArg = gpu.arg_in([K, N], [tk, tn], [Free, Axis(1)])
+
+fn same(name: String, got: List[Float], want: List[Float]) -> Unit = {
+  require(len(got) == len(want), "${name}: element count")
+  for i in range(0, len(want)) {
+    require(got[i] == want[i], "${name}: lane ${i} (row ${i / N} col ${i % N}) expected ${want[i]} got ${got[i]}")
+  }
+}
+
+fn close(name: String, got: List[Float], want: List[Float], tol: Float) -> Unit = {
+  require(len(got) == len(want), "${name}: element count")
+  for i in range(0, len(want)) {
+    require(math.abs(got[i] - want[i]) <= tol, "${name}: lane ${i} expected ${want[i]} got ${got[i]} beyond ${tol}")
+  }
+}
+
+fn run_all(arch: String) -> Result[List[String], ForeignError] !Gpu = {
+  var report: List[String] = []
+  let tm = tm_of(arch)
+  let tn = tn_of(arch)
+  let tk = tk_of(arch)
+  let ae = matrix(M, K, a_exact)
+  let be = matrix(K, N, b_exact)
+  let acc = reference(ae, be)
+  let da = upload(ae)?
+  let db = upload(be)?
+
+  # identity, exact
+  let plain: Entry3[BF16, BF16, F32] = gpu.entry3("gemm_bf16", in_a(tm, tk), in_b(tk, tn), gpu.arg_out([M, N], [tm, tn]), [])
+  let o1 = out_f32()?
+  gpu.launch_entry3(plain, gpu.buffer_arg(da), gpu.buffer_arg(db), gpu.buffer_arg(o1))?
+  gpu.sync()?
+  same("identity exact", download(o1)?, acc)
+  report = report ++ ["PASS gemm identity exact arch=${arch} tiles=${tm}x${tn}x${tk} elements=${M * N}"]
+
+  # launch-time scale, exact
+  let scaled: Entry4[BF16, BF16, F32, F32] = gpu.entry4("gemm_scale_bf16", in_a(tm, tk), in_b(tk, tn), gpu.arg_scalar(), gpu.arg_out([M, N], [tm, tn]), [])
+  let o2 = out_f32()?
+  gpu.launch_entry4(scaled, gpu.buffer_arg(da), gpu.buffer_arg(db), gpu.scalar_arg(narrow.f32(0.375)), gpu.buffer_arg(o2))?
+  gpu.sync()?
+  same("scale exact", download(o2)?, list.map(acc, x => x * 0.375))
+  report = report ++ ["PASS gemm scale exact arch=${arch} alpha=0.375 elements=${M * N}"]
+
+  # bias then relu then bf16, exact
+  let biases = list.map(range(0, N), bias_of)
+  let dbias: DeviceBuffer[F32] = gpu.alloc(F32, N)?
+  gpu.copy_from_host(dbias, list.map(biases, x => narrow.f32(x)))?
+  let fused: Entry4[BF16, BF16, F32, BF16] = gpu.entry4("gemm_bias_relu_bf16", in_a(tm, tk), in_b(tk, tn),
+    gpu.arg_in([1, N], [1, tn], [Free, Axis(1)]), gpu.arg_out([M, N], [tm, tn]), [])
+  let o3: DeviceBuffer[BF16] = gpu.alloc(BF16, M * N)?
+  gpu.copy_from_host(o3, list.map(range(0, M * N), _i => narrow.bf16(-12345.0)))?
+  gpu.launch_entry4(fused, gpu.buffer_arg(da), gpu.buffer_arg(db), gpu.buffer_arg(dbias), gpu.buffer_arg(o3))?
+  gpu.sync()?
+  let raw = gpu.copy_to_host(o3)?
+  let want = list.map(range(0, M * N), x => narrow.round_bf16(math.max(acc[x] + biases[x % N], 0.0)))
+  # the corpus must be able to tell the fused rounding from convert-then-add
+  let two = list.map(range(0, M * N), x => narrow.round_bf16(math.max(narrow.round_bf16(acc[x]) + narrow.round_bf16(biases[x % N]), 0.0)))
+  let distinct = list.fold(range(0, M * N), 0, (n, x) => if two[x] != want[x] { n + 1 } else { n })
+  let negative = list.fold(range(0, M * N), 0, (n, x) => if acc[x] < 0.0 && biases[x % N] > 0.0 { n + 1 } else { n })
+  require(distinct > M * N / 16, "corpus cannot distinguish bias-after-convert (${distinct} lanes)")
+  require(negative > M * N / 16, "corpus cannot distinguish relu-before-bias (${negative} lanes)")
+  same("bias relu bf16 exact", list.map(raw, x => narrow.to_f64(x)), want)
+  report = report ++ ["PASS gemm bias+relu->bf16 exact arch=${arch} distinguishing-lanes=${distinct} negative-bias-lanes=${negative}"]
+
+  # general corpus, tolerance tier, identity epilogue
+  let ag = matrix(M, K, a_general)
+  let bg = matrix(K, N, b_general)
+  let ga = upload(ag)?
+  let gb = upload(bg)?
+  let o4 = out_f32()?
+  gpu.launch_entry3(plain, gpu.buffer_arg(ga), gpu.buffer_arg(gb), gpu.buffer_arg(o4))?
+  gpu.sync()?
+  close("identity general", download(o4)?, reference(ag, bg), 0.001)
+  report = report ++ ["PASS gemm identity general tolerance=0.001 arch=${arch}"]
+
+  gpu.free(da)?
+  gpu.free(db)?
+  gpu.free(dbias)?
+  gpu.free(o1)?
+  gpu.free(o2)?
+  gpu.free(o3)?
+  gpu.free(o4)?
+  gpu.free(ga)?
+  gpu.free(gb)?
+  Ok(report)
+}
+
+pub fn main() -> Unit !io = {
+  let ps = args()
+  if len(ps) != 4 { panic("usage: gemm_diff <arch> <gemm_bf16.cubin> <gemm_scale_bf16.cubin> <gemm_bias_relu_bf16.cubin>") }
+  let read = (path: String) => match io.with_fs_real(() => io.read_bytes(path)) {
+    Ok(b) -> b
+    Err(e) -> panic("G14-1 gemm read cubin: ${e}")
+  }
+  let kernels = map.from([("gemm_bf16", read(ps[1])), ("gemm_scale_bf16", read(ps[2])), ("gemm_bias_relu_bf16", read(ps[3]))])
+  let r = gpu.with_gpu_real(kernels, () => run_all(ps[0]))
+  match r {
+    Ok(lines) -> {
+      for l in lines { println(l) }
+      println("tiers exact=3 tolerance=1")
+      println("tile-gpu-diff: pass")
+    }
+    Err(e) -> panic("G14-1 gemm device refused: ${e}")
+  }
+}

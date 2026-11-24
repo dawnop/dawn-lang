@@ -49,7 +49,7 @@ def contract(plan):
 
 def selections(plan, total):
     matrix = lines(ROOT / 'scripts/tile-golden/matrix.txt')
-    if len(matrix) != 430 or len(set(matrix)) != len(matrix):
+    if len(matrix) != 441 or len(set(matrix)) != len(matrix):
         raise ValueError('wrong matrix cardinality')
     dealt = {}
     header = {}
@@ -99,7 +99,7 @@ def validate(receipts, expected, selected):
         if any(not math.isfinite(t) or t <= 0 for t in r['times'].values()):
             raise ValueError('invalid successful item timing')
         ran += r['ran']
-    if len(ran) != 430 or len(set(ran)) != 430:
+    if len(ran) != 441 or len(set(ran)) != 441:
         raise ValueError('union misses or repeats work')
 
 
@@ -187,7 +187,7 @@ def selftest():
     # Fixed fixtures exercise the same verifier without compiling mutants.
     expected = dict(inputs='input', plan='plan', golden='golden')
     total = 20
-    selected = {i: [f'item-{n}' for n in range(i - 1, 430, total)] for i in range(1, total + 1)}
+    selected = {i: [f'item-{n}' for n in range(i - 1, 441, total)] for i in range(1, total + 1)}
     receipts = [dict(identity=expected.copy(), index=i, total=total, attempt='1',
         ran=names.copy(), times={n: 1.0 for n in names}, prebuilt_unchanged=True)
         for i, names in selected.items()]
