@@ -518,6 +518,12 @@ fn is_effect_union(raw: List[Token], start: Int) -> Bool = {
       if i + 1 < len(raw) && raw[i].kind == DOT && raw[i + 1].kind == TYPEIDENT {
         i = i + 2
       }
+      # a scope-indexed atom `Mem[s]` is one name too. Only an uppercase name
+      # with a lone ident inside: `o!(g[i])` is an index call and stays one
+      if i + 2 < len(raw) && raw[i - 1].kind == TYPEIDENT && raw[i].kind == LBRACKET &&
+        raw[i + 1].kind == IDENT && raw[i + 2].kind == RBRACKET {
+        i = i + 3
+      }
     } else if k == PIPE {
       want_name = true
       i = i + 1
@@ -1534,6 +1540,23 @@ test "an empty row in trait and impl members keeps its space" {
   assert fmt_of("trait P[T] {\n  effect E = !()\n  fn run(x: T) -> Int!()\n}\n") == tr
   let im = "impl P[A] {\n  effect E = !()\n  fn run(x: A) -> Int !() = x.v\n}\n"
   assert fmt_of("impl P[A] {\n  effect E = !()\n  fn run(x: A) -> Int!() = x.v\n}\n") == im
+}
+
+test "a scope-indexed effect atom in a union keeps the bang an effect marker" {
+  let row = "fn f[@s](a: Int) -> Int !(Mem[s] | e) = a\n"
+  assert fmt_of(row) == row
+  let two = "fn f[@s,@t](a: Int) -> Unit !(Mem[s] | Mem[t]) = ()\n"
+  assert fmt_of(two) == two
+  # the glued spelling is the old output; it is spaced again
+  assert fmt_of("fn f[@s](a: Int) -> Int!(Mem[s] | e) = a\n") == row
+  # an index call after a postfix unwrap is still one
+  for src in [
+    "fn u(o: Option[fn(Int) -> Int], i: Int) -> Int = o!(g[i])\n",
+    "fn u(o: Option[fn(Int) -> Int]) -> Int = o!(g[0])\n",
+    "fn u(o: Option[fn(Int) -> Int]) -> Int = o!(f(x))\n",
+  ] {
+    assert fmt_of(src) == src
+  }
 }
 
 test "a postfix unwrap followed by an empty call stays tight" {
