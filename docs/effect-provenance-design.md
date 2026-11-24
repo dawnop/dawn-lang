@@ -578,7 +578,7 @@ R3 按协议资格、R4 删 marks、R5 删后复测。不做的：本刀不改 r
 手写标记全部保留。R2 在它们旁边加一条独立的、来自编译器声明身份的视图，并让消费者
 用这条视图的关系取代文本扫描与名单。
 
-- **适配器。** [`packages/tileir/src/origin.dawn`](../packages/tileir/src/origin.dawn) 把一次观察的
+- **适配器。** `packages/tileir/src/origin.dawn`（已删除，见 tag `provenance-final`）把一次观察的
   冻结快照（`rows_of`）投影为作者写下的调用（`project`），或只给出被调用者的声明身份
   （`callees`）。身份只用编译器记录的事实：调用点所在的模块与声明、声明内相对 span、
   被调用者的定义 span、每次执行各自的实例号。同一 helper 的两次调用是两个节点、两个

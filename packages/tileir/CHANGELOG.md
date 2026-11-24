@@ -1,5 +1,11 @@
 # tileir changelog
 
+## 0.34.0
+
+- 删除 `origin` 模块（0.33.0 引入）及其旁证脚本 `scripts/tile-origin-mutants`。
+  该模块只消费 `std/provenance` 的观察快照，而观察本身正在整体移除，
+  调用记录改由 `Dev` 的 `calls` 子句承担。破坏性变更，不提供兼容层。
+
 ## 0.33.0
 
 - 新模块 `origin`：把一次 `std/provenance` 观察的冻结快照投影为作者写下的调用
