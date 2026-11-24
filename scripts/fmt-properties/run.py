@@ -553,6 +553,7 @@ def check_layout(lay):
         if c.kind in HEADED:
             bases.add(id(c))
     items = {}  # lo of a line's first token -> expected indent of that line
+    wants = {}  # id of a container -> where its items sit
     for c in walk(lay.root):
         if c.kind not in ITEM_KINDS:
             continue
@@ -563,6 +564,15 @@ def check_layout(lay):
             # parser wraps in a lambda; its statements stay where the `with` is
             p = spanned_parent(c)
             want = lay.indent_at(p.lo if p is not None else c.lo)
+            if p is not None and line_lead(lay, p) is None:
+                # the `with` shares its line with what opens the block
+                # (`if c { with x <- f()`): its siblings sit where the block's
+                # own items do, not where that line starts
+                a = c.parent
+                while a is not None and id(a) not in wants:
+                    a = a.parent
+                if a is not None:
+                    want = wants[id(a)]
         elif c.kind in ("Block", "Match", "Handle") and c.lo not in lay.first_lo:
             want = lay.indent_at(body_anchor(lay, c, bases)) + 2
         elif c.kind in ("Impl", "Trait", "Effect"):
@@ -571,6 +581,7 @@ def check_layout(lay):
             want = lay.indent_at(lay.lo_min[id(c)]) + 2
         else:
             want = lay.indent_at(c.lo) + 2
+        wants[id(c)] = want
         for k in item_children(c):
             lead = line_lead(lay, k)
             if lead is not None:
@@ -999,6 +1010,12 @@ def self_test(dawn):
         ("the same chain folded at its links",
          "fn f() -> Int = {\n  let r = xs.map(f)\n    .keep(" + "a" * 70 + ")\n    .take(" + "a" * 20 + ")\n  r\n}\n",
          None),
+        ("a `with` sharing its line with the brace: siblings sit one level in",
+         "fn g(c: Bool) -> Unit = {\n  if c { with ignored <- wrap()\n    let snapshot = 1 }\n}\n", None),
+        ("the same sibling at the brace line's own column",
+         "fn g(c: Bool) -> Unit = {\n  if c { with ignored <- wrap()\n  let snapshot = 1 }\n}\n", "item-indent"),
+        ("a `with` on a line of its own",
+         "fn g(c: Bool) -> Unit = {\n  if c {\n    with ignored <- wrap()\n    let snapshot = 1 }\n}\n", None),
         ("a wide line with no chain link is the author's",
          "fn f() -> Int = {\n  let r = g(" + "a" * 70 + ", " + "b" * 40 + ")\n  r\n}\n", None),
     ]
