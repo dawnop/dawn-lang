@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.7
+
+- Highlight the `calls` clause of an effect declaration as a contextual keyword;
+  a binding or call named `calls` stays an ordinary name.
+
 ## 0.1.6
 
 - Open embedded standard-library definitions as read-only source documents,
