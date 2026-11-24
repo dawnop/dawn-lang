@@ -20,7 +20,7 @@ use std/int/i32.{I32}
 use std/narrow.{F32, BF16, F16, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU, F4E2M1FN, F8E5M3FNU, Rounding, f32}
 use std/float.{INFINITY}
 use tileref/ref.{global_table_a, global_table_b, global_syms_c}
-use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, FloatDtype, host_float, wire_entry, param, block_id, tile_at, load, store, row_major, permute, coord,
+use tileir/dev.{Dev, Param, Tile, Idx, TileBitsDtype, TileShiftDtype, FloatDtype, wire_entry, param, block_id, tile_at, load, store, row_major, permute, coord,
   in_range, axis_mask, gather, scatter, axis_strides, ge_i, mma, full, transpose, to, add, sub, mul, div, max, min,
   abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_eq,
   d_loop, carry, get, set, lit, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes, d_reduce,
@@ -387,28 +387,93 @@ const MM_TK: Int = 32
 
 # Recording policy is application and toolchain specific, not a tileir API.
 # A missing hint stays absent; no explicit occupancy or CGA of one is added.
-type MmTiles = { tm: Int, tn: Int, tk: Int }
-type MmPlan = { tiles: MmTiles, hints: ByArch[EntryHints] }
-type MmShape = { m: Int, n: Int, k: Int }
+pub type MmTiles = { tm: Int, tn: Int, tk: Int }
+pub type MmPlan = { tiles: MmTiles, hints: ByArch[EntryHints] }
+pub type MmShape = { m: Int, n: Int, k: Int }
 
-fn mm_shape() -> MmShape = MmShape { m = MM_M, n = MM_N, k = MM_K }
+pub fn mm_shape() -> MmShape = MmShape { m = MM_M, n = MM_N, k = MM_K }
 
-fn mm_plan(arch: String, dtype: String) -> MmPlan = match (arch, dtype) {
-  ("sm_90", "f64") -> MmPlan { tiles = MmTiles { tm = 16, tn = 64, tk = 16 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2)))] }
-  ("sm_100", "f64") -> MmPlan { tiles = MmTiles { tm = 16, tn = 64, tk = 16 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2)))] }
-  (_, "f64") -> MmPlan { tiles = MmTiles { tm = 64, tn = 64, tk = 32 }, hints = [] }
-  ("sm_90", "f16") -> MmPlan { tiles = MmTiles { tm = 128, tn = 128, tk = 64 }, hints = [] }
-  ("sm_100", "f16") -> MmPlan { tiles = MmTiles { tm = 256, tn = 128, tk = 128 }, hints = [for_arch(arch, entry_hints(num_cta_in_cga = Some(2)))] }
-  (_, "f16") -> MmPlan { tiles = MmTiles { tm = 32, tn = 32, tk = 32 }, hints = [] }
-  ("sm_90", "i8") -> MmPlan { tiles = MmTiles { tm = 128, tn = 128, tk = 128 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2)))] }
-  ("sm_100", "i8") -> MmPlan { tiles = MmTiles { tm = 256, tn = 128, tk = 128 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2), num_cta_in_cga = Some(2)))] }
-  (_, "i8") -> MmPlan { tiles = MmTiles { tm = 32, tn = 32, tk = 32 }, hints = [] }
-  _ -> panic("matmul: available dtypes are f64, f16 and i8")
+# Architecture and element format are types, not strings. `Arch` is closed, so
+# a table cannot be asked about a spelling nobody wrote, and `MmElem` is
+# implemented for exactly the formats that have a matmul: an unsupported
+# format is a checker error at the call site, not a panic when the plan is
+# looked up. Only `arch_name` knows the spelling tileir's hint tables key on.
+pub type Arch = Generic | Sm86 | Sm90 | Sm100 | Sm120
+
+# The one place a spelling becomes an `Arch`: the command line. A name no table
+# measured selects the generic plans, as an unmeasured architecture always has.
+fn arch_from_name(name: String) -> Arch = match name {
+  "sm_86" -> Sm86
+  "sm_90" -> Sm90
+  "sm_100" -> Sm100
+  "sm_120" -> Sm120
+  _ -> Generic
+}
+
+fn arch_name(arch: Arch) -> String = match arch {
+  Generic -> "default"
+  Sm86 -> "sm_86"
+  Sm90 -> "sm_90"
+  Sm100 -> "sm_100"
+  Sm120 -> "sm_120"
+}
+
+# One impl per element format: the plan table, and the recording that fixes
+# the buffer formats around it (f16 keeps an f16 accumulator and output, i8
+# an i32 one).
+pub trait MmElem[D] {
+  fn mm_plan(dt: Dtype[D], arch: Arch) -> MmPlan
+  fn mm_trace(dt: Dtype[D], c: MmTiles, shape: MmShape, hints: ByArch[EntryHints]) -> TileProg
+}
+
+impl MmElem[Float] {
+  fn mm_plan(dt: Dtype[Float], arch: Arch) -> MmPlan = match arch {
+    Sm90 -> MmPlan { tiles = MmTiles { tm = 16, tn = 64, tk = 16 }, hints = [for_arch(arch_name(arch), entry_hints(occupancy = Some(2)))] }
+    Sm100 -> MmPlan { tiles = MmTiles { tm = 16, tn = 64, tk = 16 }, hints = [for_arch(arch_name(arch), entry_hints(occupancy = Some(2)))] }
+    _ -> MmPlan { tiles = MmTiles { tm = 64, tn = 64, tk = 32 }, hints = [] }
+  }
+  fn mm_trace(dt: Dtype[Float], c: MmTiles, shape: MmShape, hints: ByArch[EntryHints]) -> TileProg = {
+    let (p, _e) = trace3("matmul",
+      In(dt, cells([shape.m, shape.k], [c.tm, c.tk], along = [Axis(0), Free])),
+      In(dt, cells([shape.k, shape.n], [c.tk, c.tn], along = [Free, Axis(1)])),
+      Out(dt, cells([shape.m, shape.n], [c.tm, c.tn])), mm_kernel(c, shape), hints = hints)
+    p
+  }
+}
+
+impl MmElem[F16] {
+  fn mm_plan(dt: Dtype[F16], arch: Arch) -> MmPlan = match arch {
+    Sm90 -> MmPlan { tiles = MmTiles { tm = 128, tn = 128, tk = 64 }, hints = [] }
+    Sm100 -> MmPlan { tiles = MmTiles { tm = 256, tn = 128, tk = 128 }, hints = [for_arch(arch_name(arch), entry_hints(num_cta_in_cga = Some(2)))] }
+    _ -> MmPlan { tiles = MmTiles { tm = 32, tn = 32, tk = 32 }, hints = [] }
+  }
+  fn mm_trace(dt: Dtype[F16], c: MmTiles, shape: MmShape, hints: ByArch[EntryHints]) -> TileProg = {
+    let (p, _e) = trace3("matmul_f16",
+      In(dt, cells([shape.m, shape.k], [c.tm, c.tk], along = [Axis(0), Free])),
+      In(dt, cells([shape.k, shape.n], [c.tk, c.tn], along = [Free, Axis(1)])),
+      Out(dt, cells([shape.m, shape.n], [c.tm, c.tn])), mm_f16_kernel(c, shape), hints = hints)
+    p
+  }
+}
+
+impl MmElem[I8] {
+  fn mm_plan(dt: Dtype[I8], arch: Arch) -> MmPlan = match arch {
+    Sm90 -> MmPlan { tiles = MmTiles { tm = 128, tn = 128, tk = 128 }, hints = [for_arch(arch_name(arch), entry_hints(occupancy = Some(2)))] }
+    Sm100 -> MmPlan { tiles = MmTiles { tm = 256, tn = 128, tk = 128 }, hints = [for_arch(arch_name(arch), entry_hints(occupancy = Some(2), num_cta_in_cga = Some(2)))] }
+    _ -> MmPlan { tiles = MmTiles { tm = 32, tn = 32, tk = 32 }, hints = [] }
+  }
+  fn mm_trace(dt: Dtype[I8], c: MmTiles, shape: MmShape, hints: ByArch[EntryHints]) -> TileProg = {
+    let (p, _e) = trace3("matmul_i8",
+      In(dt, cells([shape.m, shape.k], [c.tm, c.tk], along = [Axis(0), Free])),
+      In(dt, cells([shape.k, shape.n], [c.tk, c.tn], along = [Free, Axis(1)])),
+      Out(I32, cells([shape.m, shape.n], [c.tm, c.tn])), mm_i8_kernel(c, shape), hints = hints)
+    p
+  }
 }
 
 # Measured with tileiras 13.4.92. These are performance refusals, not
 # numerical legality rules. Generic hint range validation remains in tileir.
-fn recording_policy(arch: String, row_tile: Int, hints: ByArch[EntryHints], at: Loc = caller()) -> Unit = {
+fn recording_policy(arch: Arch, row_tile: Int, hints: ByArch[EntryHints], at: Loc = caller()) -> Unit = {
   # Use the canonical wire groups: empty targets are omitted, and an
   # architecture replaces the default group wholesale rather than per key.
   let wire = wire_entry(hints)
@@ -419,7 +484,7 @@ fn recording_policy(arch: String, row_tile: Int, hints: ByArch[EntryHints], at: 
   })
   let selected = list.fold(wire, fallback, (found, pair) => {
     let (target, value) = pair
-    if target == arch { value } else { found }
+    if target == arch_name(arch) { value } else { found }
   })
   let cga = list.fold(selected, 1, (found, pair) => {
     let (key, value) = pair
@@ -429,7 +494,7 @@ fn recording_policy(arch: String, row_tile: Int, hints: ByArch[EntryHints], at: 
   if cga == 2 && row_tile < 128 {
     panic("recording policy: cga=2 requires row_tile >= 128, got ${row_tile}", at = at)
   }
-  if arch == "sm_90" && row_tile == 256 && cga != 2 {
+  if arch == Sm90 && row_tile == 256 && cga != 2 {
     panic("recording policy: sm_90 row_tile=256 requires cga=2", at = at)
   }
 }
@@ -449,39 +514,19 @@ fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev =
 fn mm_kernel(c: MmTiles, shape: MmShape) -> fn(Param[Float], Param[Float], Param[Float]) -> Unit !Dev =
   (a, b, o) => mm_body(a, b, o, c, shape)
 
-fn mm_record(arch: String, dtype: String, shape: MmShape, plan: Option[MmPlan] = None, at: Loc = caller()) -> TileProg = {
-  if dtype != "f64" && dtype != "f16" && dtype != "i8" { panic("matmul: available dtypes are f64, f16 and i8", at = at) } else { () }
+pub fn mm_record[D: MmElem](dt: Dtype[D], arch: Arch, shape: MmShape, plan: Option[MmPlan] = None, at: Loc = caller()) -> TileProg = {
   let selected = match plan { Some(p) -> p
-    None -> mm_plan(arch, dtype) }
+    None -> mm_plan(dt, arch) }
   let c = selected.tiles
   recording_policy(arch, c.tm, selected.hints, at = at)
   if c.tn <= 0 || c.tk <= 0 { panic("matmul: tile dimensions must be positive", at = at) } else { () }
   if shape.m <= 0 || shape.n <= 0 || shape.k <= 0 || shape.m % c.tm != 0 || shape.n % c.tn != 0 || shape.k % c.tk != 0 {
     panic("matmul: dimensions must be positive multiples of the configured tiles", at = at)
   } else { () }
-  let hints = selected.hints
-  if dtype == "f64" {
-    let (p, _e) = trace3("matmul",
-      In(F64, cells([shape.m, shape.k], [c.tm, c.tk], along = [Axis(0), Free])),
-      In(F64, cells([shape.k, shape.n], [c.tk, c.tn], along = [Free, Axis(1)])),
-      Out(F64, cells([shape.m, shape.n], [c.tm, c.tn])), mm_kernel(c, shape), hints = hints)
-    p
-  } else if dtype == "f16" {
-    let (p, _e) = trace3("matmul_f16",
-      In(F16, cells([shape.m, shape.k], [c.tm, c.tk], along = [Axis(0), Free])),
-      In(F16, cells([shape.k, shape.n], [c.tk, c.tn], along = [Free, Axis(1)])),
-      Out(F16, cells([shape.m, shape.n], [c.tm, c.tn])), mm_f16_kernel(c, shape), hints = hints)
-    p
-  } else {
-    let (p, _e) = trace3("matmul_i8",
-      In(I8, cells([shape.m, shape.k], [c.tm, c.tk], along = [Axis(0), Free])),
-      In(I8, cells([shape.k, shape.n], [c.tk, c.tn], along = [Free, Axis(1)])),
-      Out(I32, cells([shape.m, shape.n], [c.tm, c.tn])), mm_i8_kernel(c, shape), hints = hints)
-    p
-  }
+  mm_trace(dt, c, shape, selected.hints)
 }
 
-fn mm_named(name: String, arch: String, dtype: String = "f64") -> TileProg = TileProg { ..mm_record(arch, dtype, mm_shape()), name = name }
+fn mm_named[D: MmElem](name: String, arch: Arch, dt: Dtype[D]) -> TileProg = TileProg { ..mm_record(dt, arch, mm_shape()), name = name }
 
 # The golden harness runs this through both backends with the default
 # matmul item. Bypassing the factory's filter must make these checks red.
@@ -493,34 +538,37 @@ fn mm_expect(ok: Bool) -> Unit = if ok { () } else { panic("matmul configuration
 fn mm_config_check() -> Unit = {
   let file = loc.path(loc.here())
   let line = loc.line(loc.here())
-  let a = mm_refusal(() => mm_record("sm_100", "f64", mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 64, tn = 64, tk = 32 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] })))
+  let a = mm_refusal(() => mm_record(F64, Sm100, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 64, tn = 64, tk = 32 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] })))
   mm_expect(str.contains(a, "cga=2 requires row_tile >= 128"))
   mm_expect(str.contains(a, " at ${file}:${line + 1}:"))
   let line2 = loc.line(loc.here())
-  let b = mm_refusal(() => mm_record("sm_90", "f64", mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = [] })))
+  let b = mm_refusal(() => mm_record(F64, Sm90, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = [] })))
   mm_expect(str.contains(b, "sm_90 row_tile=256 requires cga=2"))
   mm_expect(str.contains(b, " at ${file}:${line2 + 1}:"))
-  let _a = mm_record("sm_100", "f64", mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 128, tn = 64, tk = 32 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))
-  let _b = mm_record("sm_90", "f64", mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = [for_arch("sm_90", entry_hints(num_cta_in_cga = Some(2)))] }))
-  let _c = mm_record("sm_90", "f64", mm_shape())
-  mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", "f32", mm_shape())), "available dtypes are f64, f16 and i8"))
-  mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", "f64", MmShape { m = 256, n = 256, k = 255 })), "positive multiples"))
+  let _a = mm_record(F64, Sm100, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 128, tn = 64, tk = 32 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))
+  let _b = mm_record(F64, Sm90, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = [for_arch("sm_90", entry_hints(num_cta_in_cga = Some(2)))] }))
+  let _c = mm_record(F64, Sm90, mm_shape())
+  mm_expect(str.contains(mm_refusal(() => mm_record(F64, Sm90, MmShape { m = 256, n = 256, k = 255 })), "positive multiples"))
   # Refusals must see the same default and whole-group override as IR.
   let defaults = [for_arch("default", entry_hints(num_cta_in_cga = Some(2)))]
   let tiles = MmTiles { tm = 64, tn = 64, tk = 32 }
   for hints in [defaults, defaults ++ [for_arch("sm_100", entry_hints())]] {
-    mm_expect(str.contains(mm_refusal(() => mm_record("sm_100", "f64", mm_shape(), plan = Some(MmPlan { tiles = tiles, hints = hints }))), "cga=2 requires row_tile >= 128"))
+    mm_expect(str.contains(mm_refusal(() => mm_record(F64, Sm100, mm_shape(), plan = Some(MmPlan { tiles = tiles, hints = hints }))), "cga=2 requires row_tile >= 128"))
   }
-  let _override = mm_record("sm_100", "f64", mm_shape(), plan = Some(MmPlan { tiles = tiles, hints = defaults ++ [for_arch("sm_100", entry_hints(occupancy = Some(2)))] }))
-  let _default_edge = mm_record("sm_90", "f64", mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = defaults }))
-  for dtype in ["f16", "i8"] {
-    mm_expect(str.contains(mm_refusal(() => mm_record("sm_100", dtype, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 64, tn = 64, tk = 32 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))), "cga=2 requires row_tile >= 128"))
-    mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", dtype, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = [] }))), "sm_90 row_tile=256 requires cga=2"))
-    let _d = mm_record("sm_100", dtype, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 128, tn = 64, tk = 32 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))
-    let _e = mm_record("sm_90", dtype, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = [for_arch("sm_90", entry_hints(num_cta_in_cga = Some(2)))] }))
-    let _f = mm_record("sm_90", dtype, mm_shape())
-    mm_expect(str.contains(mm_refusal(() => mm_record("sm_90", dtype, MmShape { m = 256, n = 256, k = 255 })), "positive multiples"))
-  }
+  let _override = mm_record(F64, Sm100, mm_shape(), plan = Some(MmPlan { tiles = tiles, hints = defaults ++ [for_arch("sm_100", entry_hints(occupancy = Some(2)))] }))
+  let _default_edge = mm_record(F64, Sm90, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = defaults }))
+  mm_format_check(F16)
+  mm_format_check(I8)
+}
+
+# The same filter and domain checks for the formats whose plans are measured.
+fn mm_format_check[D: MmElem](dt: Dtype[D]) -> Unit = {
+  mm_expect(str.contains(mm_refusal(() => mm_record(dt, Sm100, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 64, tn = 64, tk = 32 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))), "cga=2 requires row_tile >= 128"))
+  mm_expect(str.contains(mm_refusal(() => mm_record(dt, Sm90, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = [] }))), "sm_90 row_tile=256 requires cga=2"))
+  let _d = mm_record(dt, Sm100, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 128, tn = 64, tk = 32 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))
+  let _e = mm_record(dt, Sm90, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = [for_arch("sm_90", entry_hints(num_cta_in_cga = Some(2)))] }))
+  let _f = mm_record(dt, Sm90, mm_shape())
+  mm_expect(str.contains(mm_refusal(() => mm_record(dt, Sm90, MmShape { m = 256, n = 256, k = 255 })), "positive multiples"))
 }
 
 # The batched GEMM: BMM_B independent 64x64 products in 32x32 tiles, the
@@ -2345,18 +2393,34 @@ const FA_BQ: Int = 32
 const FA_BK: Int = 16
 
 # Tiles, plans and architecture selection stay on the host.
-type FaTiles = { bq: Int, bk: Int }
-type FaPlan = { tiles: FaTiles, hints: ByArch[EntryHints] }
+pub type FaTiles = { bq: Int, bk: Int }
+pub type FaPlan = { tiles: FaTiles, hints: ByArch[EntryHints] }
 
-fn fa_plan(arch: String, d: Int) -> FaPlan = match (arch, d) {
-  ("sm_90", 64) -> FaPlan { tiles = FaTiles { bq = 64, bk = 128 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2)))] }
-  ("sm_90", 128) -> FaPlan { tiles = FaTiles { bq = 64, bk = 64 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2)))] }
-  ("sm_100", 64) -> FaPlan { tiles = FaTiles { bq = 256, bk = 64 }, hints = [for_arch(arch, entry_hints(occupancy = Some(2), num_cta_in_cga = Some(2)))] }
-  ("sm_100", 128) -> FaPlan { tiles = FaTiles { bq = 256, bk = 128 }, hints = [for_arch(arch, entry_hints(num_cta_in_cga = Some(2)))] }
-  _ -> FaPlan { tiles = FaTiles { bq = 64, bk = 64 }, hints = [] }
+# The two attention formats are the impls of one trait, so the plan table and
+# the recording that fixes the accumulator format and numeric policy cannot be
+# asked about a pair nobody supports.
+pub trait FaElem[D] {
+  fn fa_plan(dt: Dtype[D], arch: Arch, d: Int) -> FaPlan
+  fn fa_trace(dt: Dtype[D], arch: Arch, c: FaPlan, d: Int, n: Int, bh: Int, at: Loc) -> TileProg
 }
 
-fn fa64_plan() -> FaPlan = FaPlan { tiles = FaTiles { bq = 32, bk = 16 }, hints = [] }
+impl FaElem[BF16] {
+  fn fa_plan(dt: Dtype[BF16], arch: Arch, d: Int) -> FaPlan = match (arch, d) {
+    (Sm90, 64) -> FaPlan { tiles = FaTiles { bq = 64, bk = 128 }, hints = [for_arch(arch_name(arch), entry_hints(occupancy = Some(2)))] }
+    (Sm90, 128) -> FaPlan { tiles = FaTiles { bq = 64, bk = 64 }, hints = [for_arch(arch_name(arch), entry_hints(occupancy = Some(2)))] }
+    (Sm100, 64) -> FaPlan { tiles = FaTiles { bq = 256, bk = 64 }, hints = [for_arch(arch_name(arch), entry_hints(occupancy = Some(2), num_cta_in_cga = Some(2)))] }
+    (Sm100, 128) -> FaPlan { tiles = FaTiles { bq = 256, bk = 128 }, hints = [for_arch(arch_name(arch), entry_hints(num_cta_in_cga = Some(2)))] }
+    _ -> FaPlan { tiles = FaTiles { bq = 64, bk = 64 }, hints = [] }
+  }
+  fn fa_trace(dt: Dtype[BF16], arch: Arch, c: FaPlan, d: Int, n: Int, bh: Int, at: Loc) -> TileProg =
+    fa_record_typed("flash_attn_bf16", arch, BF16, F32, fa_bf16_math(), c, d, n, bh, at = at)
+}
+
+impl FaElem[Float] {
+  fn fa_plan(dt: Dtype[Float], arch: Arch, d: Int) -> FaPlan = FaPlan { tiles = FaTiles { bq = 32, bk = 16 }, hints = [] }
+  fn fa_trace(dt: Dtype[Float], arch: Arch, c: FaPlan, d: Int, n: Int, bh: Int, at: Loc) -> TileProg =
+    fa_record_typed("flash_attn", arch, F64, F64, fa64_math(), c, d, n, bh, at = at)
+}
 
 fn fa64_math() -> FaNumerics[Float] = FaNumerics { zero = 0.0, neg_inf = -INFINITY, base2 = false, exp_ftz = false, approx_div = false, div_ftz = false }
 
@@ -2420,17 +2484,10 @@ fn fa_domain(d: Int, n: Int, bh: Int, t: FaTiles, at: Loc = caller()) -> Unit = 
   }
 }
 
-# FloatDtype alone does not establish a legal MMA pair or a scale convention.
-fn fa_record_typed[D: FloatDtype, A: FloatDtype + ScalarDtype](name: String, arch: String, dt: Dtype[D], acc_dtype: Dtype[A], math: FaNumerics[A], plan: FaPlan, d: Int, n: Int, bh: Int, at: Loc = caller()) -> TileProg = {
-  let f64 = dtype_name(dt) == "f64" && dtype_name(acc_dtype) == "f64"
-  let bf16 = dtype_name(dt) == "bf16" && dtype_name(acc_dtype) == "f32"
-  if host_float(math.zero) != 0.0 || host_float(math.neg_inf) != -INFINITY {
-    panic("flash_attn: unsupported numeric constants", at = at)
-  }
-  if not ((f64 && not math.base2 && not math.exp_ftz && not math.approx_div && not math.div_ftz)
-      || (bf16 && math.base2 && math.exp_ftz && math.approx_div && math.div_ftz)) {
-    panic("flash_attn: unsupported format or numeric policy", at = at)
-  }
+# FloatDtype alone does not establish a legal MMA pair or a scale convention,
+# so only the FaElem impls call this, each with its own accumulator format and
+# numeric policy.
+fn fa_record_typed[D: FloatDtype, A: FloatDtype + ScalarDtype](name: String, arch: Arch, dt: Dtype[D], acc_dtype: Dtype[A], math: FaNumerics[A], plan: FaPlan, d: Int, n: Int, bh: Int, at: Loc = caller()) -> TileProg = {
   let c = plan.tiles
   fa_domain(d, n, bh, c, at = at)
   recording_policy(arch, c.bq, plan.hints, at = at)
@@ -2441,17 +2498,13 @@ fn fa_record_typed[D: FloatDtype, A: FloatDtype + ScalarDtype](name: String, arc
   p
 }
 
-fn fa_record(arch: String, d: Int, n: Int, bh: Int, bf16: Bool, plan: Option[FaPlan] = None, at: Loc = caller()) -> TileProg = {
+pub fn fa_record[D: FaElem](dt: Dtype[D], arch: Arch, d: Int, n: Int, bh: Int, plan: Option[FaPlan] = None, at: Loc = caller()) -> TileProg = {
   let c = match plan { Some(p) -> p
-    None -> if bf16 { fa_plan(arch, d) } else { fa64_plan() } }
-  if bf16 {
-    fa_record_typed("flash_attn_bf16", arch, BF16, F32, fa_bf16_math(), c, d, n, bh, at = at)
-  } else {
-    fa_record_typed("flash_attn", arch, F64, F64, fa64_math(), c, d, n, bh, at = at)
-  }
+    None -> fa_plan(dt, arch, d) }
+  fa_trace(dt, arch, c, d, n, bh, at)
 }
 
-fn fa_named(name: String, arch: String, d: Int) -> TileProg = TileProg { ..fa_record(arch, d, 256, 1, true), name = name }
+fn fa_named(name: String, arch: Arch, d: Int) -> TileProg = TileProg { ..fa_record(BF16, arch, d, 256, 1), name = name }
 
 # ---- tileir 0.8.2: index division, same-rank broadcasting, `lit` ----
 
@@ -5709,12 +5762,12 @@ fn trace(name: String) -> TileProg = match name {
       Out(F64, cells([MM_M, MM_N], [MM_TM, MM_TN])), matmul)
     p
   }
-  "matmul_sm90" -> mm_named("matmul_sm90", "sm_90")
-  "matmul_sm100" -> mm_named("matmul_sm100", "sm_100")
-  "matmul_f16_sm90" -> mm_named("matmul_f16_sm90", "sm_90", "f16")
-  "matmul_f16_sm100" -> mm_named("matmul_f16_sm100", "sm_100", "f16")
-  "matmul_i8_sm90" -> mm_named("matmul_i8_sm90", "sm_90", "i8")
-  "matmul_i8_sm100" -> mm_named("matmul_i8_sm100", "sm_100", "i8")
+  "matmul_sm90" -> mm_named("matmul_sm90", Sm90, F64)
+  "matmul_sm100" -> mm_named("matmul_sm100", Sm100, F64)
+  "matmul_f16_sm90" -> mm_named("matmul_f16_sm90", Sm90, F16)
+  "matmul_f16_sm100" -> mm_named("matmul_f16_sm100", Sm100, F16)
+  "matmul_i8_sm90" -> mm_named("matmul_i8_sm90", Sm90, I8)
+  "matmul_i8_sm100" -> mm_named("matmul_i8_sm100", Sm100, I8)
   "batched_matmul" -> {
     let (p, _e) = trace3("batched_matmul", In(F64, Whole), In(F64, Whole),
       Out(F64, cells([BMM_B, BMM_M, BMM_N], [1, BMM_T, BMM_T], along = [Axis(2), Axis(0), Axis(1)])), batched_matmul)
@@ -6010,10 +6063,10 @@ fn trace(name: String) -> TileProg = match name {
     p
   }
   "flash_attn_bf16_demo" -> flash_attn_bf16_demo()
-  "flash_bf16_sm90_d64" -> fa_named("flash_bf16_sm90_d64", "sm_90", 64)
-  "flash_bf16_sm90_d128" -> fa_named("flash_bf16_sm90_d128", "sm_90", 128)
-  "flash_bf16_sm100_d64" -> fa_named("flash_bf16_sm100_d64", "sm_100", 64)
-  "flash_bf16_sm100_d128" -> fa_named("flash_bf16_sm100_d128", "sm_100", 128)
+  "flash_bf16_sm90_d64" -> fa_named("flash_bf16_sm90_d64", Sm90, 64)
+  "flash_bf16_sm90_d128" -> fa_named("flash_bf16_sm90_d128", Sm90, 128)
+  "flash_bf16_sm100_d64" -> fa_named("flash_bf16_sm100_d64", Sm100, 64)
+  "flash_bf16_sm100_d128" -> fa_named("flash_bf16_sm100_d128", Sm100, 128)
   "flash_attn_bf16" -> {
     let (p, _e) = trace5("flash_attn_bf16",
       In(BF16, cells([1, ATT_M, ATT_D], [1, 64, ATT_D], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])),
@@ -7032,9 +7085,9 @@ fn flash_policy_check(name: String, p: TileProg, bf16: Bool) -> Unit = {
 
 # Extra device samples use the actual factory and the architecture's selected
 # configuration. They are not additional golden entries or tuning candidates.
-fn flash_output_records(arch: String, dir: String) -> Unit !io = {
+fn flash_output_records(arch: Arch, dir: String) -> Unit !io = {
   for d in [32, 64, 128] {
-    let p = fa_record(arch, d, 512, 2, true)
+    let p = fa_record(BF16, arch, d, 512, 2)
     flash_output_check("sample${d}", p)
     match with_fs_real(() => write_bytes("${dir}/a2_d${d}.tilebc", encode(p))) {
       Ok(_) -> ()
@@ -7171,64 +7224,70 @@ fn hint_manifest(hints: ByArch[EntryHints]) -> String = join(list.map(hints, pai
   "${arch}:${opt(h.occupancy)}:${opt(h.num_cta_in_cga)}:${opt(h.num_worker_warps_per_cta)}"
 }), ",")
 
+fn flash_manifest[D: FaElem](dt: Dtype[D], arch: Arch, d: Int, bh: Int) -> Unit !io = {
+  let plan = fa_plan(dt, arch, d)
+  let p = fa_record(dt, arch, d, 512, bh)
+  if p != fa_record(dt, arch, d, 512, bh) { panic("flash manifest: trace_twice differs") }
+  flash_policy_check(p.name, p, p.name != "flash_attn")
+  println("BEGIN\tflash\t${arch_name(arch)}\t${dtype_name(dt)}\t${d}\t${bh}\t${plan.tiles.bq}\t${plan.tiles.bk}\t${hint_manifest(plan.hints)}")
+  print(render(p))
+  println("END")
+}
+
+fn matmul_manifest[D: MmElem](dt: Dtype[D], arch: Arch) -> Unit !io = {
+  let plan = mm_plan(dt, arch)
+  let p = mm_record(dt, arch, mm_shape())
+  if p != mm_record(dt, arch, mm_shape()) { panic("matmul manifest: trace_twice differs") }
+  println("BEGIN\tmatmul\t${arch_name(arch)}\t${dtype_name(dt)}\t${plan.tiles.tm}\t${plan.tiles.tn}\t${plan.tiles.tk}\t${hint_manifest(plan.hints)}")
+  print(render(p))
+  println("END")
+}
+
 fn config_manifest() -> Unit !io = {
-  for arch in ["sm_90", "sm_100", "default", "sm_86", "sm_120"] {
+  for arch in [Sm90, Sm100, Generic, Sm86, Sm120] {
     for d in [32, 64, 128, 256] {
       for bh in [1, 2] {
-        for bf16 in [false, true] {
-          let plan = if bf16 { fa_plan(arch, d) } else { fa64_plan() }
-          let dtype = if bf16 { "bf16" } else { "f64" }
-          let p = fa_record(arch, d, 512, bh, bf16)
-          if p != fa_record(arch, d, 512, bh, bf16) { panic("flash manifest: trace_twice differs") }
-          flash_policy_check(p.name, p, bf16)
-          println("BEGIN\tflash\t${arch}\t${dtype}\t${d}\t${bh}\t${plan.tiles.bq}\t${plan.tiles.bk}\t${hint_manifest(plan.hints)}")
-          print(render(p))
-          println("END")
-        }
+        flash_manifest(F64, arch, d, bh)
+        flash_manifest(BF16, arch, d, bh)
       }
     }
-    for dtype in ["f64", "f16", "i8"] {
-      let plan = mm_plan(arch, dtype)
-      let p = mm_record(arch, dtype, mm_shape())
-      if p != mm_record(arch, dtype, mm_shape()) { panic("matmul manifest: trace_twice differs") }
-      println("BEGIN\tmatmul\t${arch}\t${dtype}\t${plan.tiles.tm}\t${plan.tiles.tn}\t${plan.tiles.tk}\t${hint_manifest(plan.hints)}")
-      print(render(p))
-      println("END")
-    }
+    matmul_manifest(F64, arch)
+    matmul_manifest(F16, arch)
+    matmul_manifest(I8, arch)
   }
 }
 
 fn fa_config_check() -> Unit = {
   let file = loc.path(loc.here())
   let line = loc.line(loc.here())
-  let why = mm_refusal(() => fa_record("default", 32, 63, 1, false))
+  let why = mm_refusal(() => fa_record(F64, Generic, 32, 63, 1))
   mm_expect(str.contains(why, "n must be a multiple of bq and bk"))
   mm_expect(str.contains(why, " at ${file}:${line + 1}:"))
   for (n, d, bh) in [(0, 32, 1), (64, 0, 1), (64, 32, 0), (-64, 32, 1)] {
-    mm_expect(str.contains(mm_refusal(() => fa_record("default", d, n, bh, false)), "dimensions and tiles must be positive"))
+    mm_expect(str.contains(mm_refusal(() => fa_record(F64, Generic, d, n, bh)), "dimensions and tiles must be positive"))
   }
   for t in [FaTiles { bq = 0, bk = 16 }, FaTiles { bq = 32, bk = -16 }] {
-    mm_expect(str.contains(mm_refusal(() => fa_record("default", 32, 64, 1, false, plan = Some(FaPlan { tiles = t, hints = [] }))), "dimensions and tiles must be positive"))
+    mm_expect(str.contains(mm_refusal(() => fa_record(F64, Generic, 32, 64, 1, plan = Some(FaPlan { tiles = t, hints = [] }))), "dimensions and tiles must be positive"))
   }
   for t in [FaTiles { bq = 32, bk = 24 }, FaTiles { bq = 48, bk = 16 }] {
-    mm_expect(str.contains(mm_refusal(() => fa_record("default", 32, 64, 1, false, plan = Some(FaPlan { tiles = t, hints = [] }))), "n must be a multiple of bq and bk"))
+    mm_expect(str.contains(mm_refusal(() => fa_record(F64, Generic, 32, 64, 1, plan = Some(FaPlan { tiles = t, hints = [] }))), "n must be a multiple of bq and bk"))
   }
   for (n, d, bh) in [(64, 2147483647, 1), (64, 32, 2147483647), (2147483616, 32, 1)] {
-    mm_expect(str.contains(mm_refusal(() => fa_record("default", d, n, bh, false)), "offset product exceeds I32"))
+    mm_expect(str.contains(mm_refusal(() => fa_record(F64, Generic, d, n, bh)), "offset product exceeds I32"))
   }
   # A 2 GiB f64 buffer still has representable I32 element offsets.
-  let large = fa_record("default", 32, 32, 262144, false)
+  let large = fa_record(F64, Generic, 32, 32, 262144)
   mm_expect(len(large.ops) > 0)
-  let _valid = fa_record("default", 32, 64, 2, false)
-  let _valid_bf16 = fa_record("sm_100", 64, 512, 2, true)
+  let _valid = fa_record(F64, Generic, 32, 64, 2)
+  let _valid_bf16 = fa_record(BF16, Sm100, 64, 512, 2)
   # Both policies retain real recording boundaries and caller locations.
   for (arch, t, h, fragment) in [
-    ("sm_100", FaTiles { bq = 64, bk = 64 }, [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))], "cga=2 requires row_tile >= 128"),
-    ("sm_90", FaTiles { bq = 256, bk = 64 }, [], "sm_90 row_tile=256 requires cga=2")
+    (Sm100, FaTiles { bq = 64, bk = 64 }, [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))], "cga=2 requires row_tile >= 128"),
+    (Sm90, FaTiles { bq = 256, bk = 64 }, [], "sm_90 row_tile=256 requires cga=2")
   ] {
-    mm_expect(str.contains(mm_refusal(() => fa_record(arch, 64, 512, 1, true, plan = Some(FaPlan { tiles = t, hints = h }))), fragment))
+    mm_expect(str.contains(mm_refusal(() => fa_record(BF16, arch, 64, 512, 1, plan = Some(FaPlan { tiles = t, hints = h }))), fragment))
   }
-  let _edge = fa_record("sm_100", 64, 512, 1, true, plan = Some(FaPlan { tiles = FaTiles { bq = 128, bk = 64 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))
+  let _edge = fa_record(BF16, Sm100, 64, 512, 1, plan = Some(FaPlan { tiles = FaTiles { bq = 128, bk = 64 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))
 }
 
 # Numeric index construction and geometry have different representation limits.
@@ -7530,7 +7589,7 @@ pub fn main() -> Unit !io = match args() {
     fa_config_check()
     println("PASS flash and matmul recording policies, domains and caller locations")
   }
-  ["--flash-output-record", arch, dir] -> flash_output_records(arch, dir)
+  ["--flash-output-record", arch, dir] -> flash_output_records(arch_from_name(arch), dir)
   ["--staged-token-checks"] -> {
     staged_token_checks()
     println("PASS staged if token merge and conservative fork conflicts")
