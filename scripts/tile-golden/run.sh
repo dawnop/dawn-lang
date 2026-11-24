@@ -718,7 +718,7 @@ mutants=(
   producer-under-13-2-header
   debug-line-off-by-one
   debug-count-short
-  mask-and-as-andi bits-witness-mismatch bits-type-rejections
+  mask-and-as-andi bits-witness-mismatch bits-type-rejections plan-type-rejections
   shift-count-unmasked shift-witness-mismatch
   staged-type-rejections staged-if-checks staged-rank-accepted staged-dtype-accepted staged-one-arm-accepted
   staged-eager-arm staged-invariance
@@ -3263,6 +3263,23 @@ if run_item bits-type-rejections; then
     fail "bits-type-rejections: the expected checker refusals changed"
   }
   echo "PASS  bitwise checker: ineligible formats, mixed masks, missing Dev and all ten removed names refused"
+fi
+
+if run_item plan-type-rejections; then
+  # The plan tables are indexed by types, so the refusals are the checker's.
+  # kernels.dawn is a module of this project and the fixture is its main.
+  project "$work/plan-rejected" "$root/packages/tileir"
+  mv "$work/plan-rejected/src/main.dawn" "$work/plan-rejected/src/kernels.dawn"
+  cp "$here/plan-rejected.dawn" "$work/plan-rejected/src/main.dawn"
+  if "$root/bin/dawn" check "$work/plan-rejected" > "$work/plan-rejected.out" 2>&1; then
+    fail "plan-type-rejections: unsupported formats or spellings were accepted"
+  fi
+  sed -n '/^error:/p' "$work/plan-rejected.out" > "$work/plan-rejected.errors"
+  cmp -s "$here/plan-rejected.expected" "$work/plan-rejected.errors" || {
+    diff -u "$here/plan-rejected.expected" "$work/plan-rejected.errors" >&2 || true
+    fail "plan-type-rejections: the expected checker refusals changed"
+  }
+  echo "PASS  plan tables: unsupported element formats and string spellings of formats and architectures refused"
 fi
 
 # A missed mask is visible even when the interpreter would normalize the
