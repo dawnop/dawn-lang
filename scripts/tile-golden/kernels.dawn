@@ -7675,6 +7675,142 @@ fn inbounds_witness(promise: Bool) -> TileProg = {
   p
 }
 
+# ---- the tail probes (G14-2, first knife) ----
+#
+# What a partition view does with a tile that runs past its tensor, measured
+# on a device rather than read off the documentation. The matmul and flash
+# factories refuse shapes their tile does not divide; `cells` itself does not
+# (an extent that is not a multiple of the tile just leaves a partial last
+# tile), so before the factories are relaxed the device has to be shown to do
+# what the view type says: masked stores, padded loads. These kernels are not
+# goldens and not a library: scripts/tile-gpu-diff's tail family records them
+# (`--tail-record`), assembles them for the card it runs on and launches them.
+#
+# Every probe has a control, a kernel written to be wrong in exactly the way
+# the probe would catch, and the family requires each control to be seen red
+# before it believes the probe's green.
+#
+#   tail_store_2d         a [100, 100] f64 copy in 32 by 32 tiles: the last
+#                         row of tiles and the last column of tiles are each
+#                         partial and the corner tile is partial on BOTH axes.
+#                         Every lane the tile writes outside the tensor is,
+#                         in the row-major buffer, the first lanes of the next
+#                         row or the rows after the last: the buffer carries
+#                         28 sentinel rows past the end so an unmasked write
+#                         stays inside the allocation and is visible
+#   tail_store_2d_wide    control: the store goes through a [128, 128] view
+#                         over the same buffer (strides [100, 1]), so the
+#                         padding lanes are in bounds of the view and are
+#                         written. It must differ from the reference
+#   tail_stride_f16_n999  an f16 [40, 999] copy in 32 by 32 tiles: a row is
+#   tail_stride_f16_n1000 1998 bytes, which is not a multiple of 16, and
+#                         the n1000 twin (2000 bytes) is. Whether the
+#                         assembler accepts the first is the finding
+#   tail_stride_f16_narrow control: stores through a [40, 998] view, so the
+#                         last column is never written
+#   tail_mm_f16           C = A B with M = N = 64 and K = 100 in 32 tiles:
+#   tail_mm_i8            the fourth K tile covers four real lanes and 28
+#   tail_mm_bf16          padding ones. Both operand views pad with zero, so
+#                         the padding contributes 0 * 0. The buffers hold
+#                         poison (+inf, a large integer for i8) right after
+#                         the operands, where an unmasked read would land
+#   tail_mm_f16_floor     control: the K loop takes 3 tiles, not 4
+#   tail_mm_f16_wide      control: the operands are read through views whose
+#                         K extent is 128 over the same buffers, so the
+#                         tail lanes read the poison
+const TL_N: Int = 100
+const TL_TILE: Int = 32
+const TL_SF_M: Int = 40
+const TL_MM_M: Int = 64
+const TL_MM_N: Int = 64
+const TL_MM_K: Int = 100
+const TL_MM_STEPS: Int = 4
+
+fn tail_store_2d(x: Param[Float], out: Param[Float]) -> Unit !Dev = store_cell(out, load_cell(x))
+
+fn tail_store_2d_wide(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let dst = partition_view(tensor_view(out, idx_const(0), [4 * TL_TILE, 4 * TL_TILE], [TL_N, 1]),
+    [TL_TILE, TL_TILE], [0, 1], NoPadding)
+  store_view(dst, [block_id(0), block_id(1)], load_cell(x))
+}
+
+fn tail_stride_copy(x: Param[F16], out: Param[F16]) -> Unit !Dev = store_cell(out, load_cell(x))
+
+fn tail_stride_narrow(n: Int) -> fn(Param[F16], Param[F16]) -> Unit !Dev = (x, out) => {
+  let dst = partition_view(tensor_view(out, idx_const(0), [TL_SF_M, n - 1], [n, 1]),
+    [TL_TILE, TL_TILE], [0, 1], NoPadding)
+  store_view(dst, [block_id(0), block_id(1)], load_cell(x))
+}
+
+fn tail_mm_f16(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
+  var acc = zeros(c)
+  for k in d_range(0, TL_MM_STEPS) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
+  store_cell(c, acc)
+}
+
+fn tail_mm_i8(a: Param[I8], b: Param[I8], c: Param[I32]) -> Unit !Dev = {
+  var acc = zeros(c)
+  for k in d_range(0, TL_MM_STEPS) { acc = mmai(load_at(a, [k]), load_at(b, [k]), acc) }
+  store_cell(c, acc)
+}
+
+fn tail_mm_bf16(a: Param[BF16], b: Param[BF16], c: Param[F32]) -> Unit !Dev = {
+  var acc = gemm_zero(BF16, [TL_TILE, TL_TILE])
+  for k in d_range(0, TL_MM_STEPS) { acc = gemm_mma(load_at(a, [k]), load_at(b, [k]), acc) }
+  store_cell(c, acc)
+}
+
+fn tail_mm_f16_floor(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
+  var acc = zeros(c)
+  for k in d_range(0, TL_MM_K / TL_TILE) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
+  store_cell(c, acc)
+}
+
+fn tail_mm_f16_wide(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
+  let wide = TL_MM_STEPS * TL_TILE
+  let av = partition_view(tensor_view(a, idx_const(0), [TL_MM_M, wide], [TL_MM_K, 1]), [TL_TILE, TL_TILE], [0, 1], PadZero)
+  let bv = partition_view(tensor_view(b, idx_const(0), [wide, TL_MM_N], [TL_MM_N, 1]), [TL_TILE, TL_TILE], [0, 1], PadZero)
+  var acc = zeros(c)
+  for k in d_range(0, TL_MM_STEPS) {
+    acc = mma(load_view(av, [block_id(0), k]), load_view(bv, [k, block_id(1)]), acc)
+  }
+  store_cell(c, acc)
+}
+
+fn tail_progs() -> List[TileProg] = {
+  let sq = cells([TL_N, TL_N], [TL_TILE, TL_TILE])
+  let sf = (n: Int) => cells([TL_SF_M, n], [TL_TILE, TL_TILE])
+  let ak = cells([TL_MM_M, TL_MM_K], [TL_TILE, TL_TILE], along = [Axis(0), Free])
+  let bk = cells([TL_MM_K, TL_MM_N], [TL_TILE, TL_TILE], along = [Free, Axis(1)])
+  let ck = cells([TL_MM_M, TL_MM_N], [TL_TILE, TL_TILE])
+  let (p1, _e1) = trace2("tail_store_2d", In(F64, sq), Out(F64, sq), tail_store_2d)
+  let (p2, _e2) = trace2("tail_store_2d_wide", In(F64, sq), Shared(F64), tail_store_2d_wide)
+  let (p3, _e3) = trace2("tail_stride_f16_n999", In(F16, sf(999)), Out(F16, sf(999)), tail_stride_copy)
+  let (p4, _e4) = trace2("tail_stride_f16_n1000", In(F16, sf(1000)), Out(F16, sf(1000)), tail_stride_copy)
+  let (p5, _e5) = trace2("tail_stride_f16_narrow", In(F16, sf(999)), Shared(F16), tail_stride_narrow(999))
+  let (p6, _e6) = trace3("tail_mm_f16", In(F16, ak), In(F16, bk), Out(F16, ck), tail_mm_f16)
+  let (p7, _e7) = trace3("tail_mm_i8", In(I8, ak), In(I8, bk), Out(I32, ck), tail_mm_i8)
+  let (p8, _e8) = trace3("tail_mm_bf16", In(BF16, ak), In(BF16, bk), Out(F32, ck), tail_mm_bf16)
+  let (p9, _e9) = trace3("tail_mm_f16_floor", In(F16, ak), In(F16, bk), Out(F16, ck), tail_mm_f16_floor)
+  let (p10, _e10) = trace3("tail_mm_f16_wide", In(F16, Whole), In(F16, Whole), Out(F16, ck), tail_mm_f16_wide)
+  [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10]
+}
+
+# The text of each probe is written beside its bytes so the recording can be
+# read when a card disagrees; neither is pinned, the family judges the device.
+fn tail_records(dir: String) -> Unit !io = {
+  for p in tail_progs() {
+    match with_fs_real(() => write_bytes("${dir}/${p.name}.tilebc", encode(p))) {
+      Ok(_) -> ()
+      Err(e) -> panic("tail: cannot write ${p.name}: ${e}")
+    }
+    match with_fs_real(() => write_file("${dir}/${p.name}.mlir", render(p))) {
+      Ok(_) -> ()
+      Err(e) -> panic("tail: cannot write ${p.name} text: ${e}")
+    }
+  }
+}
+
 pub fn main() -> Unit !io = match args() {
   ["--inbounds-witness", promised, path] -> {
     if promised != "true" && promised != "false" { panic("inbounds witness expects true or false") }
@@ -7728,6 +7864,7 @@ pub fn main() -> Unit !io = match args() {
   }
   ["--flash-output-record", arch, dir] -> flash_output_records(arch_from_name(arch), dir)
   ["--gemm-record", arch, dir] -> gemm_records(arch_from_name(arch), dir)
+  ["--tail-record", dir] -> tail_records(dir)
   ["--staged-token-checks"] -> {
     staged_token_checks()
     println("PASS staged if token merge and conservative fork conflicts")

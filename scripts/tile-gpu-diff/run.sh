@@ -3037,6 +3037,44 @@ for m in gemm-bias-after-convert gemm-relu-before-bias gemm-scale-dropped; do
   echo "PASS  mutant: $m (valid cubins, the $oracle oracle is red)"
 done
 
+# G14-2, first knife: what a partition view does with a tile that runs past
+# its tensor. The probe kernels live in scripts/tile-golden/kernels.dawn
+# (`--tail-record`) but are not goldens: nothing pins their bytes, this run is
+# the whole claim. Each probe has a control that must be seen red, and tail_diff
+# says how red. Two of the kernels have rows of 1998 bytes, not a multiple of
+# 16: the assembler may refuse them on a card that loads tiles through the
+# tensor-memory path, and that refusal is a finding the transcript records,
+# not a failure of the run. Every other kernel must assemble.
+mkdir -p "$work/tail"
+"$root/bin/dawn" run "$asm_proj" -- --tail-record "$work/tail" > "$work/tail/record.out" 2> "$work/tail/record.err" ||
+  { cat "$work/tail/record.err" >&2; fail "tail recording failed"; }
+tail_args=()
+for k in tail_store_2d tail_store_2d_wide tail_stride_f16_n999 tail_stride_f16_n1000 tail_stride_f16_narrow \
+  tail_mm_f16 tail_mm_i8 tail_mm_bf16 tail_mm_f16_floor tail_mm_f16_wide; do
+  case "$k" in
+    tail_stride_f16_n999|tail_stride_f16_narrow)
+      if "$tileiras" --gpu-name "$gpu_name" -o "$work/tail/$k.cubin" "$work/tail/$k.tilebc" > "$work/tail/$k.asm.log" 2>&1 &&
+        ! grep -q '^error:' "$work/tail/$k.asm.log"; then
+        tail_args+=("$work/tail/$k.cubin")
+      else
+        echo "FINDING $k: tileiras $want_tileiras refused for $gpu_name:"
+        sed 's/^/        /' "$work/tail/$k.asm.log"
+        tail_args+=(-)
+      fi ;;
+    *)
+      assemble_golden "$k" "$work/tail/$k.tilebc" "$work/tail/$k.cubin"
+      tail_args+=("$work/tail/$k.cubin") ;;
+  esac
+done
+build_native "$root/std" "$work/tail.bin" "$here/tail_diff.dawn"
+rc=0
+device "$work/tail.bin" "$gpu_name" "${tail_args[@]}" > "$work/tail.out" 2> "$work/tail.err" || rc=$?
+cat "$work/tail.out"
+tail_result="$(verdict_of "$work/tail.out")"
+[ "$rc" = 0 ] && [ "$tail_result" = pass ] ||
+  { cat "$work/tail.err" >&2; fail "tail_diff: a probe disagreed with its reference or a control stayed green (exit $rc)"; }
+echo "PASS  tail: partial tiles store masked and load padded on $gpu_name, every control red (tileiras $want_tileiras)"
+
 # The ledger records one verdict for the tree: every family passes (or was
 # skipped on purpose), or it is the first thing that stopped one of them. The
 # list is in run order and is the only place the fold reads; fold_verdict.sh
@@ -6502,7 +6540,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
   scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn scripts/tile-gpu-diff/scalar_diff.dawn scripts/tile-gpu-diff/entry6_diff.dawn scripts/tile-gpu-diff/read_layout_diff.dawn \
-  scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/gemm_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
+  scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/gemm_diff.dawn scripts/tile-gpu-diff/tail_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
   scripts/tile-gpu-diff/rounding.dawn scripts/tile-gpu-diff/rounding_cases.py \
   scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py scripts/tile-gpu-diff/fold_verdict.sh)"
 [ -z "$dirty" ] ||
@@ -6524,6 +6562,7 @@ summary="$summary bitwise:$(sed -n 's/^tiers //p' "$work/bitwise.out" | tail -n 
 summary="$summary shift:$(sed -n 's/^tiers //p' "$work/shift.out" | tail -n 1)"
 summary="$summary staged:$(sed -n 's/^tiers //p' "$work/staged.out" | tail -n 1)"
 summary="$summary gemm:$(sed -n 's/^tiers //p' "$work/gemm.out" | tail -n 1)"
+summary="$summary tail:$(sed -n 's/^tiers //p' "$work/tail.out" | tail -n 1)"
 summary="$summary arch=$arch_probe"
 summary="$summary asm=$asm_probe"
 if [ -n "$note" ]; then line="$line # inputs=$inputs_digest $note; $summary"; else line="$line # inputs=$inputs_digest $summary"; fi
