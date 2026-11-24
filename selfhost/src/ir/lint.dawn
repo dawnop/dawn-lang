@@ -41,7 +41,7 @@ use std/io.{Env}
 use std/map
 use std/set
 use std/str
-use check/types.{Adts, Traits, Ty, TyFn, TyAdt, TyNever, TyVar, Eff, peel_opaque, eff_labels, eff_vars,
+use check/types.{Adts, Traits, Ty, TyFn, TyAdt, TyNever, TyVar, Eff, peel_opaque, eff_labels, eff_scopes, eff_vars,
   eff_assocs, key_is_label, key_effect_id, intrinsics, EV_PACK_ID, sig_abi_eff
 }
 use ir/core.{
@@ -593,7 +593,8 @@ fn check_pack_reads(a: Acc, f: CFun) -> Acc = {
   # that cannot hold it), and `ev_get` on it is #43's.
   var empty = true
   for row in rows {
-    if len(eff_labels(row)) > 0 || len(eff_vars(row)) > 0 || len(eff_assocs(row)) > 0 {
+    if len(eff_labels(row)) > 0 || len(eff_scopes(row)) > 0 || len(eff_vars(row)) > 0 ||
+      len(eff_assocs(row)) > 0 {
       empty = false
     }
   }
@@ -602,14 +603,15 @@ fn check_pack_reads(a: Acc, f: CFun) -> Acc = {
         "evidence atom, so its pack is empty, and its body hands that pack to a callee as " ++
         "evidence (#54)")
   }
-  for key in pack_reads(own, [], f.body) {
+  for read in pack_reads(own, [], f.body) {
+    let (key, scoped) = read
     if key_is_label(key) {
       let eid = key_effect_id(key)
       for row in rows {
-        if not row_answers(row, eid) {
+        if not row_answers(row, eid, scoped) {
           acc = flag(acc, "evidence-row", "the closure reads `" ++ label_name(a.ix.adts, eid) ++
               "` out of its own pack, and a site creates it at a row that does not name that " ++
-              "label, so no caller puts it there (#43, #54)")
+              (if scoped { "scoped label" } else { "label" }) ++ ", so no caller puts it there (#43, #54)")
         }
       }
     }
@@ -623,8 +625,18 @@ fn label_name(adts: Adts, eid: Int) -> String =
     None -> "?"
   }
 
-fn row_answers(row: Eff, eid: Int) -> Bool = {
+## `scoped` is which intrinsic the read was: `ev_get_scoped` asks for a label
+## raised in a scope (`Mem[s]`), `ev_get` for a plain one. Each is answered by its
+## own kind of atom only, since the pack a caller builds from the row holds the
+## scoped record under the scope's key and the plain one under the label's.
+fn row_answers(row: Eff, eid: Int, scoped: Bool) -> Bool = {
   if len(eff_vars(row)) > 0 || len(eff_assocs(row)) > 0 { return true }
+  if scoped {
+    for sc in eff_scopes(row) {
+      if sc.id == eid { return true }
+    }
+    return false
+  }
   for l in eff_labels(row) {
     let (id, _) = l
     if id == eid { return true }
@@ -670,8 +682,19 @@ fn is_local(e: CExpr, s: Int) -> Bool =
     _ -> false
   }
 
-## The keys `ev_get` asks of the pack in symbol `own`.
-fn pack_reads(own: Int, acc: List[Int], e: CExpr) -> List[Int] = {
+## Whether the instance argument of an `ev_get_scoped` is the literal 0, which
+## is what a function-value adapter passes for a label that carries no scope
+## (`lower` builds every unpacked slot with the scoped intrinsic): that read
+## asks for a plain label, whatever the intrinsic is called.
+fn is_plain_domain(e: CExpr) -> Bool =
+  match e {
+    CInt(0) -> true
+    _ -> false
+  }
+
+## The keys `ev_get` and `ev_get_scoped` ask of the pack in symbol `own`, each
+## with whether the read was the scoped one.
+fn pack_reads(own: Int, acc: List[(Int, Bool)], e: CExpr) -> List[(Int, Bool)] = {
   var out = acc
   match e {
     CIntrinsic(name, args, _, _) ->
@@ -680,7 +703,7 @@ fn pack_reads(own: Int, acc: List[Int], e: CExpr) -> List[Int] = {
           CLocal(s, _) ->
             if s == own {
               match args[1] {
-                CInt(k) -> { out = out ++ [k] }
+                CInt(k) -> { out = out ++ [(k, name == "ev_get_scoped" && not is_plain_domain(args[2]))] }
                 _ -> ()
               }
             }

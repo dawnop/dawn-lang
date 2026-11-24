@@ -160,6 +160,25 @@ MUTATIONS = {
         "let key = dict_key(app, subject) ++ dict_shape_suffix(nargs)",
         "let key = dict_key(app, subject)",
     ),),
+    # #852: a closure created at a row that lost its scoped atom, so the
+    # `ev_get_scoped` in its body asks for a record no caller puts in the pack.
+    "lint-scoped-row-erased": ((
+        LOWER,
+        """  }, CClosure(name, st2.owner, cap_args, ty))
+}""",
+        """  }, CClosure(name, st2.owner, cap_args,
+      match ty { TyFn(vs, r, _, c, k) -> TyFn(vs, r, EPure, c, k), _ -> ty }))
+}""",
+    ),),
+    # #852: a scoped label read as a plain one, which the pack of a closure
+    # created at `!Mem[s]` does not hold under the label's own key.
+    "lint-scoped-read-plain": ((
+        LOWER,
+        """        let raw = CIntrinsic("ev_get_scoped", [pack, CInt(key), instance], erased_ev_ty(), CNoSite)
+        adapt_out(raw, erased_ev_ty(), ty_adt(eid, [], capture.empty_arguments()))""",
+        """        let raw = CIntrinsic("ev_get", [pack, CInt(key)], erased_ev_ty(), CNoSite)
+        adapt_out(raw, erased_ev_ty(), ty_adt(eid, [], capture.empty_arguments()))""",
+    ),),
     # arith D8: the primitive Int/Float slot of an operator trait without the
     # evidence parameter its method's projection asks for. The JVM fails to
     # link it; C calls it through a cast pointer and runs.

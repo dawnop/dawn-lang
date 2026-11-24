@@ -45,7 +45,7 @@
 | `dict-shape` | 同一 key 的所有 `CDictDef`（跨模块）trait、`nargs`、槽数一致 | #144/#146 |
 | `dict-arity` | `CDictRef` 指向 `nargs == 0` 的 def；`CDictApply` 指向 `nargs == len(args) > 0` 的 def；`CDictArg` 的下标小于 `nargs` | #13、#144 |
 | `dict-undefined` | 被引用的 key 在程序某模块里有 def | （同族） |
-| `evidence-row` | 提升出来的闭包从自己的 pack 里 `ev_get` 一个 label，则它的每个创建点的行都含这个 label；每个创建点的行都不含证据原子（纯或只有 io）时，闭包不得把自己的 pack 当证据交给被调者（命名调用的证据槽或函数值调用的 pack 位） | #43、#54 |
+| `evidence-row` | 提升出来的闭包从自己的 pack 里 `ev_get` 一个 label，则它的每个创建点的行都含这个 label（`ev_get_scoped` 读要求行里有同 id 的作用域 label，如 `Mem[s]`；普通 `ev_get` 读要求同 id 的普通 label，两种不互相代答；函数值适配器对无作用域的 label 也用 `ev_get_scoped`，但实例实参恒为字面量 0，按普通读算）；每个创建点的行都不含证据原子（纯或只有 io，作用域 label 也算证据原子）时，闭包不得把自己的 pack 当证据交给被调者（命名调用的证据槽或函数值调用的 pack 位） | #43、#54 |
 | `evidence-slot` | 命名调用的证据实参与被调者的槽形状一致：精确 label 槽收到该 label 的记录；擦除槽（效果变量、投影）不收裸记录；函数值调用的 pack 位不收裸记录 | 5f91c188、abab133a 同族 |
 | `call-arity` | 对程序内已知的 `CDirect` 被调者，实参个数 = 捕获 + 参数 + 字典 + 证据槽 | 阶段间 ABI 总则 |
 | `lowered-intrinsic` | Core 里不出现 `lowered_intrinsics`/`staged_intrinsics` 的名字，也不出现任何表都没声明的名字 | #283 |
@@ -114,6 +114,8 @@ panic: core lint: 1 violation(s) of the lowered-Core invariants (DAWN_CORE_LINT=
 | `lint-54` | 局部 fn 的效果变量拒绝被关掉 | `local_variable.dawn`（issue 原形加 main），两后端 `[evidence-row]` |
 | `lint-144` | 字典 key 不含 arity | `nested_list_eq.dawn`，两后端 `[dict-arity]` |
 | `lint-5f91c188` | 投影槽交裸记录 | `effect_assoc_row.dawn`，两后端 `[evidence-slot]` |
+| `lint-scoped-row-erased` | 闭包创建点的类型行丢了 `Mem[s]`，体内的 `ev_get_scoped` 读一个没人放的记录 | `scoped_row.dawn`，两后端 `[evidence-row]` |
+| `lint-scoped-read-plain` | 作用域 label 被当普通 label 读（`ev_get`），行里只有 `Mem[s]` | `scoped_row.dawn`，两后端 `[evidence-row]` |
 
 每个 `lint-*` 还要求：同一个变异编译器**不开** lint 时接受该程序（`lint-144` 不开 lint 时 JVM 运行即
 `NoSuchMethodError: ...dict$1$List_Int.<init>(java.lang.Object)`，`lint-43`/`lint-54` 运行即
@@ -123,6 +125,12 @@ panic: core lint: 1 violation(s) of the lowered-Core invariants (DAWN_CORE_LINT=
 都不触发，`Eq[List[Int]]` 的每次请求都走 `CDictApply`；开 lint 编译 selfhost 时才发现今天的触发形状：记录的合成相等性经常量拿
 `Eq[List[Int]]`（`check/passes` 的 `Sig` 字段），嵌套列表直接比较经应用拿（`check/cx` 的测试）。
 `nested_list_eq.dawn` 把这两者放进一个模块。
+
+`scoped_row.dawn`（#852）是最小的 `mem.with_mem` 回调，原样合法，两后端开 lint 须无违例（正控）。规则最初只认
+`eff_labels`，而 `Mem` 自 ab8190a6 起只以 `EScoped` 的作用域 label 出现，所以这类闭包在 `mem_capture_scope_ok`
+上被误报 37 条；Core 本身是对的，是规则陈旧。两个变异体分别证明行侧与读侧都被检查：只放宽行侧（让任何读都被
+作用域原子放过）会漏掉 `lint-scoped-read-plain`。改动 `scripts/spike-native/mem_*` 或 lowering 里 `Mem` 相关路径时，
+要同时跑 core-lint 语料（`corpus.sh`），因为这些用例是它最宽的作用域证据输入。
 
 ## 性能（实测）
 
