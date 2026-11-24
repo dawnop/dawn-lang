@@ -1,0 +1,294 @@
+# Layer 2 for partial tiles (G14-2, first knife): what a device does with a
+# tile that runs past its tensor, before any library relies on it.
+#
+#   tail_diff <arch> <cubin or -> x 10, in the order of `case_name`
+#
+# A `-` stands for a kernel the assembler refused. Only the two f16 kernels
+# whose rows are not a whole number of 16-byte units may be refused, and
+# refusing one is a RESULT of this family, not a failure: it is printed as a
+# finding and run.sh copies the assembler's message into the transcript.
+#
+# Five questions, each asked of a kernel and then of a control, a kernel
+# written to be wrong in exactly the way the question would catch. The family
+# believes a green only after the control beside it is red, and it counts how
+# red: a control that differs in no lane is a probe that cannot see.
+#
+#   1. Two-axis store. A [100, 100] f64 copy in 32 by 32 tiles, so the last
+#      tile row, the last tile column and the corner all run off the tensor.
+#      Out of bounds the tile's lanes are the first lanes of the next row or
+#      rows past the end; the buffer is 12900 long and everything beyond the
+#      first 10000 lanes holds a sentinel, and the answer is the input
+#      followed by the sentinels, lane for lane. The control stores through a
+#      [128, 128] view over the same buffer.
+#   2. A row that is not a multiple of 16 bytes: f16, 999 columns, 1998
+#      bytes. The twin with 1000 columns is a multiple and says the assembler
+#      is fine with the rest of the program. The control stores through a view
+#      one column narrow.
+#   3. The tool: the toolchain is the pinned one (run.sh checks it before
+#      this program exists); nothing here to ask the device.
+#   4. A K tail. C = A B with K = 100 in 32-wide tiles, the fourth tile
+#      holding 4 real lanes of K and 28 padding ones, both operands padded
+#      with zero. f16 (f16 accumulator), i8 (i32) and bf16 (f32). Values are
+#      small integers, so every sum is exact whatever the order. Controls: a
+#      loop of three tiles drops the tail; operand views whose K extent is 128
+#      read what lies after the operands.
+#   5. Poison. The operands' buffers continue with +inf (127 for i8) right
+#      after the data, which is where an unmasked read of the tail lands. The
+#      correct kernels never see it; the wide control must.
+use std/io
+use std/gpu
+use std/gpu.{Gpu, with_gpu_real}
+use std/float.{INFINITY}
+use std/list
+use std/map
+use std/str
+
+const SENTINEL: Float = 0.0 - 12345.0
+# f16 has 11 significant bits, so -12345 is not one of its values; this is.
+const SENTINEL_F16: Float = 0.0 - 1000.0
+const SQ: Int = 100
+const SQ_BUF: Int = 12900
+const SF_M: Int = 40
+const SF_BUF: Int = 65000
+const MM_M: Int = 64
+const MM_N: Int = 64
+const MM_K: Int = 100
+const MM_WIDE_A: Int = 6528
+const MM_WIDE_B: Int = 8192
+
+fn case_name(i: Int) -> String =
+  ["tail_store_2d", "tail_store_2d_wide", "tail_stride_f16_n999", "tail_stride_f16_n1000",
+    "tail_stride_f16_narrow", "tail_mm_f16", "tail_mm_i8", "tail_mm_bf16", "tail_mm_f16_floor",
+    "tail_mm_f16_wide"][i]
+
+fn blocks(n: Int, tile: Int) -> Int = (n + tile - 1) / tile
+
+fn sentinels_of(n: Int, s: Float) -> List[Float] = list.map(range(0, n), _i => s)
+
+fn sentinels(n: Int) -> List[Float] = sentinels_of(n, SENTINEL)
+
+fn count_diff(a: List[Float], b: List[Float]) -> Int =
+  if len(a) != len(b) {
+    0 - 1
+  } else {
+    list.fold(range(0, len(a)), 0, (n, i) => if to_string(a[i]) != to_string(b[i]) { n + 1 } else { n })
+  }
+
+fn first_diff(a: List[Float], b: List[Float]) -> String = {
+  let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+  if len(bad) == 0 { "none" } else { "lane ${bad[0]} got ${a[bad[0]]} want ${b[bad[0]]}" }
+}
+
+fn nonfinite(v: List[Float]) -> Int = list.fold(v, 0, (n, x) => if x != x || x == INFINITY || x == 0.0 - INFINITY { n + 1 } else { n })
+
+# ---- the corpora ----
+
+fn square_in() -> List[Float] = list.map(range(0, SQ * SQ), i => to_float(i + 1))
+
+fn square_want() -> List[Float] = square_in() ++ sentinels(SQ_BUF - SQ * SQ)
+
+# Integers below 1993, so each is exact in f16, with a period that is prime
+# and so cannot line up with any row length.
+fn stride_in(n: Int) -> List[Float] = list.map(range(0, SF_M * n), i => to_float((i * 7 + 3) % 1993))
+
+fn stride_want(n: Int) -> List[Float] = stride_in(n) ++ sentinels_of(SF_BUF - SF_M * n, SENTINEL_F16)
+
+fn a_val(i: Int, k: Int) -> Int = (i * 3 + k * 5) % 5 - 2
+fn b_val(k: Int, j: Int) -> Int = (k * 7 + j * 3) % 5 - 2
+
+fn a_data() -> List[Float] = list.map(range(0, MM_M * MM_K), x => to_float(a_val(x / MM_K, x % MM_K)))
+fn b_data() -> List[Float] = list.map(range(0, MM_K * MM_N), x => to_float(b_val(x / MM_N, x % MM_N)))
+
+fn poison(n: Int, p: Float) -> List[Float] = list.map(range(0, n), _i => p)
+
+fn c_want(k_end: Int) -> List[Float] = list.map(range(0, MM_M * MM_N), x => {
+  let i = x / MM_N
+  let j = x % MM_N
+  to_float(list.fold(range(0, k_end), 0, (s, k) => s + a_val(i, k) * b_val(k, j)))
+})
+
+# ---- one launch ----
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
+  for i in range(0, len(hs)) {
+    let (dt, data) = bufs[i]
+    gpu.gpu_copy_from_host(hs[i], gpu.encode_floats(dt, data))?
+  }
+  Ok(())
+}
+
+fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignError] !Gpu = {
+  var hs: List[Int] = []
+  for (dt, data) in bufs {
+    hs = hs ++ [gpu.gpu_alloc(dt, len(data))?]
+  }
+  Ok(hs)
+}
+
+fn launch_read(kernel: String, g: (Int, Int, Int), bufs: List[(String, List[Float])], read: Int) -> Result[List[Float], ForeignError] !Gpu = {
+  let hs = alloc_all(bufs)?
+  upload_all(hs, bufs)?
+  let (gx, gy, gz) = g
+  gpu.gpu_launch(kernel, gx, gy, gz, list.map(hs, h => gpu.Buffer(h)))?
+  gpu.gpu_sync()?
+  let (dt, _d) = bufs[read]
+  let out = gpu.decode_floats(dt, gpu.gpu_copy_to_host(hs[read])?)
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+  Ok(out)
+}
+
+# ---- the cases ----
+
+fn case_grid(i: Int) -> (Int, Int, Int) = {
+  let name = case_name(i)
+  if name == "tail_store_2d" || name == "tail_store_2d_wide" {
+    (blocks(SQ, 32), blocks(SQ, 32), 1)
+  } else if name == "tail_stride_f16_n1000" {
+    (blocks(SF_M, 32), blocks(1000, 32), 1)
+  } else if name == "tail_stride_f16_n999" || name == "tail_stride_f16_narrow" {
+    (blocks(SF_M, 32), blocks(999, 32), 1)
+  } else {
+    (blocks(MM_M, 32), blocks(MM_N, 32), 1)
+  }
+}
+
+fn mm_bufs(dt: String, out_dt: String, p: Float) -> List[(String, List[Float])] =
+  [(dt, a_data() ++ poison(MM_WIDE_A - MM_M * MM_K, p)),
+    (dt, b_data() ++ poison(MM_WIDE_B - MM_K * MM_N, p)),
+    (out_dt, sentinels(MM_M * MM_N))]
+
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let name = case_name(i)
+  if name == "tail_store_2d" || name == "tail_store_2d_wide" {
+    [("f64", square_in()), ("f64", sentinels(SQ_BUF))]
+  } else if name == "tail_stride_f16_n1000" {
+    [("f16", stride_in(1000)), ("f16", sentinels_of(SF_BUF, SENTINEL_F16))]
+  } else if name == "tail_stride_f16_n999" || name == "tail_stride_f16_narrow" {
+    [("f16", stride_in(999)), ("f16", sentinels_of(SF_BUF, SENTINEL_F16))]
+  } else if name == "tail_mm_i8" {
+    mm_bufs("i8", "i32", 127.0)
+  } else if name == "tail_mm_bf16" {
+    mm_bufs("bf16", "f32", INFINITY)
+  } else {
+    mm_bufs("f16", "f16", INFINITY)
+  }
+}
+
+fn case_read(i: Int) -> Int = if i <= 4 { 1 } else { 2 }
+
+## The answer the correct kernel owes. For a control it is the same answer: the
+## control is held to the reference too, and has to MISS it.
+fn case_want(i: Int) -> List[Float] = {
+  let name = case_name(i)
+  if name == "tail_store_2d" || name == "tail_store_2d_wide" {
+    square_want()
+  } else if name == "tail_stride_f16_n1000" {
+    stride_want(1000)
+  } else if name == "tail_stride_f16_n999" || name == "tail_stride_f16_narrow" {
+    stride_want(999)
+  } else {
+    c_want(MM_K)
+  }
+}
+
+fn is_control(i: Int) -> Bool = list.any(["tail_store_2d_wide", "tail_stride_f16_narrow", "tail_mm_f16_floor", "tail_mm_f16_wide"], n => n == case_name(i))
+
+fn read_cubin(path: String) -> Option[Bytes] !io =
+  if path == "-" {
+    None
+  } else {
+    match io.with_fs_real(() => io.read_bytes(path)) {
+      Ok(b) -> Some(b)
+      Err(e) -> panic("tail_diff: cannot read ${path}: ${e.message}")
+    }
+  }
+
+# How each case is judged. A kernel must equal the reference in every lane. A
+# control must differ from it, and the way it differs is named: the wide store
+# must have written over the sentinels, the narrow one must have left the last
+# column unwritten, the floor loop must have lost the tail's contribution and
+# the wide operand views must have read the poison.
+fn judge(i: Int, got: List[Float], want: List[Float]) -> (Bool, String) = {
+  let name = case_name(i)
+  let n = count_diff(got, want)
+  if n < 0 {
+    (false, "read back ${len(got)} lanes, want ${len(want)}")
+  } else if not is_control(i) {
+    if n == 0 { (true, "exact lanes=${len(want)}") } else { (false, "${n} of ${len(want)} lanes differ, ${first_diff(got, want)}") }
+  } else if n == 0 {
+    (false, "control stayed green: it differs from the reference in no lane, so the probe cannot see this fault")
+  } else if name == "tail_store_2d_wide" {
+    let over = list.fold(range(SQ * SQ, SQ_BUF), 0, (c, x) => if got[x] != SENTINEL { c + 1 } else { c })
+    if over > 0 { (true, "red as required: ${over} sentinel lanes past the tensor were overwritten") } else { (false, "control differs but never wrote past the tensor") }
+  } else if name == "tail_stride_f16_narrow" {
+    let unwritten = list.fold(range(0, SF_M), 0, (c, r) => if got[r * 999 + 998] == SENTINEL_F16 { c + 1 } else { c })
+    if unwritten == SF_M { (true, "red as required: the last column was left unwritten in all ${SF_M} rows") } else { (false, "control differs in ${n} lanes but not as the narrow store predicts (${unwritten} rows)") }
+  } else if name == "tail_mm_f16_wide" {
+    let bad = nonfinite(got)
+    if bad > 0 { (true, "red as required: ${bad} of ${len(got)} lanes are not finite, the poison was read") } else { (false, "control differs in ${n} lanes but read no poison") }
+  } else {
+    (true, "red as required: ${n} of ${len(want)} lanes miss the dropped tail")
+  }
+}
+
+fn run_all(cubins: Map[String, Option[Bytes]]) -> List[(Bool, String)] !Gpu = {
+  var lines: List[(Bool, String)] = []
+  for i in range(0, 10) {
+    let name = case_name(i)
+    let have = match map.get(cubins, name) {
+      Some(Some(_)) -> true
+      _ -> false
+    }
+    if not have {
+      lines = lines ++ [(true, "FINDING ${name}: the assembler refused this kernel, so it was not launched")]
+    } else {
+      let r = launch_read(name, case_grid(i), case_bufs(i), case_read(i))
+      match r {
+        Err(e) -> { lines = lines ++ [(false, "FAIL ${name}: the device refused: ${e.kind} ${e.message}")] }
+        Ok(got) -> {
+          let (ok, why) = judge(i, got, case_want(i))
+          let tag = if ok { if is_control(i) { "RED  " } else { "PASS " } } else { "FAIL " }
+          lines = lines ++ [(ok, "${tag}${name}: ${why}")]
+        }
+      }
+    }
+  }
+  lines
+}
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let ps = args()
+  if len(ps) != 11 {
+    io.eprintln("usage: tail_diff <arch> <ten cubins, or - for a refused kernel>")
+    io.exit(2)
+  }
+  var kernels: Map[String, Bytes] = map.empty()
+  var seen: Map[String, Option[Bytes]] = map.empty()
+  for i in range(0, 10) {
+    let b = read_cubin(ps[i + 1])
+    seen = map.insert(seen, case_name(i), b)
+    match b {
+      Some(bytes) -> { kernels = map.insert(kernels, case_name(i), bytes) }
+      None -> ()
+    }
+  }
+  let have = seen
+  let lines = with_gpu_real(kernels, () => run_all(have))
+  io.println("  arch ${ps[0]} poison=+inf (127 for i8) store-sentinel=${SENTINEL}")
+  var failed = 0
+  var findings = 0
+  for (ok, text) in lines {
+    io.println("  ${text}")
+    if not ok { failed = failed + 1 }
+    if str.starts_with(text, "FINDING") { findings = findings + 1 }
+  }
+  io.println("tiers exact=${len(lines) - findings} findings=${findings}")
+  if failed == 0 {
+    io.println("tile-gpu-diff: pass")
+  } else {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  }
+})
