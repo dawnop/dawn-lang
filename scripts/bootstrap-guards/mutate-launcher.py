@@ -335,12 +335,11 @@ elif mutation == "follow-symlinks":
         '          if [ ! -e "$leaf_file" ]; then',
     )
 elif mutation == "chain-fallback-to-jar":
-    # The native branch swallows a failed seed and carries on into the JAR build.
-    text = replace_region(
+    # A failed native build is swallowed and the JAR branch runs instead.
+    text = replace_once(
         text,
-        '    NATIVE_SEED=$(python3',
-        "cannot build this launcher's toolchain yet (seed verified: $NATIVE_SEED)\"\n",
-        '    NATIVE_SEED=$(python3 -B "$ROOT/scripts/native-seed-chain.py" seed) || NATIVE_SEED=\n',
+        '    exec python3 -B "$ROOT/scripts/native-seed-chain.py" launch -- "$@"',
+        '    python3 -B "$ROOT/scripts/native-seed-chain.py" launch -- "$@" || true',
     )
 elif mutation == "chain-ignore-explicit":
     text = replace_once(
@@ -364,7 +363,7 @@ elif mutation == "chain-accept-elf-as-jar":
 elif mutation == "chain-ignore-native-seed-var":
     text = replace_once(
         text,
-        '    [ -z "${DAWN_NATIVE_SEED:-}" ] ||\n      dawn_fail "DAWN_NATIVE_SEED is set but',
+        '    [ -z "${DAWN_NATIVE_SEED:-}${DAWN_NATIVE_SEED_LOCK:-}${DAWN_NATIVE_SEED_TREE:-}" ] ||\n      dawn_fail "DAWN_NATIVE_SEED is set but',
         '    true ||\n      dawn_fail "DAWN_NATIVE_SEED is set but',
     )
 elif mutation == "chain-ignore-jar-seed-var":

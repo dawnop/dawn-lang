@@ -1005,9 +1005,9 @@ lockchain.set_chain(sys.argv[2], "native", "contract")
   expect_refusal "an empty chain name is refused" "$chain_plain" "must be jar or native" DAWN_SEED_CHAIN=
   expect_refusal "the native chain without a lock is refused" "$chain_plain" "does not exist" DAWN_SEED_CHAIN=native
   expect_refusal "an override forces the native chain, which has no seed to download: no fallback to the JAR chain" \
-    "$chain_locked" "no fallback to the JAR chain" DAWN_SEED_CHAIN=native
+    "$chain_locked" "no fallback to jar" DAWN_SEED_CHAIN=native
   expect_refusal "a native-default lock does not fall back to the JAR chain" "$chain_native" \
-    "no fallback to the JAR chain"
+    "no fallback to jar"
   expect_refusal "DAWN_SEED holding an ELF is refused" "$chain_plain" "native seed belongs in DAWN_NATIVE_SEED" \
     "DAWN_SEED=$work/static-elf"
   expect_refusal "DAWN_NATIVE_SEED on the JAR chain is refused" "$chain_locked" "seed chain is jar" \
@@ -1018,10 +1018,10 @@ lockchain.set_chain(sys.argv[2], "native", "contract")
     "DAWN_NATIVE_SEED=$work/static-elf" "DAWN_SEED=$work/fake.jar"
   expect_refusal "both seed variables on the native chain are refused" "$chain_native" "seed chain is native" \
     "DAWN_NATIVE_SEED=$work/static-elf" "DAWN_SEED=$work/fake.jar"
-  expect_refusal "a jar given as DAWN_NATIVE_SEED is refused" "$chain_native" "is not an ELF" \
+  expect_refusal "a jar given as DAWN_NATIVE_SEED is refused" "$chain_native" "required together" \
     "DAWN_NATIVE_SEED=$work/fake.jar"
-  expect_refusal "a verified native seed still cannot build before the cutover" "$chain_native" \
-    "cannot build this launcher's toolchain yet" "DAWN_NATIVE_SEED=$work/static-elf"
+  expect_refusal "an unpaired native override cannot start a build" "$chain_native" \
+    "required together" "DAWN_NATIVE_SEED=$work/static-elf"
 
   # records that do not verify stop the launcher, whichever chain was asked for
   chain_tamper=$(chain_root chain-tampered)
@@ -1064,10 +1064,10 @@ lockchain.set_chain(sys.argv[2], "native", "contract")
     fi
   }
   chain_fallback_holds() {
-    refusal_holds "$CHAIN_MUTANT_NATIVE" "no fallback to the JAR chain"
+    refusal_holds "$CHAIN_MUTANT_NATIVE" "no fallback to jar"
   }
   chain_explicit_holds() {
-    refusal_holds "$CHAIN_MUTANT_LOCKED" "no fallback to the JAR chain" DAWN_SEED_CHAIN=native
+    refusal_holds "$CHAIN_MUTANT_LOCKED" "no fallback to jar" DAWN_SEED_CHAIN=native
   }
   chain_lock_holds() {
     local tampered=$CHAIN_MUTANT_LOCKED

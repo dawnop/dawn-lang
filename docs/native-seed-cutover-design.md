@@ -1,6 +1,6 @@
 # Native 种子链生产切换（D12-2 P）设计
 
-> 状态：**current**（已采纳，2026-11-25；补裁一至四与 P1/P2 落地见 §10 至 §13；§13 是 P4 native 链与启动器的合同，尚待实现与最终资格）。
+> 状态：**current**（已采纳，2026-11-25；补裁一至四与 P1/P2 落地见 §10 至 §13；§13 是 P4 native 链与启动器的合同，pre2 显式缓存见 §15，尚待最终资格）。
 >
 > 前置：[native-seed-input-contract-design.md](native-seed-input-contract-design.md)（K1-K5，资格工具与隔离原型已交付，生产 no-go）。
 > 本页覆盖 P0-P5 及补裁四新增的 P4-pre0/pre1/pre2/pre3；前置开发不授权改默认或发版。不含 D12-3（站点 prepare 去 JVM），它依赖本页 P 的 builder 合同，在 P4 之后另起设计页。
@@ -11,7 +11,7 @@
 ### 1.1 P0 时的基线（历史快照）
 
 以下是 P0 的八件/schema 1 旧状态。P1 已实现九件/schema 2 与不可覆盖发布，P2 已实现 lock 消费；
-当前尚无真实 qualified lock，release 被机器冻结，源码启动器默认仍 jar，显式 native 验种子后退出（§11、§12）。
+当前尚无真实 qualified lock，release 被机器冻结，源码启动器默认仍 jar，显式 native 两阶段缓存见 §15。
 
 - **发布合同是八件资产，schema 1**。`.github/workflows/release.yml` 的 publish 步把资产分成两张表：
   `INSTALL_ASSETS`（`dawn-selfhost.jar`、`dawn-selfhost.jar.sha256`、`dawnc-linux-x86_64`、
@@ -552,7 +552,7 @@ P2 只做机制，不改默认链，也不创建真实的 `scripts/native-seed-l
 
 本节采纳方案丙：**源码检出执行 S→A→B，缓存并 exec 当前 B；C 只在 release 与资格中验证固定点。**
 直接执行旧 S 会使当前源码不可见，破坏 site 与 HEAD 对拍；执行 A 会使日常工具链与发布 B 的 std/runtime 配对不同。
-两者均不作为源码启动器方案。本节来自 P4-pre0 合同；pre1 的独立 builder 已实现（§14），启动器仍待 pre2，当前行为见 §12.2。
+两者均不作为源码启动器方案。本节来自 P4-pre0 合同；pre1 的独立 builder 已实现（§14），pre2 的启动器缓存见 §15；§12.2 保留 P2 当时行为。
 
 ### 13.1 S/A/B/C 角色与证据边界
 
@@ -728,7 +728,7 @@ lock/history/revoked、候选及待晋级描述记录属于控制层，不参加
 
 完整 chain receipt 必须记录来源、编译输入、工具链和逐阶段 whole/info/units/ELF 身份，producer 读取完整记录，
 拒绝缺 stage、换 A/B/receipt、错配对与错 CC，不从组装 runner 重新猜 CC。receipt 的规范摘要进入公开 proof；
-内部 artifact 跨 job 传递并保留 90 天，公开资产仍九件。默认链仍 jar，启动器缓存留给 pre2。
+内部 artifact 跨 job 传递并保留 90 天，公开资产仍九件。默认链仍 jar，启动器缓存见 §15。
 
 pre1 的具体接口：
 
@@ -783,3 +783,42 @@ GCC/crt/libc 路径与各自摘要，`cc-units.sh` 摘要、阶段选项与资�
 但不能由本机重组发布。资格入口同样要求托管环境，request 与 package 绑定执行来源；
 晋级拒绝本机开发来源，`describe-seed` 只有经过完整验证的托管 release 来源才登记可资格 proposed ELF。
 这些来源字段是审计记录，不作为重新写入编译输入的控制记录。
+
+## 15. P4-pre2 启动器缓存（2026-11-25）
+
+源码入口在选择 native 后、任何 Java 探测之前，交给 `native-seed-chain.py launch -- <argv>`。
+它调用 §14 的同一 builder，以 live capture 构建 S→A→B，只执行 B。默认仍为 jar，
+不创建或修改 lock/history/revoked，也不构建备用 JAR。无源码 shell 在读取 Python 模块之前
+要求 `DAWN_SEED_CHAIN=jar`，并拒绝全部种子覆盖；缺失、空值、未知选择和 native 请求均失败。
+
+缓存位于 `build/native-toolchain/generations/<输入摘要>/`，与 JAR generation 隔离。
+`generation.json` 描述 stage B、完整 build id、ELF 摘要、输入及 chain receipt 摘要；
+`committed.json` 是最后原子写入的提交标记。`build.lock` 从输入准备到最终复验持有独占 flock，
+等待者重新读取所有输入。构建使用私有 `.staging-*`，先同步文件、原子重命名目录，再提交 marker。
+中断可能留下私有 staging 或缺 marker 的目录；前者不会被选择，后者报污染错误，须显式清理后重试。
+失败保留旧代字节，本次调用失败，不执行旧代。缓存暂不自动回收，避免影响正在执行的 B。
+
+输入键绑定 chain/stage、default/override 帧、已验证历史与撤销列表、seed 完整描述、源码来源、
+live 内容清单、portable 编译输入及实际工具链快照。live capture 包括受版本控制文件、未忽略的新文件，
+并扫描源码项目、std/runtime；使用与 builder 相同的保守上界，dirty 与新增依赖均可见。
+完整来源清单使文档或来源 commit 变化也可能新建 generation，这是保守失效，不是只验 HEAD。
+A 与 B 的 `__source-inputs` 仍由 builder 交叉核对；每次命中重验输入、实际 CC/链接器/库/头文件、
+seed/配对树、chain receipt、A/B 及中间产物和 B 的 source plan，交付前再次复验输入与控制记录。
+完整校验有热启动成本，不能替换成 mtime 命中；五次冷启动与五次热启动的实测留在本刀交接报告。
+
+覆盖接口定稿为三件同时提供：`DAWN_NATIVE_SEED=<ELF>`、
+`DAWN_NATIVE_SEED_LOCK=<describe-seed 生成的完整描述>`、
+`DAWN_NATIVE_SEED_TREE=<prepare-pair 生成的配对根>`。
+配对根包含 `std/` 与 `runtime/c/`，从描述中的 seed commit 重建并核对内容，不能用当前树凑配对。
+覆盖独立 stamp，并受当前仓库撤销表约束。`CC` 可选择 clang；默认使用钉定 clang18，
+其它 clang 使用 development recipe，仍要求现行 GCC 13 静态库布局。全部源码 generation 都是 development。
+继承的 CFLAGS、include 与优化环境不参与自举，builder 继续使用清空后的环境及 `CC_JOBS=1`。
+
+查询接口也先完成相同验证：`DAWN_PRINT_STAMP=1` 输出
+`native-v1:development:<default|override>:<输入摘要>:<B ELF 摘要>`；
+`DAWN_NATIVE_PRINT_GENERATION=1` 输出一行规范 JSON，字段为 `stamp`、`executable` 与 `receipt`。
+后续消费者应使用该边界取得已验证 B 与收据，不猜缓存目录。两种查询都可能在 miss 时构建，
+构建日志仅写 stderr，stdout 只包含查询结果。普通调用最终用 `exec` 替换进程，保留 argv、cwd、信号与退出码。
+
+本刀不改默认、不推进种子、不删除原型、不迁移生产消费者、不把 generation 当作资格或发布证明。
+消费者逐个显式选链、原型删除与最终资格仍依 §13.7 分刀完成。
