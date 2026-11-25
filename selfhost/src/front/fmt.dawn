@@ -597,7 +597,9 @@ fn contextual_keywords(raw: List[Token]) -> Set[Int] = {
 # parentheses; `calls` distinguishes an effect clause from call arguments.
 # `operand_at` belongs to a lambda argument inside this bracket, until its
 # separating comma, so a binary block operand follows that argument's line.
-type Opener = { at: Int, brace: Bool, lat: Int, ld: Int, lambda_at: Int, calls: Bool, operand_at: Int }
+# `line_at` keeps the physical opening line: an arm sharing its match's brace
+# begins there even when the match header itself wrapped to that line.
+type Opener = { at: Int, brace: Bool, lat: Int, ld: Int, lambda_at: Int, calls: Bool, operand_at: Int, line_at: Int }
 
 ## The parenthesis in `effect Name calls(` opens a declaration clause. The
 ## name `calls` alone is also a valid callee, whose tail block keeps its own
@@ -915,8 +917,8 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
     let calls_brace = t.kind == LBRACE && have_prev_code && prev_code.kind == RPAREN && rparen_calls
     let scoped_params = t.kind == LPAREN && have_prev_code && prev_code.kind == RBRACKET
     let lambda_brace = t.kind == LBRACE && nl == 0 && arrow_after_rparen && have_prev_code &&
-      (prev_code.kind == FATARROW || prev_code.kind == ARROW)
-    if t.kind == FATARROW || t.kind == ARROW {
+      prev_code.kind == FATARROW
+    if t.kind == FATARROW {
       arrow_after_rparen = have_prev_code && prev_code.kind == RPAREN
     } else if t.kind != COMMENT {
       arrow_after_rparen = false
@@ -957,7 +959,9 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
           logical_indent
         } else if nl > 0 || tail_brace || kw_brace {
           line_indent
-        } else if lambda_brace && (not guard_brace || not body) {
+        } else if guard_brace && not body && len(openers) > 0 && openers[len(openers) - 1].brace {
+          openers[len(openers) - 1].line_at
+        } else if lambda_brace {
           rparen_at
         } else if group_brace {
           hdrs[len(hdrs) - 1].at
@@ -975,6 +979,7 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         lambda_at = if scope_binder { line_indent } else if scoped_params { rbracket_lambda_at } else { -1 },
         calls = t.kind == LPAREN && calls_clause_paren(toks, i),
         operand_at = -1,
+        line_at = line_indent,
       }]
       if waiting && (header || guard_brace) { hdrs = list.take(hdrs, len(hdrs) - 1) }
     } else if t.kind == RPAREN || t.kind == RBRACKET || t.kind == RBRACE {
@@ -1937,6 +1942,14 @@ test "an arm body follows its wrapped constructor pattern" {
   assert fmt_of(w) == w
   let n = "fn f(x: T) -> Unit = {\n  match x { Err(\n    (kind,\n      message)) -> {\n    work(kind, message)\n  }, _ -> () }\n}\n"
   assert fmt_of(n) == n
+  # A guard's parentheses belong to the guard, not to the arm's start.
+  let g = "fn f(x: T) -> Unit = {\n  match x { Some(\n    n) if (\n      n >\n        3) -> {\n    work(n)\n  }, _ -> () }\n}\n"
+  assert fmt_of(g) == g
+  # The match's brace can itself sit on a continuation of its header.
+  let h = "fn f(x: T) -> Unit = {\n  match fetch(\n    x) { Some(\n      n) if (\n        n >\n          3) -> {\n      work(n)\n    }, _ -> () }\n}\n"
+  assert fmt_of(h) == h
+  let l = "fn f(x: List[Int]) -> Unit = {\n  match x { [a,\n    b] -> {\n    work(a, b)\n  }, _ -> () }\n}\n"
+  assert fmt_of(l) == l
 }
 
 test "a binary block operand in a wrapped lambda follows that lambda" {
