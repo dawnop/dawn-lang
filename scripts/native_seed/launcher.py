@@ -1,0 +1,193 @@
+"""Cache the shared S -> A -> B builder, then replace the launcher with B.
+
+A generation has a private build directory, an immutable receipt and a final
+commit marker. One advisory lock covers preparation, verification and commit;
+waiters always recompute their inputs. A failed or incomplete generation is
+never permission to execute another generation. This is development evidence,
+not a qualification receipt or a release artifact.
+"""
+
+import os
+from pathlib import Path
+import platform
+import shutil
+import sys
+import tempfile
+
+from native_seed import builder, contract as c, inputs, lockchain, toolchain
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+OVERRIDES = ('DAWN_NATIVE_SEED', 'DAWN_NATIVE_SEED_LOCK', 'DAWN_NATIVE_SEED_TREE')
+
+
+def controls(repo):
+    scripts = Path(repo) / 'scripts'
+    if not lockchain.present(scripts):
+        return None, {'chain': [], 'revoked': {}}
+    loaded = lockchain.load(scripts)
+    return loaded.lock, {'chain': [c.digest(raw) for _, raw in loaded.chain], 'revoked': loaded.revoked}
+
+
+def select(repo, fetch):
+    locked, control = controls(repo)
+    values = [os.environ.get(name) for name in OVERRIDES]
+    c.require(not any(values) or all(values), 'seed-override',
+              'DAWN_NATIVE_SEED, DAWN_NATIVE_SEED_LOCK and DAWN_NATIVE_SEED_TREE are required together')
+    if all(values):
+        seed, lock_path, pair = (Path(value).absolute() for value in values)
+        lock = builder.load_lock(lock_path)
+        c.require(lock['seed']['sha256'] not in control['revoked'], 'revoked', 'override seed is revoked')
+        lockchain.override_seed(seed)
+        lockchain.verify_seed_bytes(c.regular_bytes(seed), lock)
+        c.verify_seed_tree(repo, lock, pair)
+        frame = {'selection': 'override', 'lock_sha256': c.digest(c.regular_bytes(lock_path)),
+                 'seed_path': str(seed), 'lock_path': str(lock_path), 'pair_path': str(pair)}
+    else:
+        c.require(locked is not None, 'lock-missing', 'native requires a qualified lock or a complete paired override')
+        lock = locked
+        lock_path = Path(repo) / 'scripts' / lockchain.LOCK_NAME
+        seed = lockchain.cached_seed(lock, Path(repo) / '.dawn/native-seeds', fetch)
+        pair = None
+        frame = {'selection': 'default', 'lock_sha256': c.digest(c.regular_bytes(lock_path))}
+    return lock, lock_path, seed, pair, dict(frame, controls=control)
+
+
+def snapshot(repo, lock, frame, cc, development_cc):
+    commit = c.git(repo, 'rev-parse', 'HEAD').decode().strip()
+    tree, files = builder.source_files(repo, commit, live=True)
+    tc = toolchain.prepare(cc, pinned=not development_cc)
+    toolchain.verify_record(tc, pinned=not development_cc)
+    compilation = inputs.compilation(files, lock, tc)
+    value = {'schema': 1, 'kind': 'native-launcher-inputs', 'chain': 'native', 'stage': 'B',
+             'execution': 'development', 'frame': frame, 'commit': commit, 'tree': tree,
+             'source_sha256': c.inventory_sha(c.inventory(files)),
+             'compilation_sha256': c.digest(c.canonical(compilation)),
+             'development_cc': development_cc}
+    return value, files, tc
+
+
+def verify(directory, expected, files, tc, repo, lock, marker=None):
+    marker = c.read_json(directory / 'committed.json') if marker is None else marker
+    c.fields(marker, 'schema kind inputs_sha256 receipt_sha256 chain_sha256', 'generation commit')
+    c.require(marker['schema'] == 1 and marker['kind'] == 'native-launcher-commit' and
+              marker['inputs_sha256'] == c.digest(c.canonical(expected)),
+              'generation-commit', 'missing, foreign or incomplete native generation')
+    receipt = c.read_json(directory / 'generation.json')
+    c.fields(receipt, 'schema kind inputs chain_sha256 binary stage build_id elf_sha256', 'generation receipt')
+    c.require(c.regular_bytes(directory / 'generation.json') == c.canonical(receipt) and
+              marker['receipt_sha256'] == c.digest(c.canonical(receipt)) and
+              receipt['schema'] == 1 and receipt['kind'] == 'native-launcher-generation' and
+              receipt['inputs'] == expected and receipt['binary'] == 'B/dawnc' and receipt['stage'] == 'B',
+              'generation-receipt', 'native generation receipt differs')
+    chain_path = directory / 'chain-receipt.json'
+    c.require(receipt['chain_sha256'] == marker['chain_sha256'] == c.digest(c.regular_bytes(chain_path)),
+              'generation-receipt', 'chain receipt differs')
+    chain = builder.verify_receipt(chain_path, repo, lock, directory / 'B/dawnc', directory / 'A/dawnc',
+                                   require_c=False, live=True, development_cc=expected['development_cc'])
+    c.require(chain['execution']['kind'] == 'development' and chain['toolchain'] == tc,
+              'generation-toolchain', 'actual toolchain or development scope differs')
+    c.verify_tree(directory / 'source', c.inventory(files))
+    c.verify_seed_tree(repo, lock, directory / 'seed')
+    lockchain.verify_seed_bytes(c.regular_bytes(directory / 'seed-elf'), lock)
+    for stage in ('A', 'B'):
+        c.require(builder.output_identity(directory / stage) == chain['stages'][stage]['output'],
+                  'generation-output', 'stage bytes differ from the builder receipt')
+    c.require(builder.plan(directory / 'B/dawnc', directory / 'source') == chain['plan_sha256'],
+              'generation-plan', 'B source plan differs')
+    c.require(receipt['elf_sha256'] == chain['stages']['B']['output']['elf_sha256'] and
+              receipt['build_id'] == chain['stages']['B']['build_id'],
+              'generation-output', 'B digest or full build ID differs')
+    return receipt
+
+
+def sync_tree(directory):
+    # The marker is a durable commit, so all files and renamed directories must
+    # reach storage first. A killed builder can leave staging, never a marker.
+    for parent, _, names in os.walk(directory, topdown=False):
+        for name in names:
+            fd = os.open(Path(parent) / name, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        sync_directory(Path(parent))
+
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def generation(repo, fetch, cache=None):
+    c.require(platform.system() == 'Linux' and platform.machine() == 'x86_64',
+              'native-platform', 'native source launcher requires Linux x86_64')
+    c.require(sys.version_info >= (3, 11), 'native-python', 'native source launcher requires Python 3.11+')
+    c.require(not os.environ.get('DAWN_SEED'), 'seed-override', 'native rejects DAWN_SEED')
+    cache = c.safe_destination(cache or Path(repo) / 'build/native-toolchain')
+    cache.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(c.safe_destination(cache / 'build.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock_fd, 'r+') as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        lock, lock_path, seed, pair, frame = select(repo, fetch)
+        cc = os.environ.get('CC', '/usr/lib/llvm-18/bin/clang')
+        cc = shutil.which(cc) or cc
+        # Alternate clang is allowed only as a development recipe. All source
+        # launcher generations, including pinned clang, remain development.
+        development_cc = str(Path(cc).resolve()) != '/usr/lib/llvm-18/bin/clang'
+        expected, files, tc = snapshot(repo, lock, frame, cc, development_cc)
+        key = c.digest(c.canonical(expected))
+        generations = c.safe_destination(cache / 'generations')
+        generations.mkdir(exist_ok=True)
+        directory = c.safe_destination(generations / key)
+        if not directory.exists():
+            staging = Path(tempfile.mkdtemp(prefix='.staging-', dir=cache))
+            output = staging / 'generation'
+            # Preserve a failed staging tree for diagnosis; never consult it
+            # when choosing a subsequent generation.
+            chain = builder.build(repo, lock_path, seed, pair, output, cc, jobs=1,
+                                  live=True, development_cc=development_cc)
+            c.require(select(repo, fetch)[-1] == frame, 'generation-inputs', 'seed controls changed during build')
+            c.require(snapshot(repo, lock, frame, cc, development_cc)[0] == expected,
+                      'generation-inputs', 'inputs changed during build')
+            receipt = {'schema': 1, 'kind': 'native-launcher-generation', 'inputs': expected,
+                       'chain_sha256': c.digest(c.regular_bytes(output / 'chain-receipt.json')),
+                       'binary': 'B/dawnc', 'stage': 'B', 'build_id': chain['stages']['B']['build_id'],
+                       'elf_sha256': chain['stages']['B']['output']['elf_sha256']}
+            c.atomic_json(output / 'generation.json', receipt)
+            marker = {'schema': 1, 'kind': 'native-launcher-commit', 'inputs_sha256': key,
+                      'receipt_sha256': c.digest(c.canonical(receipt)), 'chain_sha256': receipt['chain_sha256']}
+            verify(output, expected, files, tc, repo, lock, marker=marker)
+            sync_tree(output)
+            os.rename(output, directory)
+            sync_directory(generations)
+            c.atomic_json(directory / 'committed.json', marker)
+            staging.rmdir()
+        receipt = verify(directory, expected, files, tc, repo, lock)
+        # Re-read control records and the external paired override immediately
+        # before handing the verified executable to the caller.
+        c.require(select(repo, fetch)[-1] == frame, 'generation-inputs', 'seed controls changed during verification')
+        c.require(snapshot(repo, lock, frame, cc, development_cc)[0] == expected,
+                  'generation-inputs', 'inputs changed during verification')
+        stamp = 'native-v1:development:' + frame['selection'] + ':' + key + ':' + receipt['elf_sha256']
+        return {'stamp': stamp, 'executable': str(directory / 'B/dawnc'),
+                'receipt': str(directory / 'generation.json')}
+
+
+def launch(repo, argv, fetch):
+    selected = generation(repo, fetch)
+    if os.environ.get('DAWN_PRINT_STAMP') == '1':
+        print(selected['stamp'])
+        return 0
+    if os.environ.get('DAWN_NATIVE_PRINT_GENERATION') == '1':
+        sys.stdout.buffer.write(c.canonical(selected))
+        return 0
+    # No child process remains: argv/cwd, exit status and signal delivery are
+    # the native compiler's own contract, as for the shell's JVM exec.
+    os.execv(selected['executable'], [selected['executable'], *argv])

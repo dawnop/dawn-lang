@@ -10,6 +10,7 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -47,6 +48,12 @@ def source_files(repo, commit, live=False):
         files = {p: ('100755' if (Path(repo) / p).stat().st_mode & 0o111 else '100644',
                      c.regular_bytes(Path(repo) / p)) for p in files
                  if (Path(repo) / p).exists() or (Path(repo) / p).is_symlink()}
+        for raw in c.git(repo, 'ls-files', '-z', '--others', '--exclude-standard').split(b'\0'):
+            if raw:
+                path = c.logical(raw.decode('utf-8'))
+                target = Path(repo) / path
+                files[path] = ('100755' if target.stat().st_mode & 0o111 else '100644',
+                               c.regular_bytes(target))
         # Materialize a conservative project superset, including dirty and new
         # source files. Planner still owns the actual nmain dependency closure.
         projects = [Path(repo) / 'selfhost', Path(repo) / 'compiler-plan']
@@ -104,11 +111,11 @@ def run_stage(emitter, source, std, runtime, out, cc, jobs):
                'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8', 'TZ': 'UTC', 'CC': cc, 'CC_JOBS': str(jobs)}
         start = time.monotonic()
         subprocess.run(recipe.emission_command(emitter, source / ENTRY, std, out),
-                       env=env, cwd=source, check=True)
+                       env=env, cwd=source, check=True, stdout=sys.stderr)
         emitted = time.monotonic()
         subprocess.run(recipe.compilation_command(source / 'scripts/cc-units.sh', runtime, out),
-                       env=env, cwd=source, check=True)
-        print(f'timing emit {emitted - start:.1f}s cc {time.monotonic() - emitted:.1f}s', flush=True)
+                       env=env, cwd=source, check=True, stdout=sys.stderr)
+        print(f'timing emit {emitted - start:.1f}s cc {time.monotonic() - emitted:.1f}s', flush=True, file=sys.stderr)
     identity(out / 'dawnc')
     return output_identity(out)
 
@@ -160,7 +167,7 @@ def build(repo, lock_path, seed, seed_tree, out, cc, jobs=1, final_stage='B', re
             break
         emitter = private_seed if previous is None else out / previous / 'dawnc'
         base = paired if name == 'A' else source
-        print('stage ' + name, flush=True)
+        print('stage ' + name, flush=True, file=sys.stderr)
         output = run_stage(emitter, source, base / 'std', base / 'runtime/c',
                            out / name, tc['compiler']['executable'], jobs)
         _, build_id = identity(out / name / 'dawnc')
@@ -192,18 +199,19 @@ def build(repo, lock_path, seed, seed_tree, out, cc, jobs=1, final_stage='B', re
     return receipt
 
 
-def verify_receipt(receipt_path, repo, lock, native, builder, require_c=True, hosted=False, current_run=False):
+def verify_receipt(receipt_path, repo, lock, native, builder, require_c=True, hosted=False, current_run=False,
+                   live=False, development_cc=False):
     raw = c.regular_bytes(receipt_path)
     value = c.read_json(receipt_path)
     c.fields(value, RECEIPT_FIELDS, 'chain receipt')
     c.require(raw == c.canonical(value) and type(value['schema']) is int and value['schema'] == 1 and
               value['kind'] == 'native-builder-chain', 'chain-receipt', 'unknown or noncanonical chain receipt')
     commit = c.git(repo, 'rev-parse', 'HEAD').decode().strip()
-    tree, files = source_files(repo, commit)
+    tree, files = source_files(repo, commit, live=live)
     c.require(value['source_commit'] == commit and value['source_tree'] == tree and
               value['source_sha256'] == c.inventory_sha(c.inventory(files)),
               'chain-source', 'chain provenance differs from the producer checkout')
-    toolchain.verify_record(value['toolchain'])
+    toolchain.verify_record(value['toolchain'], pinned=not development_cc)
     compilation = inputs.compilation(files, lock, value['toolchain'])
     provenance.verify(value['execution'], commit, hosted=hosted, release=hosted)
     if current_run:

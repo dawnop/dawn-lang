@@ -1,10 +1,7 @@
 #!/bin/sh
-# dawn CLI launcher: the self-hosted toolchain, seeded from the previous
-# release (M8 phase 5 — the Kotlin implementation is archived at the
-# kotlin-final tag). In a repo checkout the standalone jar under build/ is
-# rebuilt whenever any of its build inputs changed (see the v2 generation
-# stamp below); outside one (the playground server rsyncs bin/ + build/) it
-# just runs the shipped jar.
+# Source checkouts cache the current stage B in the selected chain. Native
+# generations live apart from the JAR cache and never probe Java. A copied
+# deployment is explicitly JVM-only and executes its shipped JAR.
 set -e
 
 # Resolve symlinks (e.g. ~/.local/bin/dawn) so ROOT is the real repo checkout.
@@ -23,34 +20,6 @@ while [ -L "$SELF" ]; do
   esac
 done
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
-
-# if JAVA_HOME is unset, try GraalVM under ~/tools. Both layouts: macOS bundles
-# the JDK under Contents/Home, Linux tarballs put bin/ at the top level.
-if [ -z "$JAVA_HOME" ]; then
-  for d in "$HOME"/tools/graalvm-*/Contents/Home "$HOME"/tools/graalvm-*; do
-    if [ -x "$d/bin/java" ]; then
-      JAVA_HOME="$d"
-      export JAVA_HOME
-      break
-    fi
-  done
-fi
-JAVA=java
-if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
-  JAVA="$JAVA_HOME/bin/java"
-fi
-
-# Print the JVM chosen above and stop, for scripts that run a jar outside this
-# launcher (seedjar.sh seed_java). The differentials run the seed's jar next to
-# this launcher's toolchain; when they took `java` off PATH instead, a PATH
-# java of another major version put the two sides on different JDKs and the
-# diff reported the JDK's difference as the toolchain's (issue #267: a JDK 26
-# on PATH against the JDK 21 found here). Asking this launcher, rather than
-# repeating its probe, is what keeps the two answers from drifting apart.
-if [ -n "${DAWN_LAUNCHER_PRINT_JAVA:-}" ]; then
-  printf '%s\n' "$JAVA"
-  exit 0
-fi
 
 SJAR="$ROOT/build/dawn-selfhost.jar"
 STD="$ROOT/std"
@@ -153,16 +122,22 @@ fi
 # Disable HotSpot perf-data files after the configurable options: a pid-file
 # collision can print a VM warning into a compiler or LSP transcript. No Dawn
 # harness consumes these counters, and program stderr must remain untouched.
-# deployed form: no sources, no seed resolver — run the shipped jar as-is
+# A copied shell launcher is a JVM-only product. Validate selection before
+# probing Java or loading the source checkout's Python control reader.
+DEPLOYED=0
 if [ ! -f "$ROOT/scripts/seedjar.sh" ]; then
-  if [ ! -f "$SJAR" ]; then
-    echo "error: $SJAR not found (deployments must ship build/dawn-selfhost.jar)" >&2
+  DEPLOYED=1
+  [ "${DAWN_SEED_CHAIN:-}" = jar ] || {
+    echo "error: deployed shell launcher is JVM-only; set DAWN_SEED_CHAIN=jar" >&2
     exit 2
-  fi
-  exec "$JAVA" $DAWN_RUN_JVM_OPTS -XX:-UsePerfData -jar "$SJAR" "$@"
+  }
+  for override in "${DAWN_SEED:-}" "${DAWN_NATIVE_SEED:-}" "${DAWN_NATIVE_SEED_LOCK:-}" "${DAWN_NATIVE_SEED_TREE:-}"; do
+    [ -z "$override" ] || {
+      echo "error: deployed shell launcher rejects seed overrides" >&2
+      exit 2
+    }
+  done
 fi
-
-. "$ROOT/scripts/seedjar.sh"
 
 # Which seed chain builds this toolchain, decided before anything is built.
 #
@@ -185,6 +160,7 @@ file_magic() {
   LC_ALL=C od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n'
 }
 
+if [ "$DEPLOYED" = 0 ]; then
 if [ "${DAWN_SEED_CHAIN+x}" = x ]; then
   case $DAWN_SEED_CHAIN in
     jar|native) ;;
@@ -208,7 +184,7 @@ SEED_CHAIN=${DAWN_SEED_CHAIN:-$CHAIN_DEFAULT}
 # branch below refuses the variable of the other chain, so no pair gets through.
 case $SEED_CHAIN in
   jar)
-    [ -z "${DAWN_NATIVE_SEED:-}" ] ||
+    [ -z "${DAWN_NATIVE_SEED:-}${DAWN_NATIVE_SEED_LOCK:-}${DAWN_NATIVE_SEED_TREE:-}" ] ||
       dawn_fail "DAWN_NATIVE_SEED is set but the seed chain is jar; set DAWN_SEED_CHAIN=native or unset it"
     if [ -n "${DAWN_SEED:-}" ] && [ "$(file_magic "$DAWN_SEED")" = 7f454c46 ]; then
       dawn_fail "DAWN_SEED names an ELF file; a native seed belongs in DAWN_NATIVE_SEED"
@@ -220,14 +196,48 @@ case $SEED_CHAIN in
     [ -e "$ROOT/scripts/native-seed-lock.json" ] || [ -n "${DAWN_NATIVE_SEED:-}" ] ||
       dawn_fail "the native chain was requested but scripts/native-seed-lock.json does not exist"
     command -v python3 >/dev/null 2>&1 || dawn_fail "python3 is required for the native seed chain"
-    NATIVE_SEED=$(python3 -B "$ROOT/scripts/native-seed-chain.py" seed) ||
-      dawn_fail "the native seed does not verify; there is no fallback to the JAR chain"
-    # The seed is resolved and verified; building the toolchain from it is the
-    # production cutover (P4), and until then this refuses rather than builds
-    # from a different seed.
-    dawn_fail "the native seed chain cannot build this launcher's toolchain yet (seed verified: $NATIVE_SEED)"
+    [ -z "${DAWN_LAUNCHER_PRINT_JAVA:-}" ] ||
+      dawn_fail "Java selection requires DAWN_SEED_CHAIN=jar"
+    exec python3 -B "$ROOT/scripts/native-seed-chain.py" launch -- "$@"
     ;;
 esac
+
+fi
+
+# if JAVA_HOME is unset, try GraalVM under ~/tools. Both layouts: macOS bundles
+# the JDK under Contents/Home, Linux tarballs put bin/ at the top level.
+if [ -z "$JAVA_HOME" ]; then
+  for d in "$HOME"/tools/graalvm-*/Contents/Home "$HOME"/tools/graalvm-*; do
+    if [ -x "$d/bin/java" ]; then
+      JAVA_HOME="$d"
+      export JAVA_HOME
+      break
+    fi
+  done
+fi
+JAVA=java
+if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+  JAVA="$JAVA_HOME/bin/java"
+fi
+
+# Print the JVM chosen above and stop, for scripts that run a jar outside this
+# launcher (seedjar.sh seed_java). The differentials run the seed's jar next to
+# this launcher's toolchain; when they took `java` off PATH instead, a PATH
+# java of another major version put the two sides on different JDKs and the
+# diff reported the JDK's difference as the toolchain's (issue #267: a JDK 26
+# on PATH against the JDK 21 found here). Asking this launcher, rather than
+# repeating its probe, is what keeps the two answers from drifting apart.
+if [ -n "${DAWN_LAUNCHER_PRINT_JAVA:-}" ]; then
+  printf '%s\n' "$JAVA"
+  exit 0
+fi
+
+if [ "$DEPLOYED" = 1 ]; then
+  [ -f "$SJAR" ] || dawn_fail "$SJAR not found (deployments must ship build/dawn-selfhost.jar)"
+  exec "$JAVA" $DAWN_RUN_JVM_OPTS -XX:-UsePerfData -jar "$SJAR" "$@"
+fi
+
+. "$ROOT/scripts/seedjar.sh"
 
 # What the jar was built from, as a content hash rather than a timestamp.
 #

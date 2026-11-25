@@ -7,6 +7,8 @@ digest chaining). The launcher keeps only what is about its own environment,
 the DAWN_SEED_CHAIN and seed-variable conflicts, and asks this file everything
 about the records.
 
+  launch -- ARGS
+            verify/build a native generation, then exec current B
   default   verify the records and print the default chain (jar or native);
             prints nothing and fails when the records are corrupt or revoked
   check     verify the records for a release: a qualified lock must exist
@@ -78,6 +80,15 @@ def base_file(revision, name):
 
 
 def main():
+    # Keep application arguments opaque to argparse, including empty strings.
+    if sys.argv[1:2] == ['launch']:
+        from native_seed import launcher
+        try:
+            c.require(sys.argv[2:3] == ['--'], 'arguments', 'launch requires -- before application arguments')
+            return launcher.launch(HERE.parent, sys.argv[3:], fetch)
+        except (c.Rejected, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            print(f'error: {exc}; native launch refused, no fallback to jar', file=sys.stderr)
+            return 1
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('command', choices=('default', 'check', 'seed', 'describe-seed', 'prepare-pair', 'build', 'contract-fixture'))
     parser.add_argument('directory', nargs='?')

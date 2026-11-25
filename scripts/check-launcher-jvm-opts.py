@@ -144,7 +144,7 @@ def launched(launcher: str, args: list[str], env_opts: str | None) -> tuple[list
         (root / "jdk/bin/java").chmod(0o755)
         log = root / "java.log"
         env = {k: v for k, v in os.environ.items() if not k.startswith("DAWN_")}
-        env.update(JAVA_HOME=str(root / "jdk"), FAKE_JAVA_LOG=str(log))
+        env.update(JAVA_HOME=str(root / "jdk"), FAKE_JAVA_LOG=str(log), DAWN_SEED_CHAIN="jar")
         if env_opts is not None:
             env["DAWN_JVM_OPTS"] = env_opts
         done = subprocess.run(["sh", str(root / "bin/dawn"), *args], env=env,

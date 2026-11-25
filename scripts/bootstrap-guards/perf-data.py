@@ -110,7 +110,7 @@ def main():
         shim = work / "jdk/bin/java"
         shim.write_text("#!/bin/sh\nexec " + shlex.join(prefix) + ' "$@"\n')
         shim.chmod(0o755)
-        env.update(JAVA_HOME=str(work / "jdk"), DAWN_JVM_OPTS="-Xmx64m -XX:+UsePerfData")
+        env.update(JAVA_HOME=str(work / "jdk"), DAWN_SEED_CHAIN="jar", DAWN_JVM_OPTS="-Xmx64m -XX:+UsePerfData")
         env.pop("DAWN_LAUNCHER_PRINT_JAVA", None)
         for subcommand in ("check", "lsp", "run"):
             out, err = locked_run([str(work / "bin/dawn"), subcommand], env)

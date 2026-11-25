@@ -127,7 +127,7 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
 
 1. **链选择唯一**：lock 的 `chain` 是默认的唯一真相，`DAWN_SEED_CHAIN=jar|native` 是显式覆盖；
    空串/未知值拒绝。lock/history/revoked 任一存在即严格验整链，显式 jar 也不能绕过撤销或损坏；
-   全无记录时默认 jar。P2 目前只在 native 验 S 后退出，P4-pre1/pre2 才实现构建及 exec B。
+   全无记录时默认 jar。P2 落地时只在 native 验 S 后退出；P4-pre1/pre2 已实现显式构建及 exec B（设计 §15）。
    pre0/pre1/pre2/pre3 不改默认，真正 P4 才通过 `advance-native-seed.py set-chain native` 生成合法历史。
 2. **三种模式分别确定最终工具**：源码检出 native 执行 S→A→B、缓存并 exec 当前 B，jar exec 当前 JAR；
    源码启动器可要求 Python 3.11+。无源码 bin/ 加 build/ 部署声明为 JVM-only，由调用者显式选 jar，
@@ -315,8 +315,18 @@ P4-pre1 的 builder 与非循环资格接口见 [native-seed-cutover-design.md](
 `native-seed-qualify.py run|verify` 必须给 `--lock`，proposed B 还须给完整 pinned builder 来源；
 资格 package 绑定编译输入摘要与受测 ELF 摘要，实际 lock 摘要单独审计。
 晋级核对 ELF、配对树与编译输入，控制记录改变不要求重资格；编译输入变化必须重跑。
-本机开发 CC 使用独立 recipe，不能被 release/资格引用。默认仍 jar，显式 native 的启动器构建与缓存留给 pre2。
+本机开发 CC 使用独立 recipe，不能被 release/资格引用。默认仍 jar，显式 native 的启动器构建与缓存现已交付（设计 §15）。
 
 工具链按补裁七分层：跨主机核对 `recipe_identity`（clang、driver 解析输入、recipe/flags、ld 版本串），
 完整工具链字节与头文件清单各 receipt 如实留存；跨主机 B 须逐字节相同。本机 builder 一律记开发 stamp，
 资格与发布只接受托管环境来源，producer 还核对当前 workflow run。配方相同而 B 不同即停止回交。
+
+P4-pre2 已实现显式 native 的源码启动：`DAWN_SEED_CHAIN=native ./bin/dawn <命令>`
+调用同一 builder 构建并缓存当前 B，默认仍 jar。覆盖需要同时设置 `DAWN_NATIVE_SEED`、
+`DAWN_NATIVE_SEED_LOCK` 与 `DAWN_NATIVE_SEED_TREE`；最后一个是包含配对 std/runtime 的根目录。
+`DAWN_PRINT_STAMP=1` 返回带 native 类型的 development 身份；
+`DAWN_NATIVE_PRINT_GENERATION=1` 返回已验证的 executable、receipt 与 stamp。
+每次查询或启动均校验输入与产物，miss 会构建，日志只写 stderr。
+缓存布局、失效与中断语义见 [native-seed-cutover-design.md](native-seed-cutover-design.md) §15。
+复制 bin/build 的无源码部署现在明确要求 `DAWN_SEED_CHAIN=jar`，缺失选择或 native 请求均失败，
+不依赖 Python；部署消费者环境的逐个迁移属于 pre3。
