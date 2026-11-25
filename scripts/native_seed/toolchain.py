@@ -1,5 +1,6 @@
 """Materialize the single qualification C toolchain, without a host filesystem mount."""
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -27,11 +28,16 @@ DRIVER_INPUTS = {
 def driver_inputs(cc, env):
     flags = qualification_flags()
     selected = {}
-    for name in DRIVER_INPUTS:
+    def query(name):
         result = subprocess.run([str(cc), *flags, '-print-file-name=' + name], env=env,
                                 capture_output=True, text=True, timeout=20)
         path = result.stdout.strip()
-        valid_probe = result.returncode == 0 and not result.stderr and path and '\n' not in path
+        valid = result.returncode == 0 and not result.stderr and path and '\n' not in path
+        return name, path, valid
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(query, DRIVER_INPUTS))
+    for name, path, valid_probe in results:
         if not valid_probe:
             for selected_path in selected.values():
                 print(selected_path, file=sys.stderr)
@@ -98,12 +104,17 @@ def prepare(cc, destination=None, pinned=True, digest_cache=None):
     files, origins, executables = {}, {}, {}
 
     def add(path, target=None, executable=False):
-        path = Path(os.path.normpath(path))
-        logical = (target or path.as_posix()).lstrip('/')
+        path = os.path.normpath(path)
+        logical = (target or path).lstrip('/')
         c.logical(logical)
-        c.require(path.is_file(), 'toolchain-input', f'missing toolchain file: {path}')
-        origin = str(path.resolve()) if digest_cache is None else digest_cache.resolve(path)
-        data = path.read_bytes() if digest_cache is None else digest_cache.read(origin)
+        if digest_cache is None:
+            path = Path(path)
+            c.require(path.is_file(), 'toolchain-input', f'missing toolchain file: {path}')
+            origin = str(path.resolve())
+            data = path.read_bytes()
+        else:
+            origin = digest_cache.resolve(path)
+            data = digest_cache.read(origin, status=digest_cache.resolved_status.get(origin))
         if logical in files:
             c.require(c.digest(files[logical][1]) == c.digest(data), 'toolchain-input', 'conflicting toolchain paths')
         files[logical] = ('100755' if executable else '100644', data)
@@ -117,17 +128,22 @@ def prepare(cc, destination=None, pinned=True, digest_cache=None):
             if digest_cache is not None:
                 digest_cache.watch_directory(digest_cache.resolve(directory))
             for name in names:
-                add(Path(directory) / name)
+                add(os.path.join(directory, name))
 
     programs = [Path(probe['executable']), Path('/usr/bin/ld.bfd')]
     programs += [Path('/usr/bin') / name for name in TOOLS]
     programs += [Path('/bin/sh'), Path('/bin/bash')]
-    for path in programs:
-        add(path, executable=True)
+    def dependencies(path):
         result = subprocess.run(['/usr/bin/ldd', str(path)], env=env,
                                 capture_output=True, text=True, timeout=20)
         c.require(result.returncode == 0, 'toolchain-input', f'ldd failed: {path}')
-        for dependency in re.findall(r'(?:=>\s+|^\s*)(/[^\s()]+)', result.stdout, re.M):
+        return re.findall(r'(?:=>\s+|^\s*)(/[^\s()]+)', result.stdout, re.M)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        closures = list(pool.map(dependencies, programs))
+    for path, closure in zip(programs, closures):
+        add(path, executable=True)
+        for dependency in closure:
             add(dependency, executable=Path(dependency).name.startswith('ld-linux-'))
     add('/usr/bin/ld.bfd', '/usr/bin/ld', executable=True)
     tree('/usr/include')

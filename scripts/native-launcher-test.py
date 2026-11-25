@@ -89,8 +89,9 @@ def refused(action, code):
     try:
         action()
     except (c.Rejected, OSError) as exc:
-        assert code in str(exc), str(exc)
-        print('OK refusal ' + code, flush=True)
+        codes = (code,) if isinstance(code, str) else code
+        assert any(value in str(exc) for value in codes), str(exc)
+        print('OK refusal ' + '/'.join(codes), flush=True)
         return
     raise AssertionError('control missed: ' + code)
 
@@ -299,7 +300,7 @@ int main(int n, char **v) {
             before = target.read_bytes()
             target.chmod(0o644)
             target.write_bytes(before + b'polluted')
-            refused(get, ('generation-receipt' if path == 'chain-receipt.json' else 'schema') if path.endswith('.json') else ('chain-output' if path == 'B/dawnc' else 'generation-output'))
+            refused(get, ('generation-receipt' if path == 'chain-receipt.json' else 'schema') if path.endswith('.json') else (('chain-output', 'generation-output') if path == 'B/dawnc' else 'generation-output'))
             target.write_bytes(before)
             target.chmod(0o555 if path == 'B/dawnc' else 0o444)
         marker = directory / 'committed.json'

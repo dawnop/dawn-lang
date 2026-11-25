@@ -7,6 +7,7 @@ never permission to execute another generation. This is development evidence,
 not a qualification receipt or a release artifact.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import platform
@@ -33,7 +34,7 @@ def controls(repo):
     return loaded.lock, {'chain': [c.digest(raw) for _, raw in loaded.chain], 'revoked': loaded.revoked}
 
 
-def select(repo, fetch, *, git_cache=None, digest_cache=None):
+def select(repo, fetch, *, git_cache=None, digest_cache=None, probe_cache=None):
     locked, control = controls(repo)
     values = [os.environ.get(name) for name in OVERRIDES]
     c.require(not any(values) or all(values), 'seed-override',
@@ -44,7 +45,7 @@ def select(repo, fetch, *, git_cache=None, digest_cache=None):
         c.require(lock['seed']['sha256'] not in control['revoked'], 'revoked', 'override seed is revoked')
         # regular_bytes plus verify_seed_bytes cover the override type and ELF
         # checks in the same read as the required digest and identity probes.
-        lockchain.verify_seed_bytes(c.regular_bytes(seed), lock)
+        lockchain.verify_seed_bytes(c.regular_bytes(seed), lock, probe_cache=probe_cache)
         c.verify_seed_tree(repo, lock, pair, git_cache=git_cache, digest_cache=digest_cache)
         frame = {'selection': 'override', 'lock_sha256': c.digest(c.regular_bytes(lock_path)),
                  'seed_path': str(seed), 'lock_path': str(lock_path), 'pair_path': str(pair)}
@@ -52,7 +53,7 @@ def select(repo, fetch, *, git_cache=None, digest_cache=None):
         c.require(locked is not None, 'lock-missing', 'native requires a qualified lock or a complete paired override')
         lock = locked
         lock_path = Path(repo) / 'scripts' / lockchain.LOCK_NAME
-        seed = lockchain.cached_seed(lock, Path(repo) / '.dawn/native-seeds', fetch)
+        seed = lockchain.cached_seed(lock, Path(repo) / '.dawn/native-seeds', fetch, probe_cache=probe_cache)
         pair = None
         frame = {'selection': 'default', 'lock_sha256': c.digest(c.regular_bytes(lock_path))}
     return lock, lock_path, seed, pair, dict(frame, controls=control)
@@ -60,7 +61,8 @@ def select(repo, fetch, *, git_cache=None, digest_cache=None):
 
 def snapshot(repo, lock, frame, cc, development_cc, *, digest_cache=None, git_cache=None, live_paths=None):
     commit = c.git(repo, 'rev-parse', 'HEAD').decode().strip()
-    tree, files = builder.source_files(repo, commit, live=True, digest_cache=digest_cache, git_cache=git_cache, live_paths=live_paths)
+    tree, files = builder.source_files(repo, commit, live=True, digest_cache=digest_cache,
+                                       git_cache=git_cache, live_paths=live_paths)
     tc = toolchain.prepare(cc, pinned=not development_cc, digest_cache=digest_cache)
     toolchain.verify_record(tc, pinned=not development_cc)
     compilation = inputs.compilation(files, lock, tc)
@@ -69,10 +71,10 @@ def snapshot(repo, lock, frame, cc, development_cc, *, digest_cache=None, git_ca
              'source_sha256': c.inventory_sha(c.inventory(files)),
              'compilation_sha256': c.digest(c.canonical(compilation)),
              'development_cc': development_cc}
-    return value, files, tc
+    return value, files, tc, compilation
 
 
-def verify(directory, expected, files, tc, repo, lock, marker=None, *, digest_cache=None, git_cache=None):
+def verify(directory, expected, files, tc, repo, lock, marker=None, *, digest_cache=None, git_cache=None, compilation=None, probe_cache=None):
     marker = c.read_json(directory / 'committed.json') if marker is None else marker
     c.fields(marker, 'schema kind inputs_sha256 receipt_sha256 chain_sha256', 'generation commit')
     c.require(marker['schema'] == 1 and marker['kind'] == 'native-launcher-commit' and
@@ -86,21 +88,27 @@ def verify(directory, expected, files, tc, repo, lock, marker=None, *, digest_ca
               receipt['inputs'] == expected and receipt['binary'] == 'B/dawnc' and receipt['stage'] == 'B',
               'generation-receipt', 'native generation receipt differs')
     chain_path = directory / 'chain-receipt.json'
-    c.require(receipt['chain_sha256'] == marker['chain_sha256'] == c.digest(c.regular_bytes(chain_path)),
+    chain_raw = c.regular_bytes(chain_path)
+    c.require(receipt['chain_sha256'] == marker['chain_sha256'] == c.digest(chain_raw),
               'generation-receipt', 'chain receipt differs')
-    chain = builder.verify_receipt(chain_path, repo, lock, directory / 'B/dawnc', directory / 'A/dawnc',
-                                   require_c=False, live=True, development_cc=expected['development_cc'],
-                                   snapshot={'commit': expected['commit'], 'tree': expected['tree'], 'files': files,
-                                             'toolchain': tc, 'source_sha256': expected['source_sha256'],
-                                             'compilation': inputs.compilation(files, lock, tc)})
+    chain_value = c.read_json(chain_path, raw=chain_raw)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        checking = pool.submit(builder.verify_receipt, chain_path, repo, lock,
+                               directory / 'B/dawnc', directory / 'A/dawnc', require_c=False, live=True,
+                               development_cc=expected['development_cc'],
+                               snapshot={'commit': expected['commit'], 'tree': expected['tree'], 'files': files,
+                                         'toolchain': tc, 'source_sha256': expected['source_sha256'],
+                                         'compilation': compilation if compilation is not None else inputs.compilation(files, lock, tc)},
+                               receipt_data=(chain_raw, chain_value))
+        c.verify_tree(directory / 'source', c.inventory(files), digest_cache=digest_cache)
+        c.verify_seed_tree(repo, lock, directory / 'seed', git_cache=git_cache, digest_cache=digest_cache)
+        lockchain.verify_seed_bytes(c.regular_bytes(directory / 'seed-elf'), lock, probe_cache=probe_cache)
+        for stage in ('A', 'B'):
+            c.require(builder.output_identity(directory / stage, digest_cache=digest_cache) == chain_value['stages'][stage]['output'],
+                      'generation-output', 'stage bytes differ from the builder receipt')
+        chain = checking.result()
     c.require(chain['execution']['kind'] == 'development' and chain['toolchain'] == tc,
               'generation-toolchain', 'actual toolchain or development scope differs')
-    c.verify_tree(directory / 'source', c.inventory(files), digest_cache=digest_cache)
-    c.verify_seed_tree(repo, lock, directory / 'seed', git_cache=git_cache, digest_cache=digest_cache)
-    lockchain.verify_seed_bytes(c.regular_bytes(directory / 'seed-elf'), lock)
-    for stage in ('A', 'B'):
-        c.require(builder.output_identity(directory / stage, digest_cache=digest_cache) == chain['stages'][stage]['output'],
-                  'generation-output', 'stage bytes differ from the builder receipt')
     c.require(builder.plan(directory / 'B/dawnc', directory / 'source') == chain['plan_sha256'],
               'generation-plan', 'B source plan differs')
     c.require(receipt['elf_sha256'] == chain['stages']['B']['output']['elf_sha256'] and
@@ -141,6 +149,7 @@ def generation(repo, fetch, cache=None):
     with os.fdopen(lock_fd, 'r+') as held:
         fcntl.flock(held, fcntl.LOCK_EX)
         git_cache = {}
+        probe_cache = {}
         digests = DigestCache()
         hint = cache / 'last-generation.json'
         if hint.exists():
@@ -152,21 +161,21 @@ def generation(repo, fetch, cache=None):
             previous = cache / 'generations' / last['generation'] / 'stat-cache.json'
             if previous.exists():
                 digests = DigestCache.load(previous, last['generation'])
-        lock, lock_path, seed, pair, frame = select(repo, fetch, git_cache=git_cache, digest_cache=digests)
+        lock, lock_path, seed, pair, frame = select(repo, fetch, git_cache=git_cache, digest_cache=digests, probe_cache=probe_cache)
         cc = os.environ.get('CC', '/usr/lib/llvm-18/bin/clang')
         cc = shutil.which(cc) or cc
         # Alternate clang is allowed only as a development recipe. All source
         # launcher generations, including pinned clang, remain development.
         development_cc = str(Path(cc).resolve()) != '/usr/lib/llvm-18/bin/clang'
         live_paths = c.git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
-        expected, files, tc = snapshot(repo, lock, frame, cc, development_cc, digest_cache=digests, git_cache=git_cache, live_paths=live_paths)
+        expected, files, tc, compilation = snapshot(repo, lock, frame, cc, development_cc, digest_cache=digests, git_cache=git_cache, live_paths=live_paths)
         key = c.digest(c.canonical(expected))
         generations = c.safe_destination(cache / 'generations')
         generations.mkdir(exist_ok=True)
         directory = c.safe_destination(generations / key)
         if not directory.exists():
             # A cold path always captures full bytes, irrespective of a hint.
-            expected_full, files, tc = snapshot(repo, lock, frame, cc, development_cc, git_cache=git_cache)
+            expected_full, files, tc, compilation = snapshot(repo, lock, frame, cc, development_cc, git_cache=git_cache)
             c.require(expected_full == expected, 'generation-inputs', 'cold inputs changed')
             staging = Path(tempfile.mkdtemp(prefix='.staging-', dir=cache))
             output = staging / 'generation'
@@ -184,7 +193,7 @@ def generation(repo, fetch, cache=None):
             c.atomic_json(output / 'generation.json', receipt)
             marker = {'schema': 1, 'kind': 'native-launcher-commit', 'inputs_sha256': key,
                       'receipt_sha256': c.digest(c.canonical(receipt)), 'chain_sha256': receipt['chain_sha256']}
-            verify(output, expected, files, tc, repo, lock, marker=marker, git_cache=git_cache)
+            verify(output, expected, files, tc, repo, lock, marker=marker, git_cache=git_cache, compilation=compilation, probe_cache=probe_cache)
             for parent, _, names in os.walk(output):
                 for name in names:
                     path = Path(parent) / name
@@ -195,10 +204,10 @@ def generation(repo, fetch, cache=None):
             c.atomic_json(directory / 'committed.json', marker)
             (directory / 'committed.json').chmod(0o444)
             staging.rmdir()
-        receipt = verify(directory, expected, files, tc, repo, lock, digest_cache=digests, git_cache=git_cache)
+        receipt = verify(directory, expected, files, tc, repo, lock, digest_cache=digests, git_cache=git_cache, compilation=compilation, probe_cache=probe_cache)
         # Re-read control records and the external paired override immediately
         # before handing the verified executable to the caller.
-        c.require(select(repo, fetch, git_cache=git_cache, digest_cache=digests)[-1] == frame, 'generation-inputs', 'seed controls changed during verification')
+        c.require(select(repo, fetch, git_cache=git_cache, digest_cache=digests, probe_cache=probe_cache)[-1] == frame, 'generation-inputs', 'seed controls changed during verification')
         c.require(c.git(repo, 'rev-parse', 'HEAD').decode().strip() == expected['commit'] and
                   c.git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard') == live_paths,
                   'generation-inputs', 'source provenance or live file set changed during verification')
