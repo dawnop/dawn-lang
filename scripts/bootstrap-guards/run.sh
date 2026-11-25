@@ -548,7 +548,7 @@ PYORDER
   for line in \
     'cp "$RUNNER_TEMP/chain/chain-receipt.json" native-chain/chain-receipt.json' \
     'retention-days: 90' \
-    'python3 -B scripts/native_release.py verify-chain \'; do
+    'python3 -B scripts/native_release.py verify-chain --current-run \'; do
     if ! tool17_require_line "$release_file" "$line" "release.yml must transfer and verify the full chain: $line"; then
       errors=1
     fi
@@ -715,6 +715,11 @@ for marker in 'retention-days: 90' 'chain/chain-receipt.json' 'native_release.py
   tool17_expect_reject "omitting chain transfer requirement $marker" \
     "$tool17_dir/release.receipt.yml" "$tool17_dir/wrapper.base.sh"
 done
+
+sed 's/verify-chain --current-run/verify-chain/' \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.previous-run.yml"
+tool17_expect_reject "a transfer verifier without the current workflow identity" \
+  "$tool17_dir/release.previous-run.yml" "$tool17_dir/wrapper.base.sh"
 
 sed 's/build-release-jar\.sh -o dawn-selfhost\.jar/build-release-jar.sh -o candidate.jar/' \
   "$tool17_dir/release.base.yml" > "$tool17_dir/release.wrong-output.yml"
