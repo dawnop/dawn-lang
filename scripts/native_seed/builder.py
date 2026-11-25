@@ -13,12 +13,12 @@ import subprocess
 import tempfile
 import time
 
-from native_seed import contract as c, inputs, lockchain, recipe, toolchain
+from native_seed import contract as c, inputs, lockchain, provenance, recipe, toolchain
 
 ENTRY = 'selfhost/src/nmain.dawn'
 OUTPUT_FIELDS = 'whole_sha256 info_sha256 units_sha256 elf_sha256'
 RECEIPT_FIELDS = ('schema kind source_commit source_tree source_sha256 lock_sha256 '
-                  'compilation compilation_sha256 toolchain stages plan_sha256')
+                  'compilation compilation_sha256 toolchain recipe_identity execution stages plan_sha256')
 
 
 def load_lock(path, release=False):
@@ -134,6 +134,7 @@ def build(repo, lock_path, seed, seed_tree, out, cc, jobs=1, final_stage='B', re
     lock = load_lock(lock_path, release)
     lockchain.verify_seed_bytes(c.regular_bytes(seed), lock)
     commit = c.git(repo, 'rev-parse', 'HEAD').decode().strip()
+    execution = provenance.hosted(commit, release=True) if release else provenance.development(commit)
     tree, files = source_files(repo, commit, live)
     c.verify_generated(files)
     tc = toolchain.prepare(cc, pinned=not development_cc)
@@ -185,12 +186,13 @@ def build(repo, lock_path, seed, seed_tree, out, cc, jobs=1, final_stage='B', re
     receipt = {'schema': 1, 'kind': 'native-builder-chain', 'source_commit': commit, 'source_tree': tree,
                'source_sha256': c.inventory_sha(c.inventory(files)), 'lock_sha256': c.digest(c.canonical(lock)),
                'compilation': compilation, 'compilation_sha256': c.digest(c.canonical(compilation)),
-               'toolchain': tc, 'stages': stages, 'plan_sha256': plans[0]}
+               'toolchain': tc, 'recipe_identity': toolchain.recipe_identity(tc, compilation['recipe_sha256']),
+               'execution': execution, 'stages': stages, 'plan_sha256': plans[0]}
     c.atomic_json(out / 'chain-receipt.json', receipt)
     return receipt
 
 
-def verify_receipt(receipt_path, repo, lock, native, builder, require_c=True):
+def verify_receipt(receipt_path, repo, lock, native, builder, require_c=True, hosted=False, current_run=False):
     raw = c.regular_bytes(receipt_path)
     value = c.read_json(receipt_path)
     c.fields(value, RECEIPT_FIELDS, 'chain receipt')
@@ -203,6 +205,11 @@ def verify_receipt(receipt_path, repo, lock, native, builder, require_c=True):
               'chain-source', 'chain provenance differs from the producer checkout')
     toolchain.verify_record(value['toolchain'])
     compilation = inputs.compilation(files, lock, value['toolchain'])
+    provenance.verify(value['execution'], commit, hosted=hosted, release=hosted)
+    if current_run:
+        provenance.current(value['execution'], commit, release=True)
+    c.require(value['recipe_identity'] == toolchain.recipe_identity(value['toolchain'], compilation['recipe_sha256']),
+              'recipe-identity', 'clang, selected inputs, recipe, flags or linker version differ')
     c.require(value['lock_sha256'] == c.digest(c.canonical(lock)) and
               value['compilation'] == compilation and
               value['compilation_sha256'] == c.digest(c.canonical(compilation)),
@@ -234,3 +241,11 @@ def verify_receipt(receipt_path, repo, lock, native, builder, require_c=True):
                   identity(binary)[1] == stages[name]['build_id'],
                   'chain-output', 'A/B bytes or full build ID differ from the chain receipt')
     return value
+
+
+def compare_hosts(left, right):
+    """Call after verifying both receipts and their actual B binaries."""
+    c.require(left['recipe_identity'] == right['recipe_identity'],
+              'recipe-identity', 'cross-host recipes differ; retain evidence and stop')
+    c.require(left['stages']['B']['output']['elf_sha256'] == right['stages']['B']['output']['elf_sha256'],
+              'host-equivalence', 'same recipe produced different B bytes; retain evidence and stop')

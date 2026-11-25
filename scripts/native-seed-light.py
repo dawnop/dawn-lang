@@ -10,7 +10,7 @@ import sys
 import tempfile
 
 import native_seed.contract as c
-from native_seed import lockchain
+from native_seed import lockchain, provenance, test_support
 import native_seed.qualification as q
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,7 +81,8 @@ def check_cold(receipt, chain):
 
 
 def check_package(chain, value):
-    c.fields(value, 'schema kind source_commit source_tree cold_receipt_sha256 seed_lock_sha256 compilation compilation_sha256 qualified_seed_sha256 coverage implementations components lineage', 'qualification package')
+    c.fields(value, 'schema kind source_commit source_tree cold_receipt_sha256 seed_lock_sha256 compilation compilation_sha256 qualified_seed_sha256 coverage implementations components lineage execution', 'qualification package')
+    provenance.verify(value['execution'], chain['source_commit'], hosted=True)
     c.require(type(value['schema']) is int and value['schema'] == 1 and value['kind'] == 'native-qualification-package',
               'light-schema', 'unsupported qualification package')
     c.require(value['source_commit'] == chain['source_commit'] and value['source_tree'] == chain['source_tree'] and
@@ -183,6 +184,7 @@ def chain_selftest(receipt):
         chain[key + '_sha256'] = inventory[path]
     check_cold(receipt, chain)
     value = dict(schema=1, kind='native-qualification-package', source_commit=chain['source_commit'],
+                 execution=test_support.hosted_record(chain['source_commit']),
                  source_tree=chain['source_tree'], cold_receipt_sha256=c.digest(c.canonical(chain)),
                  seed_lock_sha256=chain['seed_lock_sha256'], compilation={'fixture': True},
                  compilation_sha256=c.digest(c.canonical({'fixture': True})), qualified_seed_sha256='f' * 64, coverage=['Q' + str(i) for i in range(1, 11)],

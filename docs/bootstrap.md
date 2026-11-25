@@ -316,3 +316,7 @@ P4-pre1 的 builder 与非循环资格接口见 [native-seed-cutover-design.md](
 资格 package 绑定编译输入摘要与受测 ELF 摘要，实际 lock 摘要单独审计。
 晋级核对 ELF、配对树与编译输入，控制记录改变不要求重资格；编译输入变化必须重跑。
 本机开发 CC 使用独立 recipe，不能被 release/资格引用。默认仍 jar，显式 native 的启动器构建与缓存留给 pre2。
+
+工具链按补裁七分层：跨主机核对 `recipe_identity`（clang、driver 解析输入、recipe/flags、ld 版本串），
+完整工具链字节与头文件清单各 receipt 如实留存；跨主机 B 须逐字节相同。本机 builder 一律记开发 stamp，
+资格与发布只接受托管环境来源，producer 还核对当前 workflow run。配方相同而 B 不同即停止回交。

@@ -8,7 +8,22 @@ output, not these fixtures.
 
 from pathlib import Path
 
+import repo_env
 from native_seed import builder, contract as c, inputs, toolchain
+
+
+def hosted_record(commit):
+    return {'kind': 'hosted-release', 'commit': commit, 'repository': repo_env.read()['DAWN_GITHUB_REPO'],
+            'run_id': '123', 'run_attempt': '1', 'runner': 'github-hosted/Linux/X64',
+            'workflow_ref': repo_env.read()['DAWN_GITHUB_REPO'] + '/.github/workflows/release.yml@refs/tags/rehearsal-fixture'}
+
+
+def hosted_environment(commit):
+    value = hosted_record(commit)
+    return {'GITHUB_ACTIONS': 'true', 'GITHUB_SHA': commit, 'RUNNER_ENVIRONMENT': 'github-hosted',
+            'RUNNER_OS': 'Linux', 'RUNNER_ARCH': 'X64', 'GITHUB_REPOSITORY': value['repository'],
+            'GITHUB_RUN_ID': value['run_id'], 'GITHUB_RUN_ATTEMPT': value['run_attempt'],
+            'GITHUB_WORKFLOW_REF': value['workflow_ref']}
 
 
 def compiler_record():
@@ -26,6 +41,7 @@ def compiler_record():
                          'triple': 'x86_64-pc-linux-gnu', 'resource_dir': '/usr/lib/llvm-18/lib/clang/18'},
             'driver': {'flags': toolchain.qualification_flags(),
                        'files': {name: directory + '/' + name for name, directory in toolchain.DRIVER_INPUTS.items()}},
+            'linker': {'executable': '/usr/bin/ld.bfd', 'version': 'GNU ld (fixture) 2.42'},
             'inventory': rows, 'inventory_sha256': c.inventory_sha(rows),
             'executables': {'/' + row['path']: row['sha256'] for row in rows if row['executable']},
             'origins': {p: 'fixture' for p in files}, 'scaffold': list(toolchain.SCAFFOLD)}
@@ -50,4 +66,5 @@ def chain_record(repo, lock, a, b):
     return {'schema': 1, 'kind': 'native-builder-chain', 'source_commit': commit, 'source_tree': tree,
             'source_sha256': c.inventory_sha(c.inventory(files)), 'lock_sha256': c.digest(c.canonical(lock)),
             'compilation': compilation, 'compilation_sha256': c.digest(c.canonical(compilation)),
-            'toolchain': tc, 'stages': stages, 'plan_sha256': c.digest(b'fixture plan')}
+            'toolchain': tc, 'recipe_identity': toolchain.recipe_identity(tc, compilation['recipe_sha256']),
+            'execution': hosted_record(commit), 'stages': stages, 'plan_sha256': c.digest(b'fixture plan')}

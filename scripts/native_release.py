@@ -183,7 +183,8 @@ def source_version():
 def produce(args):
     lock = lockchain.release_lock(args.lock)
     chain_receipt = builder.verify_receipt(args.chain_receipt, ROOT, lock,
-                                          Path(args.native).absolute(), Path(args.builder).absolute())
+                                          Path(args.native).absolute(), Path(args.builder).absolute(),
+                                          hosted=True, current_run=True)
     return _produce(args, chain_receipt)
 
 
@@ -277,6 +278,7 @@ def main():
     p.add_argument("--jobs", type=int, choices=(1,), default=1)
     p.add_argument("--cc", default="/usr/lib/llvm-18/bin/clang")
     p = sub.add_parser("verify-chain")
+    p.add_argument('--current-run', action='store_true')
     for name in ('lock', 'chain-receipt', 'native', 'builder'):
         p.add_argument('--' + name, required=True)
     p = sub.add_parser("produce")
@@ -301,7 +303,8 @@ def main():
             chain(args)
         elif args.command == "verify-chain":
             builder.verify_receipt(args.chain_receipt, ROOT, lockchain.release_lock(args.lock),
-                                   Path(args.native).absolute(), Path(args.builder).absolute())
+                                   Path(args.native).absolute(), Path(args.builder).absolute(),
+                                   hosted=True, current_run=args.current_run)
             print('OK complete native chain receipt')
         elif args.command == "produce":
             produce(args)

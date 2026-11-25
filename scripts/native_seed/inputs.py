@@ -31,7 +31,7 @@ def seed_identity(lock):
 def toolchain_identity(value):
     # Origin paths are preparation diagnostics, not executable inputs.
     return c.digest(c.canonical({key: value[key] for key in
-                    ('recipe', 'compiler', 'driver', 'inventory_sha256', 'executables')}))
+                    ('recipe', 'compiler', 'driver', 'linker', 'inventory_sha256', 'executables')}))
 
 
 def compilation(files, lock, tc):

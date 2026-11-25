@@ -767,3 +767,19 @@ pre1 的具体接口：
 补裁六后的 native-chain 演练 job 实测 448 s（[run 45685569422](https://github.com/dawnop/dawn-lang/actions/runs/45685569422)，native job 成功，JDK 26 leg 首次遇 Maven 429）。
 原 225 s 基线由此重核：加一成并向上取整到 5 s，planning claim 为 495 s，3 倍后向上取整为 25 min timeout。
 这是仅 tag 工作流的边界，push-total 仍为补裁六采纳的 40295 s。最终配置再通过新 prerelease tag 验证。
+
+
+补裁七将工具链身份分为两层。`recipe_identity` 绑定 clang 字节、版本与 target，driver 实际选中的
+GCC/crt/libc 路径与各自摘要，`cc-units.sh` 摘要、阶段选项与资格 flags，以及 GNU ld 版本字符串；
+这些字段跨主机必须相同。`toolchain` 则如实保留每次运行的完整字节快照（包括 ld/binutils 库、
+头文件集合），不归一化，也不要求跨主机同摘要；编译输入摘要仍绑定这份实际快照。
+跨主机等价另以验证过的 B ELF 摘要相同判定；配方相同而 B 不同必须停止，回交容器钉工具链方案。
+
+每份 chain receipt 另记 `execution`。源码 builder 的全部本机 generation 都是 `development` stamp，
+即使 clang 与资格配方完全相同也不能被资格或发布引用。release chain 只能在托管 release workflow
+生成 `hosted-release` receipt，记录 repository、commit、run/attempt、workflow ref 与 runner 类型。
+`verify-chain --current-run` 与 producer 同时核对当前运行来源；同一 run 的失败 job 重跑可引用
+较早 attempt 已成功的 native artifact，其它 run 的替换拒绝。下载后的历史 hosted receipt 可离线复验，
+但不能由本机重组发布。资格入口同样要求托管环境，request 与 package 绑定执行来源；
+晋级拒绝本机开发来源，`describe-seed` 只有经过完整验证的托管 release 来源才登记可资格 proposed ELF。
+这些来源字段是审计记录，不作为重新写入编译输入的控制记录。

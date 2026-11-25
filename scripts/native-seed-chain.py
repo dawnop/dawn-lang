@@ -114,7 +114,7 @@ def main():
                 record = c.read_json(args.chain_receipt)
                 builder.verify_receipt(args.chain_receipt, HERE.parent, builder.load_lock(args.origin_lock),
                                        args.seed_elf, args.origin_builder,
-                                       require_c='C' in record['stages'])
+                                       require_c='C' in record['stages'], hosted=True)
                 c.require(args.seed_commit == record['source_commit'], 'chain-source', 'seed commit differs from origin')
                 registration = {'kind': 'proposed-seed', 'metadata': 'absent',
                                 'evidence_sha256': c.digest(c.canonical(record))}
