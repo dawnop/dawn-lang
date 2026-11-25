@@ -256,9 +256,9 @@ U1 各负载不超过 1.05，编译与冷启动中位数回归不超过 5%；观
 
 ### 7.1 W1 冻结基线与结构判定（2026-10-25）
 
-harness 与结果位于 [effect-provenance-bench](../scripts/effect-provenance-bench/measure.py)，
-[baseline.json](../scripts/effect-provenance-bench/baseline.json) 保存环境、工具链、阈值、产物摘要及区间，
-[samples.jsonl](../scripts/effect-provenance-bench/samples.jsonl) 保存全部 507 个独立进程样本。
+harness 与结果位于 `effect-provenance-bench`，
+`baseline.json` 保存环境、工具链、阈值、产物摘要及区间，
+`samples.jsonl` 保存全部 507 个独立进程样本。
 A 是父提交 `26933caf` 的编译器，B 是 W1 草稿编译器；两者编译同一份输入与 std。
 计时期间没有并发构建或测试，固定 CPU affinity，使用 JDK 21.0.2 与 clang 18.1.3。
 每个热进程先预热 30 批，再测 50 批；以进程中位数配对，用 20000 次 bootstrap 给区间。
@@ -285,7 +285,7 @@ JVM 热路径与冷启动各 31 轮，native 热路径先 15 轮再独立补测 
 热输入的 130 个 JAR 条目及完整 C 源码在 A/B 之间逐字节相同，冷输入的 116 个条目及 C 亦相同，
 不需要剔除 build-info 才相等。热输入 JAR/C/native 大小分别为 110100/56335/144688 字节，
 冷输入为 87060/1392/113792 字节，两组 A/B 尺寸相同；native 二进制哈希不同，不宣称二进制同字节。
-[structure.py](../scripts/effect-provenance-bench/structure.py) 核对实际被测 ELF：热二进制只有
+`structure.py` 核对实际被测 ELF：热二进制只有
 偏移 133733 处的 `A.c`/`B.c` 一个字节不同，冷二进制只有偏移 105637 处的
 `A-cold.c`/`B-cold.c` 一个字节不同，均为无 allocated 标志的 `.strtab` 中 `STT_FILE` 名字。
 不存在 GNU build-id 差异，代码、数据、路径、时间戳与链接顺序没有造成加载内容差异。

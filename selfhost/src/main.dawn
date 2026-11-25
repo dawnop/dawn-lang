@@ -89,7 +89,6 @@ use ir/provenance
 use ir/reach.{Live}
 use ir/externs
 use ir/lower
-use ir/tail as call_tail
 use ir/lint
 use c/rc
 use c/unalias
@@ -360,22 +359,16 @@ fn lower_program_modes(
   traits: Traits, impl_table: Impls, adts: Adts, prog_fns: Map[(String, String), Sig],
   std_tests: Bool, target: String
 ) -> (List[lower.LMod], List[lower.LMod], Option[Live], Map[Int, String]) !Fs !Proc !Env !Exit !Console !io = {
-  var preserve_calls = false
-  for item in std_mods {
-    let (_, cx, _, _) = item
-    preserve_calls = preserve_calls || cx.observation_used
-  }
-  for cm in mods { preserve_calls = preserve_calls || cm.cx.observation_used }
   var std_lm: List[lower.LMod] = []
   for sm in std_mods {
     let (cls, _cx2, tm2, _ct2) = sm
     std_lm = std_lm ++
-      [externs.select_lowered(lower.lower_module_full(cls, tm2, traits, impl_table, adts, prog_fns, std_tests, preserve_calls), false)]
+      [externs.select_lowered(lower.lower_module_full(cls, tm2, traits, impl_table, adts, prog_fns, std_tests), false)]
   }
   var user_lm: List[lower.LMod] = []
   for cm in mods {
     user_lm = user_lm ++
-      [externs.select_lowered(lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns, true, preserve_calls), false)]
+      [externs.select_lowered(lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns, true), false)]
   }
   # `DAWN_CORE_LINT=1`: hold the Core both lists hold to the invariants
   # lowering owes a backend (ir/lint.dawn), before anything reads it.
@@ -446,10 +439,6 @@ fn lower_program_modes(
   for l in std_lm { source_core = source_core ++ [lower.emitted_core(l)] }
   for l in user_lm { source_core = source_core ++ [lower.emitted_core(l)] }
   let provenance_sites = provenance.site_table(source_core, live)
-  if preserve_calls {
-    std_lm = map(std_lm, l => call_tail.plain(l))
-    user_lm = map(user_lm, l => call_tail.plain(l))
-  }
   (std_lm, user_lm, live, provenance_sites)
 }
 

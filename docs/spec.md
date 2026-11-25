@@ -123,7 +123,7 @@ trait impl effect
 true false not
 ```
 
-关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有十六个，
+关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有十五个，
 它们只在各自唯一的语法位置有特殊含义，在别处仍是普通标识符（`let in = 1`、字段名 `test` 都合法）：
 
 | 词 | 唯一的语法位置 |
@@ -141,7 +141,6 @@ true false not
 | `opaque` | 紧接 `type`，引入不透明类型（§2.7） |
 | `ctl` | 紧接 `effect`，声明可挂起的效果（§6.5） |
 | `calls` | 效果名之后、`{` 之前且后面紧跟 `(`：`effect E calls(enter = a, …) { … }`（§6.5） |
-| `origin` | handler 臂参数表之后、`resume` 之前：`op(a) origin o => …`（§6.5） |
 | `resume` | handler 臂的参数表之后：`op(a) resume k => …`（§6.5） |
 | `pkg` | 只在 `pub(` 之后：`pub(pkg)`（§10.4） |
 
@@ -2269,99 +2268,11 @@ handler 的作用域内，与 `with x <- f(…)` 完全同构，并继承它的�
   见下面的「控制臂」一节），`=>` 与 lambda 同记号（臂本来就是闭包），臂之间换行分隔。
   每个声明的操作**恰好一臂**：少臂、多臂、臂名不属于该效果都是编译错误。
   一个 handler 里两种臂可以并存。
-- 臂语法为 `HandlerArm ::= IDENT LambdaParams OriginClause? ResumeClause? "=>" Expr`，
-  其中 `OriginClause ::= contextual("origin") IDENT`，
-  `ResumeClause ::= contextual("resume") IDENT`。`origin` 仍可用作函数、局部变量、字段、
-  具名实参与操作名称。来源绑定只接受标识符，不接受模式、`_` 或类型注解，且必须在
-  `resume` 之前；重复、逆序、缺名与缺箭头分别诊断。`)` 至 `=>` 之间的既有逻辑换行规则
-  不变，`=>` 后允许换行。绑定与操作参数共享本臂参数域，拒绝重名，可遮蔽外层变量，
-  只在本臂身体可见。
-- **观察入口。** `std/provenance.observe[T, !e](body: fn(TraceScope) -> T !e, capacity: Int = 1048576) -> T !io !e`
-  是按已解析的标准声明身份识别的具名 intrinsic。同名用户函数没有特权；入口不能取为函数值，
-  身体须为字面 lambda 或 `with` 生成的结构化身体。每次调用建立独立观察根。`TraceScope`
-  是不可逃逸的词法句柄，只能将该绑定直接用于 `note`、`completed`、`checkpoint`、`rewind`。
-  checker 拒绝别名、容器、返回、任意函数实参、计算所得句柄及逃逸闭包捕获；编译器掌握的
-  observer 与 handler 结构化区域可使用它。运行期另核对作用域、执行上下文与 checkpoint 世代。
-  `origin o` 只在词法观察能力内合法，读取计入 `io`；有 `io` 本身不产生该能力。绑定是本臂
-  普通局部名，definition、references、hover 与成功 rename 走既有路径；有诊断的模块仍拒绝 rename。
-- **不可变来源 API。** `Origin` 可离开观察作用域、放入容器并传给纯函数。纯访问器
-  `operation`、`parent`、`scope`、`epoch`、`instance`、`site`、`definition` 只读快照；`parent`
-  返回 `Option[Origin]`，根为 `None`。`site` 返回 `Option[Site]`，根为 `None`；字段为
-  `id, module, file, declaration, start, end, name_start, name_end, role, operation`，其中
-  `operation: Option[String]`，坐标均在声明内相对定位。`file` 使用稳定的源单元身份，不含构建机
-  路径。`definition` 返回 `Option[Definition]`，字段为 `id, module, declaration, start, end, role`。
-  operation envelope 不将 handler 定义冒充发起方定义；其父链保存真正的调用定义。
-  真实未知的坐标为负数，不编造位置。
-- 默认参数的来源定义使用该默认表达式自身的声明路径与坐标起点。没有书写调用点的内部合成调用保留已知 Definition，调用 Site 为 None。相同 primitive dictionary slot 共享逻辑 Definition 身份，不因后端选择的物理 helper 所在模块而改变。
-- **观察日志。** `note(scope, origin) -> Unit !io` 添加不可变操作快照；
-  续延按创建时保存的模式恢复。Plain 创建的续延在观察域中恢复仍执行 Plain；跨观察域恢复不拼接驱动者和保存的父链，当前快照不能表示的片段带 UnknownBoundary。
-  默认容量遵守通常默认参数求值与来源规则；嵌套观察在外层执行的默认容量调用有独立实例，内层调用仍以当前活跃父实例为父，不接到已返回的默认调用上。
-  `completed(scope) -> TraceSnapshot !io` 冻结包括活跃调用和 notes 的当前可见前缀。
-  不保留 String 返回版本或并列快速入口；二者不修改已有来源快照。
-  同 Site、同定义的两次调用具有不同实例身份；零 perform、零输出调用也保留。静态 Site 与定义
-  身份不随 Plain/Observed 入口改变。调用进入、正常返回、`return`、`?` 与 panic 展开维护逻辑帧，
-  实参先在调用者内完成求值。metadata 与 effect evidence 分开，handler 的词法选择不变。
-  直接调用、Fn 桥、trait 动态/default/去虚拟化、跨模块/包与库回调遵守同一观察协议；
-  普通入口保持既有 ABI。共享 Core 在会删除逻辑调用的优化前求 Plain/Observed 可达掩码，
-  仅发射可达入口，动态目标按调用者模式选择；内部目标缺观察入口是编译错误，不回落普通入口。
-  解释器与 comptime 明确拒绝观察。控制续延持有原观察激活，恢复沿用模式与逻辑实例，
-  不经 Plain 入口重新进入。尾调用保留可解码父边；未知外部 ABI 记录 UnknownBoundary。
-  自然不可达只回收内存，未恢复记录保持 Suspended；只有显式 discard（含冻结跨度内继承的
-  discard）提交 Abandoned，不依赖 native RC 或 JVM GC 的回收时机。
-- **有界观察。** `observe(body, capacity: Int = 1048576)` 的容量包括根，限制本域累计保存
-  的调用记录；notes 使用同大小的独立累计预算。rewind 不返还预算或清除 Truncated。
-  `1 <= capacity <= 38347921`，否则两端报 `provenance: capacity must be between 1 and 38347921`。
-  耗尽后计算继续，只保存可见祖先闭合前缀，不能回填较晚调用、重排或改接缺失父节点。
-  活跃控制身份和 checkpoint 创建帧纪律独立于日志是否保存。超过容量的 operation Origin
-  保留真实当前身份与 Site，标记 Truncated/UnknownBoundary，父链接不提供，不冒充完成日志行。
-  各嵌套域独立计量；用户显式持有的 checkpoint/快照另占其正常生命期空间。
-- **结构化快照。** opaque `TraceSnapshot` 复制紧凑动态数据，共享 immutable `StaticTable`；
-  后续 finish/resume/discard/rewind/作用域退出不改变旧值，记录、Site 值与文本按需物化。
-  `InvocationKey = { scope: Int, epoch: Int, instance: Int }`；
-  `CallState = Active | Returned | Unwound | Suspended | Abandoned`；
-  `Boundary = Known | UnknownBoundary`；`Completeness = Complete | Truncated`。
-  `SnapshotInfo` 字段为 `scope, epoch, records, notes, completeness`（前四项 Int）；
-  `CallRecord` 字段为 `key: InvocationKey, parent: Option[Int], state: CallState, site: Option[Int],
-  definition: Option[Int], boundary: Boundary`。parent 是同快照零起点行索引，根为 None；
-  完整快照保证父先子后、祖先闭合。site/definition 是所属静态表的索引，不是 Site.id/Definition.id。
-  纯接口为 `snapshot_info(TraceSnapshot) -> SnapshotInfo`、
-  `record_at(TraceSnapshot, Int) -> Option[CallRecord]`、`static_table(TraceSnapshot) -> StaticTable`、
-  `site_at(StaticTable, Int) -> Option[Site]`、`definition_at(StaticTable, Int) -> Option[Definition]`、
-  `note_at(TraceSnapshot, Int) -> Option[Origin]`、`find_instance(TraceSnapshot, InvocationKey) -> Option[Int]`、
-  `render_snapshot(TraceSnapshot) -> String`、`render_origin(Origin) -> String`。
-  同一快照另有 opaque `RecordView` 和 `IndexSlot`：`records(TraceSnapshot) -> RecordView`
-  正常持有原快照；`record_count(RecordView) -> Int`、`record_scope(RecordView) -> Int`、
-  `record_exists(RecordView, Int) -> Bool` 读取冻结头和范围。接受 `(RecordView, Int)` 的
-  `record_epoch`、`record_instance` 返回 Int；`record_parent`、`record_site`、`record_definition`
-  返回 IndexSlot；`record_state` 返回 CallState，`record_boundary` 返回 Boundary。
-  这些标量访问不强制构造逐行记录或 Option。`index_present(IndexSlot) -> Bool` 查询有效性，
-  `index_value(IndexSlot) -> Int` 在缺失时报 `provenance: missing index`；标量行访问越界报
-  `provenance: record index out of bounds`，record_at 等便捷访问的越界仍返回 None。
-  视图不可变、不复用外传 cursor，逃逸值正常持有引用。静态 Site/Definition 按类型化字段生成
-  并共享，getter 不解析文本或逐字段复制字符串；文本只在显式 render 时编码。
-  Origin 另有纯 getter `state(Origin) -> CallState`、`origin_boundary(Origin) -> Boundary`、
-  `origin_completeness(Origin) -> Completeness`；既有纯 getter 签名不变。全部访问只读冻结数据，
-  不读 TLS、scope registry、当前提交状态或磁盘。便捷行/静态项/note 越界返回 None；
-  批量标量访问使用前述拒绝合同。find_instance 按完整 key
-  查询当前快照的可见成员。回退后 ID 可有洞，保留祖先可跨 epoch；Truncated 下缺失不证明回滚。
-  Complete 表示没有因容量丢失历史，不表示所有调用均 Returned，UnknownBoundary 独立保留。
-  截断只保留祖先闭合前缀并标记 Truncated，不能改接或重排父节点。嵌套 scope 各有根和 key，
-  行索引不能跨 scope 使用。Origin 冻结捕获时的父链、状态、epoch 和 operation 发起方身份，
-  不引用活跃帧或可复用槽；notes 同样不可变。S1/O1 版本化文本只由显式 render 产生，
-  不是数据模型；外部传输另带 recording/build/source revision 身份并校验结构、完整性和源码匹配。
-- **观察 checkpoint。** `checkpoint(scope) -> Checkpoint !io` 保存本域日志与 note 边界；
-  `rewind(scope, c) -> Unit !io` 回退后保留目标 `c` 及所有更早建立的 checkpoint，允许反复回退
-  同一目标，并使之后建立的 checkpoint 全部失效。顺序按建立次序，不能用相同日志边界合并。
-  每次成功回退推进 epoch，新调用实例不与丢弃的试探实例重号；已外传试探 `Origin` 保持不可变，
-  可用 scope/epoch/instance 与保留日志判定是否提交。不能仅因旧 epoch 就认定未提交，因为保留祖先
-  可以来自较早 epoch。没有 release/commit 操作，退出使本域全部 checkpoint 失效。
-  checkpoint 同时绑定建立时的逻辑调用实例 `F`。回退时当前实例须恰为 `F`，不只比较深度或 Site。
-  `F` 返回、`?` 或 panic 展开完成后，其中建立的全部 checkpoint 失效，`F` 外更早的标记仍有效。
-  两后端使用相同精确错误：失效标记为 `provenance: checkpoint has been invalidated`，跨域为
-  `provenance: checkpoint belongs to another scope`，已退出域为 `provenance: scope has exited`，
-  已结束建立帧为 `provenance: creating frame has finished`，仍活跃的更深帧为
-  `provenance: not in the creating frame`，不同执行上下文为 `provenance: different execution context`。
-  续延越创建域恢复仍使用原激活；内部 lease 不使已退出的用户 TraceScope 重新有效。
+- 臂语法为 `HandlerArm ::= IDENT LambdaParams ResumeClause? "=>" Expr`，
+  其中 `ResumeClause ::= contextual("resume") IDENT`。`origin` 是普通标识符，可用作函数、
+  局部变量、字段、具名实参与操作名称，也不再是臂子句；`op(a) origin o => …` 按普通语法
+  报缺少 `=>`。`)` 至 `=>` 之间的既有逻辑换行规则不变，`=>` 后允许换行。续延绑定与操作参数
+  共享本臂参数域，拒绝重名，可遮蔽外层变量，只在本臂身体可见。
 - 一个 `handle` 一个效果；同一效果重复 `handle` 是内层遮蔽外层，合法。
 - 允许 handle 一个块里实际没发出的效果（无害的死证据）。
 - **handler 局部状态（格子）**：臂表的开头可以声明若干 `var`，每个是**这次安装**私有的
@@ -3702,7 +3613,6 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - `std/char`：字符 `Char`
 - `std/fmt`：数字的渲染与解析（见下）
 - `std/loc`：调用点位置 `Loc` 的读法与 `here()`（§8.4）
-- `std/provenance`：词法观察、不可变来源与 checkpoint（§6.5）
 - `std/dtype`：设备元素格式 `Dtype[T]` 与 `HasDtype`，定宽整数与内建三种格式的见证住这里或各自的模块
 - `std/narrow`：窄二进制浮点 bf16、binary16、binary32，逐运算正确舍入（§11「数学内建」）
 - `std/int/i8`：有符号 8 位整数 `I8`，`Int` 上的不透明类型，回绕算术（§11「定宽整数」）
