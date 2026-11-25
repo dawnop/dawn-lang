@@ -1,16 +1,17 @@
 # Native 种子链生产切换（D12-2 P）设计
 
-> 状态：**current**（accepted，2026-11-25，协调者补裁一把 §9 的开放问题全部裁定，见 §10；P1 起按此实现）。
->
-> (Accepted after the supplementary ruling of 2026-11-25; the open questions in section 9 are settled in section 10.)
+> 状态：**current**（已采纳，2026-11-25；补裁一至四与 P1/P2 落地见 §10 至 §13；§13 是 P4 native 链与启动器的合同，尚待实现与最终资格）。
 >
 > 前置：[native-seed-input-contract-design.md](native-seed-input-contract-design.md)（K1-K5，资格工具与隔离原型已交付，生产 no-go）。
-> 本页只设计 P0-P5 六刀，P0 即本页。不含 D12-3（站点 prepare 去 JVM），它依赖本页 P 的 builder 合同，在 P4 之后另起设计页。
-> 基线 main `6c9614f2`。
+> 本页覆盖 P0-P5 及补裁四新增的 P4-pre0/pre1/pre2/pre3；前置开发不授权改默认或发版。不含 D12-3（站点 prepare 去 JVM），它依赖本页 P 的 builder 合同，在 P4 之后另起设计页。
+> P0 基线 main `6c9614f2`；P4-pre0 核对基线 `33ee0a6b`。早期方案与后续裁定冲突时，以后续裁定及 §13 为准。
 
 ## 1. 现状与目标
 
-### 1.1 现状
+### 1.1 P0 时的基线（历史快照）
+
+以下是 P0 的八件/schema 1 旧状态。P1 已实现九件/schema 2 与不可覆盖发布，P2 已实现 lock 消费；
+当前尚无真实 qualified lock，release 被机器冻结，源码启动器默认仍 jar，显式 native 验种子后退出（§11、§12）。
 
 - **发布合同是八件资产，schema 1**。`.github/workflows/release.yml` 的 publish 步把资产分成两张表：
   `INSTALL_ASSETS`（`dawn-selfhost.jar`、`dawn-selfhost.jar.sha256`、`dawnc-linux-x86_64`、
@@ -34,7 +35,7 @@
 
 ### 1.2 目标
 
-| 维度 | 现在 | P4 之后 |
+| 维度 | P0 基线 | P4 之后 |
 |---|---|---|
 | 发布资产 | 八件，`dawn-toolchain.json` schema 1 | 九件，schema 2，第 9 件 `native-bootstrap.json`（归 `REPORT_ASSETS`） |
 | `dawnc-linux-x86_64` 的来源 | 由 JAR 链的产物经 `release-native.sh` 构建 | 由 native builder A（种子 S 编出）发射 B，B==C 验证；JAR 作独立 reference |
@@ -124,7 +125,7 @@ jvm_reference         {name="dawn-selfhost.jar", kind="jvm-jar", sha256, commit,
    对 JAR 链所做的同构。`bootstrap.seed` 取自**该 tag 检出里的已资格 lock**，不取自任何外部输入。
 2. **proof 去掉 `prototype_only` 与 `kind=native-bootstrap-prototype`**，改 `kind=native-bootstrap`；
    `qualification_sha256` 的含义改为「该 tag 检出里 lock 所引用的、种子自己的资格 receipt 摘要」，
-   而不是本次 release 的资格包（本次 release 不跑双 JDK 等重链，见 §5.5 和开放问题 2）。
+   而不是本次 release 的全套资格包（release 仍跑双 JDK JAR 比对与 native 三阶段，完整资格另跑，见 §10、§11）。
 
 ### 2.4 `native-bootstrap.json`
 
@@ -159,7 +160,7 @@ metadata 引用 proof 的字节摘要，proof 引用 metadata 去 `proof` 键后
 | 采纳 | 7、8 | 下载已发布字节，通过格式校验（JSON 可解析且有快照必需字段；diff 非空）后**用它替换本地副本**，不比较。理由：pub-API 的 diff 取「上一个 release」，两次运行之间若又出了新 release，重生成的 diff 会不同；而 metadata 与 proof 不引用这两件，采纳不影响身份链 |
 
 逐字节比对要求同输入同字节：B 与 JAR 均已有固定点（B==C，K5 两 root 一致），metadata 与 proof 无时间戳（§2.3）。
-**跨托管 runner 的重建是否同字节没有实测**，P1 的验收里要加一条真实重跑实测，见 §2.6 与开放问题 1。
+P1 已实测跨托管 runner 同字节，失败上传也不留截断资产，结果与边界见 §11.1。
 
 #### 2.5.4 状态机
 
@@ -180,7 +181,7 @@ metadata 引用 proof 的字节摘要，proof 引用 metadata 去 `proof` 键后
 | 中断位置 | 留下的状态 | 重跑 |
 |---|---|---|
 | create 之后、首件上传之前 | R1，零资产 | 正常补齐 |
-| 某件上传中途 | R1。是否会留下半个资产取决于 GitHub 对失败上传的处理，**未验证**（开放问题 1）；若列出了截断资产，比对时因字节不等落入 E2 | 完整的则补齐；截断的落 E2，需维护者手工清理（未封存） |
+| 某件上传中途 | R1。P1 实测不留截断资产，但中断后完整资产可能延迟出现（§11.1） | 上传失败后重看列表；出现则按已存在比对，不出现则报错，重跑再收敛；字节不等落 E2 |
 | 前八件已传、metadata 未传 | R1，未封存 | 比对前八件并补传 metadata；未封存期间消费者看不见可信 metadata |
 | metadata 刚传完、最终核对未跑 | R2 | 只验证，通过即成功 |
 | 最终核对中失败（如下载损坏） | R2 | 重跑再验证；持续失败即事故，维护者发新 tag |
@@ -189,15 +190,14 @@ metadata 引用 proof 的字节摘要，proof 引用 metadata 去 `proof` 键后
 
 #### 2.5.5 与现有守卫的冲突与改法
 
-`scripts/bootstrap-guards/run.sh` 现有守卫要求 release.yml 含 `--clobber` 的整行并检查三行相对顺序。
-P1 把它改为：断言 `--clobber` **不出现**；断言「create 唯一调用、逐件循环、metadata 最后、最终验证在上传之后」的新顺序；
+P0 时 `scripts/bootstrap-guards/run.sh` 的守卫要求旧上传整行及顺序；P1 已改为：断言生产路径中 `--clobber` **不出现**；断言「create 唯一调用、逐件循环、metadata 最后、最终验证在上传之后」的新顺序；
 并新增变异负控：把任一逐件上传改回带覆盖标志、把 metadata 挪到非末位、去掉 R2 的验证步，守卫均须红。
 这与「门禁的绿没有信息量」一致：先证明会红，再宣称它是守卫。
 
 ### 2.6 P1 验收判据
 
 - 原型 26 项拒绝控制全部搬进生产合同，并在生产路径上仍正确地红或绿（逐项列表对账，不得缩项）。
-- `--clobber` 全仓 0 命中（对 `.github/`、`scripts/`、`docs/` 的 grep 负控；注释里引用旧行为的文字改写为不含该串）。
+- `--clobber` 在 `.github/` 与 `scripts/` 生产路径 0 命中；设计页保留旧行为的历史引用（P1 实测口径，§11.3）。
 - 状态机 R0 至 R2、E1 至 E4 与七个中断点各有一条用假 `gh`（本地桩）驱动的测试，覆盖「中断后重跑得到相同终态」。
 - 在一个**非生产演练仓或演练 tag** 上完整走 producer、聚合、installer 三步，且对同一演练 tag 实际重跑一次，
   记录两次构建的 B、JAR、metadata、proof 是否同字节，作为 2.5.3 逐字节类别的实测出处。
@@ -207,9 +207,7 @@ P1 把它改为：断言 `--clobber` **不出现**；断言「create 唯一调�
 ### 2.7 P1 推翻判据
 
 撤 `--clobber` 后无法设计出可收敛的中断重跑：具体即开放问题 1 的实测显示跨 runner 重建不同字节，
-或失败上传会留下无法区分的半资产。此时退为裁决中预设的后备：**以草稿 release 承载上传，全部就绪后一次性发布**
-（草稿对消费者不可见；中断后丢弃整个草稿重来；发布后只验证）。该后备改变「是否删除任何东西」的口径，
-须另裁，P1 不自行切换。
+或失败上传会留下无法区分的半资产：停并回交。草稿 release 后备须另裁，不能自行切换（补裁一）；P1 两前提已成立（§11.1）。
 
 ## 3. P2：lock 消费、单调晋级、撤销与回滚
 
@@ -234,19 +232,19 @@ P1 把它改为：断言 `--clobber` **不出现**；断言「create 唯一调�
 - 默认路径：启动器读 lock，按 `seed.tag` 取缓存目录 `.dawn/native-seeds/<tag>/`，缺失则从该 tag 的 release
   下载 `dawnc-linux-x86_64` 并**严格重算** sha256、size、`--version`、完整 build id，全部等于 lock 才使用；
   任何一项不等直接失败，没有「忽略摘要」的常驻开关（R11）。
-- `DAWN_NATIVE_SEED` 覆盖路径仍进入 bootstrap stamp 的「override」帧（对应 `bin/dawn` 里 `dawn-bootstrap-digest-v2`
+- `DAWN_NATIVE_SEED` 覆盖必须同时声明配对 std/runtime 身份，详见 §13.3；覆盖路径仍进入 bootstrap stamp 的「override」帧（对应 `bin/dawn` 里 `dawn-bootstrap-digest-v2`
   对 jar 的做法），所以覆盖产物不会被误当默认缓存复用；release job 里该变量必须未设置，由 release.yml 断言。
 - 选择链（native 种子链或 JAR 种子链）由一个显式的启动器选择量决定，**两条链之间没有任何自动回退**：
   选了 native 而种子缺失或不合格就失败，不悄悄改走 JVM。默认值在 P4 才改；P2 到 P4 之间默认仍是 JAR 链。
-  选择量的名称与取值在 P2 实现时定稿，设计里只钉「无回退、默认在 P4 切」（开放问题 5）。
+  P2 已定稿：lock 的 `chain` 是默认的唯一真相，`DAWN_SEED_CHAIN=jar|native` 是唯一显式链覆盖量；全无记录时默认 jar，任一记录存在则必须严格验证整链（§12.2）。
 
 ### 3.3 晋级（`advance-native-seed`）
 
-在 `scripts/advance-seed.sh` 旁新增 native 版入口，输入一个 tag，保持与 JAR 版同样的「指针最后动」纪律：
+`scripts/advance-native-seed.py promote TAG` 是 native 晋级入口，保持与 JAR 版同样的「指针最后动」纪律：
 
 1. 从 origin 新鲜解析 tag commit，前后复核 tag 未移动，tag 是 HEAD 祖先；
 2. 下载九件资产，跑 §2.2 的聚合检查与 installer 前置核对；
-3. 检查**单调性**：新 `tag` 的版本严格大于当前 lock 的 `seed.tag`，`sequence = 当前 + 1`，
+3. 检查**单调性**：新 `tag` 的版本严格大于历史上所有种子版本且不得复用旧种子摘要，`sequence = 当前 + 1`，
    `lineage.parent_lock_sha256` = 当前 lock 字节摘要，`parent_receipt_sha256` = 该 tag 的 metadata 所记的
    上一代 receipt；
 4. 检查**未被撤销**：新种子 sha256 不在撤销名单；
@@ -256,7 +254,7 @@ P1 把它改为：断言 `--clobber` **不出现**；断言「create 唯一调�
    中断恢复：历史文件先于 lock 落盘，重跑见到「历史已写、lock 未换」时幂等收敛；见到「lock 已换、历史缺失」不可能
    发生（顺序保证），出现即判污染，拒绝并报错。
 
-回滚：`advance-native-seed --rollback <seq>`。只允许回到**历史里存在、未被撤销**的种子；生成一条新 lock，
+回滚：`advance-native-seed.py rollback <seq>`。只允许回到**历史里存在、未被撤销**的种子；生成一条新 lock，
 `sequence = 当前 + 1`，`lineage.transition = "rollback"`，`lineage.rolled_back_from = <被放弃的 sequence>`，
 `reason` 必填；不改旧历史，不降序号。回滚后重新晋级须选一个版本严格大于被放弃种子的 tag，
 避免「回滚后又晋同一个坏版本」。
@@ -283,8 +281,10 @@ P1 把它改为：断言 `--clobber` **不出现**；断言「create 唯一调�
 
 ### 4.1 前提
 
-S3 之后输入冻结（裁决第 2 条）。冻结的定义：从 `selfhost/`、`compiler-plan/`、`std/`、`packages/`、统一 C recipe、
-runtime 的 Git tree 在 P3 开始到 P4 发布的整个窗口内不变；资格 receipt 的 inputs 摘要绑定整树
+S3/S4、全部 P4-pre 与 P3 机制修补收完后输入冻结（补裁四，详见 §13.7）。0.107.0 的版本准备须先进入冻结候选，
+不能在资格之后临时 bump。冻结覆盖 `selfhost/`、`compiler-plan/`、`std/`、`packages/`、统一 C recipe、runtime、
+启动器及观测接线；当前资格还绑定完整 Git tree 与 commit，控制记录、合并与原型删除也必须重核。
+资格 receipt 的 inputs 摘要绑定整树
 （K5 最终输入 3935 项，tree `5cddb9ee...`，inputs `f68940f4...`；这个值在冻结后会换新，旧包失效）。
 输入再变则 P3 顺延，不在移动输入上资格。
 
@@ -295,6 +295,8 @@ runtime 的 Git tree 在 P3 开始到 P4 发布的整个窗口内不变；资格
 1. reason `initial-seed`：把 v0.104.0 候选转为已资格 lock（§3.1）；
 2. reason `seed-promotion`：对 P4 将要晋级的那份 B（即由 v0.104.0 种子编出的冻结 commit 的 B）。
 
+P3 先实现 `--lock` 并核对 receipt 的 `seed_lock_sha256` 与实际被资格种子 lock；不能继续写死候选。
+initial 的种子资格、final-inputs 的最终树资格、B 的 seed-promotion 资格分别留证，非循环绑定见 §13.7。
 资格含 K5 定义的整套（捕获、双 root 冷链、固定观察器夹具、Q1-Q10、事务、双 JDK/replay、双链、原
 `native-fixpoint`、原 `native-cli-diff`、封包、独立 verify）。重活的计时与租约由写者按现有规矩执行，
 本页不展开。
@@ -311,10 +313,8 @@ event / original run / attempt / image / steps / source / seed / toolchain / rec
 
 门槛 (b)：「至少 7 天同形态 main push 样本中 native seed 归因失败 0」。口径钉死如下，避免到时再解释：
 
-- **同形态**：在 P2 合并之后 tree-policy 里 native 轻步骤、gates.yml 的 job 集合与 steps.lock 不变的区间；
-  这三者任一改变，窗口重新起算（补裁六）。
-- **7 天**按日历天，且窗口内**至少有 push 样本**。现状是 main 零 push 时没有样本，所以窗口必须有真实 push
-  才推进；天数满而 push 数为 0 不算满（出处：就绪评估记录 11-17 至 11-24 零 push）。最小 push 样本数是开放问题 3。
+- **同形态**：最终冻结的 native 轻步骤、selector/lock/失败语义、gates.yml job 集合、steps.lock 与实际准备成本一致；任一改变重新起窗（§13.7）。
+- **7 天**为至少 7 个有 push 样本的日历日，且至少 10 次成功 main push 经过 native 种子路径；零 push 的日子不计入天数，也不阻断（补裁一第 3 条）。
 - **native seed 归因失败**：失败 job 的失败步骤属于 native seed 轻步骤（`scripts/native-seed-light.py`）、
   native lock 消费（P2 之后）、或 native 链 fixpoint 类 job 的种子准备阶段，且不是仅因后继 push 顶替造成的取消。
   取消（被后继 push 顶替）不计失败也不计成功，单列。基础设施事故（runner 掉线、下载超时）单列，须在报告里逐条判定归因，
@@ -351,15 +351,17 @@ K5 的 P 前 no-go 清单第 4 项（原型与模块 installer 不替代生产�
 
 前提：P0 至 P3 全部验收，且门槛 (a)(b) 满足。v0.106.0 已先发（旧八件合同的最后一版）。
 
-1. 改 `selfhost/src/version.dawn` 的 `VERSION` 为 0.107.0，提交，push main，等 main CI 绿，打 tag 并按
-   仓库发布规则只推该 tag（禁止 `git push --tags`）。
+1. `VERSION=0.107.0` 已在 P3 冻结前准备；P3 放行后通过 `advance-native-seed.py set-chain native` 生成合法历史，不能手改默认。
+   精确 tag commit 的实际输入、lock、合并及原型删除均须重核并满足 §13.7，等 main CI 全绿后只推该 tag（禁止 `git push --tags`）。
 2. release.yml 按 §2.5 发九件；失败走状态机，不覆盖。
 3. **真实 tag 冷下载与同提交聚合**：在干净环境下载九件，跑聚合与 installer；metadata 的 `release.commit` 等于 tag
    commit，`bootstrap.seed` 等于该 commit 里的 lock。
-4. 用 `advance-native-seed v0.107.0` 晋级（§3.3，需要对 v0.107.0 的 `seed-promotion` 资格 receipt）。
+4. 冷下载发布 B，与 P3 待晋级 B、tag commit、配对 std/runtime 逐项对账；相同才可消费该 B 的 `seed-promotion` receipt，否则重新资格及独立 verify。
+   然后用 `advance-native-seed.py promote v0.107.0` 晋级（§3.3），JAR 三文件仍由原入口按发布安排推进。
 5. 部署仍按既有规则以 tag 为准：先 Playground 后站点，站点带 `DAWN_WASM_CC`。native 种子只换构建链，
-   **不应改变运行产物**，所以验收增加一条：部署内容与 JVM 链产物逐字节一致。
-6. 启动器选择量的默认值在此刀改为 native，JAR 链改为显式选择（§3.2）。
+   对同 tag、同配方可比的 C/wasm/site 文件集逐字节对拍并做既有服务/CLI 验收；pre3 必须列明文件集。
+   JAR 与 ELF、不同链来源 receipt 分别核身份，不能要求它们互相字节相等，也不能据此豁免可比运行产物。
+6. 默认 native 后源码启动器执行当前 B，JAR 链只显式选择（§13）；P4-pre 不提前切默认。
 
 observe 删除的 S 刀已在 P3 前收完，P4 随带的是发布而不是语言改动。
 
@@ -368,7 +370,7 @@ P4 推翻判据：冷下载聚合失败、重跑出现 E2、部署产物与 JVM 
 
 ### 5.2 P5：预算收口
 
-P4 之后托管上才有真实重链 run。此刀把重链托管预算与生产频率定稿：
+P3 已须取得最终输入的配对与观测数据，不能挪到 P4 之后。P5 结合后续托管数据收口长期预算与生产频率：
 
 - 数据：累计三组成功配对，同形态七天，D/W 与 Q/S 同报，残差解释（补裁六的口径）；
 - 频率：沿用资格期口径「最终 sha 与种子晋级时」，是否需要周期性（nightly）另列选项，不先预设；
@@ -384,9 +386,9 @@ D12-3（站点 prepare 去 JVM）在 P4 之后另起设计页，不并入 P，P2
 | P0 | 本页，docs-only | `doc-check` 0 unknown，每条性能断言有出处，末尾有「不做」 | 评审推翻 §2.5 的上传语义 | 0（docs-only，不碰 workflows） | 只改 docs 与 docs/README.md |
 | P1 | schema 2 协议、第 9 件、撤 `--clobber` | §2.6 | §2.7 | 目标 0：release.yml 仅 tag 触发，不入 push 总量；守卫改写与新增变异负控并入现有 `bootstrap-guards` 步骤，不新增 job。若必须新增步骤，须在 PR 里按补裁核算并写 `Gate-Budget` | release.yml、release-native.sh、install-native.py、bootstrap-guards/run.sh、doc-check、README 及译本；与 S1 无文件重叠（裁决） |
 | P2 | lock 消费、晋级、撤销、回滚 | §3.4 | §3.5 | 轻结构检查扩到 lock/history/revocation，并入 `native-seed-light`，**不新增步骤**。该轻步骤实测日志跨度 10.363 秒、整体新增控制上限 30 秒（K5），余量约 19.6 秒；P2 目标 ≤ +5 秒，实测超出则按补裁重核 | 与 S2 都可能改 `gates.yml`：**同一时刻只许一方改**，先合者先，后者 rebase（裁决）；steps.lock 须 `steps_lock.py record`；`bin/dawn`、gate-map |
-| P3 | 重新资格与演练 | §4.6 | §4.6 | 0（资格是显式入口，重链不入 push 路径；成本是显式资格成本，不藏进日常 cap，不挪用拆片准备额度） | 只产生证据；不得与 S 刀并行（输入冻结） |
-| P4 | v0.107.0 发布 | §5.1 | §5.1 | tag 触发，不入 push 总量；release 墙钟新增 S→A→B→C 与 JAR 并行链，须实测报告（开放问题 6） | VERSION、lock、seed 文件；发布与部署顺序 |
-| P5 | 预算与频率 | §5.2 | 数据不足即不收口 | 唯一可能写 `Gate-Budget` 的刀；现状基线：K5 把 push-total 由 38673 秒改为 38683 秒，tree-policy claim 650 到 660 秒，pole 950 秒、timeout 33 分钟不变 | gates.yml、steps.lock、budget-observations |
+| P3 | 先补 `--lock` 绑定、`check --base` 接 CI，再冻结资格与演练 | §4.6、§13.7 | §4.6 | 机制改动须记预算及 steps_lock，含 P2 的约 +8.5 s；完整资格不入 push 路径 | gates.yml 修改串行；最终资格不得与输入修改并行 |
+| P4 | v0.107.0 发布 | §5.1 | §5.1 | tag 触发，不入 push 总量；P1 已实测 native 与 JAR 并行链，输入变化后按 §13.5 复测 | lock、原型删除、seed 文件；最终输入核验与发布部署顺序 |
+| P5 | 预算与频率 | §5.2 | 数据不足即不收口 | 长期收口；前置刀新增 W 必须当刀声明，不等 P5；K5 的 38683 秒仅为历史基线，不能当当前余量 | gates.yml、steps.lock、budget-observations |
 
 通用约束：每个 PR 一个主题，每刀一个提交；碰 gates.yml 的刀写 `steps_lock.py record`；改变工具链输出的提交为每个被改动的
 检查 label 写 `Emit-Change(<label>): ...`；README 英文先改，译本后改；提交与 PR 全英文，无署名 trailer。
@@ -409,7 +411,7 @@ D12-3（站点 prepare 去 JVM）在 P4 之后另起设计页，不并入 P，P2
 ## 8. 不做的（理由）
 
 - **不修改 K5 原型的目录当作生产。** 原型输出只写调用者新目录、含占位 API 报告与 `prototype_only` 标记，
-  生产要的是另一套行为（真实上传、真实 lock）；P1 把规则升格为生产模块，但原型目录按「原型」保留到 P4 之后再议去留。
+  生产要的是另一套行为（真实上传、真实 lock）；P1 已升格生产模块；补裁一要求 P4 合并时删除原型、不留兼容，删除后的输入仍须资格（§13.7）。
 - **不为 schema 1 或 v0.104.0 缺 metadata 保留兼容分支**（R2、R8）：历史事实在 lock 的 `registration` 里如实写明，
   代码里不再多一条路径。
 - **不让工作流删除或替换任何已存在的资产。** 删除是「事故处理」，由人做并留记录；自动路径里一旦允许删，
@@ -426,7 +428,9 @@ D12-3（站点 prepare 去 JVM）在 P4 之后另起设计页，不并入 P，P2
   installer 因此不声称独立证明 bootstrap 来源。
 - **不新增 nightly 替代必过门**：重链频率在 P5 依数据再裁。
 
-## 9. 待裁定的开放问题
+## 9. P0 开放问题原记录（已由补裁一裁定）
+
+以下保留决策来由，答案见 §10，实测与实现见 §11、§12；不再是当前未决项。
 
 1. **撤 `--clobber` 的收敛前提是否成立。** 需要 P1 实测两件事：失败的上传是否会在 release 里留下可见的半资产
    （`gh`/REST 接口的行为未核）；同一 tag 在不同托管 runner 上重建的 B、JAR、metadata 是否同字节（K5 只证了同
@@ -498,6 +502,8 @@ native 链与 JAR 链并行时，关键路径是 native 链，不增加整体墙
 
 ### 11.3 落地与分期说明
 
+以下记录 P1 当时的过渡状态；补裁二冻结发版，P2 已拒绝 null 资格且当前缺真实 lock，见 §12.4。
+
 - P1 合并后下一个 tag 即发九件、schema 2。**种子仍是 `scripts/native-seed-candidate-v0.104.0.json`（候选 lock）**：P2 的 qualified lock 不在 P1 内，所以 `native-bootstrap.json` 的 `qualification_sha256` 此时为 `null`（取自候选 lock 的 `lineage.qualification_sha256`），P2 之后由 lock 的资格 receipt 填入，并在 P2 起拒绝 `null`。这是设计 §2.3.1 第 2 点在 P2 之前的如实状态，不是兼容分支。
 - `release-native.sh` 仍在每次 push 上跑，但它构建的 B 来自 JAR 链，只用于 native-cli-diff 与协议契约包；release 不再用它的产物。它不再写 `dawn-toolchain.json` 与 `install-native.py`。
 - 「全仓 0 命中」的 grep 对 `.github/` 与 `scripts/` 成立；本设计页与 PR 文字里的历史引用保留（它们描述被撤掉的行为）。
@@ -541,3 +547,172 @@ P2 只做机制，不改默认链，也不创建真实的 `scripts/native-seed-l
 - 不创建真实 lock、不切默认链（P3、P4）。
 - 不改 `advance-seed.sh` 与 JAR 三文件协议（`git diff` 为空）。
 - 不在 P2 让 native 链真的构建工具链（见 12.2 第 5 点）。
+
+## 13. P4 native 链与启动器合同（补裁四，2026-11-25）
+
+本节采纳方案丙：**源码检出执行 S→A→B，缓存并 exec 当前 B；C 只在 release 与资格中验证固定点。**
+直接执行旧 S 会使当前源码不可见，破坏 site 与 HEAD 对拍；执行 A 会使日常工具链与发布 B 的 std/runtime 配对不同。
+两者均不作为源码启动器方案。本节是 P4-pre0 的合同，不声称 pre1/pre2/pre3 已实现；当前行为仍见 §12.2。
+
+### 13.1 S/A/B/C 角色与证据边界
+
+| 角色 | native 链 | JAR 链 | 职责与最终去向 |
+|---|---|---|---|
+| S / stage0 | 已资格 ELF 与该 seed commit 配对的 std/runtime | 已锁 JAR 与配对 std，含续传 vendor | 信任根与特性上限；不是源码检出的最终工具链 |
+| A / stage1 | S 编 portable 当前 `nmain` closure；发射 std、链接 runtime 均取 seed commit | S 编当前 selfhost closure，配 seed std | 过渡 builder；内嵌 stdsrc/rtsrc 来自当前快照，不因此变成 B；不公开发布 |
+| B / stage2 | A 编同份当前源码，使用 current std/runtime | A 编同份当前源码，使用 current std、续传 vendor | 源码日常工具链与 release 发布对象；native 为 ELF，JAR 为独立 JVM 产品 |
+| C / stage3 | B 再编同份当前源码与 current std/runtime | B 再编同份当前源码 | release/资格要求 B==C；不在每次源码缓存失效时强制构建 |
+
+`release-native.sh` 的局部 candidate-a/b 是同份 C 的两次独立链接，与本表 A/B 角色无关。
+公开资产仍为 §2.2 的九件：B ELF 及 sidecar、JAR reference 及 sidecar、metadata、installer、三件 report；
+A/C、C 中间文件与完整 chain receipt 不新增为公开资产。installer 只验证取得的 B，不声称独立重证 S→A→B→C。
+
+三类 receipt 各有边界：
+
+| 证据 | 证明什么 | 消费与保留要求 |
+|---|---|---|
+| 种子 qualification receipt | 某一 ELF 与配对树可作 S；initial-seed / seed-promotion，另有 final-inputs 最终树证据 | run 加独立 verify；lock 引用种子资格摘要，不能拿旧 S 的资格冒充 B 的种子资格 |
+| 完整 native chain receipt | 本次 S→A→B→C 的逐阶段 whole/info/units/ELF 摘要、来源与实际工具链/recipe 身份 | pre1 跨 job 传递并由 producer 复验；规范摘要进入 `native-bootstrap.json.cold_sha256`；内部 schema 1 与发布 schema 2 不是兼容分支 |
+| launcher generation receipt | 当前源码、配对 seed、工具链及 B 字节属于同一缓存代 | pre2 持久化并每次消费复验；不是资格 receipt，也不替代 release 固定点 |
+
+P1 当前交接 artifact 仅 A/B/cold.sha256，完整 chain receipt 未跨 job 留存；producer 仅接收摘要，
+组装 runner 探测的 CC 不能充当链执行方的工具链证据。pre1 必须闭合此边界，留存期限在该刀明确。
+
+### 13.2 三种运行模式、选链与最终 exec
+
+| 模式 | 链选择 | 构建或取用 | 最终 exec 与依赖 |
+|---|---|---|---|
+| 源码检出 `bin/dawn` | lock 的 `chain` 为默认唯一真相；`DAWN_SEED_CHAIN` 显式选 `jar` 或 `native`；无任何记录时 jar | native 构建/复验 S→A→B generation；jar 复用现有两阶段 JAR generation | native exec 当前 B ELF；jar exec Java 加当前 `build/dawn-selfhost.jar`；源码启动器可要求 Python 3.11+（`tomllib`） |
+| 无源码部署的 shell `bin/dawn`（复制 bin/ 与 build/） | 声明为 JVM-only，部署调用者显式设 `DAWN_SEED_CHAIN=jar`；缺失/空值/未知值或请求 native 均报错，种子覆盖也拒绝 | 只用随部署复制且身份已核的 JAR；不下载 seed、不自举、不读另一份默认链配置 | exec Java 加随部署 JAR；需 JDK 21，启动不依赖 Python；不得因缺 ELF 静默走 JVM |
+| installer 原生发行安装 | 安装命令本身显式选择 native 产品；安装结果是 B ELF，不是源码 selector | 校验下载的 B、sidecar、metadata，原子安装为 `bin/dawn`；不执行 A/JAR/自举 | 直接运行发布 B；不再构建当前源码，不需要 JVM 或 Python 参与日常启动 |
+
+无源码部署的模式判定和显式选择检查须在 Python/lock reader 之前；现有早期分支直接执行 JAR 的行为由 pre2 修正，
+不能静默忽略 `DAWN_SEED_CHAIN=native`。`install-native.py` 安装步骤本身仍用 Python，
+不得把源码模式的 Python 3.11+ 最低要求扩散到无源码启动；installer 的 Python 3.10 可用性须在后续实施验收中核实。
+原生发行 ELF 不提供隐式 JVM dispatch；需要 JVM 产品时单独运行同 tag 的 `java -jar dawn-selfhost.jar`。
+
+源码链选择必须先于 Java 探测或执行。任一 lock/history/revoked 记录存在就验证整链，显式 jar 也不能绕过损坏或撤销记录。
+空/未知选择、错误 seed 类型、两个 seed 覆盖变量同设、native 链设 `DAWN_SEED`、jar 链设 `DAWN_NATIVE_SEED` 均拒绝。
+种子缺失、摘要/版本/build id 不符、平台不支持、CC 缺失或构建失败都报错，**两链绝不自动回退**。
+
+### 13.3 显式 JAR、配对覆盖与环境
+
+- JVM 后端、build-to-jar、`use java`、Java deps、`--cp`/`--vendor`、JVM 依赖 lock 和需要 Java 类型解析的 LSP，
+  必须在启动器边界使用 `DAWN_SEED_CHAIN=jar bin/dawn <cmd>`；native 明确拒绝并提示此入口。
+  不按 import、子命令或 `--target jvm` 自动换链；LSP 不能在会话中途换 server。纯 Dawn LSP 仍可使用 native。
+- native `build` 的产品是 ELF，`run/test` 使用 C 工具链；JAR 链的相应产品与执行仍属 JVM。
+  release 保留 JAR reference，源码模式本机只有显式选 jar 才为它准备缓存；native 首次启动不顺带构建备用 JAR。
+- `DAWN_NATIVE_SEED` 必须同时声明与 ELF 配对的 **seed commit、std 树与 runtime 树的路径及内容身份**，
+  并核对 ELF 摘要、大小、版本、完整 build id。不能从任意 ELF 猜配对树，不能拿 HEAD std/runtime 凑 A。
+  任意本地种子调试也须完整配对输入，进入独立 override stamp，与默认 qualified S 的缓存隔离；
+  不因此宣称该 ELF 已资格。release 禁用全部种子覆盖。配对输入的具体参数/记录接口由 pre1/pre2 定稿并测试，
+  不能仅凭 P2 的常规 ELF 文件检查开始构建。
+- native 链首版要求 **Linux x86_64 与 C 工具链**，包含静态链接所需头文件、库、链接器与辅助工具；缺失即报错。
+  共用 `cc-units.sh --static --inline-rc --runtime ...` 阶段原语，记录实际 CC 字节/版本/target、链接器与库闭包、recipe 身份。
+  当前资格配方为 Ubuntu clang 18.1.3/GCC 13 布局；是否扩展其它本机 CC 须明确开发 generation 政策，不能沿用旧资格背书。
+  自举清理未声明的 CFLAGS、include、优化等环境，用户程序的 CC 选项不能悄悄改变自举配方。
+- 源码物化复用 `native-source-tree.py` / `contract.portable` 与现有 Planner，入口是
+  `selfhost/src/nmain.dawn` 的 portable closure，保留 local deps、移除 Java deps；不能直接 native build 原 `selfhost/`
+  （目录默认入口是 JVM main），也不再写一套 shell/Python 源码依赖解析器。
+  S 与配对树可在准备阶段下载且必须验证；构建阶段不得隐式联网，离线缺对象就失败。
+
+### 13.4 generation 缓存与失效
+
+native B 与 JAR 的 cache 名称、格式、stamp 必须分离。pre2 提供“已验证 B 路径加 generation receipt”的消费边界，
+具体路径与查询接口在该刀登记；site 后续迁移不得自己猜缓存路径或重建第三份 compiler。
+
+generation 身份至少绑定：chain 与 stage=B、default/override 帧、有效 lock/历史/撤销身份、S 字节与完整 build id、
+seed commit 配对 std/runtime、portable 转换及 `nmain`/Planner/local dependency closure、current std/runtime/embed、
+阶段原语与 recipe、实际 CC/链接工具/库闭包，以及输出 B 的摘要和完整 build id。
+native `__source-inputs` 是源码清单的权威 producer；旧 S 不必认识新协议，首次清单来自其构建出的 A，最终 B 再复验。
+
+构建前后重新核对输入与 plan；源码、传递依赖、std、runtime、embed、物化器、recipe、seed 配对树、工具链任一变化必须失效，
+包括 dirty 源码修改。mtime、VERSION 或 Git HEAD 单独都不足以命中。每次热命中仍验有效 lock/撤销、输入和 B 字节；
+被改的 seed/B/receipt 是污染错误，不能通过重下 seed 或执行旧代掩盖。
+
+同一 generation 用构建锁串行化，等待者重新核验；在私有 staging 构建 A/B，成功后原子提交，commit-marker 最后写。
+失败保留旧 generation 的字节，但本次命令必须失败，不能执行与当前输入不符的旧 B；中断/并发不得执行半成品。
+`DAWN_PRINT_STAMP=1` 返回带 native 类型的 generation 身份，不冒充 JAR stamp。
+保持 argv、cwd、信号、退出码与 stdout/stderr 合同，构建日志只写 stderr。
+
+### 13.5 耗时、证据与预算
+
+补裁四接受冷启动约两分钟，但这是**推断**：P1 每阶段 emit 15–18 s、cc 45–52 s（实测），
+两阶段约 120–140 s，另加取种子/配对树和准备校验时间；不是本机实测或用户机器时限。
+P1 三阶段 native-chain job 实测 170–225 s，双 JDK JAR 各 60–75 s，完整 release 约四分钟（§11.2）。
+热启动的完整输入/ELF/工具链校验尚未计时，不能用 P2 约 0.1 s 的 Python 验 lock 成本冒充；pre2 必须实测入报告。
+
+release 继续 native 与双 JDK JAR 并行，墙钟按 `max(Tnative,Tjar21,Tjar26)+Taggregate` 加调度/evidence 算，
+不把 job-seconds 相加称墙钟。native timeout 12 分钟源于 3×225 s，输入变化后复测。
+push 中 N 个 job 冷建 B 可能新增约 N×两阶段时间的 W，pre3 须逐入口核算。
+任何前置刀新增 W 都须 Gate-Budget 声明，改 gates.yml 须 `steps_lock.py record`；
+P3 接 `check --base` 时同时补 P2 已确认约 +8.5 s 的实际增量，不悬空到 P5。
+完整双 root/C/资格不塞进每次启动或每次 push，轻夹具与真实重链的账分开。
+
+### 13.6 P4-pre3 必须逐个钉链的消费者清单
+
+下表按 `33ee0a6b` 的入口登记迁移责任，不代表已修改；pre3 还须沿脚本、composite action、子进程和编辑器环境追踪间接调用，
+逐个记录“所需能力、chain、最终 exec、身份/缓存、验证证据”。不能在整个 workflow 全局设 jar，也不能让 JVM oracle 两边变成同一 native 工具。
+
+| 入口 | 必须显式选择及最终消费 | pre3 验收 |
+|---|---|---|
+| `site/dawnc.sh` 的 `site_dawnc_stamp`、`site_dawnc` | `DAWN_PRINT_STAMP` 与 `__emitc` 引导固定 jar；其产出的同树 native 工具仍直接执行 ELF | stamp 与 emit 同链；同树生成器对拍；不以下载旧 S 替代当前编译器 |
+| `site/inputs.py prepare` 的两个 `bootstrap_plan` 与调用 `site_dawnc` 的子进程 | 引导 SourcePlan 与工具构建显式 jar；已制备 native SourcePlan/工具按既有 receipt 直接运行 | bootstrap/native plan 一致，tool/data 收据不串链；D12-3 再迁 prepare |
+| `playground/deploy/redeploy.sh` 工具链构建、`PLAY_TOOLCHAIN_ID`、JAR/bin 复制 | `--version`、JAR 生成及版本解析显式 jar；无源码 shell 启动环境显式 jar；native compiler/runner 分别执行同 tag 已验证 B/runner ELF | 离线 deployment preflight 核 JAR 存在且新鲜、JAR/B/runner 各自完整身份；不用同一个 sed 解释两种版本串 |
+| `scripts/release-native.sh` 默认 `DAWN_JVM`、`version -m` 与协议包 JAR reference | 默认启动器调用显式 jar；`--jar` 仍直接执行指定 JAR；产出 ELF 用于 push 对拍/夹具，不当正式 native-chain B | JVM 发射与 native ELF 比 C；局部双链接检查保留，夹具不冒充资格 |
+| gates 的 `.github/actions/dawn-toolchain/action.yml` 准备调用及其调用者 | 依赖 JAR 的准备显式 jar；native 覆盖的准备显式 native，不能由 action 隐式替所有 job 猜链 | `build=false` 的 oracle 自建路径也核；缓存类型和实际冷建成本入账 |
+| gates `test-compiler` 的 `test compiler-plan`、`test selfhost`、`selfhost-fixpoint.sh`，以及 grammar/comptime/JVM 元数据子脚本 | 原 JVM 测试与固定点显式 jar，最终当前 JAR；native selfhost 测试另有入口 | ASM/Java 依赖仍走 JVM，保留独立 native 覆盖；fmt 步骤按自身能力另行登记 |
+| gates `contracts-6` 的 `__emit selfhost` 与 `asm-adapter-contract/run.sh` | 显式 jar，最终 JVM class 输出 | adapter oracle 及 class 常量池检查不被 native emit 替代 |
+| gates `java-target-classpath` 的 `lock --check selfhost`、`java-target-classpath-contract/run.sh`、bootstrap guards/input-manifest harness | JVM 能力显式 jar；selector/拒绝夹具各自显式测试 jar/native | 不能由外层 jar 环境屏蔽 native selector 负控，假 java 零调用断言保留 |
+| gates `lsp-workspace`、`lsp-workspace-2`、`lsp-references`、`lsp-references-2` 及 incremental LSP 脚本 | 原 JVM oracle/Java 解析样本显式 jar；纯 Dawn native LSP 覆盖显式 native | 每个 server 子进程选链可见，native 性能独立计时，不套用 JVM 旧数据 |
+| gates `wasm-target` 的 `__emitc nmain`、`native-selfhost-tests` 的 `--version`/`__emitc` | 现有 JVM 引导显式 jar，生成的 wasm/native 工具分别直接运行 | 原引导 oracle 保留，新增 native 启动覆盖单独声明 |
+| gates `docs` 的 `doc-check.py`、`test site`，`test-programs` 的 stdlib/package 测试 | 当前检查含 build-to-jar/Java 依赖的入口显式 jar；纯 Dawn 可迁 native 的步骤逐项登记 | checked blocks 的目标/产物类型不被默认变化偷换 |
+| gates `site` 的 cache-keys/prepare/build，以及 `scripts/site-dist-diff.sh` | prepare/stamp 与对拍 JVM leg 显式 jar；已准备的 site native leg 直接 ELF | 同树、同 tag 可比 C/wasm/site 文件集逐字节一致，receipt 身份各自核 |
+| gates `prev-diff` 的 selfhost prev/run/fmt/lsp/param 差分（含 range 重跑） | HEAD JVM leg 显式 jar，上一 release JAR leg 保留 | N/N−1 与重跑范围语义不变 |
+| gates `prev-diff-native`、`prev-diff-native-2` 的 release-native、native-cli-diff 与 native-fixpoint 下游 | 发射/manifest/stamp/JVM oracle 显式 jar；被测 native ELF 直接执行；新源码启动覆盖显式 native | 两侧来源分离，`__emitc`、JAR build、Java probe、LSP 子进程均逐项钉链 |
+| 编辑器需要 Java 类型解析的 LSP 启动环境 | 显式 `DAWN_SEED_CHAIN=jar`，最终 JVM LSP | 纯 Dawn native LSP 入口仍可独立使用 |
+
+pre3 的完成证据须包含扩展后的全量调用表及未迁入口为零的核对；本表不能作为省略间接消费者的理由。
+部署仍按 tag，先 Playground 后 site，并保留 `DAWN_WASM_CC`；pre3 做离线预检，不执行生产部署。
+
+### 13.7 刀序、验收与停止判据
+
+每刀一 PR；pre0/pre1/pre2/pre3 全部保持默认 jar。S3/S4 与全部前置实现完成，再冻结 P3 输入，P3 放行后才有真正 P4。
+
+| 刀 | 内容与验收 | 停止判据 |
+|---|---|---|
+| P4-pre0 合同 | 本节与 bootstrap 同步；三模式 chain/exec 唯一，九件角色/三类 receipt/阶段表一致；doc-check 0 unknown、mutation-anchor-preflight 与 anchor-guard 通过 | 若要求 native 无 JVM 产 JAR，范围改变，回交另案；不以临时 fallback 顶替 |
+| P4-pre1 builder 与 receipt | 共用 S→A→B 原语，release 追加 C；准备 seed 配对树与 portable capture；完整 receipt 跨 job 验来源/实际 CC。错 seed/std/runtime/CC、缺 stage、换 A/B/receipt 的负控先红；真实无 Java 候选 B 与同输入 release 路径一致，不复制 C flag 表 | A 起不来、B/C 不等、来源身份不符即停；旧 S 不兼容回交桥接发布，不改用 JAR |
+| P4-pre2 启动器 | 两阶段 generation、输入/ELF/toolchain stamp、锁和原子提交；默认 jar，显式 native 可用；三模式行为与 Python 边界明确。验 argv/cwd/退出码、热命中零编译、逐类输入失效、中断/并发/污染拒绝，native Java exec=0；报告冷/热实测 | 自动回退、直接执行旧 S、跨链缓存混用、dirty 源未失效或 native 需要 JVM，任一拒绝合并 |
+| P4-pre3 消费者 | §13.6 逐入口钉链并扩展间接调用；双链同树对拍、部署离线预检；README 英文先改与译本同步；原型引用迁移与删除输入安排；所有应执行 gates/ci/tile completed/success，steps_lock/Gate-Budget 完整 | site/Playground 仍猜 JAR、oracle 同源、暗增 N 次冷建或预算无来源，不切默认 |
+| P3 机制修补与最终资格 | 先让 qualify 接 `--lock` 并验证实际种子绑定；`check --base` 接 CI 并补 P2 预算；机制可在前置期间单独 PR，但 gates.yml 写者串行。最终冻结后 initial/真实 lock、三组配对、B 自身种子资格与独立 verify、五项演练、七日观测全部齐备 | 输入在变则顺延；任一配对失败或 native seed 归因失败，P4 停并回交；失败样本不得删除再凑 3/3 |
+| P4 默认与首个 schema 2 发布 | P3 放行；合法 set-chain 历史、精确 tag commit 证据和完整门禁；v0.107.0 九件封存。冷下载聚合核 B/full build id/commit/lock/proof，无 Java 安装 hello，同 tag 重跑只验证；源码默认执行当前 B，显式 jar 可用 | 资格/观测失格、E2、聚合不符或部署可比产物不符，停并回交；不改已发布资产，错版新 tag |
+| P4 后晋级 | 发布 B 与 P3 候选 B、tag commit、配对树完全相同才复用 B 的 seed-promotion receipt，否则重跑资格与独立 verify；advance-native-seed promote，JAR 原协议另推进；新 S 能编当前源且回滚演练可用 | receipt 对象是旧 S 或错 tag 即拒绝；不得以“旧 S 造出 B”替代“B 可作 S” |
+
+最终冻结顺序：S3/S4、全部 P4-pre、P3 机制修补与 0.107.0 版本准备收完 → initial-seed 资格并生成真实 lock（仍 jar）
+→ 对实际 lock/commit/tree 重新冻结 → P3 最终输入资格、三组配对、拟晋级 B 的种子资格及独立 verify、演练、七日观测
+→ 满足门槛才切默认并发布 → 冷下载对账与晋级 → P5 长期预算收口；D12-3 另起设计。
+
+`initial`、`set-chain`、VERSION、原型删除、merge/rebase 都可能改变当前协议绑定的 commit/tree。
+补裁一仍要求 P4 合并时删除 `scripts/native-seed-prototype/`：pre3 先迁引用并准备删除清单；
+若要把实际删除前移到 pre3 须协调者裁定。无论何时删，实际发布候选的删除后输入都须重核/重跑资格与三组配对。
+最终 merge sha 或 set-chain 后身份不同也同样处理，不能手改 receipt、沿用旧包或以“只是 metadata”豁免。
+若要分离编译输入与控制记录身份，须在 P3 前明确并实现新协议；现有全树绑定不提供豁免。
+
+绑定不得递归：initial receipt 资格 S，再由真实 lock 引用；final-inputs receipt 资格实际最终树，作为外部证据，
+不反写正在资格的 lock。B 先有描述 ELF/配对树的待晋级输入 lock，再取得 seed-promotion receipt，
+随后正式 lock 引用该摘要；不能要求 receipt 的输入 lock hash 等于含该 receipt 摘要的未来 lock hash。
+P3 的 `--lock` 与晋级消费者必须把这条非循环关系落实为可验证规则。
+
+三组配对是同一最终冻结输入的两次完整重链为一组、共三组；P1 六个 runner 成功不等于 P3 3/3。
+七日按补裁一为至少七个有样本日、至少十次成功 main push 经过 native 路径、归因失败零。
+默认 jar 时可通过显式 native 固定路径观测，但须覆盖最终 selector/lock/失败语义与准备成本；
+默认切换若改变 job/steps/实际成本，须先消除差异或重新起窗。K5/P1 旧证据不替代最终 P3。
+D 的 pole 红灯仍归 CI 刀 5，不属本项观测；不降低 native 归因审计标准。
+
+### 13.8 尚须定稿的实施边界
+
+补裁四已裁定 B 语义、显式 JAR、完整配对覆盖、环境/Python 边界与刀序。
+仍需在相应实现刀前明确：本机 CC 可接受范围及库闭包核验；覆盖配对输入接口；chain receipt 留存期限；
+commit/tree 与控制记录若要分离的非循环绑定协议；原型删除是否获准前移。
+这些未决项不得解释成默认切换许可。pre1/pre2 必须以可审查接口和负控定稿，P3 必须以实际最终输入证据放行。
