@@ -365,6 +365,10 @@ def main():
     ap.add_argument("--out", type=pathlib.Path)
     ap.add_argument("--allow-empty", action="store_true")
     ap.add_argument("--restep", type=pathlib.Path)
+    ap.add_argument("--quality-warnings", action="store_true",
+                    help="report data quality errors as warnings and exit 0 on them "
+                         "(the nightly report, which must not fail on a one-off API "
+                         "clock anomaly); the default keeps them an error")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
     if args.selftest:
@@ -393,9 +397,20 @@ def main():
     print(f"image reads: {report.get('image_reads', 'not recorded')}")
     for line in summary_lines(report):
         print(line)
-    for issue in report["data_quality_errors"]:
-        print(f"data quality error: {issue}", file=sys.stderr)
-    return int(bool(report["data_quality_errors"]))
+    return quality_status(report["data_quality_errors"], args.quality_warnings)
+
+
+def quality_status(errors, as_warnings):
+    """Print the data quality errors and return the exit status they earn:
+    1 by default, 0 when they are only warnings (--quality-warnings), in which
+    case the count is printed so a report still shows how much was set aside."""
+    label = "warning: data quality" if as_warnings else "data quality error"
+    for issue in errors:
+        print(f"{label}: {issue}", file=sys.stderr)
+    if as_warnings and errors:
+        print(f"warning: {len(errors)} data quality error(s) set aside; "
+              "their records are not counted in the observations")
+    return int(bool(errors) and not as_warnings)
 
 
 if __name__ == "__main__":

@@ -1132,6 +1132,13 @@ def main():
         " and tile.yml); refuse every claim under the maximum its own"
         " workflow's report records (the nightly audit, not run on a push)",
     )
+    ap.add_argument(
+        "--quality-warnings",
+        action="store_true",
+        help="with --observed: print the reports' data quality errors as"
+        " warnings instead of failing on them (the nightly report). Claims"
+        " below an observed run still fail either way",
+    )
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parent.parent
@@ -1191,6 +1198,14 @@ def main():
             problems.extend(check_claims_under_pole(text, name, pole))
     if observations is not None:
         found, said = audit_observed(budgeted, observations)
+        if args.quality_warnings:
+            quality = [f for f in found if ": data quality error: " in f]
+            found = [f for f in found if f not in quality]
+            print(f"warning: {len(quality)} data quality error(s) in the"
+                  " observation reports; claims are held to the records"
+                  " that are valid")
+            for line in quality:
+                print(f"warning: {line}")
         problems.extend(found)
         notes.extend(said)
 
