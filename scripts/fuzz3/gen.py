@@ -45,6 +45,13 @@ argument list, a list literal, a concatenation or an initializer; a block
 argument that assigns a variable an earlier argument read; `?` inside the
 right-hand side of an assignment that reads its own target.
 
+Growth invariant: a statement that grows a collection or string var (an
+assignment, or the trace append) never reads that var or any var whose value
+was computed from it. Otherwise a loop doubles the value each iteration
+(`let s = trace`, then `trace = trace ++ [to_string(s)]`) and the const
+folding walks into the comptime allocation limit, a refusal the compiler is
+right to make (#914). CaseGen.dep keeps the dependency graph.
+
 Determinism: case i of batch seed S draws from random.Random("S:i") alone, so
 `--case i` regenerates exactly the case the batch contained, and a failure is
 reproduced from two integers.
@@ -52,6 +59,7 @@ reproduced from two integers.
 
 import argparse
 import random
+import re
 import sys
 
 # Type spellings. Per-case nominal types are written R and S and renamed to
@@ -108,8 +116,41 @@ class CaseGen:
         self.n = 0
         self.helpers = []         # (name, [param types], ret type)
         self.no_never = no_never
+        self.dep = {}             # var name -> names its value was computed from (see feeds)
 
     # ------------------------------------------------------------ utilities
+    # Growth must not feed itself. A var a loop appends to may be read by an
+    # expression that is itself appended to it (`let s = trace`, then
+    # `trace = trace ++ [to_string(s)]`), which doubles it every iteration and
+    # walks the program into the comptime allocation limit (#914). dep records,
+    # per collection-carrying var, the vars its value was computed from; a
+    # growing statement may read a var only when the target is not among that
+    # var's ancestors. Int and Bool carry no size, so they are neither tracked
+    # nor restricted.
+    def reads(self, text):
+        return set(re.findall(r"[A-Za-z_]\w*", text)) & set(self.dep)
+
+    def record(self, name, ty, text):
+        if ty in (INT, BOOL):
+            return
+        self.dep.setdefault(name, set()).update(self.reads(text) - {name})
+
+    def feeds(self, name, target):
+        """Whether `target`'s value reaches `name` through dep."""
+        seen, todo = set(), [name]
+        while todo:
+            n = todo.pop()
+            if n == target:
+                return True
+            if n not in seen:
+                seen.add(n)
+                todo += self.dep.get(n, ())
+        return False
+
+    def without_cycles(self, ctx, target):
+        return ctx.child(vars=[x for x in ctx.vars if x.ty in (INT, BOOL) or
+                               (x.name != target and not self.feeds(x.name, target))])
+
     def fresh(self, base="v"):
         self.n += 1
         return f"{base}{self.n}"
@@ -479,9 +520,14 @@ class CaseGen:
 
     # ---------------------------------------------------------- statements
     def assign_rhs(self, v, ctx, d):
+        rhs = self.assign_rhs_(v, ctx, d)
+        self.record(v.name, v.ty, rhs)
+        return rhs
+
+    def assign_rhs_(self, v, ctx, d):
         # The target's own value appears once at most, so a loop grows a list
         # or a string linearly rather than doubling it.
-        others = ctx.child(vars=[x for x in ctx.vars if x.name != v.name or x.ty == INT])
+        others = self.without_cycles(ctx, v.name)
         if v.ty == LINT:
             k = self.rng.random()
             if k < 0.5:
@@ -510,12 +556,14 @@ class CaseGen:
             name = self.fresh()
             e = self.expr(ty, ctx, d)
             ctx.vars.append(Var(name, ty, False))
+            self.record(name, ty, e)
             return [f"let {name}: {self.T(ty)} = {e}"]
         if r < 0.36:
             ty = self.pick([INT, INT, STR, LINT, LSTR, BOOL, REC])
             name = self.fresh()
             e = self.expr(ty, ctx, d)
             ctx.vars.append(Var(name, ty, True))
+            self.record(name, ty, e)
             return [f"var {name}: {self.T(ty)} = {e}"]
         mv = [v for v in ctx.vars if v.mut is True]
         if r < 0.52 and mv:
@@ -523,7 +571,9 @@ class CaseGen:
             return [f"{v.name} = {self.assign_rhs(v, ctx, d)}"]
         if r < 0.62 and ctx.trace and not ctx.in_lambda:
             t = self.pick(SHOWABLE)
-            return [f"{ctx.trace} = {ctx.trace} ++ [to_string({self.expr(t, ctx.child(vars=[v for v in ctx.vars if v.name != ctx.trace]), d)})]"]
+            e = self.expr(t, self.without_cycles(ctx, ctx.trace), d)
+            self.record(ctx.trace, LSTR, e)
+            return [f"{ctx.trace} = {ctx.trace} ++ [to_string({e})]"]
         if r < 0.7 and d > 0:
             c = self.cond(ctx, d)
             a = self.stmts(ctx.child(), d - 1, self.rng.randint(1, 2))
@@ -608,6 +658,7 @@ class CaseGen:
         ]
         for j in range(self.rng.randint(1, 4)):
             decls.append(self.helper(j, 2))
+        self.dep["trace"] = set()
         ctx = Ctx([Var("trace", LSTR, True)], STR, None, False, False, "trace")
         body = self.stmts(ctx, 3, self.rng.randint(3, 8))
         fin = self.expr(self.pick(SHOWABLE), ctx, 2)
