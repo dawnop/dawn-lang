@@ -233,6 +233,11 @@ def selftest():
     spec = importlib.util.spec_from_file_location("collector", Path(__file__).with_name("gate-observations.py"))
     collector = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(collector)
+    require(collector.quality_status(["e"], False) == 1 and
+            collector.quality_status([], False) == 0,
+            "data quality errors fail the collector by default")
+    require(collector.quality_status(["e"], True) == 0,
+            "--quality-warnings reports them without failing")
     run_process, sleep = collector.subprocess.run, collector.time.sleep
     calls, waits = [], []
 

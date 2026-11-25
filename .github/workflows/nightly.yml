@@ -232,8 +232,20 @@ jobs:
       - name: PyYAML for the steps digests
         run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml==6.0.3
 
+      # 2026-11-24: an observation is a report, not a gate. The audit's whole
+      # job is to say "a claim sits under a run that happened", and the same
+      # four lines had failed the workflow, and every nightly beside it, since
+      # 2026-10-15 while the issue carried 60 identical comments. So the step
+      # is continue-on-error: its outcome stays `failure` (the issue step
+      # reads that), the job and the workflow stay green, and the verdict goes
+      # where it is read: the job summary, with each claim below its worst run
+      # named first, and the issue, which gets a comment only when that set of
+      # claims changes. --quality-warnings turns a clock anomaly in the
+      # Actions API (a one-off, unfixable record) into a counted warning; a
+      # claim below an observed run is still a failure of the step.
       - name: every budget claim is at least its worst observed run
         id: audit
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -249,17 +261,42 @@ jobs:
           # tile.yml claims arrive without a tile.yml report. --allow-empty
           # because a week with no tile.yml run on main is an answer.
           python3 scripts/gate-observations.py --repo "$GITHUB_REPOSITORY" \
-              --since "$since" --runs 150 --out obs.json > budgets.txt 2>&1 &&
+              --since "$since" --runs 150 --quality-warnings \
+              --out obs.json > budgets.txt 2>&1 &&
             python3 scripts/gate-observations.py --repo "$GITHUB_REPOSITORY" \
               --workflow tile.yml --allow-empty --since "$since" --runs 150 \
-              --out tile-obs.json >> budgets.txt 2>&1 &&
+              --quality-warnings --out tile-obs.json >> budgets.txt 2>&1 &&
             python3 scripts/check-gate-budgets.py --observed obs.json \
-              --observed tile-obs.json >> budgets.txt 2>&1 || status=$?
+              --observed tile-obs.json --quality-warnings >> budgets.txt 2>&1 \
+            || status=$?
           cat budgets.txt
+          # The claims below their worst run, one line each, for the summary
+          # and the issue; the same text is the issue's verdict.
+          grep -o '[A-Za-z_.-]*\.yml:[0-9]* ([^)]*): .* but ran [0-9]*s' budgets.txt \
+            | sort -u > claims.txt || true
+          warnings=$(grep -c '^warning: ' budgets.txt || true)
+          {
+            echo "### Budget audit: $(wc -l < claims.txt) claim(s) below their worst observed run, ${warnings:-0} warning line(s)"
+            echo
+            if [ -s claims.txt ]; then
+              echo '```'
+              cat claims.txt
+              echo '```'
+            fi
+            echo "<details><summary>Full output</summary>"
+            echo
+            echo '```'
+            cat budgets.txt
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
           exit "${status:-0}"
 
+      # Not `failure()`: the step above failed under continue-on-error, so the
+      # job is green and `failure()` is false. The step's outcome is the
+      # pre-continue-on-error result.
       - name: report under-declared budgets as an issue
-        if: failure() && steps.audit.outcome == 'failure'
+        if: ${{ !cancelled() && steps.audit.outcome == 'failure' }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -270,21 +307,46 @@ jobs:
             echo "worst observed run of their job, or could not read the runs."
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo
+            if [ -s claims.txt ]; then
+              echo "Claims below their worst observed run:"
+              echo
+              echo '```'
+              cat claims.txt
+              echo '```'
+              echo
+            else
+              echo "No claim was named below a run: the audit could not read the runs"
+              echo "or a policy check failed; the output says which."
+              echo
+            fi
             echo "Restate each line the output names (3x rule, run pole) or say"
             echo "why the observation is an outlier. Output:"
             echo
             echo '```'
             cat budgets.txt 2>/dev/null || echo "(no output was captured)"
             echo '```'
+            # The verdict is the set of claims, so a night with the same
+            # claims is not commented again whatever else the output says.
+            if [ -s claims.txt ]; then
+              echo "<!-- verdict: claims-$(sha256sum claims.txt | cut -c1-16) -->"
+            else
+              echo "<!-- verdict: no-claims-named -->"
+            fi
           } > issue.md
           scripts/nightly-issue.sh "nightly: gate budgets under-declared" issue.md
 
       # The totals are a report, so they run whether or not the audit above
       # was green. The table goes in the step summary every night; the issue
       # only when gate-totals.py exits 1.
+      #
+      # Also continue-on-error, for the reason given at the audit step.
+      # --quality-warnings is why the table no longer disappears when an old
+      # run has a bad clock: the collector exits 0 on it and the table is
+      # built from the records that are valid.
       - name: job-seconds per push, week against week
         id: totals
         if: ${{ !cancelled() }}
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -292,10 +354,11 @@ jobs:
           set -euo pipefail
           since=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)
           python3 scripts/gate-observations.py --repo "$GITHUB_REPOSITORY" \
-              --since "$since" --runs 400 --out ci-weeks.json > totals.txt 2>&1 &&
+              --since "$since" --runs 400 --quality-warnings \
+              --out ci-weeks.json > totals.txt 2>&1 &&
             python3 scripts/gate-observations.py --repo "$GITHUB_REPOSITORY" \
               --workflow tile.yml --allow-empty --since "$since" --runs 400 \
-              --out tile-weeks.json >> totals.txt 2>&1 &&
+              --quality-warnings --out tile-weeks.json >> totals.txt 2>&1 &&
             python3 scripts/gate-totals.py --ci ci-weeks.json \
               --tile tile-weeks.json > table.md 2>> totals.txt || status=$?
           cat totals.txt
@@ -303,6 +366,13 @@ jobs:
             cat table.md
             cat table.md >> "$GITHUB_STEP_SUMMARY"
           fi
+          {
+            echo "### Gate totals: $([ -z "${status:-}" ] && echo within their limits || echo over a limit or unreadable), $(grep -c '^warning: ' totals.txt || true) warning line(s)"
+            echo
+            echo '```'
+            cat totals.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           exit "${status:-0}"
 
       - name: report gate totals over their limits as an issue
