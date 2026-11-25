@@ -19,6 +19,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$(pwd)
+qualification=()
+if [ "${1:-}" = --qualification ]; then
+  qualification=(--qualification)
+  shift
+fi
+if [ "$#" -ne 0 ]; then
+  echo "usage: $0 [--qualification]" >&2
+  exit 2
+fi
 
 # Each generation's C is also written as translation units (`--split`), and
 # the units compile in parallel (scripts/cc-units.sh; docs/c-tu-split-design.md).
@@ -137,7 +146,7 @@ java -XX:-UsePerfData -Xss512m -jar "$root/build/dawn-selfhost.jar" __emitc \
   "$native_entry" -o "$work/A.c" --build-info "$work/A.info.c" \
   --split "$work/A.units"
 assert_inputs_unchanged "after generation A"
-"$root/scripts/cc-units.sh" -o "$work/dawnc-A" "$work/A.units" "$work/A.info.c"
+"$root/scripts/cc-units.sh" "${qualification[@]+"${qualification[@]}"}" -o "$work/dawnc-A" "$work/A.units" "$work/A.info.c"
 
 # generation B: A compiles the driver itself; the C must match A's exactly
 assert_inputs_unchanged "before generation B"
@@ -159,7 +168,7 @@ if ! diff -r "$work/A.units" "$work/B.units" > "$work/units.diff"; then
   sed -n '1,40p' "$work/units.diff" >&2
   exit 1
 fi
-"$root/scripts/cc-units.sh" -o "$work/dawnc-B" "$work/B.units" "$work/B.info.c"
+"$root/scripts/cc-units.sh" "${qualification[@]+"${qualification[@]}"}" -o "$work/dawnc-B" "$work/B.units" "$work/B.info.c"
 
 # generation C: B compiles the driver; B == C is the fixed point
 "$work/dawnc-B" emitc "$native_entry" -o "$work/C.c" \

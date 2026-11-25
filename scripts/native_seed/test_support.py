@@ -17,11 +17,15 @@ def compiler_record():
              for p, executable in ((cc[1:], True), ('usr/bin/ld', True), ('usr/bin/ld.bfd', True),
                                    ('usr/lib/x86_64-linux-gnu/libc.a', False),
                                    ('usr/lib/gcc/x86_64-linux-gnu/13/libgcc.a', False))}
+    files.update({directory.lstrip('/') + '/' + name: ('100644', b'fixture ' + name.encode())
+                  for name, directory in toolchain.DRIVER_INPUTS.items()})
     rows = c.inventory(files)
     return {'schema': 1, 'kind': 'native-cold-toolchain', 'recipe': toolchain.RECIPE,
             'compiler': {'executable': cc, 'sha256': c.digest(files[cc[1:]][1]),
                          'version': 'Ubuntu clang version 18.1.3 (fixture)',
                          'triple': 'x86_64-pc-linux-gnu', 'resource_dir': '/usr/lib/llvm-18/lib/clang/18'},
+            'driver': {'flags': toolchain.qualification_flags(),
+                       'files': {name: directory + '/' + name for name, directory in toolchain.DRIVER_INPUTS.items()}},
             'inventory': rows, 'inventory_sha256': c.inventory_sha(rows),
             'executables': {'/' + row['path']: row['sha256'] for row in rows if row['executable']},
             'origins': {p: 'fixture' for p in files}, 'scaffold': list(toolchain.SCAFFOLD)}
