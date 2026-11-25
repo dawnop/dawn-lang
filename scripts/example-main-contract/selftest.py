@@ -67,6 +67,7 @@ def install_real_toolchain(root: Path) -> None:
 def run_contract(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["DAWN_SEED_CHAIN"] = "jar"
     return subprocess.run(
         [sys.executable, "scripts/example-main-contract/run.py", *argv],
         cwd=root,
