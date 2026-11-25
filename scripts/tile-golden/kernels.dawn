@@ -393,6 +393,12 @@ pub type MmShape = { m: Int, n: Int, k: Int }
 
 pub fn mm_shape() -> MmShape = MmShape { m = MM_M, n = MM_N, k = MM_K }
 
+# A shape that is a multiple of no plan's tile in any of the three dimensions,
+# with rows of 203 and 299 elements (406 and 598 bytes for 16-bit formats, 203
+# and 299 for 8-bit ones: no row is a multiple of 16 bytes). The tail goldens
+# and the device family mmtail both use it.
+pub fn mm_tail_shape() -> MmShape = MmShape { m = 301, n = 203, k = 299 }
+
 # Architecture and element format are types, not strings. `Arch` is closed, so
 # a table cannot be asked about a spelling nobody wrote, and `MmElem` is
 # implemented for exactly the formats that have a matmul: an unsupported
@@ -499,11 +505,20 @@ fn recording_policy(arch: Arch, row_tile: Int, hints: ByArch[EntryHints], at: Lo
   }
 }
 
+# A shape need not be a multiple of the tiles (G14-2). The grid takes a block
+# for every part of M and N, so the last row and column of blocks may run off
+# C: C's view masks those stores, and A's and B's views read zero past their
+# extents (`cells` pads with PadZero), so the K blocks that run off K add
+# 0 * 0. The K loop therefore runs the ceiling of K over the tile, counted
+# here on the host: for a shape that is a multiple the count is the same
+# integer constant as before, and so are the recorded bytes.
+fn k_blocks(k: Int, tk: Int) -> Int = (k + tk - 1) / tk
+
 # A's rows follow grid axis 0 and B's columns follow axis 1. Their K
 # cells follow the loop; the accumulator is its carried value.
 fn mm_body(a: Param[Float], b: Param[Float], c: Param[Float], cfg: MmTiles, shape: MmShape) -> Unit !Dev = {
   var acc = zeros(c)
-  for k in d_range(0, shape.k / cfg.tk) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
+  for k in d_range(0, k_blocks(shape.k, cfg.tk)) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
   store_cell(c, acc)
 }
 
@@ -520,13 +535,15 @@ pub fn mm_record[D: MmElem](dt: Dtype[D], arch: Arch, shape: MmShape, plan: Opti
   let c = selected.tiles
   recording_policy(arch, c.tm, selected.hints, at = at)
   if c.tn <= 0 || c.tk <= 0 { panic("matmul: tile dimensions must be positive", at = at) } else { () }
-  if shape.m <= 0 || shape.n <= 0 || shape.k <= 0 || shape.m % c.tm != 0 || shape.n % c.tn != 0 || shape.k % c.tk != 0 {
-    panic("matmul: dimensions must be positive multiples of the configured tiles", at = at)
+  if shape.m <= 0 || shape.n <= 0 || shape.k <= 0 {
+    panic("matmul: dimensions must be positive", at = at)
   } else { () }
   mm_trace(dt, c, shape, selected.hints)
 }
 
 fn mm_named[D: MmElem](name: String, arch: Arch, dt: Dtype[D]) -> TileProg = TileProg { ..mm_record(dt, arch, mm_shape()), name = name }
+
+fn mm_tail_named[D: MmElem](name: String, arch: Arch, dt: Dtype[D]) -> TileProg = TileProg { ..mm_record(dt, arch, mm_tail_shape()), name = name }
 
 # The golden harness runs this through both backends with the default
 # matmul item. Bypassing the factory's filter must make these checks red.
@@ -548,7 +565,10 @@ fn mm_config_check() -> Unit = {
   let _a = mm_record(F64, Sm100, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 128, tn = 64, tk = 32 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))
   let _b = mm_record(F64, Sm90, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = [for_arch("sm_90", entry_hints(num_cta_in_cga = Some(2)))] }))
   let _c = mm_record(F64, Sm90, mm_shape())
-  mm_expect(str.contains(mm_refusal(() => mm_record(F64, Sm90, MmShape { m = 256, n = 256, k = 255 })), "positive multiples"))
+  let _tail = mm_record(F64, Sm90, MmShape { m = 256, n = 256, k = 255 })
+  for bad in [MmShape { m = 0, n = 256, k = 256 }, MmShape { m = 256, n = 0 - 1, k = 256 }, MmShape { m = 256, n = 256, k = 0 }] {
+    mm_expect(str.contains(mm_refusal(() => mm_record(F64, Sm90, bad)), "dimensions must be positive"))
+  }
   # Refusals must see the same default and whole-group override as IR.
   let defaults = [for_arch("default", entry_hints(num_cta_in_cga = Some(2)))]
   let tiles = MmTiles { tm = 64, tn = 64, tk = 32 }
@@ -568,7 +588,8 @@ fn mm_format_check[D: MmElem](dt: Dtype[D]) -> Unit = {
   let _d = mm_record(dt, Sm100, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 128, tn = 64, tk = 32 }, hints = [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))] }))
   let _e = mm_record(dt, Sm90, mm_shape(), plan = Some(MmPlan { tiles = MmTiles { tm = 256, tn = 64, tk = 32 }, hints = [for_arch("sm_90", entry_hints(num_cta_in_cga = Some(2)))] }))
   let _f = mm_record(dt, Sm90, mm_shape())
-  mm_expect(str.contains(mm_refusal(() => mm_record(dt, Sm90, MmShape { m = 256, n = 256, k = 255 })), "positive multiples"))
+  let _tail = mm_record(dt, Sm90, MmShape { m = 301, n = 203, k = 255 })
+  mm_expect(str.contains(mm_refusal(() => mm_record(dt, Sm90, MmShape { m = 256, n = 256, k = 0 })), "dimensions must be positive"))
 }
 
 # ---- the dtype-generic GEMM and its fused epilogues (G14-1) ----
@@ -620,7 +641,7 @@ impl GemmElem[BF16] {
 # `mm_body`, and leaves it unconverted for the epilogue.
 fn gemm_acc_loop[D: GemmElem](dt: Dtype[D], a: Param[D], b: Param[D], cfg: MmTiles, shape: MmShape) -> Tile[D.Acc] !Dev = {
   var acc = gemm_zero(dt, [cfg.tm, cfg.tn])
-  for k in d_range(0, shape.k / cfg.tk) { acc = gemm_mma(load_at(a, [k]), load_at(b, [k]), acc) }
+  for k in d_range(0, k_blocks(shape.k, cfg.tk)) { acc = gemm_mma(load_at(a, [k]), load_at(b, [k]), acc) }
   acc
 }
 
@@ -629,8 +650,8 @@ fn mm_domain(arch: Arch, selected: MmPlan, shape: MmShape, at: Loc) -> Unit = {
   let c = selected.tiles
   recording_policy(arch, c.tm, selected.hints, at = at)
   if c.tn <= 0 || c.tk <= 0 { panic("matmul: tile dimensions must be positive", at = at) } else { () }
-  if shape.m <= 0 || shape.n <= 0 || shape.k <= 0 || shape.m % c.tm != 0 || shape.n % c.tn != 0 || shape.k % c.tk != 0 {
-    panic("matmul: dimensions must be positive multiples of the configured tiles", at = at)
+  if shape.m <= 0 || shape.n <= 0 || shape.k <= 0 {
+    panic("matmul: dimensions must be positive", at = at)
   } else { () }
 }
 
@@ -1452,7 +1473,7 @@ const MMF_T: Int = 32
 # memory either way.
 fn mm_f16_body(a: Param[F16], b: Param[F16], c: Param[F16], cfg: MmTiles, shape: MmShape) -> Unit !Dev = {
   var acc = zeros(c)
-  for step in d_range(0, shape.k / cfg.tk) { acc = mma(load_at(a, [step]), load_at(b, [step]), acc) }
+  for step in d_range(0, k_blocks(shape.k, cfg.tk)) { acc = mma(load_at(a, [step]), load_at(b, [step]), acc) }
   store_cell(c, acc)
 }
 
@@ -1505,7 +1526,7 @@ const MMI_T: Int = 32
 
 fn mm_i8_body(a: Param[I8], b: Param[I8], c: Param[I32], cfg: MmTiles, shape: MmShape) -> Unit !Dev = {
   var acc = zeros(c)
-  for k in d_range(0, shape.k / cfg.tk) { acc = mmai(load_at(a, [k]), load_at(b, [k]), acc) }
+  for k in d_range(0, k_blocks(shape.k, cfg.tk)) { acc = mmai(load_at(a, [k]), load_at(b, [k]), acc) }
   store_cell(c, acc)
 }
 
@@ -5892,6 +5913,16 @@ fn trace(name: String) -> TileProg = match name {
   "gemm_scale_bf16" -> gemm_bf16_scale("gemm_scale_bf16", Generic, mm_shape())
   "gemm_bias_relu_bf16" -> gemm_bf16_bias_relu("gemm_bias_relu_bf16", Generic, mm_shape())
   "gemm_bias_relu_bf16_sm100" -> gemm_bf16_bias_relu("gemm_bias_relu_bf16_sm100", Sm100, mm_shape())
+  "matmul_tail" -> mm_tail_named("matmul_tail", Generic, F64)
+  "matmul_f16_tail" -> mm_tail_named("matmul_f16_tail", Generic, F16)
+  "matmul_f16_tail_sm90" -> mm_tail_named("matmul_f16_tail_sm90", Sm90, F16)
+  "matmul_f16_tail_sm100" -> mm_tail_named("matmul_f16_tail_sm100", Sm100, F16)
+  "matmul_i8_tail_sm100" -> mm_tail_named("matmul_i8_tail_sm100", Sm100, I8)
+  "gemm_bf16_tail" -> gemm_bf16("gemm_bf16_tail", Generic, mm_tail_shape())
+  "gemm_bf16_tail_sm90" -> gemm_bf16("gemm_bf16_tail_sm90", Sm90, mm_tail_shape())
+  "gemm_bf16_tail_sm100" -> gemm_bf16("gemm_bf16_tail_sm100", Sm100, mm_tail_shape())
+  "gemm_bias_relu_bf16_tail" -> gemm_bf16_bias_relu("gemm_bias_relu_bf16_tail", Generic, mm_tail_shape())
+  "gemm_bias_relu_bf16_tail_sm100" -> gemm_bf16_bias_relu("gemm_bias_relu_bf16_tail_sm100", Sm100, mm_tail_shape())
   "batched_matmul" -> {
     let (p, _e) = trace3("batched_matmul", In(F64, Whole), In(F64, Whole),
       Out(F64, cells([BMM_B, BMM_M, BMM_N], [1, BMM_T, BMM_T], along = [Axis(2), Axis(0), Axis(1)])), batched_matmul)
@@ -7811,7 +7842,29 @@ fn tail_records(dir: String) -> Unit !io = {
   }
 }
 
+# The device family mmtail (G14-2) launches each architecture's own plans on the
+# tail shape, so its cubins come from the factories rather than from the
+# goldens (which pin only some architectures). `tiles` says what the family
+# must launch: one line per kernel, name then the three tiles.
+fn mmtail_progs(arch: Arch) -> List[(TileProg, MmTiles)] = [
+  (mm_tail_named("mmtail_f64", arch, F64), mm_plan(F64, arch).tiles),
+  (mm_tail_named("mmtail_f16", arch, F16), mm_plan(F16, arch).tiles),
+  (mm_tail_named("mmtail_i8", arch, I8), mm_plan(I8, arch).tiles),
+  (gemm_bf16("mmtail_bf16", arch, mm_tail_shape()), gemm_plan(BF16, arch).tiles),
+  (gemm_bf16_bias_relu("mmtail_bias", arch, mm_tail_shape()), gemm_plan(BF16, arch).tiles)]
+
+fn mmtail_records(arch: Arch, dir: String) -> Unit !io = {
+  for (p, t) in mmtail_progs(arch) {
+    match with_fs_real(() => write_bytes("${dir}/${p.name}.tilebc", encode(p))) {
+      Ok(_) -> ()
+      Err(e) -> panic("mmtail: cannot write ${p.name}: ${e}")
+    }
+    println("tiles ${p.name} ${t.tm} ${t.tn} ${t.tk}")
+  }
+}
+
 pub fn main() -> Unit !io = match args() {
+  ["--mmtail-record", arch, dir] -> mmtail_records(arch_from_name(arch), dir)
   ["--inbounds-witness", promised, path] -> {
     if promised != "true" && promised != "false" { panic("inbounds witness expects true or false") }
     let p = inbounds_witness(promised == "true")
@@ -7907,6 +7960,8 @@ pub fn main() -> Unit !io = match args() {
         ++ "|staged_load|staged_store|staged_for|staged_atomic|staged_asym|staged_effect_nested|staged_unit|staged_value|staged_nested|staged_one|bitwise_i8|bitwise_i16|bitwise_i32|bitwise_i64|bitwise_mask|shift_i8|shift_i16|shift_i32|shift_i64|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
         ++ "|matmul_f16_sm90|matmul_f16_sm100|matmul_i8_sm90|matmul_i8_sm100"
         ++ "|gemm_bf16|gemm_bf16_sm90|gemm_bf16_sm100|gemm_scale_bf16|gemm_bias_relu_bf16|gemm_bias_relu_bf16_sm100"
+        ++ "|matmul_tail|matmul_f16_tail|matmul_f16_tail_sm90|matmul_f16_tail_sm100|matmul_i8_tail_sm100"
+        ++ "|gemm_bf16_tail|gemm_bf16_tail_sm90|gemm_bf16_tail_sm100|gemm_bias_relu_bf16_tail|gemm_bias_relu_bf16_tail_sm100"
         ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
         ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"
         ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"

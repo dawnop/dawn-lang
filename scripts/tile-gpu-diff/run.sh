@@ -3075,6 +3075,55 @@ tail_result="$(verdict_of "$work/tail.out")"
   { cat "$work/tail.err" >&2; fail "tail_diff: a probe disagreed with its reference or a control stayed green (exit $rc)"; }
 echo "PASS  tail: partial tiles store masked and load padded on $gpu_name, every control red (tileiras $want_tileiras)"
 
+# G14-2, second knife: the matmul factories on a shape that is a multiple of
+# no tile, with this card's own plans (the same factories the goldens pin).
+# f64, f16 and i8 matmul, the bf16 to f32 GEMM and its bias and relu epilogue
+# each run M=301, N=203, K=299 against an expectation computed on the host for
+# the whole output buffer, sentinels past C included.
+mmtail_record() { # outdir; prints the cubin and tile arguments
+  local out="$1" k
+  mkdir -p "$out"
+  "$root/bin/dawn" run "$asm_proj" -- --mmtail-record "$gpu_name" "$out" > "$out/record.out" 2> "$out/record.err" ||
+    { cat "$out/record.err" >&2; fail "mmtail recording failed in $out"; }
+  mmtail_args=()
+  for k in mmtail_f64 mmtail_f16 mmtail_i8 mmtail_bf16 mmtail_bias; do
+    assemble_golden "$k" "$out/$k.tilebc" "$out/$k.cubin"
+    mmtail_args+=("$out/$k.cubin" $(sed -n "s/^tiles $k //p" "$out/record.out"))
+  done
+  [ "${#mmtail_args[@]}" = 20 ] || fail "mmtail recording named no tiles for some kernel"
+}
+mmtail_record "$work/mmtail"
+build_native "$root/std" "$work/mmtail.bin" "$here/mmtail_diff.dawn"
+rc=0
+device "$work/mmtail.bin" "$gpu_name" "${mmtail_args[@]}" > "$work/mmtail.out" 2> "$work/mmtail.err" || rc=$?
+cat "$work/mmtail.out"
+mmtail_result="$(verdict_of "$work/mmtail.out")"
+[ "$rc" = 0 ] && [ "$mmtail_result" = pass ] ||
+  { cat "$work/mmtail.err" >&2; fail "mmtail_diff: a tail kernel disagreed with its independent reference (exit $rc)"; }
+echo "PASS  mmtail: the matmul factories hold a shape that is a multiple of no tile on $gpu_name (tileiras $want_tileiras)"
+
+# Each tail fault is a legal recording. It must assemble, launch, and be
+# rejected by the f16 kernel's named oracle; the oracle line is the kernel's
+# own, so the other four kernels (which the mutant leaves alone, except the
+# floor that every kernel shares) are not what turns it red.
+for m in mm-tail-k-floor mm-tail-no-pad mm-tail-out-roundup; do
+  variant="$work/$m-tree"
+  mkdir -p "$variant/scripts/tile-golden" "$work/$m-out"
+  cp "$golden/kernels.dawn" "$variant/scripts/tile-golden/kernels.dawn"
+  python3 "$golden/mutate.py" "$m" "$variant"
+  cp "$variant/scripts/tile-golden/kernels.dawn" "$asm_proj/src/main.dawn"
+  mmtail_record_rc=0
+  mmtail_record "$work/$m-out" || mmtail_record_rc=$?
+  cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
+  [ "$mmtail_record_rc" = 0 ] || fail "$m failed to record"
+  rc=0
+  device "$work/mmtail.bin" "$gpu_name" "${mmtail_args[@]}" > "$work/$m-out/device.out" 2> "$work/$m-out/device.err" || rc=$?
+  [ "$rc" != 0 ] || fail "$m stayed green"
+  grep -q '^  FAIL mmtail_f16:' "$work/$m-out/device.out" ||
+    { cat "$work/$m-out/device.out" >&2; fail "$m missed its named oracle (the f16 tail kernel)"; }
+  echo "PASS  mutant: $m (valid cubins, the mmtail_f16 oracle is red: $(sed -n 's/^  FAIL mmtail_f16: //p' "$work/$m-out/device.out" | cut -c1-120))"
+done
+
 # The ledger records one verdict for the tree: every family passes (or was
 # skipped on purpose), or it is the first thing that stopped one of them. The
 # list is in run order and is the only place the fold reads; fold_verdict.sh
@@ -3896,8 +3945,8 @@ mutant_mma_src="$work/kernels-mma.dawn"
 cp "$golden/kernels.dawn" "$mutant_mma_src"
 before=$(digest "$mutant_mma_src")
 python3 "$here/mutate.py" "$mutant_mma_src" mma-acc-not-carried \
-  '  for k in d_range(0, shape.k / cfg.tk) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }' \
-  '  for k in d_range(0, shape.k / cfg.tk) { acc = mma(load_at(a, [k]), load_at(b, [k]), zeros(c)) }'
+  '  for k in d_range(0, k_blocks(shape.k, cfg.tk)) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }' \
+  '  for k in d_range(0, k_blocks(shape.k, cfg.tk)) { acc = mma(load_at(a, [k]), load_at(b, [k]), zeros(c)) }'
 after=$(digest "$mutant_mma_src")
 echo "      mma-acc-not-carried: scripts/tile-golden/kernels.dawn md5 $before -> $after"
 mkdir -p "$work/proj-mma/src"
@@ -6540,7 +6589,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
   scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn scripts/tile-gpu-diff/scalar_diff.dawn scripts/tile-gpu-diff/entry6_diff.dawn scripts/tile-gpu-diff/read_layout_diff.dawn \
-  scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/gemm_diff.dawn scripts/tile-gpu-diff/tail_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
+  scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/gemm_diff.dawn scripts/tile-gpu-diff/tail_diff.dawn scripts/tile-gpu-diff/mmtail_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
   scripts/tile-gpu-diff/rounding.dawn scripts/tile-gpu-diff/rounding_cases.py \
   scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py scripts/tile-gpu-diff/fold_verdict.sh)"
 [ -z "$dirty" ] ||
@@ -6563,6 +6612,7 @@ summary="$summary shift:$(sed -n 's/^tiers //p' "$work/shift.out" | tail -n 1)"
 summary="$summary staged:$(sed -n 's/^tiers //p' "$work/staged.out" | tail -n 1)"
 summary="$summary gemm:$(sed -n 's/^tiers //p' "$work/gemm.out" | tail -n 1)"
 summary="$summary tail:$(sed -n 's/^tiers //p' "$work/tail.out" | tail -n 1)"
+summary="$summary mmtail:$(sed -n 's/^tiers //p' "$work/mmtail.out" | tail -n 1)"
 summary="$summary arch=$arch_probe"
 summary="$summary asm=$asm_probe"
 if [ -n "$note" ]; then line="$line # inputs=$inputs_digest $note; $summary"; else line="$line # inputs=$inputs_digest $summary"; fi
