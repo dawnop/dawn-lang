@@ -180,7 +180,7 @@ class DigestCache:
         self.recheck()
         written_ns = time.time_ns()
         entries = {path: dict(row, racy=row['racy'] or row['key'][3] >= written_ns - GRAIN_NS)
-                   for path, row in self.entries.items()}
+                   for path, row in self.entries.items() if path in self.observed}
         payload = {'schema': 1, 'generation': generation, 'written_ns': written_ns,
                    'entries': entries}
         replace_json(path, {'payload': payload, 'sha256': c.digest(c.canonical(payload))})
