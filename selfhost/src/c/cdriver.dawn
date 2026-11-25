@@ -10,9 +10,8 @@
 use std/io
 use std/io.{Env, Fs, Proc}
 use std/map
-use std/set
 use std/str
-use ir/core.{fn_key, ConstValue, CFun, CModule, CParam, CMode, COwned, CBorrowed, mode_owned}
+use ir/core.{ConstValue, CFun, CModule, CParam, CMode, COwned, CBorrowed, mode_owned}
 use check/types.{Adts, Traits, Impls, Sig, prelude_adts}
 use check/cx.{Cx}
 use ir/interp.{CtOut, ct_default}
@@ -411,7 +410,7 @@ fn build_units(
     if linting { found = found ++ lint.check_module(cls, tm, lm) }
     let core = if std_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [
-      EmitMod { logical = map.empty(), m = core, consts = merged_consts(cx, ct, const_vals), blocks = ct.blocks }
+      EmitMod { m = core, consts = merged_consts(cx, ct, const_vals), blocks = ct.blocks }
     ]
   }
   for cm in prog.modules {
@@ -420,7 +419,7 @@ fn build_units(
     if linting { found = found ++ lint.check_module(cm.class_name, cm.tm, lm) }
     let core = if with_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [
-      EmitMod { logical = map.empty(), m = core, consts = merged_consts(cm.cx, cm.ct, const_vals), blocks = cm.ct.blocks }
+      EmitMod { m = core, consts = merged_consts(cm.cx, cm.ct, const_vals), blocks = cm.ct.blocks }
     ]
     # only the entry module's `main` is the entry point (spec §10.5)
     if entry == "" && cm.cx.is_entry_module {
@@ -478,35 +477,11 @@ fn build_units(
     if not (fl.callee_side && fl.callsite_side) { singles = singles ++ [fl] }
   }
   let modes = flip_table(inferred, singles)
-  var logical_cores: List[CModule] = []
-  for unit in pre {
-    var fs: List[CFun] = []
-    for item in map.entries(unit.logical) {
-      let (_, f) = item
-      fs = fs ++ [f]
-    }
-    # Dictionary captures keep the declaring function's symbol identity.
-    # Ownership and unaliasing need the complete module dictionary union,
-    # including Plain-only factories whose closures run under observation.
-    # Filter physical entries after those passes, rather than losing that
-    # ownership fact along with an unneeded function body.
-    logical_cores = logical_cores ++ [unalias.elim_module(CModule { ..unit.m, fns = fs })]
-  }
-  let logical_modes = infer.infer_modes(logical_cores)
-  var logical_index = 0
   var units: List[EmitMod] = []
   for u2 in pre {
-    let core = rc.rc_module(infer.stamp_modes(logical_cores[logical_index], logical_modes), logical_modes)
-    var logical: Map[String, CFun] = map.empty()
-    for f in core.fns {
-      if match lv { Some(l) -> set.has(l.observed, fn_key(f)), None -> false } {
-        logical = map.insert(logical, fn_key(f), f)
-      }
-    }
-    logical_index = logical_index + 1
     units = units ++ [
       EmitMod {
-        ..u2, logical = logical,
+        ..u2,
         m = rc.rc_module(flip_callee(infer.stamp_modes(u2.m, inferred), singles), modes)
       }
     ]
@@ -762,7 +737,7 @@ test "the embedded C runtime matches runtime/c on disk" {
   io.with_fs_real(() => {
     # the staleness gate for the generated rtsrc.dawn, same shape as the
     # embedded-std one in stdlib.dawn
-    for f in ["dawn_provenance.h", "dawn_provenance.c", "dawn_rt.c", "dawn_rt.h", "dawn_ffi.h", "dawn_rt_wasi_eh.cc", "dawn_rt_wasi_tag.c"] {
+    for f in ["dawn_rt.c", "dawn_rt.h", "dawn_ffi.h", "dawn_rt_wasi_eh.cc", "dawn_rt_wasi_tag.c"] {
       let disk = match io.read_file("runtime/c/${f}") {
         Ok(t) -> t
         Err(e) -> panic("runtime/c/" ++ f ++ ": " ++ e.message)

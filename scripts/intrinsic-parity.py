@@ -184,8 +184,6 @@ def jvm_arms():
             "arms in gen_cintrinsic",
         )
     )
-    arms |= set(names(body(lines, "fn provenance_method(", "emit.dawn"),
-                      r'"(provenance_[A-Za-z_0-9]+)" ->', "emit.dawn", "provenance method references"))
     return arms
 
 
@@ -209,8 +207,6 @@ def c_arms():
     if "emit_intrinsic_values(" not in "\n".join(body(lines, "fn emit_intrinsic(", "emitc.dawn")):
         fail("emitc.dawn: the primitive wrapper no longer dispatches to emit_intrinsic_values")
     arms |= list_primitives()
-    arms |= set(names(body(lines, "fn provenance_target(", "emitc.dawn"),
-                      r'"(provenance_[A-Za-z_0-9]+)" ->', "emitc.dawn", "provenance targets"))
     return arms
 
 

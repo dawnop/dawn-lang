@@ -67,7 +67,6 @@ use std/memfs
 use jvm/codegen.{
   no_override, gen_adt
 }
-use embed/provenance_rt
 use embed/asm_diagnostics_rt
 use jvm/rtclasses.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class, gen_unit_class,
@@ -81,11 +80,10 @@ use jvm/rtclasses.{
   gen_ctl_class, gen_ctl_cont_class, gen_ctl_k_class, CTL_CLASS, CTL_CONT_CLASS, CTL_K_CLASS,
   gen_ctl_discard_class, CTL_DISCARD_CLASS
 }
-use jvm/emit.{emit_module, emit_module_mapped, gen_trait_interface, gen_provenance_sites, gen_provenance_data, gen_provenance_indices, JModMap}
+use jvm/emit.{emit_module, emit_module_mapped, gen_trait_interface, JModMap}
 use jvm/jmap
 use ir/core.{CModule, ConstValue, CMode}
 use ir/reach
-use ir/provenance
 use ir/reach.{Live}
 use ir/externs
 use ir/lower
@@ -319,7 +317,7 @@ fn collect_program_roots(
 ## The classes are the same either way: `emit_module_mapped` writes the plain
 ## emission's and reads the map off a second one.
 # Scope keys extend erased closure arity without changing the source value limit.
-fn scoped_fn_interfaces(modules: List[lower.LMod], adts: Adts, observed: Bool) -> List[(String, Bytes)] !io = {
+fn scoped_fn_interfaces(modules: List[lower.LMod], adts: Adts) -> List[(String, Bytes)] !io = {
   var arities: Set[Int] = set.empty()
   let base = set.from(fn_interface_arities())
   # These walks only collect a set. The map's insertion order would require
@@ -347,18 +345,18 @@ fn scoped_fn_interfaces(modules: List[lower.LMod], adts: Adts, observed: Bool) -
   }
   var out: List[(String, Bytes)] = []
   for arity in sort(set.to_list(arities)) {
-    out = out ++ [(fn_iface(arity), gen_fn_interface(arity, observed))]
+    out = out ++ [(fn_iface(arity), gen_fn_interface(arity))]
   }
   out
 }
 
-# Lower and analyze pristine calls before selecting Plain optimization.
-# Keeping this phase separate also keeps the driver below HugeMethodLimit.
-fn lower_program_modes(
+# Lower every module and decide what the program can reach. Keeping this phase
+# separate also keeps the driver below HugeMethodLimit.
+fn lower_program(
   std_mods: List[(String, Cx, TModule, CtOut)], mods: List[CheckedMod],
   traits: Traits, impl_table: Impls, adts: Adts, prog_fns: Map[(String, String), Sig],
   std_tests: Bool, target: String
-) -> (List[lower.LMod], List[lower.LMod], Option[Live], Map[Int, String]) !Fs !Proc !Env !Exit !Console !io = {
+) -> (List[lower.LMod], List[lower.LMod], Option[Live]) !Fs !Proc !Env !Exit !Console !io = {
   var std_lm: List[lower.LMod] = []
   for sm in std_mods {
     let (cls, _cx2, tm2, _ct2) = sm
@@ -435,11 +433,7 @@ fn lower_program_modes(
     }
     live = Some(reach.live_set(cmods, reach_roots, reach.list_roots(), extra_types))
   }
-  var source_core: List[CModule] = []
-  for l in std_lm { source_core = source_core ++ [lower.emitted_core(l)] }
-  for l in user_lm { source_core = source_core ++ [lower.emitted_core(l)] }
-  let provenance_sites = provenance.site_table(source_core, live)
-  (std_lm, user_lm, live, provenance_sites)
+  (std_lm, user_lm, live)
 }
 
 fn collect_program_full(
@@ -646,7 +640,7 @@ fn collect_program_full(
   # ride along for the user's modules only, because only those are emitted --
   # unless `dawn test --stdlib` asked for std's, in which case there is no
   # user module and std's are the whole program.
-  let (std_lm, user_lm, live, provenance_sites) = lower_program_modes(
+  let (std_lm, user_lm, live) = lower_program(
     std_mods, mods, traits, impl_table, adts, prog_fns, std_tests, target)
   let tuse =
     match live {
@@ -660,39 +654,10 @@ fn collect_program_full(
     None -> program_has_ctl(std_mods, mods)
     Some(l) -> l.ctl
   }
-  var payload_core: List[CModule] = []
-  for l in std_lm { payload_core = payload_core ++ [lower.emitted_core(l)] }
-  for l in user_lm { payload_core = payload_core ++ [lower.emitted_core(l)] }
-  let needs_observation = match live {
-    Some(value) -> value.observation || value.provenance_data
-    None -> provenance.has_data(payload_core)
-  }
-  var site_paths: Map[String, String] = map.empty()
-  for cm in mods { site_paths = map.insert(site_paths, cm.class_name, cm.path) }
-  if needs_observation {
-    var plain_classes: List[(String, Bytes)] = []
-    for item in classes {
-      let (name, _) = item
-      var replace = false
-      for k in fn_interface_arities() { if name == fn_iface(k) { replace = true } }
-      for tid in wants {
-        let tr = trait_of(traits, tid)
-        if name == tr_iface(None, tr.name) { replace = true }
-      }
-      if not replace { plain_classes = plain_classes ++ [item] }
-    }
-    classes = plain_classes
-    for k in fn_interface_arities() { classes = classes ++ [(fn_iface(k), gen_fn_interface(k, true))] }
-    for tid in wants {
-      let tr = trait_of(traits, tid)
-      classes = classes ++ [(tr_iface(None, tr.name), gen_trait_interface(sup, adts, tr, true))]
-    }
-    classes = classes ++ provenance_rt.classes() ++ gen_provenance_sites(provenance_sites, site_paths) ++ gen_provenance_data(provenance_sites, provenance.static_definitions(payload_core, live)) ++ gen_provenance_indices(provenance_sites, provenance.static_definitions(payload_core, live))
-  }
   if needs_ctl {
-    classes = classes ++ [(CTL_CLASS, gen_ctl_class(sup, provenance.enabled(live)))]
+    classes = classes ++ [(CTL_CLASS, gen_ctl_class(sup))]
     classes = classes ++ [(CTL_CONT_CLASS, gen_ctl_cont_class(sup))]
-    classes = classes ++ [(CTL_K_CLASS, gen_ctl_k_class(sup, provenance.enabled(live)))]
+    classes = classes ++ [(CTL_K_CLASS, gen_ctl_k_class(sup))]
   }
 
   # const values by declaring module, so importers can materialize them
@@ -761,7 +726,7 @@ fn collect_program_full(
       tests_info = tests_info ++ [(cm.class_name, cm.mod_path, names)]
     }
   }
-  classes = classes ++ scoped_fn_interfaces(std_lm ++ user_lm, adts, needs_observation)
+  classes = classes ++ scoped_fn_interfaces(std_lm ++ user_lm, adts)
   for outer in vendor.vendored_outers() {
     classes = classes ++ vendor.rt_class_family(outer)
   }

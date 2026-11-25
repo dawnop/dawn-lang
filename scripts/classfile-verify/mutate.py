@@ -74,8 +74,8 @@ MUTATIONS = {
     # The Never block (run.sh --never-mutants-only), in run order.
     "omit-statement-fallthrough": ((
         EMIT,
-        "    g1 = g2\n    if not stmt_falls { return (g1, false) }\n  }\n  match link {",
-        "    g1 = g2\n    if false { return (g1, false) }\n  }\n  match link {",
+        "    g1 = g2\n    if not stmt_falls { return (g1, false) }\n  }\n  match tl {",
+        "    g1 = g2\n    if false { return (g1, false) }\n  }\n  match tl {",
     ),),
     "reject-wide-sam-bottom": ((
         CHECKER,
@@ -88,19 +88,18 @@ MUTATIONS = {
          "    CallTwo -> { m.visitInsn(OP_POP) }"),
     ),
     "omit-direct-bottom": call_bottom(
-        "      call_entry(gx, g1.mv, owner, name, d, at)"),
+        "      call_entry(g1.mv, owner, name, d, at)"),
     "omit-dynamic-bottom": ((
         EMIT,
         "  if is_bottom(ret_static) {",
         "  if false {",
     ),),
     "omit-impl-bottom": call_bottom(
-        """      call_entry(gx, g1.mv, owner, impl_method_name(gx, owner, tr, subject, method), d, at)"""),
+        """      call_entry(g1.mv, owner, impl_method_name(gx, owner, tr, subject, method), d, at)"""),
     "omit-default-bottom": call_bottom(
-        """      call_entry(gx, g1.mv, owner, default_method_name(tr.name, method), d, at)"""),
+        """      call_entry(g1.mv, owner, default_method_name(tr.name, method), d, at)"""),
     "omit-trait-bottom": call_bottom(
-        """      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), entry_name(method, gx.observed_mode),
-        entry_desc(d, gx.observed_mode), true)"""),
+        """      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), method, d, true)"""),
     "omit-dictionary-bottom": ((
         EMIT,
         "    if is_bottom(ms.sig.ret) {",
