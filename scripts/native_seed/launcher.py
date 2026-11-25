@@ -42,7 +42,8 @@ def select(repo, fetch, *, git_cache=None, digest_cache=None):
         seed, lock_path, pair = (Path(value).absolute() for value in values)
         lock = builder.load_lock(lock_path)
         c.require(lock['seed']['sha256'] not in control['revoked'], 'revoked', 'override seed is revoked')
-        lockchain.override_seed(seed)
+        # regular_bytes plus verify_seed_bytes cover the override type and ELF
+        # checks in the same read as the required digest and identity probes.
         lockchain.verify_seed_bytes(c.regular_bytes(seed), lock)
         c.verify_seed_tree(repo, lock, pair, git_cache=git_cache, digest_cache=digest_cache)
         frame = {'selection': 'override', 'lock_sha256': c.digest(c.regular_bytes(lock_path)),
@@ -57,9 +58,9 @@ def select(repo, fetch, *, git_cache=None, digest_cache=None):
     return lock, lock_path, seed, pair, dict(frame, controls=control)
 
 
-def snapshot(repo, lock, frame, cc, development_cc, *, digest_cache=None, git_cache=None):
+def snapshot(repo, lock, frame, cc, development_cc, *, digest_cache=None, git_cache=None, live_paths=None):
     commit = c.git(repo, 'rev-parse', 'HEAD').decode().strip()
-    tree, files = builder.source_files(repo, commit, live=True, digest_cache=digest_cache, git_cache=git_cache)
+    tree, files = builder.source_files(repo, commit, live=True, digest_cache=digest_cache, git_cache=git_cache, live_paths=live_paths)
     tc = toolchain.prepare(cc, pinned=not development_cc, digest_cache=digest_cache)
     toolchain.verify_record(tc, pinned=not development_cc)
     compilation = inputs.compilation(files, lock, tc)
@@ -157,8 +158,8 @@ def generation(repo, fetch, cache=None):
         # Alternate clang is allowed only as a development recipe. All source
         # launcher generations, including pinned clang, remain development.
         development_cc = str(Path(cc).resolve()) != '/usr/lib/llvm-18/bin/clang'
-        untracked = c.git(repo, 'ls-files', '-z', '--others', '--exclude-standard')
-        expected, files, tc = snapshot(repo, lock, frame, cc, development_cc, digest_cache=digests, git_cache=git_cache)
+        live_paths = c.git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
+        expected, files, tc = snapshot(repo, lock, frame, cc, development_cc, digest_cache=digests, git_cache=git_cache, live_paths=live_paths)
         key = c.digest(c.canonical(expected))
         generations = c.safe_destination(cache / 'generations')
         generations.mkdir(exist_ok=True)
@@ -199,8 +200,8 @@ def generation(repo, fetch, cache=None):
         # before handing the verified executable to the caller.
         c.require(select(repo, fetch, git_cache=git_cache, digest_cache=digests)[-1] == frame, 'generation-inputs', 'seed controls changed during verification')
         c.require(c.git(repo, 'rev-parse', 'HEAD').decode().strip() == expected['commit'] and
-                  c.git(repo, 'ls-files', '-z', '--others', '--exclude-standard') == untracked,
-                  'generation-inputs', 'source provenance or untracked file set changed during verification')
+                  c.git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard') == live_paths,
+                  'generation-inputs', 'source provenance or live file set changed during verification')
         digests.recheck()
         stat_path = directory / 'stat-cache.json'
         if digests.changed or not stat_path.exists():

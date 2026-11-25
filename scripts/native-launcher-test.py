@@ -122,6 +122,9 @@ def live_inputs(work):
     _, added = builder.source_files(repo, commit, live=True)
     assert added['local/src/new.dawn'][1] == new.read_bytes() and added != before
     assert c.inventory(builder.source_files(repo, commit, live=True, digest_cache=cache)[1]) != cached_before
+    subprocess.run(['git', '-C', str(repo), 'add', 'local/src/new.dawn'], check=True)
+    assert 'local/src/new.dawn' in builder.source_files(repo, commit, live=True, digest_cache=cache)[1]
+    subprocess.run(['git', '-C', str(repo), 'reset', '-q', '--', 'local/src/new.dawn'], check=True)
     new.unlink()
     path = repo / 'local/src/main.dawn'
     path.write_bytes(path.read_bytes() + b'dirty\n')
