@@ -170,8 +170,6 @@ pub type LSt = {
   # own blocks, would look its block up in the wrong table (#563). The body
   # is pure, so running it again gives the value the table holds.
   ct_inline: Bool,
-  # Preserve logical calls until execution-mode reachability has been fixed.
-  keep_calls: Bool,
   # The call this frame owes before every `return` it executes: the exit of a
   # function the compiler records (docs/call-records-design.md 2.3). None in
   # every other frame, and in a lifted closure even inside a recorded
@@ -1310,12 +1308,7 @@ pub fn inline_intrinsics() -> List[String] = [
   "ctl_yield", "ctl_run",
   # a `dbg` line, which is the io runtime's stderr write on both backends
   # under a name of its own (the comptime interpreter's reason, above)
-  "dbg_line",
-  # Named observation primitives and immutable Origin readers are optional
-  # runtime facilities with a backend-specific representation.
-  "provenance_observe", "provenance_note", "provenance_completed",
-  "provenance_checkpoint", "provenance_rewind", "provenance_origin",
-  "provenance_field", "provenance_number", "provenance_word", "provenance_header", "provenance_column", "provenance_render_snapshot", "provenance_render_origin"
+  "dbg_line"
 ]
 
 ## The primitives only the JVM owes an arm for.
@@ -1435,12 +1428,12 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
   # 3. the sizes the comments above quote. A count written in prose is what
   #    went wrong in `internal_intrinsics`, whose comment gave two different
   #    answers for the same list in the same paragraph.
-  assert len(inline) == 62
+  assert len(inline) == 49
   assert len(host) == 2
   assert len(gone) == 23
   assert len(staged) == 0
   # and the five groups account for all declared names, with none left over
-  assert len(map.keys(it)) == 165
+  assert len(map.keys(it)) == 152
   assert len(internal) == 25
 }
 
@@ -3435,9 +3428,9 @@ fn lift_lambda(
     on_return = None
   }, body)
   let cbody1 = adapt_in(cbody0, tex_ty(body), ret_of_fn_ty(ty))
-  let cbody = wrap_self_loop(st2.self_tail && not st.keep_calls, lid, cbody1, ret_of_fn_ty(ty))
+  let cbody = wrap_self_loop(st2.self_tail, lid, cbody1, ret_of_fn_ty(ty))
   let f = CFun {
-    definition = CDefinition { ..definition, role = if st2.self_tail { definition.role ++ "-tail" } else { definition.role } },
+    definition = definition,
     name = name,
     owner = st2.owner,
     captures = caps,
@@ -3743,7 +3736,7 @@ test "a builtin taken as a value lowers as the call it wraps" {
     self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false, keep_calls = false, on_return = None
+    ct_inline = false, on_return = None
   }
   for n in lowered_intrinsics() {
     let sg = map.get(it, n).expect("a lowered name is an intrinsic").sig
@@ -3859,7 +3852,7 @@ fn lower_named_call(st: LSt, e: TExpr, tl: Bool) -> (LSt, CExpr) = match e {
       Some(tid) -> lower_trait_call(st, tid, name, args, wits, evid, ty, site)
       None -> {
         let o = match owner { Some(x) -> x, None -> st.owner }
-        if tl && is_self_fn(st, o, name) && not st.keep_calls {
+        if tl && is_self_fn(st, o, name) {
           # neither dictionaries nor evidence are re-passed: a self call is
           # the same instantiation under the same handlers, so what is
           # already in scope still holds
@@ -4205,7 +4198,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
 fn lower_dynamic_call(st: LSt, sym: Int, name: String, args: List[TExpr], evid: List[TExpr],
   lo: Int, hi: Int, nlo: Int, ty: Ty, tail: Bool) -> (LSt, CExpr) =
   if is_self_sym(st, sym) {
-    if tail && not st.keep_calls {
+    if tail {
       self_tail_jump(st, args)
     } else {
       # not a tail call, so the closure is rebuilt and called through
@@ -4594,7 +4587,7 @@ test "dictionary constructors and slots keep their argument shape in either requ
     self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false, keep_calls = false, on_return = None
+    ct_inline = false, on_return = None
   }
   for bridge in [false, true] {
     # Exercise both slot producers directly. The explicit implementation is
@@ -4671,7 +4664,7 @@ test "a tuple literal scrutinee is matched by component unless an arm needs the 
     self_ctx = None, tail = false, self_tail = false, ev_env = [], ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false, keep_calls = false, on_return = None
+    ct_inline = false, on_return = None
   }
   let tt = ty_tuple([TyInt, TyInt])
   let lit = XTupleLit([XInt(1, 0, 0), XInt(2, 0, 0)], 0, 0, tt)
@@ -5663,7 +5656,7 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   let (st1, body0) = lower_expr(st_in, f.body)
   # the tail value is a return too
   let body1 = adapt_in(body0, tex_ty(f.body), f.sig.ret)
-  let body2 = wrap_self_loop(st1.self_tail && not st.keep_calls, lid, body1, f.sig.ret)
+  let body2 = wrap_self_loop(st1.self_tail, lid, body1, f.sig.ret)
   let body = match plan {
     None -> body2
     Some(pl) -> {
@@ -5692,7 +5685,7 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     on_return = st.on_return,
     next_sym = if plan == None { st1.next_sym } else { st1.next_sym + 1 }
   }, CFun {
-    definition = definition_at(st_in, f.base, x_hi(f.body), if st1.self_tail { "function-tail" } else { "function" }),
+    definition = definition_at(st_in, f.base, x_hi(f.body), "function"),
     name = f.name,
     owner = owner,
     captures = [],
@@ -5770,7 +5763,7 @@ pub fn lower_expr_in(
     ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false, keep_calls = false, on_return = None
+    ct_inline = false, on_return = None
   }
   let (st1, ce) = lower_expr(st, e)
   (ce, st1.lifted, st1.dicts, st1.next_lam)
@@ -5822,7 +5815,7 @@ pub fn lower_fn_only(
     ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = true, keep_calls = false, on_return = None
+    ct_inline = true, on_return = None
   }
   let (st1, cf) = lower_fn(st, owner, f)
   (cf, st1.lifted, st1.dicts, st1.next_lam)
@@ -5842,8 +5835,6 @@ pub fn lower_fn_only(
 ## included, and `emitted_core` below puts the two halves back together for a
 ## JVM artifact or the native test runner.
 pub type LMod = {
-  # Pristine Core retained before TCO; the plain branch keeps its old rewrite.
-  logical: Map[String, CFun],
   m: CModule,
   fns: List[(CFun, List[CFun])],
   tests: List[(CFun, List[CFun])],
@@ -5872,8 +5863,7 @@ pub fn lower_module_full(
   impls: Impls,
   adts: Adts,
   prog_fns: Map[(String, String), Sig],
-  include_tests: Bool,
-  keep_calls: Bool = false
+  include_tests: Bool
 ) -> LMod = {
   # Temporaries continue above every checker-minted id in this module. That
   # used to be found by scanning the module's symbol table for its largest
@@ -5903,7 +5893,7 @@ pub fn lower_module_full(
     ev_own = None,
     base = -1,
     origin = "",
-    ct_inline = false, keep_calls = keep_calls, on_return = None
+    ct_inline = false, on_return = None
   }
   var fns: List[(CFun, List[CFun])] = []
   var flat: List[CFun] = []
@@ -5940,7 +5930,7 @@ pub fn lower_module_full(
     dicts = prod_dicts,
     next_sym = prod_next_sym
   }
-  densify(LMod { logical = map.empty(), m = m, fns = fns, tests = tests, dicts = st.dicts, syms = tm.syms,
+  densify(LMod { m = m, fns = fns, tests = tests, dicts = st.dicts, syms = tm.syms,
     next_sym = st.next_sym }, tm.syms)
 }
 
@@ -6210,7 +6200,6 @@ fn densify(l: LMod, syms: Map[Int, Sym]) -> LMod = {
     }
   }
   LMod {
-    logical = l.logical,
     m = CModule { ..l.m, fns = fns, next_sym = d.next },
     fns = moved_group(d, l.fns),
     tests = moved_group(d, l.tests),
@@ -6249,7 +6238,7 @@ test "lowering numbers a module's names in the order the Core dump reads them" {
   var syms: Map[Int, Sym] = map.empty()
   syms = map.insert(syms, 4002, sym_named("x"))
   syms = map.insert(syms, 9999, sym_named("unmentioned"))
-  let l = LMod { logical = map.empty(), m = CModule { owner = "m", fns = [lifted], dicts = [], next_sym = 4006 },
+  let l = LMod { m = CModule { owner = "m", fns = [lifted], dicts = [], next_sym = 4006 },
     fns = [(lifted, [])], tests = [], dicts = [], syms = syms, next_sym = 4006 }
   let dense = densify(l, syms)
   let out = dense.m.fns[0]

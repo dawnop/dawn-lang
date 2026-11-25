@@ -1154,15 +1154,6 @@ pub const LOC_OPAQUE_ID: Int = -4
 
 pub fn ty_loc() -> Ty = ty_opaque(LOC_OPAQUE_ID, "Loc", "std/loc", [], TyString, capture.empty_arguments(), capture.opaque_head(0, 0, 0))
 
-# Structural shapes of the internal provenance primitives' arguments.
-pub fn provenance_table_type() -> Ty = {
-  let numbers = ty_tuple([TyInt, TyInt, TyInt, TyInt, TyInt])
-  let strings = ty_tuple([TyString, TyString, TyString, TyString, TyString])
-  ty_tuple([ty_array(ty_tuple([numbers, strings])), ty_array(ty_tuple([TyInt, TyString, TyString, TyInt, TyInt, TyString]))])
-}
-pub fn provenance_origin_type() -> Ty = ty_tuple([TyBytes, provenance_table_type(), TyInt, TyString])
-pub fn provenance_snapshot_type() -> Ty = ty_tuple([TyBytes, provenance_table_type(), ty_array(provenance_origin_type())])
-
 ## Who may write a compiler-owned type name. This is surface policy, including
 ## the distinct return-only access used by Never.
 pub type BuiltinTypeAccess =
@@ -4666,35 +4657,6 @@ fn callback_captures(sig: Sig) -> Sig = {
   }
 }
 
-## The builtin function table (port of Types.kt BUILTINS, same order).
-# Keep each table factory below the JVM JIT method-size limit.
-fn provenance_builtins() -> List[Sig] = {
-  let t = TyVar("T", -1)
-  let e = EffVar("e", -1)
-  [
-    {
-      let identity_base = tp1(bsig("provenance_observe", [ty_fn([TyInt], t, e, capture.empty_function()), TyInt], ["body", "capacity"], t), t)
-      let identity_eff: Eff = eff_union([EIo, e])
-      Sig { ..identity_base,
-        eff = identity_eff,
-        eparams = [e],
-        scope_inert = signature_scope_inert(identity_base.scope_params, identity_base.constraints, identity_base.param_tys, identity_base.ret, identity_eff) }
-    },
-    eff1(bsig("provenance_note", [TyInt, provenance_origin_type()], ["scope", "origin"], TyUnit), EIo),
-    eff1(bsig("provenance_completed", [TyInt], ["scope"], provenance_snapshot_type()), EIo),
-    eff1(bsig("provenance_checkpoint", [TyInt], ["scope"], TyString), EIo),
-    eff1(bsig("provenance_rewind", [TyInt, TyString], ["scope", "checkpoint"], TyUnit), EIo),
-    eff1(bsig("provenance_origin", [TyInt], ["scope"], provenance_origin_type()), EIo),
-    bsig("provenance_field", [TyString, TyInt], ["origin", "index"], TyString),
-    bsig("provenance_number", [TyString, TyInt], ["origin", "index"], TyInt),
-    bsig("provenance_word", [TyBytes, TyInt], ["data", "index"], TyInt),
-    bsig("provenance_header", [provenance_snapshot_type(), TyInt], ["view", "field"], TyInt),
-    bsig("provenance_column", [provenance_snapshot_type(), TyInt, TyInt], ["view", "row", "field"], TyInt),
-    bsig("provenance_render_snapshot", [provenance_snapshot_type()], ["snapshot"], TyString),
-    bsig("provenance_render_origin", [provenance_origin_type()], ["origin"], TyString),
-  ]
-}
-
 # Keep the Map/Set/Array signatures together, outside the aggregate builtin
 # constructor. Function metadata must not push that constructor beyond the
 # JIT method-size limit.
@@ -5328,7 +5290,6 @@ pub fn builtins() -> Map[String, Sig] = {
 
   ]
   sigs = sigs ++ map(collection_sigs(t, a, k, v, e), s => if len(s.tparams) > 0 { callback_captures(s) } else { s })
-  sigs = sigs ++ provenance_builtins()
   for s in sigs { out = map.insert(out, s.name, computation_sig(s)) }
   out
 }
@@ -5550,10 +5511,6 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # a backend -- lowering replaces the call with its argument.
   internal = set.insert(internal, "char_unchecked")
 
-  for op in ["observe", "note", "completed", "checkpoint", "rewind", "origin", "field", "number", "word", "header", "column", "render_snapshot", "render_origin"] {
-    internal = set.insert(internal, "provenance_" ++ op)
-  }
-  erased = set.insert(erased, "provenance_observe")
   var out: Map[String, Intr] = map.empty()
   for n in map.keys(bs) {
     let s = map.get(bs, n).expect("builtin listed")
@@ -6382,7 +6339,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 165
+  assert map_size2(bs) == 152
 }
 
 test "the reclaim's failure is a value, under the one name left" {
