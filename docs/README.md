@@ -108,6 +108,7 @@ comptime 字节常量设计：[comptime-bytes-design.md](comptime-bytes-design.m
 | [bootstrap.md](bootstrap.md) | current | 自举链：种子 → A → B → C、固定点、种子推进协议。 |
 | [bootstrap-input-manifest-design.md](bootstrap-input-manifest-design.md) | current | TOOL-14 的 project-only Producer 与已落地的完整 v2 launcher generation：framed digests、pre/post re-plan、可恢复 commit-marker。 |
 | [native-seed-input-contract-design.md](native-seed-input-contract-design.md) | current | D12-2 K1–K5：输入、配方、双 root 冷链与双链重放；push 轻控制、显式最终输入资格、隔离 schema2 原型及生产 no-go 清单，尚未推进默认种子。 |
+| [native-seed-cutover-design.md](native-seed-cutover-design.md) | proposed | D12-2 P0：native 种子链生产切换方案。schema 2 九件资产与撤 `--clobber` 后的上传中断重跑状态机、lock 消费与单调晋级/撤销/回滚、冻结输入上的重新资格与五项演练、v0.107.0 首发与预算收口；门槛原文、外部实例与不做清单。 |
 | [builtin-fn-value-lowering-design.md](builtin-fn-value-lowering-design.md) | current | #283 #185 #186：builtin 取作函数值时按直接调用的同一条 lowering 走（包装体是一次 `XCallBuiltin`）；comptime 解释器按 lowering 的三分对齐（有臂 / lowering 已改写 / 拒绝）；`parse_float` 的原语改为 internal intrinsic `float_of_decimal`，不再按模块路径认。 |
 | [std-dir-loading-design.md](std-dir-loading-design.md) | current | #206：谁回答了 `modules.txt` 谁决定整次 std 加载。带 `modules.txt` 的 `--std` 目录缺模块时一次报错并列出全部缺失模块，不再逐文件退内嵌；没有 `modules.txt` 的目录（含 cwd 下零散的 `std/*.dawn`）一个文件都不读。#291 补「缺省来源」：`--std` → `DAWN_STD`（非空）→ 内嵌，两个驱动与 LSP 同一函数，从不读 cwd。 |
 | [std-math-design.md](std-math-design.md) | current | std/math 的 K1 设计契约：K0 已合并；K2 至 K6 的 intrinsic 所有权、fdlibm 来源与许可、三端 1 ulp 门禁、tileinterp 迁移和 f32 准入，含固定语料实测。实现尚未落地。 |
