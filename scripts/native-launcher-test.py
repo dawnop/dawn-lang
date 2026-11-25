@@ -17,7 +17,7 @@ import tempfile
 import time
 from unittest.mock import patch
 
-from native_seed import builder, contract as c, inputs, launcher, provenance, test_support, toolchain
+from native_seed import builder, contract as c, inputs, launcher, provenance, stat_cache, test_support, toolchain
 
 ROOT = Path(__file__).resolve().parents[1]
 MUTANT = sys.argv[2] if sys.argv[1:2] == ['--mutant'] else None
@@ -27,6 +27,21 @@ if MUTANT in ('marker', 'elf'):
     c.require = lambda ok, code, detail: None if code in disabled else require(ok, code, detail)
 if MUTANT == 'locking':
     launcher.fcntl.flock = lambda *a: None
+if MUTANT == 'ctime':
+    original_key = stat_cache.key
+    stat_cache.key = lambda value: [*original_key(value)[:4], 0, original_key(value)[5]]
+if MUTANT == 'racy':
+    stat_cache.DigestCache.racy = lambda *a: False
+    original_load = stat_cache.DigestCache.load.__func__
+    def unracy(cls, *args):
+        loaded = original_load(cls, *args)
+        for row in loaded.entries.values():
+            row['racy'] = False
+        return loaded
+    stat_cache.DigestCache.load = classmethod(unracy)
+if MUTANT == 'cache-integrity':
+    original_require = c.require
+    c.require = lambda ok, code, detail: None if code == 'stat-cache' else original_require(ok, code, detail)
 
 
 def deployments(work):
@@ -100,10 +115,13 @@ def live_inputs(work):
         subprocess.run(['git', '-C', str(repo), *args], check=True, capture_output=True)
     commit = c.git(repo, 'rev-parse', 'HEAD').decode().strip()
     _, before = builder.source_files(repo, commit, live=True)
+    cache = stat_cache.DigestCache()
+    cached_before = c.inventory(builder.source_files(repo, commit, live=True, digest_cache=cache)[1])
     new = repo / 'local/src/new.dawn'
     new.write_bytes(b'untracked local dependency\n')
     _, added = builder.source_files(repo, commit, live=True)
     assert added['local/src/new.dawn'][1] == new.read_bytes() and added != before
+    assert c.inventory(builder.source_files(repo, commit, live=True, digest_cache=cache)[1]) != cached_before
     new.unlink()
     path = repo / 'local/src/main.dawn'
     path.write_bytes(path.read_bytes() + b'dirty\n')
@@ -158,7 +176,7 @@ int main(int n, char **v) {
     def capture(*args, **kwargs):
         return tree, files if MUTANT == 'dirty' else c.scan(source)
 
-    def paired(repo, selected, path):
+    def paired(repo, selected, path, **kwargs):
         for key, prefix in (('std', 'std'), ('runtime', 'runtime/c')):
             c.require(c.identity(commit, c.inventory_sha(c.inventory(c.scan(Path(path) / prefix)))) == selected[key],
                       key + '-pairing', 'fixture pair differs')
@@ -365,9 +383,11 @@ def main():
         work = Path(work)
         deployments(work)
         live_inputs(work)
+        from native_seed.stat_cache_test import run as stat_controls
+        stat_controls(work)
         caches(work)
     if '--selftest' in sys.argv:
-        for mutant in ('java', 'dirty', 'fallback', 'marker', 'elf', 'locking'):
+        for mutant in ('java', 'dirty', 'fallback', 'marker', 'elf', 'locking', 'ctime', 'racy', 'cache-integrity'):
             run = subprocess.run([sys.executable, '-B', __file__, '--mutant', mutant],
                                  capture_output=True, text=True, timeout=60)
             assert run.returncode != 0 and ('AssertionError' in run.stderr), mutant + ' survived\n' + run.stdout + run.stderr

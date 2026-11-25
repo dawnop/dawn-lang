@@ -804,7 +804,7 @@ live 内容清单、portable 编译输入及实际工具链快照。live capture
 完整来源清单使文档或来源 commit 变化也可能新建 generation，这是保守失效，不是只验 HEAD。
 A 与 B 的 `__source-inputs` 仍由 builder 交叉核对；每次命中重验输入、实际 CC/链接器/库/头文件、
 seed/配对树、chain receipt、A/B 及中间产物和 B 的 source plan，交付前再次复验输入与控制记录。
-完整校验有热启动成本，不能替换成 mtime 命中；五次冷启动与五次热启动的实测留在本刀交接报告。
+pre2 每次全量校验的冷/热实测留在该刀交接报告；补裁九允许的开发 stat 摘要缓存见 §15.1，不能只看 mtime。
 
 覆盖接口定稿为三件同时提供：`DAWN_NATIVE_SEED=<ELF>`、
 `DAWN_NATIVE_SEED_LOCK=<describe-seed 生成的完整描述>`、
@@ -822,3 +822,23 @@ seed/配对树、chain receipt、A/B 及中间产物和 B 的 source plan，交�
 
 本刀不改默认、不推进种子、不删除原型、不迁移生产消费者、不把 generation 当作资格或发布证明。
 消费者逐个显式选链、原型删除与最终资格仍依 §13.7 分刀完成。
+
+### 15.1 P4-pre2b 热路径（补裁九，2026-11-25）
+
+pre2 的五次热启动中位数为 5.565 s（前序验收报告），不能进入默认切换。
+本刀目标为同机、持租约、CC_JOBS=1 的五次热启动中位数不超过 0.5 s；冷启动另行报告。
+启动内复用 Git 对象读取及已计算的源码、编译输入与工具链快照，并将快照显式传给 receipt verifier。
+开发热路径可使用内容摘要代理，键包含绝对 path、dev、inode、size、mtime_ns、ctime_ns 与完整 mode。
+缓存记录写入时间，mtime 落在写入时间的文件系统时间粒度内时强制重哈希；保守采用至少一秒窗口。
+读前后 stat 必须一致，交付前重新检查观察过的元数据及文件集合；变化即拒绝本次交付。
+头文件集合仍枚举，工具链与生成物均绑定内容摘要。S、A/B ELF 仍逐次读取并验摘要与完整身份。
+
+stat 缓存按 generation 保存，自带规范内容的 SHA-256，写入使用同步后的原子替换；
+最近 generation 指针只是查找提示，不能代替输入键、marker 或 receipt 验证。缓存损坏直接拒绝。
+缓存只通过启动器的显式参数传入；builder 冷构建、资格与 release 不读取此缓存，始终全量。
+未跟踪源文件仍枚举。源码、seed 配对、工具链、阶段输出、source plan 与撤销控制的验证边界保留。
+文件保持只读，目录保持所有者可写，使 rm -rf 与 worktree remove 无需先 chmod。
+
+负控先红覆盖伪造 mtime、同粒度改写、缓存篡改、工具链头文件与未跟踪源文件变化、
+资格/release 禁用缓存，以及两种清理方式；native Java 调用仍须为零。
+若只能靠减少身份校验达到目标则停止回报。不做缓存回收或缺 marker 自动恢复，默认链仍 jar。

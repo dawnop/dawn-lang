@@ -42,18 +42,19 @@ def prepare_pair(repo, lock, destination):
     return Path(destination)
 
 
-def source_files(repo, commit, live=False):
-    tree, files = c.git_files(repo, commit)
+def source_files(repo, commit, live=False, *, digest_cache=None, git_cache=None):
+    tree, files = c.git_files(repo, commit, metadata_only=live, git_cache=git_cache)
+    read = c.regular_bytes if digest_cache is None else digest_cache.read
     if live:
         files = {p: ('100755' if (Path(repo) / p).stat().st_mode & 0o111 else '100644',
-                     c.regular_bytes(Path(repo) / p)) for p in files
+                     read(Path(repo) / p)) for p in files
                  if (Path(repo) / p).exists() or (Path(repo) / p).is_symlink()}
         for raw in c.git(repo, 'ls-files', '-z', '--others', '--exclude-standard').split(b'\0'):
             if raw:
                 path = c.logical(raw.decode('utf-8'))
                 target = Path(repo) / path
                 files[path] = ('100755' if target.stat().st_mode & 0o111 else '100644',
-                               c.regular_bytes(target))
+                               read(target))
         # Materialize a conservative project superset, including dirty and new
         # source files. Planner still owns the actual nmain dependency closure.
         projects = [Path(repo) / 'selfhost', Path(repo) / 'compiler-plan']
@@ -63,22 +64,22 @@ def source_files(repo, commit, live=False):
             for name in ('dawn.toml', 'dawn.lock'):
                 path = project / name
                 if path.exists() or path.is_symlink():
-                    files[prefix + '/' + name] = ('100644', c.regular_bytes(path))
-            for path, value in c.scan(project / 'src').items():
+                    files[prefix + '/' + name] = ('100644', read(path))
+            for path, value in c.scan(project / 'src', digest_cache=digest_cache).items():
                 files[prefix + '/src/' + path] = value
         for prefix in ('std', 'runtime/c'):
             for path in [p for p in files if p.startswith(prefix + '/')]:
                 del files[path]
-            files.update({prefix + '/' + p: v for p, v in c.scan(Path(repo) / prefix).items()})
+            files.update({prefix + '/' + p: v for p, v in c.scan(Path(repo) / prefix, digest_cache=digest_cache).items()})
     return tree, c.portable(files)
 
 
-def output_identity(directory):
+def output_identity(directory, digest_cache=None):
     directory = Path(directory)
     c.verify_elf(c.regular_bytes(directory / 'dawnc'))
-    return {'whole_sha256': c.digest(c.regular_bytes(directory / 'whole.c')),
-            'info_sha256': c.digest(c.regular_bytes(directory / 'info.c')),
-            'units_sha256': c.inventory_sha(c.inventory(c.scan(directory / 'units'))),
+    return {'whole_sha256': c.digest(digest_cache.read(directory / 'whole.c') if digest_cache is not None else c.regular_bytes(directory / 'whole.c')),
+            'info_sha256': c.digest(digest_cache.read(directory / 'info.c') if digest_cache is not None else c.regular_bytes(directory / 'info.c')),
+            'units_sha256': c.inventory_sha(c.inventory(c.scan(directory / 'units', digest_cache=digest_cache))),
             'elf_sha256': c.digest(c.regular_bytes(directory / 'dawnc'))}
 
 
@@ -200,19 +201,28 @@ def build(repo, lock_path, seed, seed_tree, out, cc, jobs=1, final_stage='B', re
 
 
 def verify_receipt(receipt_path, repo, lock, native, builder, require_c=True, hosted=False, current_run=False,
-                   live=False, development_cc=False):
+                   live=False, development_cc=False, snapshot=None):
+    c.require(snapshot is None or (live and not hosted and not current_run and not require_c),
+              'stat-cache-scope', 'snapshots are only allowed for development launcher verification')
     raw = c.regular_bytes(receipt_path)
     value = c.read_json(receipt_path)
     c.fields(value, RECEIPT_FIELDS, 'chain receipt')
     c.require(raw == c.canonical(value) and type(value['schema']) is int and value['schema'] == 1 and
               value['kind'] == 'native-builder-chain', 'chain-receipt', 'unknown or noncanonical chain receipt')
-    commit = c.git(repo, 'rev-parse', 'HEAD').decode().strip()
-    tree, files = source_files(repo, commit, live=live)
+    if snapshot is None:
+        commit = c.git(repo, 'rev-parse', 'HEAD').decode().strip()
+        tree, files = source_files(repo, commit, live=live)
+    else:
+        commit, tree, files = snapshot['commit'], snapshot['tree'], snapshot['files']
     c.require(value['source_commit'] == commit and value['source_tree'] == tree and
-              value['source_sha256'] == c.inventory_sha(c.inventory(files)),
+              value['source_sha256'] == (c.inventory_sha(c.inventory(files)) if snapshot is None else snapshot['source_sha256']),
               'chain-source', 'chain provenance differs from the producer checkout')
-    toolchain.verify_record(value['toolchain'], pinned=not development_cc)
-    compilation = inputs.compilation(files, lock, value['toolchain'])
+    if snapshot is None:
+        toolchain.verify_record(value['toolchain'], pinned=not development_cc)
+        compilation = inputs.compilation(files, lock, value['toolchain'])
+    else:
+        c.require(value['toolchain'] == snapshot['toolchain'], 'chain-inputs', 'actual toolchain differs')
+        compilation = snapshot['compilation']
     provenance.verify(value['execution'], commit, hosted=hosted, release=hosted)
     if current_run:
         provenance.current(value['execution'], commit, release=True)

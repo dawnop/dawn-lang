@@ -55,6 +55,12 @@ def main():
         path.write_bytes(c.canonical(receipt))
         verify = lambda: builder.verify_receipt(path, ROOT, lock, b, a)
         verify()
+        refused(lambda: builder.verify_receipt(path, ROOT, lock, b, a, hosted=True,
+                    snapshot=(receipt['source_commit'], receipt['source_tree'], {})),
+                'hosted verifier accepted a development snapshot')
+        refused(lambda: builder.verify_receipt(path, ROOT, lock, b, a,
+                    snapshot=(receipt['source_commit'], receipt['source_tree'], {})),
+                'qualification verifier accepted a development snapshot')
         captured = builder.source_files(ROOT, receipt['source_commit'])
         source_patch = patch.object(builder, 'source_files', return_value=captured)
         source_patch.start()
@@ -284,4 +290,8 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    from native_seed.stat_cache import DigestCache
+    # Release and qualification fixtures must never consult development state.
+    with patch.object(DigestCache, 'load', side_effect=AssertionError('release/qualification read stat cache')), \
+         patch.object(DigestCache, 'read', side_effect=AssertionError('release/qualification used stat proxy')):
+        sys.exit(main())

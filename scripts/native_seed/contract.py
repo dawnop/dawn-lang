@@ -35,6 +35,8 @@ def fields(value, names, label):
 
 
 def digest(value):
+    if hasattr(value, 'sha256'):
+        return value.sha256
     return hashlib.sha256(value).hexdigest()
 
 
@@ -326,7 +328,10 @@ def git(repo, *args, input_data=None):
     return run.stdout
 
 
-def git_files(repo, commit):
+def git_files(repo, commit, *, metadata_only=False, git_cache=None):
+    cache_key = (str(repo), commit, metadata_only)
+    if git_cache is not None and cache_key in git_cache:
+        return git_cache[cache_key]
     oid(commit, 'source commit')
     require(git(repo, 'rev-parse', '--verify', commit + '^{commit}').decode().strip() == commit,
             'source-git', 'commit required')
@@ -341,6 +346,11 @@ def git_files(repo, commit):
         require(mode in ('100644', '100755') and kind == 'blob',
                 'source-type', f'non-regular Git input: {path}')
         entries.append((path, mode, obj))
+    if metadata_only:
+        result = tree, {path: (mode, None) for path, mode, _ in entries}
+        if git_cache is not None:
+            git_cache[cache_key] = result
+        return result
     request = ''.join(obj + '\n' for _, _, obj in entries).encode('ascii')
     stream = git(repo, 'cat-file', '--batch', input_data=request)
     pos, files = 0, {}
@@ -356,6 +366,8 @@ def git_files(repo, commit):
         files[path] = (mode, data)
         pos += size + 1
     require(pos == len(stream), 'source-git', 'extra blob data')
+    if git_cache is not None:
+        git_cache[cache_key] = (tree, files)
     return tree, files
 
 
@@ -423,13 +435,15 @@ def source_description(repo, commit):
     return source, files
 
 
-def scan(root):
+def scan(root, digest_cache=None):
     root = Path(root).absolute()
     require(root.is_dir() and not root.is_symlink(), 'source-type', 'capture root must be a directory')
     for parent in root.parents:
         require(not parent.is_symlink(), 'source-type', 'capture parent is a symlink')
     files = {}
     for directory, dirs, names in os.walk(root, followlinks=False):
+        if digest_cache is not None:
+            digest_cache.watch_directory(directory)
         for name in dirs:
             path = Path(directory) / name
             require(stat.S_ISDIR(path.lstat().st_mode), 'source-type', 'symlink directory forbidden')
@@ -437,12 +451,12 @@ def scan(root):
             path = Path(directory) / name
             relative = path.relative_to(root).as_posix()
             require(stat.S_ISREG(path.lstat().st_mode), 'source-type', f'not a regular file: {relative}')
-            files[relative] = ('100755' if path.stat().st_mode & 0o111 else '100644', path.read_bytes())
+            files[relative] = ('100755' if path.stat().st_mode & 0o111 else '100644', digest_cache.read(path) if digest_cache is not None else path.read_bytes())
     return files
 
 
-def verify_tree(root, expected_rows, code='source-inventory'):
-    actual = inventory(scan(root))
+def verify_tree(root, expected_rows, code='source-inventory', digest_cache=None):
+    actual = inventory(scan(root, digest_cache=digest_cache))
     require(actual == expected_rows, code, 'file set, missing state, type, mode or content differs')
     directories = {str(parent) for row in expected_rows if row['kind'] == 'file'
                    for parent in PurePosixPath(row['path']).parents if str(parent) != '.'}
@@ -515,14 +529,14 @@ def validate_receipt(receipt, lock):
             require(actual[key] == expected[key], f'{key}-pairing', f'{actual["stage"]} uses wrong {key}')
 
 
-def verify_seed_tree(repo, lock, seed_tree):
+def verify_seed_tree(repo, lock, seed_tree, *, git_cache=None, digest_cache=None):
     """Reconstruct a validated lock's pair from its commit, then check actual bytes."""
-    _, seed_files = git_files(repo, lock['seed']['commit'])
+    _, seed_files = git_files(repo, lock['seed']['commit'], git_cache=git_cache)
     for key, prefix in [('std', 'std'), ('runtime', 'runtime/c')]:
         require(lock[key] == identity(lock['seed']['commit'], subtree(seed_files, prefix)),
                 f'{key}-pairing', 'seed tree does not match locked commit')
         expected = {p[len(prefix) + 1:]: x for p, x in seed_files.items() if p.startswith(prefix + '/')}
-        verify_tree(Path(seed_tree) / prefix, inventory(expected), f'{key}-pairing')
+        verify_tree(Path(seed_tree) / prefix, inventory(expected), f'{key}-pairing', digest_cache=digest_cache)
 
 
 def verify_inputs(repo, root, lock, receipt, seed_path, seed_tree):
@@ -550,6 +564,3 @@ def write_tree(root, files, readonly=True):
         target.write_bytes(data)
         target.chmod((0o555 if mode == '100755' else 0o444) if readonly else
                      (0o755 if mode == '100755' else 0o644))
-    if readonly:
-        for directory, _, _ in os.walk(root, topdown=False):
-            Path(directory).chmod(0o555)
