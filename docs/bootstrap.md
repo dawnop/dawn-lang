@@ -5,15 +5,15 @@
 > 2026-07-22 自举完成（design.md M7、selfhost-gaps.md §七）；2026-07-23 **M8
 > 收口：Kotlin 实现归档在 `kotlin-final` tag，main 上只剩 selfhost**
 > （[m8-selfhost-only.md](history/m8-selfhost-only.md)）。本文回答一个问题：
-> **手上只有源码和一个种子 jar 时，如何从零得到一个能编译自己的 Dawn 编译器**，
-> 以及每一步靠什么验收。
+> **源码如何从锁定种子构建当前工具链，以及每一步靠什么验收**。JAR 链已交付；
+> D12-2 P1/P2 已交付协议与选链机制，native 源码两阶段链按下文 P4 合同实施，默认尚未切换。
 
 ## 种子（seed）
 
-**现行形态（M8 后）**：种子 = `scripts/seed-release.txt` 钉住的上一 release 的
+**现行默认 JAR 链（M8 后）**：种子 = `scripts/seed-release.txt` 钉住的上一 release 的
 `dawn-selfhost.jar`。`bin/dawn` 首次运行自动下载到 `.dawn/seeds/` 并用它编译
 HEAD 工具链（`selfhost/` 加独立 `compiler-plan/` 及其 local dependency closure；
-`DAWN_SEED=<jar>` 指本地 jar 逃生）。种子 jar 自带一切：编译器类、
+`DAWN_SEED=<jar>` 指本地 jar 覆盖，不能指 ELF）。种子 jar 自带一切：编译器类、
 由 std 源编译出的 `stdsrc` 模块、vendored 的 ASM / coursier interface；后两样二进制
 像 OCaml 的 `boot/` 一样**随种子逐代续传**（vendor 从当前运行 jar 的类路径拷出），
 在库没有对应源码。stage A 的类型检查仍配对使用该 release 的 std 源树，
@@ -53,17 +53,18 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 ## 种子推进协议（2026-07-23 立法，M8 阶段一）
 
 1. **种子形态**：v0.8.0 双发 `dawn.jar`（最后一个 Kotlin jar）与
-   **`dawn-selfhost.jar`**（首个 selfhost 种子）；自 v0.9.0 起**种子只有**
+   **`dawn-selfhost.jar`**（首个 selfhost 种子）；自 v0.9.0 起 JAR 种子为
    `dawn-selfhost.jar`。v0.6.0 起的历史 release 永久保留，构成可重放的信任链。
    K-B7（`docs/native-driver-plan.md` §22）给 `release.yml` 加了第二件产物
    `dawnc-linux-x86_64`（native 编译器的静态可执行文件）与它的 `.sha256`，
    但那一步落在 `v0.49.0` 的 tag 之后，所以 **v0.46–v0.49 的 release 页面上没有它；
    v0.50.0 是第一个真的挂上它的 release**（四件产物齐全，下载下来的二进制核过
    `.sha256`、报 0.50.0、并在只有一个 `.dawn` 文件的裸目录里编译运行通过）。
-   它也**不是种子**：`scripts/seedjar.sh` 只下载、只校验 jar，
-   `scripts/seed-checksums.txt` 里也只有 jar 的摘要。
-2. **祝圣仪式（机器强制）**：`scripts/build-release-jar.sh -o <jar>` 是唯一构建
-   配方；`release.yml` 与日常 `selfhost-fixpoint.sh` 都只能调用它。它在 tag 上重建
+   在当时它**不是种子**：`scripts/seedjar.sh` 只下载、只校验 jar，
+   `scripts/seed-checksums.txt` 里也只有 jar 的摘要。D12-2 的 native ELF 种子另走 qualified lock，
+   不改 JAR 三文件的类型；详见下文 native 推进协议。
+2. **祝圣仪式（机器强制）**：`scripts/build-release-jar.sh -o <jar>` 是唯一 JAR 构建
+   配方；`release.yml` 的 JAR job 与日常 `selfhost-fixpoint.sh` 都只能调用它。它在 tag 上重建
    种子→A→B→C（B = HEAD 编 HEAD，即要上传的那份字节），验证 `cmp B C`、独立
    emit、原子提升后的最终路径仍与 C 相同；workflow 再精确核对源码版本、tag 与
    artifact 输出——任一红则 release 不出。push CI（ci.yml）的全金样绿是前置，
@@ -71,7 +72,10 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 `ci.yml` 在这个 sha 上有一次 push 到默认分支触发的成功运行（2026-09-25 起只认这一种，
 PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的做法是在 tag 上把同一套门禁
 再跑一遍）。2026-09-24 起也接受维护者签名的外部证据，条件见下文「GitHub 之外执行门禁集的证据协议」。
-3. **单一推进入口**：release 四件资产齐全后只运行
+   D12-2 P1 后 release 还并行构建 native S→A→B→C 并验 B==C，组装九件/schema 2；
+   双 JDK JAR 是独立 reference。v0.106.0 的旧八件合同是历史边界，P2 后缺真实 qualified lock 时禁止发 tag；
+   首个正式 schema 2 发布仍须 P3 放行，不能把“producer 已实现”写成“已发布”。
+3. **JAR 单一推进入口**：按对应 release 合同完成并校验资产后，只运行
    `./scripts/advance-seed.sh <tag>`。脚本从 `origin` 新鲜解析 tag commit，前后复核 tag
    没有移动，校验 tag 版本、HEAD 祖先关系与版本单调性；再从 GitHub Release 下载
    `dawn-selfhost.jar` 及 sidecar，严格重算摘要并执行 `--version`。std 摘要来自该 tag
@@ -94,7 +98,7 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
    v0.8.0，中间二十一个 release 一个没记）。
 4. **特性纪律**：`selfhost/src`、`compiler-plan/src` 及这条编译 closure（连同它引用的
    `std/`）只准用**当前种子已支持**的语言特性。想用新特性：先在 selfhost 实现 → 发 release（过祝圣）→
-   用上述单一入口推进三文件 → 下一轮才能自用。（Rust stage0 的规矩，
+   用对应链的单一入口推进记录 → 下一轮才能自用。（Rust stage0 的规矩，
    CI 机器强制：种子编不动 HEAD 直接红。）
 5. **链条可重放**：`scripts/replay-bootstrap.sh <seed-jar | vX.Y.Z>` 从任一环
    种子重放：种子编 selfhost → 固定点（stage2==stage3）→ standalone 闭包 →
@@ -109,7 +113,66 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
    越线（退出状态 1）不拦发版，但要在 todo 里记一条。负载敏感，不进 CI，口径见
    [lsp-sync-bench-design.md](lsp-sync-bench-design.md)。
 
-### 链条表
+### Native 推进与启动合同（D12-2 补裁三、四，2026-11-25）
+
+完整合同、阶段表、消费者清单与各刀停止条件见
+[native-seed-cutover-design.md](native-seed-cutover-design.md) §13。这里同步日常入口与推进纪律：
+
+| 角色 | native 配对 | 用途 |
+|---|---|---|
+| S | 已资格 ELF 与 seed commit 的 std/runtime | 构建当前源码的信任根 |
+| A | S 编 portable 当前 `nmain` closure，发射/链接使用 seed std/runtime | 过渡 builder；内嵌 std/runtime 来自当前快照 |
+| B | A 编同份当前源码，使用 current std/runtime | 源码工具链与发布对象 |
+| C | B 再编同份当前源码与 current std/runtime | release/资格验证 B==C；日常缓存不强制构建 |
+
+1. **链选择唯一**：lock 的 `chain` 是默认的唯一真相，`DAWN_SEED_CHAIN=jar|native` 是显式覆盖；
+   空串/未知值拒绝。lock/history/revoked 任一存在即严格验整链，显式 jar 也不能绕过撤销或损坏；
+   全无记录时默认 jar。P2 目前只在 native 验 S 后退出，P4-pre1/pre2 才实现构建及 exec B。
+   pre0/pre1/pre2/pre3 不改默认，真正 P4 才通过 `advance-native-seed.py set-chain native` 生成合法历史。
+2. **三种模式分别确定最终工具**：源码检出 native 执行 S→A→B、缓存并 exec 当前 B，jar exec 当前 JAR；
+   源码启动器可要求 Python 3.11+。无源码 bin/ 加 build/ 部署声明为 JVM-only，由调用者显式选 jar，
+   直接 exec 随部署 JAR，不自举、不调用 Python；请求 native、缺失/错误选择或种子覆盖均报错。
+   installer 则明确安装原生产品 B ELF，安装后直接执行发布 B，不跑源码自举、JVM 或 Python。
+   Python installer 的安装步骤与源码 Python 最低要求分开验收，不能给无源码启动引入 Python 3.11+ 依赖。
+3. **JAR 显式并存且无回退**：JVM 后端、build-to-jar、`use java`、Java deps 与需 Java 类型解析的 LSP，
+   使用 `DAWN_SEED_CHAIN=jar bin/dawn ...`；纯 Dawn native LSP 可继续使用。
+   native `build` 产 ELF，`run/test` 经 C 工具链；不按 import、命令、缺 ELF、平台或构建失败自动转 JVM。
+   native 首次启动不构建备用 JAR；发行 ELF 的 JVM 需求用独立 `java -jar dawn-selfhost.jar`。
+4. **配对与环境**：`DAWN_NATIVE_SEED` 覆盖须同时声明 seed commit 与 std/runtime 路径和内容身份，
+   重验 ELF 摘要/大小/版本/完整 build id；任意本地调试同样须完整配对，独立 override stamp，release 禁用。
+   `DAWN_SEED` 永不指 ELF，两个覆盖变量同设或错链均拒绝。native 要求 Linux x86_64 与可完成静态链接的 C 工具链，
+   缺失即失败；共用阶段原语，记录实际 CC/链接器/库闭包，不让继承环境悄悄改配方。
+5. **缓存不是旧种子快捷执行**：native/JAR generation 分离，绑定 S/配对树、portable closure、current std/runtime/embed、
+   recipe、实际工具链、lock/撤销与 B 字节；本地未提交修改也必须失效。以 native `__source-inputs` 为权威，
+   A/B 构建前后 re-plan，锁内 staging，原子提交且 marker 最后写；等待者复验，热命中仍核身份。
+   缓存污染报错；失败保留旧字节却不执行旧代。冷启动约两分钟是由 P1 阶段耗时推断，另有下载与准备成本，
+   pre2 必须实测冷/热成本；P2 约 0.1 s 的 Python 校验不是完整热启动数据。
+6. **native 单一推进入口**：`scripts/advance-native-seed.py initial/promote/rollback/revoke/set-chain`，
+   lock/history/revoked 共用唯一严格读写模块；历史原字节只增、sequence 严格 +1，指针最后换。
+   晋级版本大于历史上所有种子且不得复用摘要，验证 tag/祖先/九件/ELF/配对树与该 ELF 的 seed-promotion receipt。
+   当前种子被撤销时失败关闭；恢复由维护者显式回滚到未撤销历史，不能自动选别的种子。
+   JAR 三文件仍只用 `advance-seed.sh`，不手改、不把 ELF 填进 JAR 摘要表。
+7. **先实现、再冻结资格、最后切换**：pre1 builder/完整 chain receipt → pre2 两阶段缓存与三模式 →
+   pre3 site/Playground/release-native/gates/编辑器消费者逐个显式选链（不全局 jar）→ 最终 P3 → P4。
+   P3 先实现 qualify `--lock`、receipt 绑定实际种子 lock、`check --base` 接 CI，补 P2 约 +8.5 s 预算；
+   各前置新增 W 当刀写 Gate-Budget，改 gates.yml 要 record steps_lock，不等 P5。
+8. **最终输入与资格对象不可偷换**：S3/S4、前置实现、机制修补与 0.107.0 版本准备都先收完。
+   initial 资格 S 后生成真实 lock（仍 jar），再对实际最终 commit/tree/lock 冻结，取得最终输入证据、
+   三组重链配对 3/3、至少七个有 push 样本日且十次成功 main push 经过 native 路径、归因失败零，以及五项演练。
+   拟晋级 B 自身须 seed-promotion 资格与独立 verify；receipt 输入 lock 不得要求等于含该 receipt 摘要的未来 lock，
+   final-inputs 证据不反写正在资格的 lock。VERSION、initial/set-chain、原型删除、merge/rebase 改变绑定身份时重核/重跑，
+   不手改 receipt 或复用旧 sha 证明。补裁一要求 P4 合并删除原型，若前移须另裁；删除后的真实发布输入也必须资格。
+9. **发布与晋级**：P3 放行后才能真正 P4 默认切换与 v0.107.0 九件封存；tag 的 B、full build id、commit、lock、proof
+   冷下载聚合核对，无 Java 安装 hello，同 tag 重跑只验证。发布 B 与已资格候选 B/tag/配对树完全相符才复用其
+   seed-promotion receipt，否则重跑；再 promote 与安排 JAR 推进。任一配对失败、native 归因失败、固定点或来源身份不符，
+   停并回交，旧 S 不兼容走桥接裁定，不用 JAR fallback。D 的 pole 红灯按裁定归 CI 刀 5，不属本项观测。
+
+三类证据分别是种子 qualification、构建 chain、日常 generation receipt，互不替代；公开资产仍九件，A/C 与完整 chain receipt
+不新增为公开下载。pre1 需跨 job 留存完整 receipt 并由 producer 核验实际 builder/CC；pre2 需报告热启动；
+pre3 需全量调用表、双链同树对拍与离线部署预检，ci/tile 全部 completed/success；P3 若输入变化即顺延，数据不足不切 P4。
+部署仍按 tag 先 Playground 后 site，保留 `DAWN_WASM_CC`；站点 prepare 去 JVM 属 P4 后的 D12-3。
+
+### 链条表（早期 JAR 信任根）
 
 | release | 种子形态 | 备注 |
 |---|---|---|
@@ -179,7 +242,7 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
   [gates-external-design.md](gates-external-design.md)「PR 与 main 上的证据档」。
 - 换钥就是改默认分支上的 `allowed_signers`。旧钥签的 note 从那个提交起核不过，没有多钥过渡期。
 
-## 链
+## JAR 链
 
 ```bash
 # 0) 种子：seed-release.txt 钉住的 release 的 dawn-selfhost.jar
@@ -191,7 +254,7 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
 #    A 配对 seed release 的 std，B/C 使用当前 std；vendor 逐代续传。
 ./scripts/selfhost-fixpoint.sh
 
-# 需要保留规范产物时直接指定输出；release.yml 只做这一调用。
+# 需要保留规范 JAR 时直接指定输出；release.yml 的 JAR job 调用它。
 ./scripts/build-release-jar.sh -o /tmp/dawn-selfhost.jar
 ```
 
@@ -202,16 +265,16 @@ recipe 的参数；`scripts/selfhost-fixpoint.sh` 只是丢弃产物的兼容 wr
 
 ## launcher 的源码输入边界
 
-`bin/dawn` 的 rebuild stamp 不再只读 `selfhost/dawn.toml` 的直接 `[deps]`。已有当前工具链时，
-它调用隐藏的 `__source-inputs`，消费 `compiler-plan/src/source.dawn` 产出的版本化递归清单；
+现行 JAR `bin/dawn` 的 v2 generation 已使用隐藏的 `__source-inputs`，
+消费 `compiler-plan/src/source.dawn` 产出的版本化递归清单；
 因此 `compiler-plan`、`fspath`、`sha2`、`inflate` 等传递 local package 都是 compiler build input。
-首次 clean checkout 还没有当前 JAR，不能要求当前 Planner 先运行；launcher 此时只为仓库采用的
-local path 形状执行递归、fail-closed fallback，当前 JAR 一出现即让位给 Planner producer。
+首次 clean checkout 的清单由种子构建出的 stage1 生产，不要求旧 S 认识新协议；
+stage1 与最终 candidate 各做 pre/post re-plan。v1 的 shell 递归 fallback 已删除，launcher 不再解释 manifest。
 
 `scripts/bootstrap-guards/run.sh` 在无 JVM、无下载的复制根里逐项修改 Planner 与传递依赖，要求
 stamp 随之改变；`scripts/bootstrap-input-manifest-contract/run.sh` 则固定 v1 线协议、CLI 边界与
-producer mutants。当前仍未关闭 hasher 缺失时的 mtime fallback、无长度 framing、pre/post
-re-plan 与多文件 promotion；这些残余不能被“递归输入已覆盖”代替，见
+producer mutants。known-vector hasher 缺失时失败关闭、framed digest、持久化 inputs 与可恢复 commit-marker
+均已落地，不能再写成未关闭残余；native generation 必须保留同等失效与事务保证，详见
 [`bootstrap-input-manifest-design.md`](bootstrap-input-manifest-design.md)。
 
 ## 为什么字节级一致做得到
@@ -235,7 +298,7 @@ backend-dawn 生态扫描，未声明的字节差异红灯）加 CLI/格式化/L
 
 ## 运行注意
 
-- 跑 selfhost 要 `-Xss512m`：comptime 解释器递归吃宿主栈。
+- JAR 链跑 selfhost 要 `-Xss512m`：comptime 解释器递归吃 JVM 宿主栈；不是 native ELF 的运行参数。
 - `selfhost build` 产物的确定性由 `jarw.dawn` 保证（manifest 在先、条目顺序不变、
   全部条目显式使用 STORED，并钉死长度、压缩后长度、CRC32 与时间戳）——闭包验收能
   `cmp` 整 jar 靠这个。STORED 不经过宿主 JDK 的 DEFLATE 实现，故 JDK 升级不会只因
