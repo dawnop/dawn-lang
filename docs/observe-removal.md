@@ -22,7 +22,7 @@ lower/emit/reach/checker 都要背孪生不变量，所以整体删除。语言�
 由通用观察设施替代。R4-f 用另一条路到了同一个目标：编译器按效果的 `calls` 子句**代写**调用记录，手写 marks 随之删除。
 此后：
 
-- **消费者没有了。** Playground 自 `c193cd17` 起不再观察，改读 `prog.call_table`；gpu-map 与 xmap 读的是录制文件，不读快照；
+- **消费者没有了。** Playground 自 `c193cd17` 起不再观察；gpu-map 与 xmap 读的是录制文件，不读快照；
   `site/gpu-map/record.py` 的观察 harness 因 marks 恒空而空转；`tileir/origin.dawn` 只剩一个旁证脚本在用。
 - **常驻成本。** 拆除前 main 上（run 43892969085）观察相关步骤合计 **983 s/push**（contracts-1 69、-3 121、-6 178、-8 372、-9 243），
   占 contracts 九片的约一半。
@@ -57,7 +57,7 @@ lower/emit/reach/checker 都要背孪生不变量，所以整体删除。语言�
 ## 四、留下了什么
 
 - **R4-f 代写调用记录**：`Sig.calls`、`lower_fn` 与 `emit_return` 的出口钩子、录制器的 `Snap`；`StagedIter` 签名上的 `at: Loc = caller()`。
-  tile 的调用表读这条路，Playground 的 tilemap 视图读 `prog.call_table`，与观察无关。
+  tile 的调用表读这条路，与观察无关。Playground 的 tilemap 视图按裁决 (c) 退回了手写 marks 视图（#972，`84f6f0fa`），R4-f 随后用代写调用记录取代了这些 marks。
 - **静态身份层的非观察读者**：`CDefinition`、`CSyntax`、`CallSource` 仍被 emitc、coresites 与 lint 读；`dawn_ctl_apply_arm` 本身保留。
 - **名字相近但无关的东西没动**：`AnalysisObserver`、`observable_impls`、CI 预算观察器（`ci-budget-observer-design.md`）、包来源（`pkg-origin`）。
 - **`origin` 回到普通标识符。** grammar 语料里新增一条 reject：`origin` 子句现在报 ``expected `=>` after handler arm clauses``，没有另造诊断。
