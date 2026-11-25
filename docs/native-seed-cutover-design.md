@@ -468,3 +468,36 @@ D12-3（站点 prepare 去 JVM）在 P4 之后另起设计页，不并入 P，P2
 8. **`jdk_equivalence_sha256`** 由 release 内既有 JDK21/26 比对产生。
 9. **`scripts/native-seed-prototype/`** 在 P4 合并时删除，不留兼容（不做兼容层原则）。
 10. 本页状态由 P1 写者在第一个提交里写回以上裁定并改为 accepted（本节即是）。
+
+## 11. P1 实测与落地记录（2026-11-25）
+
+### 11.1 两个前提的实测（补裁一第 1 条）
+
+在一次性演练 tag（`rehearsal-p1-*`，prerelease，验完已删 release 与远端 tag）上用托管 runner 与本机各测一遍：
+
+| 前提 | 做法 | 结果 |
+|---|---|---|
+| (a) 失败上传留半个资产 | 托管 runner 上对 400 MB 文件 `gh release upload` 分别 KILL、TERM 中断；本机对 150 MB 文件 KILL 中断，另用 `curl` 限速 5 MB/s 直传 REST 上传端点后 KILL；每次轮询资产列表 30 s | 四次都没有截断资产，`state` 恒为 `uploaded`。托管 runner 的两次中断后 5 s 内列表为空，随后该资产以**完整大小**出现（客户端被杀时请求体已发完，服务端异步落盘）；本机两次 30 s 内始终为空。同名重传（不带覆盖标志）报 `asset under the same name already exists`，rc 1 |
+| (b) 同 tag 不同 runner 逐字节同 | 同一提交的 JAR 链（JDK 21）与 release-native 在两台并发 runner 上各建一次；native 链 S→A→B→C 在 6 台 runner 上建（含不同提交的演练 tag） | JAR、B（JAR 链产物）、sidecar、旧 metadata、installer 两台完全一致；native 链 A、B 与 chain 收据摘要在所有 runner 上一致，且跨不同提交保持（`selfhost` 源未变则 B 的 sha256 不变，`13542f15...`） |
+
+两个前提都成立，不退草稿 release 后备。唯一的修正：中断的上传可能**稍后**以完整字节出现，所以 publisher 在上传失败后重看列表，出现则按「已存在」比对，不出现才报错（§2.5.4 的「某件上传中途」一行据此成立，不会遇到截断资产，E2 只会来自真实的字节不同）。
+
+### 11.2 release 内 native 链的墙钟（补裁一第 6 条）
+
+演练里 release 工作流的真实形态（S→A→B→C 与 JAR 链并行，release job 在两者之后）：
+
+| job | 观测（秒） |
+|---|---|
+| native-chain（独立 job，含 checkout、取种子、链、传 artifact） | 170（最小）、225（最大），共 6 次成功 |
+| 链本体（emit 加 cc，三阶段合计） | 169 至 212 |
+| release JAR（JDK 21 与 26 各一） | 60 至 75 |
+| release（比较 JAR、API 快照、产出九件、发布） | 54 至 66（含 R1、R2 重跑） |
+| 全工作流墙钟 | 约 4 分 |
+
+native 链与 JAR 链并行时，关键路径是 native 链，不增加整体墙钟的量级。按 3 倍实测定：native-chain job `timeout-minutes: 12`（3 倍 225 秒，取整分），预算注释 `3x 225s worst observed`。release job 原预算 `3x 137s` 不变（它不再编译 native，只做比较与发布，实测更短）。tag 触发的 release 不入 push 总量，所以没有 Gate-Budget 变化。
+
+### 11.3 落地与分期说明
+
+- P1 合并后下一个 tag 即发九件、schema 2。**种子仍是 `scripts/native-seed-candidate-v0.104.0.json`（候选 lock）**：P2 的 qualified lock 不在 P1 内，所以 `native-bootstrap.json` 的 `qualification_sha256` 此时为 `null`（取自候选 lock 的 `lineage.qualification_sha256`），P2 之后由 lock 的资格 receipt 填入，并在 P2 起拒绝 `null`。这是设计 §2.3.1 第 2 点在 P2 之前的如实状态，不是兼容分支。
+- `release-native.sh` 仍在每次 push 上跑，但它构建的 B 来自 JAR 链，只用于 native-cli-diff 与协议契约包；release 不再用它的产物。它不再写 `dawn-toolchain.json` 与 `install-native.py`。
+- 「全仓 0 命中」的 grep 对 `.github/` 与 `scripts/` 成立；本设计页与 PR 文字里的历史引用保留（它们描述被撤掉的行为）。

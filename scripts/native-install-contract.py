@@ -26,7 +26,7 @@ def main(package):
     package = Path(package).resolve()
     original = {name: (package / name).read_bytes() for name in installer.INSTALL_INPUTS}
     info = json.loads(original[installer.METADATA])
-    tag = info["tag"]
+    tag = info["release"]["tag"]
     passed = 0
 
     def ok(condition, name):
@@ -100,20 +100,32 @@ def main(package):
                 return change
 
             for key, value, error in (
-                ("tag", "v0.0.0", "tag/version"),
-                ("version", "0.0.0", "tag/version"),
-                ("schema", 2, "schema"),
-                ("commit", "abc", "source commit"),
-                ("host_target", "linux-aarch64", "target/install"),
-                ("native.name", "dawnc-linux-aarch64", "asset name"),
-                ("native.sha256", "0" * 64, "SHA-256 mismatch"),
+                ("schema", 1, "schema 2 is required"),
+                ("schema", 999, "schema 2 is required"),
+                ("schema", True, "schema 2 is required"),
+                ("release.tag", "v0.0.0", "tag/version"),
+                ("release.version", "0.0.0", "tag/version"),
+                ("release.commit", "abc", "source commit"),
+                ("native.name", "dawnc-linux-aarch64", "native identity"),
+                ("native.kind", "jvm-jar", "native identity"),
+                ("native.stage", "C", "native identity"),
+                ("native.target", "aarch64-unknown-linux-gnu", "native identity"),
+                ("native.sha256", "0" * 64, "SHA-256 or size mismatch"),
+                ("native.size", info["native"]["size"] + 1, "SHA-256 or size mismatch"),
                 ("builder.version", "0.0.0", "builder version"),
-                ("builder.sha256", "", "SHA-256"),
-                ("native.source_manifest", "b1:" + "0" * 64, "version does not match"),
-                ("native.source_manifest", info["native"]["source_manifest"][:-1] +
-                 ("0" if info["native"]["source_manifest"][-1] != "0" else "1"), "source manifest"),
+                ("builder.kind", "jvm-jar", "native stage A"),
+                ("builder.name", "dawn-selfhost.jar", "native stage A"),
+                ("builder.sha256", "", "builder identity"),
+                ("bootstrap.seed.tag", "v9.9.9", "seed identity"),
+                ("bootstrap.std.commit", "0" * 40, "seed pair"),
+                ("jvm_reference.commit", "0" * 40, "JVM reference"),
+                ("native.build_id", "b1:" + "0" * 64, "version does not match"),
+                ("native.build_id", info["native"]["build_id"][:-1] +
+                 ("0" if info["native"]["build_id"][-1] != "0" else "1"), "build id"),
             ):
                 rejected("metadata " + key, metadata(key, value), error)
+            rejected("duplicate metadata key", lambda data: data.update(
+                {installer.METADATA: data[installer.METADATA].rstrip()[:-1] + b',"schema":2}'}), "duplicate JSON key")
             rejected("bad checksum", lambda data: data.update({installer.ASSET + ".sha256": b"0\n"}),
                      "checksum mismatch")
             rejected("truncated download", lambda data: data.update({installer.ASSET: data[installer.ASSET][:64]}),
@@ -128,6 +140,7 @@ def main(package):
                     data[installer.ASSET + ".sha256"] = f"{digest}  {installer.ASSET}\n".encode()
                     meta = copy.deepcopy(info)
                     meta["native"]["sha256"] = digest
+                    meta["native"]["size"] = len(payload)
                     data[installer.METADATA] = json.dumps(meta).encode()
                 return change
 

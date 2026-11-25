@@ -400,14 +400,15 @@ tool17_line_number() {
 tool17_validate() {
   local release_file="$1"
   local wrapper_file="$2"
+  local publisher_file="${3:-$root/scripts/release_publish.py}"
+  local protocol_file="${4:-$root/scripts/native_release.py}"
   local compare_line
   local create_line
   local errors=0
   local exact_count
   local expected_assets expected_reports
-  local native_line
-  local publish_check_line
-  local publish_upload_line
+  local chain_download_line produce_line publisher_call_line
+  local publisher_create_line publisher_upload_line publisher_verify_line
   local ref_count
   local metadata_line metadata_pin_line snapshot_line
 
@@ -436,8 +437,8 @@ tool17_validate() {
       "release.yml must retain each matrix candidate under its JDK identity"; then
     errors=1
   fi
-  if ! tool17_require_line "$release_file" 'needs: release-jar' \
-      "release.yml must wait for both matrix candidates before release"; then
+  if ! tool17_require_line "$release_file" 'needs: [release-jar, native-chain]' \
+      "release.yml must wait for both matrix candidates and the native chain before release"; then
     errors=1
   fi
   # shellcheck disable=SC2016 # literal workflow shell source
@@ -472,27 +473,57 @@ tool17_validate() {
   fi
   expected_reports="$(printf '%s\n' \
     dawn-pub-api.json \
-    dawn-pub-api-diff.md)"
+    dawn-pub-api-diff.md \
+    native-bootstrap.json)"
   if [ "$(tool17_asset_block "$release_file" REPORT_ASSETS)" != "$expected_reports" ]; then
-    echo "release.yml must publish exactly the two pub-API report asset names" >&2
+    echo "release.yml must publish exactly the three report asset names" >&2
     errors=1
   fi
+  # Publication is not written in the workflow at all: one call hands the
+  # assembled directory to the publisher, which never replaces or deletes an
+  # asset. So the workflow must not mutate a release on its own, and the
+  # publisher must keep its three properties: one create, one plain upload
+  # with no overwrite flag, and a final verification of what is published.
+  # The overwrite flag is spelled in two pieces so this guard does not
+  # contain the string it forbids.
+  overwrite_flag='--clo''bber'
   # shellcheck disable=SC2016 # literal workflow shell source
   for line in \
-    'if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then' \
-    'gh release upload "$GITHUB_REF_NAME" --clobber "${EXPECTED_ASSETS[@]}"' \
-    'mapfile -t PUBLISHED_ASSETS < <(' \
-    'for EXPECTED in "${EXPECTED_ASSETS[@]}"; do' \
-    'if [ "$COUNT" -ne 1 ]; then'; do
+    'python3 scripts/release_publish.py --tag "$GITHUB_REF_NAME" --dir release-assets' \
+    'EXPECTED_ASSETS=("${INSTALL_ASSETS[@]}" "${REPORT_ASSETS[@]}")'; do
     if ! tool17_require_line "$release_file" "$line" \
-        "release.yml is missing one exact idempotent publish assertion: $line"; then
+        "release.yml is missing one exact publication step: $line"; then
       errors=1
     fi
   done
-  # shellcheck disable=SC2016 # literal workflow shell source
-  ref_count="$(grep -F -c 'gh release create "$GITHUB_REF_NAME"' "$release_file")"
-  if [ "$ref_count" -ne 1 ]; then
-    echo "release.yml must create the release only through its guarded call" >&2
+  for forbidden in "$overwrite_flag" 'gh release upload' 'gh release create' 'gh release delete' \
+      'gh release edit'; do
+    for file in "$release_file" "$publisher_file"; do
+      if grep -qF -- "$forbidden" "$file"; then
+        echo "$file must not contain '$forbidden': a published asset is never replaced" >&2
+        errors=1
+      fi
+    done
+  done
+  if [ "$(grep -F -c 'self.run("release", "create"' "$publisher_file")" -ne 1 ] || \
+      [ "$(grep -F -c 'self.run("release", "upload", tag, str(path))' "$publisher_file")" -ne 1 ] || \
+      [ "$(grep -F -o 'self.run("release", "' "$publisher_file" | wc -l)" -ne 5 ] || \
+      [ "$(grep -F -c '.upload(' "$publisher_file")" -ne 1 ]; then
+    echo "release_publish.py must create once, upload once through a plain call, and make no other release call than view, download and those two" >&2
+    errors=1
+  fi
+  # The metadata is the seal and goes last; that is a property of the order
+  # list, so read the list rather than a comment about it.
+  if ! python3 - "$protocol_file" <<'PYORDER'
+import re
+import sys
+text = open(sys.argv[1]).read()
+match = re.search(r"UPLOAD_ORDER = \((.*?)\)\n", text, re.S)
+names = [part.strip() for part in match.group(1).replace("\n", " ").split(",")] if match else []
+sys.exit(0 if names and names[-1] == "installer.METADATA" and names.count("installer.METADATA") == 1 else 1)
+PYORDER
+  then
+    echo "native_release.py must upload dawn-toolchain.json (the seal) last" >&2
     errors=1
   fi
 
@@ -511,35 +542,35 @@ tool17_validate() {
   done
 
   # Presence is not enough: the release job must consume the comparison before
-  # native compilation, and publication must upload before it checks GitHub's
-  # resulting asset set.
-  # shellcheck disable=SC2016 # literal workflow shell source
+  # the native chain's binary is used, assemble the assets only after the API
+  # snapshot, and hand them to the publisher last.
   compare_line="$(tool17_line_number "$release_file" 'cmp "$JDK21_JAR" "$JDK26_JAR"')"
-  native_line="$(tool17_line_number "$release_file" './scripts/release-native.sh')"
+  chain_download_line="$(tool17_line_number "$release_file" 'name: download the native chain')"
   metadata_line="$(tool17_line_number "$release_file" 'python3 scripts/java-metadata/prepare.py')"
   metadata_pin_line="$(tool17_line_number "$release_file" 'cmp scripts/java-metadata/jdk21.lock.json')"
   snapshot_line="$(tool17_line_number "$release_file" 'python3 scripts/api-snapshot.py')"
-  if [ -z "$metadata_line" ] || [ -z "$metadata_pin_line" ] || [ -z "$snapshot_line" ] || \
-      [ -z "$native_line" ] || [ "$native_line" -ge "$metadata_line" ] || \
-      [ "$metadata_line" -ge "$metadata_pin_line" ] || [ "$metadata_pin_line" -ge "$snapshot_line" ]; then
-    echo "release.yml must build the native artifact and pin metadata before the API snapshot" >&2
+  produce_line="$(tool17_line_number "$release_file" 'python3 scripts/native_release.py produce')"
+  publisher_call_line="$(tool17_line_number "$release_file" 'python3 scripts/release_publish.py')"
+  if [ -z "$compare_line" ] || [ -z "$chain_download_line" ] || [ -z "$metadata_line" ] || \
+      [ -z "$metadata_pin_line" ] || [ -z "$snapshot_line" ] || [ -z "$produce_line" ] || \
+      [ -z "$publisher_call_line" ] || [ "$compare_line" -ge "$chain_download_line" ] || \
+      [ "$chain_download_line" -ge "$metadata_line" ] || [ "$metadata_line" -ge "$metadata_pin_line" ] || \
+      [ "$metadata_pin_line" -ge "$snapshot_line" ] || [ "$snapshot_line" -ge "$produce_line" ] || \
+      [ "$produce_line" -ge "$publisher_call_line" ]; then
+    echo "release.yml must compare the JDK candidates, take the native chain, snapshot the API, assemble, then publish" >&2
     errors=1
   fi
-  # shellcheck disable=SC2016 # literal workflow shell source
-  create_line="$(tool17_line_number "$release_file" 'gh release create "$GITHUB_REF_NAME"')"
-  # shellcheck disable=SC2016 # literal workflow shell source
-  publish_upload_line="$(tool17_line_number "$release_file" 'gh release upload "$GITHUB_REF_NAME"')"
-  publish_check_line="$(tool17_line_number "$release_file" 'mapfile -t PUBLISHED_ASSETS')"
-  if [ -z "$compare_line" ] || [ -z "$native_line" ] || \
-      [ "$compare_line" -ge "$native_line" ]; then
-    echo "release.yml must compare JDK candidates before native compilation" >&2
-    errors=1
-  fi
-  if [ -z "$create_line" ] || [ -z "$publish_upload_line" ] || \
-      [ -z "$publish_check_line" ] || \
-      [ "$create_line" -ge "$publish_upload_line" ] || \
-      [ "$publish_upload_line" -ge "$publish_check_line" ]; then
-    echo "release.yml must create, clobber-upload, then verify release assets" >&2
+  # shellcheck disable=SC2016 # literal publisher source
+  publisher_create_line="$(tool17_line_number "$publisher_file" 'gh.create(tag)')"
+  # shellcheck disable=SC2016 # literal publisher source
+  publisher_upload_line="$(tool17_line_number "$publisher_file" 'gh.upload(tag, local / name)')"
+  # shellcheck disable=SC2016 # literal publisher source
+  publisher_verify_line="$(tool17_line_number "$publisher_file" 'nr.aggregate(final, tag)')"
+  if [ -z "$publisher_create_line" ] || [ -z "$publisher_upload_line" ] || \
+      [ -z "$publisher_verify_line" ] || \
+      [ "$publisher_create_line" -ge "$publisher_upload_line" ] || \
+      [ "$publisher_upload_line" -ge "$publisher_verify_line" ]; then
+    echo "release_publish.py must create, upload, then verify the published assets" >&2
     errors=1
   fi
 
@@ -569,7 +600,7 @@ tool17_validate() {
 release_file="$root/.github/workflows/release.yml"
 wrapper_file="$root/scripts/selfhost-fixpoint.sh"
 if tool17_validate "$release_file" "$wrapper_file"; then
-  ok "release uses one cross-JDK recipe and an idempotent six-asset contract"
+  ok "release uses one cross-JDK recipe, a native chain and a non-replacing nine-asset contract"
 else
   bad "release bypasses its canonical build, comparison, or publish contract"
 fi
@@ -583,7 +614,10 @@ tool17_expect_reject() {
   local name="$1"
   local mutated_release="$2"
   local mutated_wrapper="$3"
+  local mutated_publisher="${4:-}"
+  local mutated_protocol="${5:-}"
   if tool17_validate "$mutated_release" "$mutated_wrapper" \
+      ${mutated_publisher:+"$mutated_publisher"} ${mutated_protocol:+"$mutated_protocol"} \
       > "$tool17_dir/control.out" 2>&1; then
     bad "$name did not trip the release-recipe guard"
   else
@@ -635,6 +669,12 @@ for asset in dawn-toolchain.json install-native.py; do
     "$tool17_dir/release.missing-$asset.yml" "$tool17_dir/wrapper.base.sh"
 done
 
+for asset in native-bootstrap.json; do
+  sed "/^[[:space:]]*$asset\$/d" "$tool17_dir/release.base.yml" > "$tool17_dir/release.missing-$asset.yml"
+  tool17_expect_reject "omitting report asset $asset" \
+    "$tool17_dir/release.missing-$asset.yml" "$tool17_dir/wrapper.base.sh"
+done
+
 sed 's/^[[:space:]]*dawn-pub-api-diff\.md$/            dawn-api-diff.md/' \
   "$tool17_dir/release.base.yml" > "$tool17_dir/release.wrong-report.yml"
 tool17_expect_reject "a wrong pub-API report asset name" \
@@ -654,6 +694,80 @@ sed 's|\./scripts/build-release-jar\.sh -o "$work/dawn-selfhost\.jar"|java -Xss5
   "$tool17_dir/wrapper.base.sh" > "$tool17_dir/wrapper.bypass.sh"
 tool17_expect_reject "a wrapper that bypasses the builder" \
   "$tool17_dir/release.base.yml" "$tool17_dir/wrapper.bypass.sh"
+
+# The non-replacing publication contract. Each control puts back one behaviour
+# the protocol removed, or removes one thing it added, and must go red. The
+# overwrite flag is assembled from two pieces so no file here spells it.
+overwrite_flag='--clo''bber'
+publisher_file="$root/scripts/release_publish.py"
+protocol_file="$root/scripts/native_release.py"
+cp "$publisher_file" "$tool17_dir/publisher.base.py"
+cp "$protocol_file" "$tool17_dir/protocol.base.py"
+
+# shellcheck disable=SC2016 # mutate literal workflow shell source
+sed 's|python3 scripts/release_publish.py --tag "$GITHUB_REF_NAME" --dir release-assets|gh release upload "$GITHUB_REF_NAME" '"$overwrite_flag"' release-assets/*|' \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.overwrite-upload.yml"
+tool17_expect_reject "an overwriting upload in the workflow" \
+  "$tool17_dir/release.overwrite-upload.yml" "$tool17_dir/wrapper.base.sh"
+
+# shellcheck disable=SC2016 # mutate literal publisher source
+sed 's|self.run("release", "upload", tag, str(path))|self.run("release", "upload", tag, str(path), "'"$overwrite_flag"'")|' \
+  "$tool17_dir/publisher.base.py" > "$tool17_dir/publisher.overwrite.py"
+tool17_expect_reject "an overwrite flag in the publisher" \
+  "$tool17_dir/release.base.yml" "$tool17_dir/wrapper.base.sh" \
+  "$tool17_dir/publisher.overwrite.py" "$tool17_dir/protocol.base.py"
+
+# shellcheck disable=SC2016 # mutate literal publisher source
+sed 's|self.run("release", "upload", tag, str(path))|self.run("release", "delete-asset", tag, str(path)); self.run("release", "upload", tag, str(path))|' \
+  "$tool17_dir/publisher.base.py" > "$tool17_dir/publisher.extra-call.py"
+tool17_expect_reject "a second release call in the publisher" \
+  "$tool17_dir/release.base.yml" "$tool17_dir/wrapper.base.sh" \
+  "$tool17_dir/publisher.extra-call.py" "$tool17_dir/protocol.base.py"
+
+# shellcheck disable=SC2016 # mutate literal publisher source
+awk 'index($0, "nr.aggregate(final, tag)") == 0' "$tool17_dir/publisher.base.py" \
+  > "$tool17_dir/publisher.no-verify.py"
+tool17_expect_reject "a publisher without the final verification" \
+  "$tool17_dir/release.base.yml" "$tool17_dir/wrapper.base.sh" \
+  "$tool17_dir/publisher.no-verify.py" "$tool17_dir/protocol.base.py"
+
+python3 - "$tool17_dir/protocol.base.py" "$tool17_dir/protocol.seal-first.py" <<'PYMUTATE'
+import sys
+text = open(sys.argv[1]).read()
+text = text.replace("UPLOAD_ORDER = (JAR,", "UPLOAD_ORDER = (installer.METADATA, JAR,", 1)
+text = text.replace(",\n                installer.METADATA)\n", ")\n", 1)
+open(sys.argv[2], "w").write(text)
+PYMUTATE
+if cmp -s "$tool17_dir/protocol.base.py" "$tool17_dir/protocol.seal-first.py"; then
+  bad "the seal-first fixture was not mutated"
+fi
+tool17_expect_reject "the seal uploaded before the other assets" \
+  "$tool17_dir/release.base.yml" "$tool17_dir/wrapper.base.sh" \
+  "$tool17_dir/publisher.base.py" "$tool17_dir/protocol.seal-first.py"
+
+# shellcheck disable=SC2016 # mutate literal workflow shell source
+awk 'index($0, "python3 scripts/native_release.py produce") == 0' "$tool17_dir/release.base.yml" \
+  > "$tool17_dir/release.no-assemble.yml"
+tool17_expect_reject "a release that never assembles the nine assets" \
+  "$tool17_dir/release.no-assemble.yml" "$tool17_dir/wrapper.base.sh"
+
+# shellcheck disable=SC2016 # mutate literal workflow shell source
+awk 'index($0, "name: download the native chain") == 0' "$tool17_dir/release.base.yml" \
+  > "$tool17_dir/release.no-chain.yml"
+tool17_expect_reject "a release that does not take the native chain" \
+  "$tool17_dir/release.no-chain.yml" "$tool17_dir/wrapper.base.sh"
+
+# shellcheck disable=SC2016 # mutate literal workflow shell source
+sed 's|needs: \[release-jar, native-chain\]|needs: release-jar|' "$tool17_dir/release.base.yml" \
+  > "$tool17_dir/release.no-chain-wait.yml"
+tool17_expect_reject "a release that does not wait for the native chain" \
+  "$tool17_dir/release.no-chain-wait.yml" "$tool17_dir/wrapper.base.sh"
+
+# shellcheck disable=SC2016 # mutate literal workflow shell source
+sed 's|EXPECTED_ASSETS=("${INSTALL_ASSETS\[@\]}" "${REPORT_ASSETS\[@\]}")|EXPECTED_ASSETS=("${INSTALL_ASSETS[@]}")|' \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.install-only.yml"
+tool17_expect_reject "publishing only the install list" \
+  "$tool17_dir/release.install-only.yml" "$tool17_dir/wrapper.base.sh"
 
 # ---------------------------------------------------------------------------
 # TOOL-18: one entry advances both seed trust records before the pointer.
@@ -995,5 +1109,16 @@ tool19_expect_reject "removing the INTERP rejection" "$tool19_dir/native.no-inte
 sed '/reject_elf_marker "$candidate" "$dynamic_section" NEEDED/d' \
   "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-needed.sh"
 tool19_expect_reject "removing the NEEDED rejection" "$tool19_dir/native.no-needed.sh"
+
+
+# The release protocol itself, not only the text that calls it: states, every
+# interruption point of the upload order, and the refusals of the schema 2
+# metadata. A fake release store and a fake compiler; see the script's header.
+if python3 "$root/scripts/release-protocol-test.py" > "$work/release-protocol.out" 2>&1; then
+  ok "the release protocol holds: $(tail -n 1 "$work/release-protocol.out")"
+else
+  tail -n 20 "$work/release-protocol.out" >&2
+  bad "the release protocol contract failed"
+fi
 
 exit "$fail"
