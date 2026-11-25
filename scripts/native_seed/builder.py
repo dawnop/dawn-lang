@@ -42,19 +42,17 @@ def prepare_pair(repo, lock, destination):
     return Path(destination)
 
 
-def source_files(repo, commit, live=False, *, digest_cache=None, git_cache=None):
+def source_files(repo, commit, live=False, *, digest_cache=None, git_cache=None, live_paths=None):
     tree, files = c.git_files(repo, commit, metadata_only=live, git_cache=git_cache)
     read = c.regular_bytes if digest_cache is None else digest_cache.read
     if live:
+        if live_paths is None:
+            live_paths = c.git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
+        paths = set(files)
+        paths.update(c.logical(raw.decode('utf-8')) for raw in live_paths.split(b'\0') if raw)
         files = {p: ('100755' if (Path(repo) / p).stat().st_mode & 0o111 else '100644',
-                     read(Path(repo) / p)) for p in files
+                     read(Path(repo) / p)) for p in paths
                  if (Path(repo) / p).exists() or (Path(repo) / p).is_symlink()}
-        for raw in c.git(repo, 'ls-files', '-z', '--others', '--exclude-standard').split(b'\0'):
-            if raw:
-                path = c.logical(raw.decode('utf-8'))
-                target = Path(repo) / path
-                files[path] = ('100755' if target.stat().st_mode & 0o111 else '100644',
-                               read(target))
         # Materialize a conservative project superset, including dirty and new
         # source files. Planner still owns the actual nmain dependency closure.
         projects = [Path(repo) / 'selfhost', Path(repo) / 'compiler-plan']
@@ -76,11 +74,13 @@ def source_files(repo, commit, live=False, *, digest_cache=None, git_cache=None)
 
 def output_identity(directory, digest_cache=None):
     directory = Path(directory)
-    c.verify_elf(c.regular_bytes(directory / 'dawnc'))
-    return {'whole_sha256': c.digest(digest_cache.read(directory / 'whole.c') if digest_cache is not None else c.regular_bytes(directory / 'whole.c')),
-            'info_sha256': c.digest(digest_cache.read(directory / 'info.c') if digest_cache is not None else c.regular_bytes(directory / 'info.c')),
+    binary = c.regular_bytes(directory / 'dawnc')
+    c.verify_elf(binary)
+    read = c.regular_bytes if digest_cache is None else digest_cache.read
+    return {'whole_sha256': c.digest(read(directory / 'whole.c')),
+            'info_sha256': c.digest(read(directory / 'info.c')),
             'units_sha256': c.inventory_sha(c.inventory(c.scan(directory / 'units', digest_cache=digest_cache))),
-            'elf_sha256': c.digest(c.regular_bytes(directory / 'dawnc'))}
+            'elf_sha256': c.digest(binary)}
 
 
 def identity(binary):
