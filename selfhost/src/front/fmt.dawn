@@ -593,7 +593,24 @@ fn contextual_keywords(raw: List[Token]) -> Set[Int] = {
 ## `lat`/`ld` are the statement anchor (`logical_indent`, `logical_depth` in
 ## `reflow`) as it stood when the bracket opened; closing the bracket gives it
 ## back, because whatever the inside moved it to belongs to the inside (#545).
-type Opener = { at: Int, brace: Bool, lat: Int, ld: Int }
+# `lambda_at` carries a Scope binder's start through its following parameter
+# parentheses; `calls` distinguishes an effect clause from call arguments.
+type Opener = { at: Int, brace: Bool, lat: Int, ld: Int, lambda_at: Int, calls: Bool }
+
+## The parenthesis in `effect Name calls(` opens a declaration clause. The
+## name `calls` alone is also a valid callee, whose tail block keeps its own
+## brace-line anchor. Comments are transparent in either spelling.
+fn calls_clause_paren(toks: List[Token], i: Int) -> Bool = {
+  var j = i - 1
+  while j >= 0 && toks[j].kind == COMMENT { j = j - 1 }
+  if j < 0 || toks[j].kind != IDENT || toks[j].text != "calls" { return false }
+  j = j - 1
+  while j >= 0 && toks[j].kind == COMMENT { j = j - 1 }
+  if j < 0 || toks[j].kind != TYPEIDENT { return false }
+  j = j - 1
+  while j >= 0 && toks[j].kind == COMMENT { j = j - 1 }
+  j >= 0 && toks[j].kind == EFFECT
+}
 
 ## An `if` reflow has seen: the bracket depth it stands at and the indent of
 ## its line.
@@ -744,6 +761,8 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
   # whether the last `else` began its line
   var else_leads = false
   var rparen_at = 0
+  var rparen_calls = false
+  var rbracket_lambda_at = -1
   var arrow_after_rparen = false
   var line_first = toks[0]
   var prev = toks[0]
@@ -891,6 +910,8 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       hdrs[len(hdrs) - 1].depth < len(openers)
     let tail_brace = t.kind == LBRACE && have_prev_code &&
       (prev_code.kind == RPAREN || prev_code.kind == IDENT)
+    let calls_brace = t.kind == LBRACE && have_prev_code && prev_code.kind == RPAREN && rparen_calls
+    let scoped_params = t.kind == LPAREN && have_prev_code && prev_code.kind == RBRACKET
     let lambda_brace = t.kind == LBRACE && nl == 0 && arrow_after_rparen && have_prev_code &&
       prev_code.kind == FATARROW
     if t.kind == FATARROW {
@@ -913,9 +934,14 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       let header = waiting && not operand && not guard_brace
       let header_indent = if header { hdrs[len(hdrs) - 1].at } else { -1 }
       let body = t.kind == LBRACE && len(openers) == logical_depth
+      var next = i + 1
+      while next < len(toks) && toks[next].kind == COMMENT { next = next + 1 }
+      let scope_binder = t.kind == LBRACKET && next < len(toks) && toks[next].kind == AT
       openers = openers ++ [Opener {
         at = if header && nl == 0 {
           header_indent
+        } else if calls_brace {
+          logical_indent
         } else if nl > 0 || tail_brace || kw_brace {
           line_indent
         } else if lambda_brace {
@@ -932,12 +958,18 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         brace = t.kind == LBRACE,
         lat = logical_indent,
         ld = logical_depth,
+        lambda_at = if scope_binder { line_indent } else if scoped_params { rbracket_lambda_at } else { -1 },
+        calls = t.kind == LPAREN && calls_clause_paren(toks, i),
       }]
       if waiting && (header || guard_brace) { hdrs = list.take(hdrs, len(hdrs) - 1) }
     } else if t.kind == RPAREN || t.kind == RBRACKET || t.kind == RBRACE {
       if len(openers) > 0 {
         let inner = openers[len(openers) - 1]
-        if t.kind == RPAREN { rparen_at = inner.at }
+        if t.kind == RPAREN {
+          rparen_at = if inner.lambda_at >= 0 { inner.lambda_at } else { inner.at }
+          rparen_calls = inner.calls
+        }
+        if t.kind == RBRACKET { rbracket_lambda_at = inner.lambda_at }
         logical_indent = inner.lat
         logical_depth = inner.ld
         openers = list.take(openers, len(openers) - 1)
@@ -1854,6 +1886,34 @@ test "a lambda body follows the line its wrapped parameters began on" {
   assert fmt_of(a) == "fn f() -> Int = {\n  g(l, (\n    acc, k) => {\n    1\n  })\n}\n"
   let b = "fn f() -> Int = {\n  g(\n    () =>\n      {\n        1\n      })\n}\n"
   assert fmt_of(b) == b
+}
+
+## #851: `calls(...)` belongs to the effect declaration, not a call with a
+## trailing block. Its closing parenthesis must not move the member anchor.
+test "an effect body follows its declaration across a wrapped calls clause" {
+  let w = "pub effect Rec calls(enter = r_enter, exit =\n    r_exit, body_enter = r_body_enter, body_exit = r_body_exit) {\n  fn r_enter() -> Unit\n  fn r_exit() -> Unit\n}\n"
+  assert fmt_of(w) == w
+  assert fmt_of("pub effect Rec calls(enter = r_enter, exit =\nr_exit, body_enter = r_body_enter, body_exit = r_body_exit) {\nfn r_enter() -> Unit\nfn r_exit() -> Unit\n}\n") == w
+  let c = "effect Rec calls(enter = r_enter, # keep this comment\n  exit = r_exit, body_enter = r_body_enter, body_exit = r_body_exit)\n{\n  fn r_enter() -> Unit\n}\n"
+  assert fmt_of(c) == c
+  # A function named `calls` still takes an ordinary trailing block.
+  let t = "fn f() -> Unit = {\n  calls(a,\n    b) {\n      work()\n    }\n}\n"
+  assert fmt_of(t) == t
+}
+
+## #851: scope binders start the lambda before its parameter parentheses.
+## Wrapping inside or after `[@s]` must keep the body at the binder's level.
+test "a scope lambda body follows its binder across a wrapped header" {
+  let w = "fn f() -> Unit = {\n  with_mem([\n    @s] () => {\n    work()\n  })\n}\n"
+  assert fmt_of(w) == w
+  assert fmt_of("fn f() -> Unit = {\nwith_mem([\n@s] () => {\nwork()\n})\n}\n") == w
+  let p = "fn f() -> Unit = {\n  with_mem([@s] (a,\n    b) => {\n    work()\n  })\n}\n"
+  assert fmt_of(p) == p
+  let c = "fn f() -> Unit = {\n  with_mem([ # scope\n    @s]\n    () => {\n    work()\n  })\n}\n"
+  assert fmt_of(c) == c
+  # Nested scope lambdas retain their own binder anchors.
+  let n = "fn f() -> Unit = {\n  with_mem([\n    @s] () => {\n    with_mem([\n      @t] () => {\n      work()\n    })\n  })\n}\n"
+  assert fmt_of(n) == n
 }
 
 ## #545: a tail block starts a lambda at its brace, so its body follows the line
