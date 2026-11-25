@@ -328,8 +328,8 @@ def git(repo, *args, input_data=None):
     return run.stdout
 
 
-def git_files(repo, commit, *, metadata_only=False, git_cache=None):
-    cache_key = (str(repo), commit, metadata_only)
+def git_files(repo, commit, *, metadata_only=False, git_cache=None, paths=()):
+    cache_key = (str(repo), commit, metadata_only, tuple(paths))
     if git_cache is not None and cache_key in git_cache:
         return git_cache[cache_key]
     oid(commit, 'source commit')
@@ -337,7 +337,7 @@ def git_files(repo, commit, *, metadata_only=False, git_cache=None):
             'source-git', 'commit required')
     tree = git(repo, 'rev-parse', commit + '^{tree}').decode().strip()
     entries = []
-    for entry in git(repo, 'ls-tree', '-rz', '--full-tree', commit).split(b'\0'):
+    for entry in git(repo, 'ls-tree', '-rz', '--full-tree', commit, '--', *paths).split(b'\0'):
         if not entry:
             continue
         head, raw_path = entry.split(b'\t', 1)
@@ -531,7 +531,7 @@ def validate_receipt(receipt, lock):
 
 def verify_seed_tree(repo, lock, seed_tree, *, git_cache=None, digest_cache=None):
     """Reconstruct a validated lock's pair from its commit, then check actual bytes."""
-    _, seed_files = git_files(repo, lock['seed']['commit'], git_cache=git_cache)
+    _, seed_files = git_files(repo, lock['seed']['commit'], git_cache=git_cache, paths=('std', 'runtime/c'))
     for key, prefix in [('std', 'std'), ('runtime', 'runtime/c')]:
         require(lock[key] == identity(lock['seed']['commit'], subtree(seed_files, prefix)),
                 f'{key}-pairing', 'seed tree does not match locked commit')
