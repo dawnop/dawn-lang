@@ -322,6 +322,7 @@ def profile_case(
 ) -> CaseEvidence:
     toolchain = bench.resolve_toolchain()
     env = clean_environment()
+    env["DAWN_SEED_CHAIN"] = "jar"
     env["JAVA_HOME"] = os.fspath(toolchain.java.parent.parent)
     if jvm_opts is not None:
         env["DAWN_JVM_OPTS"] = jvm_opts

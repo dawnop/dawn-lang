@@ -1714,7 +1714,9 @@ def measure_startup(
     for name in STARTUP_TARGETS:
         print(f"startup {name}: warm-up + {options.startup_samples} samples", file=sys.stderr)
         result[name] = time_startup(
-            commands[name], cwd=ROOT, env=env, samples=options.startup_samples
+            commands[name], cwd=ROOT,
+            env=dict(env, DAWN_SEED_CHAIN="jar") if name == "bin_dawn" else env,
+            samples=options.startup_samples
         )
     return result
 
