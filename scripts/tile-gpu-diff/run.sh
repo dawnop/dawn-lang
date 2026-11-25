@@ -3075,10 +3075,10 @@ tail_result="$(verdict_of "$work/tail.out")"
   { cat "$work/tail.err" >&2; fail "tail_diff: a probe disagreed with its reference or a control stayed green (exit $rc)"; }
 echo "PASS  tail: partial tiles store masked and load padded on $gpu_name, every control red (tileiras $want_tileiras)"
 
-# G14-2, second knife: the matmul factories on a shape that is a multiple of
-# no tile, with this card's own plans (the same factories the goldens pin).
-# f64, f16 and i8 matmul, the bf16 to f32 GEMM and its bias and relu epilogue
-# each run M=301, N=203, K=299 against an expectation computed on the host for
+# G14-2, second and third knives: the matmul factories on a shape that is a
+# multiple of no tile, with this card's own plans (the same factories the
+# goldens pin). f64, f16 and i8 matmul, the bf16 to f32 GEMM and its bias,
+# relu and scale epilogues each run M=301, N=203, K=299 against an expectation computed on the host for
 # the whole output buffer, sentinels past C included.
 mmtail_record() { # outdir; prints the cubin and tile arguments
   local out="$1" k
@@ -3086,11 +3086,11 @@ mmtail_record() { # outdir; prints the cubin and tile arguments
   "$root/bin/dawn" run "$asm_proj" -- --mmtail-record "$gpu_name" "$out" > "$out/record.out" 2> "$out/record.err" ||
     { cat "$out/record.err" >&2; fail "mmtail recording failed in $out"; }
   mmtail_args=()
-  for k in mmtail_f64 mmtail_f16 mmtail_i8 mmtail_bf16 mmtail_bias; do
+  for k in mmtail_f64 mmtail_f16 mmtail_i8 mmtail_bf16 mmtail_bias mmtail_scale; do
     assemble_golden "$k" "$out/$k.tilebc" "$out/$k.cubin"
     mmtail_args+=("$out/$k.cubin" $(sed -n "s/^tiles $k //p" "$out/record.out"))
   done
-  [ "${#mmtail_args[@]}" = 20 ] || fail "mmtail recording named no tiles for some kernel"
+  [ "${#mmtail_args[@]}" = 24 ] || fail "mmtail recording named no tiles for some kernel"
 }
 mmtail_record "$work/mmtail"
 build_native "$root/std" "$work/mmtail.bin" "$here/mmtail_diff.dawn"
@@ -3103,10 +3103,18 @@ mmtail_result="$(verdict_of "$work/mmtail.out")"
 echo "PASS  mmtail: the matmul factories hold a shape that is a multiple of no tile on $gpu_name (tileiras $want_tileiras)"
 
 # Each tail fault is a legal recording. It must assemble, launch, and be
-# rejected by the f16 kernel's named oracle; the oracle line is the kernel's
-# own, so the other four kernels (which the mutant leaves alone, except the
-# floor that every kernel shares) are not what turns it red.
-for m in mm-tail-k-floor mm-tail-no-pad mm-tail-out-roundup; do
+# rejected by its named oracle, the kernel's own line in the family's output.
+# The first three are faults of the matmul factories and are judged by the f16
+# kernel. The epilogue faults (third knife) are judged by the bias+relu kernel:
+# operands not padded, an output extent rounded up so the epilogue stores
+# lanes past C, and a bias row one column short, the one fault only the bias
+# kernel can see (the scale kernel has no bias row). A bias row that is not
+# padded is not among them on purpose: its unspecified values land only in
+# lanes the output view masks, so no whole-buffer comparison can tell it
+# apart (the design note records the run that shows it). The last three are
+# the G14-1 numeric faults, which must be red on the tail shape as well.
+tail_mutant() { # mutation, kernels that must be red, kernels that must stay green
+  local m="$1" red="$2" green="$3" variant k
   variant="$work/$m-tree"
   mkdir -p "$variant/scripts/tile-golden" "$work/$m-out"
   cp "$golden/kernels.dawn" "$variant/scripts/tile-golden/kernels.dawn"
@@ -3119,10 +3127,26 @@ for m in mm-tail-k-floor mm-tail-no-pad mm-tail-out-roundup; do
   rc=0
   device "$work/mmtail.bin" "$gpu_name" "${mmtail_args[@]}" > "$work/$m-out/device.out" 2> "$work/$m-out/device.err" || rc=$?
   [ "$rc" != 0 ] || fail "$m stayed green"
-  grep -q '^  FAIL mmtail_f16:' "$work/$m-out/device.out" ||
-    { cat "$work/$m-out/device.out" >&2; fail "$m missed its named oracle (the f16 tail kernel)"; }
-  echo "PASS  mutant: $m (valid cubins, the mmtail_f16 oracle is red: $(sed -n 's/^  FAIL mmtail_f16: //p' "$work/$m-out/device.out" | cut -c1-120))"
-done
+  for k in $red; do
+    grep -q "^  FAIL $k:" "$work/$m-out/device.out" ||
+      { cat "$work/$m-out/device.out" >&2; fail "$m missed its named oracle ($k)"; }
+  done
+  for k in $green; do
+    grep -q "^  PASS $k:" "$work/$m-out/device.out" ||
+      { cat "$work/$m-out/device.out" >&2; fail "$m turned $k red, which it must not touch"; }
+  done
+  k="${red%% *}"
+  echo "PASS  mutant: $m (valid cubins, the $k oracle is red: $(sed -n "s/^  FAIL $k: //p" "$work/$m-out/device.out" | cut -c1-120))"
+}
+tail_mutant mm-tail-k-floor mmtail_f16 ""
+tail_mutant mm-tail-no-pad mmtail_f16 ""
+tail_mutant mm-tail-out-roundup mmtail_f16 ""
+tail_mutant gemm-tail-no-pad "mmtail_bias mmtail_scale" "mmtail_f16"
+tail_mutant gemm-tail-out-roundup "mmtail_bias mmtail_scale" "mmtail_f16"
+tail_mutant gemm-tail-bias-extent-short mmtail_bias "mmtail_scale mmtail_f16"
+tail_mutant gemm-scale-dropped mmtail_scale "mmtail_bias"
+tail_mutant gemm-bias-after-convert mmtail_bias "mmtail_scale"
+tail_mutant gemm-relu-before-bias mmtail_bias "mmtail_scale"
 
 # The ledger records one verdict for the tree: every family passes (or was
 # skipped on purpose), or it is the first thing that stopped one of them. The

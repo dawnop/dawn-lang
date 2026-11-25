@@ -2,7 +2,7 @@
 # refuse a shape that is not a multiple of the tiles, run on the shape that is
 # a multiple of nothing, with each architecture's own plan.
 #
-#   mmtail_diff <arch> then, for f64 f16 i8 bf16 bias in that order,
+#   mmtail_diff <arch> then, for f64 f16 i8 bf16 bias scale in that order,
 #               <cubin> <tm> <tn> <tk>
 #
 # The first knife (tail_diff) asked a card what it does with a partial tile at
@@ -17,8 +17,15 @@
 # not masked past the last row lands on them, and the operands are followed by
 # poison (+inf, 127 for i8), so a read past the end of the operand shows as a
 # lane that is not finite. The expectations are computed on the host from small
-# integers (f64, f16, i8) or from sixteenths (the bf16 GEMM and its bias and
-# relu epilogue), so every sum is exact in any order of accumulation.
+# integers (f64, f16, i8) or from sixteenths (the bf16 GEMM and its bias, relu
+# and scale epilogues), so every sum is exact in any order of accumulation.
+#
+# The epilogues are held to the tail too (G14-2, third knife). A bias is a row
+# of N read by the same view machinery as an operand, and the bias buffer is
+# followed by +inf, so a block that runs off N reads past the live bias; the
+# output lanes that read it are the ones the C view masks, which is why the
+# whole-buffer comparison is the oracle for them. The scale is a value passed
+# at launch and has no tail of its own, but it runs on the blocks that do.
 use std/io
 use std/gpu
 use std/gpu.{Gpu, with_gpu_real}
@@ -35,7 +42,11 @@ const K: Int = 299
 const SENT_ROWS: Int = 320
 const POISON: Int = 4096
 
-fn case_name(i: Int) -> String = ["mmtail_f64", "mmtail_f16", "mmtail_i8", "mmtail_bf16", "mmtail_bias"][i]
+fn case_name(i: Int) -> String = ["mmtail_f64", "mmtail_f16", "mmtail_i8", "mmtail_bf16", "mmtail_bias", "mmtail_scale"][i]
+
+# The scale passed at launch: 3/8, so the product of an exact sum is exact.
+# It is an f32 parameter, passed as the bits of the f32.
+const SCALE_BITS: Int = 1052770304
 
 fn blocks(n: Int, tile: Int) -> Int = (n + tile - 1) / tile
 
@@ -77,7 +88,7 @@ fn nonfinite(v: List[Float]) -> Int = list.fold(v, 0, (n, x) => if x != x || x =
 
 # ---- one launch ----
 
-fn launch_read(kernel: String, g: (Int, Int, Int), bufs: List[(String, List[Float])], read: Int) -> Result[List[Float], ForeignError] !Gpu = {
+fn launch_read(kernel: String, g: (Int, Int, Int), bufs: List[(String, List[Float])], read: Int, word: Option[Int]) -> Result[List[Float], ForeignError] !Gpu = {
   var hs: List[Int] = []
   for (dt, data) in bufs {
     let h = gpu.gpu_alloc(dt, len(data))?
@@ -85,7 +96,12 @@ fn launch_read(kernel: String, g: (Int, Int, Int), bufs: List[(String, List[Floa
     hs = hs ++ [h]
   }
   let (gx, gy, gz) = g
-  gpu.gpu_launch(kernel, gx, gy, gz, list.map(hs, h => gpu.Buffer(h)))?
+  let args = list.map(hs, h => gpu.Buffer(h))
+  let launched = match word {
+    Some(bits) -> [args[0], args[1], gpu.Word("f32", bits)] ++ list.map(range(2, len(args)), i => args[i])
+    None -> args
+  }
+  gpu.gpu_launch(kernel, gx, gy, gz, launched)?
   gpu.gpu_sync()?
   let (dt, _d) = bufs[read]
   let out = gpu.decode_floats(dt, gpu.gpu_copy_to_host(hs[read])?)
@@ -107,13 +123,13 @@ fn judge(name: String, got: List[Float], want: List[Float], sentinel: Float) -> 
   }
 }
 
-fn run_case(i: Int, tm: Int, tn: Int, a: (String, List[Float]), b: (String, List[Float]), c_dt: String, c_sent: Float, want_c: List[Float], extra: List[(String, List[Float])], poison: Float) -> (Bool, String) !Gpu = {
+fn run_case(i: Int, tm: Int, tn: Int, a: (String, List[Float]), b: (String, List[Float]), c_dt: String, c_sent: Float, want_c: List[Float], extra: List[(String, List[Float])], word: Option[Int], poison: Float) -> (Bool, String) !Gpu = {
   let name = case_name(i)
   let (a_dt, a_data) = a
   let (b_dt, b_data) = b
   let bufs = [(a_dt, a_data ++ fill(POISON, poison)), (b_dt, b_data ++ fill(POISON, poison))] ++ extra ++ [(c_dt, fill(M * N + SENT_ROWS * N, c_sent))]
   let want = want_c ++ fill(SENT_ROWS * N, c_sent)
-  match launch_read(name, (blocks(M, tm), blocks(N, tn), 1), bufs, len(bufs) - 1) {
+  match launch_read(name, (blocks(M, tm), blocks(N, tn), 1), bufs, len(bufs) - 1, word) {
     Err(e) -> (false, "${name}: the device refused: ${e.kind} ${e.message}")
     Ok(got) -> judge(name, got, want, c_sent)
   }
@@ -127,17 +143,20 @@ fn run_all(tiles: List[(Int, Int, Int)]) -> List[(Bool, String)] !Gpu = {
   let b_sx = flat(K, N, b_sixteenth)
   let c_sx = list.map(product(a_sx, b_sx), x => to_float(x) / 256.0)
   let biases = list.map(range(0, N), bias_of)
+  let scaled = list.map(c_sx, x => x * 0.375)
   let relu_bf16 = list.map(range(0, M * N), x => narrow.round_bf16(math.max(c_sx[x] + biases[x % N], 0.0)))
   let (tm0, tn0, _tk0) = tiles[0]
   let (tm1, tn1, _tk1) = tiles[1]
   let (tm2, tn2, _tk2) = tiles[2]
   let (tm3, tn3, _tk3) = tiles[3]
   let (tm4, tn4, _tk4) = tiles[4]
-  [run_case(0, tm0, tn0, ("f64", floats(a_int, 1.0)), ("f64", floats(b_int, 1.0)), "f64", 0.0 - 12345.0, floats(c_int, 1.0), [], INFINITY),
-    run_case(1, tm1, tn1, ("f16", floats(a_int, 1.0)), ("f16", floats(b_int, 1.0)), "f16", 0.0 - 1000.0, floats(c_int, 1.0), [], INFINITY),
-    run_case(2, tm2, tn2, ("i8", floats(a_int, 1.0)), ("i8", floats(b_int, 1.0)), "i32", 0.0 - 12345.0, floats(c_int, 1.0), [], 127.0),
-    run_case(3, tm3, tn3, ("bf16", floats(a_sx, 0.0625)), ("bf16", floats(b_sx, 0.0625)), "f32", 0.0 - 12345.0, c_sx, [], INFINITY),
-    run_case(4, tm4, tn4, ("bf16", floats(a_sx, 0.0625)), ("bf16", floats(b_sx, 0.0625)), "bf16", 0.0 - 1024.0, relu_bf16, [("f32", biases ++ fill(POISON, INFINITY))], INFINITY)]
+  let (tm5, tn5, _tk5) = tiles[5]
+  [run_case(0, tm0, tn0, ("f64", floats(a_int, 1.0)), ("f64", floats(b_int, 1.0)), "f64", 0.0 - 12345.0, floats(c_int, 1.0), [], None, INFINITY),
+    run_case(1, tm1, tn1, ("f16", floats(a_int, 1.0)), ("f16", floats(b_int, 1.0)), "f16", 0.0 - 1000.0, floats(c_int, 1.0), [], None, INFINITY),
+    run_case(2, tm2, tn2, ("i8", floats(a_int, 1.0)), ("i8", floats(b_int, 1.0)), "i32", 0.0 - 12345.0, floats(c_int, 1.0), [], None, 127.0),
+    run_case(3, tm3, tn3, ("bf16", floats(a_sx, 0.0625)), ("bf16", floats(b_sx, 0.0625)), "f32", 0.0 - 12345.0, c_sx, [], None, INFINITY),
+    run_case(4, tm4, tn4, ("bf16", floats(a_sx, 0.0625)), ("bf16", floats(b_sx, 0.0625)), "bf16", 0.0 - 1024.0, relu_bf16, [("f32", biases ++ fill(POISON, INFINITY))], None, INFINITY),
+    run_case(5, tm5, tn5, ("bf16", floats(a_sx, 0.0625)), ("bf16", floats(b_sx, 0.0625)), "f32", 0.0 - 12345.0, scaled, [], Some(SCALE_BITS), INFINITY)]
 }
 
 fn read_cubin(path: String) -> Bytes !io =
@@ -153,13 +172,13 @@ fn int_arg(s: String) -> Int = match fmt.parse_int(s) {
 
 pub fn main() -> Unit !io = io.with_exit_real(() => {
   let ps = args()
-  if len(ps) != 21 {
-    io.eprintln("usage: mmtail_diff <arch> then five of <cubin> <tm> <tn> <tk>")
+  if len(ps) != 25 {
+    io.eprintln("usage: mmtail_diff <arch> then six of <cubin> <tm> <tn> <tk>")
     io.exit(2)
   }
   var kernels: Map[String, Bytes] = map.empty()
   var tiles: List[(Int, Int, Int)] = []
-  for i in range(0, 5) {
+  for i in range(0, 6) {
     kernels = map.insert(kernels, case_name(i), read_cubin(ps[1 + i * 4]))
     tiles = tiles ++ [(int_arg(ps[2 + i * 4]), int_arg(ps[3 + i * 4]), int_arg(ps[4 + i * 4]))]
   }
