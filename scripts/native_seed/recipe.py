@@ -1,5 +1,6 @@
 """Explicit stage selection for the shared split-C recipe, not a cold runner."""
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import re
@@ -53,15 +54,20 @@ def compiler_probe(cc, env, pinned=True):
                   'cc-identity', f'compiler probe failed: {flag}')
         return result.stdout.decode('utf-8').strip()
 
-    version = query('--version')
+    # These are identity queries, never compilation jobs. Read all answers
+    # freshly while avoiding one process-wait round trip per independent flag.
+    flags = ['--version', '-dumpmachine', '-print-resource-dir'] + (['-dumpversion'] if pinned else [])
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        answers = dict(zip(flags, pool.map(query, flags)))
+    version = answers['--version']
     c.require('clang version ' in version, 'cc-version', 'a clang C toolchain is required')
     if pinned:
         c.require(re.search(r'\bclang version 18\.1\.3\b', version) and
-                  query('-dumpversion') == '18.1.3', 'cc-version', 'clang 18.1.3 is required')
-    triple = query('-dumpmachine')
+                  answers['-dumpversion'] == '18.1.3', 'cc-version', 'clang 18.1.3 is required')
+    triple = answers['-dumpmachine']
     c.require(re.fullmatch(r'x86_64-(?:[a-z0-9_]+-)?linux-gnu', triple),
               'cc-target', 'x86_64 GNU Linux compiler required')
-    resource = query('-print-resource-dir')
+    resource = answers['-print-resource-dir']
     c.require(Path(resource).is_absolute() and Path(resource).is_dir(),
               'cc-identity', 'compiler resource directory missing')
     return {'executable': str(cc), 'sha256': c.digest(cc.read_bytes()),

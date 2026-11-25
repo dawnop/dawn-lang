@@ -393,17 +393,17 @@ def revoke(scripts_dir, digest, reason):
 
 # ----------------------------------------------------------- seed resolution
 
-def verify_seed_bytes(data, lock):
+def verify_seed_bytes(data, lock, probe_cache=None):
     seed = lock['seed']
     c.require(len(data) == seed['size'] and c.digest(data) == seed['sha256'], 'seed-digest',
               'seed bytes differ from the lock; execution refused')
     c.verify_elf(data)
-    version, build_id = c.probe_seed(data, seed['version'])
+    version, build_id = c.probe_seed(data, seed['version'], probe_cache=probe_cache)
     c.require((version, build_id) == (seed['version'], seed['build_id']), 'seed-identity',
               'version or build ID differs from the lock')
 
 
-def cached_seed(lock, cache_root, fetch):
+def cached_seed(lock, cache_root, fetch, probe_cache=None):
     """The locked ELF under cache_root/<tag>/, fetched once, re-verified on every use.
 
     A cache hit is recomputed from its bytes like a download: a tampered cache
@@ -413,10 +413,10 @@ def cached_seed(lock, cache_root, fetch):
     directory = Path(cache_root) / seed['tag']
     target = directory / c.ASSET
     if target.exists() or target.is_symlink():
-        verify_seed_bytes(c.regular_bytes(target), lock)
+        verify_seed_bytes(c.regular_bytes(target), lock, probe_cache=probe_cache)
         return target
     data = fetch(seed)
-    verify_seed_bytes(data, lock)
+    verify_seed_bytes(data, lock, probe_cache=probe_cache)
     directory.mkdir(parents=True, exist_ok=True)
     write_atomic(target, data)
     os.chmod(target, 0o555)

@@ -1,5 +1,6 @@
 """Strict qualification inputs, independent of the JVM seed and release metadata."""
 
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -51,9 +52,15 @@ def oid(value, label):
 
 
 def logical(path):
+    require(type(path) is str, 'source-path', 'logical path must be text')
+    return _logical(path)
+
+
+@lru_cache(maxsize=65536)
+def _logical(path):
     require(type(path) is str and path and not path.startswith('/') and
             all(x not in ('', '.', '..') for x in path.split('/')) and
-            '\\' not in path and not any(ord(x) < 32 or ord(x) == 127 for x in path),
+            '\\' not in path and re.search(r'[\x00-\x1f\x7f]', path) is None,
             'source-path', f'unsafe logical path: {path!r}')
     path.encode('utf-8', errors='strict')
     return path
@@ -72,9 +79,9 @@ def no_duplicates(pairs):
     return result
 
 
-def read_json(path):
+def read_json(path, raw=None):
     try:
-        return json.loads(regular_bytes(path), object_pairs_hook=no_duplicates,
+        return json.loads(regular_bytes(path) if raw is None else raw, object_pairs_hook=no_duplicates,
                           parse_constant=lambda x: (_ for _ in ()).throw(
                               Rejected(f'schema: invalid JSON constant {x}')))
     except (UnicodeError, json.JSONDecodeError) as exc:
@@ -239,10 +246,13 @@ def verify_seed(path, lock):
     return data
 
 
-def probe_seed(data, version=None):
+def probe_seed(data, version=None, infer_version=False, probe_cache=None):
     # `version` is the full banner the lock promises; the default is the one
     # historical seed this module was written for.
     version = version or 'dawnc 0.104.0 (native)'
+    cache_key = (digest(data), version, infer_version) if probe_cache is not None else None
+    if probe_cache is not None and cache_key in probe_cache:
+        return probe_cache[cache_key]
     # Execute a private copy of verified bytes, not a mutable caller path.
     with tempfile.TemporaryDirectory(prefix='native-seed-probe-') as work:
         executable = Path(work) / 'dawnc'
@@ -257,7 +267,8 @@ def probe_seed(data, version=None):
             text = result.stdout.decode('ascii')
         except UnicodeError as exc:
             raise Rejected('seed-identity: non-ASCII version') from exc
-        match = re.fullmatch('(' + re.escape(version) + r') (b1:[0-9a-f]{12})\n', text)
+        banner = r'dawnc [0-9]+\.[0-9]+\.[0-9]+ \(native\)' if infer_version else re.escape(version)
+        match = re.fullmatch('(' + banner + r') (b1:[0-9a-f]{12})\n', text)
         require(match is not None, 'seed-identity', f'unexpected version transcript: {text!r}')
         listing = subprocess.run([str(executable), 'version', '-m', str(executable)],
                                  cwd=work, env=env, timeout=20, capture_output=True)
@@ -266,7 +277,10 @@ def probe_seed(data, version=None):
                 'seed-identity', 'expected exactly one full embedded build ID')
         build_id = builds[0].decode('ascii')
         require(match[2] == build_id[:15], 'seed-identity', 'short/full build ID mismatch')
-        return match[1], build_id
+        result = match[1], build_id
+        if probe_cache is not None:
+            probe_cache[cache_key] = result
+        return result
 
 
 def verify_seed_probe(path, lock):
@@ -284,8 +298,8 @@ def record(path, data=None, executable=False):
 def inventory(files):
     result = [record(path, data, mode == '100755') for path, (mode, data) in files.items()]
     for path in files:
-        if PurePosixPath(path).name == 'dawn.toml':
-            lock = str(PurePosixPath(path).with_name('dawn.lock'))
+        if path.rsplit('/', 1)[-1] == 'dawn.toml':
+            lock = path[:-len('dawn.toml')] + 'dawn.lock'
             if lock not in files:
                 result.append(record(lock))
     return sorted(result, key=lambda x: x['path'].encode('utf-8'))
@@ -440,29 +454,43 @@ def scan(root, digest_cache=None):
     require(root.is_dir() and not root.is_symlink(), 'source-type', 'capture root must be a directory')
     for parent in root.parents:
         require(not parent.is_symlink(), 'source-type', 'capture parent is a symlink')
+    root = str(root)
+    prefix = len(root.rstrip(os.sep) + os.sep)
     files = {}
     for directory, dirs, names in os.walk(root, followlinks=False):
         if digest_cache is not None:
             digest_cache.watch_directory(directory)
         for name in dirs:
-            path = Path(directory) / name
-            require(stat.S_ISDIR(path.lstat().st_mode), 'source-type', 'symlink directory forbidden')
+            path = os.path.join(directory, name)
+            require(stat.S_ISDIR(os.stat(path, follow_symlinks=False).st_mode),
+                    'source-type', 'symlink directory forbidden')
         for name in names:
-            path = Path(directory) / name
-            relative = path.relative_to(root).as_posix()
-            require(stat.S_ISREG(path.lstat().st_mode), 'source-type', f'not a regular file: {relative}')
-            files[relative] = ('100755' if path.stat().st_mode & 0o111 else '100644', digest_cache.read(path) if digest_cache is not None else path.read_bytes())
+            path = os.path.join(directory, name)
+            relative = path[prefix:]
+            status = os.stat(path, follow_symlinks=False)
+            require(stat.S_ISREG(status.st_mode), 'source-type', f'not a regular file: {relative}')
+            if digest_cache is None:
+                with open(path, 'rb') as source:
+                    data = source.read()
+            else:
+                data = digest_cache.read(path, status=status)
+            files[relative] = ('100755' if status.st_mode & 0o111 else '100644', data)
     return files
 
 
 def verify_tree(root, expected_rows, code='source-inventory', digest_cache=None):
     actual = inventory(scan(root, digest_cache=digest_cache))
     require(actual == expected_rows, code, 'file set, missing state, type, mode or content differs')
-    directories = {str(parent) for row in expected_rows if row['kind'] == 'file'
-                   for parent in PurePosixPath(row['path']).parents if str(parent) != '.'}
+    directories = set()
+    for row in expected_rows:
+        if row['kind'] == 'file':
+            parts = row['path'].split('/')
+            directories.update('/'.join(parts[:i]) for i in range(1, len(parts)))
+    root = os.path.abspath(root)
+    prefix = len(root.rstrip(os.sep) + os.sep)
     for directory, children, _ in os.walk(root):
         for child in children:
-            relative = (Path(directory) / child).relative_to(root).as_posix()
+            relative = os.path.join(directory, child)[prefix:]
             require(relative in directories, code, f'unexpected directory: {relative}')
 
 

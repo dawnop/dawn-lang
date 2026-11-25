@@ -50,9 +50,15 @@ def source_files(repo, commit, live=False, *, digest_cache=None, git_cache=None,
             live_paths = c.git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
         paths = set(files)
         paths.update(c.logical(raw.decode('utf-8')) for raw in live_paths.split(b'\0') if raw)
-        files = {p: ('100755' if (Path(repo) / p).stat().st_mode & 0o111 else '100644',
-                     read(Path(repo) / p)) for p in paths
-                 if (Path(repo) / p).exists() or (Path(repo) / p).is_symlink()}
+        files = {}
+        for path in paths:
+            target = os.path.join(repo, path)
+            try:
+                status = os.stat(target, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            data = read(target) if digest_cache is None else digest_cache.read(target, status=status)
+            files[path] = ('100755' if status.st_mode & 0o111 else '100644', data)
         # Materialize a conservative project superset, including dirty and new
         # source files. Planner still owns the actual nmain dependency closure.
         projects = [Path(repo) / 'selfhost', Path(repo) / 'compiler-plan']
@@ -86,12 +92,7 @@ def output_identity(directory, digest_cache=None):
 def identity(binary):
     data = c.regular_bytes(binary)
     c.verify_elf(data)
-    with tempfile.TemporaryDirectory(prefix='native-builder-probe-') as work:
-        private = Path(work) / 'dawnc'
-        private.write_bytes(data)
-        private.chmod(0o500)
-        version = source_version(private)
-        return c.probe_seed(data, 'dawnc ' + version + ' (native)')
+    return c.probe_seed(data, infer_version=True)
 
 
 def source_version(binary):
@@ -201,11 +202,12 @@ def build(repo, lock_path, seed, seed_tree, out, cc, jobs=1, final_stage='B', re
 
 
 def verify_receipt(receipt_path, repo, lock, native, builder, require_c=True, hosted=False, current_run=False,
-                   live=False, development_cc=False, snapshot=None):
+                   live=False, development_cc=False, snapshot=None, receipt_data=None):
     c.require(snapshot is None or (live and not hosted and not current_run and not require_c),
               'stat-cache-scope', 'snapshots are only allowed for development launcher verification')
-    raw = c.regular_bytes(receipt_path)
-    value = c.read_json(receipt_path)
+    c.require(receipt_data is None or snapshot is not None, 'stat-cache-scope', 'receipt reuse requires a development snapshot')
+    raw, value = (c.regular_bytes(receipt_path), None) if receipt_data is None else receipt_data
+    value = c.read_json(receipt_path, raw=raw) if value is None else value
     c.fields(value, RECEIPT_FIELDS, 'chain receipt')
     c.require(raw == c.canonical(value) and type(value['schema']) is int and value['schema'] == 1 and
               value['kind'] == 'native-builder-chain', 'chain-receipt', 'unknown or noncanonical chain receipt')

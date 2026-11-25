@@ -463,7 +463,7 @@ MUTANTS = (
      "c.require(all(loaded.revoked.get(k) == v for k, v in base_revoked.items()), 'revoked-base',",
      "c.require(True, 'revoked-base',"),
     ('revocation list order', "c.require(match[1] > previous,", "c.require(True,"),
-    ('cache re-verification', "verify_seed_bytes(c.regular_bytes(target), lock)", "pass"),
+    ('cache re-verification', "verify_seed_bytes(c.regular_bytes(target), lock, probe_cache=probe_cache)", "pass"),
     ('seed digest', "c.require(len(data) == seed['size'] and c.digest(data) == seed['sha256'], 'seed-digest',",
      "c.require(True, 'seed-digest',"),
     ('seed identity', "c.require((version, build_id) == (seed['version'], seed['build_id']), 'seed-identity',",
