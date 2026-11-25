@@ -97,10 +97,11 @@ printf 'pub fn main() -> Unit !io = println("hello, dawn")\n' > hello.dawn
 dawn run hello.dawn
 ```
 
-`dawn-toolchain.json` binds the tag, full source commit, Linux x86_64 target,
-native checksum and source manifest to the builder JAR's checksum and version.
-The installer verifies this metadata, the checksum, ELF architecture and native
-identity before atomically replacing `bin/dawn`. A failed install preserves the
+`dawn-toolchain.json` (schema 2) binds the tag, full source commit, Linux x86_64
+target, native checksum, size and build id to the native builder that produced
+it, the seed it was bootstrapped from, and the JVM reference JAR. The installer
+verifies this metadata, the checksum, ELF architecture and native identity
+before atomically replacing `bin/dawn`. A failed install preserves the
 old entry. An old `dawn` symlink is replaced without overwriting its target.
 For an online install, run `python3 install-native.py --tag "$tag"`; omit `--tag`
 to resolve latest once. Use `--prefix /your/prefix` to choose another destination.
@@ -130,6 +131,11 @@ A release also carries `dawn-pub-api.json`, every public signature in `std` and
 `packages/` with its effect row, and `dawn-pub-api-diff.md`, the classified
 difference from the previous release. Read the second before upgrading: effects
 are in the types, so the report names any expansion in those signatures.
+
+It also carries `native-bootstrap.json`, the record of the native chain that built
+the binary. The installer does not fetch it; `dawn-toolchain.json` references its
+digest. A release asset is never replaced after it is published: a wrong release
+is fixed by a new tag.
 
 **From a checkout**, which is what the rest of this file assumes: `./bin/dawn`
 remains the JVM bootstrap driver. It downloads the seed on first use, verifies it

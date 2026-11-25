@@ -7,10 +7,11 @@ name: release
 # the kotlin-final tag; releases before v0.8.0 shipped its dawn.jar too.
 #
 # Since K-B7 it also publishes dawnc-linux-x86_64, the native compiler as a
-# single static executable. That one is additive and nothing bootstraps from
-# it: its .sha256 is download integrity, not a seed checksum — the only file
-# scripts/seedjar.sh ever verifies against scripts/seed-checksums.txt is the
-# jar.
+# single static executable. Since schema 2 (docs/native-seed-cutover-design.md)
+# that executable is stage B of a native chain, seed -> A -> B -> C with B == C,
+# and the jar is the JVM reference beside it. The jar is still the JAR chain's
+# bootstrap seed (scripts/seedjar.sh against scripts/seed-checksums.txt); the
+# native binary's .sha256 is download integrity, not a seed checksum.
 #
 # Releasing is: bump VERSION in selfhost/src/version.dawn, commit, push main,
 # wait for main CI, then create and push exactly one tag:
@@ -142,8 +143,58 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  # The native chain: seed S emits A, A emits B, B emits C, and B must equal C
+  # byte for byte. It needs no JVM, so it runs beside the JAR chain rather than
+  # after it. The seed is the one the checked-out lock names, verified against
+  # the lock before it is executed; nothing here trusts a download by name.
+  # scripts/native_release.py says what is compared and why.
+  native-chain:
+    needs: verified
+    runs-on: ubuntu-24.04
+    # budget: 3x 225s worst observed
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+
+      - name: fetch the seed and its input pair
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LOCK=scripts/native-seed-candidate-v0.104.0.json
+          SEED_TAG=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['seed']['tag'])" "$LOCK")
+          SEED_COMMIT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['seed']['commit'])" "$LOCK")
+          mkdir -p "$RUNNER_TEMP/seed" "$RUNNER_TEMP/seed-tree"
+          gh release download "$SEED_TAG" --pattern dawnc-linux-x86_64 --dir "$RUNNER_TEMP/seed"
+          chmod 0755 "$RUNNER_TEMP/seed/dawnc-linux-x86_64"
+          git fetch --depth 1 origin "$SEED_COMMIT"
+          git archive "$SEED_COMMIT" std runtime/c | tar -x -C "$RUNNER_TEMP/seed-tree"
+
+      - name: build the chain seed -> A -> B -> C
+        run: |
+          python3 scripts/native_release.py chain \
+            --lock scripts/native-seed-candidate-v0.104.0.json \
+            --seed-elf "$RUNNER_TEMP/seed/dawnc-linux-x86_64" \
+            --seed-tree "$RUNNER_TEMP/seed-tree" \
+            --out "$RUNNER_TEMP/chain" | tee "$RUNNER_TEMP/chain.log"
+          mkdir native-chain
+          cp "$RUNNER_TEMP/chain/A/dawnc" native-chain/dawnc-stage-a
+          cp "$RUNNER_TEMP/chain/B/dawnc" native-chain/dawnc-linux-x86_64
+          tail -n 1 "$RUNNER_TEMP/chain.log" > native-chain/cold.sha256
+
+      - name: retain the native chain
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-chain
+          path: native-chain
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   release:
-    needs: release-jar
+    needs: [release-jar, native-chain]
     runs-on: ubuntu-24.04
     # budget: 3x 137s worst observed
     timeout-minutes: 30
@@ -216,24 +267,19 @@ jobs:
             exit 1
           fi
 
-      # K-B7: a second artifact, for consumers who would rather not install a
-      # JVM. It is *additive* — the bootstrap seed is still the jar
-      # (scripts/seed-release.txt, seedjar.sh), nothing reads this binary, and
-      # scripts/seed-checksums.txt is untouched. Built from the jar published
-      # above, so it is that jar's own output; scripts/release-native.sh is the
-      # same script gates.yml runs on every push, and its header says what each
-      # of its four checks catches that the previous one does not.
-      # The compiler the binary's bytes are a function of: the image's
-      # clang 18.1.3, checked by version, the same one every gates.yml job
-      # that compiles C uses (scripts/pinned-cc.sh says why). Until
-      # 2026-10-05 this was ubuntu-latest's `cc`, gcc 13.3.
-      - name: the pinned C compiler
-        run: ./scripts/pinned-cc.sh
+      # Stage B of the native chain above is the binary this release ships.
+      # The comparison B == C already happened there; the producer below holds
+      # the published file to the identity that chain recorded.
+      - name: download the native chain
+        uses: actions/download-artifact@v4
+        with:
+          name: native-chain
+          path: native-chain
 
       - name: the native binary
         run: |
-          ./scripts/release-native.sh -o dawnc-linux-x86_64 \
-            --jar dawn-selfhost.jar --expect "${GITHUB_REF_NAME#v}"
+          cp native-chain/dawnc-linux-x86_64 dawnc-linux-x86_64
+          chmod +x dawnc-linux-x86_64 native-chain/dawnc-stage-a
 
       # The public API surface of this tag, and its diff against the previous
       # release's (issue #29). A report, not a gate: nothing here fails the
@@ -278,18 +324,22 @@ jobs:
             python3 scripts/api-diff.py dawn-pub-api.json -o dawn-pub-api-diff.md
           fi
 
-      # Publish the digest beside the jar. advance-seed.sh later downloads and
-      # rechecks both instead of trusting a local build or cache.
-      - name: checksum
+      # Everything the release carries is produced in one place: the nine
+      # assets and their cross references (scripts/native_release.py), checked
+      # as a set before anything is uploaded.
+      - name: assemble the nine release assets
         run: |
-          sha256sum dawn-selfhost.jar | tee dawn-selfhost.jar.sha256
+          python3 scripts/native_release.py produce \
+            --lock scripts/native-seed-candidate-v0.104.0.json \
+            --native dawnc-linux-x86_64 \
+            --builder native-chain/dawnc-stage-a \
+            --jdk21-jar release-candidates/jdk-21/dawn-selfhost.jar \
+            --jdk26-jar release-candidates/jdk-26/dawn-selfhost.jar \
+            --pub-api dawn-pub-api.json --pub-api-diff dawn-pub-api-diff.md \
+            --cold-sha256 "$(cat native-chain/cold.sha256)" \
+            --expect-tag "$GITHUB_REF_NAME" \
+            --out release-assets
 
-      # A run can stop after creating the release or after uploading only some
-      # assets. Re-running must converge rather than fail on existing state:
-      # create only when absent, replace every named asset, then query GitHub
-      # and require each contract name exactly once. Historical extra assets
-      # are tolerated, but none of the current assets may be omitted.
-      #
       # Two lists because they answer to different documents, and
       # scripts/doc-check.py holds both ends. INSTALL_ASSETS is what the
       # README download blocks fetch, compared name for name in both
@@ -299,6 +349,11 @@ jobs:
       # to download a Markdown file to run `hello.dawn`. They are named in the
       # README all the same, because an asset no document mentions is an asset
       # nobody knows to look for.
+      #
+      # Nothing here replaces or deletes an asset. scripts/release_publish.py
+      # uploads each missing asset in a fixed order with the metadata last (it
+      # is the seal), compares each present one, and stops at any difference:
+      # a wrong release is fixed by a new tag, not by editing the old one.
       - name: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -314,31 +369,14 @@ jobs:
           REPORT_ASSETS=(
             dawn-pub-api.json
             dawn-pub-api-diff.md
+            native-bootstrap.json
           )
           EXPECTED_ASSETS=("${INSTALL_ASSETS[@]}" "${REPORT_ASSETS[@]}")
-          if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" \
-              --title "$GITHUB_REF_NAME" \
-              --generate-notes
+          if [ "$(ls release-assets | sort)" != "$(printf '%s\n' "${EXPECTED_ASSETS[@]}" | sort)" ]; then
+            echo "::error::the assembled assets are not the declared contract"
+            exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" --clobber "${EXPECTED_ASSETS[@]}"
-
-          mapfile -t PUBLISHED_ASSETS < <(
-            gh release view "$GITHUB_REF_NAME" --json assets \
-              --jq '.assets[].name'
-          )
-          for EXPECTED in "${EXPECTED_ASSETS[@]}"; do
-            COUNT=0
-            for PUBLISHED in "${PUBLISHED_ASSETS[@]}"; do
-              if [ "$PUBLISHED" = "$EXPECTED" ]; then
-                COUNT=$((COUNT + 1))
-              fi
-            done
-            if [ "$COUNT" -ne 1 ]; then
-              echo "::error::release asset '$EXPECTED' appears $COUNT times; expected exactly once"
-              exit 1
-            fi
-          done
+          python3 scripts/release_publish.py --tag "$GITHUB_REF_NAME" --dir release-assets
 
       - name: report the seed-advance command
         run: echo "::notice::./scripts/advance-seed.sh $GITHUB_REF_NAME"

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 011837d32b0d94b3 -->
+<!-- doc-check: translation-of README.md @ 38e27a4b084d2427 -->
 
 <p align="center">
   <a href="https://dawn-lang.dawnop.com">
@@ -93,9 +93,9 @@ printf 'pub fn main() -> Unit !io = println("hello, dawn")\n' > hello.dawn
 dawn run hello.dawn
 ```
 
-`dawn-toolchain.json` 把 tag、完整源码提交、Linux x86_64 目标、native checksum 和源码清单
-绑定到构建它的 JAR 的 checksum 与版本。安装器校验元数据、checksum、ELF 架构和 native 身份，
-再原子替换 `bin/dawn`；失败时保留原入口。旧 `dawn` 若为符号链接，只替换链接本身，不覆盖目标。
+`dawn-toolchain.json`（schema 2）把 tag、完整源码提交、Linux x86_64 目标、native checksum、
+大小和 build id 绑定到产出它的 native builder、它所自举的种子，以及 JVM 参照 JAR。
+安装器校验元数据、checksum、ELF 架构和 native 身份，再原子替换 `bin/dawn`；失败时保留原入口。旧 `dawn` 若为符号链接，只替换链接本身，不覆盖目标。
 在线安装可运行 `python3 install-native.py --tag "$tag"`，省略 `--tag` 时只解析一次 latest。
 用 `--prefix /your/prefix` 选择其他位置。不创建 `dawnc` 别名，运行时不选择后端。
 
@@ -121,6 +121,9 @@ native 的 `run`、`build` 与 `test` 需要 C 编译器，WebAssembly 输出需
 release 还提供 `dawn-pub-api.json`，列出 `std` 与 `packages/` 的全部公开签名及效果行；
 `dawn-pub-api-diff.md` 给出与前一 release 的分类差异。升级前读后者：效果写在类型中，
 这份报告会点明这些签名中的效果扩张。
+
+release 还提供 `native-bootstrap.json`，记录构建该二进制的 native 链。安装器不下载它，
+`dawn-toolchain.json` 引用它的摘要。已发布的 release 资产永不被替换：错版发新 tag。
 
 **从仓库检出**（本文其余部分默认的路径）：`./bin/dawn` 仍是 JVM bootstrap 驱动。
 首次运行下载种子，按 `scripts/seed-checksums.txt` 校验，再用它编译 HEAD。
