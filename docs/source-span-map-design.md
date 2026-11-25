@@ -11,8 +11,8 @@
 本文原有 f64 展示、调用计数、编译时延及测量说明属于所记实施阶段，不能作为
 当前展示或性能声明；泛型算法、数值 helper、host plan 与内部 f64 回归能力保留。
 
-2026-10-25 的[效果来源提案](effect-provenance-design.md)以已存在的 `CSite`、`CFun.origin`
-和 C/JVM 侧表为静态底座，另定义运行调用实例、效果 envelope 与观察生命期，尚未实现。
+2026-10-25 的[效果来源提案](history/effect-provenance-design.md)曾以已存在的 `CSite`、`CFun.origin`
+和 C/JVM 侧表为静态底座，另定义运行调用实例、效果 envelope 与观察生命期；该机制已拆除（[observe-removal.md](observe-removal.md)），从未落成。
 静态 span 不能单独重建录制调用树；本文早期「Core 无 span」是 M2 前的历史前提。
 
 ## 一、要什么，不要什么

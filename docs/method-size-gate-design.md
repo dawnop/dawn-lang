@@ -166,6 +166,9 @@ vendored 包里的宽方法过；读取器往返核对描述符与访问标志�
 
 ## observed 发射里 8000 的角色（W3-R R2′-1）
 
+> 本节所述的 observed 发射、`check_observed_code`、站点表类与 `--observed-jar` 都已随 observe 机制拆除（[observe-removal.md](observe-removal.md)）；
+> 下面保留作历史记录，门禁现在只量普通发射。
+
 observed 发射把 8000 当硬约束：分区器把区域带宽从 80 折半到 1 重试，到 1 还超就 `panic`（`emit.dawn` 的 `gen_cbody`
 与终检 `check_observed_code`）。这把性能线当成了正确性线：超过 8000 的方法类文件装得下、字节码合法，只是 HotSpot
 永远不编它，在解释器里跑。`outline.region` 只切「语句块余部能搬成闭合区域」的形状，平铺一串都写同一变量的语句（约

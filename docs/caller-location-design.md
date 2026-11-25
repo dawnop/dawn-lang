@@ -5,9 +5,10 @@
 > 的 L4 行（`caller()` 默认参数 + `Loc`；`panic`/`todo` 签名加 `at`；不做隐式调用者位置），
 > 调研 `agent-handoff/research-debug-print-report-20261003.md` §3.2(b) 与 §四刀 4。仓库行号指 `bc745727`。
 
-2026-10-25 的[效果来源提案](effect-provenance-design.md)重新裁决本文对隐式传播的否决：
-观察型来源改为按作用域隐式携带，语言设施尚未实现；`caller()`、`Loc` 与 panic 的显式归责保持。
-本文「转传必须显式」及「不做调用栈」的理由仍描述 L4，不再作为否决通用来源观察的依据。
+2026-10-25 的[效果来源提案](history/effect-provenance-design.md)曾重新裁决本文对隐式传播的否决，
+把观察型来源改为按作用域隐式携带；该机制已于 2026-11 拆除（[observe-removal.md](observe-removal.md)），
+调用来源改由编译器按效果的 `calls` 子句代写记录（[call-records-design.md](call-records-design.md)）。
+`caller()`、`Loc` 与 panic 的显式归责保持，本文「转传必须显式」及「不做调用栈」的理由仍然成立。
 
 ## 一、问题
 

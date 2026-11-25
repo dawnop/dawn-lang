@@ -1,6 +1,6 @@
 # 编译器代写调用记录：效果的 `calls` 子句与 Core 变换
 
-> 状态：**current**（R4-f0 设计、R4-f1 钩子声明加 Core 变换、R4-f2 删除手写 marks 均已落地；
+> 状态：**current**（R4-f0 设计、R4-f1 钩子声明加 Core 变换、R4-f2 删除手写 marks 均已落地；其后 observe 孪生整体拆除，见 [observe-removal.md](observe-removal.md)；
 > 第十节记 f2）。依据：W3-R 终局调研（Rust `#[track_caller]`、tracing `#[instrument]`、GCC
 > `-finstrument-functions`、Scala sourcecode、Swift SE-0274 的一手出处）与补裁七、补裁八。
 > 提交哈希见文末「落地进度」。
@@ -26,7 +26,7 @@ GCC 的 `-finstrument-functions`、Rust tracing 的 `#[instrument]`（对照见�
 1. 不用 observe 视图替代录制器的标记栈：四个钩子操作、录制器的处理臂、`Snap` 的栈式 marks、trial 回滚都保留，
    只是从「手写协议」变成「编译器目标」。没有已知能过 Playground 门的表示（补裁六）。
 2. 不给任意用户函数代写，没有逐函数属性。
-3. 不碰 `observe` 孪生机制；其去留在 R4-f2 之后另裁。
+3. 不碰 `observe` 孪生机制（当时的非目标；该机制其后已整体拆除，见 [observe-removal.md](observe-removal.md)）。
 4. 不改 `caller()`、`Loc` 与 `panic(at =)` 的显式归责（spec §8.4）：`at` 在这里只是被读取。
 
 ## 二、语法与语义
@@ -96,7 +96,7 @@ r
 3. `panic`：不 `exit`。与手写一致：`panic` 终止录制运行，被 `catch_panic` 吃掉的情形由录制器的 `Snap` 回滚配平。
    返回类型为 `Never` 的函数不插尾部 `exit`。
 
-实现上不拆内层函数（会让观察孪生多出一个调用帧与 Definition 身份），也不用 `CBreak` 汇聚（Core 的 `CBreak` 不带值）：
+实现上不拆内层函数（当时会让观察孪生多出一个调用帧与 Definition 身份；孪生已拆除，但改写返回路径仍然更小），也不用 `CBreak` 汇聚（Core 的 `CBreak` 不带值）：
 `LSt` 多一个字段 `on_return: Option[CExpr]`，降低 `return`/`?` 的两处（`emit_return`）看它：为空就是原来的
 `CReturn`，非空就先 perform 出口。`lift_lambda` 把它重置为空并在返回后恢复：闭包里的 `return` 离开闭包，不离开写它的函数。
 
@@ -183,7 +183,7 @@ f1 **不删任何手写 mark**，在分支上提供两份 tileir，同一批 ker
 **一处不是名字的差：`staged_for` 的 `at`。** 手写 `called("d_range", r.at, ..)` 报的是 `DRange` 创建时存下的位置 `r.at`，
 `staged_for` 是 trait 方法，没有 `at: Loc = caller()` 形参，代写给 `None`。对拍里这一类共 59 行（kernel 里每个 `for .. in d_range(..)` 一行），
 其余字段全等。这不是机制的不稳，是规则的边界：区域位置的来源是形参之外的字段。f2 要在两条里选：接受 `None`
-（`effect-provenance-design` P2 本来就要把区域位置改成 `for` 的使用处），或给 `at` 的来源规则加「形参的 `Loc` 字段」（范围更大，不建议）。
+（[effect-provenance-design](history/effect-provenance-design.md) 的 P2 本来就要把区域位置改成 `for` 的使用处），或给 `at` 的来源规则加「形参的 `Loc` 字段」（范围更大，不建议）。
 **这一条需要裁决，不在 f1 里自行决定。**
 
 **派生包自带的测试。** tileir 的 309 个 test 块在派生包上跑（`run.py` 默认执行）：303 个通过，6 个失败，且失败集合是固定的：
@@ -278,7 +278,7 @@ xmap-samples 在 f1 不动：手写 mark 还在，它们照旧运行。
 2. **不加 `name` 覆盖语法。** 17 处不一致用「改展示名为声明名」解决（补裁八第 3 条），不为它们造语法，也不留映射表。
 3. **不代写私有函数、局部 fn、lambda、trait 默认体。** 没有稳定的声明名；归入包裹它的公共调用，与现行规则一致。
 4. **不支持 `ctl effect` 的钩子。** 被放弃的续延使 `enter` 无 `exit`；要支持须先设计「放弃时补 `exit`」，无消费者，不做。
-5. **不拆内层函数承载函数体。** 会给观察孪生与影子比较多一个调用帧与 Definition 身份；改写返回路径更小。
+5. **不拆内层函数承载函数体。** 当时会给观察孪生与影子比较多一个调用帧与 Definition 身份（两者都已删除）；改写返回路径更小，这个理由独立成立。
 6. **不内联、不优化掉钩子。** perform 有可观测的副作用，JIT 与 C 编译器自己处理。
 7. **不新增隐藏实参，不改调用约定。** `at` 读现成的 `caller()` 形参；没有就是 `None`。把 Rust 式隐藏实参推广到所有函数是已被判为规模大、风险高的路线。
 8. **不包 `!e` 效果变量形参**（Q5）。函数形状不随实例化变。
@@ -319,8 +319,9 @@ xmap-samples 在 f1 不动：手写 mark 还在，它们照旧运行。
 （效果不再声明 `calls`、helper 不再是 `pub fn`）必须红；编译器层变异体不变；`site/gpu-map/record.py
 --check-call-origin` 的删除对照改为“helper 变私有”，MLIR 与字节码逐字节不变而严格配对必须拒绝。
 
-**未处理：观察孪生。** `tileir/origin.dawn` 里的 `is_mark` 用 `called`/`called_at`/`called_bare` 的声明名认记录标记，
-这些声明已不存在，所以它的 `marked` 恒为假。观察孪生的去留按补裁七第 4 条另裁，这里不动。
+**观察孪生（当时未处理，其后已拆除）。** f2 之后 `tileir/origin.dawn` 里的 `is_mark` 用 `called`/`called_at`/`called_bare` 的声明名认记录标记，
+这些声明已不存在，`marked` 恒为假；`is_mark`/`marked` 随影子比较在 `a0493367` 删除。观察孪生本身随后整体拆除，
+`origin.dawn` 也在其中，见 [observe-removal.md](observe-removal.md)。
 
 ## 九、落地进度
 

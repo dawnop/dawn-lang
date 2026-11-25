@@ -51,7 +51,7 @@
 
 ## 自动来源 P1 后续核账（2026-10-26）
 
-本项延续 [自动来源设计](../effect-provenance-design.md)，不改变 M7 历史任务边界。
+本项延续 [自动来源设计](effect-provenance-design.md)，不改变 M7 历史任务边界。
 W1（#890）已交付静态身份与 `origin` 臂语法；W2（#891）已交付普通效果、
 Plain/Observed 双入口与 checkpoint 创建帧纪律。W3 收口 control 续延、逻辑 tail 边、
 累计容量、展开与资源释放，并将导出改为公共类型化不可变快照和结构化静态表。
