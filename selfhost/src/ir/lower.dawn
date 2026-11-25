@@ -40,7 +40,6 @@ use check/capture.{Arguments as CaptureArguments, Scope as CaptureScope, TraitAp
 use std/list
 use std/map
 use std/str
-use check/provenance as observation
 use check/scope_infer
 use check/trait_contract
 use ir/walk
@@ -3860,13 +3859,6 @@ fn lower_named_call(st: LSt, e: TExpr, tl: Bool) -> (LSt, CExpr) = match e {
       Some(tid) -> lower_trait_call(st, tid, name, args, wits, evid, ty, site)
       None -> {
         let o = match owner { Some(x) -> x, None -> st.owner }
-        match observation.primitive(o, name) {
-          Some(primitive) -> {
-            let (next, call) = lower_expr(st, XCallBuiltin(primitive, args, wits, evid, lo, hi, nlo, ty))
-            return (next, result_site(call, site))
-          }
-          None -> ()
-        }
         if tl && is_self_fn(st, o, name) && not st.keep_calls {
           # neither dictionaries nor evidence are re-passed: a self call is
           # the same instantiation under the same handlers, so what is

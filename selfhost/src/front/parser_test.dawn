@@ -7,7 +7,7 @@ use std/str
 use std/list
 use front/parser.{parse_module, parse_module_marked}
 use front/astdump.{render_module}
-use front/ast.{Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambda, EHandle, EMatch, EPropagate,
+use front/ast.{Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambda, EMatch, EPropagate,
   EListLit, ListElem, LeExpr, LeSpread, LeIf,
   OpAdd, OpMul,
   PLit, POr, PCtor, PQual, PTuple, PList,
@@ -2279,26 +2279,14 @@ test "marks run beside the declarations, one for each" {
   }
 }
 
-test "origin has a clause span and a distinct local name span" {
-  let src = "fn f() -> Int = {\n  with handle Ask { ask(n) origin o resume k => k(n) }\n  g()\n}"
-  let (m, ds) = parse_module(src)
+test "origin is an ordinary identifier and no longer a handler arm clause" {
+  let (m, ds) = parse_module("fn origin(origin: Int) -> Int = {\n  let origin = origin\n  origin\n}")
   assert ds == []
-  match m.decls[0] {
-    DFn(f) -> match f.body {
-      EBlock(_, Some(EHandle(_, _, [arm], _, ..)), ..) -> {
-        let o = arm.origin.expect("origin binding")
-        assert o.name == "o"
-        assert o.nhi - o.nlo == 1
-        assert o.hi == o.nhi
-        assert o.lo < o.nlo
-        assert arm.binder == Some("k")
-      }
-      _ -> panic("handler body")
-    }
-    _ -> panic("function")
-  }
-  let out = rendered(src)
-  assert str.contains(out, "Arm ask origin o@")
+  assert len(m.decls) == 1
+  let (_, bad) = parse_module("fn f() -> Int = {\n  with handle Ask { ask(n) origin o => n }\n  g()\n}")
+  assert len(bad) > 0
+  assert str.contains(bad[0].msg, "`=>` after handler arm clauses")
+  let out = rendered("fn f() -> Int = {\n  with handle Ask { ask(n) resume k => k(n) }\n  g()\n}")
   assert str.contains(out, " resume k@")
 }
 

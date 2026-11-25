@@ -21,7 +21,6 @@ use driver/analyze.{CheckedMod, Program, analyze_program, load_target}
 use check/jsig.{jsig_refused}
 use ir/externs
 use ir/lower
-use ir/tail as call_tail
 use ir/lint
 use c/rc
 use c/unalias
@@ -383,12 +382,6 @@ fn build_units(
   std_tests: Bool
 ) -> (List[EmitMod], String, Adts, Map[(String, String), List[CMode]], Option[Live]) !Env = {
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
-  var preserve = false
-  for item in std.mods {
-    let (_, cx, _, _) = item
-    preserve = preserve || cx.observation_used
-  }
-  for cm in prog.modules { preserve = preserve || cm.cx.observation_used }
   # `flips` is the mutant harness's injection channel (see ModeFlip above)
   # and is empty on every compile that did not set DAWN_RC_MODE_FLIPS.
   let flips = mode_flips_from_env()
@@ -414,7 +407,7 @@ fn build_units(
   var found: List[lint.Violation] = []
   for sm in std.mods {
     let (cls, cx, tm, ct) = sm
-    let lm = externs.select_lowered(lower.lower_module_full(cls, tm, traits, impl_table, adts, prog_fns, std_tests, preserve), true)
+    let lm = externs.select_lowered(lower.lower_module_full(cls, tm, traits, impl_table, adts, prog_fns, std_tests), true)
     if linting { found = found ++ lint.check_module(cls, tm, lm) }
     let core = if std_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [
@@ -423,7 +416,7 @@ fn build_units(
   }
   for cm in prog.modules {
     let lm = externs.select_lowered(lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns,
-      with_tests, preserve), true)
+      with_tests), true)
     if linting { found = found ++ lint.check_module(cm.class_name, cm.tm, lm) }
     let core = if with_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [
@@ -438,15 +431,6 @@ fn build_units(
   }
 
   let lv = live(pre, prog, std_tests)
-  if preserve {
-    var plain: List[EmitMod] = []
-    for unit in pre {
-      var logical: Map[String, CFun] = map.empty()
-      for f in call_tail.observed_module(unit.m).fns { logical = map.insert(logical, fn_key(f), f) }
-      plain = plain ++ [EmitMod { ..unit, m = call_tail.plain_module(unit.m), logical = logical }]
-    }
-    pre = plain
-  }
 
   # The inference stamps both halves of the contract from one fixpoint
   # (table row and CParam.mode). A `both` flip re-runs the fixpoint with the

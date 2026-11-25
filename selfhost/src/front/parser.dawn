@@ -41,7 +41,7 @@ use front/ast.{no_scope_syntax,
   EApply, EMethod, ELambda, ECtor, ERecord, EFieldAcc, EListLit, ETupleLit, EPropagate,
   ListElem, LeExpr, LeSpread, LeIf, ListIfArm,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EExtern, EComptime,
-  EBinary, EUnary, EIf, EMatch, EBlock, EHandle, OriginBinding, HandlerArm, HandlerCell,
+  EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm, HandlerCell,
   PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
@@ -4089,9 +4089,8 @@ fn handler_cell(p: P, st: St, after_arm: Bool) -> PR[HandlerCell] = {
   }))
 }
 
-## An arm is a closure over operation parameters. Contextual `origin` binds
-## the perform snapshot before an optional `resume` continuation binding.
-## The parser retains both; observation remains a checker rejection in W1.
+## An arm is a closure over operation parameters, with an optional contextual
+## `resume` continuation binding before the arrow.
 fn handler_arm(p: P, st: St) -> PR[HandlerArm] = {
   # `let` is the other binder a reader might reach for when declaring a state
   # cell, and the generic "expected an operation name" would send them looking
@@ -4102,24 +4101,12 @@ fn handler_arm(p: P, st: St) -> PR[HandlerArm] = {
   }
   let (st1, name) = want(p, st, IDENT, "an operation name (`op(...) => ...`)")?
   let (st2, params) = lambda_params(p, st1, false)?
-  # These words are contextual only here. Do not skip newlines between the
+  # `resume` is contextual only here. Do not skip newlines between the
   # parameter list and the arrow: that boundary belongs to today's grammar.
   var st3 = st2
-  var origin: Option[OriginBinding] = None
   var binder: Option[String] = None
   var blo = name.lo
   var bhi = name.hi
-  if is_word(p, st3, 0, "origin") {
-    let kw = cur(p, st3)
-    let (next, binding) = want(p, adv1(p, st3), IDENT,
-      "a name for the origin (`op(a) origin o => ...`)")?
-    origin = Some(OriginBinding { name = binding.text, lo = kw.lo, hi = binding.hi,
-      nlo = binding.lo, nhi = binding.hi })
-    st3 = next
-  }
-  if is_word(p, st3, 0, "origin") {
-    return Err((st3, perr(p, st3, "duplicate `origin` clause in handler arm")))
-  }
   if is_word(p, st3, 0, "resume") {
     let kw = cur(p, st3)
     let (next, binding) = want(p, adv1(p, st3), IDENT,
@@ -4129,9 +4116,6 @@ fn handler_arm(p: P, st: St) -> PR[HandlerArm] = {
     bhi = binding.hi
     st3 = next
   }
-  if is_word(p, st3, 0, "origin") {
-    return Err((st3, perr(p, st3, "`origin` must precede `resume` in a handler arm")))
-  }
   if is_word(p, st3, 0, "resume") {
     return Err((st3, perr(p, st3, "duplicate `resume` clause in handler arm")))
   }
@@ -4139,7 +4123,6 @@ fn handler_arm(p: P, st: St) -> PR[HandlerArm] = {
   let st5 = skip_nl(p, st4)
   let (st6, body) = expression(p, st5, false)?
   Ok((st6, HandlerArm {
-    origin = origin,
     name = name.text,
     params = params,
     binder = binder,
