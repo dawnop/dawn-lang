@@ -10,6 +10,7 @@ import sys
 import tempfile
 
 import native_seed.contract as c
+from native_seed import lockchain
 import native_seed.qualification as q
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -224,6 +225,16 @@ def run(work):
         (work / (name + '.stdout')).write_bytes(result.stdout)
         (work / (name + '.stderr')).write_bytes(result.stderr)
         c.require(result.returncode == 0, 'light-fixture', name + ': see saved stdout/stderr')
+    # The qualified lock records (scripts/native_seed/lockchain.py): the records
+    # in the tree must verify as a hash chain whenever any of them exists, and
+    # the transition rules are held by their own controls and mutants.
+    if lockchain.present():
+        lockchain.load()
+    result = subprocess.run([sys.executable, '-B', 'scripts/native-seed-lock-test.py'], cwd=ROOT,
+                            capture_output=True, timeout=20)
+    (work / 'P2.stdout').write_bytes(result.stdout)
+    (work / 'P2.stderr').write_bytes(result.stderr)
+    c.require(result.returncode == 0, 'light-fixture', 'P2: see saved stdout/stderr')
     results = {
         'K1': c.read_json(work / 'K1.stdout')['negative'],
         'K2': c.read_json(work / 'k2/results.json')['fixture_controls'],

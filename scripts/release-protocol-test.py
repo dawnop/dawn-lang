@@ -29,11 +29,13 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import native_release as nr  # noqa: E402
 import native_seed.contract as c  # noqa: E402
+from native_seed import lockchain  # noqa: E402
 import release_publish as rp  # noqa: E402
 
 installer = nr.installer
 ROOT = HERE.parent
-LOCK = ROOT / "scripts/native-seed-candidate-v0.104.0.json"
+CANDIDATE = ROOT / "scripts/native-seed-candidate-v0.104.0.json"
+LOCK = None  # a qualified fixture lock, made in main(): the repository's own lock needs a real promotion
 passed = 0
 
 
@@ -138,9 +140,21 @@ def write_info(directory, info, fix_proof=True):
     (directory / installer.METADATA).write_bytes(nr.canonical(info))
 
 
+def fixture_lock(directory, label):
+    """A qualified lock whose receipt digest is a label; only the protocol reads it."""
+    lockchain.initial(directory, CANDIDATE, sha256(label.encode()))
+    return directory / lockchain.LOCK_NAME
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
 def main():
+    global LOCK
     with tempfile.TemporaryDirectory(prefix="release-protocol-") as temporary:
         work = Path(temporary)
+        LOCK = fixture_lock(work / "lock", "release protocol fixture")
         tag, good = build_package(work)
         info = json.loads(read(good, installer.METADATA))
         ok(info["schema"] == 2 and sorted(p.name for p in good.iterdir()) == sorted(nr.UPLOAD_ORDER),
@@ -220,6 +234,59 @@ def main():
         mutated("an extra asset", lambda d: (d / "extra.txt").write_text("x"), "release-assets")
         mutated("the seed lock differs", lambda d: None, "release-lineage",
                 lock=_other_lock(work, "sequence-free"))
+
+        # ---- promotion consumes the nine assets: what the lock would record comes from verified bytes
+        spec = importlib.util.spec_from_file_location("advance_native_seed", ROOT / "scripts/advance-native-seed.py")
+        advance = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(advance)
+        commit = info["release"]["commit"]
+        seed, std, runtime, registration = advance.evidence_from_assets(good, tag, commit, LOCK, ROOT)
+        ok(seed["tag"] == tag and seed["sha256"] == info["native"]["sha256"] and
+           seed["build_id"] == info["native"]["build_id"] and seed["version"] == f"dawnc {tag[1:]} (native)" and
+           registration["evidence_sha256"] == sha256(read(good, installer.METADATA)),
+           "promotion evidence is read from the verified nine assets")
+        refuses("promotion evidence for another commit", "release-lineage",
+                lambda: advance.evidence_from_assets(good, tag, "0" * 40, LOCK, ROOT))
+        shutil.copytree(good, work / "promo-tampered")
+        (work / "promo-tampered" / nr.ASSET).write_bytes(read(good, nr.ASSET) + b"x")
+        refuses("promotion evidence from tampered payload", "release-payload",
+                lambda: advance.evidence_from_assets(work / "promo-tampered", tag, commit, LOCK, ROOT))
+        promoted = work / "promoted"
+        shutil.copytree(LOCK.parent, promoted)
+        lockchain.promote(promoted, seed, std, runtime, sha256(b"promotion receipt"), registration)
+        ok(lockchain.load(promoted).lock["seed"]["tag"] == tag, "the promoted lock records the released seed")
+        refuses("a package built from the seed that was just replaced", "release-lineage",
+                lambda: nr.aggregate(good, tag, promoted / lockchain.LOCK_NAME))
+
+        # A release must name the qualification its seed rests on (ruling of 2026-11-25).
+        def null_qualification(directory):
+            proof = json.loads(read(directory, nr.PROOF))
+            proof["qualification_sha256"] = None
+            proof_bytes = nr.canonical(proof)
+            (directory / nr.PROOF).write_bytes(proof_bytes)
+            changed = copy.deepcopy(info)
+            changed["proof"]["sha256"] = sha256(proof_bytes)
+            write_info(directory, changed)
+        mutated("a proof that names no qualification", null_qualification, "release-qualification")
+        mutated("a proof that names no qualification, with the lock", null_qualification,
+                "release-qualification", lock=LOCK)
+        candidate_dir = work / "candidate-as-lock"
+        candidate_dir.mkdir()
+        shutil.copyfile(CANDIDATE, candidate_dir / lockchain.LOCK_NAME)
+        unqualified = dict(lock=str(candidate_dir / lockchain.LOCK_NAME), native=str(work / "stage-b"),
+                           builder=str(work / "stage-a"), jdk21_jar=str(work / "dawn-selfhost.jar"),
+                           jdk26_jar=str(work / "dawn-selfhost.jar"), pub_api=str(work / "api.json"),
+                           pub_api_diff=str(work / "diff.md"), cold_sha256="c" * 64, expect_tag=tag,
+                           skip_smoke=True, out=str(work / "never"))
+        refuses("producing from the unqualified candidate", "lock-", lambda: nr.produce(type("A", (), unqualified)))
+        refuses("producing with no lock", "lock-missing", lambda: nr.produce(type("A", (), dict(
+            unqualified, lock=str(work / "nowhere" / lockchain.LOCK_NAME)))))
+        ok(not (work / "never").exists(), "a refused producer creates no output")
+        revoked_dir = work / "revoked-lock"
+        fixture_lock(revoked_dir, "revoked fixture")
+        lockchain.revoke(revoked_dir, json.loads(CANDIDATE.read_bytes())["seed"]["sha256"], "withdrawn")
+        refuses("producing from a revoked seed", "seed-revoked", lambda: nr.produce(type("A", (), dict(
+            unqualified, lock=str(revoked_dir / lockchain.LOCK_NAME)))))
 
         # ---- the installer consumes the same package and refuses the same lies
         with tempfile.TemporaryDirectory(prefix="release-install-") as prefix:
@@ -329,11 +396,7 @@ def main():
 
 
 def _other_lock(work, label):
-    value = json.loads(LOCK.read_bytes())
-    value["registration"]["evidence_sha256"] = "0" * 64
-    path = work / f"lock-{label}.json"
-    path.write_bytes(nr.canonical(value))
-    return path
+    return fixture_lock(work / f"lock-{label}", "another qualification receipt")
 
 
 if __name__ == "__main__":

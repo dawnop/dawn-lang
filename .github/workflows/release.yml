@@ -159,11 +159,26 @@ jobs:
       - name: the pinned C compiler
         run: ./scripts/pinned-cc.sh
 
+      # The seed comes from the qualified lock (scripts/native-seed-lock.json
+      # and its history and revocation records), verified before anything is
+      # downloaded: a candidate, a missing record, a broken chain or a revoked
+      # seed stops the release here. The two seed overrides are a debugging
+      # convenience for a developer's machine and have no business in a release.
+      - name: verify the native seed lock
+        run: |
+          for name in DAWN_SEED DAWN_NATIVE_SEED DAWN_SEED_CHAIN; do
+            if [ -n "$(printenv "$name")" ]; then
+              echo "error: $name must not be set in a release" >&2
+              exit 1
+            fi
+          done
+          python3 -B scripts/native-seed-chain.py check
+
       - name: fetch the seed and its input pair
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LOCK=scripts/native-seed-candidate-v0.104.0.json
+          LOCK=scripts/native-seed-lock.json
           SEED_TAG=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['seed']['tag'])" "$LOCK")
           SEED_COMMIT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['seed']['commit'])" "$LOCK")
           mkdir -p "$RUNNER_TEMP/seed" "$RUNNER_TEMP/seed-tree"
@@ -175,7 +190,7 @@ jobs:
       - name: build the chain seed -> A -> B -> C
         run: |
           python3 scripts/native_release.py chain \
-            --lock scripts/native-seed-candidate-v0.104.0.json \
+            --lock scripts/native-seed-lock.json \
             --seed-elf "$RUNNER_TEMP/seed/dawnc-linux-x86_64" \
             --seed-tree "$RUNNER_TEMP/seed-tree" \
             --out "$RUNNER_TEMP/chain" | tee "$RUNNER_TEMP/chain.log"
@@ -330,7 +345,7 @@ jobs:
       - name: assemble the nine release assets
         run: |
           python3 scripts/native_release.py produce \
-            --lock scripts/native-seed-candidate-v0.104.0.json \
+            --lock scripts/native-seed-lock.json \
             --native dawnc-linux-x86_64 \
             --builder native-chain/dawnc-stage-a \
             --jdk21-jar release-candidates/jdk-21/dawn-selfhost.jar \

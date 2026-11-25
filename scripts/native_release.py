@@ -39,6 +39,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 import native_seed.contract as c  # noqa: E402
+from native_seed import lockchain  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("install_native", HERE / "install-native.py")
 installer = importlib.util.module_from_spec(spec)
@@ -134,11 +135,14 @@ def aggregate(directory, tag, lock=None):
               "release-proof", "proof does not describe this metadata")
     for key in ("lock_sha256", "cold_sha256"):
         c.sha(proof[key], key)
-    if proof["qualification_sha256"] is not None:
-        c.sha(proof["qualification_sha256"], "qualification")
+    # A release says which qualification receipt its seed rests on. There is no
+    # spelling for "none": that was the state before the qualified lock existed.
+    c.require(proof["qualification_sha256"] is not None, "release-qualification",
+              "the release does not name a qualification receipt")
+    c.sha(proof["qualification_sha256"], "qualification")
     if lock is not None:
         lock = Path(lock)
-        value = c.read_lock(lock)
+        value = lockchain.release_lock(lock)
         c.require(proof["lock_sha256"] == sha256(lock.read_bytes()) and
                   info["bootstrap"]["seed"] == value["seed"] and info["bootstrap"]["std"] == value["std"] and
                   info["bootstrap"]["runtime"] == value["runtime"] and
@@ -200,7 +204,7 @@ def produce(args):
     out = c.safe_destination(args.out)
     c.require(not out.exists(), "destination", "producer requires a new output directory")
     lock_path = Path(args.lock)
-    lock = c.read_lock(lock_path)
+    lock = lockchain.release_lock(lock_path)
     native, builder = Path(args.native).absolute(), Path(args.builder).absolute()
     c.verify_elf(native.read_bytes())
     c.verify_elf(builder.read_bytes())
@@ -282,9 +286,9 @@ def emit_and_link(emitter, entry, std, runtime, out, jobs):
 
 
 def chain(args):
-    lock = c.read_lock(args.lock)
+    lock = lockchain.release_lock(args.lock)
     seed = Path(args.seed_elf)
-    c.verify_seed_probe(seed, lock)
+    lockchain.verify_seed_bytes(c.regular_bytes(seed), lock)
     out = c.safe_destination(args.out)
     c.require(not out.exists(), "destination", "chain requires a new output directory")
     out.mkdir(parents=True)
