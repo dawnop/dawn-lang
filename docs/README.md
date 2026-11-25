@@ -45,7 +45,7 @@ Scaled MMA accumulator coverage: [gpu-g31-4-scaled-mma-acc-design.md](gpu-g31-4-
 
 装配器版本身份严格拒绝：[gpu-assemble-version-design.md](gpu-assemble-version-design.md)。
 
-效果来源提案：[effect-provenance-design.md](effect-provenance-design.md)，按观察作用域保留逻辑调用，含来源负控与分期验收；语言机制尚未实现。
+效果来源提案（observe 机制，已拆除）：原设计归档为 [effect-provenance-design.md](history/effect-provenance-design.md)，拆除的理由与留下的东西见 [observe-removal.md](observe-removal.md)。
 
 编译器代写调用记录：[call-records-design.md](call-records-design.md)，效果的 `calls` 子句与 Core 变换，与手写 marks 并存对拍；R4-f0 设计与 R4-f1 实现。
 
@@ -75,6 +75,7 @@ comptime 字节常量设计：[comptime-bytes-design.md](comptime-bytes-design.m
 | 文档 | 生命周期 | 说明 |
 |---|---|---|
 | [incremental-semantics-removal.md](incremental-semantics-removal.md) | current | 2026-09-27 拆除增量引擎的 opt-in 切片（体级重放、准入类别、读取日志与写日志）：三次 G3 实测为什么判它不值钱、两刀各拆了什么、留下的身份/调度/按键产物为什么是 laziness 的地基，以及不做的。 |
+| [observe-removal.md](observe-removal.md) | current | 2026-11 拆除 observe 机制（`origin` 子句、`std/provenance`、observed 孪生与两端运行时）：为什么删（R4-f 之后无消费者、983 s/push、native 可空观察者 ABI）、四刀各删了什么与提交、留下的代写调用记录、随删除消失的独立改进，以及被推翻的前提与不做的。 |
 | [lsp-module-memo-design.md](lsp-module-memo-design.md) | current | 2026-09-28 LSP 同步延迟刀 1：模块步骤按（输入，进入 carry）记忆，一条规则代替前缀复用的文本预算与 Java 查询规则并包含早截断；未变文本复用解析；`decl_spans` 围绕复用步骤重拼；导出面的 alias 不带源码位置。selfhost 工作区 sync 中位数 1.5 到 2.0 s 降到 0.05 到 0.39 s。 |
 | [lsp-source-snapshot-design.md](lsp-source-snapshot-design.md) | proposed | 每修订共享 code points、UTF-16 映射和行起点；以生产 A/B 价值门决定是否采用。 |
 | [lsp-sync-bench-design.md](lsp-sync-bench-design.md) | current | 2026-10-19 把 LSP sync 复测固化成 `scripts/lsp-sync-bench/`：selfhost 工作区场景 (a)(b)(c)(d) 与 `check/types` 全部 `pub fn` 的签名改动，报中位与 p90 并对照两层线（L-edit 100 ms，L-ws 300 ms / 类型定义 1 s），负载守卫，两个 jar 同时起、逐次交错的对照模式；不进 CI，进发版清单。 |
@@ -332,6 +333,9 @@ comptime 字节常量设计：[comptime-bytes-design.md](comptime-bytes-design.m
 [source-equality-oracle-design.md](history/source-equality-oracle-design.md) ·
 [real-edit-matrix-design.md](history/real-edit-matrix-design.md) ·
 [body-diag-guard-design.md](history/body-diag-guard-design.md)
+
+observe 机制（2026-11 拆除，理由见 [observe-removal.md](observe-removal.md)，最后一版树在 tag `provenance-final`）：
+[effect-provenance-design.md](history/effect-provenance-design.md)（效果来源提案与 W1/W2/W3-R 实施记录）
 
 这一层全部 historical。指向 `compiler/` 的链接已改为 `kotlin-final` tag 上的
 GitHub URL——那套实现不在 main。

@@ -33,8 +33,9 @@
 > 代码块都不标 `dawn run` / `dawn compile`，`doc-check.py` 不编译它们；
 > 已落地的部分以 `std/gpu.dawn` 及其 test 块为准。
 
-2026-10-25 的[效果来源提案](effect-provenance-design.md)计划由通用观察设施替代手工 call/body
-协议，tileir 只保留投影政策；机制尚未实现，当前标记继续保留。
+2026-10-25 的[效果来源提案](history/effect-provenance-design.md)曾计划由通用观察设施替代手工 call/body
+协议；该机制已拆除（[observe-removal.md](observe-removal.md)），手写标记则由编译器代写调用记录
+（[call-records-design.md](call-records-design.md)）取代并已删除。
 删除 helper 标记的真实录制可保持设备字节却被严格 gpu-map 配对拒绝，P0 将其纳入永久负控。
 
 当前 FlashAttention 读者入口统一为 BF16 输入、F32 状态/scale/输出，见

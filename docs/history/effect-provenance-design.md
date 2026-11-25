@@ -1,6 +1,9 @@
 # 效果来源：按观察作用域保留逻辑调用
 
-> 状态：**W3-R 刀 R1 已合并，刀 R2（通用消费适配）进行中**（2026-11-14 重开）。2026-11-15 起另有 R4-f 线：编译器按效果的 `calls` 子句代写调用记录，见 [call-records-design.md](call-records-design.md)。W1 提供语法与静态身份，W2 提供普通观察及双后端逻辑调用 ABI；W3 补齐控制续延、尾边与有界日志。旧 W3 资格封存；本分支把该实现按当前 main 重做，手写 tile marks 与其全部消费者原样保留。P1 完成与否由后续 R3 资格裁定，P2 才删 marks。
+> 状态：**historical** —— 已退役：observe 机制（`origin` 子句、`std/provenance`、observed 孪生与两端运行时）于 2026-11 分四刀拆除，最后一版树在 tag `provenance-final`，考古看那个 tag；拆除的理由、删了什么与留下了什么见 [observe-removal.md](../observe-removal.md)。
+> 下面是退役前的原文，其中的「现状」「尚未实现」「进行中」都指拆除之前。§一的证据与教训仍然成立，予以保留。
+>
+> 退役前的状态：**W3-R 刀 R1 已合并，刀 R2（通用消费适配）进行中**（2026-11-14 重开）。2026-11-15 起另有 R4-f 线：编译器按效果的 `calls` 子句代写调用记录，见 [call-records-design.md](../call-records-design.md)。W1 提供语法与静态身份，W2 提供普通观察及双后端逻辑调用 ABI；W3 补齐控制续延、尾边与有界日志。旧 W3 资格封存；本分支把该实现按当前 main 重做，手写 tile marks 与其全部消费者原样保留。P1 完成与否由后续 R3 资格裁定，P2 才删 marks。
 
 <!-- 为什么写这篇：设备字节相同不能证明源码归属相同。把客观调用来源交给编译器，
      把展示抽象留给观察器，才能退休散在库签名与用户 helper 中的第二套调用协议。 -->
@@ -24,7 +27,7 @@ handler 中调用 `loc.here()` 只会得到 handler 那一行。
 `dev.dawn` 中 213 个顶层公开函数只有 185 个带该默认参数；运算符与 staged trait
 方法不能接默认值，所以不能把问题简写为「每个 pub 函数都有 at」。
 
-永久负控在 [record.py](../site/gpu-map/record.py) 的 `--check-call-origin` 入口：
+永久负控在 [record.py](../../site/gpu-map/record.py) 的 `--check-call-origin` 入口：
 只在临时副本删除 `fa_exp`、`fa_divide` 共八条标记调用，保留行号、`at` 和数值分支，
 清理对应 unused imports。两份程序都必须真实编译并录制，不能靠伪造 rows 通过。
 
@@ -44,7 +47,7 @@ handler 中调用 `loc.here()` 只会得到 handler 那一行。
 
 ## 二、重新裁决与职责
 
-[caller-location-design.md](caller-location-design.md) 第二节选择显式默认值、第九节否决
+[caller-location-design.md](../caller-location-design.md) 第二节选择显式默认值、第九节否决
 隐式调用者传播的结论，**对观察型来源在此推翻**。193 个默认参数、228 处包装与完整调用树需求
 已经超出「少数库函数替调用者报错」的前提。观察作用域中的来源由编译器隐式携带，
 普通函数与用户 helper 的签名不写机械 `at`，也不要求逐函数加属性。
@@ -55,7 +58,7 @@ handler 中调用 `loc.here()` 只会得到 handler 那一行。
 
 W1 之前，Core 已有 `CSite = CNoSite | CAt(lo, hi, nlo)`、`CFun.origin` 与
 `ir/coresites.dawn` 的声明基址恢复；C/JVM `.dawnmap` 也已存在。
-[source-span-map-design.md](source-span-map-design.md) 的这些静态信息是底座，
+[source-span-map-design.md](../source-span-map-design.md) 的这些静态信息是底座，
 缺的是执行中的调用实例、结束状态及 perform 发起方来源，不能再用「Core 无 span」作前提。
 
 W1 为 `CAt` 增加 `CallSource`，用 `CSyntax` 显式保存合成语法的 span 与角色，
