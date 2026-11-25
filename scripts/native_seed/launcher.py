@@ -15,6 +15,7 @@ import sys
 import tempfile
 
 from native_seed import builder, contract as c, inputs, lockchain, toolchain
+from native_seed.stat_cache import DigestCache, replace_json
 
 try:
     import fcntl
@@ -32,7 +33,7 @@ def controls(repo):
     return loaded.lock, {'chain': [c.digest(raw) for _, raw in loaded.chain], 'revoked': loaded.revoked}
 
 
-def select(repo, fetch):
+def select(repo, fetch, *, git_cache=None, digest_cache=None):
     locked, control = controls(repo)
     values = [os.environ.get(name) for name in OVERRIDES]
     c.require(not any(values) or all(values), 'seed-override',
@@ -43,7 +44,7 @@ def select(repo, fetch):
         c.require(lock['seed']['sha256'] not in control['revoked'], 'revoked', 'override seed is revoked')
         lockchain.override_seed(seed)
         lockchain.verify_seed_bytes(c.regular_bytes(seed), lock)
-        c.verify_seed_tree(repo, lock, pair)
+        c.verify_seed_tree(repo, lock, pair, git_cache=git_cache, digest_cache=digest_cache)
         frame = {'selection': 'override', 'lock_sha256': c.digest(c.regular_bytes(lock_path)),
                  'seed_path': str(seed), 'lock_path': str(lock_path), 'pair_path': str(pair)}
     else:
@@ -56,10 +57,10 @@ def select(repo, fetch):
     return lock, lock_path, seed, pair, dict(frame, controls=control)
 
 
-def snapshot(repo, lock, frame, cc, development_cc):
+def snapshot(repo, lock, frame, cc, development_cc, *, digest_cache=None, git_cache=None):
     commit = c.git(repo, 'rev-parse', 'HEAD').decode().strip()
-    tree, files = builder.source_files(repo, commit, live=True)
-    tc = toolchain.prepare(cc, pinned=not development_cc)
+    tree, files = builder.source_files(repo, commit, live=True, digest_cache=digest_cache, git_cache=git_cache)
+    tc = toolchain.prepare(cc, pinned=not development_cc, digest_cache=digest_cache)
     toolchain.verify_record(tc, pinned=not development_cc)
     compilation = inputs.compilation(files, lock, tc)
     value = {'schema': 1, 'kind': 'native-launcher-inputs', 'chain': 'native', 'stage': 'B',
@@ -70,7 +71,7 @@ def snapshot(repo, lock, frame, cc, development_cc):
     return value, files, tc
 
 
-def verify(directory, expected, files, tc, repo, lock, marker=None):
+def verify(directory, expected, files, tc, repo, lock, marker=None, *, digest_cache=None, git_cache=None):
     marker = c.read_json(directory / 'committed.json') if marker is None else marker
     c.fields(marker, 'schema kind inputs_sha256 receipt_sha256 chain_sha256', 'generation commit')
     c.require(marker['schema'] == 1 and marker['kind'] == 'native-launcher-commit' and
@@ -87,14 +88,17 @@ def verify(directory, expected, files, tc, repo, lock, marker=None):
     c.require(receipt['chain_sha256'] == marker['chain_sha256'] == c.digest(c.regular_bytes(chain_path)),
               'generation-receipt', 'chain receipt differs')
     chain = builder.verify_receipt(chain_path, repo, lock, directory / 'B/dawnc', directory / 'A/dawnc',
-                                   require_c=False, live=True, development_cc=expected['development_cc'])
+                                   require_c=False, live=True, development_cc=expected['development_cc'],
+                                   snapshot={'commit': expected['commit'], 'tree': expected['tree'], 'files': files,
+                                             'toolchain': tc, 'source_sha256': expected['source_sha256'],
+                                             'compilation': inputs.compilation(files, lock, tc)})
     c.require(chain['execution']['kind'] == 'development' and chain['toolchain'] == tc,
               'generation-toolchain', 'actual toolchain or development scope differs')
-    c.verify_tree(directory / 'source', c.inventory(files))
-    c.verify_seed_tree(repo, lock, directory / 'seed')
+    c.verify_tree(directory / 'source', c.inventory(files), digest_cache=digest_cache)
+    c.verify_seed_tree(repo, lock, directory / 'seed', git_cache=git_cache, digest_cache=digest_cache)
     lockchain.verify_seed_bytes(c.regular_bytes(directory / 'seed-elf'), lock)
     for stage in ('A', 'B'):
-        c.require(builder.output_identity(directory / stage) == chain['stages'][stage]['output'],
+        c.require(builder.output_identity(directory / stage, digest_cache=digest_cache) == chain['stages'][stage]['output'],
                   'generation-output', 'stage bytes differ from the builder receipt')
     c.require(builder.plan(directory / 'B/dawnc', directory / 'source') == chain['plan_sha256'],
               'generation-plan', 'B source plan differs')
@@ -135,18 +139,34 @@ def generation(repo, fetch, cache=None):
     lock_fd = os.open(c.safe_destination(cache / 'build.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(lock_fd, 'r+') as held:
         fcntl.flock(held, fcntl.LOCK_EX)
-        lock, lock_path, seed, pair, frame = select(repo, fetch)
+        git_cache = {}
+        digests = DigestCache()
+        hint = cache / 'last-generation.json'
+        if hint.exists():
+            last = c.read_json(hint)
+            c.fields(last, 'generation sha256', 'generation hint')
+            c.require(last['sha256'] == c.digest(c.canonical(last['generation'])),
+                      'stat-cache', 'generation hint integrity differs')
+            c.sha(last['generation'], 'generation hint')
+            previous = cache / 'generations' / last['generation'] / 'stat-cache.json'
+            if previous.exists():
+                digests = DigestCache.load(previous, last['generation'])
+        lock, lock_path, seed, pair, frame = select(repo, fetch, git_cache=git_cache, digest_cache=digests)
         cc = os.environ.get('CC', '/usr/lib/llvm-18/bin/clang')
         cc = shutil.which(cc) or cc
         # Alternate clang is allowed only as a development recipe. All source
         # launcher generations, including pinned clang, remain development.
         development_cc = str(Path(cc).resolve()) != '/usr/lib/llvm-18/bin/clang'
-        expected, files, tc = snapshot(repo, lock, frame, cc, development_cc)
+        untracked = c.git(repo, 'ls-files', '-z', '--others', '--exclude-standard')
+        expected, files, tc = snapshot(repo, lock, frame, cc, development_cc, digest_cache=digests, git_cache=git_cache)
         key = c.digest(c.canonical(expected))
         generations = c.safe_destination(cache / 'generations')
         generations.mkdir(exist_ok=True)
         directory = c.safe_destination(generations / key)
         if not directory.exists():
+            # A cold path always captures full bytes, irrespective of a hint.
+            expected_full, files, tc = snapshot(repo, lock, frame, cc, development_cc, git_cache=git_cache)
+            c.require(expected_full == expected, 'generation-inputs', 'cold inputs changed')
             staging = Path(tempfile.mkdtemp(prefix='.staging-', dir=cache))
             output = staging / 'generation'
             # Preserve a failed staging tree for diagnosis; never consult it
@@ -163,18 +183,29 @@ def generation(repo, fetch, cache=None):
             c.atomic_json(output / 'generation.json', receipt)
             marker = {'schema': 1, 'kind': 'native-launcher-commit', 'inputs_sha256': key,
                       'receipt_sha256': c.digest(c.canonical(receipt)), 'chain_sha256': receipt['chain_sha256']}
-            verify(output, expected, files, tc, repo, lock, marker=marker)
+            verify(output, expected, files, tc, repo, lock, marker=marker, git_cache=git_cache)
+            for parent, _, names in os.walk(output):
+                for name in names:
+                    path = Path(parent) / name
+                    path.chmod(0o555 if path.stat().st_mode & 0o111 else 0o444)
             sync_tree(output)
             os.rename(output, directory)
             sync_directory(generations)
             c.atomic_json(directory / 'committed.json', marker)
+            (directory / 'committed.json').chmod(0o444)
             staging.rmdir()
-        receipt = verify(directory, expected, files, tc, repo, lock)
+        receipt = verify(directory, expected, files, tc, repo, lock, digest_cache=digests, git_cache=git_cache)
         # Re-read control records and the external paired override immediately
         # before handing the verified executable to the caller.
-        c.require(select(repo, fetch)[-1] == frame, 'generation-inputs', 'seed controls changed during verification')
-        c.require(snapshot(repo, lock, frame, cc, development_cc)[0] == expected,
-                  'generation-inputs', 'inputs changed during verification')
+        c.require(select(repo, fetch, git_cache=git_cache, digest_cache=digests)[-1] == frame, 'generation-inputs', 'seed controls changed during verification')
+        c.require(c.git(repo, 'rev-parse', 'HEAD').decode().strip() == expected['commit'] and
+                  c.git(repo, 'ls-files', '-z', '--others', '--exclude-standard') == untracked,
+                  'generation-inputs', 'source provenance or untracked file set changed during verification')
+        digests.recheck()
+        stat_path = directory / 'stat-cache.json'
+        if digests.changed or not stat_path.exists():
+            digests.save(stat_path, key)
+        replace_json(hint, {'generation': key, 'sha256': c.digest(c.canonical(key))})
         stamp = 'native-v1:development:' + frame['selection'] + ':' + key + ':' + receipt['elf_sha256']
         return {'stamp': stamp, 'executable': str(directory / 'B/dawnc'),
                 'receipt': str(directory / 'generation.json')}

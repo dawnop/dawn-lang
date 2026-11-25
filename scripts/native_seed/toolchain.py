@@ -77,7 +77,8 @@ def verify_linker(value):
               'toolchain-identity', 'invalid linker version probe')
 
 
-def prepare(cc, destination=None, pinned=True):
+def prepare(cc, destination=None, pinned=True, digest_cache=None):
+    c.require(digest_cache is None or destination is None, 'stat-cache-scope', 'materialized toolchains require full bytes')
     if destination is not None:
         destination = c.safe_destination(destination)
         c.require(not destination.exists(), 'destination', 'new toolchain directory required')
@@ -101,17 +102,20 @@ def prepare(cc, destination=None, pinned=True):
         logical = (target or path.as_posix()).lstrip('/')
         c.logical(logical)
         c.require(path.is_file(), 'toolchain-input', f'missing toolchain file: {path}')
-        data = path.read_bytes()
+        origin = str(path.resolve()) if digest_cache is None else digest_cache.resolve(path)
+        data = path.read_bytes() if digest_cache is None else digest_cache.read(origin)
         if logical in files:
-            c.require(files[logical][1] == data, 'toolchain-input', 'conflicting toolchain paths')
+            c.require(c.digest(files[logical][1]) == c.digest(data), 'toolchain-input', 'conflicting toolchain paths')
         files[logical] = ('100755' if executable else '100644', data)
-        origins[logical] = str(path.resolve())
+        origins[logical] = origin
         if executable:
             executables['/' + logical] = c.digest(data)
 
     def tree(path):
         # Resolve input symlinks into ordinary snapshot files, never retain an external link.
         for directory, dirs, names in os.walk(path, followlinks=True):
+            if digest_cache is not None:
+                digest_cache.watch_directory(digest_cache.resolve(directory))
             for name in names:
                 add(Path(directory) / name)
 
@@ -130,6 +134,9 @@ def prepare(cc, destination=None, pinned=True):
     tree(probe['resource_dir'])
     tree('/usr/lib/gcc/x86_64-linux-gnu/13/include')
     gcc = Path('/usr/lib/gcc/x86_64-linux-gnu/13')
+    if digest_cache is not None:
+        digest_cache.watch_directory(gcc)
+        digest_cache.watch_directory('/usr/lib/x86_64-linux-gnu')
     for path in sorted(gcc.iterdir()):
         if path.suffix in ('.a', '.o') or path.name == 'libgcc_s.so':
             add(path)
@@ -163,7 +170,7 @@ def prepare(cc, destination=None, pinned=True):
         for name in names:
             path = Path(directory) / name
             path.chmod(0o555 if path.stat().st_mode & 0o111 else 0o444)
-        Path(directory).chmod(0o555)
+        Path(directory).chmod(0o755)
     c.atomic_json(destination / 'toolchain.json', result)
     return result
 
