@@ -139,6 +139,13 @@ b near scripts/tile-gpu-diff/red_diff.dawn
 #   traits: REAL, low severity. `assert cmp("b", "a") > 0` without the `0`:
 #     the newline after a trailing binary operator is swallowed, so the
 #     report lands on the statement 5 lines later (#577).
+#   float_eval, lint: REAL, low severity, parser recovery (long-term item
+#     #887). float_eval: an `if` inserted before a bare literal puts the
+#     first diagnostic (`expected {`) at the following line instead of at
+#     the insertion. lint: an inserted `}` is reported several lines after
+#     it, where the resync finally gives up. Pinned 2026-11-24 because both
+#     files are new or newly edited code that drew fresh mutants (the
+#     ratchet fails any new key); the fix is in the parser, not here.
 KNOWN_DEFECTS = """\
 b near examples/traits/traits.dawn
 b near scripts/checker-corpus/cases/effect_type_args.dawn
@@ -149,6 +156,8 @@ b near scripts/map-reuse-contract/record_update_native.dawn
 b near scripts/slab-bench/workloads/lexer/src/main.dawn
 b near scripts/table-freight/only_in_test.dawn
 b near selfhost/src/driver/stdlib.dawn
+b near selfhost/src/ir/float_eval.dawn
+b near selfhost/src/ir/lint.dawn
 b near site/play-ui/samples/effects.dawn
 b near site/src/gen/search_body.dawn
 """
