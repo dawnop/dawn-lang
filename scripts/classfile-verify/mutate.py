@@ -86,6 +86,11 @@ MUTATIONS = {
         (EMIT,
          "    CallTwo -> { m.visitInsn(OP_POP2) }",
          "    CallTwo -> { m.visitInsn(OP_POP) }"),
+        # the only remaining use of OP_POP2 is the one just replaced, and an
+        # unused import is a compile error
+        (EMIT,
+         "OP_NEW, OP_POP, OP_POP2, OP_PUTFIELD,",
+         "OP_NEW, OP_POP, OP_PUTFIELD,"),
     ),
     "omit-direct-bottom": call_bottom(
         "      call_entry(g1.mv, owner, name, d, at)"),
