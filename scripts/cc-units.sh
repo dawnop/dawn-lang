@@ -33,7 +33,7 @@
 # that is only run to be tested (docs/native-inline-design.md section 10);
 # release-native.sh, whose binary users run, passes it.
 #
-#   scripts/cc-units.sh [--static] [--inline-rc] [--runtime DIR] -o OUT UNITS_DIR [EXTRA.c ...]
+#   scripts/cc-units.sh [--qualification] [--static] [--inline-rc] [--runtime DIR] -o OUT UNITS_DIR [EXTRA.c ...]
 #
 # UNITS_DIR holds dawn_prog.h and tu*.c, or a single main.c for a text with
 # no unit markers. CC picks the compiler (default cc), CC_JOBS the number of
@@ -43,10 +43,17 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 
 static=()
 inline=()
+qualification=()
+# The qualification snapshot contains GCC 13. Clang otherwise chooses a newer
+# installed GCC on hosted runners. Keep selection and the probe's flag query
+# here so compilation, linking and identity checks cannot drift apart.
+qualification_flags=(--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13)
 out=
 runtime="$root/runtime/c"
 while [ $# -gt 0 ]; do
   case $1 in
+    --print-qualification-flags) printf '%s\n' "${qualification_flags[@]}"; exit 0 ;;
+    --qualification) qualification=("${qualification_flags[@]}"); shift ;;
     --static) static=(-static); shift ;;
     --inline-rc) inline=(-DDAWN_RT_INLINE_RC); shift ;;
     --runtime) runtime=${2:?--runtime needs a directory}; shift 2 ;;
@@ -55,7 +62,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -z "$out" ] || [ $# -lt 1 ]; then
-  echo "usage: $0 [--static] [--inline-rc] [--runtime DIR] -o OUT UNITS_DIR [EXTRA.c ...]" >&2
+  echo "usage: $0 [--qualification] [--static] [--inline-rc] [--runtime DIR] -o OUT UNITS_DIR [EXTRA.c ...]" >&2
   exit 2
 fi
 units=$1
@@ -68,7 +75,7 @@ fi
 
 cc_bin="${CC:-cc}"
 jobs="${CC_JOBS:-$(nproc 2>/dev/null || echo 4)}"
-ccflags=(-std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread "${inline[@]+"${inline[@]}"}" -I "$runtime")
+ccflags=(-std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -ffp-contract=off -pthread "${qualification[@]+"${qualification[@]}"}" "${inline[@]+"${inline[@]}"}" -I "$runtime")
 
 srcs=()
 while IFS= read -r f; do srcs+=("$f"); done < <(find "$units" -maxdepth 1 -name 'tu*.c' | LC_ALL=C sort)

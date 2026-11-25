@@ -70,7 +70,7 @@ def main():
                     '--commit', args.commit, '--out', str(out / 'jvm')]),
                 ('dual', k4 + ['dual', '--cold', str(out / 'cold'), '--java', str(args.java21.absolute()),
                                '--jar', str(out / 'jvm/jdk-21.jar'), '--out', str(out / 'dual')]),
-                ('native-fixpoint', [str(out / 'jvm/source-21/scripts/native-fixpoint.sh')]),
+                ('native-fixpoint', [str(out / 'jvm/source-21/scripts/native-fixpoint.sh'), '--qualification']),
                 ('native-cli-diff', ['env', 'DAWNC_BIN=' + str(out / 'cold/root-1/B/dawnc'),
                                      str(out / 'jvm/source-21/scripts/native-cli-diff.sh')]),
                 ('seal', k4 + ['seal', '--out', str(out)]),

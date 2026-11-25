@@ -9,6 +9,18 @@ import tempfile
 import native_seed.contract as c
 
 
+def qualification_flags():
+    script = Path(__file__).resolve().parents[1] / 'cc-units.sh'
+    result = subprocess.run(['/usr/bin/bash', str(script), '--print-qualification-flags'],
+                            env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'},
+                            capture_output=True, text=True, timeout=20)
+    flags = result.stdout.splitlines()
+    c.require(result.returncode == 0 and not result.stderr and flags and
+              all(flag.startswith('--') and not any(ch.isspace() for ch in flag) for flag in flags),
+              'toolchain-recipe', 'cannot read the shared qualification flags')
+    return flags
+
+
 def stage_inputs(repo, lock, receipt, source, seed_tree, stage, std, runtime):
     c.validate_lock(lock)
     c.validate_receipt(receipt, lock)
@@ -79,7 +91,7 @@ def compile_stage(args):
         env['PATH'] = str(Path(probe['executable']).parent) + ':' + env['PATH']
         env['CC'] = probe['executable']
         env['CC_JOBS'] = str(args.jobs)
-        command = [str(script), '--static', '--inline-rc', '--runtime',
+        command = [str(script), '--qualification', '--static', '--inline-rc', '--runtime',
                    str(Path(args.runtime).absolute()), '-o', str(out), str(units), str(info)]
         run = subprocess.run(command, env=env)
         c.require(run.returncode == 0, 'cc-build', f'shared recipe exited {run.returncode}')
@@ -106,5 +118,5 @@ def emission_command(emitter, entry, std, out):
 
 
 def compilation_command(script, runtime, out):
-    return ['/usr/bin/bash', str(script), '--static', '--inline-rc', '--runtime', str(runtime),
+    return ['/usr/bin/bash', str(script), '--qualification', '--static', '--inline-rc', '--runtime', str(runtime),
             '-o', str(out / 'dawnc'), str(out / 'units'), str(out / 'info.c')]

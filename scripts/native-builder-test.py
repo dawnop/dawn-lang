@@ -8,6 +8,7 @@ its control fail; the same controls also run against the pre1 base producer.
 
 import copy
 import importlib.util
+import io
 from pathlib import Path
 import subprocess
 import sys
@@ -68,6 +69,9 @@ def main():
             ('wrong CC bytes', lambda v: v['toolchain']['compiler'].update(sha256='0' * 64)),
             ('wrong CC target', lambda v: v['toolchain']['compiler'].update(triple='aarch64-linux-gnu')),
             ('wrong linker bytes', lambda v: v['toolchain']['executables'].update({'/usr/bin/ld': '0' * 64})),
+            ('wrong GCC driver path', lambda v: v['toolchain']['driver']['files'].update({'libgcc.a': '/usr/lib/gcc/x86_64-linux-gnu/14/libgcc.a'})),
+            ('wrong crt path', lambda v: v['toolchain']['driver']['files'].update({'crtbeginT.o': '/usr/lib/gcc/x86_64-linux-gnu/14/crtbeginT.o'})),
+            ('missing GCC selection flag', lambda v: v['toolchain']['driver'].update(flags=[])),
             ('wrong libc closure', lambda v: v['toolchain']['inventory'].pop()),
             ('development CC', lambda v: v['toolchain'].update(recipe='development-clang-gcc13-static-v1')),
             ('missing A', lambda v: v['stages'].pop('A')),
@@ -107,6 +111,26 @@ def main():
         path.write_bytes(c.canonical(receipt))
         _, files = builder.source_files(ROOT, receipt['source_commit'])
         tc = test_support.compiler_record()
+        diagnostics = io.StringIO()
+
+        def wrong_driver(argv, **kwargs):
+            name = argv[-1].split('=', 1)[1]
+            path = tc['driver']['files'][name]
+            if name == 'libgcc.a':
+                path = '/usr/lib/gcc/x86_64-linux-gnu/14/libgcc.a'
+            return subprocess.CompletedProcess(argv, 0, stdout=path + '\n', stderr='')
+
+        with patch.object(toolchain, 'qualification_flags', return_value=tc['driver']['flags']), \
+             patch.object(toolchain.subprocess, 'run', side_effect=wrong_driver), \
+             patch.object(sys, 'stderr', diagnostics):
+            refused(lambda: toolchain.driver_inputs('/fixture/clang', {'CANARY': 'private-value'}),
+                    'actual GCC resolution outside capture')
+        diagnostic_paths = diagnostics.getvalue().splitlines()
+        assert len(diagnostic_paths) == len(toolchain.DRIVER_INPUTS)
+        assert all(path.startswith('/') for path in diagnostic_paths)
+        assert '/usr/lib/gcc/x86_64-linux-gnu/14/libgcc.a' in diagnostic_paths
+        assert 'CANARY' not in diagnostics.getvalue() and 'private-value' not in diagnostics.getvalue()
+        print('OK toolchain rejection prints only actual resolved paths')
         baseline = inputs.compilation_sha(files, lock, tc)
         changed = dict(files)
         for name in inputs.CONTROL_FILES | {'scripts/native-seed-history/0.json'}:

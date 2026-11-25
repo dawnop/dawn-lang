@@ -125,7 +125,7 @@ def fixture_controls(work):
     info.write_text('info')
     env = {'PATH': '/usr/bin:/bin', 'CC': str(cc), 'CC_JOBS': '1'}
     runtime = seed_tree / 'runtime/c'
-    result = subprocess.run([str(ROOT / 'scripts/cc-units.sh'), '--runtime', str(runtime),
+    result = subprocess.run([str(ROOT / 'scripts/cc-units.sh'), '--qualification', '--runtime', str(runtime),
                              '--static', '--inline-rc', '-o', str(work / 'binary'),
                              str(units), str(info)], env=env, capture_output=True)
     assert result.returncode == 0, result.stderr
@@ -133,6 +133,7 @@ def fixture_controls(work):
     compiles, link = commands[:-1], commands[-1]
     assert len(compiles) == 4 and '-static' in link and '-lm' == link[-1]
     for argv in commands:
+        assert all(argv.count(flag) == 1 for flag in recipe.qualification_flags())
         assert argv[argv.index('-I') + 1] == str(runtime)
         assert '-DDAWN_RT_INLINE_RC' in argv and '-ffp-contract=off' in argv
     by_source = {argv[argv.index('-c') + 1]: argv[argv.index('-o') + 1] for argv in compiles}

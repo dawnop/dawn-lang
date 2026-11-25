@@ -755,3 +755,11 @@ pre1 的具体接口：
 排除 `scripts/native-seed-lock.json`、`native-seed-history/`、`native-seed-revoked.txt`、历史 candidate 与 JAR seed 三文件；
 额外待晋级描述写在仓外，不引入新的递归记录。原始 commit/tree 与完整输入 receipt 仍保存，
 控制层和编译层的验证各自保留，不能把“摘要不变”解释为绕过撤销或来源验证。
+
+补裁六要求资格配方显式选择 GCC 13。`cc-units.sh --qualification` 在编译和链接的共同参数中加入
+`--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13`，该参数只在此脚本定义。
+`--print-qualification-flags` 供身份探测读取同一参数；builder、cold、compile-stage 和资格固定点显式使用资格模式。
+通用 C 构建继续按调用者的 CC 配方执行，集群 prefix 与开发 CC 的路径不会被资格目录覆盖。
+工具链探测记录实际 libgcc、GCC crt、libc crt 与静态 libc 的解析路径，并要求每一项位于捕获目录且在清单中。
+失败时只额外打印解析路径；未知目录继续拒绝。新配方下须重测本机 A/B 与 native-fixpoint，
+再在新的 prerelease tag 完成 A/B/C、receipt 交接与 producer 验证；托管仍不满足 GCC 13 闭包则停止回报。
