@@ -595,7 +595,9 @@ fn contextual_keywords(raw: List[Token]) -> Set[Int] = {
 ## back, because whatever the inside moved it to belongs to the inside (#545).
 # `lambda_at` carries a Scope binder's start through its following parameter
 # parentheses; `calls` distinguishes an effect clause from call arguments.
-type Opener = { at: Int, brace: Bool, lat: Int, ld: Int, lambda_at: Int, calls: Bool }
+# `operand_at` belongs to a lambda argument inside this bracket, until its
+# separating comma, so a binary block operand follows that argument's line.
+type Opener = { at: Int, brace: Bool, lat: Int, ld: Int, lambda_at: Int, calls: Bool, operand_at: Int }
 
 ## The parenthesis in `effect Name calls(` opens a declaration clause. The
 ## name `calls` alone is also a valid callee, whose tail block keeps its own
@@ -754,7 +756,7 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
   # it anchors where that `if` did, even when the `else` sits on a line the
   # header was wrapped to; an `else if` is a new `if` on its own line.
   var ifs: List[IfAt] = []
-  # The anchor of the parenthesis `)` last closed, and whether the `=>` just
+  # The anchor of the parenthesis `)` last closed, and whether an arrow just
   # seen stood right after it: a lambda `(a,` / `b) => {` whose parameters
   # wrapped. Its body follows the line the parameters began on, not the wrapped
   # line the arrow ended up on (#545).
@@ -913,11 +915,22 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
     let calls_brace = t.kind == LBRACE && have_prev_code && prev_code.kind == RPAREN && rparen_calls
     let scoped_params = t.kind == LPAREN && have_prev_code && prev_code.kind == RBRACKET
     let lambda_brace = t.kind == LBRACE && nl == 0 && arrow_after_rparen && have_prev_code &&
-      prev_code.kind == FATARROW
-    if t.kind == FATARROW {
+      (prev_code.kind == FATARROW || prev_code.kind == ARROW)
+    if t.kind == FATARROW || t.kind == ARROW {
       arrow_after_rparen = have_prev_code && prev_code.kind == RPAREN
     } else if t.kind != COMMENT {
       arrow_after_rparen = false
+    }
+    # A lambda argument can wrap before a binary block operand. That block
+    # belongs to the lambda's expression, not to the enclosing call's line.
+    # Keep the anchor on that argument's bracket so nested calls cannot erase
+    # it, and discard it at the next argument separator.
+    if len(openers) > 0 && not openers[len(openers) - 1].brace {
+      let inner = openers[len(openers) - 1]
+      if t.kind == FATARROW || t.kind == COMMA {
+        let at = if t.kind == COMMA { -1 } else if arrow_after_rparen { rparen_at } else { line_indent }
+        openers = list.take(openers, len(openers) - 1) ++ [Opener { ..inner, operand_at = at }]
+      }
     }
     if t.kind != COMMENT {
       prev_code = t
@@ -944,14 +957,15 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
           logical_indent
         } else if nl > 0 || tail_brace || kw_brace {
           line_indent
-        } else if lambda_brace {
+        } else if lambda_brace && (not guard_brace || not body) {
           rparen_at
         } else if group_brace {
           hdrs[len(hdrs) - 1].at
         } else if body {
           logical_indent
         } else if operand && len(openers) > 0 && not openers[len(openers) - 1].brace {
-          openers[len(openers) - 1].at
+          let inner = openers[len(openers) - 1]
+          if inner.operand_at >= 0 { inner.operand_at } else { inner.at }
         } else {
           line_indent
         },
@@ -960,6 +974,7 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         ld = logical_depth,
         lambda_at = if scope_binder { line_indent } else if scoped_params { rbracket_lambda_at } else { -1 },
         calls = t.kind == LPAREN && calls_clause_paren(toks, i),
+        operand_at = -1,
       }]
       if waiting && (header || guard_brace) { hdrs = list.take(hdrs, len(hdrs) - 1) }
     } else if t.kind == RPAREN || t.kind == RBRACKET || t.kind == RBRACE {
@@ -1914,6 +1929,22 @@ test "a scope lambda body follows its binder across a wrapped header" {
   # Nested scope lambdas retain their own binder anchors.
   let n = "fn f() -> Unit = {\n  with_mem([\n    @s] () => {\n    with_mem([\n      @t] () => {\n      work()\n    })\n  })\n}\n"
   assert fmt_of(n) == n
+}
+
+## #851: an arm sharing the match line still starts before its wrapped pattern.
+test "an arm body follows its wrapped constructor pattern" {
+  let w = "fn f(x: T) -> Unit = {\n  match x { Some(\n    entry) -> { let y = entry\n    work(y)\n  }, None -> () }\n}\n"
+  assert fmt_of(w) == w
+  let n = "fn f(x: T) -> Unit = {\n  match x { Err(\n    (kind,\n      message)) -> {\n    work(kind, message)\n  }, _ -> () }\n}\n"
+  assert fmt_of(n) == n
+}
+
+test "a binary block operand in a wrapped lambda follows that lambda" {
+  let w = "fn f(xs: List[Int]) -> List[Int] = {\n  filter(xs,\n    r => pred(r) && {\n      let a = r\n      a > 0\n    })\n}\n"
+  assert fmt_of(w) == w
+  # The next argument has its own anchor, even after an unbraced lambda.
+  let c = "fn f() -> Unit = {\n  g(\n    r => r, a && {\n    work()\n  })\n}\n"
+  assert fmt_of(c) == c
 }
 
 ## #545: a tail block starts a lambda at its brace, so its body follows the line
