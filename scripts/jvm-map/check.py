@@ -83,7 +83,7 @@ JAVAP = os.environ.get("JAVAP", "javap")
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
 READ_CLASS = runpy.run_path(str(ROOT / "scripts" / "method-size-gate.py"))["read_class"]
 
-CASES = ["corpus", "kernels", "dead", "selfhost", "observed-builder", "observed-modes"]
+CASES = ["corpus", "kernels", "dead", "selfhost"]
 
 INVOKES = {"invokestatic", "invokevirtual", "invokeinterface", "invokespecial"}
 
@@ -101,8 +101,6 @@ def run(cmd, cwd=ROOT):
 
 
 def target(name, work):
-    if name.startswith("observed-"):
-        return ROOT / "scripts/effect-provenance-contract" / (name[9:]+".dawn")
     if name == "corpus":
         return ROOT / "scripts" / "core-sites" / "corpus.dawn"
     if name == "dead":

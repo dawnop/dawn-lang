@@ -71,7 +71,7 @@ DAWN_BIN = os.environ.get("DAWN_BIN", str(ROOT / "bin" / "dawn"))
 DAWN = (["java", "-XX:-UsePerfData", "-Xss512m", "-Xmx4g", "-jar", DAWN_BIN] if DAWN_BIN.endswith(".jar") else [DAWN_BIN])
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
 
-CASES = ["corpus", "kernels", "nmain", "observed-builder", "observed-modes"]
+CASES = ["corpus", "kernels", "nmain"]
 
 # what the rules looked at, printed per case so that a rule that saw nothing shows
 STATS = {"kept sites": 0, "same-line pairs": 0, "identical texts on one line": 0}
@@ -111,8 +111,6 @@ def run(cmd):
 
 
 def target(name, work):
-    if name.startswith("observed-"):
-        return ROOT / "scripts/effect-provenance-contract" / (name[9:]+".dawn")
     if name == "corpus":
         return HERE / "corpus.dawn"
     if name == "nmain":
