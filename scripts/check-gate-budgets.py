@@ -80,7 +80,16 @@ before restating a budget line, and it is what a restatement cites:
     scripts/check-gate-budgets.py --observed /tmp/obs.json \
         --observed /tmp/tile-obs.json
 
-A `3x <N>s` claim is refused when the observed maximum is above N. A `floor`
+A `3x <N>s` claim is refused when N is under min(950, ceil5(1.04 x P99)) of the
+job's observed runs (supplementary ruling ten, 2026-11-24). Every attempt of
+the window is a sample, reruns included. With fewer than 50 runs the P99 base is
+the larger of the sample P99 and the median times 1.503, the P99/median ratio
+all of ci.yml's runs showed in November, because a small sample's P99 is just
+its maximum and under-reads the tail; with fewer than 10 runs the quantiles
+mean nothing and N must reach the worst run, as it always did. The worst run is
+still printed whenever it is over N: it is a note when the quantile rule
+accepts the claim, a refusal when it does not. A restatement must go both ways,
+or claims only ratchet up. A `floor`
 claim is refused when three times the observation no longer fits inside the
 timeout the floor was granted -- the floor exists because 3x six seconds is a
 bound no runner could meet, and a job that grew to minutes is no longer
@@ -188,6 +197,20 @@ RUN_POLE_RE = re.compile(r"^#\s*run-pole:\s*(\d+)s\b")
 
 MULTIPLE = 3
 RUN_POLE_FILE = "gates.yml"
+
+# The audit's quantile rule (ruling of 2026-11-24, supplement ten). A claim is
+# refused when it is under min(CLAIM_CAP, ceil5(MARGIN x base)), where base is
+# the P99 of the job's observed runs. With fewer than TAIL_FROM runs the sample
+# P99 is close to the maximum and says little about the tail, so the base is
+# the larger of it and the median times TAIL_RATIO, the P99/median ratio the
+# whole of ci.yml's runs showed in the 2026-11 window (runner speed is bimodal,
+# independent of what the job does). Below MIN_SAMPLES the quantiles mean
+# nothing at all and the old rule stands: the claim must reach the worst run.
+MARGIN = 1.04
+TAIL_RATIO = 1.503
+TAIL_FROM = 50
+MIN_SAMPLES = 10
+CLAIM_CAP = 950  # the run-pole's figure; no claim may ask for more
 
 # `# push-total: <N>s` / `# path-total: <N>s`, at the start of a line like the
 # pole. The value is captured loosely so that a malformed one is refused by
@@ -321,31 +344,83 @@ def collect_budgets(text, name):
     return records
 
 
+def ceil5(value):
+    return -(-int(round(value * 1000)) // 5000) * 5
+
+
+def quantile(values, q):
+    """Linear interpolation between order statistics (the research's method)."""
+    values = sorted(values)
+    position = q * (len(values) - 1)
+    low = int(position)
+    high = min(low + 1, len(values) - 1)
+    return values[low] + (values[high] - values[low]) * (position - low)
+
+
+def required_claim(samples):
+    """-> (seconds a 3x claim must reach, the P99 base it came from)."""
+    median = quantile(samples, 0.5)
+    p99 = quantile(samples, 0.99)
+    base = p99 if len(samples) >= TAIL_FROM else max(p99, median * TAIL_RATIO)
+    return min(CLAIM_CAP, ceil5(MARGIN * base)), base
+
+
+def samples_of(observations, job):
+    """The job's observed run times as a list, or None when it has none.
+
+    A lookup that can list its runs (`samples`) is read by quantile; one that
+    only knows the worst (`get`) is a single sample.
+    """
+    if hasattr(observations, "samples"):
+        return observations.samples(job)
+    seconds = observations.get(job)
+    return None if seconds is None else [seconds]
+
+
 def check_observed(records, observations, name):
     """Return (problems, notes) from comparing declared values with real runs.
 
-    A claim is a claim about the worst case, so the comparison is against the
-    maximum, not the median: an average puts a routinely-observed run inside
-    the kill window, which is the reasoning the 3x rule already carries.
+    A claim is a claim about the tail, not the median: an average puts a
+    routinely-observed run inside the kill window, which is the reasoning the
+    3x rule already carries. With MIN_SAMPLES runs or more the tail is the P99
+    (see required_claim) and the worst run is reported, not enforced; with
+    fewer it is the worst run itself.
     """
     problems = []
     notes = []
     for job, line_number, claim, minutes in records:
         where = f"{name}:{line_number} ({job})"
-        seconds = observations.get(job)
-        if seconds is None:
+        samples = samples_of(observations, job)
+        if not samples:
             notes.append(f"{where}: no observation in this window")
             continue
+        seconds = max(samples)
         three_x = THREE_X_RE.match(claim)
         if three_x:
             declared = int(three_x.group(1))
-            if seconds > declared:
+            if len(samples) < MIN_SAMPLES:
+                if seconds > declared:
+                    problems.append(
+                        f"{where}: declares {declared}s but ran {seconds}s"
+                        f" -- {seconds - declared}s of the worst case is undeclared;"
+                        f" restate the line as 3x {seconds}s and take the timeout to"
+                        f" {-(-MULTIPLE * seconds // 60)}min"
+                    )
+                continue
+            needed, base = required_claim(samples)
+            if declared < needed:
                 problems.append(
-                    f"{where}: declares {declared}s but ran {seconds}s"
-                    f" -- {seconds - declared}s of the worst case is undeclared;"
-                    f" restate the line as 3x {seconds}s and take the timeout to"
-                    f" {-(-MULTIPLE * seconds // 60)}min"
+                    f"{where}: declares {declared}s but ran {seconds}s at worst"
+                    f" over {len(samples)} runs (P99 base {base:.0f}s) -- the"
+                    f" claim must reach {needed}s; restate the line as"
+                    f" 3x {needed}s and take the timeout to"
+                    f" {-(-MULTIPLE * needed // 60)}min"
                 )
+            elif seconds > declared:
+                notes.append(
+                    f"{where}: worst run {seconds}s is over the {declared}s"
+                    f" claim, within the P99 rule ({needed}s needed,"
+                    f" {len(samples)} runs)")
             continue
         if FLOOR_RE.match(claim):
             if MULTIPLE * seconds > minutes * 60:
@@ -412,8 +487,7 @@ class ShapedObservations:
 
     @staticmethod
     def _keep(table, key, seconds):
-        if seconds > table.get(key, -1):
-            table[key] = seconds
+        table.setdefault(key, []).append(seconds)
 
     def for_file(self, name):
         digests = self.digests if name in KEYED_FILES else {}
@@ -421,10 +495,15 @@ class ShapedObservations:
 
         class Lookup:
             @staticmethod
-            def get(job):
+            def samples(job):
                 if job in digests:
                     return by_digest.get(digests[job])
                 return by_name.get(job)
+
+            @classmethod
+            def get(cls, job):
+                found = cls.samples(job)
+                return max(found) if found else None
 
         return Lookup()
 
@@ -472,20 +551,13 @@ def load_reports(reports, digests):
                 f"two observation reports read {workflow}; pass one per"
                 " workflow so it is clear which window the claims are held to")
         keyed = digests.get(workflow, {})
-        observed[workflow] = ShapedObservations(report, keyed)
+        # Every attempt is a sample: a rerun lands on another runner, which
+        # is the draw the quantile is about (the attempt-1 view in per_run
+        # would hide half of them).
+        observed[workflow] = ShapedObservations(
+            {"per_run": report["attempts"]}, keyed)
         observed[workflow].report = report
         observed[workflow].quality_errors = report["data_quality_errors"]
-        observed[workflow].reruns = ShapedObservations(
-            {"per_run": [r for r in report["attempts"] if r["attempt"] > 1]}, keyed)
-        observed[workflow].groups = []
-        for group in report["groups"]:
-            if group["image"] == "unknown" or group["image_version"] == "unknown":
-                continue
-            record = {"id": tuple(group["runs"]),
-                      "jobs": {group["name"]: group["D"]["max"]},
-                      "steps": ({group["name"]: group["steps"]}
-                                if group["steps"] else {})}
-            observed[workflow].groups.append((group, ShapedObservations({"per_run": [record]}, keyed)))
     return observed
 
 
@@ -520,16 +592,7 @@ def audit_observed(texts, observed):
         found, said = check_observed(
             records, observed[source].for_file(name), name)
         notes.extend(said)
-        if hasattr(observed[source], "groups"):
-            for group, seen in observed[source].groups:
-                found, _ = check_observed(records, seen.for_file(name), name)
-                identity = (f"{group['phase']} {group['event']} "
-                            f"{group['image']}@{group['image_version']} "
-                            f"steps={group['steps']} input={group['input']} "
-                            f"runs={group['runs']}")
-                problems.extend(f"{identity}: {problem}" for problem in found)
-        else:
-            problems.extend(found)
+        problems.extend(found)
     return problems, notes
 
 
@@ -792,6 +855,55 @@ jobs:
     ]
 
     failures = []
+
+    # Supplementary ruling ten: with MIN_SAMPLES or more runs the claim is held
+    # to the P99 rule, not the worst run. 49 runs of 380s and one of 640s are
+    # n=50: P99 513s, so 535s is needed, and 600s is enough although the worst
+    # run is 40s over it. Eleven runs are a small sample, so the base is the
+    # median times 1.503 (571s) and 595s is needed; 580s would pass on the
+    # sample P99 alone (542s) and must not.
+    tail_runs = [380] * 49 + [640]
+    small_runs = [380] * 10 + [560]
+    capped_runs = [940] * 12
+
+    def tail_audit(claim, runs):
+        class Lookup:
+            @staticmethod
+            def samples(job):
+                return runs if job == "slow" else [8]
+
+        return check_observed(
+            collect_budgets(observed_good.replace("3x 600s", f"3x {claim}s"),
+                            "tail.yml"),
+            Lookup, "tail.yml")
+
+    tail_mutants = [
+        ("a claim under P99 plus the margin", 530, tail_runs),
+        ("a small sample's claim under the median-ratio base",
+         580, small_runs),
+        ("a claim under the cap when the base is over it", 940, capped_runs),
+        ("nine runs read by their worst, which the claim does not reach",
+         500, [380] * 8 + [560]),
+    ]
+    tail_clean = [
+        ("a claim at the P99 rule with the worst run over it",
+         600, tail_runs, 1),
+        ("a small sample at its median-ratio claim", 595, small_runs, 0),
+        ("the capped claim", 950, capped_runs, 0),
+        ("nine runs, a claim at their worst", 560, [380] * 8 + [560], 0),
+    ]
+    for label, claim, runs in tail_mutants:
+        found, _notes = tail_audit(claim, runs)
+        if not found:
+            failures.append(f"mutant not caught: {label}")
+        else:
+            print(f"  refused: {label}")
+    for label, claim, runs, want_notes in tail_clean:
+        found, notes = tail_audit(claim, runs)
+        if found or len(notes) != want_notes:
+            failures.append(f"quantile audit: {label}: {found or notes}")
+        else:
+            print(f"  accepted: {label}")
     if check_text(good, "good.yml"):
         failures.append("the unmutated input was refused: " + "; ".join(check_text(good, "good.yml")))
     for label, text in mutants:
@@ -1113,6 +1225,7 @@ jobs:
             print(f"SELFTEST FAIL: {f}", file=sys.stderr)
         return 1
     count = (len(mutants) + len(pole_mutants) + len(observed_mutants)
+             + len(tail_mutants)
              + len(totals_mutants)
              + sum(1 for case in shaped_cases if case[4]) + 1
              + sum(1 for case in source_cases if case[2]) + 1)

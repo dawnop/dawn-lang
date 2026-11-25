@@ -270,13 +270,13 @@ jobs:
               --observed tile-obs.json --quality-warnings >> budgets.txt 2>&1 \
             || status=$?
           cat budgets.txt
-          # The claims below their worst run, one line each, for the summary
+          # The claims below the P99 rule, one line each, for the summary
           # and the issue; the same text is the issue's verdict.
           grep -o '[A-Za-z_.-]*\.yml:[0-9]* ([^)]*): .* but ran [0-9]*s' budgets.txt \
             | sort -u > claims.txt || true
           warnings=$(grep -c '^warning: ' budgets.txt || true)
           {
-            echo "### Budget audit: $(wc -l < claims.txt) claim(s) below their worst observed run, ${warnings:-0} warning line(s)"
+            echo "### Budget audit: $(wc -l < claims.txt) claim(s) below the P99 rule (or a worst run when under 10 runs), ${warnings:-0} warning line(s)"
             echo
             if [ -s claims.txt ]; then
               echo '```'
@@ -308,7 +308,7 @@ jobs:
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo
             if [ -s claims.txt ]; then
-              echo "Claims below their worst observed run:"
+              echo "Claims below the P99 rule (worst run quoted):"
               echo
               echo '```'
               cat claims.txt
