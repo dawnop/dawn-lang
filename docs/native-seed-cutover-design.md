@@ -1,8 +1,8 @@
 # Native 种子链生产切换（D12-2 P）设计
 
-> 状态：**proposed**。动码前的**调研与方案**，不是设计定稿。
+> 状态：**current**（accepted，2026-11-25，协调者补裁一把 §9 的开放问题全部裁定，见 §10；P1 起按此实现）。
 >
-> (Investigation and proposal, before any code. Not a settled design.)
+> (Accepted after the supplementary ruling of 2026-11-25; the open questions in section 9 are settled in section 10.)
 >
 > 前置：[native-seed-input-contract-design.md](native-seed-input-contract-design.md)（K1-K5，资格工具与隔离原型已交付，生产 no-go）。
 > 本页只设计 P0-P5 六刀，P0 即本页。不含 D12-3（站点 prepare 去 JVM），它依赖本页 P 的 builder 合同，在 P4 之后另起设计页。
@@ -447,3 +447,24 @@ D12-3（站点 prepare 去 JVM）在 P4 之后另起设计页，不并入 P，P2
 8. **JAR reference 的 `jdk_equivalence_sha256`** 在生产里由谁产生：资格包（重链）或 release job 内双 JDK 比对
    （现行 `build-release-jar.sh` 在 release 内已比对 JDK21/26 候选，见 bootstrap-guards 对 `cmp "$JDK21_JAR" "$JDK26_JAR"` 的守卫）。
    本页倾向后者，待裁。
+
+## 10. 补裁一（2026-11-25）：§9 开放问题的裁定
+
+依据：本页 PR #992 与 P0 报告；外部实例（Rust stage0 由单一清单文件决定、Go 以显式最低版本政策推进）都是
+「单一真相加无隐式回退」。裁定逐条如下，§2 至 §6 中与之冲突的措辞以本节为准。
+
+1. **撤 `--clobber` 的两个前提先测。** P1 第一步在一次性演练 tag（`rehearsal-*` 前缀，prerelease，验完即删
+   release 与 tag）上实测：失败上传是否留半个资产；同 tag 在不同托管 runner 上重建 B、JAR、metadata 是否逐字节同。
+   任一不成立：停，回交，不自行改走草稿 release 后备。
+2. **release job 只做 S→A→B→C 与 `cmp`**，完整资格只在晋级时跑（`seed-promotion`）。资格属于种子而非每次发布，
+   每发一次重跑资格是重复付费。
+3. **门槛 (b) 的样本量**：至少 7 个日历日且至少 10 次成功的 main push 运行经过 native 种子路径；
+   零 push 的日子不计入天数，也不阻断。
+4. **lock、history、revoked 落在 `scripts/` 下**，与 `seed-release.txt` 同层（§3.1 的路径不变）。
+5. **链的选择只有一个真相**：lock 文件里的字段决定默认链；显式覆盖用一个环境变量（如 `DAWN_SEED_CHAIN=jar|native`，
+   与既有 `DAWN_SEED` 同族）；两链之间不自动回退，错链即报错。
+6. **P4 起 release 内 native 链的并行与 timeout**：P1 演练实测后按 3 倍实测定，写入 Gate-Budget。
+7. **`proof.qualification_sha256`** 取 lock 引用的种子资格 receipt（与第 2 条一致）。
+8. **`jdk_equivalence_sha256`** 由 release 内既有 JDK21/26 比对产生。
+9. **`scripts/native-seed-prototype/`** 在 P4 合并时删除，不留兼容（不做兼容层原则）。
+10. 本页状态由 P1 写者在第一个提交里写回以上裁定并改为 accepted（本节即是）。
