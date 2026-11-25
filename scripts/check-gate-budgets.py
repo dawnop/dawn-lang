@@ -193,6 +193,10 @@ BUDGET_RE = re.compile(r"^\s*#\s*budget:\s*(.+?)\s*$")
 THREE_X_RE = re.compile(r"^3x\s+(\d+)s\b")
 FLOOR_RE = re.compile(r"^floor\b")
 JOB_RE = re.compile(r"^  ([A-Za-z][\w-]*):\s*$")
+# A job's own keys sit four spaces in. A `timeout-minutes:` any deeper is a
+# step's, a stop for one stalled action and not a claim about the job, so it
+# neither needs a budget line nor is held to an observation.
+JOB_KEY_INDENT = 4
 RUN_POLE_RE = re.compile(r"^#\s*run-pole:\s*(\d+)s\b")
 
 MULTIPLE = 3
@@ -284,7 +288,7 @@ def check_text(text, name):
             job = job_match.group(1)
             continue
         timeout_match = TIMEOUT_RE.match(line)
-        if not timeout_match:
+        if not timeout_match or len(timeout_match.group(1)) > JOB_KEY_INDENT:
             continue
         minutes = int(timeout_match.group(2))
         where = f"{name}:{i + 1} ({job})"
@@ -335,7 +339,8 @@ def collect_budgets(text, name):
             job = job_match.group(1)
             continue
         timeout_match = TIMEOUT_RE.match(line)
-        if not timeout_match or i == 0:
+        if (not timeout_match or i == 0
+                or len(timeout_match.group(1)) > JOB_KEY_INDENT):
             continue
         budget_match = BUDGET_RE.match(lines[i - 1])
         if not budget_match:
@@ -795,6 +800,10 @@ jobs:
   slow:
     # budget: 3x 100s worst observed
     timeout-minutes: 5
+    steps:
+      - name: a stalled download is stopped
+        timeout-minutes: 2
+        uses: actions/download-artifact@v4
   quick:
     # budget: floor (seconds-scale job)
     timeout-minutes: 10
