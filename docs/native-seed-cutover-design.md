@@ -763,3 +763,7 @@ pre1 的具体接口：
 工具链探测记录实际 libgcc、GCC crt、libc crt 与静态 libc 的解析路径，并要求每一项位于捕获目录且在清单中。
 失败时只额外打印解析路径；未知目录继续拒绝。新配方下须重测本机 A/B 与 native-fixpoint，
 再在新的 prerelease tag 完成 A/B/C、receipt 交接与 producer 验证；托管仍不满足 GCC 13 闭包则停止回报。
+
+补裁六后的 native-chain 演练 job 实测 448 s（[run 45685569422](https://github.com/dawnop/dawn-lang/actions/runs/45685569422)，native job 成功，JDK 26 leg 首次遇 Maven 429）。
+原 225 s 基线由此重核：加一成并向上取整到 5 s，planning claim 为 495 s，3 倍后向上取整为 25 min timeout。
+这是仅 tag 工作流的边界，push-total 仍为补裁六采纳的 40295 s。最终配置再通过新 prerelease tag 验证。
