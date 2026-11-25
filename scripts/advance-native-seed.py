@@ -32,7 +32,7 @@ import urllib.request
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from native_seed import contract as c, lockchain  # noqa: E402
+from native_seed import builder, contract as c, inputs, lockchain, toolchain  # noqa: E402
 import native_release as nr  # noqa: E402
 import repo_env  # noqa: E402
 
@@ -46,7 +46,7 @@ def qualification_receipt(directory, reason):
     """The receipt digest of a complete, independently verified qualification. Strict."""
     directory = Path(directory)
     request = c.read_json(directory / 'request.json')
-    c.fields(request, 'schema kind commit reason entry_sha256', 'qualification request')
+    c.fields(request, 'schema kind commit reason entry_sha256 seed_lock_sha256', 'qualification request')
     c.require(request['schema'] == 1 and request['kind'] == 'native-qualification-request' and
               request['reason'] == reason, 'lock-qualification',
               f'the qualification must have been run for the reason {reason}')
@@ -57,6 +57,13 @@ def qualification_receipt(directory, reason):
               receipt.get('source_commit') == request['commit'] and
               receipt.get('coverage') == ['Q' + str(i) for i in range(1, 11)],
               'lock-qualification', 'the receipt does not describe this qualification')
+    subject = c.read_lock(directory / 'cold/seed-lock.json')
+    c.require(request['seed_lock_sha256'] == c.digest(c.canonical(subject)) and
+              receipt.get('seed_lock_sha256') == request['seed_lock_sha256'] and
+              receipt.get('qualified_seed_sha256') == subject['seed']['sha256'] and
+              receipt.get('compilation_sha256') == c.digest(c.canonical(receipt.get('compilation'))) and
+              receipt['compilation'].get('seed') == inputs.seed_identity(subject),
+              'lock-qualification', 'qualification is bound to another input lock or ELF')
     for name, steps in (('completed.json', RUN_STEPS), ('verified.json', VERIFY_STEPS)):
         done = c.read_json(directory / name)
         c.require(type(done) is dict and done.get('receipt_sha256') == c.digest(receipt_bytes) and
@@ -66,6 +73,21 @@ def qualification_receipt(directory, reason):
                   all(row.get('exit_code') == 0 for row in done['checks']),
                   'lock-qualification', f'{name} is missing, incomplete or from another receipt')
     return c.digest(receipt_bytes), request['commit']
+
+
+def verify_subject(directory, repo, commit, seed, std, runtime):
+    """Match the promoted bytes and current compilation inputs without a future lock hash."""
+    directory = Path(directory)
+    receipt = c.read_json(directory / 'receipt.json')
+    subject = c.read_lock(directory / 'cold/seed-lock.json')
+    expected = dict(subject, seed=seed, std=std, runtime=runtime)
+    tc = toolchain.verify_record(c.read_json(directory / 'cold/toolchain/toolchain.json'))
+    _, files = builder.source_files(repo, commit)
+    c.require(inputs.seed_identity(subject) == inputs.seed_identity(expected) and
+              receipt['qualified_seed_sha256'] == seed['sha256'] and
+              receipt['compilation'] == inputs.compilation(files, expected, tc) and
+              receipt['compilation_sha256'] == inputs.compilation_sha(files, expected, tc),
+              'lock-qualification', 'promoted ELF, pair or compilation inputs differ; rerun qualification')
 
 
 def release_base():
@@ -132,7 +154,7 @@ def promote(args):
     c.require(args.qualification is not None, 'lock-qualification', 'promotion requires --qualification')
     commit, again = resolve_tag(args.repo, args.origin, tag)
     receipt, receipt_commit = qualification_receipt(args.qualification, 'seed-promotion')
-    c.require(receipt_commit == commit, 'lock-qualification', 'the qualification was run for another commit')
+    # Compilation identity is checked below; a control-only commit needs no new qualification.
     ref = f'refs/dawn-advance-native-seed/{tag}'
     fetched = subprocess.run(['git', '-C', str(args.repo), 'fetch', '--no-tags', '--quiet', args.origin,
                               f'+refs/tags/{tag}:{ref}'])
@@ -147,6 +169,7 @@ def promote(args):
             seed, std, runtime, registration = evidence_from_assets(assets, tag, commit, lock_path, args.repo)
     finally:
         subprocess.run(['git', '-C', str(args.repo), 'update-ref', '-d', ref], capture_output=True)
+    verify_subject(args.qualification, args.repo, commit, seed, std, runtime)
     c.require(again() == commit, 'seed-tag', 'the tag moved while the promotion ran')
     lockchain.promote(args.scripts_dir, seed, std, runtime, receipt, registration)
     print(f'promoted {tag} as native seed lock {loaded.lock["sequence"] + 1}')
@@ -168,6 +191,9 @@ def main():
             c.require(args.target is None and args.qualification is not None, 'arguments',
                       'initial takes only --qualification')
             receipt, _ = qualification_receipt(args.qualification, 'initial-seed')
+            candidate = c.read_lock(CANDIDATE)
+            verify_subject(args.qualification, args.repo, c.git(args.repo, 'rev-parse', 'HEAD').decode().strip(),
+                           candidate['seed'], candidate['std'], candidate['runtime'])
             lock = lockchain.initial(args.scripts_dir, CANDIDATE, receipt)
             print(f'native seed lock {lock["sequence"]} written for {lock["seed"]["tag"]}')
             return 0

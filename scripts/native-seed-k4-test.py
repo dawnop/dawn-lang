@@ -177,7 +177,7 @@ def main():
                 restored_checks = []
                 def rollback_check(data):
                     c.require(data == first, 'transaction-test', 'restored bytes differ')
-                    c.require(c.probe_seed(data) == (lock['seed']['version'], lock['seed']['build_id']),
+                    c.require(c.probe_seed(data, lock['seed']['version']) == (lock['seed']['version'], lock['seed']['build_id']),
                               'transaction-test', 'restored seed no longer answers its exact identity')
                     restored_checks.append(c.digest(data))
                 transactions(args.out, first, second,

@@ -166,7 +166,7 @@ jobs:
       # convenience for a developer's machine and have no business in a release.
       - name: verify the native seed lock
         run: |
-          for name in DAWN_SEED DAWN_NATIVE_SEED DAWN_SEED_CHAIN; do
+          for name in DAWN_SEED DAWN_NATIVE_SEED DAWN_SEED_CHAIN DAWN_NATIVE_SEED_LOCK; do
             if [ -n "$(printenv "$name")" ]; then
               echo "error: $name must not be set in a release" >&2
               exit 1
@@ -185,7 +185,9 @@ jobs:
           gh release download "$SEED_TAG" --pattern dawnc-linux-x86_64 --dir "$RUNNER_TEMP/seed"
           chmod 0755 "$RUNNER_TEMP/seed/dawnc-linux-x86_64"
           git fetch --depth 1 origin "$SEED_COMMIT"
-          git archive "$SEED_COMMIT" std runtime/c | tar -x -C "$RUNNER_TEMP/seed-tree"
+          rmdir "$RUNNER_TEMP/seed-tree"
+          python3 -B scripts/native-seed-chain.py prepare-pair \
+            --lock "$LOCK" --out "$RUNNER_TEMP/seed-tree"
 
       - name: build the chain seed -> A -> B -> C
         run: |
@@ -193,11 +195,11 @@ jobs:
             --lock scripts/native-seed-lock.json \
             --seed-elf "$RUNNER_TEMP/seed/dawnc-linux-x86_64" \
             --seed-tree "$RUNNER_TEMP/seed-tree" \
-            --out "$RUNNER_TEMP/chain" | tee "$RUNNER_TEMP/chain.log"
+            --jobs 1 --out "$RUNNER_TEMP/chain" | tee "$RUNNER_TEMP/chain.log"
           mkdir native-chain
           cp "$RUNNER_TEMP/chain/A/dawnc" native-chain/dawnc-stage-a
           cp "$RUNNER_TEMP/chain/B/dawnc" native-chain/dawnc-linux-x86_64
-          tail -n 1 "$RUNNER_TEMP/chain.log" > native-chain/cold.sha256
+          cp "$RUNNER_TEMP/chain/chain-receipt.json" native-chain/chain-receipt.json
 
       - name: retain the native chain
         uses: actions/upload-artifact@v4
@@ -205,7 +207,7 @@ jobs:
           name: native-chain
           path: native-chain
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 90
           compression-level: 0
 
   release:
@@ -295,6 +297,10 @@ jobs:
         run: |
           cp native-chain/dawnc-linux-x86_64 dawnc-linux-x86_64
           chmod +x dawnc-linux-x86_64 native-chain/dawnc-stage-a
+          python3 -B scripts/native_release.py verify-chain \
+            --lock scripts/native-seed-lock.json \
+            --chain-receipt native-chain/chain-receipt.json \
+            --native dawnc-linux-x86_64 --builder native-chain/dawnc-stage-a
 
       # The public API surface of this tag, and its diff against the previous
       # release's (issue #29). A report, not a gate: nothing here fails the
@@ -351,7 +357,7 @@ jobs:
             --jdk21-jar release-candidates/jdk-21/dawn-selfhost.jar \
             --jdk26-jar release-candidates/jdk-26/dawn-selfhost.jar \
             --pub-api dawn-pub-api.json --pub-api-diff dawn-pub-api-diff.md \
-            --cold-sha256 "$(cat native-chain/cold.sha256)" \
+            --chain-receipt native-chain/chain-receipt.json \
             --expect-tag "$GITHUB_REF_NAME" \
             --out release-assets
 

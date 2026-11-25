@@ -136,6 +136,31 @@ def read_lock(path):
 
 
 def validate_lock(value):
+    # A proposed seed has no qualification hash yet. Qualified snapshots keep
+    # their actual lock bytes; entry points verify the complete control chain.
+    if type(value) is dict and value.get('state') == 'qualified':
+        from native_seed.lockchain import validate_qualified
+        require('chain' in value, 'lineage', 'a qualification flag is not a qualified lock')
+        validate_qualified(value)
+        return
+    if type(value) is dict and value.get('state') == 'proposed':
+        from native_seed.lockchain import validate_seed
+        fields(value, 'schema kind state sequence seed std runtime lineage registration', 'proposed lock')
+        require(type(value['schema']) is int and value['schema'] == 2 and
+                value['kind'] == 'native-seed-lock' and type(value['sequence']) is int and
+                value['sequence'] == 0, 'schema', 'expected an unqualified proposed seed')
+        validate_seed(value['seed'])
+        for key in ('std', 'runtime'):
+            validate_identity(value[key], key)
+            require(value[key]['commit'] == value['seed']['commit'], key + '-pairing', 'seed commit mismatch')
+        fields(value['lineage'], 'parent_lock_sha256 parent_receipt_sha256 qualification_sha256', 'lineage')
+        require(all(x is None for x in value['lineage'].values()), 'lineage', 'a proposal has no qualification')
+        fields(value['registration'], 'kind metadata evidence_sha256', 'registration')
+        require((value['registration']['kind'], value['registration']['metadata']) in
+                (('release', 'present'), ('proposed-seed', 'absent'), ('local-development', 'absent')),
+                'schema', 'a proposed seed needs explicit registration state')
+        sha(value['registration']['evidence_sha256'], 'registration evidence')
+        return
     fields(value, 'schema kind state sequence seed std runtime lineage registration', 'lock')
     require(type(value['schema']) is int and value['schema'] == 2 and
             value['kind'] == 'native-seed-lock', 'schema', 'expected native-seed-lock schema 2')
@@ -243,7 +268,7 @@ def probe_seed(data, version=None):
 
 
 def verify_seed_probe(path, lock):
-    version, build_id = probe_seed(verify_seed(path, lock))
+    version, build_id = probe_seed(verify_seed(path, lock), lock['seed']['version'])
     require((version, build_id) == (lock['seed']['version'], lock['seed']['build_id']),
             'seed-identity', 'version/build ID differs from lock')
 

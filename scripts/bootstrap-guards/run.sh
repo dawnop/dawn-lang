@@ -535,14 +535,26 @@ PYORDER
   for line in \
     'python3 -B scripts/native-seed-chain.py check' \
     'LOCK=scripts/native-seed-lock.json' \
-    'for name in DAWN_SEED DAWN_NATIVE_SEED DAWN_SEED_CHAIN; do'; do
+    'for name in DAWN_SEED DAWN_NATIVE_SEED DAWN_SEED_CHAIN DAWN_NATIVE_SEED_LOCK; do'; do
     if ! tool17_require_line "$release_file" "$line" \
         "release.yml must verify the native seed lock and refuse seed overrides: $line"; then
       errors=1
     fi
   done
-  if [ "$(tool17_count_line "$release_file" '--lock scripts/native-seed-lock.json \')" -ne 2 ]; then
-    echo "release.yml must hand the qualified lock to both the chain and the producer" >&2
+  if [ "$(tool17_count_line "$release_file" '--lock scripts/native-seed-lock.json \')" -ne 3 ]; then
+    echo "release.yml must hand the qualified lock to the chain, transfer verifier and producer" >&2
+    errors=1
+  fi
+  for line in \
+    'cp "$RUNNER_TEMP/chain/chain-receipt.json" native-chain/chain-receipt.json' \
+    'retention-days: 90' \
+    'python3 -B scripts/native_release.py verify-chain \'; do
+    if ! tool17_require_line "$release_file" "$line" "release.yml must transfer and verify the full chain: $line"; then
+      errors=1
+    fi
+  done
+  if [ "$(tool17_count_line "$release_file" '--chain-receipt native-chain/chain-receipt.json \')" -ne 2 ]; then
+    echo "release.yml must pass the full chain to the transfer verifier and producer" >&2
     errors=1
   fi
   if grep -qF -- 'native-seed-candidate' "$release_file"; then
@@ -681,7 +693,7 @@ sed 's/native-seed-lock\.json/native-seed-candidate-v0.104.0.json/' \
 tool17_expect_reject "a release built from the unqualified candidate" \
   "$tool17_dir/release.candidate-lock.yml" "$tool17_dir/wrapper.base.sh"
 
-sed 's/for name in DAWN_SEED DAWN_NATIVE_SEED DAWN_SEED_CHAIN; do/for name in DAWN_SEED; do/' \
+sed 's/for name in DAWN_SEED DAWN_NATIVE_SEED DAWN_SEED_CHAIN DAWN_NATIVE_SEED_LOCK; do/for name in DAWN_SEED; do/' \
   "$tool17_dir/release.base.yml" > "$tool17_dir/release.seed-overrides.yml"
 tool17_expect_reject "a release that tolerates the native seed override" \
   "$tool17_dir/release.seed-overrides.yml" "$tool17_dir/wrapper.base.sh"
@@ -697,6 +709,12 @@ printf '\n      - name: inline recipe mutation\n        run: java -jar seed.jar 
   >> "$tool17_dir/release.inline.yml"
 tool17_expect_reject "an appended inline build" \
   "$tool17_dir/release.inline.yml" "$tool17_dir/wrapper.base.sh"
+
+for marker in 'retention-days: 90' 'chain/chain-receipt.json' 'native_release.py verify-chain'; do
+  grep -vF "$marker" "$tool17_dir/release.base.yml" > "$tool17_dir/release.receipt.yml"
+  tool17_expect_reject "omitting chain transfer requirement $marker" \
+    "$tool17_dir/release.receipt.yml" "$tool17_dir/wrapper.base.sh"
+done
 
 sed 's/build-release-jar\.sh -o dawn-selfhost\.jar/build-release-jar.sh -o candidate.jar/' \
   "$tool17_dir/release.base.yml" > "$tool17_dir/release.wrong-output.yml"

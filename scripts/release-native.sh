@@ -329,7 +329,7 @@ printf 'contract package, not a release\n' > "$WORK/contract-api-diff.md"
 # The lock is a fixture: the protocol needs a qualified lock to build from, and
 # the repository's own lock is only created by an explicit promotion.
 python3 scripts/native-seed-chain.py contract-fixture "$WORK/contract-lock" > /dev/null
-python3 scripts/native_release.py produce \
+python3 scripts/native-protocol-fixture.py \
   --lock "$WORK/contract-lock/native-seed-lock.json" \
   --native "$ARTIFACT" --builder "$ARTIFACT" \
   --jdk21-jar "$BUILDER_JAR" --jdk26-jar "$BUILDER_JAR" \

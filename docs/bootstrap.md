@@ -168,7 +168,7 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
    停并回交，旧 S 不兼容走桥接裁定，不用 JAR fallback。D 的 pole 红灯按裁定归 CI 刀 5，不属本项观测。
 
 三类证据分别是种子 qualification、构建 chain、日常 generation receipt，互不替代；公开资产仍九件，A/C 与完整 chain receipt
-不新增为公开下载。pre1 需跨 job 留存完整 receipt 并由 producer 核验实际 builder/CC；pre2 需报告热启动；
+不新增为公开下载。pre1 跨 job 留存完整 receipt 90 天，并由 producer 核验实际 builder/CC；pre2 需报告热启动；
 pre3 需全量调用表、双链同树对拍与离线部署预检，ci/tile 全部 completed/success；P3 若输入变化即顺延，数据不足不切 P4。
 部署仍按 tag 先 Playground 后 site，保留 `DAWN_WASM_CC`；站点 prepare 去 JVM 属 P4 后的 D12-3。
 
@@ -308,3 +308,11 @@ backend-dawn 生态扫描，未声明的字节差异红灯）加 CLI/格式化/L
   此前用的是 `setTime(epoch millis)`，
   它经默认时区换算成 DOS 时间——确定性只按机器成立，而 release 以字节固定点为核心，
   「只有在我的时区才同字节」撑不起这个说法。
+
+
+P4-pre1 的 builder 与非循环资格接口见 [native-seed-cutover-design.md](native-seed-cutover-design.md) §14。
+`native-seed-chain.py build` 只构建 A/B，不接启动器缓存；release 用同一原语追加 C。
+`native-seed-qualify.py run|verify` 必须给 `--lock`，proposed B 还须给完整 pinned builder 来源；
+资格 package 绑定编译输入摘要与受测 ELF 摘要，实际 lock 摘要单独审计。
+晋级核对 ELF、配对树与编译输入，控制记录改变不要求重资格；编译输入变化必须重跑。
+本机开发 CC 使用独立 recipe，不能被 release/资格引用。默认仍 jar，显式 native 的启动器构建与缓存留给 pre2。

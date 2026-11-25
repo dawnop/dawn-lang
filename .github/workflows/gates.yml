@@ -420,7 +420,7 @@ name: gates
 # lowered, not left to stand.
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 40270s (the most this file's `3x` claims may add up to)
+# push-total: 40295s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2855,8 +2855,12 @@ jobs:
     # 2026-11-25, restated both ways: P99 478s, median 334s,
     # worst 479s over 47 main push samples of this job's current shape,
     # claim = min(950, ceil5(1.04 x max(P99, median x 1.503))) = 525s (was 695s).
-    # budget: 3x 525s P99 rule over 47 main push runs, 2026-11-14 .. 2026-11-25
-    timeout-minutes: 27
+    # P4-pre1 planning increment: 25s includes the previously unclaimed P2
+    # 8.5s (5.8s bootstrap guards, 2.7s lock controls moved here from the
+    # saturated tree-policy job), plus native builder receipt controls.
+    # Tree-policy retains its 950s claim; its duplicated lock fixture run is removed.
+    # budget: 3x 550s planning value over the 525s P99 baseline plus P2 and pre1 controls
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2879,6 +2883,10 @@ jobs:
       # everything would each pass half of this on their own.
       - name: bootstrap guards (cache generation, seed verification)
         run: ./scripts/bootstrap-guards/run.sh
+      - name: native seed transition and builder receipt controls
+        run: |
+          python3 -B scripts/native-seed-lock-test.py
+          python3 -B scripts/native-builder-test.py
 
       - name: pub-API snapshot input contracts
         run: |

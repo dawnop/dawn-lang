@@ -383,14 +383,21 @@ def qualification_suite(tmp):
     adv = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(adv)
     commit = 'c' * 40
+    from native_seed import inputs
+    subject = c.read_lock(CANDIDATE)
+    compilation = {'seed': inputs.seed_identity(subject)}
     receipt = c.canonical({'kind': 'native-qualification-package', 'source_commit': commit,
-                           'coverage': ['Q' + str(i) for i in range(1, 11)]})
+                           'compilation': compilation, 'compilation_sha256': c.digest(c.canonical(compilation)),
+                           'qualified_seed_sha256': subject['seed']['sha256'],
+                           'seed_lock_sha256': c.digest(c.canonical(subject)), 'coverage': ['Q' + str(i) for i in range(1, 11)]})
 
     def build(name, reason='seed-promotion', mutate=None):
         directory = Path(tmp) / name
         directory.mkdir()
         files = {'request.json': {'schema': 1, 'kind': 'native-qualification-request', 'commit': commit,
-                                  'reason': reason, 'entry_sha256': sha('entry')},
+                                  'reason': reason, 'entry_sha256': sha('entry'),
+                                  'seed_lock_sha256': c.digest(c.canonical(subject))},
+                 'cold/seed-lock.json': subject,
                  'completed.json': {'source_commit': commit, 'receipt_sha256': c.digest(receipt),
                                     'checks': [{'name': n, 'exit_code': 0} for n in adv.RUN_STEPS],
                                     'production_authorized': False},
@@ -401,6 +408,7 @@ def qualification_suite(tmp):
             mutate(files)
         for file, value in files.items():
             if value is not None:
+                (directory / file).parent.mkdir(parents=True, exist_ok=True)
                 (directory / file).write_bytes(c.canonical(value))
         (directory / 'receipt.json').write_bytes(receipt)
         return directory

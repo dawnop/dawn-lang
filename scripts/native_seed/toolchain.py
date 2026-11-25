@@ -14,15 +14,20 @@ TOOLS = ('bash', 'env', 'dirname', 'find', 'sort', 'mktemp', 'rm', 'wc', 'tr', '
 FORBIDDEN = re.compile(r'^(?:java(?:c)?|jre|jdk|libjvm\.so|ccache|sccache)(?:[.-].*)?$')
 
 
-def prepare(cc, destination):
-    destination = c.safe_destination(destination)
-    c.require(not destination.exists(), 'destination', 'new toolchain directory required')
+def prepare(cc, destination=None, pinned=True):
+    if destination is not None:
+        destination = c.safe_destination(destination)
+        c.require(not destination.exists(), 'destination', 'new toolchain directory required')
     env = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
-    probe = compiler_probe(cc, env)
-    c.require(probe['executable'] == '/usr/lib/llvm-18/bin/clang' and
+    probe = compiler_probe(cc, env, pinned=pinned)
+    c.require(not pinned or (probe['executable'] == '/usr/lib/llvm-18/bin/clang' and
               probe['resource_dir'] == '/usr/lib/llvm-18/lib/clang/18' and
-              Path('/usr/lib/gcc/x86_64-linux-gnu/13').is_dir(),
+              Path('/usr/lib/gcc/x86_64-linux-gnu/13').is_dir()),
               'toolchain-recipe', 'the Ubuntu clang 18.1.3 and GCC 13 layout is required')
+    selected = subprocess.run([probe['executable'], '-print-libgcc-file-name'], env=env,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    c.require(str(Path(selected).resolve()).startswith('/usr/lib/gcc/x86_64-linux-gnu/13/'),
+              'toolchain-recipe', 'the selected compiler must use the captured GCC 13 libraries')
     files, origins, executables = {}, {}, {}
 
     def add(path, target=None, executable=False):
@@ -79,9 +84,11 @@ def prepare(cc, destination):
     files['emitter/dawnc'] = ('100644', b'')
     origins['emitter/dawnc'] = 'generated-mount-point-v1'
     rows = c.inventory(files)
-    result = {'schema': 1, 'kind': 'native-cold-toolchain', 'recipe': RECIPE,
+    result = {'schema': 1, 'kind': 'native-cold-toolchain', 'recipe': RECIPE if pinned else 'development-clang-gcc13-static-v1',
               'compiler': probe, 'inventory': rows, 'inventory_sha256': c.inventory_sha(rows),
               'executables': executables, 'origins': origins, 'scaffold': list(SCAFFOLD)}
+    if destination is None:
+        return result
     destination.mkdir(parents=True)
     c.write_tree(destination / 'root', files, readonly=False)
     for name in SCAFFOLD:
@@ -125,4 +132,34 @@ def verify(directory):
     c.require(actual == value['executables'], 'toolchain-identity', 'executable inventory differs')
     c.require(actual.get(value['compiler']['executable']) == value['compiler']['sha256'],
               'toolchain-identity', 'compiler is not in executable inventory')
+    return value
+
+
+def verify_record(value, pinned=True):
+    c.fields(value, 'schema kind recipe compiler inventory inventory_sha256 executables origins scaffold', 'toolchain')
+    c.require(type(value['schema']) is int and value['schema'] == 1 and
+              value['kind'] == 'native-cold-toolchain' and value['scaffold'] == list(SCAFFOLD),
+              'toolchain-recipe', 'unknown toolchain record')
+    c.require(value['recipe'] == RECIPE if pinned else value['recipe'] in
+              (RECIPE, 'development-clang-gcc13-static-v1'),
+              'toolchain-recipe', 'development toolchains cannot be released or qualified')
+    probe = value['compiler']
+    c.fields(probe, 'executable sha256 version triple resource_dir', 'toolchain compiler')
+    if pinned:
+        c.require(probe['executable'] == '/usr/lib/llvm-18/bin/clang' and
+                  probe['resource_dir'] == '/usr/lib/llvm-18/lib/clang/18' and
+                  re.search(r'\bclang version 18\.1\.3\b', probe['version']),
+                  'toolchain-recipe', 'compiler differs from the qualification recipe')
+    rows = value['inventory']
+    c.require(c.inventory_sha(rows) == value['inventory_sha256'],
+              'toolchain-identity', 'toolchain inventory digest differs')
+    actual = {'/' + row['path']: row['sha256'] for row in rows if row['executable']}
+    c.require(actual == value['executables'] and actual.get(probe['executable']) == probe['sha256'] and
+              '/usr/bin/ld' in actual and '/usr/bin/ld.bfd' in actual and
+              re.fullmatch(r'x86_64-(?:[a-z0-9_]+-)?linux-gnu', probe['triple']),
+              'toolchain-identity', 'compiler/linker executable identity differs')
+    paths = {row['path'] for row in rows}
+    c.require({'usr/lib/x86_64-linux-gnu/libc.a', 'usr/lib/gcc/x86_64-linux-gnu/13/libgcc.a'} <= paths and
+              all(not any(FORBIDDEN.fullmatch(p) for p in path.split('/')) for path in paths),
+              'toolchain-identity', 'static library closure is missing or forbidden')
     return value

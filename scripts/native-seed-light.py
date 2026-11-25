@@ -81,13 +81,16 @@ def check_cold(receipt, chain):
 
 
 def check_package(chain, value):
-    c.fields(value, 'schema kind source_commit source_tree cold_receipt_sha256 seed_lock_sha256 coverage implementations components lineage', 'qualification package')
+    c.fields(value, 'schema kind source_commit source_tree cold_receipt_sha256 seed_lock_sha256 compilation compilation_sha256 qualified_seed_sha256 coverage implementations components lineage', 'qualification package')
     c.require(type(value['schema']) is int and value['schema'] == 1 and value['kind'] == 'native-qualification-package',
               'light-schema', 'unsupported qualification package')
     c.require(value['source_commit'] == chain['source_commit'] and value['source_tree'] == chain['source_tree'] and
               value['seed_lock_sha256'] == chain['seed_lock_sha256'] and
               value['cold_receipt_sha256'] == c.digest(c.canonical(chain)),
               'light-input', 'qualification package input identity differs')
+    c.sha(value['qualified_seed_sha256'], 'qualified seed')
+    c.require(value['compilation_sha256'] == c.digest(c.canonical(value['compilation'])),
+              'light-input', 'compilation digest differs')
     c.require(value['coverage'] == ['Q' + str(i) for i in range(1, 11)],
               'light-coverage', 'qualification control coverage differs')
     c.fields(value['components'], 'real fixtures transactions jvm dual', 'package components')
@@ -181,7 +184,8 @@ def chain_selftest(receipt):
     check_cold(receipt, chain)
     value = dict(schema=1, kind='native-qualification-package', source_commit=chain['source_commit'],
                  source_tree=chain['source_tree'], cold_receipt_sha256=c.digest(c.canonical(chain)),
-                 seed_lock_sha256=chain['seed_lock_sha256'], coverage=['Q' + str(i) for i in range(1, 11)],
+                 seed_lock_sha256=chain['seed_lock_sha256'], compilation={'fixture': True},
+                 compilation_sha256=c.digest(c.canonical({'fixture': True})), qualified_seed_sha256='f' * 64, coverage=['Q' + str(i) for i in range(1, 11)],
                  components={name: 'd' * 64 for name in ('real', 'fixtures', 'transactions', 'jvm', 'dual')},
                  implementations={name: 'e' * 64 for name in ('scripts/native-seed-k4-test.py',
                      'scripts/native_seed/qualification.py', 'scripts/native_seed/rehearsal.py', 'scripts/native_seed/package.py')},
@@ -230,11 +234,8 @@ def run(work):
     # the transition rules are held by their own controls and mutants.
     if lockchain.present():
         lockchain.load()
-    result = subprocess.run([sys.executable, '-B', 'scripts/native-seed-lock-test.py'], cwd=ROOT,
-                            capture_output=True, timeout=20)
-    (work / 'P2.stdout').write_bytes(result.stdout)
-    (work / 'P2.stderr').write_bytes(result.stderr)
-    c.require(result.returncode == 0, 'light-fixture', 'P2: see saved stdout/stderr')
+    # Transition and receipt controls run in java-target-classpath; the light
+    # job keeps strict record loading without duplicating those fixtures.
     results = {
         'K1': c.read_json(work / 'K1.stdout')['negative'],
         'K2': c.read_json(work / 'k2/results.json')['fixture_controls'],
@@ -259,6 +260,7 @@ def run(work):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--lock', type=Path, help='actual input lock for external receipt checks')
     parser.add_argument('--receipt', type=Path, help='check an external input receipt without executing it')
     parser.add_argument('--commit', help='required full commit identity for --receipt')
     parser.add_argument('--cold-receipt', type=Path)
@@ -275,7 +277,8 @@ def main():
             c.oid(args.commit, 'expected source')
             source, _ = c.source_description(ROOT, args.commit)
             receipt = c.read_json(args.receipt)
-            check_inputs(c.read_lock(ROOT / 'scripts/native-seed-candidate-v0.104.0.json'), receipt, source)
+            c.require(args.lock is not None, 'arguments', '--receipt requires the actual --lock')
+            check_inputs(c.read_lock(args.lock), receipt, source)
             if args.cold_receipt:
                 chain = c.read_json(args.cold_receipt)
                 check_cold(receipt, chain)

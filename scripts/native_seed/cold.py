@@ -5,7 +5,7 @@ import shutil
 import subprocess
 
 from native_seed import contract as c
-from native_seed import cold_audit, toolchain
+from native_seed import cold_audit, toolchain, recipe
 
 POLICY = 'native-cold-linux-x86_64-v1'
 ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C',
@@ -76,15 +76,13 @@ def run_step(base, name, tcdir, tc, source, seed, emitter, output, command, extr
 
 
 def emission_command(stage):
-    return ['/seed/dawnc' if stage == 'A' else '/emitter/dawnc', 'emitc', '--std',
-            '/seed/std' if stage == 'A' else '/src/std', '/src/selfhost/src/nmain.dawn',
-            '-o', '/out/whole.c', '--build-info', '/out/info.c', '--split', '/out/units']
+    return recipe.emission_command('/seed/dawnc' if stage == 'A' else '/emitter/dawnc',
+            Path('/src/selfhost/src/nmain.dawn'), Path('/seed/std' if stage == 'A' else '/src/std'), Path('/out'))
 
 
 def compilation_command(stage):
-    return ['/usr/bin/bash', '/src/scripts/cc-units.sh', '--static', '--inline-rc',
-            '--runtime', '/seed/runtime/c' if stage == 'A' else '/src/runtime/c',
-            '-o', '/out/dawnc', '/out/units', '/out/info.c']
+    return recipe.compilation_command(Path('/src/scripts/cc-units.sh'),
+            Path('/seed/runtime/c' if stage == 'A' else '/src/runtime/c'), Path('/out'))
 
 
 def emission_identity(directory):

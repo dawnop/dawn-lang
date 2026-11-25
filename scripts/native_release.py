@@ -33,13 +33,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 import native_seed.contract as c  # noqa: E402
-from native_seed import lockchain  # noqa: E402
+from native_seed import builder, lockchain  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("install_native", HERE / "install-native.py")
 installer = importlib.util.module_from_spec(spec)
@@ -181,16 +180,14 @@ def source_version():
     return found[0]
 
 
-def toolchain_identity():
-    cc = os.environ.get("CC") or shutil.which("cc") or ""
-    if not cc:
-        return sha256(canonical({"cc": None}))
-    version = subprocess.run([cc, "--version"], capture_output=True, timeout=60).stdout
-    return sha256(canonical({"cc_version_sha256": sha256(version),
-                             "cc_binary_sha256": sha256(Path(shutil.which(cc) or cc).read_bytes())}))
-
-
 def produce(args):
+    lock = lockchain.release_lock(args.lock)
+    chain_receipt = builder.verify_receipt(args.chain_receipt, ROOT, lock,
+                                          Path(args.native).absolute(), Path(args.builder).absolute())
+    return _produce(args, chain_receipt)
+
+
+def _produce(args, chain_receipt):
     version = source_version()
     tag = "v" + version
     commit = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=ROOT, capture_output=True,
@@ -227,8 +224,7 @@ def produce(args):
     (out / INSTALLER).write_text(source.replace("@REPOSITORY@", "https://github.com/" + repo_env.github_repo()))
     shutil.copyfile(args.pub_api, out / API)
     shutil.copyfile(args.pub_api_diff, out / API_DIFF)
-    cold = args.cold_sha256 or sha256(canonical({"stages": "unrecorded"}))
-    c.sha(cold, "cold receipt")
+    cold = sha256(canonical(chain_receipt))
     info = {
         "schema": 2,
         "release": {"tag": tag, "version": version, "commit": commit},
@@ -238,9 +234,9 @@ def produce(args):
                     "sha256": sha256(builder_bytes), "version": version, "build_id": a_id},
         "bootstrap": {"seed": lock["seed"], "std": lock["std"], "runtime": lock["runtime"],
                       "parent_receipt_sha256": lock["lineage"]["parent_receipt_sha256"]},
-        "recipe": {"inputs_sha256": sha256(canonical({"commit": commit, "tree": tree})),
-                   "toolchain_sha256": toolchain_identity(),
-                   "recipe_sha256": sha256((ROOT / "scripts/cc-units.sh").read_bytes())},
+        "recipe": {"inputs_sha256": chain_receipt["compilation_sha256"],
+                   "toolchain_sha256": chain_receipt["compilation"]["toolchain_sha256"],
+                   "recipe_sha256": chain_receipt["compilation"]["recipe_sha256"]},
         "proof": {"name": PROOF, "sha256": "0" * 64},
         "jvm_reference": {"name": JAR, "kind": "jvm-jar", "sha256": sha256(jdk21), "commit": commit,
                           "jdk_equivalence_sha256": sha256(canonical(
@@ -264,52 +260,9 @@ def produce(args):
 
 # -------------------------------------------------------------------- chain
 
-def tree_digest(directory):
-    return c.inventory_sha(c.inventory(c.scan(Path(directory))))
-
-
-def emit_and_link(emitter, entry, std, runtime, out, jobs):
-    out.mkdir(parents=True)
-    t0 = time.monotonic()
-    subprocess.run([str(emitter), "emitc", "--std", str(std), str(entry), "-o", str(out / "whole.c"),
-                    "--build-info", str(out / "info.c"), "--split", str(out / "units")], check=True)
-    t1 = time.monotonic()
-    env = dict(os.environ, CC_JOBS=str(jobs))
-    subprocess.run([str(ROOT / "scripts/cc-units.sh"), "--static", "--inline-rc", "--runtime", str(runtime),
-                    "-o", str(out / "dawnc"), str(out / "units"), str(out / "info.c")], check=True, env=env)
-    t2 = time.monotonic()
-    print(f"timing emit {t1 - t0:.1f}s cc {t2 - t1:.1f}s", flush=True)
-    return {"whole_sha256": sha256((out / "whole.c").read_bytes()),
-            "info_sha256": sha256((out / "info.c").read_bytes()),
-            "units_sha256": tree_digest(out / "units"),
-            "elf_sha256": sha256((out / "dawnc").read_bytes())}
-
-
 def chain(args):
-    lock = lockchain.release_lock(args.lock)
-    seed = Path(args.seed_elf)
-    lockchain.verify_seed_bytes(c.regular_bytes(seed), lock)
-    out = c.safe_destination(args.out)
-    c.require(not out.exists(), "destination", "chain requires a new output directory")
-    out.mkdir(parents=True)
-    seed_tree = Path(args.seed_tree)
-    c.verify_seed_tree(ROOT, lock, seed_tree)
-    entry = subprocess.run([sys.executable, str(HERE / "native-source-tree.py"), str(out / "source")],
-                           check=True, capture_output=True, text=True).stdout.strip()
-    t0 = time.monotonic()
-    stages = {}
-    for name, emitter, std, runtime in (
-            ("A", seed, seed_tree / "std", seed_tree / "runtime/c"),
-            ("B", out / "A/dawnc", ROOT / "std", ROOT / "runtime/c"),
-            ("C", out / "B/dawnc", ROOT / "std", ROOT / "runtime/c")):
-        print(f"stage {name}", flush=True)
-        stages[name] = emit_and_link(emitter, entry, std, runtime, out / name, args.jobs)
-    for key in ("whole_sha256", "info_sha256", "units_sha256", "elf_sha256"):
-        c.require(stages["B"][key] == stages["C"][key], "fixpoint", f"B and C differ in {key}")
-    print(f"timing chain {time.monotonic() - t0:.1f}s; B == C", flush=True)
-    receipt = {"schema": 1, "kind": "native-release-chain", "seed_sha256": lock["seed"]["sha256"],
-               "stages": stages}
-    (out / "chain-receipt.json").write_bytes(canonical(receipt))
+    receipt = builder.build(ROOT, args.lock, args.seed_elf, args.seed_tree, args.out,
+                            args.cc, args.jobs, final_stage='C', release=True)
     print(sha256(canonical(receipt)))
 
 
@@ -321,7 +274,11 @@ def main():
     p.add_argument("--seed-elf", required=True)
     p.add_argument("--seed-tree", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
+    p.add_argument("--jobs", type=int, choices=(1,), default=1)
+    p.add_argument("--cc", default="/usr/lib/llvm-18/bin/clang")
+    p = sub.add_parser("verify-chain")
+    for name in ('lock', 'chain-receipt', 'native', 'builder'):
+        p.add_argument('--' + name, required=True)
     p = sub.add_parser("produce")
     p.add_argument("--lock", required=True)
     p.add_argument("--native", required=True)
@@ -330,7 +287,7 @@ def main():
     p.add_argument("--jdk26-jar", required=True)
     p.add_argument("--pub-api", required=True)
     p.add_argument("--pub-api-diff", required=True)
-    p.add_argument("--cold-sha256")
+    p.add_argument("--chain-receipt", required=True)
     p.add_argument("--expect-tag")
     p.add_argument("--skip-smoke", action="store_true")
     p.add_argument("--out", required=True)
@@ -342,6 +299,10 @@ def main():
     try:
         if args.command == "chain":
             chain(args)
+        elif args.command == "verify-chain":
+            builder.verify_receipt(args.chain_receipt, ROOT, lockchain.release_lock(args.lock),
+                                   Path(args.native).absolute(), Path(args.builder).absolute())
+            print('OK complete native chain receipt')
         elif args.command == "produce":
             produce(args)
         else:
