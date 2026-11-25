@@ -72,6 +72,28 @@ def run(work):
     (headers / 'new.h').write_bytes(b'new')
     assert len(c.inventory(c.scan(headers, digest_cache=cache))) == 2
     print('OK changed and added toolchain headers invalidate')
+    cache = DigestCache()
+    c.scan(headers, digest_cache=cache)
+    (headers / 'late.h').write_bytes(b'late')
+    try:
+        cache.recheck()
+    except c.Rejected as exc:
+        assert 'stat-cache-race' in str(exc)
+    else:
+        raise AssertionError('late file addition escaped the final check')
+    link = root / 'header-link'
+    link.symlink_to(header)
+    cache = DigestCache()
+    cache.read(cache.resolve(link))
+    link.unlink()
+    link.symlink_to(headers / 'new.h')
+    try:
+        cache.recheck()
+    except c.Rejected as exc:
+        assert 'stat-cache-race' in str(exc)
+    else:
+        raise AssertionError('changed toolchain symlink escaped the final check')
+    print('OK directory and symlink changes during verification are rejected')
     readonly = root / 'readonly'
     c.write_tree(readonly, {'nested/file': ('100644', b'owned')})
     assert not (readonly / 'nested/file').stat().st_mode & 0o222
