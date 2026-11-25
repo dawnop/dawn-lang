@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from native_seed import builder, cold, contract as c
+from native_seed import builder, cold, contract as c, provenance
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,6 +28,7 @@ def main():
         c.oid(args.commit, 'qualification source')
         c.require(c.git(ROOT, 'rev-parse', 'HEAD').decode().strip() == args.commit,
                   'qualification-input', 'entry checkout must be the requested final commit')
+        execution = provenance.hosted(args.commit)
         implementation = c.regular_bytes(Path(__file__))
         c.require(c.git(ROOT, 'show', args.commit + ':scripts/native-seed-qualify.py') == implementation,
                   'qualification-input', 'qualification entry differs from the committed implementation')
@@ -47,7 +48,7 @@ def main():
             c.require(seed_path is not None, 'arguments', '--seed is required for proposed seed qualification')
             builder.verify_receipt(args.chain_receipt, ROOT, builder.load_lock(args.origin_lock),
                                    seed_path.absolute(), args.origin_builder.absolute(),
-                                   require_c='C' in origin['stages'])
+                                   require_c='C' in origin['stages'], hosted=True)
             c.require(c.digest(c.canonical(origin)) == subject['registration']['evidence_sha256'],
                       'qualification-origin', 'proposed seed origin receipt differs')
         if args.command == 'run':
@@ -79,10 +80,12 @@ def main():
                     '--cold-receipt', str(out / 'cold/receipt.json'), '--package-receipt', str(out / 'receipt.json')])]
             c.atomic_json(out / 'request.json', {'schema': 1, 'kind': 'native-qualification-request',
                           'commit': args.commit, 'reason': args.reason,
-                          'entry_sha256': c.digest(implementation), 'seed_lock_sha256': subject_sha})
+                          'entry_sha256': c.digest(implementation), 'seed_lock_sha256': subject_sha,
+                          'execution': execution})
         else:
             request = c.read_json(out / 'request.json')
-            c.fields(request, 'schema kind commit reason entry_sha256 seed_lock_sha256', 'qualification request')
+            c.fields(request, 'schema kind commit reason entry_sha256 seed_lock_sha256 execution', 'qualification request')
+            provenance.verify(request['execution'], args.commit, hosted=True)
             c.require(request['schema'] == 1 and request['kind'] == 'native-qualification-request' and
                       request['commit'] == args.commit and request['entry_sha256'] == c.digest(implementation) and
                       request['seed_lock_sha256'] == subject_sha and
@@ -126,7 +129,8 @@ def main():
             c.require(result.returncode == 0, 'qualification-step', name + ': see saved log')
         receipt = c.read_json(out / 'receipt.json')
         c.require(receipt['seed_lock_sha256'] == subject_sha and
-                  receipt['qualified_seed_sha256'] == subject['seed']['sha256'],
+                  receipt['qualified_seed_sha256'] == subject['seed']['sha256'] and
+                  receipt['execution'] == c.read_json(out / 'request.json')['execution'],
                   'qualification-input', 'qualification subject differs from the actual input lock/ELF')
         c.require(receipt['source_commit'] == args.commit and receipt['source_tree'] ==
                   c.git(ROOT, 'rev-parse', args.commit + '^{tree}').decode().strip(),

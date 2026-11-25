@@ -32,7 +32,7 @@ import urllib.request
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from native_seed import builder, contract as c, inputs, lockchain, toolchain  # noqa: E402
+from native_seed import builder, contract as c, inputs, lockchain, provenance, toolchain  # noqa: E402
 import native_release as nr  # noqa: E402
 import repo_env  # noqa: E402
 
@@ -46,15 +46,17 @@ def qualification_receipt(directory, reason):
     """The receipt digest of a complete, independently verified qualification. Strict."""
     directory = Path(directory)
     request = c.read_json(directory / 'request.json')
-    c.fields(request, 'schema kind commit reason entry_sha256 seed_lock_sha256', 'qualification request')
+    c.fields(request, 'schema kind commit reason entry_sha256 seed_lock_sha256 execution', 'qualification request')
     c.require(request['schema'] == 1 and request['kind'] == 'native-qualification-request' and
               request['reason'] == reason, 'lock-qualification',
               f'the qualification must have been run for the reason {reason}')
     c.oid(request['commit'], 'qualification commit')
+    provenance.verify(request['execution'], request['commit'], hosted=True)
     receipt_bytes = c.regular_bytes(directory / 'receipt.json')
     receipt = c.read_json(directory / 'receipt.json')
     c.require(type(receipt) is dict and receipt.get('kind') == 'native-qualification-package' and
               receipt.get('source_commit') == request['commit'] and
+              receipt.get('execution') == request['execution'] and
               receipt.get('coverage') == ['Q' + str(i) for i in range(1, 11)],
               'lock-qualification', 'the receipt does not describe this qualification')
     subject = c.read_lock(directory / 'cold/seed-lock.json')

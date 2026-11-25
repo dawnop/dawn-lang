@@ -8,6 +8,8 @@ import tempfile
 
 import native_seed.contract as c
 
+STAGE_OPTIONS = ('--qualification', '--static', '--inline-rc')
+
 
 def qualification_flags():
     script = Path(__file__).resolve().parents[1] / 'cc-units.sh'
@@ -91,7 +93,7 @@ def compile_stage(args):
         env['PATH'] = str(Path(probe['executable']).parent) + ':' + env['PATH']
         env['CC'] = probe['executable']
         env['CC_JOBS'] = str(args.jobs)
-        command = [str(script), '--qualification', '--static', '--inline-rc', '--runtime',
+        command = [str(script), *STAGE_OPTIONS, '--runtime',
                    str(Path(args.runtime).absolute()), '-o', str(out), str(units), str(info)]
         run = subprocess.run(command, env=env)
         c.require(run.returncode == 0, 'cc-build', f'shared recipe exited {run.returncode}')
@@ -118,5 +120,5 @@ def emission_command(emitter, entry, std, out):
 
 
 def compilation_command(script, runtime, out):
-    return ['/usr/bin/bash', str(script), '--qualification', '--static', '--inline-rc', '--runtime', str(runtime),
+    return ['/usr/bin/bash', str(script), *STAGE_OPTIONS, '--runtime', str(runtime),
             '-o', str(out / 'dawnc'), str(out / 'units'), str(out / 'info.c')]

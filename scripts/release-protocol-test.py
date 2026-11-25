@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -402,4 +403,5 @@ def _other_lock(work, label):
 
 
 if __name__ == "__main__":
-    main()
+    with patch.dict(os.environ, test_support.hosted_environment(c.git(ROOT, 'rev-parse', 'HEAD').decode().strip())):
+        main()

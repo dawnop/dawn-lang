@@ -10,7 +10,7 @@ import argparse
 from pathlib import Path
 
 import native_release as nr
-from native_seed import contract as c, lockchain, test_support
+from native_seed import builder, contract as c, lockchain, test_support
 
 
 def main():
@@ -24,7 +24,11 @@ def main():
                                        Path(args.builder).absolute(), Path(args.native).absolute())
     args.chain_receipt = str(Path(args.out).parent / 'synthetic-chain-receipt.json')
     c.atomic_json(args.chain_receipt, record)
-    nr.produce(args)
+    # This adapter exercises assets, not an actual hosted execution. Production
+    # enters through produce(), which also requires the current hosted run.
+    checked = builder.verify_receipt(args.chain_receipt, nr.ROOT, lockchain.release_lock(args.lock),
+                                      Path(args.native).absolute(), Path(args.builder).absolute())
+    nr._produce(args, checked)
 
 
 if __name__ == '__main__':

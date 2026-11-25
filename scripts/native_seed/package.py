@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from native_seed import cold, contract as c, inputs, qualification as q, rehearsal, toolchain
+from native_seed import cold, contract as c, inputs, provenance, qualification as q, rehearsal, toolchain
 
 REPLAY_SENTENCES = (b'OK: fixed point', b'OK: standalone closure',
                     b'OK: converges to the current compiler byte-for-byte', b'replay complete:')
@@ -79,6 +79,8 @@ def inspect(repo, directory):
     """Recompute identities, coverage, lineage and differential observations from saved evidence."""
     directory = Path(directory).absolute()
     chain = cold.verify(repo, directory / 'cold')
+    request = c.read_json(directory / 'request.json')
+    execution = provenance.verify(request['execution'], chain['source_commit'], hosted=True)
     implementation_paths = ('scripts/native-seed-k4-test.py', 'scripts/native_seed/qualification.py',
                             'scripts/native_seed/rehearsal.py', 'scripts/native_seed/package.py')
     captured = {row['path']: row['sha256'] for row in c.read_json(directory / 'cold/inputs.json')['source']['inventory']}
@@ -189,7 +191,7 @@ def inspect(repo, directory):
     subject = c.read_lock(directory / 'cold/seed-lock.json')
     compilation = inputs.compilation(c.scan(directory / 'cold/inputs/source'), subject,
                                      toolchain.verify(directory / 'cold/toolchain'))
-    return {'compilation': compilation, 'compilation_sha256': c.digest(c.canonical(compilation)),
+    return {'execution': execution, 'compilation': compilation, 'compilation_sha256': c.digest(c.canonical(compilation)),
             'qualified_seed_sha256': subject['seed']['sha256'],
             'schema': 1, 'kind': 'native-qualification-package', 'source_commit': chain['source_commit'],
             'source_tree': chain['source_tree'], 'cold_receipt_sha256': c.digest(c.canonical(chain)),

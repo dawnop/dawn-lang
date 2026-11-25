@@ -383,10 +383,11 @@ def qualification_suite(tmp):
     adv = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(adv)
     commit = 'c' * 40
-    from native_seed import inputs
+    from native_seed import inputs, provenance, test_support
     subject = c.read_lock(CANDIDATE)
     compilation = {'seed': inputs.seed_identity(subject)}
     receipt = c.canonical({'kind': 'native-qualification-package', 'source_commit': commit,
+                           'execution': test_support.hosted_record(commit),
                            'compilation': compilation, 'compilation_sha256': c.digest(c.canonical(compilation)),
                            'qualified_seed_sha256': subject['seed']['sha256'],
                            'seed_lock_sha256': c.digest(c.canonical(subject)), 'coverage': ['Q' + str(i) for i in range(1, 11)]})
@@ -395,6 +396,7 @@ def qualification_suite(tmp):
         directory = Path(tmp) / name
         directory.mkdir()
         files = {'request.json': {'schema': 1, 'kind': 'native-qualification-request', 'commit': commit,
+                                  'execution': test_support.hosted_record(commit),
                                   'reason': reason, 'entry_sha256': sha('entry'),
                                   'seed_lock_sha256': c.digest(c.canonical(subject))},
                  'cold/seed-lock.json': subject,
@@ -415,6 +417,9 @@ def qualification_suite(tmp):
 
     ok(adv.qualification_receipt(build('q-good'), 'seed-promotion') == (c.digest(receipt), commit),
        'a complete verified qualification yields its receipt digest')
+    refuses('a local development qualification', 'execution-origin', lambda: adv.qualification_receipt(
+        build('q-local', mutate=lambda f: f['request.json'].update(execution=provenance.development(commit))),
+        'seed-promotion'))
     refuses('a qualification run for another reason', 'lock-qualification',
             lambda: adv.qualification_receipt(build('q-reason', reason='final-inputs'), 'seed-promotion'))
     refuses('a qualification that was never independently verified', 'source-missing',

@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 from native_seed import contract as c
-from native_seed.recipe import compiler_probe, qualification_flags
+from native_seed.recipe import STAGE_OPTIONS, compiler_probe, qualification_flags
 
 RECIPE = 'ubuntu24-clang18.1.3-gcc13-static-v2'
 SCAFFOLD = ('src', 'seed', 'emitter', 'out', 'home', 'tmp', 'dev', 'proc', 'etc', 'run')
@@ -58,6 +58,25 @@ def verify_driver(value, rows):
                   'toolchain-identity', 'selected compiler input is outside the captured closure')
 
 
+def recipe_identity(value, recipe_sha256):
+    """Portable recipe equality; the complete byte snapshot is bound separately."""
+    c.sha(recipe_sha256, 'C recipe')
+    rows = {row['path']: row['sha256'] for row in value['inventory']}
+    return {'recipe': value['recipe'], 'recipe_sha256': recipe_sha256,
+            'clang': {key: value['compiler'][key] for key in ('sha256', 'version', 'triple')},
+            'inputs': {name: {'path': path, 'sha256': rows[path.lstrip('/')]}
+                       for name, path in value['driver']['files'].items()},
+            'flags': [*STAGE_OPTIONS, *value['driver']['flags']],
+            'ld_version': value['linker']['version']}
+
+
+def verify_linker(value):
+    c.fields(value, 'executable version', 'linker probe')
+    c.require(value['executable'] == '/usr/bin/ld.bfd' and type(value['version']) is str and
+              value['version'].startswith('GNU ld ') and '\n' not in value['version'],
+              'toolchain-identity', 'invalid linker version probe')
+
+
 def prepare(cc, destination=None, pinned=True):
     if destination is not None:
         destination = c.safe_destination(destination)
@@ -65,6 +84,12 @@ def prepare(cc, destination=None, pinned=True):
     env = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
     probe = compiler_probe(cc, env, pinned=pinned)
     driver = driver_inputs(probe['executable'], env)
+    ld = subprocess.run(['/usr/bin/ld.bfd', '--version'], env=env,
+                        capture_output=True, text=True, timeout=20)
+    c.require(ld.returncode == 0 and not ld.stderr and ld.stdout.splitlines(),
+              'toolchain-identity', 'linker version probe failed')
+    linker = {'executable': '/usr/bin/ld.bfd', 'version': ld.stdout.splitlines()[0]}
+    verify_linker(linker)
     c.require(not pinned or (probe['executable'] == '/usr/lib/llvm-18/bin/clang' and
               probe['resource_dir'] == '/usr/lib/llvm-18/lib/clang/18' and
               Path('/usr/lib/gcc/x86_64-linux-gnu/13').is_dir()),
@@ -126,7 +151,7 @@ def prepare(cc, destination=None, pinned=True):
     origins['emitter/dawnc'] = 'generated-mount-point-v1'
     rows = c.inventory(files)
     result = {'schema': 1, 'kind': 'native-cold-toolchain', 'recipe': RECIPE if pinned else 'development-clang-gcc13-static-v1',
-              'compiler': probe, 'driver': driver, 'inventory': rows, 'inventory_sha256': c.inventory_sha(rows),
+              'compiler': probe, 'driver': driver, 'linker': linker, 'inventory': rows, 'inventory_sha256': c.inventory_sha(rows),
               'executables': executables, 'origins': origins, 'scaffold': list(SCAFFOLD)}
     if destination is None:
         return result
@@ -146,7 +171,7 @@ def prepare(cc, destination=None, pinned=True):
 def verify(directory):
     directory = Path(directory).absolute()
     value = c.read_json(directory / 'toolchain.json')
-    c.fields(value, 'schema kind recipe compiler driver inventory inventory_sha256 executables origins scaffold', 'toolchain')
+    verify_record(value)
     c.require(type(value['schema']) is int and value['schema'] == 1 and
               value['kind'] == 'native-cold-toolchain' and value['recipe'] == RECIPE and
               value['scaffold'] == list(SCAFFOLD), 'toolchain-recipe', 'unknown toolchain recipe')
@@ -178,7 +203,7 @@ def verify(directory):
 
 
 def verify_record(value, pinned=True):
-    c.fields(value, 'schema kind recipe compiler driver inventory inventory_sha256 executables origins scaffold', 'toolchain')
+    c.fields(value, 'schema kind recipe compiler driver linker inventory inventory_sha256 executables origins scaffold', 'toolchain')
     c.require(type(value['schema']) is int and value['schema'] == 1 and
               value['kind'] == 'native-cold-toolchain' and value['scaffold'] == list(SCAFFOLD),
               'toolchain-recipe', 'unknown toolchain record')
@@ -196,6 +221,7 @@ def verify_record(value, pinned=True):
     c.require(c.inventory_sha(rows) == value['inventory_sha256'],
               'toolchain-identity', 'toolchain inventory digest differs')
     verify_driver(value['driver'], rows)
+    verify_linker(value['linker'])
     actual = {'/' + row['path']: row['sha256'] for row in rows if row['executable']}
     c.require(actual == value['executables'] and actual.get(probe['executable']) == probe['sha256'] and
               '/usr/bin/ld' in actual and '/usr/bin/ld.bfd' in actual and

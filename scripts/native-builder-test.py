@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import native_release as nr
-from native_seed import builder, contract as c, inputs, lockchain, test_support, toolchain
+from native_seed import builder, contract as c, inputs, lockchain, provenance, test_support, toolchain
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = '6af3d9d2ee983c18789f000d28ecb475ce937e05'
@@ -68,6 +68,15 @@ def main():
             ('wrong runtime', lambda v: v['stages']['B']['runtime'].update(sha256='0' * 64)),
             ('wrong CC bytes', lambda v: v['toolchain']['compiler'].update(sha256='0' * 64)),
             ('wrong CC target', lambda v: v['toolchain']['compiler'].update(triple='aarch64-linux-gnu')),
+            ('wrong recipe clang version', lambda v: v['recipe_identity']['clang'].update(version='changed')),
+            ('wrong recipe clang bytes', lambda v: v['recipe_identity']['clang'].update(sha256='0' * 64)),
+            ('wrong recipe target', lambda v: v['recipe_identity']['clang'].update(triple='aarch64-linux-gnu')),
+            ('wrong recipe selected input', lambda v: v['recipe_identity']['inputs']['libgcc.a'].update(sha256='0' * 64)),
+            ('wrong recipe input path', lambda v: v['recipe_identity']['inputs']['libc.a'].update(path='/wrong/libc.a')),
+            ('wrong recipe flags', lambda v: v['recipe_identity'].update(flags=[])),
+            ('wrong recipe script', lambda v: v['recipe_identity'].update(recipe_sha256='0' * 64)),
+            ('wrong ld version', lambda v: v['recipe_identity'].update(ld_version='GNU ld changed')),
+            ('changed captured ld version', lambda v: v['toolchain']['linker'].update(version='GNU ld changed')),
             ('wrong linker bytes', lambda v: v['toolchain']['executables'].update({'/usr/bin/ld': '0' * 64})),
             ('wrong GCC driver path', lambda v: v['toolchain']['driver']['files'].update({'libgcc.a': '/usr/lib/gcc/x86_64-linux-gnu/14/libgcc.a'})),
             ('wrong crt path', lambda v: v['toolchain']['driver']['files'].update({'crtbeginT.o': '/usr/lib/gcc/x86_64-linux-gnu/14/crtbeginT.o'})),
@@ -111,6 +120,38 @@ def main():
         path.write_bytes(c.canonical(receipt))
         _, files = builder.source_files(ROOT, receipt['source_commit'])
         tc = test_support.compiler_record()
+        # Full snapshots remain factual. A self-consistent non-recipe change
+        # may differ across hosts, while the recipe and B must stay identical.
+        changed = copy.deepcopy(receipt)
+        for row in changed['toolchain']['inventory']:
+            if row['path'] in ('usr/bin/ld', 'usr/bin/ld.bfd'):
+                row['sha256'] = 'f' * 64
+                changed['toolchain']['executables']['/' + row['path']] = row['sha256']
+        changed['toolchain']['inventory_sha256'] = c.inventory_sha(changed['toolchain']['inventory'])
+        changed['compilation'] = inputs.compilation(files, lock, changed['toolchain'])
+        changed['compilation_sha256'] = c.digest(c.canonical(changed['compilation']))
+        assert changed['compilation_sha256'] != receipt['compilation_sha256']
+        assert changed['recipe_identity'] == toolchain.recipe_identity(changed['toolchain'], changed['compilation']['recipe_sha256'])
+        path.write_bytes(c.canonical(changed))
+        builder.verify_receipt(path, ROOT, lock, b, a, hosted=True)
+        builder.compare_hosts(receipt, changed)
+        changed['execution'] = provenance.development(receipt['source_commit'])
+        path.write_bytes(c.canonical(changed))
+        verify()
+        refused(lambda: builder.verify_receipt(path, ROOT, lock, b, a, hosted=True), 'development stamp as release evidence')
+        mismatch = copy.deepcopy(receipt)
+        mismatch['stages']['B']['output']['elf_sha256'] = '0' * 64
+        refused(lambda: builder.compare_hosts(receipt, mismatch), 'same recipe different B')
+        for key in ('clang', 'inputs', 'flags', 'ld_version', 'recipe_sha256'):
+            mismatch = copy.deepcopy(receipt)
+            mismatch['recipe_identity'][key] = None
+            refused(lambda: builder.compare_hosts(receipt, mismatch), 'cross-host recipe ' + key)
+        with patch.dict('os.environ', test_support.hosted_environment(receipt['source_commit'])):
+            provenance.current(receipt['execution'], receipt['source_commit'], release=True)
+            mismatch = dict(receipt['execution'], run_id='456')
+            refused(lambda: provenance.current(mismatch, receipt['source_commit'], release=True), 'another hosted run')
+        path.write_bytes(c.canonical(receipt))
+        print('OK distinct environment snapshots retain recipe equality and development scope')
         diagnostics = io.StringIO()
 
         def wrong_driver(argv, **kwargs):
@@ -169,11 +210,13 @@ def main():
         (evidence / 'cold/toolchain/toolchain.json').write_bytes(c.canonical(tc))
         compiled = inputs.compilation(files, proposed, tc)
         package = {'kind': 'native-qualification-package', 'source_commit': receipt['source_commit'],
+                   'execution': receipt['execution'],
                    'coverage': ['Q' + str(i) for i in range(1, 11)], 'compilation': compiled,
                    'compilation_sha256': c.digest(c.canonical(compiled)),
                    'seed_lock_sha256': cap['seed_lock_sha256'], 'qualified_seed_sha256': proposed['seed']['sha256']}
         adv = load_script('advance-native-seed')
         request = {'schema': 1, 'kind': 'native-qualification-request', 'commit': receipt['source_commit'],
+                   'execution': receipt['execution'],
                    'reason': 'seed-promotion', 'entry_sha256': c.digest(b'fixture entry'),
                    'seed_lock_sha256': cap['seed_lock_sha256']}
         (evidence / 'request.json').write_bytes(c.canonical(request))
