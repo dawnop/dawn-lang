@@ -552,7 +552,7 @@ P2 只做机制，不改默认链，也不创建真实的 `scripts/native-seed-l
 
 本节采纳方案丙：**源码检出执行 S→A→B，缓存并 exec 当前 B；C 只在 release 与资格中验证固定点。**
 直接执行旧 S 会使当前源码不可见，破坏 site 与 HEAD 对拍；执行 A 会使日常工具链与发布 B 的 std/runtime 配对不同。
-两者均不作为源码启动器方案。本节是 P4-pre0 的合同，不声称 pre1/pre2/pre3 已实现；当前行为仍见 §12.2。
+两者均不作为源码启动器方案。本节来自 P4-pre0 合同；pre1 的独立 builder 已实现（§14），启动器仍待 pre2，当前行为见 §12.2。
 
 ### 13.1 S/A/B/C 角色与证据边界
 
@@ -575,8 +575,8 @@ A/C、C 中间文件与完整 chain receipt 不新增为公开资产。installer
 | 完整 native chain receipt | 本次 S→A→B→C 的逐阶段 whole/info/units/ELF 摘要、来源与实际工具链/recipe 身份 | pre1 跨 job 传递并由 producer 复验；规范摘要进入 `native-bootstrap.json.cold_sha256`；内部 schema 1 与发布 schema 2 不是兼容分支 |
 | launcher generation receipt | 当前源码、配对 seed、工具链及 B 字节属于同一缓存代 | pre2 持久化并每次消费复验；不是资格 receipt，也不替代 release 固定点 |
 
-P1 当前交接 artifact 仅 A/B/cold.sha256，完整 chain receipt 未跨 job 留存；producer 仅接收摘要，
-组装 runner 探测的 CC 不能充当链执行方的工具链证据。pre1 必须闭合此边界，留存期限在该刀明确。
+P1 当时的交接 artifact 仅 A/B/cold.sha256，producer 仅接收摘要，组装 runner 探测的 CC 不代表链执行方。
+pre1 已改为传递完整 receipt、producer 复验并保留 90 天，见 §14。
 
 ### 13.2 三种运行模式、选链与最终 exec
 
@@ -694,10 +694,10 @@ pre3 的完成证据须包含扩展后的全量调用表及未迁入口为零的
 → 满足门槛才切默认并发布 → 冷下载对账与晋级 → P5 长期预算收口；D12-3 另起设计。
 
 `initial`、`set-chain`、VERSION、原型删除、merge/rebase 都可能改变当前协议绑定的 commit/tree。
-补裁一仍要求 P4 合并时删除 `scripts/native-seed-prototype/`：pre3 先迁引用并准备删除清单；
-若要把实际删除前移到 pre3 须协调者裁定。无论何时删，实际发布候选的删除后输入都须重核/重跑资格与三组配对。
-最终 merge sha 或 set-chain 后身份不同也同样处理，不能手改 receipt、沿用旧包或以“只是 metadata”豁免。
-若要分离编译输入与控制记录身份，须在 P3 前明确并实现新协议；现有全树绑定不提供豁免。
+补裁五已把 `scripts/native-seed-prototype/` 的引用迁移与删除前移到 pre3；
+实际发布候选的删除后输入须重核/重跑资格与三组配对。
+最终 merge 或 set-chain 后须重核实际编译输入；编译输入不同就重跑资格，控制记录不同则独立复验，不能手改 receipt。
+补裁五要求 pre1 实现编译输入与控制记录分离，具体可验证边界见 §14；不再把控制记录写入编译输入摘要。
 
 绑定不得递归：initial receipt 资格 S，再由真实 lock 引用；final-inputs receipt 资格实际最终树，作为外部证据，
 不反写正在资格的 lock。B 先有描述 ELF/配对树的待晋级输入 lock，再取得 seed-promotion receipt，
@@ -713,6 +713,45 @@ D 的 pole 红灯仍归 CI 刀 5，不属本项观测；不降低 native 归因�
 ### 13.8 尚须定稿的实施边界
 
 补裁四已裁定 B 语义、显式 JAR、完整配对覆盖、环境/Python 边界与刀序。
-仍需在相应实现刀前明确：本机 CC 可接受范围及库闭包核验；覆盖配对输入接口；chain receipt 留存期限；
-commit/tree 与控制记录若要分离的非循环绑定协议；原型删除是否获准前移。
+补裁五明确了开发工具链隔离、非循环绑定、内部 artifact 留存 90 天与 pre3 删除原型；
+pre1 定稿 builder 与 qualification 接口，pre2 定稿缓存与查询接口。
 这些未决项不得解释成默认切换许可。pre1/pre2 必须以可审查接口和负控定稿，P3 必须以实际最终输入证据放行。
+
+## 14. P4-pre1 实施边界（补裁五，2026-11-25）
+
+共用 builder 负责 portable capture、seed commit 的 std/runtime 物化与 S→A→B，release 在同一原语上追加 C。
+入口固定 `selfhost/src/nmain.dawn`；保留 Planner 的本地依赖，不另写 Dawn 依赖解析器，也不复制 C flags。
+编译输入摘要使用物化源码的内容清单、配对树、转换器、`cc-units.sh` 与实际 CC/链接器/libc 闭包；
+lock/history/revoked、候选及待晋级描述记录属于控制层，不参加该摘要。Git commit/tree 另记为来源证据。
+资格 receipt 同时绑定这个摘要、实际输入 lock 的摘要与受测种子 ELF 摘要；正式晋级重新核对 seed/std/runtime，
+不要求未来含资格摘要的正式 lock 与待晋级输入 lock 同摘要。
+
+完整 chain receipt 必须记录来源、编译输入、工具链和逐阶段 whole/info/units/ELF 身份，producer 读取完整记录，
+拒绝缺 stage、换 A/B/receipt、错配对与错 CC，不从组装 runner 重新猜 CC。receipt 的规范摘要进入公开 proof；
+内部 artifact 跨 job 传递并保留 90 天，公开资产仍九件。默认链仍 jar，启动器缓存留给 pre2。
+
+pre1 的具体接口：
+
+- `native-seed-chain.py build --lock <输入> --seed-elf <ELF> --out <新目录>` 构建 A/B；
+  `prepare-pair --lock <输入> --out <新目录>` 离线从 seed commit 物化配对树，缺 Git 对象即失败。
+  `--seed-tree` 可指向已准备的完整配对树，构建前后均重验；`--live` 物化当前工作树和新源码文件，仍不提供缓存。
+- `describe-seed --seed-elf <ELF> --seed-commit <commit> --out <仓外描述文件>` 生成完整 proposed 输入；
+  同时给 `--chain-receipt`、`--origin-lock`、`--origin-builder` 才能登记可资格的 pinned 来源，
+  否则只登记 `local-development`。pre2 的覆盖接口使用 `DAWN_NATIVE_SEED` 加 `DAWN_NATIVE_SEED_LOCK`，
+  后者指向该完整描述；配对路径使用 builder 的 `--seed-tree`，不能只给 ELF。
+- 工具链首版支持 clang 与 GCC 13 静态库布局。默认严格要求资格配方的 clang 18.1.3；
+  `--development-cc` 允许其它 clang，但 receipt 使用独立 development recipe，release/资格拒绝引用。
+  记录 CC 字节、版本、target、resource、linker、头文件与静态库清单，清空继承的编译环境，前后重验实际闭包。
+- `native_release.py chain` 调同一 builder 追加 C，比较 whole/info/units/ELF 与 full build id；
+  `verify-chain` 在下载后、执行 B 的 API 快照前核对，`produce --chain-receipt` 再核对后组装九件。
+  `recipe.inputs_sha256` 是编译输入摘要，toolchain/recipe 字段取链执行方；不再接受裸 cold 摘要。
+- `native-seed-qualify.py run|verify --lock <实际输入>` 不再钉死历史候选。proposed ELF 还须带上述三件来源参数，
+  本地开发 generation 不能资格。package 同时携带 `compilation`、`compilation_sha256`、`qualified_seed_sha256`，
+  并保留实际 `seed_lock_sha256` 作为控制审计。晋级消费者核对受测 ELF、配对内容与当前编译输入，
+  控制记录变更不触发重资格，源码/配对/recipe/工具链变化均拒绝复用。
+
+编译源清单采用物化 Git 树中源码项目、std/runtime、scripts、workflows、bin 的保守上界，
+包含原型与构建脚本，因此删除原型仍改变编译输入；docs 与根文档不属于编译输入。
+排除 `scripts/native-seed-lock.json`、`native-seed-history/`、`native-seed-revoked.txt`、历史 candidate 与 JAR seed 三文件；
+额外待晋级描述写在仓外，不引入新的递归记录。原始 commit/tree 与完整输入 receipt 仍保存，
+控制层和编译层的验证各自保留，不能把“摘要不变”解释为绕过撤销或来源验证。

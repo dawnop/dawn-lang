@@ -27,7 +27,7 @@ def stage_inputs(repo, lock, receipt, source, seed_tree, stage, std, runtime):
     return selected
 
 
-def compiler_probe(cc, env):
+def compiler_probe(cc, env, pinned=True):
     cc = Path(cc)
     c.require(cc.is_absolute() and cc.is_file() and os.access(cc, os.X_OK),
               'cc-identity', 'an explicit executable compiler path is required')
@@ -40,8 +40,10 @@ def compiler_probe(cc, env):
         return result.stdout.decode('utf-8').strip()
 
     version = query('--version')
-    c.require(re.search(r'\bclang version 18\.1\.3\b', version) and
-              query('-dumpversion') == '18.1.3', 'cc-version', 'clang 18.1.3 is required')
+    c.require('clang version ' in version, 'cc-version', 'a clang C toolchain is required')
+    if pinned:
+        c.require(re.search(r'\bclang version 18\.1\.3\b', version) and
+                  query('-dumpversion') == '18.1.3', 'cc-version', 'clang 18.1.3 is required')
     triple = query('-dumpmachine')
     c.require(re.fullmatch(r'x86_64-(?:[a-z0-9_]+-)?linux-gnu', triple),
               'cc-target', 'x86_64 GNU Linux compiler required')
@@ -95,3 +97,14 @@ def compile_stage(args):
                   'compiler_probe': probe, 'jobs': args.jobs, 'output_sha256': c.digest(binary)}
         c.atomic_json(recipe_out, result)
     return result
+
+
+def emission_command(emitter, entry, std, out):
+    return [str(emitter), 'emitc', '--std', str(std), str(entry),
+            '-o', str(out / 'whole.c'), '--build-info', str(out / 'info.c'),
+            '--split', str(out / 'units')]
+
+
+def compilation_command(script, runtime, out):
+    return ['/usr/bin/bash', str(script), '--static', '--inline-rc', '--runtime', str(runtime),
+            '-o', str(out / 'dawnc'), str(out / 'units'), str(out / 'info.c')]

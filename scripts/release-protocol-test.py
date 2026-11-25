@@ -29,7 +29,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import native_release as nr  # noqa: E402
 import native_seed.contract as c  # noqa: E402
-from native_seed import lockchain  # noqa: E402
+from native_seed import lockchain, test_support  # noqa: E402
 import release_publish as rp  # noqa: E402
 
 installer = nr.installer
@@ -125,9 +125,11 @@ def build_package(work):
     diff = work / "diff.md"
     diff.write_text("# diff\n")
     out = work / "package"
+    receipt = work / 'chain-receipt.json'
+    c.atomic_json(receipt, test_support.chain_record(ROOT, lockchain.release_lock(LOCK), a, b))
     nr.produce(type("A", (), dict(lock=str(LOCK), native=str(b), builder=str(a), jdk21_jar=str(jar),
                                   jdk26_jar=str(jar), pub_api=str(api), pub_api_diff=str(diff),
-                                  cold_sha256="c" * 64, expect_tag=tag, skip_smoke=True, out=str(out))))
+                                  chain_receipt=str(work / "chain-receipt.json"), expect_tag=tag, skip_smoke=True, out=str(out))))
     return tag, out
 
 
@@ -171,7 +173,7 @@ def main():
             nr.produce(type("A", (), dict(
                 lock=str(LOCK), native="stage-b", builder="stage-a", jdk21_jar="dawn-selfhost.jar",
                 jdk26_jar="dawn-selfhost.jar", pub_api="api.json", pub_api_diff="diff.md",
-                cold_sha256="c" * 64, expect_tag=tag, skip_smoke=True, out="relative-package")))
+                chain_receipt=str(work / "chain-receipt.json"), expect_tag=tag, skip_smoke=True, out="relative-package")))
         finally:
             os.chdir(previous)
         ok(read(work / "relative-package", installer.METADATA) == read(good, installer.METADATA),
@@ -276,7 +278,7 @@ def main():
         unqualified = dict(lock=str(candidate_dir / lockchain.LOCK_NAME), native=str(work / "stage-b"),
                            builder=str(work / "stage-a"), jdk21_jar=str(work / "dawn-selfhost.jar"),
                            jdk26_jar=str(work / "dawn-selfhost.jar"), pub_api=str(work / "api.json"),
-                           pub_api_diff=str(work / "diff.md"), cold_sha256="c" * 64, expect_tag=tag,
+                           pub_api_diff=str(work / "diff.md"), chain_receipt=str(work / "chain-receipt.json"), expect_tag=tag,
                            skip_smoke=True, out=str(work / "never"))
         refuses("producing from the unqualified candidate", "lock-", lambda: nr.produce(type("A", (), unqualified)))
         refuses("producing with no lock", "lock-missing", lambda: nr.produce(type("A", (), dict(

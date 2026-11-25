@@ -88,10 +88,16 @@ def real_controls(repo, directory, destination):
     (destination / 'same-version-dawnc.sha256').write_text(c.digest(bad) + '  same-version-dawnc\n')
     reject('Q1', 'same-version-changed-bytes-own-sidecar', 'seed-digest',
            lambda: c.verify_seed(replacement, lock))
-    c.require(c.probe_seed(bad) == (lock['seed']['version'], lock['seed']['build_id']),
+    c.require(c.probe_seed(bad, lock['seed']['version']) == (lock['seed']['version'], lock['seed']['build_id']),
               'control-verdict', 'same-version mutation changed the identity transcript')
+    current = directory / 'root-1/B/dawnc'
+    if current.read_bytes() == data:
+        # A proposed seed may already be the fixed point of these exact inputs.
+        # Retain a different real ELF without changing its executable sections.
+        current = destination / 'different-current-dawnc'
+        current.write_bytes(data + b'qualification-control\n')
     reject('Q1', 'different-real-current-compiler', 'seed-digest',
-           lambda: c.verify_seed(directory / 'root-1/B/dawnc', lock))
+           lambda: c.verify_seed(current, lock))
     for target in ('aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-musl'):
         altered = copy.deepcopy(lock)
         altered['seed']['target'] = target

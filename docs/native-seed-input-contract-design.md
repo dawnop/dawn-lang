@@ -56,7 +56,7 @@ JSON key、坏摘要必须拒绝，安装失败保留旧文件，原型重发不
 K1/K2/K3/K4/事务分别固定 42/18/14/6/72 条；25 项外层负控覆盖阶段漏重、
 receipt 输入身份、整套夹具缺失及各套丢项/重项。K2 的 C compiler 是写 argv 的
 Python 替身；K4 在临时目录用小 bytes 演练事务，不真实重编编译器。
-外部输入收据可用 `--receipt <inputs.json> --commit <完整提交>` 单独核结构与身份。
+外部输入收据可用 `--lock <实际输入 lock> --receipt <inputs.json> --commit <完整提交>` 单独核结构与身份。
 另可附 `--cold-receipt <receipt.json> --package-receipt <receipt.json>`，核两 root、
 阶段/步骤集合、输入/recipe/执行器摘要和 Q1–Q10/事务覆盖；不读取真实 trace 或重编。
 十个 candidate/fixture/共享模块条目已从 unseen 消化；根脚本的命名空间导入未被当前 map
@@ -64,11 +64,11 @@ Python 替身；K4 在临时目录用小 bytes 演练事务，不真实重编编
 这说明映射的保守边界，不能将已经运行的夹具说成从未执行，也不能冒称重链日常覆盖。
 
 ```sh
-python3 -B scripts/native-seed-qualify.py run --commit FULL_COMMIT --reason final-inputs \
+python3 -B scripts/native-seed-qualify.py run --lock /prepared/seed-input.json --commit FULL_COMMIT --reason final-inputs \
   --seed /prepared/seed/dawnc --seed-tree /prepared/seed \
   --toolchain /prepared/toolchain --java21 /jdk21/bin/java --java26 /jdk26/bin/java \
   --seed-cache /prepared/jvm-seeds --out /qualification/new-run
-python3 -B scripts/native-seed-qualify.py verify --commit FULL_COMMIT --out /qualification/new-run
+python3 -B scripts/native-seed-qualify.py verify --lock /prepared/seed-input.json --commit FULL_COMMIT --out /qualification/new-run
 python3 -B scripts/native-seed-prototype/rehearse.py rehearse \
   --package /qualification/new-run --out /prototype/new-run
 ```

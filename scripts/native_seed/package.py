@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from native_seed import cold, contract as c, qualification as q, rehearsal
+from native_seed import cold, contract as c, inputs, qualification as q, rehearsal, toolchain
 
 REPLAY_SENTENCES = (b'OK: fixed point', b'OK: standalone closure',
                     b'OK: converges to the current compiler byte-for-byte', b'replay complete:')
@@ -186,7 +186,12 @@ def inspect(repo, directory):
                   case['jvm']['stdout_sha256'] == case['native']['stdout_sha256'] and
                   case['jvm']['stderr_sha256'] == case['native']['stderr_sha256'],
                   'package-diff', 'functional transcript differs')
-    return {'schema': 1, 'kind': 'native-qualification-package', 'source_commit': chain['source_commit'],
+    subject = c.read_lock(directory / 'cold/seed-lock.json')
+    compilation = inputs.compilation(c.scan(directory / 'cold/inputs/source'), subject,
+                                     toolchain.verify(directory / 'cold/toolchain'))
+    return {'compilation': compilation, 'compilation_sha256': c.digest(c.canonical(compilation)),
+            'qualified_seed_sha256': subject['seed']['sha256'],
+            'schema': 1, 'kind': 'native-qualification-package', 'source_commit': chain['source_commit'],
             'source_tree': chain['source_tree'], 'cold_receipt_sha256': c.digest(c.canonical(chain)),
             'seed_lock_sha256': chain['seed_lock_sha256'], 'coverage': ['Q' + str(i) for i in range(1, 11)],
             'implementations': implementations,
