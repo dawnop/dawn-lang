@@ -1,10 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- `origin` is no longer highlighted as a contextual keyword: the language removed the
-  handler arm `origin` clause, so it is an ordinary name everywhere.
-
 ## 0.1.7
 
 - Highlight the `calls` clause of an effect declaration as a contextual keyword;
