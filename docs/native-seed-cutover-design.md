@@ -501,3 +501,43 @@ native 链与 JAR 链并行时，关键路径是 native 链，不增加整体墙
 - P1 合并后下一个 tag 即发九件、schema 2。**种子仍是 `scripts/native-seed-candidate-v0.104.0.json`（候选 lock）**：P2 的 qualified lock 不在 P1 内，所以 `native-bootstrap.json` 的 `qualification_sha256` 此时为 `null`（取自候选 lock 的 `lineage.qualification_sha256`），P2 之后由 lock 的资格 receipt 填入，并在 P2 起拒绝 `null`。这是设计 §2.3.1 第 2 点在 P2 之前的如实状态，不是兼容分支。
 - `release-native.sh` 仍在每次 push 上跑，但它构建的 B 来自 JAR 链，只用于 native-cli-diff 与协议契约包；release 不再用它的产物。它不再写 `dawn-toolchain.json` 与 `install-native.py`。
 - 「全仓 0 命中」的 grep 对 `.github/` 与 `scripts/` 成立；本设计页与 PR 文字里的历史引用保留（它们描述被撤掉的行为）。
+
+## 12. P2 落地记录（2026-11-25）
+
+P2 只做机制，不改默认链，也不创建真实的 `scripts/native-seed-lock.json`：它需要一份对该种子的有效资格 receipt，而资格属于 P3（§3.1）。所以这一刀合并后仓里**没有 lock**，默认链是 JAR 链（与今天一致），release 因「找不到 qualified lock」而拒绝（补裁二第 1 条的发版冻结至此改由机器强制，而不是靠约定）。P3 在冻结输入上资格通过后，用 `advance-native-seed.py initial` 把候选转成第一条 lock。
+
+### 12.1 记录与读取
+
+- `scripts/native_seed/lockchain.py` 是唯一的读与写：`load` 严格读 lock、历史目录、撤销名单并验证整条哈希链；晋级、回滚、改链、初始化全部先把「当前链加提议的新 lock」交给同一个 `verify_chain` 再落盘。读者与写者用同一份规则，所以写者不会写出读者不认的东西，反之亦然。
+- qualified lock 的字段：`chain`（`jar`|`native`，默认链的唯一真相，初始为 `jar`）；`lineage` 扩为 `parent_lock_sha256 parent_receipt_sha256 qualification_sha256 transition rolled_back_from rolled_back_to reason`。`rolled_back_to` 是为了让两条回滚路径可区分（§3.5 的推翻判据）：被放弃的序号与被恢复的序号都显式写出。
+- 历史：`native-seed-history/<序号>.json` 是旧 lock 的原字节，0 号是候选原字节；新 lock 的 `parent_lock_sha256` 是上一条原字节的摘要，所以改任何一份历史、或删一份，链就断。lock 必须是规范形式（键序、空白），重排版本身就是改动。
+- 单调：晋级的 tag 必须大于**历史上出现过的所有种子**（不只是当前），所以回滚后不能再晋级被放弃的版本；也不能复用旧种子摘要。
+- 撤销名单：每行 `<种子 sha256> <原因关键字>`，按摘要排序、无重复。**load 时检查**：当前种子被撤销则整条链失败关闭（不改走别的种子）；晋级与回滚的目标被撤销同样拒绝。补救是回滚到未被撤销的历史种子。
+- 中断：晋级先写历史、最后换 lock。历史已写、lock 未换时恢复是幂等的（多出的那一条必须恰好等于当前 lock 的字节）；lock 已换而历史缺失在顺序下不会发生，出现即判污染。三个切点（历史写前、历史写后、lock 换后）重跑得到与不中断逐字节相同的终态。
+- 只增不改的另一半：`native-seed-chain.py check --base REV` 比较 REV 处的记录：REV 的 lock 必须仍在链里且逐字节相同，REV 的撤销行不得被删改。这是为了抓「原地改最新一条 lock」——那种改动在链内看不出来，因为还没有后继指向它。本刀没有把它接进 CI（接入点与基线选择见开放问题）。
+
+### 12.2 启动器
+
+`bin/dawn` 在 source seedjar.sh 之后、做任何重活之前决定链：
+
+1. `DAWN_SEED_CHAIN` 只能是 `jar` 或 `native`（空串也拒绝）。
+2. scripts/ 下 lock、历史、撤销名单**任一存在**就必须经 `native-seed-chain.py default` 验证，不通过一律失败（不分链）；全不存在默认 `jar`。
+3. 实际链 = `DAWN_SEED_CHAIN` 或 lock 的 `chain`。JAR 链上设 `DAWN_NATIVE_SEED` 报错，`DAWN_SEED` 指向 ELF 报错；native 链上设 `DAWN_SEED` 报错。两个变量同设因此在任何链上都报错。
+4. native 链：`native-seed-chain.py seed` 取 `.dawn/native-seeds/<tag>/dawnc-linux-x86_64`，缺则从 tag 的 release 下载，**每次使用都重算** sha256、size、ELF 形状、`--version` 与完整 build id，全部等于 lock 才用；缓存被改是错误，不是重新下载的理由。`DAWN_NATIVE_SEED` 只接受 ELF（jar 拒绝、符号链接拒绝）。验证失败即退出，**不回退 JAR 链**。
+5. 验证通过后 native 链仍然退出：用 native 种子构建本启动器管的工具链是 P4 的事（`nmain` 没有 `build` 到 jar），P2 只保证选择、验证与失败行为。
+
+不存在忽略摘要的开关（测试里对三个脚本的环境变量与「unverified/insecure」字样做了 grep 负控）。
+
+### 12.3 晋级
+
+`scripts/advance-native-seed.py`：`initial`、`promote TAG`、`rollback N`、`revoke SHA`、`set-chain jar|native`。`promote` 复核 tag 在 origin 上的 commit（前后两次）、tag 是 HEAD 祖先、版本大于所有历史种子；下载九件并跑 `native_release.aggregate`（与当前 lock 对账，所以基于旧种子建的包会因 `release-lineage` 被拒）；用 `--version` 与 `version -m` 复核 ELF；std/runtime 身份取自 tag commit。资格证据要求 `native-seed-qualify.py` 的 `run` 与独立 `verify` 都完整通过（十三步与两步全 0、receipt 摘要一致、请求原因是 `seed-promotion`、commit 等于 tag commit）；没有就拒绝，不允许先晋级后补。
+
+### 12.4 release 拒绝 null 资格
+
+`native_release.aggregate`（产出端与消费端共用）拒绝 `proof.qualification_sha256 = null`；`produce`、`chain`、`aggregate --lock` 只接受经 `lockchain.release_lock` 验证的 qualified lock（候选、缺失、断链、被撤销种子都在这里被拒）。release.yml 的 native-chain job 在取种子之前先跑 `native-seed-chain.py check`，并断言三个种子变量未设置；`release-native.sh` 每次 push 跑的协议契约包改用 `contract-fixture` 生成的 qualified 夹具 lock（资格摘要只是标签，不是证据）。
+
+### 12.5 不做
+
+- 不创建真实 lock、不切默认链（P3、P4）。
+- 不改 `advance-seed.sh` 与 JAR 三文件协议（`git diff` 为空）。
+- 不在 P2 让 native 链真的构建工具链（见 12.2 第 5 点）。

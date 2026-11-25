@@ -164,6 +164,71 @@ fi
 
 . "$ROOT/scripts/seedjar.sh"
 
+# Which seed chain builds this toolchain, decided before anything is built.
+#
+# The records under scripts/ (native-seed-lock.json, its history and its
+# revocation list) are the one truth for the default chain; DAWN_SEED_CHAIN=jar
+# or =native overrides it for one run. The two chains never stand in for each
+# other: a missing, unverifiable or revoked native seed is an error, not a
+# reason to build from the JAR seed, and a seed variable that belongs to the
+# other chain is an error, not an ignored setting. scripts/native-seed-chain.py
+# reads the records (docs/native-seed-cutover-design.md section 3.2). With no
+# records at all the default is the JAR chain, which is what every checkout
+# before the first qualified lock has.
+dawn_fail() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+# First four bytes of a file as hex, to tell a jar (PK) from an ELF.
+file_magic() {
+  LC_ALL=C od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n'
+}
+
+if [ "${DAWN_SEED_CHAIN+x}" = x ]; then
+  case $DAWN_SEED_CHAIN in
+    jar|native) ;;
+    *) dawn_fail "DAWN_SEED_CHAIN must be jar or native, not '$DAWN_SEED_CHAIN'" ;;
+  esac
+fi
+CHAIN_DEFAULT=jar
+if [ -e "$ROOT/scripts/native-seed-lock.json" ] || [ -L "$ROOT/scripts/native-seed-lock.json" ] ||
+    [ -e "$ROOT/scripts/native-seed-history" ] || [ -e "$ROOT/scripts/native-seed-revoked.txt" ]; then
+  command -v python3 >/dev/null 2>&1 ||
+    dawn_fail "python3 is required to verify the native seed lock under scripts/"
+  CHAIN_DEFAULT=$(python3 -B "$ROOT/scripts/native-seed-chain.py" default) ||
+    dawn_fail "the native seed lock does not verify"
+  case $CHAIN_DEFAULT in
+    jar|native) ;;
+    *) dawn_fail "the native seed lock names an unknown chain" ;;
+  esac
+fi
+SEED_CHAIN=${DAWN_SEED_CHAIN:-$CHAIN_DEFAULT}
+# Setting both seed variables is an error whichever chain is chosen: each
+# branch below refuses the variable of the other chain, so no pair gets through.
+case $SEED_CHAIN in
+  jar)
+    [ -z "${DAWN_NATIVE_SEED:-}" ] ||
+      dawn_fail "DAWN_NATIVE_SEED is set but the seed chain is jar; set DAWN_SEED_CHAIN=native or unset it"
+    if [ -n "${DAWN_SEED:-}" ] && [ "$(file_magic "$DAWN_SEED")" = 7f454c46 ]; then
+      dawn_fail "DAWN_SEED names an ELF file; a native seed belongs in DAWN_NATIVE_SEED"
+    fi
+    ;;
+  native)
+    [ -z "${DAWN_SEED:-}" ] ||
+      dawn_fail "DAWN_SEED is set but the seed chain is native; set DAWN_SEED_CHAIN=jar or unset it"
+    [ -e "$ROOT/scripts/native-seed-lock.json" ] || [ -n "${DAWN_NATIVE_SEED:-}" ] ||
+      dawn_fail "the native chain was requested but scripts/native-seed-lock.json does not exist"
+    command -v python3 >/dev/null 2>&1 || dawn_fail "python3 is required for the native seed chain"
+    NATIVE_SEED=$(python3 -B "$ROOT/scripts/native-seed-chain.py" seed) ||
+      dawn_fail "the native seed does not verify; there is no fallback to the JAR chain"
+    # The seed is resolved and verified; building the toolchain from it is the
+    # production cutover (P4), and until then this refuses rather than builds
+    # from a different seed.
+    dawn_fail "the native seed chain cannot build this launcher's toolchain yet (seed verified: $NATIVE_SEED)"
+    ;;
+esac
+
 # What the jar was built from, as a content hash rather than a timestamp.
 #
 # `find -newer "$SJAR"` was the old test, and mtime does not answer the question

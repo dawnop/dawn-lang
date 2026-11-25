@@ -212,7 +212,10 @@ def verify_seed(path, lock):
     return data
 
 
-def probe_seed(data):
+def probe_seed(data, version=None):
+    # `version` is the full banner the lock promises; the default is the one
+    # historical seed this module was written for.
+    version = version or 'dawnc 0.104.0 (native)'
     # Execute a private copy of verified bytes, not a mutable caller path.
     with tempfile.TemporaryDirectory(prefix='native-seed-probe-') as work:
         executable = Path(work) / 'dawnc'
@@ -227,7 +230,7 @@ def probe_seed(data):
             text = result.stdout.decode('ascii')
         except UnicodeError as exc:
             raise Rejected('seed-identity: non-ASCII version') from exc
-        match = re.fullmatch(r'(dawnc 0\.104\.0 \(native\)) (b1:[0-9a-f]{12})\n', text)
+        match = re.fullmatch('(' + re.escape(version) + r') (b1:[0-9a-f]{12})\n', text)
         require(match is not None, 'seed-identity', f'unexpected version transcript: {text!r}')
         listing = subprocess.run([str(executable), 'version', '-m', str(executable)],
                                  cwd=work, env=env, timeout=20, capture_output=True)

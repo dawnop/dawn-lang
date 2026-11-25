@@ -905,6 +905,195 @@ if prepare_mutant follow-symlinks; then
   fi
 fi
 
+# ---- seed chain selection (docs/native-seed-cutover-design.md section 3.2).
+# The records under scripts/ are the one truth for the default chain, an
+# explicit DAWN_SEED_CHAIN overrides it, and nothing falls back from one chain
+# to the other. Every refusal below must leave the fake java untouched: a
+# refusal that still built something would be a fallback with an error message.
+chain_root() {
+  local name=$1 launcher=${2:-$repo/bin/dawn}
+  local target
+  target=$(make_root "$name" "$launcher")
+  cp "$repo/scripts/native-seed-chain.py" "$repo/scripts/repo_env.py" "$repo/scripts/repo.env" "$target/scripts/"
+  cp -R "$repo/scripts/native_seed" "$target/scripts/native_seed"
+  cp "$repo/scripts/native-seed-candidate-v0.104.0.json" "$target/scripts/"
+  printf '%s\n' "$target"
+}
+
+chain_lock() { # target: install a qualified fixture lock (JAR default)
+  local target=$1
+  rm -rf "$work/lock-fixture.$$"
+  python3 -B "$target/scripts/native-seed-chain.py" contract-fixture "$work/lock-fixture.$$" > /dev/null || return 1
+  cp -R "$work/lock-fixture.$$/." "$target/scripts/"
+  rm -rf "$work/lock-fixture.$$"
+}
+
+chain_run() { # target log status-var-file [VAR=value ...]; stdout/stderr in $work/chain.{out,err}
+  local target=$1 log=$2
+  shift 2
+  (
+    unset DAWN_SEED DAWN_NATIVE_SEED DAWN_SEED_CHAIN DAWN_PRINT_STAMP DAWN_SEED_CACHE DAWN_SEED_ALLOW_UNVERIFIED
+    export JAVA_HOME="$target/.fake/java-home" DAWN_JVM_OPTS=-Xmx32m FAKE_JAVA_LOG=$log
+    export FAKE_MANIFEST_PRE="$target/.fake/manifest.pre" FAKE_MANIFEST_POST="$target/.fake/manifest.pre"
+    export DAWN_RELEASE_BASE_URL="file://$work/no-releases"
+    env "$@" "$target/bin/dawn" --version
+  ) > "$work/chain.out" 2> "$work/chain.err"
+}
+
+# refusal_holds: the launcher exits nonzero, says $msg, and never starts java.
+refusal_holds() {
+  local target=$1 msg=$2
+  shift 2
+  local log=$work/chain-refusal.java.log
+  : > "$log"
+  if chain_run "$target" "$log" "$@"; then
+    return 1
+  fi
+  [[ $(wc -l < "$log" | tr -d '[:space:]') -eq 0 ]] && grep -q -- "$msg" "$work/chain.err"
+}
+
+expect_refusal() {
+  local label=$1
+  shift
+  if refusal_holds "$@"; then
+    pass "$label"
+  else
+    bad "$label was not refused as expected: $(head -c 300 "$work/chain.err")"
+  fi
+}
+
+# runs_holds: the launcher builds and execs as it always did.
+runs_holds() {
+  local target=$1
+  shift
+  local log=$work/chain-run.java.log
+  : > "$log"
+  chain_run "$target" "$log" "$@" && [[ $(wc -l < "$log" | tr -d '[:space:]') -gt 0 ]]
+}
+
+expect_runs() {
+  local label=$1
+  shift
+  if runs_holds "$@"; then
+    pass "$label"
+  else
+    bad "$label did not run: $(head -c 300 "$work/chain.err")"
+  fi
+}
+
+if command -v cc >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  printf 'int main(void) { return 0; }\n' > "$work/static-elf.c"
+  cc -static -O0 "$work/static-elf.c" -o "$work/static-elf" || bad "cannot build the static ELF fixture"
+  printf 'PK\003\004' > "$work/fake.jar"
+  chain_plain=$(chain_root chain-plain)
+  chain_locked=$(chain_root chain-locked)
+  chain_lock "$chain_locked" || bad "cannot install the fixture lock"
+  chain_native=$(chain_root chain-native-default)
+  chain_lock "$chain_native" &&
+    python3 -B -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from native_seed import lockchain
+lockchain.set_chain(sys.argv[2], "native", "contract")
+' "$chain_native/scripts" "$chain_native/scripts" || bad "cannot install the native-default lock"
+
+  expect_runs "no records: the JAR chain is the default" "$chain_plain" A=1
+  expect_runs "a qualified lock with chain jar: the JAR chain runs" "$chain_locked" A=1
+  expect_runs "DAWN_SEED_CHAIN=jar over a native-default lock runs the JAR chain" "$chain_native" DAWN_SEED_CHAIN=jar
+  expect_runs "DAWN_SEED may name a jar on the JAR chain" "$chain_locked" "DAWN_SEED=$chain_locked/.fake/seed.jar"
+  expect_refusal "an unknown chain name is refused" "$chain_plain" "must be jar or native" DAWN_SEED_CHAIN=both
+  expect_refusal "an empty chain name is refused" "$chain_plain" "must be jar or native" DAWN_SEED_CHAIN=
+  expect_refusal "the native chain without a lock is refused" "$chain_plain" "does not exist" DAWN_SEED_CHAIN=native
+  expect_refusal "an override forces the native chain, which has no seed to download: no fallback to the JAR chain" \
+    "$chain_locked" "no fallback to the JAR chain" DAWN_SEED_CHAIN=native
+  expect_refusal "a native-default lock does not fall back to the JAR chain" "$chain_native" \
+    "no fallback to the JAR chain"
+  expect_refusal "DAWN_SEED holding an ELF is refused" "$chain_plain" "native seed belongs in DAWN_NATIVE_SEED" \
+    "DAWN_SEED=$work/static-elf"
+  expect_refusal "DAWN_NATIVE_SEED on the JAR chain is refused" "$chain_locked" "seed chain is jar" \
+    "DAWN_NATIVE_SEED=$work/static-elf"
+  expect_refusal "DAWN_SEED on the native chain is refused" "$chain_native" "seed chain is native" \
+    "DAWN_SEED=$work/fake.jar"
+  expect_refusal "both seed variables on the JAR chain are refused" "$chain_locked" "seed chain is jar" \
+    "DAWN_NATIVE_SEED=$work/static-elf" "DAWN_SEED=$work/fake.jar"
+  expect_refusal "both seed variables on the native chain are refused" "$chain_native" "seed chain is native" \
+    "DAWN_NATIVE_SEED=$work/static-elf" "DAWN_SEED=$work/fake.jar"
+  expect_refusal "a jar given as DAWN_NATIVE_SEED is refused" "$chain_native" "is not an ELF" \
+    "DAWN_NATIVE_SEED=$work/fake.jar"
+  expect_refusal "a verified native seed still cannot build before the cutover" "$chain_native" \
+    "cannot build this launcher's toolchain yet" "DAWN_NATIVE_SEED=$work/static-elf"
+
+  # records that do not verify stop the launcher, whichever chain was asked for
+  chain_tamper=$(chain_root chain-tampered)
+  chain_lock "$chain_tamper"
+  sed 's/"chain":"jar"/"chain": "jar"/' "$chain_tamper/scripts/native-seed-lock.json" > "$work/tampered-lock"
+  cat "$work/tampered-lock" > "$chain_tamper/scripts/native-seed-lock.json"
+  expect_refusal "a re-printed lock is refused even for the JAR chain" "$chain_tamper" "does not verify"
+  expect_refusal "a re-printed lock is refused with an explicit chain too" "$chain_tamper" "does not verify" DAWN_SEED_CHAIN=jar
+  chain_revoked=$(chain_root chain-revoked)
+  chain_lock "$chain_revoked"
+  printf '%s revoked\n' "$(python3 -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["seed"]["sha256"])' \
+    "$chain_revoked/scripts/native-seed-lock.json")" > "$chain_revoked/scripts/native-seed-revoked.txt"
+  expect_refusal "a revoked seed in force stops the launcher" "$chain_revoked" "does not verify"
+  chain_nohist=$(chain_root chain-no-history)
+  chain_lock "$chain_nohist"
+  rm -rf "$chain_nohist/scripts/native-seed-history"
+  expect_refusal "a lock without its history is refused" "$chain_nohist" "does not verify"
+
+  # each assertion above has a mutant of the launcher that must turn it red
+  chain_mutant_red() { # mutant-name expected-to-hold-function-and-args...
+    local mutation=$1
+    shift
+    if prepare_mutant "$mutation"; then
+      local mutant_plain=$work/chain-m-$mutation-plain mutant_locked=$work/chain-m-$mutation-locked
+      local mutant_native=$work/chain-m-$mutation-native
+      # the same three roots as above with the launcher swapped, so nothing but the mutation differs
+      cp -R "$chain_plain" "$mutant_plain"
+      cp -R "$chain_locked" "$mutant_locked"
+      cp -R "$chain_native" "$mutant_native"
+      for mutant_root in "$mutant_plain" "$mutant_locked" "$mutant_native"; do
+        cp "$MUTANT" "$mutant_root/bin/dawn"
+        chmod +x "$mutant_root/bin/dawn"
+      done
+      CHAIN_MUTANT_PLAIN=$mutant_plain CHAIN_MUTANT_LOCKED=$mutant_locked CHAIN_MUTANT_NATIVE=$mutant_native
+      if "$@"; then
+        bad "$mutation mutant still satisfied its assertion"
+      else
+        pass "$mutation mutant turns its seed chain assertion red"
+      fi
+    fi
+  }
+  chain_fallback_holds() {
+    refusal_holds "$CHAIN_MUTANT_NATIVE" "no fallback to the JAR chain"
+  }
+  chain_explicit_holds() {
+    refusal_holds "$CHAIN_MUTANT_LOCKED" "no fallback to the JAR chain" DAWN_SEED_CHAIN=native
+  }
+  chain_lock_holds() {
+    local tampered=$CHAIN_MUTANT_LOCKED
+    cat "$tampered/scripts/native-seed-lock.json" | sed 's/"chain":"jar"/"chain": "jar"/' > "$work/tampered-mutant-lock"
+    cat "$work/tampered-mutant-lock" > "$tampered/scripts/native-seed-lock.json"
+    refusal_holds "$tampered" "does not verify"
+  }
+  chain_elf_holds() {
+    refusal_holds "$CHAIN_MUTANT_PLAIN" "native seed belongs in DAWN_NATIVE_SEED" "DAWN_SEED=$work/static-elf"
+  }
+  chain_native_var_holds() {
+    refusal_holds "$CHAIN_MUTANT_LOCKED" "seed chain is jar" "DAWN_NATIVE_SEED=$work/static-elf"
+  }
+  chain_jar_var_holds() {
+    refusal_holds "$CHAIN_MUTANT_NATIVE" "seed chain is native" "DAWN_SEED=$work/fake.jar"
+  }
+  chain_mutant_red chain-fallback-to-jar chain_fallback_holds
+  chain_mutant_red chain-ignore-explicit chain_explicit_holds
+  chain_mutant_red chain-ignore-lock chain_lock_holds
+  chain_mutant_red chain-accept-elf-as-jar chain_elf_holds
+  chain_mutant_red chain-ignore-native-seed-var chain_native_var_holds
+  chain_mutant_red chain-ignore-jar-seed-var chain_jar_var_holds
+else
+  bad "seed chain controls need cc and python3"
+fi
+
 if [[ $fail -ne 0 ]]; then
   exit 1
 fi

@@ -527,6 +527,35 @@ PYORDER
     errors=1
   fi
 
+  # The native chain's seed is the verified qualified lock, never a candidate
+  # and never a name the workflow picked itself: the lock is checked before
+  # anything is downloaded, the producer and the chain read the same file, and
+  # none of the seed overrides can be set in a release.
+  # shellcheck disable=SC2016 # literal workflow shell source
+  for line in \
+    'python3 -B scripts/native-seed-chain.py check' \
+    'LOCK=scripts/native-seed-lock.json' \
+    'for name in DAWN_SEED DAWN_NATIVE_SEED DAWN_SEED_CHAIN; do'; do
+    if ! tool17_require_line "$release_file" "$line" \
+        "release.yml must verify the native seed lock and refuse seed overrides: $line"; then
+      errors=1
+    fi
+  done
+  if [ "$(tool17_count_line "$release_file" '--lock scripts/native-seed-lock.json \')" -ne 2 ]; then
+    echo "release.yml must hand the qualified lock to both the chain and the producer" >&2
+    errors=1
+  fi
+  if grep -qF -- 'native-seed-candidate' "$release_file"; then
+    echo "release.yml must not name the unqualified candidate lock" >&2
+    errors=1
+  fi
+  lock_check_line="$(tool17_line_number "$release_file" 'name: verify the native seed lock')"
+  seed_fetch_line="$(tool17_line_number "$release_file" 'name: fetch the seed and its input pair')"
+  if [ -z "$lock_check_line" ] || [ -z "$seed_fetch_line" ] || [ "$lock_check_line" -ge "$seed_fetch_line" ]; then
+    echo "release.yml must verify the native seed lock before it fetches the seed" >&2
+    errors=1
+  fi
+
   # The release consumes its native artifact and locked raw metadata. A
   # command-only switch without the web-jvm input breaks the full inventory.
   # shellcheck disable=SC2016 # literal workflow shell source
@@ -640,6 +669,22 @@ sed '/cmp "$JDK21_JAR" "$JDK26_JAR"/d' \
   "$tool17_dir/release.base.yml" > "$tool17_dir/release.no-cross-jdk-cmp.yml"
 tool17_expect_reject "bypassing the cross-JDK comparison" \
   "$tool17_dir/release.no-cross-jdk-cmp.yml" "$tool17_dir/wrapper.base.sh"
+
+# shellcheck disable=SC2016 # mutate literal workflow shell source
+sed '/python3 -B scripts\/native-seed-chain.py check/d' \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.no-lock-check.yml"
+tool17_expect_reject "a release that does not verify the native seed lock" \
+  "$tool17_dir/release.no-lock-check.yml" "$tool17_dir/wrapper.base.sh"
+
+sed 's/native-seed-lock\.json/native-seed-candidate-v0.104.0.json/' \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.candidate-lock.yml"
+tool17_expect_reject "a release built from the unqualified candidate" \
+  "$tool17_dir/release.candidate-lock.yml" "$tool17_dir/wrapper.base.sh"
+
+sed 's/for name in DAWN_SEED DAWN_NATIVE_SEED DAWN_SEED_CHAIN; do/for name in DAWN_SEED; do/' \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.seed-overrides.yml"
+tool17_expect_reject "a release that tolerates the native seed override" \
+  "$tool17_dir/release.seed-overrides.yml" "$tool17_dir/wrapper.base.sh"
 
 cp "$tool17_dir/release.base.yml" "$tool17_dir/release.double.yml"
 printf '\n      - name: duplicate builder mutation\n        run: ./scripts/build-release-jar.sh -o dawn-selfhost.jar\n' \

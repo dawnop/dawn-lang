@@ -29,6 +29,12 @@ MUTATIONS = (
     "accept-bad-header",
     "lax-repo-relative-path",
     "follow-symlinks",
+    "chain-fallback-to-jar",
+    "chain-ignore-explicit",
+    "chain-ignore-lock",
+    "chain-accept-elf-as-jar",
+    "chain-ignore-native-seed-var",
+    "chain-ignore-jar-seed-var",
 )
 
 
@@ -327,6 +333,45 @@ elif mutation == "follow-symlinks":
         text,
         '          if [ -L "$leaf_file" ] || [ ! -f "$leaf_file" ]; then',
         '          if [ ! -e "$leaf_file" ]; then',
+    )
+elif mutation == "chain-fallback-to-jar":
+    # The native branch swallows a failed seed and carries on into the JAR build.
+    text = replace_region(
+        text,
+        '    NATIVE_SEED=$(python3',
+        "cannot build this launcher's toolchain yet (seed verified: $NATIVE_SEED)\"\n",
+        '    NATIVE_SEED=$(python3 -B "$ROOT/scripts/native-seed-chain.py" seed) || NATIVE_SEED=\n',
+    )
+elif mutation == "chain-ignore-explicit":
+    text = replace_once(
+        text,
+        'SEED_CHAIN=${DAWN_SEED_CHAIN:-$CHAIN_DEFAULT}',
+        'SEED_CHAIN=$CHAIN_DEFAULT',
+    )
+elif mutation == "chain-ignore-lock":
+    text = replace_once(
+        text,
+        '  CHAIN_DEFAULT=$(python3 -B "$ROOT/scripts/native-seed-chain.py" default) ||\n'
+        '    dawn_fail "the native seed lock does not verify"\n',
+        '  CHAIN_DEFAULT=jar\n',
+    )
+elif mutation == "chain-accept-elf-as-jar":
+    text = replace_once(
+        text,
+        '"$(file_magic "$DAWN_SEED")" = 7f454c46',
+        '"$(file_magic "$DAWN_SEED")" = 00000000',
+    )
+elif mutation == "chain-ignore-native-seed-var":
+    text = replace_once(
+        text,
+        '    [ -z "${DAWN_NATIVE_SEED:-}" ] ||\n      dawn_fail "DAWN_NATIVE_SEED is set but',
+        '    true ||\n      dawn_fail "DAWN_NATIVE_SEED is set but',
+    )
+elif mutation == "chain-ignore-jar-seed-var":
+    text = replace_once(
+        text,
+        '    [ -z "${DAWN_SEED:-}" ] ||\n      dawn_fail "DAWN_SEED is set but',
+        '    true ||\n      dawn_fail "DAWN_SEED is set but',
     )
 
 path.write_text(text)
