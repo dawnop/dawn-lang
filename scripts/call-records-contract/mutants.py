@@ -63,7 +63,7 @@ COMPILER = [
 # with the effect.
 AUTHOR = [
     ("recorder-effect-declares-no-calls", "dev",
-     "pub effect Dev calls(enter = t_call_enter, exit = t_call_exit, body_enter = t_body_enter, body_exit = t_body_exit) {",
+     "pub effect Dev calls(enter = t_call_enter, exit = t_call_exit,\n  body_enter = t_body_enter, body_exit = t_body_exit) {",
      "pub effect Dev {", r"row count \d+ vs 0|name|rows"),
     ("author-helper-not-public", "kernels", "pub fn fa_exp[", "fn fa_exp[", r"name fa_exp vs \w+"),
 ]
