@@ -5921,6 +5921,7 @@ fn trace(name: String) -> TileProg = match name {
   "gemm_bf16_tail" -> gemm_bf16("gemm_bf16_tail", Generic, mm_tail_shape())
   "gemm_bf16_tail_sm90" -> gemm_bf16("gemm_bf16_tail_sm90", Sm90, mm_tail_shape())
   "gemm_bf16_tail_sm100" -> gemm_bf16("gemm_bf16_tail_sm100", Sm100, mm_tail_shape())
+  "gemm_scale_bf16_tail" -> gemm_bf16_scale("gemm_scale_bf16_tail", Generic, mm_tail_shape())
   "gemm_bias_relu_bf16_tail" -> gemm_bf16_bias_relu("gemm_bias_relu_bf16_tail", Generic, mm_tail_shape())
   "gemm_bias_relu_bf16_tail_sm100" -> gemm_bf16_bias_relu("gemm_bias_relu_bf16_tail_sm100", Sm100, mm_tail_shape())
   "batched_matmul" -> {
@@ -7851,7 +7852,8 @@ fn mmtail_progs(arch: Arch) -> List[(TileProg, MmTiles)] = [
   (mm_tail_named("mmtail_f16", arch, F16), mm_plan(F16, arch).tiles),
   (mm_tail_named("mmtail_i8", arch, I8), mm_plan(I8, arch).tiles),
   (gemm_bf16("mmtail_bf16", arch, mm_tail_shape()), gemm_plan(BF16, arch).tiles),
-  (gemm_bf16_bias_relu("mmtail_bias", arch, mm_tail_shape()), gemm_plan(BF16, arch).tiles)]
+  (gemm_bf16_bias_relu("mmtail_bias", arch, mm_tail_shape()), gemm_plan(BF16, arch).tiles),
+  (gemm_bf16_scale("mmtail_scale", arch, mm_tail_shape()), gemm_plan(BF16, arch).tiles)]
 
 fn mmtail_records(arch: Arch, dir: String) -> Unit !io = {
   for (p, t) in mmtail_progs(arch) {
@@ -7961,7 +7963,7 @@ pub fn main() -> Unit !io = match args() {
         ++ "|matmul_f16_sm90|matmul_f16_sm100|matmul_i8_sm90|matmul_i8_sm100"
         ++ "|gemm_bf16|gemm_bf16_sm90|gemm_bf16_sm100|gemm_scale_bf16|gemm_bias_relu_bf16|gemm_bias_relu_bf16_sm100"
         ++ "|matmul_tail|matmul_f16_tail|matmul_f16_tail_sm90|matmul_f16_tail_sm100|matmul_i8_tail_sm100"
-        ++ "|gemm_bf16_tail|gemm_bf16_tail_sm90|gemm_bf16_tail_sm100|gemm_bias_relu_bf16_tail|gemm_bias_relu_bf16_tail_sm100"
+        ++ "|gemm_bf16_tail|gemm_bf16_tail_sm90|gemm_bf16_tail_sm100|gemm_scale_bf16_tail|gemm_bias_relu_bf16_tail|gemm_bias_relu_bf16_tail_sm100"
         ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
         ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"
         ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"

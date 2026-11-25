@@ -562,7 +562,7 @@ kernels=(
   matmul_f16_sm90 matmul_f16_sm100 matmul_i8_sm90 matmul_i8_sm100
   gemm_bf16 gemm_bf16_sm90 gemm_bf16_sm100 gemm_scale_bf16 gemm_bias_relu_bf16 gemm_bias_relu_bf16_sm100
   matmul_tail matmul_f16_tail matmul_f16_tail_sm90 matmul_f16_tail_sm100 matmul_i8_tail_sm100
-  gemm_bf16_tail gemm_bf16_tail_sm90 gemm_bf16_tail_sm100 gemm_bias_relu_bf16_tail gemm_bias_relu_bf16_tail_sm100
+  gemm_bf16_tail gemm_bf16_tail_sm90 gemm_bf16_tail_sm100 gemm_scale_bf16_tail gemm_bias_relu_bf16_tail gemm_bias_relu_bf16_tail_sm100
   scalar_scale scalar_len scalar_loop scalar_wide
   entry6_dynamic entry6_project1 entry6_project3
   read_layout_g3 read_layout_g1 read_layout_mqa read_repeat read_mask
@@ -731,6 +731,7 @@ mutants=(
   flash-demo-scale-constant flash-demo-last-kv flash-demo-no-rescale
   gemm-type-rejections gemm-bias-after-convert gemm-relu-before-bias gemm-scale-dropped
   mm-tail-k-floor mm-tail-no-pad mm-tail-out-roundup
+  gemm-tail-no-pad gemm-tail-out-roundup gemm-tail-bias-extent-short
   entry6-type-rejections entry6-source-controls
   entry6-n-constant entry6-view-capacity entry6-loop-floor entry6-unmarked entry6-sixth-as-pointer entry6-erase-projection
   read-layout-type-rejections read-group-axis read-group-zero read-group-div2 read-group-shift read-n-constant read-loop-floor read-view-capacity read-live-stride read-no-mask
@@ -3573,6 +3574,22 @@ if run_item mm-tail-no-pad; then
 fi
 if run_item mm-tail-out-roundup; then
   gemm_mutant mm-tail-out-roundup matmul_f16_tail
+fi
+
+# The same faults in the epilogue factories (G14-2, third knife). The GEMM
+# with a fused epilogue has its own operand and output views, and its bias row
+# has an extent of its own: operands that are not padded, an output extent
+# rounded up (the epilogue then stores lanes past C), and a bias row one
+# column short. tile-gpu-diff's mmtail family launches each against the
+# bias+relu kernel's oracle.
+if run_item gemm-tail-no-pad; then
+  gemm_mutant gemm-tail-no-pad gemm_bias_relu_bf16_tail
+fi
+if run_item gemm-tail-out-roundup; then
+  gemm_mutant gemm-tail-out-roundup gemm_bias_relu_bf16_tail
+fi
+if run_item gemm-tail-bias-extent-short; then
+  gemm_mutant gemm-tail-bias-extent-short gemm_bias_relu_bf16_tail
 fi
 
 if run_item entry6-type-rejections; then
