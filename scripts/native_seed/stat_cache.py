@@ -6,6 +6,7 @@ marker and the ordinary receipt checks remain the authority for execution.
 """
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import stat
@@ -16,6 +17,15 @@ from native_seed import contract as c
 
 # Conservative for second-resolution filesystems as well as nanosecond ones.
 GRAIN_NS = 1_000_000_000
+
+
+def index_integrity(payload_raw, expected):
+    return c.digest(payload_raw) == expected
+
+
+def full_link(raw, prefix, suffix, expected):
+    return (raw.startswith(prefix) and raw.endswith(suffix) and len(raw) > len(prefix) + len(suffix) and
+            c.digest(raw[len(prefix):-len(suffix)] + b'\n') == expected)
 
 
 @dataclass(frozen=True)
@@ -75,10 +85,22 @@ class DigestCache:
         self.directories = {}
         self.hashes = 0
         self.changed = False
+        self.compact = False
+        self.full_raw = None
+        self.generation = None
 
     @classmethod
     def load(cls, path, generation):
         raw = c.regular_bytes(path)
+        if raw.startswith(b'{"index":'):
+            loaded = cls.load_hot(path, generation, raw=raw)
+            value = c.read_json(path, raw=raw)
+            full = cls.from_payload(value['payload'], generation)
+            c.require(all(full.entries.get(p) == row for p, row in loaded.entries.items()) and
+                      full.probes == loaded.probes and full.written_ns == loaded.written_ns,
+                      'stat-cache', 'compact projection differs from the full cache')
+            full.full_raw = loaded.full_raw
+            return full
         value = c.read_json(path, raw=raw)
         c.fields(value, 'payload sha256', 'stat cache')
         # Authenticate the exact payload bytes before interpreting its proxies.
@@ -90,6 +112,13 @@ class DigestCache:
         payload_raw = raw[len(prefix):-len(suffix)]
         payload = value['payload']
         c.require(c.digest(payload_raw + b'\n') == value['sha256'], 'stat-cache', 'integrity digest differs')
+        return cls.from_payload(payload, generation)
+
+    @classmethod
+    def from_payload(cls, payload, generation, compact=False):
+        if compact:
+            c.sha(payload['full_sha256'], 'full stat cache')
+            payload = {k: v for k, v in payload.items() if k != 'full_sha256'}
         c.fields(payload, 'schema generation written_ns entries' + (' probes' if 'probes' in payload else ''), 'stat cache payload')
         c.require(payload.get('probes') is None or type(payload['probes']) is dict,
                   'stat-cache', 'invalid tool query record')
@@ -102,7 +131,41 @@ class DigestCache:
                       all(type(v) is int for v in row['key']), 'stat-cache', 'invalid stat key')
             c.sha(row['sha256'], 'stat cache entry')
             c.require(type(row['racy']) is bool, 'stat-cache', 'invalid race flag')
-        return cls(payload['entries'], payload['written_ns'], payload.get('probes'))
+        loaded = cls(payload['entries'], payload['written_ns'], payload.get('probes'))
+        loaded.generation = generation
+        loaded.compact = compact
+        return loaded
+
+    @classmethod
+    def load_hot(cls, path, generation, raw=None):
+        raw = c.regular_bytes(path) if raw is None else raw
+        if not raw.startswith(b'{"index":'):
+            return cls.load(path, generation)
+        # Decode only the first, compact JSON value. The full payload stays
+        # opaque but every byte is authenticated against the reverse link.
+        text = raw.decode('utf-8')
+        decoder = json.JSONDecoder(object_pairs_hook=c.no_duplicates,
+                                   parse_constant=lambda _: (_ for _ in ()).throw(c.Rejected('stat-cache: invalid JSON constant')))
+        try:
+            index, end = decoder.raw_decode(text, len('{"index":'))
+        except json.JSONDecodeError as exc:
+            raise c.Rejected('stat-cache: invalid compact index') from exc
+        c.fields(index, 'payload sha256', 'compact stat index')
+        payload = index['payload']
+        c.fields(payload, 'schema generation written_ns entries probes full_sha256', 'compact stat index payload')
+        payload_raw = c.canonical(payload)
+        c.require(index_integrity(payload_raw, index['sha256']), 'stat-cache', 'compact index integrity differs')
+        index_raw = (b'{"payload":' + payload_raw[:-1] + b',"sha256":' +
+                     c.canonical(index['sha256'])[:-1] + b'}')
+        c.require(raw[len(b'{"index":'):len(text[:end].encode('utf-8'))] == index_raw,
+                  'stat-cache', 'noncanonical compact index')
+        prefix = b'{"index":' + index_raw + b',"index_sha256":' + c.canonical(index['sha256'])[:-1] + b',"payload":'
+        suffix = b',"sha256":' + c.canonical(payload['full_sha256'])[:-1] + b'}\n'
+        c.require(full_link(raw, prefix, suffix, payload['full_sha256']),
+                  'stat-cache', 'full cache and compact index digests differ')
+        loaded = cls.from_payload(payload, generation, compact=True)
+        loaded.full_raw = raw[len(prefix):-len(suffix)] + b'\n'
+        return loaded
 
     def read(self, path, status=None):
         path = os.path.abspath(path)
@@ -179,11 +242,16 @@ class DigestCache:
             c.require(key(os.stat(path, follow_symlinks=False)) == proxy,
                       'stat-cache-race', 'observed file changed before execution')
 
-    def save(self, path, generation):
+    def save(self, path, generation, compact_paths=None):
         self.recheck()
         written_ns = time.time_ns()
+        known = self.entries
+        if compact_paths is not None and self.full_raw is not None and self.generation == generation:
+            previous = self.from_payload(c.read_json(path, raw=self.full_raw), generation)
+            known = dict(previous.entries, **self.entries)
         entries = {path: dict(row, racy=row['racy'] or row['key'][3] >= written_ns - GRAIN_NS)
-                   for path, row in self.entries.items() if path in self.observed}
+                   for path, row in known.items()
+                   if path in self.observed or (compact_paths is not None and self.generation == generation)}
         probes = self.probes
         if probes is not None:
             rows = [probes['binding']['clang'], *probes['binding']['files'].values(),
@@ -193,8 +261,17 @@ class DigestCache:
                           row['key'][3] >= written_ns - GRAIN_NS for row in rows))
         payload = {'schema': 1, 'generation': generation, 'written_ns': written_ns,
                    'entries': entries, 'probes': probes}
-        replace_json(path, {'payload': payload, 'sha256': c.digest(c.canonical(payload))})
-        self.entries = entries
+        full_sha = c.digest(c.canonical(payload))
+        envelope = {'payload': payload, 'sha256': full_sha}
+        if compact_paths is not None:
+            hot = dict(payload, entries={p: row for p, row in entries.items() if p in compact_paths}, full_sha256=full_sha)
+            index = {'payload': hot, 'sha256': c.digest(c.canonical(hot))}
+            envelope.update(index=index, index_sha256=index['sha256'])
+        replace_json(path, envelope)
+        self.entries = entries if compact_paths is None else hot['entries']
         self.probes = probes
         self.written_ns = written_ns
         self.changed = False
+        self.compact = compact_paths is not None
+        self.generation = generation
+        self.full_raw = c.canonical(payload) if compact_paths is not None else None

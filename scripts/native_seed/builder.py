@@ -92,7 +92,7 @@ def output_identity(directory, digest_cache=None):
 def identity(binary):
     data = c.regular_bytes(binary)
     c.verify_elf(data)
-    return c.probe_seed(data, infer_version=True)
+    return c.probe_seed(data, infer_version=True, scope=Path(binary).parent.name)
 
 
 def source_version(binary):

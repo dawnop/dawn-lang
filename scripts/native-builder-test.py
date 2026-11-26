@@ -294,6 +294,7 @@ if __name__ == '__main__':
     from native_seed.probes import Queries
     # Release and qualification fixtures must never consult development state.
     with patch.object(Queries, 'run', side_effect=AssertionError('release/qualification used query cache')), \
+         patch.object(DigestCache, 'load_hot', side_effect=AssertionError('release/qualification read compact index')), \
          patch.object(DigestCache, 'load', side_effect=AssertionError('release/qualification read stat cache')), \
          patch.object(DigestCache, 'read', side_effect=AssertionError('release/qualification used stat proxy')):
         sys.exit(main())

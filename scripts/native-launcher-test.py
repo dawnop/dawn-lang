@@ -55,6 +55,10 @@ if MUTANT == 'probe-racy':
 if MUTANT == 'cache-integrity':
     original_require = c.require
     c.require = lambda ok, code, detail: None if code == 'stat-cache' else original_require(ok, code, detail)
+if MUTANT == 'index-integrity':
+    stat_cache.index_integrity = lambda *args: True
+if MUTANT == 'index-link':
+    stat_cache.full_link = lambda *args: True
 if MUTANT in ('dep-included', 'dep-shadow'):
     original_dependencies = dependencies.unchanged
     ignored_dependency = 'files' if MUTANT == 'dep-included' else 'directories'
@@ -186,6 +190,8 @@ int main(int n, char **v) {
 ''')
     binary = fixture / 'seed-elf'
     subprocess.run(['cc', '-static', '-O0', str(program), '-o', str(binary)], check=True, capture_output=True)
+    from native_seed.memo_test import run as memo_controls
+    memo_controls(binary)
     commit, tree = 'a' * 40, 'b' * 40
     lock = {'schema': 2, 'kind': 'native-seed-lock', 'state': 'proposed', 'sequence': 0,
             'seed': {'kind': 'native-elf', 'tag': 'v0.106.0', 'commit': commit, 'asset': c.ASSET,
@@ -413,13 +419,15 @@ def main():
         live_inputs(work)
         from native_seed.stat_cache_test import run as stat_controls
         stat_controls(work)
+        from native_seed.compact_test import run as compact_controls
+        compact_controls(work)
         from native_seed.probes_test import run as probe_controls
         probe_controls(work)
         from native_seed.dependencies_test import run as dependency_controls
         dependency_controls(work)
         caches(work)
     if '--selftest' in sys.argv:
-        for mutant in ('java', 'dirty', 'fallback', 'marker', 'elf', 'locking', 'ctime', 'racy', 'cache-integrity', 'probe-clang', 'probe-gcc', 'probe-recipe', 'probe-racy', 'dep-included', 'dep-shadow', 'dep-unused'):
+        for mutant in ('java', 'dirty', 'fallback', 'marker', 'elf', 'locking', 'ctime', 'racy', 'cache-integrity', 'probe-clang', 'probe-gcc', 'probe-recipe', 'probe-racy', 'dep-included', 'dep-shadow', 'dep-unused', 'index-integrity', 'index-link'):
             run = subprocess.run([sys.executable, '-B', __file__, '--mutant', mutant],
                                  capture_output=True, text=True, timeout=60)
             assert run.returncode != 0 and ('AssertionError' in run.stderr), mutant + ' survived\n' + run.stdout + run.stderr
