@@ -25,6 +25,7 @@ import threading
 import time
 
 
+ROOT = Path(__file__).resolve().parents[1]
 HEADER_MAX_BYTES = 8192
 BODY_MAX_BYTES = 64 * 1024 * 1024
 STARTUP_LIMIT_S = 120.0
@@ -32,6 +33,7 @@ FATAL_LIMIT_S = 5.0
 REAP_LIMIT_S = 10.0
 RSS_BODY_BYTES = 48 * 1024 * 1024
 RSS_DELTA_LIMIT_KIB = 32 * 1024
+RETENTION_REQUESTS = 8
 HEADER_NAME_BYTES = frozenset(
     b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+-.^_`|~"
 )
@@ -211,10 +213,12 @@ class OpenServer:
                 break
             self.stdout.extend(chunk)
 
-    def wait_for_frames(self, count, timeout_s):
+    def wait_for_frames(self, count, timeout_s, sample=None):
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             self.drain()
+            if sample is not None:
+                sample()
             try:
                 if len(parse_frames(bytes(self.stdout))) >= count:
                     return True
@@ -311,29 +315,100 @@ def stdin_read_snapshot(before, state, after, pending):
     return pending == 0 and state == "S" and read_zero(before) and read_zero(after)
 
 
-def group_rss_kib(pgid):
-    """Resident KiB for every Linux process in `pgid`, or None elsewhere."""
-    if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
-        return None
-    total = 0
-    found = False
+def group_pids(pgid):
+    """Snapshot the group, including children of an exec-less launcher."""
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
         try:
             with open("/proc/%s/stat" % entry, encoding="ascii") as stat_file:
                 fields = stat_file.read().rsplit(") ", 1)[1].split()
-            if int(fields[2]) != pgid:
-                continue
-            with open("/proc/%s/status" % entry, encoding="ascii") as status_file:
-                for line in status_file:
-                    if line.startswith("VmRSS:"):
-                        total += int(line.split()[1])
-                        found = True
-                        break
-        except (FileNotFoundError, IndexError, OSError, ValueError):
+            if int(fields[2]) == pgid:
+                yield int(entry)
+        except (OSError, IndexError, ValueError):
+            pass
+
+
+def process_rss_kib(pid):
+    with open("/proc/%d/status" % pid, encoding="ascii") as status_file:
+        for line in status_file:
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1])
+    return None  # Zombies have a stat entry but no resident pages.
+
+
+def group_rss_kib(pgid):
+    """Resident KiB for every Linux process in `pgid`, or None elsewhere."""
+    if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
+        return None
+    total = 0
+    found = False
+    for pid in group_pids(pgid):
+        try:
+            rss = process_rss_kib(pid)
+            if rss is not None:
+                total += rss
+                found = True
+        except OSError:
             pass
     return total if found else None
+
+
+def histogram_kib(output):
+    totals = [line.split() for line in output.splitlines() if line.startswith("Total ")]
+    if len(totals) != 1 or len(totals[0]) != 3:
+        raise AssertionError("GC.class_histogram omitted its unique total")
+    size = int(totals[0][2])
+    if size <= 0:
+        raise AssertionError("GC.class_histogram returned a non-positive live size")
+    return size / 1024
+
+
+def retained_kib(server):
+    """Collect JVM garbage at a protocol quiet point; count only live objects.
+
+    RSS after GC still includes committed heap pages. Use the live histogram
+    for Java processes and resident pages for other members of the group.
+    An unavailable JVM probe is an error, never a silently skipped assertion.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    if group_rss_kib(server.pgid) is None:
+        raise AssertionError("server unavailable at the memory sampling quiet point")
+    if os.uname().machine == "x86_64":
+        deadline = time.monotonic() + STARTUP_LIMIT_S
+        while not server.waiting_for_stdin():
+            if server.proc.poll() is not None or time.monotonic() >= deadline:
+                raise AssertionError("server did not reach the memory sampling quiet point")
+            time.sleep(0.01)
+    total = 0
+    for pid in group_pids(server.pgid):
+        exe = Path(os.readlink("/proc/%d/exe" % pid))
+        # Toolchain shims may rename the ELF (for example java.real). The
+        # loaded VM identifies Java even when the executable name does not.
+        with open("/proc/%d/maps" % pid, encoding="utf-8") as maps_file:
+            is_jvm = any(line.rstrip().endswith("/libjvm.so") for line in maps_file)
+        if is_jvm:
+            result = subprocess.run(
+                [str(exe.with_name("jcmd")), str(pid), "GC.class_histogram"],
+                capture_output=True, text=True, timeout=STARTUP_LIMIT_S,
+            )
+            if result.returncode != 0:
+                raise AssertionError("JVM live heap probe failed: %s" % result.stderr[-400:])
+            total += histogram_kib(result.stdout)
+        else:
+            rss = process_rss_kib(pid)
+            if rss is None:
+                raise AssertionError("server vanished at the memory sampling quiet point")
+            total += rss
+    return total
+
+
+def assert_memory_delta(delta, label):
+    note = "%s delta %.1f KiB (limit %d KiB)" % (label, delta, RSS_DELTA_LIMIT_KIB)
+    if delta > RSS_DELTA_LIMIT_KIB:
+        raise AssertionError(note)
+    return note
 
 
 def assert_initialize_response(value, request_id):
@@ -388,14 +463,44 @@ def expect_open_fatal(cmd, payload, request_id, flood_body=False):
     writer = None
     rss_note = "RSS unavailable"
     try:
-        server.send(frame(initialize(request_id)))
-        if not server.wait_for_frames(1, STARTUP_LIMIT_S):
-            raise AssertionError(
-                "server never completed warm-up; stderr=%r" % server.error_tail()
-            )
-        pgid = server.pgid
-        baseline_rss = group_rss_kib(pgid)
-        max_rss = [baseline_rss]
+        # A maximum legal header exercises the same byte accumulator as the
+        # fatal header. Compare peaks within this process, after the same work,
+        # rather than charging demand paging / GC timing to a malformed frame.
+        max_rss = [None]
+
+        def sample_rss():
+            current = group_rss_kib(server.pgid)
+            if current is not None and (max_rss[0] is None or current > max_rss[0]):
+                max_rss[0] = current
+
+        def request(index):
+            # initialize is only legal once. Hover on an unopened document is
+            # a normal null result and exercises framing without workspace I/O.
+            body = initialize(request_id) if index == 0 else json_body({
+                "jsonrpc": "2.0", "id": request_id + index,
+                "method": "textDocument/hover", "params": {
+                    "textDocument": {"uri": "file:///framing-unopened.dawn"},
+                    "position": {"line": 0, "character": 0},
+                },
+            })
+            server.send(padded_header(HEADER_MAX_BYTES, body))
+            if not server.wait_for_frames(index + 1, STARTUP_LIMIT_S, sample_rss):
+                raise AssertionError("server never completed memory warm-up; stderr=%r"
+                                     % server.error_tail())
+            frames = parse_frames(bytes(server.stdout))
+            assert_initialize_response(frames[index], request_id + index)
+
+        request(0)
+        before = retained_kib(server)
+        sample_rss()
+        for index in range(1, RETENTION_REQUESTS + 1):
+            request(index)
+        after = retained_kib(server)
+        sample_rss()
+        retained_note = "memory check skipped off Linux"
+        if before is not None and after is not None:
+            retained_note = assert_memory_delta(after - before, "retained memory")
+        baseline_rss = max_rss[0]
 
         server.send(payload)
         if flood_body:
@@ -414,11 +519,6 @@ def expect_open_fatal(cmd, payload, request_id, flood_body=False):
             writer = threading.Thread(target=write_body, daemon=True)
             writer.start()
 
-        def sample_rss():
-            current = group_rss_kib(pgid)
-            if current is not None and (max_rss[0] is None or current > max_rss[0]):
-                max_rss[0] = current
-
         if not server.wait_for_exit(FATAL_LIMIT_S, sample_rss):
             delta = None
             if baseline_rss is not None and max_rss[0] is not None:
@@ -433,22 +533,17 @@ def expect_open_fatal(cmd, payload, request_id, flood_body=False):
                 % (server.proc.returncode, server.error_tail())
             )
         frames = parse_frames(bytes(server.stdout))
-        if len(frames) != 2:
+        if len(frames) != RETENTION_REQUESTS + 2:
             raise AssertionError("want warm-up plus one fatal response, got %r" % frames)
-        assert_initialize_response(frames[0], request_id)
-        if frames[1] != FIXED_PARSE_ERROR:
-            raise AssertionError("fatal response is not fixed: %r" % frames[1])
+        if frames[-1] != FIXED_PARSE_ERROR:
+            raise AssertionError("fatal response is not fixed: %r" % frames[-1])
 
         if baseline_rss is not None and max_rss[0] is not None:
             delta = max_rss[0] - baseline_rss
-            rss_note = "RSS delta %d KiB (limit %d KiB)" % (
-                delta, RSS_DELTA_LIMIT_KIB,
-            )
-            if delta > RSS_DELTA_LIMIT_KIB:
-                raise AssertionError(rss_note)
+            rss_note = assert_memory_delta(delta, "fatal RSS above same-run peak")
         elif not sys.platform.startswith("linux"):
             rss_note = "RSS check skipped off Linux"
-        return rss_note
+        return retained_note + "; " + rss_note
     finally:
         server.close()
         if writer is not None:
@@ -460,7 +555,7 @@ def run_check(results, label, action):
     try:
         detail = action()
         results.append((label, True, detail or "ok"))
-    except (AssertionError, BrokenPipeError, OSError, ValueError) as error:
+    except (AssertionError, BrokenPipeError, OSError, ValueError, subprocess.TimeoutExpired) as error:
         results.append((label, False, str(error)))
 
 
@@ -546,6 +641,29 @@ def self_test_orphan_cleanup():
             launcher.wait(timeout=1.0)
 
 
+def self_test_memory(cmd, failure=None):
+    try:
+        note = expect_open_fatal(cmd, b"x" * HEADER_MAX_BYTES, 704)
+    except AssertionError as error:
+        if failure is not None and failure in str(error):
+            return "expected rejection: " + str(error)
+        raise
+    if failure is not None:
+        raise AssertionError("memory mutation escaped detection: " + note)
+    return note
+
+
+def self_test_histogram():
+    if histogram_kib(" num #instances #bytes class\nTotal 2 4096\n") != 4:
+        raise AssertionError("live histogram total was not counted in KiB")
+    for text in ("", "Total 1 0", "Total 1 20\nTotal 1 20", "Total 1 20 extra"):
+        try:
+            histogram_kib(text)
+        except (AssertionError, ValueError):
+            continue
+        raise AssertionError("invalid live histogram was accepted: " + text)
+
+
 def harness_self_tests():
     results = []
     run_check(results, "kernel CPU allowance", lambda: subprocess.run(
@@ -557,6 +675,24 @@ def harness_self_tests():
         for mode in modes:
             run_check(results, "fatal wait observes " + mode,
                       lambda mode=mode: self_test_fatal_wait(mode))
+    if sys.platform.startswith("linux"):
+        fixture_dir = ROOT / "scripts" / "lsp-framing"
+        run_check(results, "live heap histogram validation", self_test_histogram)
+        for mode, failure in (("transient", None), ("retain", "retained memory"),
+                              ("fatal-allocation", "fatal RSS")):
+            run_check(results, "resident memory fixture " + mode, lambda mode=mode, failure=failure:
+                      self_test_memory([sys.executable, str(fixture_dir / "memory_fixture.py"), mode],
+                                       failure))
+        # Use the launcher's selected JDK, including on a native framing leg.
+        env = dict(os.environ, DAWN_LAUNCHER_PRINT_JAVA="1", DAWN_SEED_CHAIN="jar")
+        for name in ("DAWN_NATIVE_SEED", "DAWN_NATIVE_SEED_LOCK", "DAWN_NATIVE_SEED_TREE"):
+            env.pop(name, None)
+        java = subprocess.check_output([str(ROOT / "bin" / "dawn")],
+                                       env=env, text=True).strip()
+        for mode, failure in (("transient", None), ("retain", "retained memory")):
+            run_check(results, "JVM memory fixture " + mode, lambda mode=mode, failure=failure:
+                      self_test_memory([java, "-Xmx512m", "-XX:+UseParallelGC",
+                                        str(fixture_dir / "MemoryFixture.java"), mode], failure))
     run_check(results, "cleanup kills child after launcher exits", self_test_orphan_cleanup)
     run_check(results, "response parser accepts exact 8192-byte header", lambda:
               expect_parsed_frames(padded_response(HEADER_MAX_BYTES), [{}]))
