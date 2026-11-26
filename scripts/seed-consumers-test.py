@@ -8,6 +8,7 @@ The integration controls also drive the real site and copied shell boundaries.
 """
 
 import argparse
+import ast
 import importlib.util
 import json
 import os
@@ -32,6 +33,13 @@ def selections(root):
         expected = row.get('occurrences', 1)
         if source.count(pin) != expected:
             raise AssertionError(f"{row['path']}: selection must occur {expected} time(s)")
+        if row['path'].endswith('.py'):
+            nodes = ast.walk(ast.parse(source))
+            assert any(ast.get_source_segment(source, node) == pin for node in nodes), (
+                row['path'] + ': selection must be Python code, not a comment or string')
+        else:
+            assert any(pin in line and not line.lstrip().startswith('#')
+                       for line in source.splitlines()), row['path'] + ': commented selection'
         yield row, source
 
 
@@ -52,12 +60,18 @@ def check(root):
             # Execute the selection itself, then a capability that the native
             # default refuses. No inherited jar setting may mask a missing pin.
             if row['kind'] == 'shell':
-                command = ['bash', '-euc', pin + '\nexec dawn __emit']
-                mutant = ['bash', '-euc', 'exec dawn __emit']
+                lines = source.splitlines(keepends=True)
+                end = next(i + 1 for i, line in enumerate(lines) if pin in line)
+                prefix = ''.join(lines[:end])
+                command = ['bash', '-euc', prefix + '\nexec dawn __emit']
+                mutant = ['bash', '-euc', prefix.replace(pin, '', 1) + '\nexec dawn __emit']
             elif row['kind'] == 'python':
+                lines = source.splitlines(keepends=True)
+                end = next(i + 1 for i, line in enumerate(lines) if pin in line)
+                prefix = ''.join(lines[:end])
                 tail = '\nimport subprocess\nraise SystemExit(subprocess.call(["dawn", "__emit"]))'
-                command = [sys.executable, '-c', 'import os\n' + pin + tail]
-                mutant = [sys.executable, '-c', tail]
+                command = [sys.executable, '-c', prefix + tail]
+                mutant = [sys.executable, '-c', prefix.replace(pin, '', 1) + tail]
             elif row['kind'] == 'inline':
                 assert 'DAWN_SEED_CHAIN=jar' in pin
                 command = ['bash', '-euc', 'DAWN_SEED_CHAIN=jar dawn __emit']
@@ -69,15 +83,19 @@ def check(root):
             elif row['kind'] == 'python-env':
                 import re
                 assert re.search(r'DAWN_SEED_CHAIN["\x27]?\]?\s*=\s*["\x27]jar["\x27]', pin), pin
+                setup = ('import os, subprocess\nstate={"env":dict(os.environ)}\n'
+                         'env=dict(os.environ)\nclean=dict(os.environ)\n')
+                statement = 'env=' + pin if pin.startswith('dict(') else pin
+                selected = 'clean' if pin.startswith('clean[') else 'env'
                 command = [sys.executable, '-c',
-                           'import os, subprocess\nraise SystemExit(subprocess.call(["dawn", "__emit"], '
-                           'env=dict(os.environ, DAWN_SEED_CHAIN="jar")))']
+                           setup + statement + '\nraise SystemExit(subprocess.call(["dawn", "__emit"], '
+                           'env=' + selected + '))']
                 mutant = ['bash', '-euc', 'dawn __emit']
             else:
                 raise AssertionError('unknown selection kind: ' + row['kind'])
             good = run(command, env)
             bad = run(mutant, env)
-            assert good.returncode == 0 and good.stdout == 'jar oracle\n', row['path']
+            assert good.returncode == 0 and good.stdout == 'jar oracle\n', (row['path'], good.stderr)
             assert bad.returncode == 42 and not bad.stdout, row['path'] + ': missing selection survived'
             count += 1
         # Use the actual site helper, including its command substitution, with
