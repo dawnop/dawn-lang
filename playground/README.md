@@ -32,9 +32,9 @@ existing `/check` diagnostics and static completion paths.
 
 ```sh
 ./dawnc-linux-x86_64 build playground -o dawn-play-linux-x86_64
-PLAY_UNSAFE_LOCAL=1 DAWN_BIN=$PWD/bin/dawn \
+DAWN_SEED_CHAIN=jar PLAY_UNSAFE_LOCAL=1 DAWN_BIN=$PWD/bin/dawn \
   systemd-socket-activate -l 127.0.0.1:8087 -a --inetd \
-  -E PLAY_UNSAFE_LOCAL -E DAWN_BIN -E PATH -E JAVA_HOME -E HOME \
+  -E DAWN_SEED_CHAIN -E PLAY_UNSAFE_LOCAL -E DAWN_BIN -E PATH -E JAVA_HOME -E HOME \
   ./dawn-play-linux-x86_64 serve      # one process per connection on 127.0.0.1:8087
 curl --noproxy '*' -X POST --data '{"code":"pub fn main() -> Unit !io = println(\"hi\")"}' \
   http://127.0.0.1:8087/run
