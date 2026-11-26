@@ -1038,7 +1038,7 @@ JAR 侧最终执行当前 `build/dawn-selfhost.jar`，JAR generation/stamp 由�
 | `site/inputs.py:229` | 28, 232 | JVM bootstrap SourcePlan and native tool preparation | `jar` |
 | `scripts/seedjar.sh:123` | 123 | JDK identity for JAR seed and JVM differential oracles | `jar` |
 | `scripts/bootstrap-guards/perf-data.py:81` | 80, 108, 116 | JVM perf-data policy and copied launcher fixture | `jar` |
-| `.github/actions/dawn-toolchain/action.yml:145` | 145 | Explicit JAR bootstrap shared by JVM gate consumers | `jar` |
+| `.github/actions/dawn-toolchain/action.yml:146` | 145 | Explicit JAR bootstrap shared by JVM gate consumers | `jar` |
 | `scripts/gates-external/backend_local.py:478` | 478, 480 | Exact local substitution of the JAR composite build only | `jar` |
 | `scripts/gates-external/inputs.py:636` | 19, 553, 627, 646, 649, 651 | Coursier input-pack priming requires Java dependencies | `jar` |
 | `playground/sandbox/run-sandboxed.sh:125` | 选择环境传给显式子进程 | JVM-only deployed launcher in an empty sandbox environment | `jar` |
@@ -1086,7 +1086,7 @@ JSON 分别记录三个产品的 SHA-256/full build id；它不宣称重新证�
 
 既有独立对拍保留以下文件集：native CLI/fixpoint 的 whole C 与 split C/manifest；
 `scripts/site-dist-diff.sh` 的两侧 `site/dist` 完整文件清单、每个文件字节（含可比 wasm/assets）、
-`docs-jvm`/`docs-native` API JSON，以及相同输入的 generator 输出。
+`docs-jvm` 与 snapshot `site/build/doc-inputs` 的 API JSON，以及相同输入的 generator 输出。
 JAR 与 ELF、自身身份/来源 receipt 不互作字节相等对象；每侧身份另核。
 本刀不增加每个 job 的源码 native 冷启动：新增冷建数 N=0，现有 native 题目继续直接运行其独立 ELF。
 新增固定选链/部署身份夹具实测约 4.0 秒，java-target-classpath claim 565→575 秒，
