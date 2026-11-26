@@ -1061,6 +1061,7 @@ JAR 侧最终执行当前 `build/dawn-selfhost.jar`，JAR generation/stamp 由�
 | `scripts/fp-contract-contract/run.py:18` | 123, 141 | JVM __emitc and floating point differential oracle | `jar` |
 | `scripts/slab-bench/run.py:371` | 936 | JVM __emitc benchmark producer | `jar` |
 | `scripts/xmap-samples/record.py:36` | 43 | JVM sample recording and javap metadata | `jar` |
+| `site/redeploy.sh:32` | `site/build.sh` 子进程 | 站点部署中的 JAR 引导与 JVM recording oracle | `jar` |
 
 ### 16.2 独立对象与无需迁移的入口
 

@@ -27,6 +27,9 @@
 # it never looked at what the page points at. So this script refuses an empty
 # value and checks the built pages carry it.
 set -euo pipefail
+
+# Site preparation and its JVM oracle require the JAR product explicitly.
+export DAWN_SEED_CHAIN=jar
 # The repo is resolved from this script's own location, never from $PWD: on
 # 2026-10-08 an agent's `cd` into a deleted worktree failed, the script ran
 # from the wrong checkout and shipped the wrong commit. So the caller names the
