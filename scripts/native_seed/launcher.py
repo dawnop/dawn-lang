@@ -61,11 +61,13 @@ def select(repo, fetch, *, git_cache=None, digest_cache=None, probe_cache=None):
     return lock, lock_path, seed, pair, dict(frame, controls=control)
 
 
-def snapshot(repo, lock, frame, cc, development_cc, *, digest_cache=None, git_cache=None, live_paths=None):
+def snapshot(repo, lock, frame, cc, development_cc, *, digest_cache=None, git_cache=None, live_paths=None, baseline=None):
     commit = c.git(repo, 'rev-parse', 'HEAD').decode().strip()
     tree, files = builder.source_files(repo, commit, live=True, digest_cache=digest_cache,
                                        git_cache=git_cache, live_paths=live_paths)
-    tc = toolchain.prepare(cc, pinned=not development_cc, digest_cache=digest_cache)
+    tc = toolchain.prepare(cc, pinned=not development_cc, digest_cache=digest_cache,
+                           **({'baseline': baseline['toolchain'], 'dependencies': baseline['dependencies']}
+                              if baseline is not None else {}))
     toolchain.verify_record(tc, pinned=not development_cc)
     compilation = inputs.compilation(files, lock, tc)
     value = {'schema': 1, 'kind': 'native-launcher-inputs', 'chain': 'native', 'stage': 'B',
@@ -154,6 +156,8 @@ def generation(repo, fetch, cache=None):
         probe_cache = {}
         digests = DigestCache()
         hint = cache / 'last-generation.json'
+        baseline = None
+        last = None
         if hint.exists():
             last = c.read_json(hint)
             c.fields(last, 'generation sha256', 'generation hint')
@@ -163,6 +167,14 @@ def generation(repo, fetch, cache=None):
             previous = cache / 'generations' / last['generation'] / 'stat-cache.json'
             if previous.exists():
                 digests = DigestCache.load(previous, last['generation'])
+                chain_raw = c.regular_bytes(previous.with_name('chain-receipt.json'))
+                old_generation = c.read_json(previous.with_name('generation.json'))
+                old_marker = c.read_json(previous.with_name('committed.json'))
+                c.require(c.digest(chain_raw) == old_generation.get('chain_sha256') == old_marker.get('chain_sha256'),
+                          'generation-receipt', 'chain receipt differs before dependency reuse')
+                baseline = c.read_json(previous.with_name('chain-receipt.json'), raw=chain_raw)
+                if 'dependencies' not in baseline:
+                    baseline = None
         lock, lock_path, seed, pair, frame = select(repo, fetch, git_cache=git_cache, digest_cache=digests, probe_cache=probe_cache)
         cc = os.environ.get('CC', '/usr/lib/llvm-18/bin/clang')
         cc = shutil.which(cc) or cc
@@ -174,7 +186,7 @@ def generation(repo, fetch, cache=None):
                           allow_reuse=hint.exists(),
                           driver_paths=[directory + '/' + name for name, directory in toolchain.DRIVER_INPUTS.items()])
         with queries.activate():
-            expected, files, tc, compilation = snapshot(repo, lock, frame, cc, development_cc, digest_cache=digests, git_cache=git_cache, live_paths=live_paths)
+            expected, files, tc, compilation = snapshot(repo, lock, frame, cc, development_cc, digest_cache=digests, git_cache=git_cache, live_paths=live_paths, baseline=baseline)
         key = c.digest(c.canonical(expected))
         generations = c.safe_destination(cache / 'generations')
         generations.mkdir(exist_ok=True)
@@ -182,8 +194,11 @@ def generation(repo, fetch, cache=None):
         cold = not directory.exists()
         if cold:
             # A cold path always captures full bytes, irrespective of a hint.
-            expected_full, files, tc, compilation = snapshot(repo, lock, frame, cc, development_cc, git_cache=git_cache)
-            c.require(expected_full == expected, 'generation-inputs', 'cold inputs changed')
+            expected, files, tc, compilation = snapshot(repo, lock, frame, cc, development_cc, git_cache=git_cache)
+            key = c.digest(c.canonical(expected))
+            directory = c.safe_destination(generations / key)
+            cold = not directory.exists()
+        if cold:
             staging = Path(tempfile.mkdtemp(prefix='.staging-', dir=cache))
             output = staging / 'generation'
             # Preserve a failed staging tree for diagnosis; never consult it
@@ -227,7 +242,8 @@ def generation(repo, fetch, cache=None):
         stat_path = directory / 'stat-cache.json'
         if digests.changed or not stat_path.exists():
             digests.save(stat_path, key)
-        replace_json(hint, {'generation': key, 'sha256': c.digest(c.canonical(key))})
+        if last is None or last['generation'] != key:
+            replace_json(hint, {'generation': key, 'sha256': c.digest(c.canonical(key))})
         stamp = 'native-v1:development:' + frame['selection'] + ':' + key + ':' + receipt['elf_sha256']
         return {'stamp': stamp, 'executable': str(directory / 'B/dawnc'),
                 'receipt': str(directory / 'generation.json')}

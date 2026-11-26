@@ -49,6 +49,7 @@ qualification=()
 # here so compilation, linking and identity checks cannot drift apart.
 qualification_flags=(--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13)
 out=
+depfiles=
 runtime="$root/runtime/c"
 while [ $# -gt 0 ]; do
   case $1 in
@@ -57,6 +58,7 @@ while [ $# -gt 0 ]; do
     --static) static=(-static); shift ;;
     --inline-rc) inline=(-DDAWN_RT_INLINE_RC); shift ;;
     --runtime) runtime=${2:?--runtime needs a directory}; shift 2 ;;
+    --depfiles) depfiles=${2:?--depfiles needs a directory}; mkdir -p "$depfiles"; shift 2 ;;
     -o) out=$2; shift 2 ;;
     *) break ;;
   esac
@@ -110,7 +112,9 @@ sort -t "$(printf '\t')" -k1,1nr "$list.unsorted" | cut -f2,3 | tr '\t' '\n' > "
 # failed, and cc has already said why on stderr; the script stops there,
 # before a link of half the units.
 xargs -d '\n' -n 2 -P "$jobs" bash -c \
-  'n=$#; exec "${@:1:n-2}" -c "${@:n-1:1}" -o "${@:n:1}"' _ "$cc_bin" "${ccflags[@]}" < "$list" \
+  'depdir=$1; shift; n=$#; obj=${!n}; deps=();
+   if [ -n "$depdir" ]; then deps=(-MD -MF "$depdir/${obj##*/}.d" -MT dawn-native-deps); fi
+   exec "${@:1:n-2}" "${deps[@]}" -c "${@:n-1:1}" -o "$obj"' _ "$depfiles" "$cc_bin" "${ccflags[@]}" < "$list" \
   || { echo "FAIL: compiling the units in $units" >&2; exit 1; }
 
 "$cc_bin" "${ccflags[@]}" "${static[@]}" -o "$out" "${objs[@]}" -lm
