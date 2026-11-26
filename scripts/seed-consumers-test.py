@@ -103,6 +103,21 @@ def prototype_free(root):
     print('OK: retired prototype directory and tracked references are absent')
 
 
+def prototype_control():
+    with tempfile.TemporaryDirectory(prefix='prototype-reference-') as temporary:
+        root = Path(temporary)
+        subprocess.run(['git', '-C', str(root), 'init', '-q'], check=True)
+        (root / 'leftover.sh').write_text('# scripts/' + 'native-seed-' + 'prototype/rehearse.py\n')
+        subprocess.run(['git', '-C', str(root), 'add', 'leftover.sh'], check=True)
+        try:
+            prototype_free(root)
+        except AssertionError as exc:
+            assert 'reference: leftover.sh' in str(exc), str(exc)
+        else:
+            raise AssertionError('a retired prototype reference survived the guard')
+    print('OK: a residual reference is refused even when the prototype directory is absent')
+
+
 def preflight_controls(root):
     from unittest.mock import patch
     import hashlib
@@ -173,6 +188,7 @@ def main():
         check(args.root.resolve())
         preflight_controls(args.root.resolve())
     prototype_free(args.root.resolve())
+    prototype_control()
 
 
 if __name__ == '__main__':
