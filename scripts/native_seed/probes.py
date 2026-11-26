@@ -85,6 +85,9 @@ class Queries:
         gcc = {}
         if os.path.isdir(self.gcc):
             for parent, children, names in os.walk(self.gcc, followlinks=True):
+                # Header invalidation belongs to compiler depfiles. Retain the
+                # GCC program/library binding without traversing unused headers.
+                children[:] = [name for name in children if name not in ('include', 'include-fixed')]
                 gcc[parent] = self.signature(parent)
                 for name in names:
                     path = os.path.join(parent, name)

@@ -9,7 +9,7 @@ output, not these fixtures.
 from pathlib import Path
 
 import repo_env
-from native_seed import builder, contract as c, inputs, toolchain
+from native_seed import builder, contract as c, dependencies, inputs, toolchain
 
 
 def hosted_record(commit):
@@ -67,4 +67,5 @@ def chain_record(repo, lock, a, b):
             'source_sha256': c.inventory_sha(c.inventory(files)), 'lock_sha256': c.digest(c.canonical(lock)),
             'compilation': compilation, 'compilation_sha256': c.digest(c.canonical(compilation)),
             'toolchain': tc, 'recipe_identity': toolchain.recipe_identity(tc, compilation['recipe_sha256']),
-            'execution': hosted_record(commit), 'stages': stages, 'plan_sha256': c.digest(b'fixture plan')}
+            'execution': hosted_record(commit), 'stages': stages, 'plan_sha256': c.digest(b'fixture plan'),
+            'dependencies': dependencies.record([], [])}

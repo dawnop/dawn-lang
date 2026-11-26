@@ -129,5 +129,5 @@ def emission_command(emitter, entry, std, out):
 
 
 def compilation_command(script, runtime, out):
-    return ['/usr/bin/bash', str(script), *STAGE_OPTIONS, '--runtime', str(runtime),
+    return ['/usr/bin/bash', str(script), *STAGE_OPTIONS, '--runtime', str(runtime), '--depfiles', str(out / 'deps'),
             '-o', str(out / 'dawnc'), str(out / 'units'), str(out / 'info.c')]

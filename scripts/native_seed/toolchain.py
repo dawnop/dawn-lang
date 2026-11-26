@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 
-from native_seed import contract as c
+from native_seed import contract as c, dependencies as deps
 from native_seed.probes import ACTIVE, runner, same_binding
 from native_seed.recipe import STAGE_OPTIONS, compiler_probe, qualification_flags
 
@@ -85,8 +85,48 @@ def verify_linker(value):
               'toolchain-identity', 'invalid linker version probe')
 
 
-def prepare(cc, destination=None, pinned=True, digest_cache=None):
+def warm(cc, baseline, dependencies, pinned, digest_cache):
+    session = ACTIVE.get()
+    if session is None or not session.reuse or not deps.unchanged(dependencies, digest_cache):
+        return None
+    env = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
+    probe = compiler_probe(cc, env, pinned=pinned)
+    driver = driver_inputs(probe['executable'], env)
+    run_query = runner()
+    ld = run_query(['/usr/bin/ld.bfd', '--version'], env=env, capture_output=True, text=True, timeout=20)
+    if (probe != baseline['compiler'] or driver != baseline['driver'] or ld.returncode or ld.stderr or
+            not ld.stdout.splitlines() or ld.stdout.splitlines()[0] != baseline['linker']['version']):
+        session.restart()
+        return None
+    programs = [probe['executable'], '/usr/bin/ld.bfd', *('/usr/bin/' + name for name in TOOLS), '/bin/sh', '/bin/bash']
+    def closure(path):
+        result = run_query(['/usr/bin/ldd', path], env=env, capture_output=True, text=True, timeout=20)
+        c.require(result.returncode == 0, 'toolchain-input', f'ldd failed: {path}')
+        return re.findall(r'(?:=>\s+|^\s*)(/[^\s()]+)', result.stdout, re.M)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        closures = list(pool.map(closure, programs))
+    paths = [*programs, '/usr/bin/ldd', '/etc/ld.so.cache', '/etc/ld.so.preload',
+             *driver['files'].values(), *(path for group in closures for path in group)]
+    if set(paths) != set(session.paths):
+        session.restart()
+        return None
+    rows = {row['path']: row['sha256'] for row in baseline['inventory']}
+    for path in [*programs, *driver['files'].values(), *(path for group in closures for path in group)]:
+        if c.digest(digest_cache.read(digest_cache.resolve(path))) != rows.get(path.lstrip('/')):
+            session.restart()
+            return None
+    session.finish(paths, session.directories)
+    return baseline
+
+
+def prepare(cc, destination=None, pinned=True, digest_cache=None, baseline=None, dependencies=None):
     c.require(digest_cache is None or destination is None, 'stat-cache-scope', 'materialized toolchains require full bytes')
+    c.require(baseline is None or (digest_cache is not None and dependencies is not None),
+              'stat-cache-scope', 'dependency reuse requires a development stat cache')
+    if baseline is not None:
+        reused = warm(cc, baseline, dependencies, pinned, digest_cache)
+        if reused is not None:
+            return reused
     if destination is not None:
         destination = c.safe_destination(destination)
         c.require(not destination.exists(), 'destination', 'new toolchain directory required')

@@ -17,7 +17,7 @@ import tempfile
 import time
 from unittest.mock import patch
 
-from native_seed import builder, contract as c, inputs, launcher, probes, provenance, stat_cache, test_support, toolchain
+from native_seed import builder, contract as c, dependencies, inputs, launcher, probes, provenance, stat_cache, test_support, toolchain
 
 ROOT = Path(__file__).resolve().parents[1]
 MUTANT = sys.argv[2] if sys.argv[1:2] == ['--mutant'] else None
@@ -55,6 +55,16 @@ if MUTANT == 'probe-racy':
 if MUTANT == 'cache-integrity':
     original_require = c.require
     c.require = lambda ok, code, detail: None if code == 'stat-cache' else original_require(ok, code, detail)
+if MUTANT in ('dep-included', 'dep-shadow'):
+    original_dependencies = dependencies.unchanged
+    ignored_dependency = 'files' if MUTANT == 'dep-included' else 'directories'
+    dependencies.unchanged = lambda value, cache: original_dependencies(dict(value, **{ignored_dependency: {}}), cache)
+if MUTANT == 'dep-unused':
+    original_record = dependencies.record
+    def full_header_tree(headers, search, depfiles_sha256=None):
+        return original_record([*headers, *(str(path) for root in search for path in Path(root).rglob('*.h'))],
+                               search, depfiles_sha256)
+    dependencies.record = full_header_tree
 
 
 def deployments(work):
@@ -233,7 +243,8 @@ int main(int n, char **v) {
                    'compilation': compilation, 'compilation_sha256': c.digest(c.canonical(compilation)),
                    'toolchain': tc, 'recipe_identity': toolchain.recipe_identity(tc, compilation['recipe_sha256']),
                    'execution': provenance.development(commit), 'stages': stages,
-                   'plan_sha256': builder.plan(out / 'B/dawnc', out / 'source')}
+                   'plan_sha256': builder.plan(out / 'B/dawnc', out / 'source'),
+                   'dependencies': dependencies.record([], [])}
         c.atomic_json(out / 'chain-receipt.json', receipt)
         return receipt
 
@@ -404,9 +415,11 @@ def main():
         stat_controls(work)
         from native_seed.probes_test import run as probe_controls
         probe_controls(work)
+        from native_seed.dependencies_test import run as dependency_controls
+        dependency_controls(work)
         caches(work)
     if '--selftest' in sys.argv:
-        for mutant in ('java', 'dirty', 'fallback', 'marker', 'elf', 'locking', 'ctime', 'racy', 'cache-integrity', 'probe-clang', 'probe-gcc', 'probe-recipe', 'probe-racy'):
+        for mutant in ('java', 'dirty', 'fallback', 'marker', 'elf', 'locking', 'ctime', 'racy', 'cache-integrity', 'probe-clang', 'probe-gcc', 'probe-recipe', 'probe-racy', 'dep-included', 'dep-shadow', 'dep-unused'):
             run = subprocess.run([sys.executable, '-B', __file__, '--mutant', mutant],
                                  capture_output=True, text=True, timeout=60)
             assert run.returncode != 0 and ('AssertionError' in run.stderr), mutant + ' survived\n' + run.stdout + run.stderr

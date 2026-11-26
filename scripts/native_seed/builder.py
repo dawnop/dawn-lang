@@ -14,12 +14,12 @@ import sys
 import tempfile
 import time
 
-from native_seed import contract as c, inputs, lockchain, provenance, recipe, toolchain
+from native_seed import contract as c, dependencies, inputs, lockchain, provenance, recipe, toolchain
 
 ENTRY = 'selfhost/src/nmain.dawn'
 OUTPUT_FIELDS = 'whole_sha256 info_sha256 units_sha256 elf_sha256'
 RECEIPT_FIELDS = ('schema kind source_commit source_tree source_sha256 lock_sha256 '
-                  'compilation compilation_sha256 toolchain recipe_identity execution stages plan_sha256')
+                  'compilation compilation_sha256 toolchain recipe_identity execution stages plan_sha256 dependencies')
 
 
 def load_lock(path, release=False):
@@ -196,7 +196,8 @@ def build(repo, lock_path, seed, seed_tree, out, cc, jobs=1, final_stage='B', re
                'source_sha256': c.inventory_sha(c.inventory(files)), 'lock_sha256': c.digest(c.canonical(lock)),
                'compilation': compilation, 'compilation_sha256': c.digest(c.canonical(compilation)),
                'toolchain': tc, 'recipe_identity': toolchain.recipe_identity(tc, compilation['recipe_sha256']),
-               'execution': execution, 'stages': stages, 'plan_sha256': plans[0]}
+               'execution': execution, 'stages': stages, 'plan_sha256': plans[0],
+               'dependencies': dependencies.capture(out, tc)}
     c.atomic_json(out / 'chain-receipt.json', receipt)
     return receipt
 
@@ -209,6 +210,7 @@ def verify_receipt(receipt_path, repo, lock, native, builder, require_c=True, ho
     raw, value = (c.regular_bytes(receipt_path), None) if receipt_data is None else receipt_data
     value = c.read_json(receipt_path, raw=raw) if value is None else value
     c.fields(value, RECEIPT_FIELDS, 'chain receipt')
+    dependencies.validate(value['dependencies'])
     c.require(raw == c.canonical(value) and type(value['schema']) is int and value['schema'] == 1 and
               value['kind'] == 'native-builder-chain', 'chain-receipt', 'unknown or noncanonical chain receipt')
     if snapshot is None:

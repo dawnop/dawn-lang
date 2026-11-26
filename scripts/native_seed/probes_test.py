@@ -23,6 +23,9 @@ def run(work):
     selected, extra = gcc / 'libgcc.a', gcc / 'cc1'
     for path in (cc, ld, recipe, selected, extra):
         path.write_bytes(b'original')
+    (gcc / 'include').mkdir()
+    unused = gcc / 'include/unused.h'
+    unused.write_bytes(b'unused')
     def age(path):
         value = path.stat()
         os.utime(path, ns=(value.st_atime_ns, value.st_mtime_ns - 3 * GRAIN_NS))
@@ -48,6 +51,9 @@ def run(work):
     assert len(calls) == 1, 'duplicate query executed twice'
     capture(DigestCache.load(state, 'a' * 64))
     assert len(calls) == 1, 'unchanged query missed the persistent cache'
+    unused.write_bytes(b'changed unused header')
+    capture(DigestCache.load(state, 'a' * 64))
+    assert len(calls) == 1, 'unused GCC header invalidated cached recipe probes'
     print('OK tool queries run once and unchanged bindings reuse their result')
     replacement = root / 'replacement'
     replacement.write_bytes(cc.read_bytes())
