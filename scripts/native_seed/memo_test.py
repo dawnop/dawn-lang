@@ -23,16 +23,25 @@ def run(binary):
             assert all(future.result() == first for future in futures)
         assert calculation.call_count == 1, 'equal canonical inventories were recalculated'
         rows[0]['size'] += 1
-        assert c.inventory_sha(rows) != first and calculation.call_count == 2, 'mutable inventory reused an old answer'
+        second = c.inventory_sha(rows)
+        assert second != first and calculation.call_count == 2, 'mutable inventory reused an old answer'
+        previous = c.canonical(rows)
+        digest = rows[0]['sha256']
+        rows[0]['sha256'] = digest[:20] + ('f' if digest[20] != 'f' else 'e') + digest[21:]
+        changed = c.canonical(rows)
+        assert previous[:32] == changed[:32] and previous[-32:] == changed[-32:]
+        third = c.inventory_sha(rows)
+        assert third != second and calculation.call_count == 3, 'memo lookup trusted a partial byte match'
     with validation_scope(), patch.object(c, '_inventory_sha', wraps=c._inventory_sha) as calculation:
-        c.inventory_sha(rows)
+        assert c.inventory_sha(rows) == third
         assert calculation.call_count == 1, 'inventory memo escaped its startup'
     print('OK canonical inventory work runs once and changed contents invalidate it')
     data = b'x' * (1024 * 1024)
     with validation_scope(), patch.object(c.hashlib, 'sha256', wraps=c.hashlib.sha256) as hashing:
         first = c.digest(data)
         assert c.digest(bytes(bytearray(data))) == first and hashing.call_count == 1
-        assert c.digest(data[:-1] + b'y') != first and hashing.call_count == 2
+        changed = data[:len(data) // 2] + b'y' + data[len(data) // 2 + 1:]
+        assert c.digest(changed) != first and hashing.call_count == 2
     print('OK large digest reuse compares complete bytes')
     data = c.regular_bytes(binary)
     with validation_scope(), patch.object(c.subprocess, 'run', wraps=c.subprocess.run) as actual:
