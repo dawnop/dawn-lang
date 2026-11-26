@@ -11,6 +11,8 @@ import struct
 import subprocess
 import tempfile
 
+from native_seed.memo import ACTIVE as VALIDATION_MEMO, startup
+
 TARGET = 'x86_64-unknown-linux-gnu'
 ASSET = 'dawnc-linux-x86_64'
 ALGORITHM = 'native-bootstrap-inputs-v1'
@@ -38,6 +40,9 @@ def fields(value, names, label):
 def digest(value):
     if hasattr(value, 'sha256'):
         return value.sha256
+    memo = VALIDATION_MEMO.get()
+    if memo is not None and type(value) is bytes and len(value) >= 1024 * 1024:
+        return memo.run(('sha256', value), lambda: hashlib.sha256(value).hexdigest())
     return hashlib.sha256(value).hexdigest()
 
 
@@ -246,7 +251,16 @@ def verify_seed(path, lock):
     return data
 
 
-def probe_seed(data, version=None, infer_version=False, probe_cache=None):
+def probe_seed(data, version=None, infer_version=False, probe_cache=None, scope=None):
+    version = version or 'dawnc 0.104.0 (native)'
+    memo = VALIDATION_MEMO.get()
+    if memo is not None:
+        return memo.run(('seed-probe', data, version, infer_version, scope),
+                        lambda: _probe_seed(data, version, infer_version, probe_cache))
+    return _probe_seed(data, version, infer_version, probe_cache)
+
+
+def _probe_seed(data, version, infer_version, probe_cache):
     # `version` is the full banner the lock promises; the default is the one
     # historical seed this module was written for.
     version = version or 'dawnc 0.104.0 (native)'
@@ -307,6 +321,19 @@ def inventory(files):
 
 def inventory_sha(rows):
     require(type(rows) is list, 'schema', 'inventory must be a list')
+    memo = VALIDATION_MEMO.get()
+    if memo is not None:
+        try:
+            raw = canonical(rows)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise Rejected('schema: inventory cannot be serialized') from exc
+        # Validate the immutable encoding used as the key, never an object
+        # that a caller could mutate while another worker is hashing it.
+        return memo.run(('inventory', raw), lambda: _inventory_sha(json.loads(raw)))
+    return _inventory_sha(rows)
+
+
+def _inventory_sha(rows):
     previous = b''
     h = hashlib.sha256(ALGORITHM.encode('ascii') + b'\0')
     for row in rows:

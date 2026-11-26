@@ -78,7 +78,7 @@ def snapshot(repo, lock, frame, cc, development_cc, *, digest_cache=None, git_ca
     return value, files, tc, compilation
 
 
-def verify(directory, expected, files, tc, repo, lock, marker=None, *, digest_cache=None, git_cache=None, compilation=None, probe_cache=None):
+def verify(directory, expected, files, tc, repo, lock, marker=None, *, digest_cache=None, git_cache=None, compilation=None, probe_cache=None, chain_data=None):
     marker = c.read_json(directory / 'committed.json') if marker is None else marker
     c.fields(marker, 'schema kind inputs_sha256 receipt_sha256 chain_sha256', 'generation commit')
     c.require(marker['schema'] == 1 and marker['kind'] == 'native-launcher-commit' and
@@ -95,7 +95,8 @@ def verify(directory, expected, files, tc, repo, lock, marker=None, *, digest_ca
     chain_raw = c.regular_bytes(chain_path)
     c.require(receipt['chain_sha256'] == marker['chain_sha256'] == c.digest(chain_raw),
               'generation-receipt', 'chain receipt differs')
-    chain_value = c.read_json(chain_path, raw=chain_raw)
+    chain_value = (chain_data[1] if chain_data is not None and chain_data[0] == chain_raw
+                   else c.read_json(chain_path, raw=chain_raw))
     with ThreadPoolExecutor(max_workers=2) as pool:
         checking = pool.submit(copy_context().run, builder.verify_receipt, chain_path, repo, lock,
                                directory / 'B/dawnc', directory / 'A/dawnc', require_c=False, live=True,
@@ -142,6 +143,7 @@ def sync_directory(path):
         os.close(fd)
 
 
+@c.startup
 def generation(repo, fetch, cache=None):
     c.require(platform.system() == 'Linux' and platform.machine() == 'x86_64',
               'native-platform', 'native source launcher requires Linux x86_64')
@@ -157,6 +159,7 @@ def generation(repo, fetch, cache=None):
         digests = DigestCache()
         hint = cache / 'last-generation.json'
         baseline = None
+        chain_data = None
         last = None
         if hint.exists():
             last = c.read_json(hint)
@@ -166,13 +169,14 @@ def generation(repo, fetch, cache=None):
             c.sha(last['generation'], 'generation hint')
             previous = cache / 'generations' / last['generation'] / 'stat-cache.json'
             if previous.exists():
-                digests = DigestCache.load(previous, last['generation'])
+                digests = DigestCache.load_hot(previous, last['generation'])
                 chain_raw = c.regular_bytes(previous.with_name('chain-receipt.json'))
                 old_generation = c.read_json(previous.with_name('generation.json'))
                 old_marker = c.read_json(previous.with_name('committed.json'))
                 c.require(c.digest(chain_raw) == old_generation.get('chain_sha256') == old_marker.get('chain_sha256'),
                           'generation-receipt', 'chain receipt differs before dependency reuse')
                 baseline = c.read_json(previous.with_name('chain-receipt.json'), raw=chain_raw)
+                chain_data = (chain_raw, baseline)
                 if 'dependencies' not in baseline:
                     baseline = None
         lock, lock_path, seed, pair, frame = select(repo, fetch, git_cache=git_cache, digest_cache=digests, probe_cache=probe_cache)
@@ -230,7 +234,7 @@ def generation(repo, fetch, cache=None):
             receipt = verify(directory, expected, files, tc, repo, lock, digest_cache=digests, git_cache=git_cache, compilation=compilation, probe_cache=probe_cache)
         else:
             with queries.activate():
-                receipt = verify(directory, expected, files, tc, repo, lock, digest_cache=digests, git_cache=git_cache, compilation=compilation, probe_cache=probe_cache)
+                receipt = verify(directory, expected, files, tc, repo, lock, digest_cache=digests, git_cache=git_cache, compilation=compilation, probe_cache=probe_cache, chain_data=chain_data)
         queries.recheck()
         # Re-read control records and the external paired override immediately
         # before handing the verified executable to the caller.
@@ -240,8 +244,15 @@ def generation(repo, fetch, cache=None):
                   'generation-inputs', 'source provenance or live file set changed during verification')
         digests.recheck()
         stat_path = directory / 'stat-cache.json'
-        if digests.changed or not stat_path.exists():
-            digests.save(stat_path, key)
+        if digests.changed or not stat_path.exists() or not digests.compact:
+            origins = {path for path in tc['origins'].values() if os.path.isabs(path)}
+            needed = set(digests.entries) - origins
+            dependencies = c.read_json(directory / 'chain-receipt.json')['dependencies']
+            paths = [*dependencies['files'], *(queries.paths or [])]
+            for path in paths:
+                if os.path.isfile(path):
+                    needed.add(digests.resolve(path))
+            digests.save(stat_path, key, compact_paths=needed)
         if last is None or last['generation'] != key:
             replace_json(hint, {'generation': key, 'sha256': c.digest(c.canonical(key))})
         stamp = 'native-v1:development:' + frame['selection'] + ':' + key + ':' + receipt['elf_sha256']
