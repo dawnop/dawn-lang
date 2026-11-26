@@ -976,8 +976,8 @@ JAR 侧最终执行当前 `build/dawn-selfhost.jar`，JAR generation/stamp 由�
 | `scripts/table-freight/run.sh:27` | 35, 42, 43 | JVM `__emit`/class 输出 | `jar` |
 | `scripts/tea-reconciler-contract/mutants.sh:27` | 73, 74, 75 | JVM CLI oracle | `jar` |
 | `scripts/tea-reconciler-contract/run.sh:44` | 51, 55 | JVM CLI oracle | `jar` |
-| `scripts/tile-golden/run.sh:505` | 855, 891, 898, 1297, 3266, 3283, 3322, 3528, 3601, 3690 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
-| `scripts/tile-gpu-diff/run.sh:509` | 797, 1271, 1300, 1352, 2708, 2725, 2850, 2877, 2915, 2921, 2966, 2985, 3004, 3025, 3052, 3089, 3320, 3445, 3617, 3880, 3989, 4048, 4204, 4580, 4658, 4857, 5765, 5779 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/tile-golden/run.sh:505` | 857, 893, 900, 1299, 3268, 3285, 3324, 3530, 3609, 3698 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/tile-gpu-diff/run.sh:509` | 797, 1271, 1300, 1352, 2708, 2725, 2850, 2877, 2915, 2921, 2966, 2985, 3004, 3025, 3052, 3089, 3159, 3367, 3492, 3664, 3927, 4036, 4095, 4251, 4627, 4705, 4904, 5812, 5826 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
 | `scripts/tileinterp-diff/run.sh:37` | 68, 149, 179, 192, 198, 211, 222, 228 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
 | `scripts/unicode-contract/run.sh:34` | 39 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
 | `scripts/wasm-contract/run.sh:44` | 81, 86, 180, 264 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
