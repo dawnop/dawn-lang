@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 from native_seed import contract as c
+from native_seed.probes import ACTIVE, runner, same_binding
 from native_seed.recipe import STAGE_OPTIONS, compiler_probe, qualification_flags
 
 RECIPE = 'ubuntu24-clang18.1.3-gcc13-static-v2'
@@ -28,8 +29,9 @@ DRIVER_INPUTS = {
 def driver_inputs(cc, env):
     flags = qualification_flags()
     selected = {}
+    run_query = runner()
     def query(name):
-        result = subprocess.run([str(cc), *flags, '-print-file-name=' + name], env=env,
+        result = run_query([str(cc), *flags, '-print-file-name=' + name], env=env,
                                 capture_output=True, text=True, timeout=20)
         path = result.stdout.strip()
         valid = result.returncode == 0 and not result.stderr and path and '\n' not in path
@@ -91,7 +93,8 @@ def prepare(cc, destination=None, pinned=True, digest_cache=None):
     env = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
     probe = compiler_probe(cc, env, pinned=pinned)
     driver = driver_inputs(probe['executable'], env)
-    ld = subprocess.run(['/usr/bin/ld.bfd', '--version'], env=env,
+    run_query = runner()
+    ld = run_query(['/usr/bin/ld.bfd', '--version'], env=env,
                         capture_output=True, text=True, timeout=20)
     c.require(ld.returncode == 0 and not ld.stderr and ld.stdout.splitlines(),
               'toolchain-identity', 'linker version probe failed')
@@ -134,7 +137,7 @@ def prepare(cc, destination=None, pinned=True, digest_cache=None):
     programs += [Path('/usr/bin') / name for name in TOOLS]
     programs += [Path('/bin/sh'), Path('/bin/bash')]
     def dependencies(path):
-        result = subprocess.run(['/usr/bin/ldd', str(path)], env=env,
+        result = run_query(['/usr/bin/ldd', str(path)], env=env,
                                 capture_output=True, text=True, timeout=20)
         c.require(result.returncode == 0, 'toolchain-input', f'ldd failed: {path}')
         return re.findall(r'(?:=>\s+|^\s*)(/[^\s()]+)', result.stdout, re.M)
@@ -176,6 +179,19 @@ def prepare(cc, destination=None, pinned=True, digest_cache=None):
     result = {'schema': 1, 'kind': 'native-cold-toolchain', 'recipe': RECIPE if pinned else 'development-clang-gcc13-static-v1',
               'compiler': probe, 'driver': driver, 'linker': linker, 'inventory': rows, 'inventory_sha256': c.inventory_sha(rows),
               'executables': executables, 'origins': origins, 'scaffold': list(SCAFFOLD)}
+    session = ACTIVE.get()
+    if digest_cache is not None and session is not None:
+        paths = [*programs, '/usr/bin/ldd', '/etc/ld.so.cache', '/etc/ld.so.preload',
+                 *driver['files'].values(), *(path for closure in closures for path in closure)]
+        directories = [str(Path(path).parent) for path in paths]
+        directories += [str(Path(probe['executable']).parent.parent / 'lib'),
+                        '/usr/lib/gcc/x86_64-linux-gnu']
+        if session.reuse and not same_binding(session.binding(paths, directories), session.expected):
+            # Fresh ldd may discover a new dependency despite unchanged known
+            # files. Re-probe all answers against that new resolution closure.
+            session.restart()
+            return prepare(cc, destination=destination, pinned=pinned, digest_cache=digest_cache)
+        session.finish(paths, directories)
     if destination is None:
         return result
     destination.mkdir(parents=True)
