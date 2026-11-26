@@ -59,6 +59,14 @@ if MUTANT == 'index-integrity':
     stat_cache.index_integrity = lambda *args: True
 if MUTANT == 'index-link':
     stat_cache.full_link = lambda *args: True
+if MUTANT == 'index-missing':
+    original_hot_load = stat_cache.DigestCache.load_hot.__func__
+    def permit_missing(cls, path, generation, raw=None):
+        raw = c.regular_bytes(path) if raw is None else raw
+        if not raw.startswith(b'{"index":'):
+            return cls.load(path, generation)
+        return original_hot_load(cls, path, generation, raw=raw)
+    stat_cache.DigestCache.load_hot = classmethod(permit_missing)
 if MUTANT in ('dep-included', 'dep-shadow'):
     original_dependencies = dependencies.unchanged
     ignored_dependency = 'files' if MUTANT == 'dep-included' else 'directories'
@@ -427,7 +435,7 @@ def main():
         dependency_controls(work)
         caches(work)
     if '--selftest' in sys.argv:
-        for mutant in ('java', 'dirty', 'fallback', 'marker', 'elf', 'locking', 'ctime', 'racy', 'cache-integrity', 'probe-clang', 'probe-gcc', 'probe-recipe', 'probe-racy', 'dep-included', 'dep-shadow', 'dep-unused', 'index-integrity', 'index-link'):
+        for mutant in ('java', 'dirty', 'fallback', 'marker', 'elf', 'locking', 'ctime', 'racy', 'cache-integrity', 'probe-clang', 'probe-gcc', 'probe-recipe', 'probe-racy', 'dep-included', 'dep-shadow', 'dep-unused', 'index-integrity', 'index-link', 'index-missing'):
             run = subprocess.run([sys.executable, '-B', __file__, '--mutant', mutant],
                                  capture_output=True, text=True, timeout=60)
             assert run.returncode != 0 and ('AssertionError' in run.stderr), mutant + ' survived\n' + run.stdout + run.stderr

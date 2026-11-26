@@ -53,6 +53,8 @@ def run(work):
     changed['sha256'] = c.digest(c.canonical(changed['payload']))
     refused(changed, 'full cache inconsistent with the compact index accepted')
     print('OK a changed full cache fails the reverse link')
+    refused({'payload': value['payload'], 'sha256': value['sha256']}, 'missing compact index accepted')
+    print('OK removing the compact index cannot fall back to the full cache')
     path.write_bytes(original)
     from native_seed import stat_cache
     with patch.object(stat_cache, 'replace_json', wraps=stat_cache.replace_json) as writer:

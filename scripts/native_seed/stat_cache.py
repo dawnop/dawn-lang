@@ -139,8 +139,8 @@ class DigestCache:
     @classmethod
     def load_hot(cls, path, generation, raw=None):
         raw = c.regular_bytes(path) if raw is None else raw
-        if not raw.startswith(b'{"index":'):
-            return cls.load(path, generation)
+        c.require(raw.startswith(b'{"index":'), 'stat-cache',
+                  'compact index missing; clear the development native cache')
         # Decode only the first, compact JSON value. The full payload stays
         # opaque but every byte is authenticated against the reverse link.
         text = raw.decode('utf-8')
