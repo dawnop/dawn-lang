@@ -8,13 +8,27 @@ Choose the compiler explicitly:
 
 - Installed native: follow the [project installation instructions](../README.md#install)
   for Linux x86_64, put its `bin` on PATH, and run `dawn lsp`. It refuses `use java`.
-- Checkout: `./bin/dawn` is the JVM bootstrap driver. With JDK 21 or newer,
-  `./bin/dawn --version` fetches the seed and builds the toolchain. Select its
+- Checkout: `./bin/dawn` selects the source chain, currently JAR by default. With
+  JDK 21 or newer, `DAWN_SEED_CHAIN=jar ./bin/dawn --version` builds the JVM toolchain. Select its
   absolute path in the editor.
 - Explicit JVM: with JDK 21 or newer, run
   `java -jar /absolute/versioned/dawn-selfhost.jar lsp` from a verified release.
   JDK options go before `-jar`.
 
+For Java imports or Java dependency resolution through a source checkout,
+select `DAWN_SEED_CHAIN=jar` in the server's environment. A wrapper works with
+all editors and makes the selection independent of a running editor's inherited
+environment. Save this as an executable file and use its absolute path as the
+server command, with the same final `lsp` argument:
+
+```sh
+#!/bin/sh
+export DAWN_SEED_CHAIN=jar
+exec /absolute/checkout/bin/dawn "$@"
+```
+
+Pure Dawn sessions may explicitly select `native`; the source launcher then
+builds and runs current B. It requires Python 3.11+, Linux x86_64 and a C toolchain.
 The installed native command does not switch toolchains after a failure.
 
 ## VS Code
