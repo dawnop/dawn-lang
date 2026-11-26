@@ -47,10 +47,10 @@ def contract(plan):
         golden=golden.hexdigest(), recipe=sha(Path(__file__)))
 
 
-def selections(plan, total):
-    matrix = lines(ROOT / 'scripts/tile-golden/matrix.txt')
-    if len(matrix) != 466 or len(set(matrix)) != len(matrix):
-        raise ValueError('wrong matrix cardinality')
+def selections(plan, total, matrix_path=None):
+    matrix = lines(matrix_path or ROOT / 'scripts/tile-golden/matrix.txt')
+    if not matrix or len(set(matrix)) != len(matrix):
+        raise ValueError('empty matrix or duplicate matrix item')
     dealt = {}
     header = {}
     for line in lines(plan):
@@ -79,6 +79,9 @@ def selections(plan, total):
 
 
 def validate(receipts, expected, selected):
+    expected_ran = [name for names in selected.values() for name in names]
+    if not expected_ran or len(set(expected_ran)) != len(expected_ran):
+        raise ValueError('empty or duplicate selected work')
     if len(receipts) != len(selected):
         raise ValueError('missing or duplicate shard')
     seen = set()
@@ -99,7 +102,7 @@ def validate(receipts, expected, selected):
         if any(not math.isfinite(t) or t <= 0 for t in r['times'].values()):
             raise ValueError('invalid successful item timing')
         ran += r['ran']
-    if len(ran) != 466 or len(set(ran)) != 466:
+    if sorted(ran) != sorted(expected_ran):
         raise ValueError('union misses or repeats work')
 
 
@@ -184,35 +187,103 @@ def union(args):
 
 
 def selftest():
-    # Fixed fixtures exercise the same verifier without compiling mutants.
-    expected = dict(inputs='input', plan='plan', golden='golden')
-    total = 20
-    selected = {i: [f'item-{n}' for n in range(i - 1, 466, total)] for i in range(1, total + 1)}
-    receipts = [dict(identity=expected.copy(), index=i, total=total, attempt='1',
-        ran=names.copy(), times={n: 1.0 for n in names}, prebuilt_unchanged=True)
-        for i, names in selected.items()]
-    validate(receipts, expected, selected)
-    changes = {
-        'missing shard': lambda r: r.pop(),
-        'duplicate shard': lambda r: r.__setitem__(-1, copy.deepcopy(r[0])),
-        'wrong index': lambda r: r[0].__setitem__('index', 0),
-        'wrong inputs': lambda r: r[0]['identity'].__setitem__('inputs', 'wrong'),
-        'changed golden': lambda r: r[0]['identity'].__setitem__('golden', 'wrong'),
-        'changed plan': lambda r: r[0]['identity'].__setitem__('plan', 'wrong'),
-        'missing mutant': lambda r: r[0]['ran'].pop(),
-        'repeated mutant': lambda r: r[0]['ran'].append(r[0]['ran'][0]),
-        'missing clock': lambda r: r[0]['times'].pop(r[0]['ran'][0]),
-        'consumer rebuild': lambda r: r[0].__setitem__('prebuilt_unchanged', False),
-    }
-    for name, change in changes.items():
-        candidate = copy.deepcopy(receipts)
-        change(candidate)
+    # Independent small matrices catch accidental coupling to production size.
+    # The real plan is checked too, without compiling or running any kernel.
+    expected = dict(schema=1, checkout='checkout', tree='tree',
+        repository='repository', run='run', inputs='input', plan='plan',
+        matrix='matrix', golden='golden', recipe='recipe')
+
+    def records(selected):
+        return [dict(identity=expected.copy(), index=i, total=len(selected), attempt='1',
+            ran=names.copy(), times={n: 1.0 for n in names}, prebuilt_unchanged=True)
+            for i, names in selected.items()]
+
+    def refuse(name, action):
         try:
-            validate(candidate, expected, selected)
+            action()
         except ValueError:
             print('PASS coverage refusal: ' + name)
         else:
             raise AssertionError('accepted ' + name)
+
+    plan = ROOT / 'scripts/mutant-coverage/plans/tile-golden.txt'
+    selected = selections(plan, 20)
+    validate(records(selected), expected, selected)
+    matrix = lines(ROOT / 'scripts/tile-golden/matrix.txt')
+    assert sorted(n for names in selected.values() for n in names) == sorted(matrix)
+    print(f'PASS real matrix and plan: {len(matrix)} items, {len(selected)} shards')
+    with tempfile.TemporaryDirectory() as tmp:
+        matrix_path = Path(tmp) / 'matrix.txt'
+        plan = Path(tmp) / 'plan.txt'
+        for count, total in ((1, 1), (7, 3), (23, 4)):
+            matrix = [f'item-{n}' for n in range(count)]
+            matrix_path.write_text('\n'.join(matrix) + '\n')
+            rows = [f'{name} {n % total + 1}' for n, name in enumerate(matrix)]
+            header = f'harness=tile-golden\nshards={total}\n'
+            plan.write_text(header + '\n'.join(reversed(rows)) + '\n')
+            selected = selections(plan, total, matrix_path)
+            assert selected == {i: matrix[i - 1::total] for i in range(1, total + 1)}
+            validate(records(selected), expected, selected)
+            print(f'PASS independent matrix: {count} items, {total} shards')
+
+        # Keep item counts unchanged in substitutions: cardinality cannot
+        # distinguish a complete plan from one with the wrong work identities.
+        for name, changed in {
+            'missing plan item': rows[:-1],
+            'duplicate plan item': rows + rows[:1],
+            'unknown plan item': rows + ['unknown 1'],
+            'same count plan substitution': rows[:-1] + ['unknown 1'],
+            'same count plan duplication': rows[:-1] + rows[:1],
+            'out of range plan shard': rows[:-1] + [f'{matrix[-1]} {total + 1}'],
+            'empty plan shard': [f'{n} 1' for n in matrix],
+        }.items():
+            plan.write_text(header + '\n'.join(changed) + '\n')
+            refuse(name, lambda: selections(plan, total, matrix_path))
+        plan.write_text(header + '\n'.join(rows) + '\n')
+        for name, changed in (('empty matrix', []),
+                              ('duplicate matrix item', matrix + matrix[:1])):
+            matrix_path.write_text('\n'.join(changed) + '\n')
+            refuse(name, lambda: selections(plan, total, matrix_path))
+
+    receipts = records(selected)
+
+    def exchange_work(r):
+        r[0]['ran'][0], r[1]['ran'][0] = r[1]['ran'][0], r[0]['ran'][0]
+
+    changes = {
+        'missing shard': lambda r: r.pop(),
+        'duplicate shard': lambda r: r.__setitem__(-1, copy.deepcopy(r[0])),
+        'wrong index': lambda r: r[0].__setitem__('index', 0),
+        'wrong total': lambda r: r[0].__setitem__('total', len(selected) + 1),
+        'wrong attempt': lambda r: r[0].__setitem__('attempt', '0'),
+        'missing mutant': lambda r: r[0]['ran'].pop(),
+        'repeated mutant': lambda r: r[0]['ran'].append(r[0]['ran'][0]),
+        'unknown mutant': lambda r: r[0]['ran'].append('unknown'),
+        'same count substitution': lambda r: r[0]['ran'].__setitem__(0, 'unknown'),
+        'same count duplication': lambda r: r[0]['ran'].__setitem__(0, r[0]['ran'][1]),
+        'wrong shard work': lambda r: r[0]['ran'].__setitem__(0, r[1]['ran'][0]),
+        'exchanged shard work': exchange_work,
+        'reordered work': lambda r: r[0]['ran'].reverse(),
+        'missing clock': lambda r: r[0]['times'].pop(r[0]['ran'][0]),
+        'unknown clock': lambda r: r[0]['times'].__setitem__('unknown', 1.0),
+        'consumer rebuild': lambda r: r[0].__setitem__('prebuilt_unchanged', False),
+    }
+    for key in expected:
+        changes['wrong identity ' + key] = lambda r, key=key: r[0]['identity'].__setitem__(key, 'wrong')
+    for value in (0.0, -1.0, math.nan, math.inf):
+        changes[f'invalid clock {value}'] = lambda r, value=value: r[0]['times'].__setitem__(r[0]['ran'][0], value)
+    for name, change in changes.items():
+        candidate = copy.deepcopy(receipts)
+        change(candidate)
+        if name in ('missing mutant', 'repeated mutant', 'unknown mutant',
+                    'same count substitution', 'same count duplication',
+                    'wrong shard work', 'exchanged shard work', 'reordered work'):
+            for r in candidate:
+                r['times'] = {n: 1.0 for n in r['ran']}
+        refuse(name, lambda: validate(candidate, expected, selected))
+    duplicate = copy.deepcopy(selected)
+    duplicate[1][0] = duplicate[2][0]
+    refuse('duplicate selection union', lambda: validate(records(duplicate), expected, duplicate))
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         closure = root / 'closure'
@@ -232,6 +303,10 @@ def selftest():
         (native / 'native.json').write_text(json.dumps(dict(files={
             name: sha(native / name) for name in ('clean.bin', 'dawn_rt.o')})))
         verify_prebuilt(closure, build)
+        for actual in build.iterdir():
+            actual.write_bytes(b'altered compiler closure')
+            refuse('altered ' + actual.name, lambda: verify_prebuilt(closure, build))
+            shutil.copy2(source / actual.name, actual)
         jar = build / 'dawn-selfhost.jar'
         before = jar.stat()
         os.utime(jar, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
