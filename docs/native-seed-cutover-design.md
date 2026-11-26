@@ -887,6 +887,7 @@ receipt 解析可在重新读取且字节相等后复用，S/A/B 每阶段仍至
 
 表中“JVM CLI oracle”表示保留原门的 JVM 运行/输出/黄金或性能口径；纯 Dawn 程序不因此被声明为必须依赖 Java。
 同一脚本内的所有 launcher 调用均继承该行的选择，额外独立的空环境必须再次声明。
+负控执行真实消费者的初始化前缀或实际环境表达式；注释或字符串中的同名字面量不算选择。
 JAR 侧最终执行当前 `build/dawn-selfhost.jar`，JAR generation/stamp 由源码 launcher 复验；native 侧直接执行原被测 ELF。
 
 | 选择文件:行 | 调用或默认命令定义行 | 所需能力 | 选链 |
@@ -1038,7 +1039,7 @@ JAR 侧最终执行当前 `build/dawn-selfhost.jar`，JAR generation/stamp 由�
 | `site/inputs.py:229` | 28, 232 | JVM bootstrap SourcePlan and native tool preparation | `jar` |
 | `scripts/seedjar.sh:123` | 123 | JDK identity for JAR seed and JVM differential oracles | `jar` |
 | `scripts/bootstrap-guards/perf-data.py:81` | 80, 108, 116 | JVM perf-data policy and copied launcher fixture | `jar` |
-| `.github/actions/dawn-toolchain/action.yml:146` | 145 | Explicit JAR bootstrap shared by JVM gate consumers | `jar` |
+| `.github/actions/dawn-toolchain/action.yml:146` | 147 | Explicit JAR bootstrap shared by JVM gate consumers | `jar` |
 | `scripts/gates-external/backend_local.py:478` | 478, 480 | Exact local substitution of the JAR composite build only | `jar` |
 | `scripts/gates-external/inputs.py:636` | 19, 553, 627, 646, 649, 651 | Coursier input-pack priming requires Java dependencies | `jar` |
 | `playground/sandbox/run-sandboxed.sh:125` | 选择环境传给显式子进程 | JVM-only deployed launcher in an empty sandbox environment | `jar` |
