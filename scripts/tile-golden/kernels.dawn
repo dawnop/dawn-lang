@@ -2563,7 +2563,16 @@ impl FaElem[Float] {
 
 fn fa64_math() -> FaNumerics[Float] = FaNumerics { zero = 0.0, neg_inf = -INFINITY, base2 = false, exp_ftz = false, approx_div = false, div_ftz = false }
 
-fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[D], v: Param[D], o: Param[A], scale: Param[A], dt: Dtype[D], math: FaNumerics[A]) -> Unit !Dev = {
+# A padded key has score zero, which would change the softmax denominator.
+# Complete key tiles pass zero here, so they record no mask operations.
+fn fa_tail_scores[A: FloatDtype](s: Tile[A], j: Idx, tail_n: Int, math: FaNumerics[A]) -> Tile[A] !Dev = {
+  if tail_n > 0 {
+    let live = lt_i(coord(j * idx_const(tile_shape(s)[1]), tile_shape(s), 1, 1), i_const(tail_n))
+    select(live, s, full(tile_shape(s), math.neg_inf))
+  } else { s }
+}
+
+fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[D], v: Param[D], o: Param[A], scale: Param[A], dt: Dtype[D], math: FaNumerics[A], tail_n: Int = 0) -> Unit !Dev = {
   let tq = load_cell(q)
   let rows = tile_shape(tq)[0]
   var m: Tile[A] = full([rows, 1], math.neg_inf)
@@ -2571,8 +2580,9 @@ fn flash_attn[D: FloatDtype, A: FloatDtype + ScalarDtype](q: Param[D], k: Param[
   var acc = zeros(o)
   for j in d_range(idx_const(0), blocks_of(k, 1)) {
     let s: Tile[A] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
-    let m_new = max(m, reduce_max(s, keepdims = true))
-    let p = fa_exp(math, s - m_new)
+    let scores = fa_tail_scores(s, j, tail_n, math)
+    let m_new = max(m, reduce_max(scores, keepdims = true))
+    let p = fa_exp(math, scores - m_new)
     let alpha = fa_exp(math, m - m_new)
     l = l * alpha + reduce_sum(p, keepdims = true)
     acc = mma(p.to(dt), load_at(v, [j]), acc * alpha)
@@ -2597,6 +2607,9 @@ pub fn fa_divide[A: FloatDtype](math: FaNumerics[A], x: Tile[A], y: Tile[A], at:
 fn fa_kernel[D: FloatDtype, A: FloatDtype + ScalarDtype](dt: Dtype[D], math: FaNumerics[A]) -> fn(Param[D], Param[D], Param[D], Param[A], Param[A]) -> Unit !Dev =
   (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, dt, math)
 
+fn fa_tail_kernel[D: FloatDtype, A: FloatDtype + ScalarDtype](dt: Dtype[D], math: FaNumerics[A], n: Int) -> fn(Param[D], Param[D], Param[D], Param[A], Param[A]) -> Unit !Dev =
+  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, dt, math, n)
+
 fn flash_attn_bf16_demo() -> TileProg = {
   let (p, _e) = trace5("flash_attn_bf16_demo",
     In(BF16, cells([1, ATT_M, ATT_D], [1, FA_BQ, ATT_D], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])),
@@ -2606,14 +2619,11 @@ fn flash_attn_bf16_demo() -> TileProg = {
   p
 }
 
-# Refuse unsupported tails before cells can silently pad or cross a head.
+# Keep each head in its own view dimension, including a partial final tile.
 # Division guards element products before multiplication.
 fn fa_domain(d: Int, n: Int, bh: Int, t: FaTiles, at: Loc = caller()) -> Unit = {
   if d <= 0 || n <= 0 || bh <= 0 || t.bq <= 0 || t.bk <= 0 {
     panic("flash_attn: dimensions and tiles must be positive", at = at)
-  }
-  if n % t.bq != 0 || n % t.bk != 0 {
-    panic("flash_attn: n must be a multiple of bq and bk", at = at)
   }
   # Device offsets count elements; byte addresses use pointer-width arithmetic.
   let limit = 2147483647
@@ -2633,7 +2643,7 @@ fn fa_record_typed[D: FloatDtype, A: FloatDtype + ScalarDtype](name: String, arc
   let q = cells([bh, n, d], [1, c.bq, d], along = [Axis(2), Axis(0), Axis(1)], squeeze = [0])
   let kv = cells([bh, n, d], [1, c.bk, d], along = [Axis(2), Free, Axis(1)], squeeze = [0])
   let (p, _e) = trace5(name, In(dt, q), In(dt, kv), In(dt, kv), Out(acc_dtype, q), Scalar(acc_dtype),
-    fa_kernel(dt, math), hints = plan.hints)
+    if n % c.bk == 0 { fa_kernel(dt, math) } else { fa_tail_kernel(dt, math, n) }, hints = plan.hints)
   p
 }
 
@@ -2644,6 +2654,9 @@ pub fn fa_record[D: FaElem](dt: Dtype[D], arch: Arch, d: Int, n: Int, bh: Int, p
 }
 
 fn fa_named(name: String, arch: Arch, d: Int) -> TileProg = TileProg { ..fa_record(BF16, arch, d, 256, 1), name = name }
+
+fn fatail_named(name: String, arch: Arch, d: Int, n: Int, plan: Option[FaPlan] = None) -> TileProg =
+  TileProg { ..fa_record(BF16, arch, d, n, 2, plan = plan), name = name }
 
 # ---- tileir 0.8.2: index division, same-rank broadcasting, `lit` ----
 
@@ -6219,6 +6232,11 @@ fn trace(name: String) -> TileProg = match name {
     p
   }
   "flash_attn_bf16_demo" -> flash_attn_bf16_demo()
+  "flash_bf16_tail" -> fatail_named("flash_bf16_tail", Generic, 64, 255)
+  "flash_bf16_tail_sm90_d64" -> fatail_named("flash_bf16_tail_sm90_d64", Sm90, 64, 255)
+  "flash_bf16_tail_sm90_d128" -> fatail_named("flash_bf16_tail_sm90_d128", Sm90, 128, 255)
+  "flash_bf16_tail_sm100_d64" -> fatail_named("flash_bf16_tail_sm100_d64", Sm100, 64, 255)
+  "flash_bf16_tail_sm100_d128" -> fatail_named("flash_bf16_tail_sm100_d128", Sm100, 128, 255)
   "flash_bf16_sm90_d64" -> fa_named("flash_bf16_sm90_d64", Sm90, 64)
   "flash_bf16_sm90_d128" -> fa_named("flash_bf16_sm90_d128", Sm90, 128)
   "flash_bf16_sm100_d64" -> fa_named("flash_bf16_sm100_d64", Sm100, 64)
@@ -7429,8 +7447,8 @@ fn config_manifest() -> Unit !io = {
 fn fa_config_check() -> Unit = {
   let file = loc.path(loc.here())
   let line = loc.line(loc.here())
-  let why = mm_refusal(() => fa_record(F64, Generic, 32, 63, 1))
-  mm_expect(str.contains(why, "n must be a multiple of bq and bk"))
+  let why = mm_refusal(() => fa_record(F64, Generic, 32, 0, 1))
+  mm_expect(str.contains(why, "dimensions and tiles must be positive"))
   mm_expect(str.contains(why, " at ${file}:${line + 1}:"))
   for (n, d, bh) in [(0, 32, 1), (64, 0, 1), (64, 32, 0), (-64, 32, 1)] {
     mm_expect(str.contains(mm_refusal(() => fa_record(F64, Generic, d, n, bh)), "dimensions and tiles must be positive"))
@@ -7439,7 +7457,7 @@ fn fa_config_check() -> Unit = {
     mm_expect(str.contains(mm_refusal(() => fa_record(F64, Generic, 32, 64, 1, plan = Some(FaPlan { tiles = t, hints = [] }))), "dimensions and tiles must be positive"))
   }
   for t in [FaTiles { bq = 32, bk = 24 }, FaTiles { bq = 48, bk = 16 }] {
-    mm_expect(str.contains(mm_refusal(() => fa_record(F64, Generic, 32, 64, 1, plan = Some(FaPlan { tiles = t, hints = [] }))), "n must be a multiple of bq and bk"))
+    mm_expect(str.contains(mm_refusal(() => fa_record(F64, Generic, 32, 64, 1, plan = Some(FaPlan { tiles = t, hints = [] }))), "every tile dimension is a power of two"))
   }
   for (n, d, bh) in [(64, 2147483647, 1), (64, 32, 2147483647), (2147483616, 32, 1)] {
     mm_expect(str.contains(mm_refusal(() => fa_record(F64, Generic, d, n, bh)), "offset product exceeds I32"))
@@ -7449,6 +7467,8 @@ fn fa_config_check() -> Unit = {
   mm_expect(len(large.ops) > 0)
   let _valid = fa_record(F64, Generic, 32, 64, 2)
   let _valid_bf16 = fa_record(BF16, Sm100, 64, 512, 2)
+  let _tail = fa_record(BF16, Sm100, 64, 255, 2)
+  let _tail_f64 = fa_record(F64, Generic, 32, 63, 2)
   # Both policies retain real recording boundaries and caller locations.
   for (arch, t, h, fragment) in [
     (Sm100, FaTiles { bq = 64, bk = 64 }, [for_arch("sm_100", entry_hints(num_cta_in_cga = Some(2)))], "cga=2 requires row_tile >= 128"),
@@ -7865,7 +7885,28 @@ fn mmtail_records(arch: Arch, dir: String) -> Unit !io = {
   }
 }
 
+# Tail records use the public factory and two heads, never a flattened row axis.
+fn fatail_records(arch: Arch, dir: String) -> Unit !io = {
+  for (name, d, n, override) in [
+    ("fatail_d64", 64, 255, None),
+    ("fatail_d128", 128, 255, None),
+    ("fatail_q", 64, 192, Some(FaPlan { tiles = FaTiles { bq = 128, bk = 64 }, hints = [] })),
+    ("fatail_kv", 64, 192, Some(FaPlan { tiles = FaTiles { bq = 64, bk = 128 }, hints = [] })),
+    ("fatail_exact64", 64, 32, Some(FaPlan { tiles = FaTiles { bq = 128, bk = 128 }, hints = [] })),
+    ("fatail_exact128", 128, 64, Some(FaPlan { tiles = FaTiles { bq = 128, bk = 128 }, hints = [] }))
+  ] {
+    let p = fatail_named(name, arch, d, n, override)
+    let t = (match override { Some(c) -> c, None -> fa_plan(BF16, arch, d) }).tiles
+    match with_fs_real(() => write_bytes("${dir}/${name}.tilebc", encode(p))) {
+      Ok(_) -> ()
+      Err(e) -> panic("fatail: cannot write ${name}: ${e}")
+    }
+    println("tiles ${name} ${d} ${n} ${t.bq} ${t.bk}")
+  }
+}
+
 pub fn main() -> Unit !io = match args() {
+  ["--fatail-record", arch, dir] -> fatail_records(arch_from_name(arch), dir)
   ["--mmtail-record", arch, dir] -> mmtail_records(arch_from_name(arch), dir)
   ["--inbounds-witness", promised, path] -> {
     if promised != "true" && promised != "false" { panic("inbounds witness expects true or false") }

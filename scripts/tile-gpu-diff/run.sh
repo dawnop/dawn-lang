@@ -3148,6 +3148,53 @@ tail_mutant gemm-scale-dropped mmtail_scale "mmtail_bias"
 tail_mutant gemm-bias-after-convert mmtail_bias "mmtail_scale"
 tail_mutant gemm-relu-before-bias mmtail_bias "mmtail_scale"
 
+# The FA tail family uses exact means, including the sentinel region after
+# the last head. Zero-filled keys alone cannot remove softmax denominator terms.
+fatail_record() {
+  local out="$1" k
+  mkdir -p "$out"
+  "$root/bin/dawn" run "$asm_proj" -- --fatail-record "$gpu_name" "$out" > "$out/record.out" 2> "$out/record.err" ||
+    { cat "$out/record.err" >&2; fail "fatail recording failed"; }
+  fatail_args=()
+  for k in fatail_d64 fatail_d128 fatail_q fatail_kv fatail_exact64 fatail_exact128; do
+    assemble_golden "$k" "$out/$k.tilebc" "$out/$k.cubin"
+    fatail_args+=("$out/$k.cubin" $(sed -n "s/^tiles $k //p" "$out/record.out"))
+  done
+  [ "${#fatail_args[@]}" = 30 ] || fail "fatail recording omitted dimensions"
+}
+fatail_record "$work/fatail"
+build_native "$root/std" "$work/fatail.bin" "$here/fatail_diff.dawn"
+# Run the legal faults first: each must reach the device and its named oracle.
+for m in fa-tail-no-mask fa-tail-q-roundup fa-tail-extent-short; do
+  bad_tree="$work/$m-tree"
+  mkdir -p "$bad_tree/scripts/tile-golden"
+  cp "$asm_proj/src/main.dawn" "$bad_tree/scripts/tile-golden/kernels.dawn"
+  python3 "$golden/mutate.py" "$m" "$bad_tree"
+  cp "$bad_tree/scripts/tile-golden/kernels.dawn" "$asm_proj/src/main.dawn"
+  fatail_record "$work/$m-out"
+  cp "$golden/kernels.dawn" "$asm_proj/src/main.dawn"
+  rc=0
+  device "$work/fatail.bin" "$gpu_name" "${fatail_args[@]}" > "$work/$m-out/device.out" 2> "$work/$m-out/device.err" || rc=$?
+  cat "$work/$m-out/device.out"
+  [ "$rc" = 1 ] && [ "$(verdict_of "$work/$m-out/device.out")" = fail ] ||
+    { cat "$work/$m-out/device.err" >&2; fail "$m did not fail its numerical oracle"; }
+  grep -q '^  FAIL fatail_d64: different=[1-9]' "$work/$m-out/device.out" || fail "$m missed the tail oracle"
+  if [ "$m" = fa-tail-q-roundup ]; then
+    grep -q '^  FAIL fatail_d64: .*sentinel-overwritten=[1-9]' "$work/$m-out/device.out" || fail "$m missed the output sentinel"
+  else
+    grep -q '^  FAIL fatail_d64: .*red-separated=yes' "$work/$m-out/device.out" || fail "$m did not exceed the two-ULP bound by 1000x"
+    grep -q '^  PASS fatail_q:' "$work/$m-out/device.out" || fail "$m changed the complete KV control"
+  fi
+  echo "PASS  mutant: $m (legal cubins, exact FA tail oracle red)"
+done
+fatail_record "$work/fatail"
+rc=0
+device "$work/fatail.bin" "$gpu_name" "${fatail_args[@]}" > "$work/fatail.out" 2> "$work/fatail.err" || rc=$?
+cat "$work/fatail.out"
+[ "$rc" = 0 ] && [ "$(verdict_of "$work/fatail.out")" = pass ] ||
+  { cat "$work/fatail.err" >&2; fail "fatail: an exact mean or output sentinel differs"; }
+echo "PASS  fatail: exact isolation, bounded general means and Q tail sentinels"
+
 # The ledger records one verdict for the tree: every family passes (or was
 # skipped on purpose), or it is the first thing that stopped one of them. The
 # list is in run order and is the only place the fold reads; fold_verdict.sh
@@ -6613,7 +6660,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
   scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn scripts/tile-gpu-diff/scalar_diff.dawn scripts/tile-gpu-diff/entry6_diff.dawn scripts/tile-gpu-diff/read_layout_diff.dawn \
-  scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/gemm_diff.dawn scripts/tile-gpu-diff/tail_diff.dawn scripts/tile-gpu-diff/mmtail_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
+  scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/flash_output_diff.dawn scripts/tile-gpu-diff/gemm_diff.dawn scripts/tile-gpu-diff/tail_diff.dawn scripts/tile-gpu-diff/mmtail_diff.dawn scripts/tile-gpu-diff/fatail_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
   scripts/tile-gpu-diff/rounding.dawn scripts/tile-gpu-diff/rounding_cases.py \
   scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py scripts/tile-gpu-diff/fold_verdict.sh)"
 [ -z "$dirty" ] ||
@@ -6637,6 +6684,7 @@ summary="$summary staged:$(sed -n 's/^tiers //p' "$work/staged.out" | tail -n 1)
 summary="$summary gemm:$(sed -n 's/^tiers //p' "$work/gemm.out" | tail -n 1)"
 summary="$summary tail:$(sed -n 's/^tiers //p' "$work/tail.out" | tail -n 1)"
 summary="$summary mmtail:$(sed -n 's/^tiers //p' "$work/mmtail.out" | tail -n 1)"
+summary="$summary fatail:$(sed -n 's/^tiers //p' "$work/fatail.out" | tail -n 1)"
 summary="$summary arch=$arch_probe"
 summary="$summary asm=$asm_probe"
 if [ -n "$note" ]; then line="$line # inputs=$inputs_digest $note; $summary"; else line="$line # inputs=$inputs_digest $summary"; fi
