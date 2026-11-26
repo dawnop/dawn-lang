@@ -29,7 +29,8 @@ def run(work):
     source = root / 'main.c'
     source.write_text('#include <nested/selected.h>\nint value = SELECTED;\n')
     dep = root / 'actual.d'
-    subprocess.run(['/usr/lib/llvm-18/bin/clang', '-I', str(first), '-I', str(last),
+    compiler = os.environ.get('CC') or 'cc'
+    subprocess.run([compiler, '-I', str(first), '-I', str(last),
                     '-MD', '-MF', str(dep), '-MT', 'dawn-native-deps', '-c', str(source),
                     '-o', str(root / 'main.o')], check=True, capture_output=True)
     paths = dependencies.parse(dep.read_text())
