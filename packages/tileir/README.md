@@ -324,6 +324,13 @@ The launch passes `f32(log2(e) / sqrt(D))` as the scale, changing base once.
 The [Playground sample](../../site/play-ui/samples/flash_attn.dawn) records the shared
 generic body with this BF16/F32 numerical policy and a 32×16 demonstration layout.
 
+The library BF16 FA factory also accepts sequence lengths that are not multiples
+of the query and key tiles. It keeps `[heads, sequence, dimension]` views: the
+output view masks query rows past the sequence, while an explicit negative
+infinity score mask excludes padded key columns before softmax. Zero padding
+of K and V alone would add false terms to the softmax denominator.
+Complete key tiles retain the existing recording and numerical policy.
+
 `carry`, `get` and `set` remain for the loops a `for` cannot write: `d_loop`'s
 body is a closure with a data-dependent exit.
 

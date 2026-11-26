@@ -1,0 +1,142 @@
+# Layered numerical witnesses for the library FA tail path. Every valid key has the same
+# score (+1 or -1 depending on the query), so softmax is an ordinary mean.
+# The first and last value rows have opposite perturbations: their sum is
+# zero, but dropping the last key changes the answer. Distinct signed means
+# in each head expose a view that flattens heads or changes its row stride.
+# Entire output buffers are compared, including sentinels after the last head.
+use std/io
+use std/gpu
+use std/gpu.{Gpu, with_gpu_real}
+use std/list
+use std/map
+use std/fmt
+use std/narrow
+use std/float.{INFINITY}
+
+fn mean(head: Int, col: Int) -> Float = to_float((col % 4 + 1) * (if head == 0 { 1 } else { -1 })) / 8.0
+fn names() -> List[String] = ["fatail_d64", "fatail_d128", "fatail_q", "fatail_kv", "fatail_exact64", "fatail_exact128"]
+fn fill(n: Int, x: Float) -> List[Float] = list.map(range(0, n), _i => x)
+
+# Map IEEE sign-magnitude bits into numeric order before counting adjacent
+# representable F32 values. Nonfinite values are rejected before this call.
+fn ordered(x: Float) -> Int = {
+  let b = narrow.f32_bits(x)
+  if b >= 2147483648 { 4294967295 - b } else { b + 2147483648 }
+}
+fn distance(x: Float, y: Float) -> Int = {
+  let a = ordered(x)
+  let b = ordered(y)
+  if a >= b { a - b } else { b - a }
+}
+fn magnitude(x: Float) -> Float = if x < 0.0 { -x } else { x }
+
+# Use the larger adjacent spacing at a binade boundary, so the negative
+# control's 1000x separation from a two-ULP bound is conservative.
+fn spacing(x: Float) -> Float = {
+  let b = narrow.f32_bits(x)
+  let a = magnitude(narrow.f32_of_bits(b + 1) - x)
+  let c = magnitude(narrow.f32_of_bits(b - 1) - x)
+  if a > c { a } else { c }
+}
+
+fn oracle_selftest() -> Unit = {
+  let x = 0.125
+  for sign in [1.0, -1.0] {
+    for delta in [1, 2, 3] {
+      let y = narrow.f32_of_bits(narrow.f32_bits(x * sign) + delta)
+      if distance(x * sign, y) != delta { panic("fatail: signed ULP oracle failed") }
+    }
+  }
+  if distance(x, narrow.f32_of_bits(0x3dffffff)) != 1
+    || magnitude(0.1247553825378418 - x) / (2.0 * spacing(x)) < 1000.0 {
+    panic("fatail: binade boundary or negative separation oracle failed")
+  }
+}
+
+fn sample(name: String, d: Int, n: Int, bq: Int, exact: Bool) -> (Bool, Int, String) !Gpu = {
+  let size = 2 * n * d
+  let extra = 320 * d
+  let q = list.map(range(0, size), i => if i % d == 0 { if (i / d) % 2 == 0 { 1.0 } else { -1.0 } } else { 0.0 })
+  let k = list.map(range(0, size), i => if i % d == 0 { 1.0 } else { 0.0 })
+  let v = list.map(range(0, size), i => {
+    let row = (i / d) % n
+    mean(i / (n * d), i % d) + (if row == 0 { -0.125 } else if row == n - 1 { 0.125 } else { 0.0 })
+  })
+  let sentinel = -12345.0
+  let data = [("bf16", q ++ fill(extra, INFINITY)), ("bf16", k ++ fill(extra, INFINITY)),
+    ("bf16", v ++ fill(extra, INFINITY)), ("f32", fill(size + extra, sentinel))]
+  let run: fn() -> Result[List[Float], ForeignError] !Gpu = () => {
+    var hs: List[Int] = []
+    for (dt, xs) in data {
+      let h = gpu.gpu_alloc(dt, len(xs))?
+      gpu.gpu_copy_from_host(h, gpu.encode_floats(dt, xs))?
+      hs = hs ++ [h]
+    }
+    gpu.gpu_launch(name, (n - 1) / bq + 1, 1, 2,
+      list.map(hs, h => gpu.Buffer(h)) ++ [gpu.Word("f32", 1065353216)])?
+    gpu.gpu_sync()?
+    let got = gpu.decode_floats("f32", gpu.gpu_copy_to_host(hs[3])?)
+    for h in hs { gpu.gpu_free(h)? }
+    Ok(got)
+  }
+  match run() {
+    Err(e) -> (false, 0, "${name}: device refused ${e.kind} ${e.message}")
+    Ok(got) -> {
+      if len(got) != size + extra { return (false, 0, "${name}: output size differs") }
+      var diff = 0
+      var over = 0
+      var bad = 0
+      var first = ""
+      var max_ulp = 0
+      var rejected = 0
+      var separated = 0
+      var min_ratio = INFINITY
+      for i in range(0, len(got)) {
+        let want = if i < size { mean(i / (n * d), i % d) } else { sentinel }
+        let finite = got[i] == got[i] && got[i] != INFINITY && got[i] != -INFINITY
+        if not finite { bad = bad + 1 }
+        if i < size && finite {
+          let ulp = distance(got[i], want)
+          if ulp > max_ulp { max_ulp = ulp }
+          if ulp > (if exact { 0 } else { 2 }) {
+            rejected = rejected + 1
+            let ratio = magnitude(got[i] - want) / (2.0 * spacing(want))
+            if ratio < min_ratio { min_ratio = ratio }
+            if ratio >= 1000.0 { separated = separated + 1 }
+          }
+        }
+        if got[i] != want {
+          if diff == 0 { first = "first lane=${i} got=${got[i]} want=${want}" }
+          diff = diff + 1
+          if i >= size { over = over + 1 }
+        }
+      }
+      let apart = rejected > 0 && separated == rejected && bad == 0
+      (rejected == 0 && over == 0 && bad == 0, max_ulp,
+        "${name}: different=${diff} sentinel-overwritten=${over} nonfinite=${bad} max-ulp=${max_ulp} rejected=${rejected} red-separated=${if apart { "yes" } else { "no" }} min-bound-ratio=${if rejected > 0 { min_ratio } else { 0.0 }} lanes=${len(got)} n=${n} d=${d} heads=2 tier=${if exact { "exact" } else { "2ulp" }} ${first}")
+    }
+  }
+}
+
+fn int_arg(s: String) -> Int = match fmt.parse_int(s) { Some(n) -> n, None -> panic("fatail: invalid integer ${s}") }
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  oracle_selftest()
+  let ps = args()
+  if len(ps) != 31 { panic("usage: fatail_diff <arch> then six of <cubin> <d> <n> <bq> <bk>") }
+  var kernels: Map[String, Bytes] = map.empty()
+  for i in range(0, 6) { kernels = map.insert(kernels, names()[i], io.with_fs_real(() => match io.read_bytes(ps[1 + i * 5]) {
+    Ok(b) -> b, Err(e) -> panic("fatail: cannot read cubin ${e}")
+  })) }
+  let results = with_gpu_real(kernels, () => list.map(range(0, 6), i => sample(names()[i], int_arg(ps[2 + i * 5]), int_arg(ps[3 + i * 5]), int_arg(ps[4 + i * 5]), i >= 4)))
+  var failed = 0
+  var max_ulp = 0
+  for (ok, ulp, detail) in results {
+    if ulp > max_ulp { max_ulp = ulp }
+    println("  ${if ok { "PASS " } else { "FAIL " }}${detail}")
+    if not ok { failed = failed + 1 }
+  }
+  println("tiers exact=2 bounded=4 max-ulp=${max_ulp}")
+  println("tile-gpu-diff: ${if failed == 0 { "pass" } else { "fail" }}")
+  if failed != 0 { io.exit(1) }
+})

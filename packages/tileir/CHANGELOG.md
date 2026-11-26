@@ -1,5 +1,9 @@
 # tileir changelog
 
+## 0.35.0
+
+- 库 FA 工厂接受非整除序列长度；K/V 尾列在 softmax 前掩成负无穷，Q 尾行由三维输出 view 屏蔽。bf16 尾块用例与负控覆盖双 head 边界，既有整除 golden 不变。
+
 ## 0.34.0
 
 - 删除 `origin` 模块（0.33.0 引入）及其旁证脚本 `scripts/tile-origin-mutants`。
