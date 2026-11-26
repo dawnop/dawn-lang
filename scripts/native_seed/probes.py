@@ -79,6 +79,7 @@ class Queries:
         return {'path': path, 'key': key(value)}
 
     def binding(self, paths, directories):
+        paths = set(map(str, paths))
         files = {str(path): self.signature(path) for path in sorted(set(paths) |
                  set(self.driver_paths) | {self.linker}) if os.path.realpath(path) != self.cc}
         gcc = {}

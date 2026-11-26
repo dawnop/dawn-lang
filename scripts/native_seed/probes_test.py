@@ -39,6 +39,7 @@ def run(work):
         for _ in range(2):
             result = queries.run([str(cc), '--version'], text=True, env={}, capture_output=True)
             assert result.stdout == 'actual\n'
+        assert queries.binding([cc, ld, selected], []) == queries.binding([str(cc), str(ld), str(selected)], [])
         queries.finish([cc, ld, selected], [])
         queries.recheck()
         cache.save(state, 'a' * 64)
@@ -79,6 +80,7 @@ def run(work):
         queries.run([str(cc), '--version'], text=True, env={}, capture_output=True)
         for _ in range(2):
             queries.run(['/usr/bin/ldd', str(cc)], text=True, env={}, capture_output=True)
+        assert queries.binding([cc, ld, selected], []) == queries.binding([str(cc), str(ld), str(selected)], [])
         queries.finish([cc, ld, selected], [])
         cache.save(state, 'a' * 64)
     assert len(calls) == 7, 'ldd resolution was cached across launches or duplicated within one'
