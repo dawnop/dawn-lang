@@ -56,6 +56,9 @@
 # the same way is refused rather than silently mutated in its place.
 set -euo pipefail
 
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/narrow-contract"
 program="$root/scripts/spike-native/narrow_round.dawn"

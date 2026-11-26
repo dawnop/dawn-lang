@@ -64,6 +64,9 @@
 # nothing is conditional on anything but which job carries it, and the local
 # no-flag run still does the whole thing in one process.
 set -euo pipefail
+
+# JVM class emitter; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/../.."
 root=$(pwd)
 

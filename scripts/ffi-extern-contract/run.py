@@ -8,6 +8,9 @@ ASan use-after-free; an unrelated build or runtime failure never counts.
 """
 import importlib.util
 import os
+
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import re
 from pathlib import Path
 import shutil

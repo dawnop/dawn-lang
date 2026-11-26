@@ -15,6 +15,9 @@
 # n_ must be rejected, i_ is implementation-defined and only counted. A nonzero
 # exit means a mandatory case moved.
 set -euo pipefail
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/.."
 
 DAWN=${DAWN_BIN:-./bin/dawn}

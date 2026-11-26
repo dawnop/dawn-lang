@@ -265,7 +265,7 @@ def check_toolchain_action(text):
     """Fingerprint the composite the dawn-toolchain substitution stands for.
 
     The substitution means: a local JDK 21 on JAVA_HOME and PATH, the seed
-    cache restored from a shared cache, and `./bin/dawn --version` unless
+    cache restored from a shared cache, and `DAWN_SEED_CHAIN=jar ./bin/dawn --version` unless
     `build` is 'false'. It is only that while the composite is exactly the
     two setup-graalvm attempts, a retry note, the two caches and the build.
     """
@@ -298,12 +298,12 @@ def check_toolchain_action(text):
             problems.append(f"step {step.get('name')!r} is neither uses nor run")
     if sorted(uses) != sorted(["graalvm/setup-graalvm@v1"] * 2 + ["actions/cache@v4"] * 2):
         problems.append(f"uses references are {sorted(uses)}")
-    build = [r for c, r in run_steps if r == "./bin/dawn --version"]
+    build = [r for c, r in run_steps if r == "DAWN_SEED_CHAIN=jar ./bin/dawn --version"]
     notes = [r for c, r in run_steps
              if c == "steps.graalvm.outcome == 'failure'" and r.startswith('echo "::warning')]
     if len(build) != 1 or len(notes) != 1 or len(run_steps) != 2:
         problems.append(f"run steps are {[r.splitlines()[0] for _, r in run_steps]}")
-    build_if = [c for c, r in run_steps if r == "./bin/dawn --version"]
+    build_if = [c for c, r in run_steps if r == "DAWN_SEED_CHAIN=jar ./bin/dawn --version"]
     if build_if and build_if[0] != "inputs.build == 'true'":
         problems.append(f"the build step is guarded by {build_if[0]!r}")
     if problems:

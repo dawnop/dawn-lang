@@ -13,6 +13,9 @@ import ctypes
 import ctypes.util
 import json
 import os
+
+# JVM __emitc and floating point differential oracle; preserve the independent JVM consumer.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import re
 import shlex

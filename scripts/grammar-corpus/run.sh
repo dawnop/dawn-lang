@@ -27,6 +27,9 @@
 # against mutations of a passing case. A checker that has never been shown to
 # fail is indistinguishable from one that cannot.
 set -euo pipefail
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/../.."
 here=${GRAMMAR_CORPUS_DIR:-scripts/grammar-corpus}
 

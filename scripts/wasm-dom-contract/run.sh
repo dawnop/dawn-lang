@@ -77,6 +77,9 @@
 # for the host and not for wasm.
 set -euo pipefail
 
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/wasm-dom-contract"
 work="$(mktemp -d)"

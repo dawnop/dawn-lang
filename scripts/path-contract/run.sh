@@ -12,6 +12,9 @@
 # RD-09), and a `[deps]` entry needs a manifest.
 set -euo pipefail
 
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 out="$("$root/bin/dawn" run "$root/scripts/path-contract")"

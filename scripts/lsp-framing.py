@@ -14,6 +14,9 @@ import json
 import array
 import fcntl
 import os
+
+# JVM LSP regression and Java resolution oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import select
 import signal

@@ -23,6 +23,9 @@
 #     small dawn/rt/Strings -- pruning was not simply switched off.
 set -euo pipefail
 
+# JVM class emitter; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/table-freight"
 

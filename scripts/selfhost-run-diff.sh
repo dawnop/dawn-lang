@@ -5,6 +5,9 @@
 # for byte. An intentional CLI-output change lands with an `Emit-Change:`
 # line in its commit message, which downgrades the mismatch to a note.
 set -euo pipefail
+
+# JVM class emitter; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 . scripts/seedjar.sh

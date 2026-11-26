@@ -633,6 +633,7 @@ def prime_coursier(prefix, repo, tag, coursier, log):
                           capture_output=True, text=True).stdout.strip()
     env = prefix_mod.job_env(prefix, tmpdir=work / "tmp", runner_temp=work / "tmp")
     env["COURSIER_CACHE"] = str(coursier)
+    env["DAWN_SEED_CHAIN"] = "jar"
     subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", str(repo), str(tree)],
                    check=True, env=env)
     subprocess.run(["git", "-C", str(tree), "checkout", "-q", "--detach", head], check=True, env=env)

@@ -21,6 +21,9 @@
 # the C of the two is held equal by the native fixpoint (A == B), and the map
 # is a function of the same emission.
 set -euo pipefail
+
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 dawn="${DAWN_BIN:-$root/bin/dawn}"
 dawnc=""

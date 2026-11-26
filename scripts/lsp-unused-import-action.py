@@ -18,6 +18,9 @@ Usage:  scripts/lsp-unused-import-action.py [server command...]   (default ./bin
 """
 import json
 import os
+
+# JVM LSP regression and Java resolution oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import select
 import subprocess
 import sys

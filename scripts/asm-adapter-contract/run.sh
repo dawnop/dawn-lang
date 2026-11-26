@@ -75,6 +75,9 @@
 # Red demo (2026-08-04): see docs/jvm-base-plan.md §5.7. Every check below has
 # been shown to go red, each against a discriminating negative control.
 set -euo pipefail
+
+# JVM class emitter; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/../.."
 root=$(pwd)
 

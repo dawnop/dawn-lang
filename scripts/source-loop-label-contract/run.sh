@@ -3,6 +3,9 @@
 # the match once-loop optimization. Every compiler runs the same assertion set.
 set -euo pipefail
 
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/source-loop-label-contract"
 probe="$root/scripts/spike-native/source_loop_targets.dawn"

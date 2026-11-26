@@ -38,6 +38,9 @@ Usage:  scripts/lsp-decl-pairing.py [dawn-launcher]     (default ./bin/dawn)
 """
 import json
 import os
+
+# JVM LSP regression and Java resolution oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import subprocess
 import sys
 

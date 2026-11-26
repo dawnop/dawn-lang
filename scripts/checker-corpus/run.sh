@@ -15,6 +15,9 @@
 # point: `cerr` appends, so the golden fails on a reordering that no assertion
 # about individual messages would see.
 set -euo pipefail
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/../.."
 here=scripts/checker-corpus
 

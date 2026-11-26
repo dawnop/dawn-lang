@@ -87,6 +87,9 @@ kind of finding appears or goes, not every night the same files are listed.
 
 import argparse
 import os
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import random
 import re
 import shutil

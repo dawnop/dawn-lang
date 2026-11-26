@@ -20,6 +20,9 @@
 # own": every package must have one.
 set -euo pipefail
 
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 cd "$(dirname "$0")/.."
 
 units=()

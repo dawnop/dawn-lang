@@ -15,6 +15,7 @@ import datetime as dt
 import functools
 import hashlib
 import os
+
 from pathlib import Path
 import platform
 import selectors
@@ -366,6 +367,8 @@ def benchmark_environment() -> tuple[dict[str, str], list[str]]:
             clean[key] = value
     clean["LANG"] = "C"
     clean["LC_ALL"] = "C"
+    # Allocator controls are cleared above; the emitter's chain is explicit.
+    clean["DAWN_SEED_CHAIN"] = "jar"
     return clean, sorted(removed)
 
 

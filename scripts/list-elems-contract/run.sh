@@ -27,6 +27,9 @@
 # mutant matrix cites), reduced to what one compiler build per sentence needs.
 set -euo pipefail
 
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/list-elems-contract"
 cases="$here/cases"

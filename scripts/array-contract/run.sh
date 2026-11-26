@@ -21,6 +21,9 @@
 #     at these sizes is milliseconds against minutes.
 set -euo pipefail
 
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/array-contract"
 

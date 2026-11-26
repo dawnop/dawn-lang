@@ -63,6 +63,9 @@
 #   ./scripts/native-cli-diff.sh              # builds the native driver
 #   DAWNC_BIN=/path/to/dawnc ./scripts/native-cli-diff.sh   # reuse one
 set -euo pipefail
+
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 

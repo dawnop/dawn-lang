@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 dawn="$root/bin/dawn"

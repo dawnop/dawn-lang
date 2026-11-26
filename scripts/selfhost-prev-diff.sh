@@ -89,6 +89,9 @@
 # to read; that line decides nothing. The pin sat at a72bfc9 (v0.59.0) from
 # 2026-08 until this check existed, three bumps behind.
 set -euo pipefail
+
+# JVM class emitter; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/.."
 
 CORPUS=none

@@ -90,6 +90,9 @@
 # rule is easy to state and was demonstrably not transferring: `gen_equality`
 # repeated the mistake thirty lines below a comment describing it.
 set -uo pipefail
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/../.." || exit 2
 DAWN=${DAWN_BIN:-./bin/dawn}
 DIR=scripts/opaque-twin

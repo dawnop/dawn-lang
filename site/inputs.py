@@ -225,6 +225,8 @@ def prepare(jdk):
         # Bootstrap here, never in build.sh or its children.
         (NATIVE / 'dawnc.stamp').unlink(missing_ok=True)
         env = dict(os.environ)
+        # D12-3 owns native preparation; this bootstrap consumes the JAR plan.
+        env['DAWN_SEED_CHAIN'] = 'jar'
         env.pop('DAWNC_BIN', None)
         def bootstrap_plan(project):
             return run([ROOT / 'bin/dawn', '__source-inputs', '--base', ROOT, project],

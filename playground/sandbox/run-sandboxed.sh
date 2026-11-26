@@ -122,6 +122,7 @@ exec systemd-run \
   --quiet --wait --pipe --collect \
   --unit="$unit" \
   --setenv="DAWN_JVM_OPTS=$SANDBOX_JVM_OPTS" \
+  --setenv="DAWN_SEED_CHAIN=jar" \
   --setenv="JAVA_HOME=$SANDBOX_JAVA_HOME" \
   --property=DynamicUser=yes \
   --property=PrivateNetwork=yes \

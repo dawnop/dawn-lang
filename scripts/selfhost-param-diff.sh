@@ -36,6 +36,9 @@
 # Runs as the fifth step of gates.yml's prev-diff job, after run-diff has
 # built ./bin/dawn, so the HEAD side costs one `doc --stdlib`.
 set -euo pipefail
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 . scripts/seedjar.sh

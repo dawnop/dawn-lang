@@ -12,6 +12,9 @@ script reads them from there and applies them in memory, still refusing a
 drifted one before it copies or builds anything.
 """
 import os
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import re
 import runpy

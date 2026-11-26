@@ -20,6 +20,9 @@
 # byte -- the same shape scripts/classfile-verify was caught in. K-B3 made it
 # switchable; scripts/native-cli-diff.sh sets it to the native binary.
 set -euo pipefail
+
+# JVM LSP regression and Java resolution oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/.."
 
 ROOT=$(pwd)

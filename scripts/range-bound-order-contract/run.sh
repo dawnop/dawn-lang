@@ -3,6 +3,9 @@
 # Every compiler runs the same assertions before its red set is classified.
 set -euo pipefail
 
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/range-bound-order-contract"
 probe="$root/scripts/spike-native/eval_order.dawn"

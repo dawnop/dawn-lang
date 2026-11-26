@@ -38,6 +38,9 @@
 # `--no-controls` runs step 1 only. The controls build the checker against two
 # mutated copies of the package and run it four more times.
 set -euo pipefail
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
 DAWN="${DAWN_BIN:-$ROOT/bin/dawn}"

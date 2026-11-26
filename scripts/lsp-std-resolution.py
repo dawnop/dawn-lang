@@ -29,6 +29,9 @@ Usage:  scripts/lsp-std-resolution.py [dawn-launcher]     (default ./bin/dawn)
 """
 import json
 import os
+
+# JVM LSP regression and Java resolution oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import shutil
 import subprocess
 import sys

@@ -34,6 +34,9 @@ matches exactly once, on every push and without building anything.
 """
 
 import os
+
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import runpy
 import shutil

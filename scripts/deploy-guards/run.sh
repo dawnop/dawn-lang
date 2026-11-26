@@ -89,6 +89,12 @@ mkrepo() {
     printf '%s' "$new" >"$f"
   fi
   printf '#!/bin/sh\necho "dawn 9.9.9 b1:aaaaaaaaaaaa (selfhost)"\n' >"$R/bin/dawn"
+  # Artifact identity behavior is tested against the real preflight verifier
+  # separately. Here only the deploy ordering and inherited selection matter.
+  cat >"$R/playground/deploy/preflight.py" <<'PY_STUB'
+import os
+assert os.environ.get('DAWN_SEED_CHAIN') == 'jar'
+PY_STUB
   printf 'pub const VERSION: String = "9.9.9"\n' >"$R/selfhost/src/version.dawn"
   cat >"$R/site/build.sh" <<'SH'
 #!/bin/sh

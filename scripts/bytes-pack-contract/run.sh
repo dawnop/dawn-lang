@@ -23,6 +23,9 @@
 # ByteBuffer loop) and the native one (dawn_rt.c) share no code.
 set -euo pipefail
 
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/bytes-pack-contract"
 cc_bin="${CC:-cc}"

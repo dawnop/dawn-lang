@@ -501,6 +501,9 @@
 # shellcheck disable=SC2016  # the refusals are Dawn source, quoted verbatim on purpose
 set -euo pipefail
 
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/tile-golden"
 kernels=(

@@ -18,6 +18,9 @@
 # and every examples/ program and project `__emit` accepts. An input it refuses
 # without `--map` (a module of a project, a fragment) is skipped.
 set -euo pipefail
+
+# JVM class emitter; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 dawn="${DAWN_BIN:-$root/bin/dawn}"
 

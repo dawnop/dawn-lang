@@ -126,6 +126,9 @@
 # that starts passing -- fix the defect and the line has to go with it.
 set -euo pipefail
 
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/spike-native"
 cc_bin="${CC:-cc}"

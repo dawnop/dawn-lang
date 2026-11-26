@@ -7,6 +7,14 @@
 # Prerequisites: SSH key loaded; JAVA_HOME set or a GraalVM under ~/tools;
 # DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) of the checkout this script is in.
 set -euo pipefail
+
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+case "${1:-}" in
+  '') preflight_only=0 ;;
+  --preflight) preflight_only=1 ;;
+  *) echo "usage: $0 [--preflight]" >&2; exit 2 ;;
+esac
 # The repo is resolved from this script's own location, never from $PWD (the
 # same rule as site/redeploy.sh, which learned it on 2026-10-08 when a `cd`
 # into a deleted worktree ran the script from the wrong checkout and shipped
@@ -38,7 +46,9 @@ fi
 cd "$repo"
 
 # Server login name is not committed (public repo); set DEPLOY_USER in your env.
-HOST="${DEPLOY_USER:?set DEPLOY_USER to the server login name}@dawnop.com"
+if [ "$preflight_only" = 0 ]; then
+  HOST="${DEPLOY_USER:?set DEPLOY_USER to the server login name}@dawnop.com"
+fi
 REMOTE=/opt/dawn
 NATIVE_BIN="${DAWN_NATIVE_BIN:-dawnc-linux-x86_64}"
 case "$NATIVE_BIN" in
@@ -119,6 +129,13 @@ case "$PLAY_NATIVE_HEALTH" in
     printf '%s\n' "$PLAY_NATIVE_HEALTH" >&2
     exit 1 ;;
 esac
+
+# The local preflight has no server credentials or connection. It checks full
+# identities independently of the short version strings used by the canary.
+python3 playground/deploy/preflight.py --native "$NATIVE_BIN" --runner "$PLAY_NATIVE_BIN"
+if [ "$preflight_only" = 1 ]; then
+  exit 0
+fi
 
 # The runner runs commands from the unit's default PATH. They are
 # coreutils and util-linux on any Ubuntu, but a minimal image can lack one, and

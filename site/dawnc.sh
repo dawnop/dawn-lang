@@ -39,6 +39,9 @@
 #
 # Everything this file builds lives in one directory, so CI caches one path and a
 # program added to site/native-progs.txt needs no new cache step.
+
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 site_native_dir=site/build/native
 site_native_progs=site/native-progs.txt
 

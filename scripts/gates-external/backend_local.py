@@ -475,7 +475,7 @@ class LocalBackend:
                 shutil.copytree(src, dst, symlinks=True)
         if action["with"].get("build", "true") == "false":
             return True, ""
-        code, _, _ = self._run_process(state, ["./bin/dawn", "--version"], dict(state["env"]),
+        code, _, _ = self._run_process(state, ["./bin/dawn", "--version"], dict(state["env"], DAWN_SEED_CHAIN="jar"),
                                        f"step-{number}.toolchain")
         return code == 0, f"./bin/dawn --version exited {code}"
 

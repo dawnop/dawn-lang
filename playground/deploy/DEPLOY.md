@@ -171,13 +171,30 @@ by hand, with the server reachable.
 ```sh
 ./scripts/release-native.sh -o dawnc-linux-x86_64  # or reuse the release asset
 ./dawnc-linux-x86_64 build playground -o dawn-play-linux-x86_64
-DEPLOY_USER=<server login> DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh
+DAWN_SEED_CHAIN=jar DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh --preflight
+DAWN_SEED_CHAIN=jar DEPLOY_USER=<server login> DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh
 scripts/play-live-check.py         # then verify what is actually deployed
 ```
 
 `redeploy.sh` syncs the toolchain, the gateway and the runner binary,
 restarts the gateway, holds the new runner to the live one (the canary),
 swaps it in and checks it through the socket.
+
+The source-side build and JAR version parsing explicitly select the JAR chain.
+`--preflight` runs only the local checks, without a login name or any server
+connection. It checks the current JAR against `selfhost`, compares JVM and
+native readers of the compiler's full build manifest, recomputes that manifest
+from the current portable source with the existing emitter, and checks the
+runner against the current `playground` project. It prints SHA-256 and full
+build IDs separately for all three products. This is a deployment check;
+release stage-B provenance still comes from the release metadata and receipt.
+
+The copied `bin/dawn` is a JVM-only shell launcher: every caller must set
+`DAWN_SEED_CHAIN=jar`; missing, empty, unknown or native selections fail before
+Python or Java is called. It runs the shipped JAR without Python, including
+on a Python 3.10 server. The runner service passes this selection to its
+children, and the sandbox explicitly passes it through its empty environment.
+The native compiler and native LSP continue to execute their own ELF directly.
 
 The redeploy's LSP health check is an end-to-end smoke, not only a systemd
 status: `deploy/lsp-smoke.py` performs the WebSocket handshake, initializes the

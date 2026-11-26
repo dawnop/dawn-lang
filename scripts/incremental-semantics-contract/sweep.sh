@@ -63,6 +63,9 @@
 # The selected JDK is also placed first on PATH for host-side harness commands.
 set -euo pipefail
 
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 SELF=$(cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")
 HERE=$(dirname -- "$SELF")
 ROOT=$(cd -- "$HERE/../.." && pwd)

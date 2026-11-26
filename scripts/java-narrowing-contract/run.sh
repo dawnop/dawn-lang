@@ -13,6 +13,9 @@
 # purpose, copy the line the failure prints into the file.
 set -euo pipefail
 
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 dawn=${DAWN_BIN:-"$root/bin/dawn"}
 here="$root/scripts/java-narrowing-contract"

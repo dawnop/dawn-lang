@@ -20,6 +20,9 @@
 # is gone, and with it the cases that were about it (its startup sweep and
 # its answer cache).
 set -e
+
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 # The Python entry validates the stable selector before any build or session.
 # Its child returns only after this shell's EXIT cleanup has completed.
 if [ "${1:-}" != --execute-selector ]; then
