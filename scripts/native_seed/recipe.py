@@ -8,13 +8,14 @@ import subprocess
 import tempfile
 
 import native_seed.contract as c
+from native_seed.probes import runner
 
 STAGE_OPTIONS = ('--qualification', '--static', '--inline-rc')
 
 
 def qualification_flags():
     script = Path(__file__).resolve().parents[1] / 'cc-units.sh'
-    result = subprocess.run(['/usr/bin/bash', str(script), '--print-qualification-flags'],
+    result = runner()(['/usr/bin/bash', str(script), '--print-qualification-flags'],
                             env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'},
                             capture_output=True, text=True, timeout=20)
     flags = result.stdout.splitlines()
@@ -48,8 +49,10 @@ def compiler_probe(cc, env, pinned=True):
               'cc-identity', 'an explicit executable compiler path is required')
     cc = cc.resolve()
 
+    run_query = runner()
+
     def query(flag):
-        result = subprocess.run([str(cc), flag], env=env, capture_output=True, timeout=20)
+        result = run_query([str(cc), flag], env=env, capture_output=True, timeout=20)
         c.require(result.returncode == 0 and not result.stderr,
                   'cc-identity', f'compiler probe failed: {flag}')
         return result.stdout.decode('utf-8').strip()

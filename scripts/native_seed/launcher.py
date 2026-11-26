@@ -8,6 +8,7 @@ not a qualification receipt or a release artifact.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 import os
 from pathlib import Path
 import platform
@@ -17,6 +18,7 @@ import tempfile
 
 from native_seed import builder, contract as c, inputs, lockchain, toolchain
 from native_seed.stat_cache import DigestCache, replace_json
+from native_seed.probes import Queries
 
 try:
     import fcntl
@@ -93,7 +95,7 @@ def verify(directory, expected, files, tc, repo, lock, marker=None, *, digest_ca
               'generation-receipt', 'chain receipt differs')
     chain_value = c.read_json(chain_path, raw=chain_raw)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        checking = pool.submit(builder.verify_receipt, chain_path, repo, lock,
+        checking = pool.submit(copy_context().run, builder.verify_receipt, chain_path, repo, lock,
                                directory / 'B/dawnc', directory / 'A/dawnc', require_c=False, live=True,
                                development_cc=expected['development_cc'],
                                snapshot={'commit': expected['commit'], 'tree': expected['tree'], 'files': files,
@@ -168,12 +170,17 @@ def generation(repo, fetch, cache=None):
         # launcher generations, including pinned clang, remain development.
         development_cc = str(Path(cc).resolve()) != '/usr/lib/llvm-18/bin/clang'
         live_paths = c.git(repo, 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
-        expected, files, tc, compilation = snapshot(repo, lock, frame, cc, development_cc, digest_cache=digests, git_cache=git_cache, live_paths=live_paths)
+        queries = Queries(digests, cc, pinned=not development_cc,
+                          allow_reuse=hint.exists(),
+                          driver_paths=[directory + '/' + name for name, directory in toolchain.DRIVER_INPUTS.items()])
+        with queries.activate():
+            expected, files, tc, compilation = snapshot(repo, lock, frame, cc, development_cc, digest_cache=digests, git_cache=git_cache, live_paths=live_paths)
         key = c.digest(c.canonical(expected))
         generations = c.safe_destination(cache / 'generations')
         generations.mkdir(exist_ok=True)
         directory = c.safe_destination(generations / key)
-        if not directory.exists():
+        cold = not directory.exists()
+        if cold:
             # A cold path always captures full bytes, irrespective of a hint.
             expected_full, files, tc, compilation = snapshot(repo, lock, frame, cc, development_cc, git_cache=git_cache)
             c.require(expected_full == expected, 'generation-inputs', 'cold inputs changed')
@@ -204,7 +211,12 @@ def generation(repo, fetch, cache=None):
             c.atomic_json(directory / 'committed.json', marker)
             (directory / 'committed.json').chmod(0o444)
             staging.rmdir()
-        receipt = verify(directory, expected, files, tc, repo, lock, digest_cache=digests, git_cache=git_cache, compilation=compilation, probe_cache=probe_cache)
+        if cold:
+            receipt = verify(directory, expected, files, tc, repo, lock, digest_cache=digests, git_cache=git_cache, compilation=compilation, probe_cache=probe_cache)
+        else:
+            with queries.activate():
+                receipt = verify(directory, expected, files, tc, repo, lock, digest_cache=digests, git_cache=git_cache, compilation=compilation, probe_cache=probe_cache)
+        queries.recheck()
         # Re-read control records and the external paired override immediately
         # before handing the verified executable to the caller.
         c.require(select(repo, fetch, git_cache=git_cache, digest_cache=digests, probe_cache=probe_cache)[-1] == frame, 'generation-inputs', 'seed controls changed during verification')

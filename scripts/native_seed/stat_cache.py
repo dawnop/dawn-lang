@@ -62,8 +62,9 @@ def replace_json(path, value):
 
 
 class DigestCache:
-    def __init__(self, entries=None, written_ns=0):
+    def __init__(self, entries=None, written_ns=0, probes=None):
         self.entries = entries or {}
+        self.probes = probes
         self.written_ns = written_ns
         self.observed = {}
         self.parents = set()
@@ -89,7 +90,9 @@ class DigestCache:
         payload_raw = raw[len(prefix):-len(suffix)]
         payload = value['payload']
         c.require(c.digest(payload_raw + b'\n') == value['sha256'], 'stat-cache', 'integrity digest differs')
-        c.fields(payload, 'schema generation written_ns entries', 'stat cache payload')
+        c.fields(payload, 'schema generation written_ns entries' + (' probes' if 'probes' in payload else ''), 'stat cache payload')
+        c.require(payload.get('probes') is None or type(payload['probes']) is dict,
+                  'stat-cache', 'invalid tool query record')
         c.require(payload['schema'] == 1 and payload['generation'] == generation and
                   type(payload['written_ns']) is int and payload['written_ns'] > 0 and
                   type(payload['entries']) is dict, 'stat-cache', 'invalid cache generation')
@@ -99,7 +102,7 @@ class DigestCache:
                       all(type(v) is int for v in row['key']), 'stat-cache', 'invalid stat key')
             c.sha(row['sha256'], 'stat cache entry')
             c.require(type(row['racy']) is bool, 'stat-cache', 'invalid race flag')
-        return cls(payload['entries'], payload['written_ns'])
+        return cls(payload['entries'], payload['written_ns'], payload.get('probes'))
 
     def read(self, path, status=None):
         path = os.path.abspath(path)
@@ -181,9 +184,17 @@ class DigestCache:
         written_ns = time.time_ns()
         entries = {path: dict(row, racy=row['racy'] or row['key'][3] >= written_ns - GRAIN_NS)
                    for path, row in self.entries.items() if path in self.observed}
+        probes = self.probes
+        if probes is not None:
+            rows = [probes['binding']['clang'], *probes['binding']['files'].values(),
+                    *probes['binding']['gcc'].values(),
+                    *(row['stat'] for row in probes['binding']['directories'].values())]
+            probes = dict(probes, racy=probes['racy'] or any(row['key'] is not None and
+                          row['key'][3] >= written_ns - GRAIN_NS for row in rows))
         payload = {'schema': 1, 'generation': generation, 'written_ns': written_ns,
-                   'entries': entries}
+                   'entries': entries, 'probes': probes}
         replace_json(path, {'payload': payload, 'sha256': c.digest(c.canonical(payload))})
         self.entries = entries
+        self.probes = probes
         self.written_ns = written_ns
         self.changed = False

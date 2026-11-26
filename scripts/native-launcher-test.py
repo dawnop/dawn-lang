@@ -17,7 +17,7 @@ import tempfile
 import time
 from unittest.mock import patch
 
-from native_seed import builder, contract as c, inputs, launcher, provenance, stat_cache, test_support, toolchain
+from native_seed import builder, contract as c, inputs, launcher, probes, provenance, stat_cache, test_support, toolchain
 
 ROOT = Path(__file__).resolve().parents[1]
 MUTANT = sys.argv[2] if sys.argv[1:2] == ['--mutant'] else None
@@ -39,6 +39,19 @@ if MUTANT == 'racy':
             row['racy'] = False
         return loaded
     stat_cache.DigestCache.load = classmethod(unracy)
+if MUTANT in ('probe-clang', 'probe-gcc', 'probe-recipe'):
+    ignored = MUTANT.removeprefix('probe-')
+    probes.same_binding = lambda left, right: ({k: v for k, v in left.items() if k != ignored} ==
+                                               {k: v for k, v in right.items() if k != ignored})
+if MUTANT == 'probe-racy':
+    probes.Queries.is_racy = lambda *args: False
+    original_probe_load = stat_cache.DigestCache.load.__func__
+    def clean_probes(cls, *args):
+        loaded = original_probe_load(cls, *args)
+        if loaded.probes is not None:
+            loaded.probes['racy'] = False
+        return loaded
+    stat_cache.DigestCache.load = classmethod(clean_probes)
 if MUTANT == 'cache-integrity':
     original_require = c.require
     c.require = lambda ok, code, detail: None if code == 'stat-cache' else original_require(ok, code, detail)
@@ -389,9 +402,11 @@ def main():
         live_inputs(work)
         from native_seed.stat_cache_test import run as stat_controls
         stat_controls(work)
+        from native_seed.probes_test import run as probe_controls
+        probe_controls(work)
         caches(work)
     if '--selftest' in sys.argv:
-        for mutant in ('java', 'dirty', 'fallback', 'marker', 'elf', 'locking', 'ctime', 'racy', 'cache-integrity'):
+        for mutant in ('java', 'dirty', 'fallback', 'marker', 'elf', 'locking', 'ctime', 'racy', 'cache-integrity', 'probe-clang', 'probe-gcc', 'probe-recipe', 'probe-racy'):
             run = subprocess.run([sys.executable, '-B', __file__, '--mutant', mutant],
                                  capture_output=True, text=True, timeout=60)
             assert run.returncode != 0 and ('AssertionError' in run.stderr), mutant + ' survived\n' + run.stdout + run.stderr
