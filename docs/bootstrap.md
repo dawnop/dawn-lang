@@ -91,7 +91,7 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
    `scripts/repo.env` 的 `DAWN_GITHUB_REPO` 一行；仓库换组织时改这一行，信任仍由摘要表决定，
    与 URL 无关。
    推进完成后接着部署，同样以这个 tag 为准：在 tag 的检出上先跑
-   `DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh`，再跑 `DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) DAWN_SITE_PLAY_ORIGIN=https://play.dawnop.com DAWN_WASM_CC=clang-20 ./site/redeploy.sh`。
+   `DAWN_SEED_CHAIN=jar DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh`，再跑 `DAWN_SEED_CHAIN=jar DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) DAWN_SITE_PLAY_ORIGIN=https://play.dawnop.com DAWN_WASM_CC=clang-20 ./site/redeploy.sh`。
    站点曾因部署与发版脱钩，在 v0.78.0 已拒绝 `$name` 插值后仍教了三周旧写法。
    下面的链条表记的是**种子形态变过的那几环**，不是每一次 bump——每次 bump 的记录
    就是上述三文件和它们的提交，再抄一遍只会过期（这张表一度写着「逐条记」，却停在
@@ -161,7 +161,7 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
    三组重链配对 3/3、至少七个有 push 样本日且十次成功 main push 经过 native 路径、归因失败零，以及五项演练。
    拟晋级 B 自身须 seed-promotion 资格与独立 verify；receipt 输入 lock 不得要求等于含该 receipt 摘要的未来 lock，
    final-inputs 证据不反写正在资格的 lock。VERSION、initial/set-chain、原型删除、merge/rebase 改变绑定身份时重核/重跑，
-   不手改 receipt 或复用旧 sha 证明。补裁一要求 P4 合并删除原型，若前移须另裁；删除后的真实发布输入也必须资格。
+   不手改 receipt 或复用旧 sha 证明。补裁五第 4 条已将原型删除前移至 pre3；删除后的真实发布输入也必须资格。
 9. **发布与晋级**：P3 放行后才能真正 P4 默认切换与 v0.107.0 九件封存；tag 的 B、full build id、commit、lock、proof
    冷下载聚合核对，无 Java 安装 hello，同 tag 重跑只验证。发布 B 与已资格候选 B/tag/配对树完全相符才复用其
    seed-promotion receipt，否则重跑；再 promote 与安排 JAR 推进。任一配对失败、native 归因失败、固定点或来源身份不符，

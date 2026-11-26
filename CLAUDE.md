@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 这是什么
 
-**Dawn** —— 一门自制语言，编译到 JVM 字节码（也能经 GraalVM 出 native 二进制）。
+**Dawn** —— 一门自制语言，有 JVM 字节码与 Core IR → C → ELF 两个后端。
 编译器**已自举且只此一套**：`selfhost/` 用 Dawn 写成（词法到 codegen + LSP），
-从上一 release 的种子 jar 自举；最初的 Kotlin 实现归档在 `kotlin-final` tag。
+JAR 链从上一 release 的种子 JAR 自举；native 链从配对 std/runtime 的已资格 ELF 自举。
+源码 native 启动器构建 S→A→B 并执行当前 B，release/资格再构建 C 验 B==C；默认仍 jar。
+最初的 Kotlin 实现归档在 `kotlin-final` tag。
 它不是玩具：同作者的 [dawnop-site](https://github.com/dawnop/dawnop-site)
 整个生产后端（博客 + 网盘 + WebDAV）100% 跑在它编出来的代码上。
 
@@ -56,8 +58,8 @@ parser 靠首字母大小写消歧（`TYPEIDENT` 是独立 token），所以改�
 
 ```bash
 ./bin/dawn --version                     # 首次自动拉种子并重建工具链
-./bin/dawn test selfhost                 # 编译器主体测试
-./bin/dawn test compiler-plan            # 独立 Planner/manifest 测试
+DAWN_SEED_CHAIN=jar ./bin/dawn test selfhost       # 编译器主体 JVM 测试
+DAWN_SEED_CHAIN=jar ./bin/dawn test compiler-plan  # 独立 Planner/manifest 测试
 ./bin/dawn run examples/data/shapes.dawn      # 单文件
 ./bin/dawn run examples/projects/hello_mod     # 多模块项目
 ./bin/dawn test site                     # 站点生成器的 Dawn 测试
@@ -71,10 +73,14 @@ parser 靠首字母大小写消歧（`TYPEIDENT` 是独立 token），所以改�
 ./scripts/selfhost-lsp-diff.sh           # LSP 会话对拍 vs 上一 release
 ```
 
-> `bin/dawn` 需要 JDK 21。没设 `JAVA_HOME` 时它会在 `~/tools/graalvm-*` 里找
-> （macOS 的 `Contents/Home` 与 Linux 的顶层 `bin/` 两种布局都试）。
-> 种子 = `scripts/seed-release.txt` 钉住的 release 的 `dawn-selfhost.jar`，
-> 缓存在 `.dawn/seeds/`；离线或调试用 `DAWN_SEED=<jar>` 指本地 jar。
+> 源码 `bin/dawn` 需要 Python 3.11+；lock 的 `chain` 决定默认，
+> `DAWN_SEED_CHAIN=jar|native` 显式覆盖。jar 需要 JDK 21；没设 `JAVA_HOME` 时在
+> `~/tools/graalvm-*` 找。JAR 种子由 `scripts/seed-release.txt` 钉住，缓存于 `.dawn/seeds/`；
+> `DAWN_SEED=<jar>` 可覆盖。native 要求 Linux x86_64 与 C 工具链，不探测 Java；
+> 覆盖 ELF 须完整配对，见 [bootstrap.md](docs/bootstrap.md)。两链之间不自动回退。
+> JVM 后端、build-to-jar、Java deps、lock 与 Java 类型解析 LSP 必须显式选 jar。
+> 无源码 bin/ 加 build/ 部署是 JVM-only，调用者必须选 jar，启动不调用 Python；
+> installer 安装的 `bin/dawn` 则直接是发布 B ELF。
 
 ## 目录结构
 
@@ -168,20 +174,23 @@ release）、`selfhost-run-diff.sh`（CLI 转写）、`selfhost-fmt-diff.sh`（�
 
 ## 发布与跨仓契约
 
-版本在 `selfhost/src/version.dawn` 的 `VERSION`。发布 = 改它 → 提交 →
-`git push origin main` 并等 main CI 通过 → `git tag v0.9.0` →
-`git push origin refs/tags/v0.9.0`；禁止 `git push --tags`，避免顺手发布无关 tag。
-`release.yml` 在 tag 上调用唯一配方
-`scripts/build-release-jar.sh -o dawn-selfhost.jar` 重建种子→A→B→C 链，验证 B==C
-闭包，并精确核对源码版本、tag 与 artifact 输出后发上 GitHub Release。
-**release 即下一个种子**：四件资产发布完成后运行
-`./scripts/advance-seed.sh v0.9.0`，由它从 GitHub Release 获取 JAR、从远端 tag archive
-获取 std，再依次推进 `seed-checksums.txt`、`seed-std-checksums.txt`、
-`seed-release.txt`，不得手改其中之一。
+版本在 `selfhost/src/version.dawn` 的 `VERSION`。D12-2 当前处于前置开发，
+**P3 未放行前禁止正式 tag**；pre0/pre1/pre2/pre3 不切默认。0.107.0 的版本准备必须在
+最终输入冻结前完成，不能在资格后临时 bump。P3 要求最终输入资格、拟晋级 B 自身的种子资格与
+独立 verify、三组重链配对、七个有样本日且至少十次成功 main push 的 native 归因失败零及演练。
+具体条件见 [native-seed-cutover-design.md](docs/native-seed-cutover-design.md) §13。
+放行后提交并等 main CI 通过，再推精确 tag ref（`git push origin refs/tags/<tag>`）；
+禁止 `git push --tags`。`release.yml` 并行执行 native S→A→B→C 与双 JDK JAR reference，
+各验 B==C；JAR 唯一配方仍为 `scripts/build-release-jar.sh`。producer 核完整 chain receipt、
+来源、实际工具链与资格，发布九件/schema 2 资产；已发布资产不可覆盖。
+**发布不等于自动晋级**：native 通过 `scripts/advance-native-seed.py promote <tag>`
+核被晋级 B 的资格、配对树与 lock/history/revoked；JAR 另用 `./scripts/advance-seed.sh <tag>`
+依次推进 `seed-checksums.txt`、`seed-std-checksums.txt`、`seed-release.txt`，不得手改记录。
 仓库名（`DAWN_GITHUB_REPO`）与站点源（`DAWN_SITE_ORIGIN`）只写在 `scripts/repo.env`：
 脚本 source 它或经 `scripts/repo_env.py` 读，`check-no-server-identity.py` 拦新的硬编码。
 **部署随发版**：advance-seed 之后，在该 tag 的检出上先部署 Playground、再部署站点：
-`DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh` → `DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) DAWN_SITE_PLAY_ORIGIN=https://play.dawnop.com DAWN_WASM_CC=clang-20 ./site/redeploy.sh`。
+`DAWN_SEED_CHAIN=jar DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh` → `DAWN_SEED_CHAIN=jar DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) DAWN_SITE_PLAY_ORIGIN=https://play.dawnop.com DAWN_WASM_CC=clang-20 ./site/redeploy.sh`。
+部署前可用 `playground/deploy/redeploy.sh --preflight` 离线核当前 JAR、native compiler 与 runner 的完整身份。
 站点与 Playground 以 tag 为准，不以 main 为准；顺序反了，侧栏样例会交给拒绝它的旧 runner
 （见 `playground/deploy/DEPLOY.md`），漏带 `DAWN_WASM_CC` 则 Demo 与全站搜索的 wasm 是占位。
 `selfhost/src` 只准用当前种子已支持的语言特性（机器强制：种子编不动 HEAD 就红）——
