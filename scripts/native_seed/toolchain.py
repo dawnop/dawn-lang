@@ -112,7 +112,7 @@ def warm(cc, baseline, dependencies, pinned, digest_cache):
         return None
     rows = {row['path']: row['sha256'] for row in baseline['inventory']}
     for path in [*programs, *driver['files'].values(), *(path for group in closures for path in group)]:
-        if c.digest(digest_cache.read(digest_cache.resolve(path))) != rows.get(path.lstrip('/')):
+        if c.digest(digest_cache.read(digest_cache.resolve(path))) != rows.get(os.path.normpath(path).lstrip('/')):
             session.restart()
             return None
     session.finish(paths, session.directories)

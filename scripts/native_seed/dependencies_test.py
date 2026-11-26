@@ -7,6 +7,7 @@ controls reject an incomplete depfile or search-directory implementation.
 import os
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from native_seed import contract as c
@@ -66,3 +67,33 @@ def run(work):
         assert not dependencies.unchanged(record, DigestCache(written_ns=prior.st_mtime_ns)), \
             'a racy directory reused its old member set'
     print('OK racy directory metadata still checks the member digest')
+    # ldd can spell the same library through a compiler-relative ../lib path.
+    # Exercise the entire warm branch so a false miss cannot hide behind the
+    # launcher's full-capture fallback in its protocol fixture.
+    from native_seed import toolchain
+    cc, library = root / 'clang', root / 'library.so'
+    cc.write_bytes(b'private compiler')
+    library.write_bytes(b'private library')
+    alias = str(first / '../library.so')
+    programs = [str(cc), '/usr/bin/ld.bfd', '/bin/sh', '/bin/bash']
+    probe = {'executable': str(cc)}
+    driver = {'files': {'private': str(library)}}
+    baseline = {'compiler': probe, 'driver': driver, 'linker': {'version': 'GNU ld fixture'},
+                'inventory': [{'path': path.lstrip('/'), 'sha256': c.digest(Path(path).read_bytes())}
+                              for path in [*programs, str(library)]]}
+    def query(argv, **kwargs):
+        output = 'GNU ld fixture\n' if argv[0] == '/usr/bin/ld.bfd' else ' lib => ' + alias + '\n'
+        return subprocess.CompletedProcess(argv, 0, stdout=output, stderr='')
+    def restarted():
+        raise AssertionError('valid dependency paths fell back to full capture')
+    session = SimpleNamespace(reuse=True, run=query, restart=restarted, directories=[],
+                              paths=[*programs, '/usr/bin/ldd', '/etc/ld.so.cache', '/etc/ld.so.preload',
+                                     str(library), alias], finish=lambda *args: None)
+    token = toolchain.ACTIVE.set(session)
+    try:
+        with patch.object(toolchain, 'TOOLS', ()), patch.object(toolchain, 'compiler_probe', return_value=probe), \
+             patch.object(toolchain, 'driver_inputs', return_value=driver):
+            assert toolchain.warm(str(cc), baseline, dependencies.record([], []), False, DigestCache()) == baseline
+    finally:
+        toolchain.ACTIVE.reset(token)
+    print('OK compiler-relative ldd paths retain the validated warm branch')
