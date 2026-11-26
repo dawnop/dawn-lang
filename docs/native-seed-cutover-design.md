@@ -1014,7 +1014,7 @@ JAR 侧最终执行当前 `build/dawn-selfhost.jar`，JAR generation/stamp 由�
 | `scripts/jvm-map/run.py:35` | 46 | JVM `__emit`/class 输出 | `jar` |
 | `scripts/lex-properties/run.py:69` | 458 | JVM CLI oracle | `jar` |
 | `scripts/lsp-decl-pairing.py:43` | 37, 50 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
-| `scripts/lsp-framing.py:19` | 9, 663 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
+| `scripts/lsp-framing.py:19` | 9, 799 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
 | `scripts/lsp-lifecycle.py:15` | 8, 292 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
 | `scripts/lsp-liveness.py:59` | 50, 651 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
 | `scripts/lsp-references-workspace.py:39` | 26, 372 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
