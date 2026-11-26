@@ -153,12 +153,13 @@ class DigestCache:
         c.fields(index, 'payload sha256', 'compact stat index')
         payload = index['payload']
         c.fields(payload, 'schema generation written_ns entries probes full_sha256', 'compact stat index payload')
-        payload_raw = c.canonical(payload)
+        index_raw = raw[len(b'{"index":'):len(text[:end].encode('utf-8'))]
+        index_prefix = b'{"payload":'
+        index_suffix = b',"sha256":' + c.canonical(index['sha256'])[:-1] + b'}'
+        c.require(index_raw.startswith(index_prefix) and index_raw.endswith(index_suffix),
+                  'stat-cache', 'invalid compact index envelope')
+        payload_raw = index_raw[len(index_prefix):-len(index_suffix)] + b'\n'
         c.require(index_integrity(payload_raw, index['sha256']), 'stat-cache', 'compact index integrity differs')
-        index_raw = (b'{"payload":' + payload_raw[:-1] + b',"sha256":' +
-                     c.canonical(index['sha256'])[:-1] + b'}')
-        c.require(raw[len(b'{"index":'):len(text[:end].encode('utf-8'))] == index_raw,
-                  'stat-cache', 'noncanonical compact index')
         prefix = b'{"index":' + index_raw + b',"index_sha256":' + c.canonical(index['sha256'])[:-1] + b',"payload":'
         suffix = b',"sha256":' + c.canonical(payload['full_sha256'])[:-1] + b'}\n'
         c.require(full_link(raw, prefix, suffix, payload['full_sha256']),

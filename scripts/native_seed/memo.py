@@ -20,12 +20,17 @@ class Memo:
         self.lock = Lock()
 
     def run(self, key, compute):
+        namespace, raw, *context = key
+        # This bucket is only a lookup accelerator. Reuse still compares every
+        # byte, including the middle, before accepting an existing computation.
+        bucket = (namespace, len(raw), raw[:32], raw[-32:], *context)
         with self.lock:
-            future = self.values.get(key)
+            entries = self.values.setdefault(bucket, [])
+            future = next((value for known, value in entries if known == raw), None)
             owner = future is None
             if owner:
                 future = Future()
-                self.values[key] = future
+                entries.append((raw, future))
         if not owner:
             return future.result()
         try:

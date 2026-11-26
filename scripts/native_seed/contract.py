@@ -21,6 +21,8 @@ HISTORICAL_COMMIT = '8068f0ba3ffaaabfcf10e103e375da678dbb15b6'
 HISTORICAL_SHA = 'e1506ef0aee7978a00fa07a0c2eebe565a2a35fc788128590d6106baeaf0186f'
 HISTORICAL_SIZE = 13800672
 HISTORICAL_BUILD_ID = 'b1:158ec8003d1d7a1b9d30943aad1d9f04440d65df96e9481d8ad73b16e8a6ebf1'
+SHA_PATTERN = re.compile('[0-9a-f]{64}')
+CONTROL_PATTERN = re.compile(r'[\x00-\x1f\x7f]')
 
 
 class Rejected(ValueError):
@@ -33,8 +35,13 @@ def require(ok, code, detail):
 
 
 def fields(value, names, label):
-    require(type(value) is dict and set(value) == set(names.split()),
-            'schema', f'{label}: expected fields {names}')
+    if not (type(value) is dict and set(value) == _field_names(names)):
+        require(False, 'schema', f'{label}: expected fields {names}')
+
+
+@lru_cache(maxsize=128)
+def _field_names(names):
+    return frozenset(names.split())
 
 
 def digest(value):
@@ -47,8 +54,8 @@ def digest(value):
 
 
 def sha(value, label):
-    require(type(value) is str and re.fullmatch('[0-9a-f]{64}', value),
-            'schema', f'{label}: invalid SHA-256')
+    if not (type(value) is str and SHA_PATTERN.fullmatch(value)):
+        require(False, 'schema', f'{label}: invalid SHA-256')
 
 
 def oid(value, label):
@@ -57,16 +64,18 @@ def oid(value, label):
 
 
 def logical(path):
-    require(type(path) is str, 'source-path', 'logical path must be text')
+    if type(path) is not str:
+        require(False, 'source-path', 'logical path must be text')
     return _logical(path)
 
 
 @lru_cache(maxsize=65536)
 def _logical(path):
-    require(type(path) is str and path and not path.startswith('/') and
+    valid = (type(path) is str and path and not path.startswith('/') and
             all(x not in ('', '.', '..') for x in path.split('/')) and
-            '\\' not in path and re.search(r'[\x00-\x1f\x7f]', path) is None,
-            'source-path', f'unsafe logical path: {path!r}')
+            '\\' not in path and CONTROL_PATTERN.search(path) is None)
+    if not valid:
+        require(False, 'source-path', f'unsafe logical path: {path!r}')
     path.encode('utf-8', errors='strict')
     return path
 
@@ -77,10 +86,13 @@ def canonical(value):
 
 
 def no_duplicates(pairs):
-    result = {}
-    for key, value in pairs:
-        require(key not in result, 'schema', f'duplicate JSON key: {key}')
-        result[key] = value
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        seen = set()
+        for key, _ in pairs:
+            if key in seen:
+                require(False, 'schema', f'duplicate JSON key: {key}')
+            seen.add(key)
     return result
 
 
@@ -255,6 +267,7 @@ def probe_seed(data, version=None, infer_version=False, probe_cache=None, scope=
     version = version or 'dawnc 0.104.0 (native)'
     memo = VALIDATION_MEMO.get()
     if memo is not None:
+        data = bytes(data)
         return memo.run(('seed-probe', data, version, infer_version, scope),
                         lambda: _probe_seed(data, version, infer_version, probe_cache))
     return _probe_seed(data, version, infer_version, probe_cache)
@@ -349,10 +362,16 @@ def _inventory_sha(rows):
         else:
             require(row['size'] == 0 and row['sha256'] is None and not row['executable'],
                     'schema', 'invalid missing record')
-        for field in (path, row['kind'].encode('ascii'), str(row['size']).encode('ascii'),
-                      (row['sha256'] or '').encode('ascii'), b'1' if row['executable'] else b'0'):
-            h.update(len(field).to_bytes(8, 'big'))
-            h.update(field)
+        kind = row['kind'].encode('ascii')
+        size = str(row['size']).encode('ascii')
+        checksum = (row['sha256'] or '').encode('ascii')
+        executable = b'1' if row['executable'] else b'0'
+        # The wire bytes remain the same five length-prefixed fields.
+        h.update(b''.join((len(path).to_bytes(8, 'big'), path,
+                           len(kind).to_bytes(8, 'big'), kind,
+                           len(size).to_bytes(8, 'big'), size,
+                           len(checksum).to_bytes(8, 'big'), checksum,
+                           len(executable).to_bytes(8, 'big'), executable)))
     return h.hexdigest()
 
 
