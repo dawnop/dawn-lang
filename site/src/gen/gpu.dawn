@@ -607,7 +607,8 @@ pub fn read_ledgers() -> List[Ledger] !Fs = {
 ## a rule that can be checked against the files rather than by a list:
 ##
 ##   - scripts/tile-golden/run.sh lists its mutants (`mutants=(`), each run in
-##     an `if run_item <name>; then` block. A block that goes through
+##     an `if run_item <name>; then` block, directly or in a static `for m`
+##     list guarded by `if run_item "$m"; then`. A block that goes through
 ##     `writer_mutant_checks` or hands the mutant's bytecode to `tileiras`
 ##     (`if [ -n "$tileiras" ]`) is proving the assembler's net: gate 1. The
 ##     rest are red in the text or at trace time: gate 0. (A gate-1 mutant's
@@ -643,7 +644,33 @@ pub fn golden_mutants(run_sh: String) -> List[String] = {
 ## A complete block may put its command and closing `fi` on the header line.
 pub fn golden_gate(run_sh: String, name: String) -> Result[Int, String] =
   match str.split_once(run_sh, "\nif run_item ${name}; then") {
-    None -> Err("scripts/tile-golden/run.sh lists `${name}` and runs no block for it")
+    None -> {
+      # A literal loop uses the same selected block for each listed mutant.
+      # Keep the surrounding harness so helper checks still read their body.
+      for part in list.drop(str.split(run_sh, "\nfor m in "), 1) {
+        match str.split_once(part, "; do\n") {
+          Some((names, rest)) -> {
+            let members = filter(str.split(str.replace(names, "\t", " "), " "), n => n != "")
+            if list.contains(members, name) {
+              match str.split_once(rest, "\ndone\n") {
+                Some((guarded, _after)) -> {
+                  match str.strip_prefix(guarded, "  if run_item \"\$m\"; then\n") {
+                    Some(body) -> match str.strip_suffix(body, "\n  fi") {
+                      Some(block) -> return golden_gate(run_sh ++ "\nif run_item ${name}; then\n${block}\nfi\n", name)
+                      None -> ()
+                    }
+                    None -> ()
+                  }
+                }
+                None -> ()
+              }
+            }
+          }
+          None -> ()
+        }
+      }
+      Err("scripts/tile-golden/run.sh lists `${name}` and runs no block for it")
+    }
     Some((_a, after)) -> {
       let block =
         if str.starts_with(after, "\n") {
@@ -2049,6 +2076,24 @@ test "compact gate blocks end on their own line and keep their exact selector" {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e, "runs no block") }
   }
+}
+
+test "literal mutant loops keep their selector and closing guard" {
+  let loop = "\nfor m in fa-tail-no-mask fa-tail-q-roundup; do\n  if run_item \"\$m\"; then\n    gemm_mutant \"\$m\" flash_bf16_tail\n  fi\ndone\n"
+  for name in ["fa-tail-no-mask", "fa-tail-q-roundup"] {
+    assert golden_gate(loop, name) == Ok(0)
+  }
+  for broken in [str.replace(loop, "\ndone\n", "\n"), str.replace(loop, "run_item \"\$m\"", "run_item other")] {
+    match golden_gate(broken, "fa-tail-no-mask") {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert str.contains(e, "runs no block") }
+    }
+  }
+  match golden_gate(loop, "fa-tail-no-mask-extra") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "runs no block") }
+  }
+  assert golden_gate(str.replace(loop, "gemm_mutant ", "writer_mutant_checks "), "fa-tail-no-mask") == Ok(1)
 }
 
 test "numeric writer controls follow the checked helper at the assembly gate" {
