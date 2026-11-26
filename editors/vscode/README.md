@@ -28,8 +28,11 @@ settings to the absolute path of the executable. The extension runs
 `<dawn.lspPath>` with `dawn.lspArgs` followed by `lsp`, and speaks LSP over stdio.
 The default settings run the installed native command as `dawn lsp`.
 
-To use a checkout's JVM bootstrap driver, set `dawn.lspPath` to its absolute
-`bin/dawn` path and leave `dawn.lspArgs` empty. To use a release JAR explicitly:
+To use a checkout, set `dawn.lspPath` to its absolute `bin/dawn` path and leave
+`dawn.lspArgs` empty. Its chain comes from the seed lock, currently JAR by default.
+For Java-aware sessions, use a wrapper that exports `DAWN_SEED_CHAIN=jar` and
+executes that launcher (see [editor setup](../README.md)); set `dawn.lspPath` to
+the wrapper. To use a release JAR explicitly:
 
 ```json
 {
@@ -51,8 +54,8 @@ version the server reports. If that is not the `dawn` you meant, the setting is 
 this window does not read (another profile, or another folder's workspace
 settings) or names a file that does not exist.
 
-Installed `dawn` is the native C backend and refuses `use java`. The checkout
-driver and explicit JAR run on the JVM and support Java interop.
+Installed `dawn` is the native C backend and refuses `use java`. An explicitly
+selected source JAR chain or release JAR runs on the JVM and supports Java interop.
 
 ## Settings
 
