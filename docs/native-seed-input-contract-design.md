@@ -23,15 +23,16 @@ toolchain 摘要及 cold 状态分组，保留失败/取消/截尾和事故组�
 不足或仍有未解释残差时维持未通过，不先改声明使观测转绿。生产期重链频率与
 托管预算另裁，现有 native-fixpoint 和 native-cli-diff 义务继续保留。
 
-schema2 仅在 `scripts/native-seed-prototype/` 演练 producer、installer 与聚合身份，
-其输出只写调用者的新目录。builder 明确是实际发射 B 的 A，bootstrap seed 为 S，
+K5 时 schema 2 只在隔离原型演练 producer、installer 与聚合身份。P1 已迁入
+`scripts/native_release.py`、`scripts/install-native.py` 与 `scripts/release-protocol-test.py`；
+pre3 删除原型，不保留兼容入口。下述原型判据是当时验收记录。builder 明确是实际发射 B 的 A，bootstrap seed 为 S，
 native 为 B；显式 JVM 类型臂可演练，但不能当 native 资格。安装只验证自己取得
 的 B、sidecar 和 metadata，不下载/执行 A、JAR 或编译链，不声称独立证明来源。
 proof 绑定独立角色字段并排除 metadata 的 proof 引用，禁止循环摘要；模拟第九件报告与资产不可覆盖仅在
 隔离目录验证。schema1、未知 kind、JAR/ELF 混名、错 stage/target/lineage、重复
 JSON key、坏摘要必须拒绝，安装失败保留旧文件，原型重发不能覆盖同 tag bytes。
 
-不改生产 `release-native.sh`、`install-native.py`、`release.yml` 或八件资产合同，
+K5 当时不改生产 `release-native.sh`、`install-native.py`、`release.yml` 或八件资产合同，
 因为资格授权不含 P。不开 schema1 自动兼容，不把旧 seed 的版本改写成当前版本，
 不发布 A，不把同源双链称为 DDC。不把重链塞进 prev-diff-native 的 900 秒，
 因为它已有独立职责与预算；不把一次性真实负控搬到每 push，因为其编译成本违背
@@ -69,8 +70,6 @@ python3 -B scripts/native-seed-qualify.py run --lock /prepared/seed-input.json -
   --toolchain /prepared/toolchain --java21 /jdk21/bin/java --java26 /jdk26/bin/java \
   --seed-cache /prepared/jvm-seeds --out /qualification/new-run
 python3 -B scripts/native-seed-qualify.py verify --lock /prepared/seed-input.json --commit FULL_COMMIT --out /qualification/new-run
-python3 -B scripts/native-seed-prototype/rehearse.py rehearse \
-  --package /qualification/new-run --out /prototype/new-run
 ```
 
 资格原因还包括 `initial-seed` 和 `seed-promotion`；调用者须提供已验证的离线材料，
@@ -80,6 +79,9 @@ python3 -B scripts/native-seed-prototype/rehearse.py rehearse \
 相关 inputs 至少包括 selfhost、compiler-plan、packages、std、runtime、内嵌
 生成器、native seed/recipe/runner/verifier、C 工具链、隔离审计、JVM seed/build/
 replay 及发布协议；其中任一变化后在最终提交跑资格，不按中间 push 次数重跑。
+
+生产协议现用 `python3 -B scripts/release-protocol-test.py` 核 producer、聚合与安装拒绝边界；
+实际 release 的三阶段链与九件资产合同见 [native-seed-cutover-design.md](native-seed-cutover-design.md) §11、§14。
 
 CI 观测复用 `scripts/gate-observations.py` 的原始 attempt/job/step 数据；轻步骤
 单独读 Actions 时间戳，准备与编译次数另计。资格入口可由明确的 CI 资格任务执行，

@@ -27,7 +27,7 @@
   （[bootstrap.md](bootstrap.md)「种子推进协议」）。
 - **native 侧只有隔离资格**：`scripts/native_seed/`（K1-K4 资格工具）、
   `scripts/native-seed-candidate-v0.104.0.json`（`state=candidate`、`sequence=0`、lineage 全 null、
-  `registration.metadata=absent`）和 `scripts/native-seed-prototype/`（schema 2 的 producer、聚合、installer
+  `registration.metadata=absent`）和 P0 的隔离 schema 2 原型（schema 2 的 producer、聚合、installer
   原型，共 419 行，只写调用者的新目录）。K5 在最终输入 `f68940f4...` 上证明了双 root 冷链 B/C 一致、
   Java exec=0、外网 syscall=0，原型 26 项拒绝控制通过（出处：K5 交付记录与
   [native-seed-input-contract-design.md](native-seed-input-contract-design.md)）。
@@ -470,7 +470,7 @@ D12-3（站点 prepare 去 JVM）在 P4 之后另起设计页，不并入 P，P2
 6. **P4 起 release 内 native 链的并行与 timeout**：P1 演练实测后按 3 倍实测定，写入 Gate-Budget。
 7. **`proof.qualification_sha256`** 取 lock 引用的种子资格 receipt（与第 2 条一致）。
 8. **`jdk_equivalence_sha256`** 由 release 内既有 JDK21/26 比对产生。
-9. **`scripts/native-seed-prototype/`** 在 P4 合并时删除，不留兼容（不做兼容层原则）。
+9. **P0 的隔离 schema 2 原型** 按补裁五第 4 条前移至 pre3 删除，不留兼容。
 10. 本页状态由 P1 写者在第一个提交里写回以上裁定并改为 accepted（本节即是）。
 
 ## 11. P1 实测与落地记录（2026-11-25）
@@ -694,7 +694,7 @@ pre3 的完成证据须包含扩展后的全量调用表及未迁入口为零的
 → 满足门槛才切默认并发布 → 冷下载对账与晋级 → P5 长期预算收口；D12-3 另起设计。
 
 `initial`、`set-chain`、VERSION、原型删除、merge/rebase 都可能改变当前协议绑定的 commit/tree。
-补裁五已把 `scripts/native-seed-prototype/` 的引用迁移与删除前移到 pre3；
+补裁五已把 P0 的隔离 schema 2 原型 的引用迁移与删除前移到 pre3；
 实际发布候选的删除后输入须重核/重跑资格与三组配对。
 最终 merge 或 set-chain 后须重核实际编译输入；编译输入不同就重跑资格，控制记录不同则独立复验，不能手改 receipt。
 补裁五要求 pre1 实现编译输入与控制记录分离，具体可验证边界见 §14；不再把控制记录写入编译输入摘要。
