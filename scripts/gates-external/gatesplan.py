@@ -298,14 +298,18 @@ def check_toolchain_action(text):
             problems.append(f"step {step.get('name')!r} is neither uses nor run")
     if sorted(uses) != sorted(["graalvm/setup-graalvm@v1"] * 2 + ["actions/cache@v4"] * 2):
         problems.append(f"uses references are {sorted(uses)}")
-    build = [r for c, r in run_steps if r == "DAWN_SEED_CHAIN=jar ./bin/dawn --version"]
+    build = [r for c, r in run_steps if r == "./bin/dawn --version"]
     notes = [r for c, r in run_steps
              if c == "steps.graalvm.outcome == 'failure'" and r.startswith('echo "::warning')]
     if len(build) != 1 or len(notes) != 1 or len(run_steps) != 2:
         problems.append(f"run steps are {[r.splitlines()[0] for _, r in run_steps]}")
-    build_if = [c for c, r in run_steps if r == "DAWN_SEED_CHAIN=jar ./bin/dawn --version"]
+    build_if = [c for c, r in run_steps if r == "./bin/dawn --version"]
     if build_if and build_if[0] != "inputs.build == 'true'":
         problems.append(f"the build step is guarded by {build_if[0]!r}")
+    build_steps = [step for step in runs.get("steps", [])
+                   if step.get("run") == "./bin/dawn --version"]
+    if len(build_steps) != 1 or build_steps[0].get("env") != {"DAWN_SEED_CHAIN": "jar"}:
+        problems.append("the JAR bootstrap step must explicitly select jar")
     if problems:
         raise PlanError(
             "dawn-toolchain composite no longer matches its substitution: "

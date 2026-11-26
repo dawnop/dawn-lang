@@ -62,6 +62,10 @@ def check(root):
                 assert 'DAWN_SEED_CHAIN=jar' in pin
                 command = ['bash', '-euc', 'DAWN_SEED_CHAIN=jar dawn __emit']
                 mutant = ['bash', '-euc', 'dawn __emit']
+            elif row['kind'] == 'yaml-env':
+                assert pin.split(':', 1) == ['DAWN_SEED_CHAIN', ' jar'], pin
+                command = ['bash', '-euc', 'DAWN_SEED_CHAIN=jar dawn __emit']
+                mutant = ['bash', '-euc', 'dawn __emit']
             elif row['kind'] == 'python-env':
                 import re
                 assert re.search(r'DAWN_SEED_CHAIN["\x27]?\]?\s*=\s*["\x27]jar["\x27]', pin), pin
