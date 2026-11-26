@@ -505,6 +505,9 @@
 # shellcheck disable=SC2016  # the mutant anchors are Dawn source, quoted verbatim on purpose
 set -euo pipefail
 
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/tile-gpu-diff"
 # shellcheck source=scripts/tile-gpu-diff/fold_verdict.sh

@@ -23,6 +23,9 @@
 # an old seed plus today's sources must land byte-identical to HEAD.
 set -euo pipefail
 
+# JVM class emitter; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 if [ "${1:-}" = "--allow-unverified" ]; then
   DAWN_SEED_ALLOW_UNVERIFIED=1
   export DAWN_SEED_ALLOW_UNVERIFIED

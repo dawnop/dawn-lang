@@ -7,6 +7,9 @@ the corresponding positive builds, and compiler failures must name a cause.
 """
 import json
 import os
+
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import shutil
 import subprocess

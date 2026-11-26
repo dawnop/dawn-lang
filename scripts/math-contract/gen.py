@@ -11,6 +11,9 @@ import hashlib
 import json
 import math
 import os
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import random
 import struct

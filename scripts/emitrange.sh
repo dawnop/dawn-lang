@@ -55,6 +55,9 @@
 # earlier declaration. Native-backed fmt/lsp differentials (native-cli-diff)
 # keep the window leg only.
 
+
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 _er_root() { git rev-parse --show-toplevel; }
 
 # Digest pair of a toolchain root, as one line: "source=<d> bootstrap=<d>".

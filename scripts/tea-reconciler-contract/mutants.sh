@@ -23,6 +23,9 @@
 # tree gives the tree back as it was and not as it was last committed.
 set -uo pipefail
 
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root" || exit 1
 

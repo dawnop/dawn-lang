@@ -9,6 +9,9 @@
 # previous-release golden path and continues to use the compiler system loader.
 set -euo pipefail
 
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/java-target-classpath-contract"
 dawn=${DAWN_BIN:-"$root/bin/dawn"}

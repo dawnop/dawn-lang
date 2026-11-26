@@ -15,6 +15,9 @@
 # scripts/mutant-coverage/check.py holds the union to the matrices.
 set -euo pipefail
 
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 dawn=${DAWN_BIN:-"$root/bin/dawn"}
 fixture="$root/scripts/grammar-corpus/reject/declaration_recovery_opaque.dawn"

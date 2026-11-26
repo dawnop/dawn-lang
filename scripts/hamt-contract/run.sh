@@ -15,6 +15,9 @@
 # scripts/array-contract, which reaches the `array_*` primitives this way.
 set -euo pipefail
 
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/hamt-contract"
 

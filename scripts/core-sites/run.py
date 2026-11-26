@@ -30,6 +30,9 @@ exactly once, on every push and without building anything.
 """
 
 import os
+
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import runpy
 import shutil

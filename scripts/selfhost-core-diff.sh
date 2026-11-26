@@ -89,6 +89,9 @@
 # compared as written. Both rules live in scripts/core-site-normalise.py, whose
 # `--selftest` holds that line.
 set -euo pipefail
+
+# JVM class emitter; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 

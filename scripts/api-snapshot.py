@@ -62,6 +62,9 @@ import argparse
 import glob
 import json
 import os
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import shlex
 import subprocess
 import sys

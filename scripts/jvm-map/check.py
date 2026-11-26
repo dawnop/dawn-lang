@@ -64,6 +64,9 @@ mutant's jar). JAVAP overrides the javap binary.
 """
 
 import os
+
+# JVM class emitter and javap source-map oracle; preserve the independent JVM consumer.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import re
 import runpy

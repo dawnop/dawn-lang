@@ -47,6 +47,9 @@ owner spelled `test:<module> :: <name>` is a selfhost test instead, run with
 """
 import json
 import os
+
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import shutil
 import subprocess
 import sys

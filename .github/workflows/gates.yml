@@ -420,7 +420,7 @@ name: gates
 # lowered, not left to stand.
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 40310s (the most this file's `3x` claims may add up to)
+# push-total: 40320s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -1707,11 +1707,11 @@ jobs:
       # discovers. Its inline tests own the
       # manifest/MVS/source-input planning boundary and must run explicitly.
       - name: compiler Planner tests
-        run: ./bin/dawn test compiler-plan
+        run: DAWN_SEED_CHAIN=jar ./bin/dawn test compiler-plan
 
       - name: selfhost tests
         run: |
-          ./bin/dawn test selfhost
+          DAWN_SEED_CHAIN=jar ./bin/dawn test selfhost
           python3 scripts/java-metadata/run.py
 
       # The panic barrier around ir/interp `eval_closed`, the editor's fold
@@ -1768,7 +1768,7 @@ jobs:
       # 2 in spike-hamt, and one each in rc-mode-contract and
       # comptime-trace-contract. Adding a path here is what makes it stick.
       - name: formatting
-        run: ./bin/dawn fmt compiler-plan std site selfhost packages examples scripts/tile-gpu-diff --check
+        run: DAWN_SEED_CHAIN=jar ./bin/dawn fmt compiler-plan std site selfhost packages examples scripts/tile-gpu-diff --check
 
   # The half of the core suite that runs Dawn programs and checks what they
   # compute, split out of `test` on 2026-09-26 (#242) when that job's worst
@@ -1828,7 +1828,7 @@ jobs:
       # and its `impl Iter[String]` is an orphan anywhere else), so the runner
       # learned a flag instead.
       - name: standard library tests
-        run: ./bin/dawn test --stdlib
+        run: DAWN_SEED_CHAIN=jar ./bin/dawn test --stdlib
 
       # std/narrow's rounding against an exact rational oracle. Both backends
       # compile the same Dawn source, so their agreement (native-diff runs the
@@ -2715,7 +2715,7 @@ jobs:
       - name: adapter call sites (emitted compiler names dawn/rt/Asm only)
         run: |
           rm -rf "${RUNNER_TEMP:?}/gate-emit" && mkdir -p "$RUNNER_TEMP/gate-emit"
-          ./bin/dawn __emit selfhost -o "$RUNNER_TEMP/gate-emit" > /dev/null
+          DAWN_SEED_CHAIN=jar ./bin/dawn __emit selfhost -o "$RUNNER_TEMP/gate-emit" > /dev/null
           ./scripts/adapter-callsites.py "$RUNNER_TEMP/gate-emit"
 
   contracts-7:
@@ -2861,7 +2861,9 @@ jobs:
     # Tree-policy retains its 950s claim; its duplicated lock fixture run is removed.
     # P4-pre2 controls measured 13.90s locally. Reserve 15s for native generation
     # and guard-sensitivity fixtures, rounded up with headroom.
-    # budget: 3x 565s planning value over the baseline plus P2, pre1 and pre2 controls
+    # P4-pre3 selection and deployment identity fixtures measured 4.0s locally;
+    # reserve 10s without introducing another native cold bootstrap.
+    # budget: 3x 575s planning value over the baseline plus P2 and pre1/pre2/pre3 controls
     timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4
@@ -2890,6 +2892,7 @@ jobs:
           python3 -B scripts/native-seed-lock-test.py
           python3 -B scripts/native-builder-test.py
           python3 -B scripts/native-launcher-test.py --selftest
+          python3 -B scripts/seed-consumers-test.py
 
       - name: pub-API snapshot input contracts
         run: |
@@ -2909,7 +2912,7 @@ jobs:
       # what stands behind the coursier cache in the setup action: a cache
       # holding a different closure fails here.
       - name: java-deps lock
-        run: ./bin/dawn lock --check selfhost
+        run: DAWN_SEED_CHAIN=jar ./bin/dawn lock --check selfhost
 
       # The source-package half of the same promise. `dawn.lock` covers
       # [java-deps]; [deps.<alias>] is pinned by a content hash instead, and
@@ -3367,7 +3370,7 @@ jobs:
       # docs/c-tu-split-design.md knife 2).
       - name: the C driver, once
         run: |
-          ./bin/dawn __emitc selfhost/src/nmain.dawn --split "$RUNNER_TEMP/nmain"
+          DAWN_SEED_CHAIN=jar ./bin/dawn __emitc selfhost/src/nmain.dawn --split "$RUNNER_TEMP/nmain"
           scripts/cc-units.sh -o "$RUNNER_TEMP/dawnc" "$RUNNER_TEMP/nmain"
           echo "DAWNC_BIN=$RUNNER_TEMP/dawnc" >>"$GITHUB_ENV"
 
@@ -3838,7 +3841,7 @@ jobs:
         run: ./scripts/pub-doc-check.py --self-test && ./scripts/pub-doc-check.py
 
       - name: site tests
-        run: ./bin/dawn test site
+        run: DAWN_SEED_CHAIN=jar ./bin/dawn test site
 
       # The Playground's online compile view pairs a visitor's code with its
       # C and bytecode through packages/xmap and says nothing of a call a
@@ -4254,8 +4257,8 @@ jobs:
       # header carries the rest of the reasoning.
       - name: prepare the shared native test compiler
         run: |
-          ./bin/dawn --version > /dev/null
-          ./bin/dawn __emitc selfhost/src/nmain.dawn --split "$RUNNER_TEMP/native-selfhost-c"
+          DAWN_SEED_CHAIN=jar ./bin/dawn --version > /dev/null
+          DAWN_SEED_CHAIN=jar ./bin/dawn __emitc selfhost/src/nmain.dawn --split "$RUNNER_TEMP/native-selfhost-c"
           scripts/cc-units.sh -o "$RUNNER_TEMP/native-selfhost-dawnc" "$RUNNER_TEMP/native-selfhost-c"
 
       - name: selfhost tests on the native backend

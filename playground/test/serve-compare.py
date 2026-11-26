@@ -25,6 +25,9 @@ of this release).
 """
 import json, os, re, signal, socket, statistics, subprocess, sys, tempfile, threading, time
 
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 

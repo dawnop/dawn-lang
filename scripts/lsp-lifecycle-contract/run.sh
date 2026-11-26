@@ -3,6 +3,9 @@
 # Every mutant reaches a normal LSP session and must fail only its target case.
 set -euo pipefail
 
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 harness="$root/scripts/lsp-lifecycle.py"
 work="$(mktemp -d "${TMPDIR:-/tmp}/lsp-lifecycle-contract.XXXXXX")"

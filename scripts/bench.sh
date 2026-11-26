@@ -22,6 +22,9 @@
 # is meant to move the number, so a regression stays distinguishable from a win.
 set -euo pipefail
 
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 cd "$(dirname "$0")/.."
 
 KB="${1:-1000}"

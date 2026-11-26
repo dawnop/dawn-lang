@@ -49,6 +49,9 @@
 # side: `__emitc`, as mem-contract does) and a `cc`, with sanitizers for the
 # ASan leg; no native driver.
 set -euo pipefail
+
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 HERE=scripts/io-prims-contract

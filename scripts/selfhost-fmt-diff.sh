@@ -19,6 +19,9 @@
 # paths modified to use new syntax remain in the intersection and still turn
 # the gate red.
 set -euo pipefail
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 . scripts/seedjar.sh

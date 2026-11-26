@@ -18,6 +18,9 @@
 # to assert is a gap, and it reds here instead of being skipped.
 set -euo pipefail
 
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 cd "$(dirname "$0")/.."
 
 units=()

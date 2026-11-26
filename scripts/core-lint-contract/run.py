@@ -32,6 +32,9 @@ which is cheap and runs in tree-policy.
 
 import argparse
 import os
+
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import re
 import runpy

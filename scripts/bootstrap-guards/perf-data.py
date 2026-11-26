@@ -78,7 +78,7 @@ def locked_run(command, env):
 def main():
     start = time.monotonic()
     java = subprocess.check_output([str(ROOT / "bin/dawn")],
-                                  env=dict(os.environ, DAWN_LAUNCHER_PRINT_JAVA="1"), text=True).strip()
+                                  env=dict(os.environ, DAWN_SEED_CHAIN="jar", DAWN_LAUNCHER_PRINT_JAVA="1"), text=True).strip()
     jdk = Path(java).parent
     with tempfile.TemporaryDirectory(prefix="perf-data.") as tmp:
         work = Path(tmp)

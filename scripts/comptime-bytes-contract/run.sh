@@ -3,6 +3,9 @@
 # oracles judge the values; cross-backend agreement alone is insufficient.
 # The native-host leg reuses the compiler native-selfhost-tests already built.
 set -euo pipefail
+
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 here="$root/scripts/comptime-bytes-contract"
 mode=${1:-all}

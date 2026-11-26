@@ -19,6 +19,10 @@ import re
 from pathlib import Path
 import sys
 
+import os
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
+
 ROOT = Path(__file__).resolve().parents[2]
 KERNELS = ROOT / "scripts/tile-golden/kernels.dawn"
 LEDGER = Path(__file__).with_name("ledger.json")

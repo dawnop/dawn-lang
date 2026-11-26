@@ -22,6 +22,9 @@
 # returns, which is data rather than checker state, and needs no subcommand.
 set -euo pipefail
 
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/builtin-decl-contract"
 dawn=${DAWN_BIN:-"$root/bin/dawn"}

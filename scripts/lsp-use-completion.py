@@ -25,6 +25,9 @@ Usage:  scripts/lsp-use-completion.py [server command...]   (default ./bin/dawn 
 """
 import json
 import os
+
+# JVM LSP regression and Java resolution oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import re
 import subprocess
 import sys

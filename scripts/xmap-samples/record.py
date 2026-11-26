@@ -31,6 +31,9 @@ two programs and its Tile IR half went with it.
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import os
+
+# JVM sample recording and javap metadata; preserve the independent JVM consumer.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import shutil
 import subprocess
 import sys

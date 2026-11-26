@@ -61,6 +61,9 @@
 #   DAWNC_BIN=<file> ...                 # use that dawnc (site/dawnc.sh)
 #   KEEP=1 ./scripts/site-dist-diff.sh   # keep the work directory
 set -euo pipefail
+
+# JAR generation stamp; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 . site/dawnc.sh

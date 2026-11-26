@@ -8,6 +8,9 @@ its projects. Every boundary fixture must first pass the original Check.
 import argparse
 import json
 import os
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import re
 import subprocess

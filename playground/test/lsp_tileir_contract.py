@@ -19,6 +19,9 @@ false errors this exists to remove (the negative control).
 import importlib.util
 import json
 import os
+
+# JVM LSP regression and Java resolution oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import shlex
 import subprocess
 import sys

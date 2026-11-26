@@ -27,6 +27,9 @@
 # reads the record and needs no build; the mutants are divided round-robin.
 set -euo pipefail
 
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 dawn=${DAWN_BIN:-"$root/bin/dawn"}
 case "$dawn" in /*) ;; *) dawn="$root/$dawn" ;; esac

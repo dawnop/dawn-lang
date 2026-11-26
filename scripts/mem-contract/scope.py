@@ -9,6 +9,9 @@ can fail; compiler errors and missing fixture files never count as a kill.
 """
 import argparse
 import os
+
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import shutil
 import subprocess

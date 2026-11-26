@@ -12,6 +12,9 @@ import argparse
 import hashlib
 import json
 import os
+
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import platform
 from pathlib import Path
 import statistics

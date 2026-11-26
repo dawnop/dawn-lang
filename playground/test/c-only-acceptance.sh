@@ -4,6 +4,9 @@
 # ratchets. The measured five-group data lives in agent-handoff's
 # play-c-only-view-report-20261023.md. Keep their toolchain and limits identical.
 set -euo pipefail
+
+# JVM CLI regression oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
 MODE=${1:-matrix}

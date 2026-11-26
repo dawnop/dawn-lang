@@ -38,6 +38,9 @@ mutant's jar).
 """
 
 import os
+
+# JVM __lower and parse oracle; preserve the independent JVM consumer.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 from pathlib import Path
 import re
 import shutil

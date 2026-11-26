@@ -11,6 +11,9 @@
 # what the unmutated seam must report. Edit it by hand when a leg is added.
 set -euo pipefail
 
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/jsig-lease-contract"
 dawn=${DAWN_BIN:-"$root/bin/dawn"}

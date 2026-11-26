@@ -29,6 +29,9 @@
 #   scripts/web-exchange-contract/run.sh <path to dawnc>
 #   WEB_SPILL_MB=32 scripts/web-exchange-contract/run.sh <path to dawnc>   # smaller upload
 set -euo pipefail
+
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 contract_started=$SECONDS
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

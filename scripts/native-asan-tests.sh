@@ -34,6 +34,9 @@
 #   DAWNC_BIN=/path/to/dawnc ./scripts/native-asan-tests.sh   # reuse one
 #   ./scripts/native-asan-tests.sh packages/json std    # only these units
 set -euo pipefail
+
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 

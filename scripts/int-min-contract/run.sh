@@ -10,6 +10,9 @@
 # hold both backends to, so it is edited by hand and never taken from a run.
 set -euo pipefail
 
+# JVM C emitter and independent native oracle; keep this consumer independent of the default chain.
+export DAWN_SEED_CHAIN=jar
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/int-min-contract"
 cc_bin="${CC:-cc}"

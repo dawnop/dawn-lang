@@ -34,6 +34,9 @@ failures; a build failure is not a negative control and fails the run.
 """
 import json
 import os
+
+# JAR build or JVM artifact oracle; keep this consumer independent of the default chain.
+os.environ["DAWN_SEED_CHAIN"] = "jar"
 import shutil
 import subprocess
 import sys

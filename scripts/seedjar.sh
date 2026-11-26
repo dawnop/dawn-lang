@@ -120,7 +120,7 @@ seed_verify() {
 ## difference then reads as a toolchain one (issue #267). bin/dawn owns the
 ## probe; this asks it rather than keeping a second copy that could drift.
 seed_java() {
-  DAWN_LAUNCHER_PRINT_JAVA=1 "$ROOT/bin/dawn"
+  DAWN_SEED_CHAIN=jar DAWN_LAUNCHER_PRINT_JAVA=1 "$ROOT/bin/dawn"
 }
 
 ## Where a tagged release's assets are downloaded from. The repository is
