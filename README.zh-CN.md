@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 38e27a4b084d2427 -->
+<!-- doc-check: translation-of README.md @ 1f1b5e599416c0bc -->
 
 <p align="center">
   <a href="https://dawn-lang.dawnop.com">
@@ -71,7 +71,7 @@ pub fn main() -> Unit !io =
 release 提供 native 编译器和显式 JVM 工具链。所有文件从同一个 tag 下载，使用前核对 SHA-256。
 
 **Native**（仅 Linux x86_64）：一个静态可执行文件，内嵌 `std` 与 C 运行时。
-安装需要 Python 3 和 curl。下载的文件本体安装为 `~/.local/bin/dawn`，版本行仍保留
+安装需要 Python 3.10+ 和 curl。下载的文件本体安装为 `~/.local/bin/dawn`，版本行仍保留
 `dawnc <version> (native)`。其他 native 平台明确不支持，并在下载前失败。
 
 ```bash
@@ -125,8 +125,11 @@ release 还提供 `dawn-pub-api.json`，列出 `std` 与 `packages/` 的全部�
 release 还提供 `native-bootstrap.json`，记录构建该二进制的 native 链。安装器不下载它，
 `dawn-toolchain.json` 引用它的摘要。已发布的 release 资产永不被替换：错版发新 tag。
 
-**从仓库检出**（本文其余部分默认的路径）：`./bin/dawn` 仍是 JVM bootstrap 驱动。
-首次运行下载种子，按 `scripts/seed-checksums.txt` 校验，再用它编译 HEAD。
+**从仓库检出**（本文其余部分默认的路径）：`./bin/dawn` 使用种子 lock 的默认链，目前为 `jar`。
+JVM 产物、Java 依赖、`lock` 或需要 Java 类型解析的 LSP 会话显式设 `DAWN_SEED_CHAIN=jar`。
+`DAWN_SEED_CHAIN=native` 选择源码 native 链，从当前源码构建并缓存 S → A → B，再执行 B。
+源码启动器需要 Python 3.11+；native 链还需要 Linux x86_64 与 C 工具链。两链不自动回退。
+JAR 种子按 `scripts/seed-checksums.txt` 校验；native 种子及配对 std/runtime 按种子 lock 校验。
 
 ### 一个项目
 
@@ -270,11 +273,10 @@ JVM 上真设备的 launch 一律被拒。
 | 入口 | 编译器宿主与默认构建产物 |
 |---|---|
 | 安装后的 `dawn` | Native C 后端；`dawn build app -o app` 写出本机可执行文件。仅 Linux x86_64。 |
-| 检出中的 `./bin/dawn` | JVM bootstrap 驱动；`./bin/dawn build app -o app.jar` 写出可执行 JAR。需要 JDK 21 及以上。 |
+| 检出中的 `./bin/dawn` | 选择源码链，目前默认 JAR。`DAWN_SEED_CHAIN=jar ./bin/dawn build app -o app.jar` 写出可执行 JAR，需要 JDK 21+。显式 `native` 在 Linux x86_64 构建并执行当前 B。两条源码链均需要 Python 3.11+。 |
 | `java -jar /absolute/versioned/dawn-selfhost.jar` | 显式运行该 release 的 JVM 工具链，默认产物同上。需要 JDK 21 及以上。 |
 
-安装后的命令不会在失败后切换到 Java。把检出的 `bin` 放到 PATH 最前面，就会选中该检出的
-JVM 驱动。编辑器要选择特定编译器时，请使用绝对路径。
+安装后的命令不会在失败后切换到 Java。把检出的 `bin` 放到 PATH 最前面，就会选中该检出的源码启动器及其选定的链。编辑器要选择特定编译器时，请使用绝对路径。
 
 `<target>` 可以是单个 `.dawn` 文件，也可以是项目目录（`src/main.dawn` 为入口）。
 
@@ -282,8 +284,8 @@ JVM 驱动。编辑器要选择特定编译器时，请使用绝对路径。
 # 需要 JDK 21。首次运行自动下载种子（上一 release 的 dawn-selfhost.jar）并用它编译 HEAD。
 ./bin/dawn run examples/projects/hello_mod        # 编译并运行（单文件或多模块项目）
 ./bin/dawn test <target>                    # 跑源码里内联的 test 块（构建时剥除）
-./bin/dawn build <target> -o app.jar        # JVM 后端：可执行 jar
-./bin/dawn build <target> --native -o app   # 把上一步那个 jar 交给 GraalVM native-image 打包
+DAWN_SEED_CHAIN=jar ./bin/dawn build <target> -o app.jar        # JVM 后端：可执行 jar
+DAWN_SEED_CHAIN=jar ./bin/dawn build <target> --native -o app   # 把上一步那个 jar 交给 GraalVM native-image 打包
                                             #   （不是 C 后端；见下）
 ./bin/dawn fmt <target>                     # 就地格式化（--check 供 CI 校验）
 ./bin/dawn doc <target>                     # pub API 导出为 JSON；add 保格式编辑 dawn.toml
@@ -303,10 +305,10 @@ JVM 驱动。编辑器要选择特定编译器时，请使用绝对路径。
 `["-jar", "/absolute/versioned/dawn-selfhost.jar"]`。扩展在末尾追加 `lsp`，不经 shell 逐参数传递；
 任一配置变化都会重启服务。Neovim / Helix 配置见 [editors/](editors/)。
 
-JVM 构建可用 `./bin/dawn build app --native -o app` 或
+JVM 构建可用 `DAWN_SEED_CHAIN=jar ./bin/dawn build app --native -o app` 或
 `java -jar /absolute/versioned/dawn-selfhost.jar build app --native -o app`，把 JAR 交给
 GraalVM `native-image` 打包，`use java` 仍可用。安装后的 `dawn` 经 C 构建，内嵌 `std` 与运行时，
-拒绝 `use java`；native 已是默认产物，因此它也拒绝 `--native`。自举种子仍然是 jar（`scripts/seed-release.txt`），JVM 后端仍是一等目标。
+拒绝 `use java`；native 已是默认产物，因此它也拒绝 `--native`。JAR 种子仍由 `scripts/seed-release.txt` 选择，native 源码自举有独立的已资格种子 lock。默认链仍为 JAR，JVM 后端仍是一等目标。
 其余细节见 [docs/native-driver-plan.md](docs/native-driver-plan.md)。
 
 ## 文档

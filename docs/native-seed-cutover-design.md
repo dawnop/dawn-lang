@@ -651,7 +651,7 @@ P3 接 `check --base` 时同时补 P2 已确认约 +8.5 s 的实际增量，不�
 
 ### 13.6 P4-pre3 必须逐个钉链的消费者清单
 
-下表按 `33ee0a6b` 的入口登记迁移责任，不代表已修改；pre3 还须沿脚本、composite action、子进程和编辑器环境追踪间接调用，
+下表保留 pre0 按 `33ee0a6b` 登记的迁移责任；pre3 实施后的逐文件、逐选择行清单见 §16。间接调用须沿脚本、composite action、子进程和编辑器环境追踪，
 逐个记录“所需能力、chain、最终 exec、身份/缓存、验证证据”。不能在整个 workflow 全局设 jar，也不能让 JVM oracle 两边变成同一 native 工具。
 
 | 入口 | 必须显式选择及最终消费 | pre3 验收 |
@@ -694,7 +694,7 @@ pre3 的完成证据须包含扩展后的全量调用表及未迁入口为零的
 → 满足门槛才切默认并发布 → 冷下载对账与晋级 → P5 长期预算收口；D12-3 另起设计。
 
 `initial`、`set-chain`、VERSION、原型删除、merge/rebase 都可能改变当前协议绑定的 commit/tree。
-补裁五已把 P0 的隔离 schema 2 原型 的引用迁移与删除前移到 pre3；
+补裁五已把 P0 隔离 schema 2 原型的引用迁移与删除前移到 pre3；
 实际发布候选的删除后输入须重核/重跑资格与三组配对。
 最终 merge 或 set-chain 后须重核实际编译输入；编译输入不同就重跑资格，控制记录不同则独立复验，不能手改 receipt。
 补裁五要求 pre1 实现编译输入与控制记录分离，具体可验证边界见 §14；不再把控制记录写入编译输入摘要。
@@ -873,3 +873,227 @@ receipt/source plan 及其余耗时后停线，不继续减少验证项目。
 receipt 解析可在重新读取且字节相等后复用，S/A/B 每阶段仍至少真实探测一次版本及完整 build ID。
 大块内容摘要也仅按当前完整字节复用，文件仍逐次读取；S/A/B 探测按阶段分别记忆，不合并阶段。
 开发热路径缺少紧凑索引时直接拒绝，不回退旧缓存格式；显式清理开发缓存后重新全量构建。
+
+## 16. P4-pre3 消费者显式选链（2026-11-25）
+
+默认仍为 jar，不改种子三文件、native lock/history/revoked 或 VERSION。
+下表登记每处选择的文件、行号、能力与链；机器清单是 `scripts/seed-consumers.json`，
+`scripts/seed-consumers-test.py` 要求选择仍存在，且在模拟 native 默认的能力夹具中逐项移除必红。
+脚本内的 export 只约束该 JVM oracle 及其子进程，不设置 workflow/job 的全局 jar。
+混合差分继续用当前 JAR 与直接执行的 native ELF；`DAWN_SELF`、`DAWNC_BIN` 与显式 Java 命令仍指定原来的独立对象。
+共享 toolchain action 明确只准备 JAR，其外部执行替身只对该构建子进程设 jar，不污染后续 selector 夹具。
+
+### 16.1 已迁入口全表
+
+表中“JVM CLI oracle”表示保留原门的 JVM 运行/输出/黄金或性能口径；纯 Dawn 程序不因此被声明为必须依赖 Java。
+同一脚本内的所有 launcher 调用均继承该行的选择，额外独立的空环境必须再次声明。
+JAR 侧最终执行当前 `build/dawn-selfhost.jar`，JAR generation/stamp 由源码 launcher 复验；native 侧直接执行原被测 ELF。
+
+| 选择文件:行 | 调用或默认命令定义行 | 所需能力 | 选链 |
+|---|---|---|---|
+| `playground/deploy/redeploy.sh:12` | 87, 117 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `playground/test/c-only-acceptance.sh:9` | 19 | JVM CLI oracle | `jar` |
+| `playground/test/contract.sh:25` | 98, 133 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/adt-reuse-contract/run.sh:36` | 182, 198, 215 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/array-contract/run.sh:25` | 36, 107 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/asm-adapter-contract/run.sh:80` | 98 | JVM `__emit`/class 输出 | `jar` |
+| `scripts/atomic-write-contract/run.sh:34` | 123, 128, 139, 558, 725 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/bench.sh:26` | 66 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/bootstrap-input-manifest-contract/run.sh:13` | 16 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/builtin-decl-contract/run.sh:26` | 30 | JVM CLI oracle | `jar` |
+| `scripts/builtin-type-contract/run.sh:23` | 26 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/bytes-pack-contract/run.sh:27` | 37, 47, 53 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/c-map/same.sh:26` | 28 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/checker-corpus/run.sh:20` | 46, 85, 87, 94 | JVM CLI oracle | `jar` |
+| `scripts/classfile-verify/run.sh:69` | 84, 132, 287, 375, 377, 381, 387, 390, 392, 438, 440, 488, 501 | JVM `__emit`/class 输出 | `jar` |
+| `scripts/comptime-bytes-contract/run.sh:8` | 24 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/comptime-eval-closed-contract/run.sh:20` | 23 | JVM CLI oracle | `jar` |
+| `scripts/comptime-trace-contract/run.sh:10` | 13 | JVM CLI oracle | `jar` |
+| `scripts/core-lint-contract/corpus.sh:24` | 35, 49, 54, 68, 71 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/ctl-live-contract/run.sh:56` | 174, 175 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/delete-contract/run.sh:20` | 106, 110, 117, 293, 300 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/dict-owner-contract/run.sh:27` | 58 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/display-layering-contract/run.sh:35` | 41 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/dtoa-contract/run.sh:24` | 49, 61, 64 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/effect-evidence-contract/run.sh:64` | 68 | JVM CLI oracle | `jar` |
+| `scripts/emitrange.sh:60` | 65, 192, 195 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/error-contract/run.sh:20` | 24 | JVM CLI oracle | `jar` |
+| `scripts/example-tests.sh:22` | 45 | JVM CLI oracle | `jar` |
+| `scripts/export-surface-contract/run.sh:22` | 25 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/for-pattern-contract/run.sh:15` | 19 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/frame-contract/run.sh:39` | 73, 75 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/grammar-corpus/run.sh:32` | 36, 54, 74, 124, 131 | JVM CLI oracle | `jar` |
+| `scripts/hamt-contract/run.sh:19` | 25, 36 | JVM CLI oracle | `jar` |
+| `scripts/imm-contract/run.sh:34` | 139 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/incremental-semantics-contract/sweep.sh:67` | 195, 416 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/inflate-contract/run.sh:12` | 32, 57, 64, 94, 139, 184, 272 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/int-min-contract/run.sh:14` | 22, 24, 30 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/io-prims-contract/run.sh:54` | 65, 96, 102, 124, 125, 211, 216 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/java-member-dispatch-contract/run.sh:25` | 28 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/java-narrowing-contract/run.sh:17` | 20 | JVM CLI oracle | `jar` |
+| `scripts/java-target-classpath-contract/run.sh:13` | 17 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/jsig-lease-contract/run.sh:15` | 19 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/json-suite.sh:20` | 23 | JVM CLI oracle | `jar` |
+| `scripts/jvm-map/same.sh:23` | 25 | JVM `__emit`/class 输出 | `jar` |
+| `scripts/list-elems-contract/run.sh:31` | 36 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/loader-listdir-contract/run.sh:35` | 123 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/lsp-lifecycle-contract/run.sh:7` | 53 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/lsp-workspace-contract/run.sh:9` | 13 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/map-reuse-contract/run.sh:43` | 197, 198, 214, 215, 234, 256, 257 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/mem-contract/run.sh:36` | 41 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/narrow-contract/run.sh:60` | 88, 103, 108 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/native-asan-tests.sh:39` | 74, 76 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/native-cli-diff.sh:68` | 97, 103, 138, 167, 192, 218, 245, 314, 404, 560, 610, 630, 701, 821, 936, 1014, 1306, 1390 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/native-fixpoint.sh:22` | 93, 94, 122 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/native-selfhost-tests.sh:31` | 42, 45 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/opaque-twin/run.sh:95` | 97 | JVM CLI oracle | `jar` |
+| `scripts/package-tests.sh:24` | 46 | JVM CLI oracle | `jar` |
+| `scripts/path-contract/run.sh:16` | 20 | JVM CLI oracle | `jar` |
+| `scripts/pattern-or-contract/run.sh:15` | 19 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/pipe-contract/run.sh:31` | 34 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/pkg-origin-contract/run.sh:37` | 40 | JVM CLI oracle | `jar` |
+| `scripts/project-plan-contract/run.sh:8` | 12 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/pvec-contract/run.sh:20` | 26, 37 | JVM CLI oracle | `jar` |
+| `scripts/range-bound-order-contract/run.sh:7` | 13 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/rc-mode-contract/run.sh:62` | 122, 125 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/rc-view-contract/run.sh:31` | 135, 151 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/release-native.sh:57` | 116 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/replay-bootstrap.sh:27` | 126 | JVM `__emit`/class 输出 | `jar` |
+| `scripts/scalar-bench/run.sh:18` | 55, 58, 79 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/selfhost-core-diff.sh:94` | 150, 164 | JVM `__emit`/class 输出 | `jar` |
+| `scripts/selfhost-fmt-diff.sh:24` | 43, 44 | JVM CLI oracle | `jar` |
+| `scripts/selfhost-lsp-diff.sh:25` | 34 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
+| `scripts/selfhost-param-diff.sh:41` | 91, 92 | JVM CLI oracle | `jar` |
+| `scripts/selfhost-prev-diff.sh:94` | 271, 272 | JVM `__emit`/class 输出 | `jar` |
+| `scripts/selfhost-run-diff.sh:10` | 39, 41 | JVM `__emit`/class 输出 | `jar` |
+| `scripts/site-dist-diff.sh:66` | 82, 146, 149, 159 | JAR generation stamp | `jar` |
+| `scripts/source-loop-label-contract/run.sh:7` | 13 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/source-plan-contract/run.sh:15` | 18 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/spike-native/run.sh:130` | 254, 283, 292, 528 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/std-version-contract/run.sh:43` | 46 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/syntax-small-contract/run.sh:19` | 22 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/table-freight/run.sh:27` | 35, 42, 43 | JVM `__emit`/class 输出 | `jar` |
+| `scripts/tea-reconciler-contract/mutants.sh:27` | 73, 74, 75 | JVM CLI oracle | `jar` |
+| `scripts/tea-reconciler-contract/run.sh:44` | 51, 55 | JVM CLI oracle | `jar` |
+| `scripts/tile-golden/run.sh:505` | 855, 891, 898, 1297, 3266, 3283, 3322, 3528, 3601, 3690 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/tile-gpu-diff/run.sh:509` | 797, 1271, 1300, 1352, 2708, 2725, 2850, 2877, 2915, 2921, 2966, 2985, 3004, 3025, 3052, 3089, 3320, 3445, 3617, 3880, 3989, 4048, 4204, 4580, 4658, 4857, 5765, 5779 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/tileinterp-diff/run.sh:37` | 68, 149, 179, 192, 198, 211, 222, 228 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/unicode-contract/run.sh:34` | 39 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/wasm-contract/run.sh:44` | 81, 86, 180, 264 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/wasm-dom-contract/collect.sh:33` | 40 | JVM CLI oracle | `jar` |
+| `scripts/wasm-dom-contract/flags.sh:34` | 45 | JVM CLI oracle | `jar` |
+| `scripts/wasm-dom-contract/retained.sh:32` | 50, 53 | JVM CLI oracle | `jar` |
+| `scripts/wasm-dom-contract/run.sh:81` | 154 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/web-exchange-contract/run.sh:34` | 46, 49, 113 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/xmap-samples/run.sh:43` | 46 | JVM CLI oracle | `jar` |
+| `site/dawnc.sh:44` | 54, 70 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `playground/test/c-only-contract.py:12` | 114 | JVM CLI oracle | `jar` |
+| `playground/test/c-only-matrix.py:18` | 110, 148, 151 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `playground/test/lsp_tileir_contract.py:24` | 59 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
+| `playground/test/serve-compare.py:29` | 23, 107, 155 | JVM CLI oracle | `jar` |
+| `playground/test/tile-probe-contract.py:13` | 74 | JVM CLI oracle | `jar` |
+| `scripts/api-snapshot.py:67` | 455, 456 | JVM CLI oracle | `jar` |
+| `scripts/bitwise-contract/check.py:15` | 24 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/c-map/run.py:39` | 50 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/call-records-contract/run.py:39` | 130, 211, 358, 370 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/core-lint-contract/run.py:37` | 49 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/core-sites/run.py:35` | 46 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/dependency-test-contract/run.py:12` | 121, 142 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/diag-properties/run.py:112` | 600 | JVM CLI oracle | `jar` |
+| `scripts/dict-owner-contract/shapes.py:17` | 27 | JVM CLI oracle | `jar` |
+| `scripts/doc-check.py:256` | 267, 2736, 3324, 3327, 5012 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/example-main-contract/run.py:10` | 220 | JVM CLI oracle | `jar` |
+| `scripts/ffi-extern-contract/run.py:13` | 24 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/ffi-sources-contract/run.py:12` | 24 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/flash-config/check.py:24` | 46 | JVM CLI oracle | `jar` |
+| `scripts/fmt-properties/run.py:92` | 816 | JVM CLI oracle | `jar` |
+| `scripts/incremental-semantics-contract/bench.py:17` | 104 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/incremental-semantics-contract/cold.py:16` | 27 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/java-metadata/run.py:15` | 350 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/jvm-map/run.py:35` | 46 | JVM `__emit`/class 输出 | `jar` |
+| `scripts/lex-properties/run.py:69` | 458 | JVM CLI oracle | `jar` |
+| `scripts/lsp-decl-pairing.py:43` | 37, 50 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
+| `scripts/lsp-framing.py:19` | 9, 663 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
+| `scripts/lsp-lifecycle.py:15` | 8, 292 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
+| `scripts/lsp-liveness.py:59` | 50, 651 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
+| `scripts/lsp-references-workspace.py:39` | 26, 372 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/lsp-references.py:41` | 28, 366 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/lsp-rename.py:67` | 53, 818, 885 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/lsp-resolution-coverage.py:34` | 22, 414 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/lsp-semantic-tokens.py:52` | 37, 902 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/lsp-std-documents.py:14` | 308, 365 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/lsp-std-resolution.py:34` | 18, 28, 41 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
+| `scripts/lsp-unused-import-action.py:23` | 17, 134 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
+| `scripts/lsp-use-completion.py:30` | 24, 176 | JVM LSP 回归与 Java 类型解析 oracle | `jar` |
+| `scripts/math-contract/gen.py:16` | 149 | JVM CLI oracle | `jar` |
+| `scripts/math-contract/run.py:13` | 50, 56, 78 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `scripts/mem-contract/scope.py:14` | 26, 43 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/native-cli-contract/doc_metadata.py:12` | 36, 79 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/pub-doc-check.py:54` | 4, 103, 211 | JVM CLI oracle | `jar` |
+| `scripts/sqlite-contract/run.py:18` | 33 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/tile-golden/entry6-source-controls.py:13` | 21 | JVM CLI oracle | `jar` |
+| `scripts/tile-prep/full.py:9` | 182 | build-to-jar、当前 JAR 或 JVM 产物 oracle | `jar` |
+| `scripts/trait-capture-contract/run.py:20` | 213, 215, 232, 251, 292, 294, 296, 298, 342, 345, 353 | JVM `__emitc` 引导与独立 native 对拍 | `jar` |
+| `site/gpu-map/record.py:64` | 290, 738 | JVM CLI oracle | `jar` |
+| `site/inputs.py:229` | 28, 232 | JVM bootstrap SourcePlan and native tool preparation | `jar` |
+| `scripts/seedjar.sh:123` | 123 | JDK identity for JAR seed and JVM differential oracles | `jar` |
+| `scripts/bootstrap-guards/perf-data.py:81` | 80, 108, 116 | JVM perf-data policy and copied launcher fixture | `jar` |
+| `.github/actions/dawn-toolchain/action.yml:145` | 145 | Explicit JAR bootstrap shared by JVM gate consumers | `jar` |
+| `scripts/gates-external/backend_local.py:478` | 478, 480 | Exact local substitution of the JAR composite build only | `jar` |
+| `scripts/gates-external/inputs.py:636` | 19, 553, 627, 646, 649, 651 | Coursier input-pack priming requires Java dependencies | `jar` |
+| `playground/sandbox/run-sandboxed.sh:125` | 选择环境传给显式子进程 | JVM-only deployed launcher in an empty sandbox environment | `jar` |
+| `playground/deploy/dawn-play-native@.service:36` | 35 | JVM-only deployed launcher for runner subprocesses | `jar` |
+| `playground/deploy/preflight.py:31` | 62 | Current JAR freshness, JVM ELF reader and current-source native manifest oracle | `jar` |
+| `.github/workflows/gates.yml:1710` | 1710, 1714, 1771, 1831, 2718, 2915, 3373, 3844, 4260, 4261 | JVM test compiler-plan | `jar` |
+| `.github/workflows/gates.yml:1714` | 1710, 1714, 1771, 1831, 2718, 2915, 3373, 3844, 4260, 4261 | JVM test selfhost | `jar` |
+| `.github/workflows/gates.yml:1771` | 1710, 1714, 1771, 1831, 2718, 2915, 3373, 3844, 4260, 4261 | JVM fmt compiler-plan std site selfhost packages examples scripts/tile-gpu-diff --check | `jar` |
+| `.github/workflows/gates.yml:1831` | 1710, 1714, 1771, 1831, 2718, 2915, 3373, 3844, 4260, 4261 | JVM test --stdlib | `jar` |
+| `.github/workflows/gates.yml:2718` | 1710, 1714, 1771, 1831, 2718, 2915, 3373, 3844, 4260, 4261 | JVM __emit selfhost -o "$RUNNER_TEMP/gate-emit" > /dev/null | `jar` |
+| `.github/workflows/gates.yml:2915` | 1710, 1714, 1771, 1831, 2718, 2915, 3373, 3844, 4260, 4261 | JVM lock --check selfhost | `jar` |
+| `.github/workflows/gates.yml:3373` | 1710, 1714, 1771, 1831, 2718, 2915, 3373, 3844, 4260, 4261 | JVM __emitc selfhost/src/nmain.dawn --split "$RUNNER_TEMP/nmain" | `jar` |
+| `.github/workflows/gates.yml:3844` | 1710, 1714, 1771, 1831, 2718, 2915, 3373, 3844, 4260, 4261 | JVM test site | `jar` |
+| `.github/workflows/gates.yml:4260` | 1710, 1714, 1771, 1831, 2718, 2915, 3373, 3844, 4260, 4261 | JVM --version > /dev/null | `jar` |
+| `.github/workflows/gates.yml:4261` | 1710, 1714, 1771, 1831, 2718, 2915, 3373, 3844, 4260, 4261 | JVM __emitc selfhost/src/nmain.dawn --split "$RUNNER_TEMP/native-selfhost-c" | `jar` |
+| `.github/workflows/nightly.yml:135` | 135 | JVM test selfhost | `jar` |
+| `scripts/c-map/check.py:60` | 73 | JVM __emitc source-map oracle | `jar` |
+| `scripts/core-sites/check.py:43` | 54 | JVM __lower and parse oracle | `jar` |
+| `scripts/jvm-map/check.py:69` | 83 | JVM class emitter and javap source-map oracle | `jar` |
+| `scripts/fp-contract-contract/run.py:18` | 123, 141 | JVM __emitc and floating point differential oracle | `jar` |
+| `scripts/slab-bench/run.py:371` | 936 | JVM __emitc benchmark producer | `jar` |
+| `scripts/xmap-samples/record.py:36` | 43 | JVM sample recording and javap metadata | `jar` |
+
+### 16.2 独立对象与无需迁移的入口
+
+| 入口 | 能力与明确对象 | 选择方式 |
+|---|---|---|
+| `scripts/build-release-jar.sh`、`scripts/selfhost-fixpoint.sh` | 唯一 JAR 固定点配方；S/A/B/C 是各自 JAR | 直接 `java -jar`，不经默认 selector |
+| `scripts/native_release.py chain`、`scripts/native-seed-qualify.py` | 原生 S→A→B→C、资格与独立 verify | 显式 ELF 和配对树参数，不自动转 JAR |
+| `bin/dawn` 的 native 分支、`scripts/native-launcher-test.py`、`scripts/native-seed-lock-test.py` | native 源码启动及两链拒绝边界 | selector 夹具逐项构造 jar/native 环境，禁止外层 jar 遮蔽 |
+| `scripts/bootstrap-guards/launcher-contract.sh`、`scripts/check-launcher-jvm-opts.py`、`scripts/dependency-heap-contract/run.py`、`scripts/example-main-contract/selftest.py` | launcher/JVM 策略及无源码 JAR 夹具 | 各私有 fixture 已显式 jar；非法/native 拒绝在独立空环境验 |
+| site 已制备 `dawnc`、SourcePlan、generator/search、TEA reactor | 同树 native 消费与 Java metadata 数据读取 | 直接 ELF；prepare 引导仍 jar，D12-3 另迁 |
+| Playground `/check`、C/tile view、native LSP gateway | native compiler/runner 独立身份 | 直接 ELF；`/run`、JVM view 的 shell 子进程在 service 和 sandbox 各选 jar |
+| `editors/vscode` 与 `editors/` JVM LSP 配置 | Java 类型解析 | 已有显式 `java -jar <versioned JAR>`；源码 launcher 用户在编辑器启动环境设 `DAWN_SEED_CHAIN=jar`，不按 import 猜链 |
+| `scripts/native-install-contract.py`、`scripts/install-native.py` | 原生发行 B 安装与无 Java smoke | installer 明确安装 ELF；日常启动没有 selector、Python 或 JVM |
+| `scripts/method-size-gate.py` | 读指定产物/记录或接受明确 compiler 参数 | 不隐式启动默认 launcher；调用方已经选择独立 JAR/ELF |
+
+无源码 shell 保持 JVM-only，缺失/空/未知/native 选择和 seed 覆盖在 Python/Java 前拒绝。
+`playground/deploy/redeploy.sh --preflight` 在任何远端连接前比较当前 JAR 与项目清单、
+两种 reader 的 native 完整 build id、当前 portable 源码重算的 native manifest，以及 runner 与当前 playground 清单。
+JSON 分别记录三个产品的 SHA-256/full build id；它不宣称重新证明 release S→A→B→C 或 B 的种子资格。
+部署实际 native B 的 provenance 仍必须由同 tag 的发布 metadata/完整 receipt 核验。
+
+### 16.3 可比文件集、预算与边界
+
+既有独立对拍保留以下文件集：native CLI/fixpoint 的 whole C 与 split C/manifest；
+`scripts/site-dist-diff.sh` 的两侧 `site/dist` 完整文件清单、每个文件字节（含可比 wasm/assets）、
+`docs-jvm`/`docs-native` API JSON，以及相同输入的 generator 输出。
+JAR 与 ELF、自身身份/来源 receipt 不互作字节相等对象；每侧身份另核。
+本刀不增加每个 job 的源码 native 冷启动：新增冷建数 N=0，现有 native 题目继续直接运行其独立 ELF。
+新增固定选链/部署身份夹具实测约 4.0 秒，java-target-classpath claim 565→575 秒，
+push-total 40310→40320 秒，timeout 29 分钟不变；steps lock 随 run 文本更新。
+P2 的约 8.5 秒已计入 pre1，未重复计入。本机计时与最终全套证据另在实施报告保留。
+
+P0 原型的所有调用/文档/门禁台账引用已迁至生产协议，并按补裁五第 4 条删除目录。
+源码启动器仍可要求 Python 3.11+；installer 的 Python 3.10 独立实测不改变源码依赖。
+P3 仍须最终输入资格、真实 qualified lock、拟晋级 B 自身资格/独立 verify、三组配对与七日/十次观测；
+本刀的夹具和双链对拍不代替这些条件。热启动 ≤0.1 秒是 P4 后的新债，不并入 pre3。

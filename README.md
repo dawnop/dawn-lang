@@ -74,7 +74,7 @@ Releases provide a native compiler and an explicit JVM toolchain. Download every
 file from one tag and verify its SHA-256 before use.
 
 **Native** (Linux x86_64 only): one static executable with `std` and the C runtime
-embedded. Installation needs Python 3 and curl. This installs the downloaded file
+embedded. Installation needs Python 3.10+ and curl. This installs the downloaded file
 itself as `~/.local/bin/dawn`; its version line retains `dawnc <version> (native)`.
 Other native platforms are unsupported and fail before downloading.
 
@@ -138,8 +138,13 @@ digest. A release asset is never replaced after it is published: a wrong release
 is fixed by a new tag.
 
 **From a checkout**, which is what the rest of this file assumes: `./bin/dawn`
-remains the JVM bootstrap driver. It downloads the seed on first use, verifies it
-against `scripts/seed-checksums.txt`, and builds HEAD with it.
+uses the seed lock's default chain, currently `jar`. Select `DAWN_SEED_CHAIN=jar`
+for JVM output, Java dependencies, `lock`, or Java-aware LSP sessions. Select
+`DAWN_SEED_CHAIN=native` for the source native chain: it builds and caches
+S → A → B from current sources and runs B. Source launchers need Python 3.11+;
+the native chain also needs Linux x86_64 and a C toolchain. Neither chain falls
+back to the other. The JAR seed is verified against `scripts/seed-checksums.txt`;
+the native seed and its paired std/runtime are verified against the seed lock.
 
 ### A project
 
@@ -322,11 +327,11 @@ Choose the entry point explicitly:
 | Entry point | Compiler host and default build output |
 |---|---|
 | Installed `dawn` | Native C backend; `dawn build app -o app` writes a native executable. Linux x86_64 only. |
-| Checkout `./bin/dawn` | JVM bootstrap driver; `./bin/dawn build app -o app.jar` writes an executable JAR. Requires JDK 21 or newer. |
+| Checkout `./bin/dawn` | Selected source chain, currently JAR by default. `DAWN_SEED_CHAIN=jar ./bin/dawn build app -o app.jar` writes an executable JAR and requires JDK 21+. Explicit `native` builds and runs current B on Linux x86_64. Both source chains need Python 3.11+. |
 | `java -jar /absolute/versioned/dawn-selfhost.jar` | Explicit JVM toolchain from that release, with the same JVM build output. Requires JDK 21 or newer. |
 
 The installed command does not switch to Java after a failure. Putting a checkout's
-`bin` first on PATH selects that checkout's JVM driver. Use an absolute path when
+`bin` first on PATH selects that checkout's source launcher and its selected chain. Use an absolute path when
 selecting a particular compiler in an editor.
 
 `<target>` may be a single `.dawn` file or a project directory (with `src/main.dawn`
@@ -337,8 +342,8 @@ as the entry point).
 # dawn-selfhost.jar) automatically and compiles HEAD with it.
 ./bin/dawn run examples/projects/hello_mod        # compile and run (single file or multi-module project)
 ./bin/dawn test <target>                    # run the test blocks inlined in the source (stripped at build)
-./bin/dawn build <target> -o app.jar        # JVM backend: an executable jar
-./bin/dawn build <target> --native -o app   # that jar, packaged by GraalVM native-image
+DAWN_SEED_CHAIN=jar ./bin/dawn build <target> -o app.jar        # JVM backend: an executable jar
+DAWN_SEED_CHAIN=jar ./bin/dawn build <target> --native -o app   # that jar, packaged by GraalVM native-image
                                             #   (not the C backend; see below)
 ./bin/dawn fmt <target>                     # format in place (--check for CI)
 ./bin/dawn doc <target>                     # export the pub API as JSON; `add` edits dawn.toml format-preservingly
@@ -361,12 +366,13 @@ explicit JVM server, set `dawn.lspPath` to `java` and `dawn.lspArgs` to
 passes each argument without a shell, and restarts when either setting changes.
 Neovim / Helix configuration is in [editors/](editors/).
 
-For a JVM build, `./bin/dawn build app --native -o app` or
+For a JVM build, `DAWN_SEED_CHAIN=jar ./bin/dawn build app --native -o app` or
 `java -jar /absolute/versioned/dawn-selfhost.jar build app --native -o app` packages
 the JAR with GraalVM `native-image`, and `use java` still works. Installed `dawn`
 builds through C, embeds `std` and the runtime, and refuses `use java`; it rejects
-`--native` because native output is already its default. The bootstrap seed is still a jar
-(`scripts/seed-release.txt`), and the JVM backend is still a first-class target.
+`--native` because native output is already its default. The JAR seed remains
+`scripts/seed-release.txt`; native source bootstrapping has its own qualified seed
+lock. The default chain is still JAR, and the JVM backend remains a first-class target.
 The rest is in [docs/native-driver-plan.md](docs/native-driver-plan.md).
 
 ## Documentation
